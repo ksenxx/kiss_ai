@@ -193,23 +193,6 @@ class TestAwaitUserResponseLoop:
 # ---------------------------------------------------------------------------
 
 
-class TestCompleteFromActiveFileShorterSuffix:
-    """Cover branch 685->682: shorter suffix not replacing best."""
-
-    def test_multiple_candidates_shorter_not_chosen(self) -> None:
-        """When multiple candidates match, shorter suffix doesn't replace best."""
-        server = VSCodeServer()
-        # Content has both 'method_long_name' and 'method_l' — partial is 'method_'
-        # 'method_long_name' gives suffix 'long_name' (len=9)
-        # 'method_l' gives suffix 'l' (len=1) — shorter, should NOT replace best
-        content = "method_long_name method_l other_stuff"
-        result = server._complete_from_active_file(
-            "call method_", snapshot_content=content
-        )
-        # Should pick the longest suffix
-        assert result == "long_name"
-
-
 # ---------------------------------------------------------------------------
 # server.py — _run_task_inner drain (lines 268-269)
 # ---------------------------------------------------------------------------

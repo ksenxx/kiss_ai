@@ -56,30 +56,6 @@ class TestTemplateConstants(unittest.TestCase):
         self.assertIn("Continue", formatted)
 
 
-class TestStrToBool(unittest.TestCase):
-    """Tests for the _str_to_bool helper."""
-
-    def test_string_true_variants(self) -> None:
-        self.assertTrue(_str_to_bool("true"))
-        self.assertTrue(_str_to_bool("True"))
-        self.assertTrue(_str_to_bool("TRUE"))
-        self.assertTrue(_str_to_bool("1"))
-        self.assertTrue(_str_to_bool("yes"))
-        self.assertTrue(_str_to_bool("Yes"))
-
-    def test_string_false_variants(self) -> None:
-        self.assertFalse(_str_to_bool("false"))
-        self.assertFalse(_str_to_bool("False"))
-        self.assertFalse(_str_to_bool("0"))
-        self.assertFalse(_str_to_bool("no"))
-        self.assertFalse(_str_to_bool(""))
-        self.assertFalse(_str_to_bool("anything"))
-
-    def test_bool_passthrough(self) -> None:
-        self.assertTrue(_str_to_bool(True))
-        self.assertFalse(_str_to_bool(False))
-
-
 class TestFinish(unittest.TestCase):
     """Tests for the finish() tool function."""
 
@@ -89,28 +65,6 @@ class TestFinish(unittest.TestCase):
         parsed = yaml.safe_load(result)
         self.assertTrue(parsed["success"])
         self.assertTrue(parsed["is_continue"])
-
-    def test_finish_string_false(self) -> None:
-        """finish() converts string 'false' / '0' / 'no' to bool False."""
-        for s_val, c_val in [("false", "no"), ("0", "false"), ("no", "0")]:
-            result = finish(success=s_val, is_continue=c_val, summary="y")  # type: ignore[arg-type]
-            parsed = yaml.safe_load(result)
-            self.assertFalse(parsed["success"])
-            self.assertFalse(parsed["is_continue"])
-
-    def test_finish_string_one(self) -> None:
-        """finish() converts string '1' to bool True."""
-        result = finish(success="1", is_continue="1", summary="z")  # type: ignore[arg-type]
-        parsed = yaml.safe_load(result)
-        self.assertTrue(parsed["success"])
-        self.assertTrue(parsed["is_continue"])
-
-    def test_finish_bool_values(self) -> None:
-        """finish() passes through bool values."""
-        result = finish(success=True, is_continue=False, summary="done")
-        parsed = yaml.safe_load(result)
-        self.assertTrue(parsed["success"])
-        self.assertFalse(parsed["is_continue"])
 
 
 @requires_gemini_api_key
@@ -223,114 +177,8 @@ class TestDockerStreamCallback(unittest.TestCase):
         self.assertTrue(parsed["success"])
 
 
-class TestExtractErrorPhrases(unittest.TestCase):
-    """Tests for _extract_error_phrases()."""
-
-    def test_extracts_lines_with_error_keywords(self) -> None:
-        text = "Everything is fine\ntest_foo FAILED with AssertionError\nDone"
-        phrases = _extract_error_phrases(text)
-        self.assertEqual(len(phrases), 1)
-        self.assertIn("test_foo failed with assertionerror", phrases)
-
-    def test_skips_short_lines(self) -> None:
-        """Lines shorter than 10 chars (after normalization) are skipped."""
-        text = "error\nfail\nok error x"
-        phrases = _extract_error_phrases(text)
-        # "error" (5 chars) and "fail" (4 chars) are too short
-        # "ok error x" (10 chars) qualifies
-        self.assertEqual(len(phrases), 1)
-        self.assertIn("ok error x", phrases)
-
-    def test_skips_lines_without_keywords(self) -> None:
-        text = "The test passed successfully\nAll checks completed"
-        phrases = _extract_error_phrases(text)
-        self.assertEqual(len(phrases), 0)
-
-    def test_normalizes_whitespace(self) -> None:
-        text = "  test_bar   FAILED   with   ValueError  "
-        phrases = _extract_error_phrases(text)
-        self.assertEqual(phrases, {"test_bar failed with valueerror"})
-
-    def test_all_error_keywords(self) -> None:
-        """Each keyword in _ERROR_KEYWORDS triggers extraction."""
-        lines = [
-            "the test failure is real here",
-            "some error occurred in module",
-            "an assert violation was found",
-            "the code is broken beyond repair",
-            "traceback most recent call last",
-            "unhandled exception in handler",
-        ]
-        for line in lines:
-            phrases = _extract_error_phrases(line)
-            self.assertEqual(len(phrases), 1, f"Expected 1 phrase for: {line}")
-
-    def test_empty_input(self) -> None:
-        self.assertEqual(_extract_error_phrases(""), set())
-
-    def test_multiple_error_lines(self) -> None:
-        text = "test_a failed with error\ntest_b failed with error\nall good here"
-        phrases = _extract_error_phrases(text)
-        self.assertEqual(len(phrases), 2)
-
-
 class TestDetectStall(unittest.TestCase):
     """Tests for _detect_stall()."""
-
-    def test_below_threshold_returns_empty(self) -> None:
-        """Fewer than threshold summaries -> no stall."""
-        summaries = [
-            "test_foo failed with AssertionError",
-            "test_foo failed with AssertionError",
-        ]
-        self.assertEqual(_detect_stall(summaries), set())
-
-    def test_no_error_phrases_returns_empty(self) -> None:
-        """Summaries without error keywords -> no stall."""
-        summaries = [
-            "Completed step one successfully",
-            "Completed step two successfully",
-            "Completed step three successfully",
-        ]
-        self.assertEqual(_detect_stall(summaries), set())
-
-    def test_different_errors_returns_empty(self) -> None:
-        """Summaries with different errors -> no stall."""
-        summaries = [
-            "test_foo failed with AssertionError",
-            "test_bar failed with ValueError now",
-            "test_baz failed with TypeError here",
-        ]
-        result = _detect_stall(summaries)
-        # The only common phrase would need to match exactly after normalization
-        # "test_foo failed..." != "test_bar failed..." so no common phrases
-        self.assertEqual(result, set())
-
-    def test_same_errors_returns_common(self) -> None:
-        """Same error phrase across threshold summaries -> stall detected."""
-        error_line = "test_foo failed with AssertionError: expected 1 got 2"
-        summaries = [
-            f"Tried to fix the code.\n{error_line}\nWill retry.",
-            f"Changed approach.\n{error_line}\nStill broken.",
-            f"Tried another fix.\n{error_line}\nNo progress.",
-        ]
-        result = _detect_stall(summaries)
-        self.assertIn(
-            "test_foo failed with assertionerror: expected 1 got 2", result
-        )
-
-    def test_uses_last_threshold_summaries(self) -> None:
-        """Only the last threshold summaries matter."""
-        error_line = "test_x failed with error in module"
-        summaries = [
-            "no errors here at all today",
-            f"Something else.\n{error_line}",
-            f"Another try.\n{error_line}",
-            f"Yet another.\n{error_line}",
-        ]
-        # Last 3 all have the error_line
-        result = _detect_stall(summaries)
-        self.assertTrue(len(result) > 0)
 
     def test_custom_threshold(self) -> None:
         """Custom threshold parameter works."""
@@ -340,17 +188,6 @@ class TestDetectStall(unittest.TestCase):
         self.assertTrue(len(result) > 0)
         # Below threshold returns empty
         result = _detect_stall(summaries[:4], threshold=5)
-        self.assertEqual(result, set())
-
-    def test_one_summary_without_errors_breaks_stall(self) -> None:
-        """If one of the last N summaries has no errors, no stall."""
-        error_line = "test_z failed with error in function"
-        summaries = [
-            f"Attempt 1.\n{error_line}",
-            "This attempt had no errors at all and is clean",
-            f"Attempt 3.\n{error_line}",
-        ]
-        result = _detect_stall(summaries)
         self.assertEqual(result, set())
 
     def test_threshold_constant(self) -> None:

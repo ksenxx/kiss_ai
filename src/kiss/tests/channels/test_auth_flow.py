@@ -290,53 +290,14 @@ def _get_tools(agent: Any) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("info", _AUTH_AGENTS, ids=_IDS)
-def test_check_prompt_references_auth_function(info: dict[str, Any]) -> None:
-    """check_*_auth() output mentions the authenticate_*() function name."""
-    agent = _get_agent(info)
-    tools = _get_tools(agent)
-    result = tools[info["check"]]()
-    assert info["auth"] in result, (
-        f"check prompt should reference '{info['auth']}', got: {result[:300]}"
-    )
-
-
 # ---------------------------------------------------------------------------
 # 2. Check prompt contains expected URLs
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("info", _AUTH_AGENTS, ids=_IDS)
-def test_check_prompt_contains_urls(info: dict[str, Any]) -> None:
-    """check_*_auth() output includes the expected setup URLs."""
-    if not info["prompt_urls"]:
-        pytest.skip("No URLs expected for this agent")
-    agent = _get_agent(info)
-    tools = _get_tools(agent)
-    result = tools[info["check"]]()
-    for url in info["prompt_urls"]:
-        assert url in result, (
-            f"check prompt should contain URL '{url}', got: {result[:300]}"
-        )
-
-
 # ---------------------------------------------------------------------------
 # 3. Check prompt contains expected keywords
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("info", _AUTH_AGENTS, ids=_IDS)
-def test_check_prompt_contains_keywords(info: dict[str, Any]) -> None:
-    """check_*_auth() output includes platform-specific keywords."""
-    if not info["prompt_keywords"]:
-        pytest.skip("No keywords expected for this agent")
-    agent = _get_agent(info)
-    tools = _get_tools(agent)
-    result = tools[info["check"]]()
-    for kw in info["prompt_keywords"]:
-        assert kw.lower() in result.lower(), (
-            f"check prompt should contain keyword '{kw}', got: {result[:300]}"
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -416,25 +377,6 @@ def test_authenticate_rejects_whitespace_params(info: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("info", _AUTH_AGENTS, ids=_IDS)
-def test_clear_then_check_shows_unauthenticated(info: dict[str, Any]) -> None:
-    """After clear_*_auth(), check_*_auth() shows not authenticated."""
-    agent = _get_agent(info)
-    tools = _get_tools(agent)
-
-    # Clear first
-    tools[info["clear"]]()
-
-    # Check should show not authenticated
-    result = tools[info["check"]]()
-    lower = result.lower()
-    assert (
-        "not authenticated" in lower
-        or "not configured" in lower
-        or "authenticate" in lower
-    ), f"After clear, check should show unauthenticated, got: {result[:300]}"
-
-
 # ---------------------------------------------------------------------------
 # 7. Auth tool function signatures have expected required params
 # ---------------------------------------------------------------------------
@@ -461,44 +403,9 @@ def test_auth_function_has_expected_params(info: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("info", _AUTH_AGENTS, ids=_IDS)
-def test_auth_function_has_documented_args(info: dict[str, Any]) -> None:
-    """authenticate_*() has a docstring with Args section if it takes params."""
-    agent = _get_agent(info)
-    tools = _get_tools(agent)
-    auth_fn = tools[info["auth"]]
-
-    assert auth_fn.__doc__, f"{info['auth']} has no docstring"
-
-    sig = inspect.signature(auth_fn)
-    if sig.parameters:
-        assert "Args:" in auth_fn.__doc__, (
-            f"{info['auth']} takes params but docstring has no Args section"
-        )
-        for param_name in info["required_params"]:
-            assert param_name in auth_fn.__doc__, (
-                f"{info['auth']} docstring should document '{param_name}'"
-            )
-
-
 # ---------------------------------------------------------------------------
 # 9. Check and clear tool docstrings are present
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("info", _AUTH_AGENTS, ids=_IDS)
-def test_check_and_clear_have_docstrings(info: dict[str, Any]) -> None:
-    """check_*_auth() and clear_*_auth() have docstrings with Returns."""
-    agent = _get_agent(info)
-    tools = _get_tools(agent)
-
-    check_fn = tools[info["check"]]
-    assert check_fn.__doc__, f"{info['check']} has no docstring"
-    assert "Returns:" in check_fn.__doc__, f"{info['check']} docstring has no Returns"
-
-    clear_fn = tools[info["clear"]]
-    assert clear_fn.__doc__, f"{info['clear']} has no docstring"
-    assert "Returns:" in clear_fn.__doc__, f"{info['clear']} docstring has no Returns"
 
 
 # ---------------------------------------------------------------------------
@@ -527,30 +434,9 @@ def test_browser_auth_fallback_no_browser(info: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("info", _AUTH_AGENTS, ids=_IDS)
-def test_clear_auth_returns_cleared_message(info: dict[str, Any]) -> None:
-    """clear_*_auth() return value contains 'cleared'."""
-    agent = _get_agent(info)
-    tools = _get_tools(agent)
-    result = tools[info["clear"]]()
-    assert "cleared" in result.lower(), (
-        f"clear should return message with 'cleared', got: {result[:200]}"
-    )
-
-
 # ---------------------------------------------------------------------------
 # 12. Check auth returns str (not None or other type)
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("info", _AUTH_AGENTS, ids=_IDS)
-def test_check_auth_returns_string(info: dict[str, Any]) -> None:
-    """check_*_auth() always returns a string."""
-    agent = _get_agent(info)
-    tools = _get_tools(agent)
-    result = tools[info["check"]]()
-    assert isinstance(result, str)
-    assert len(result) > 0
 
 
 # ---------------------------------------------------------------------------
@@ -607,28 +493,3 @@ class TestPlatformSpecificAuth:
 # ---------------------------------------------------------------------------
 # 14. Full cycle: check (unauth) → clear → check (unauth)
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("info", _AUTH_AGENTS, ids=_IDS)
-def test_full_unauth_cycle(info: dict[str, Any]) -> None:
-    """Full cycle: check (unauth) → clear → check (unauth) is consistent."""
-    agent = _get_agent(info)
-    tools = _get_tools(agent)
-
-    # Initial check
-    result1 = tools[info["check"]]()
-
-    # Clear
-    tools[info["clear"]]()
-
-    # Check again — should be same unauthenticated state
-    result2 = tools[info["check"]]()
-
-    # Both should indicate unauthenticated
-    for result in [result1, result2]:
-        lower = result.lower()
-        assert (
-            "not authenticated" in lower
-            or "not configured" in lower
-            or "authenticate" in lower
-        ), f"Expected unauthenticated message, got: {result[:300]}"

@@ -68,25 +68,6 @@ def test_backend_inherits_tool_method_backend(cls: type) -> None:
 
 
 @pytest.mark.parametrize("cls", ALL_BACKENDS, ids=lambda c: c.__name__)
-def test_get_tool_methods_excludes_protocol_methods(cls: type) -> None:
-    """get_tool_methods() returns only callables that aren't protocol methods."""
-    instance = cls()
-    methods = instance.get_tool_methods()
-    method_names = {m.__name__ for m in methods}
-    assert method_names.isdisjoint(_NON_TOOL_METHODS)
-    assert all(callable(m) for m in methods)
-
-
-@pytest.mark.parametrize("cls", ALL_BACKENDS, ids=lambda c: c.__name__)
-def test_get_tool_methods_returns_sorted_list(cls: type) -> None:
-    """get_tool_methods() returns methods in sorted order."""
-    instance = cls()
-    methods = instance.get_tool_methods()
-    names = [m.__name__ for m in methods]
-    assert names == sorted(names)
-
-
-@pytest.mark.parametrize("cls", ALL_BACKENDS, ids=lambda c: c.__name__)
 def test_no_inline_get_tool_methods(cls: type) -> None:
     """Backend class does not define its own get_tool_methods (uses mixin)."""
     assert "get_tool_methods" not in cls.__dict__

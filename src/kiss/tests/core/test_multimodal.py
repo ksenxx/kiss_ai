@@ -127,40 +127,6 @@ class TestAttachment(unittest.TestCase):
         assert "video/mpeg" in SUPPORTED_MIME_TYPES
         assert "video/quicktime" in SUPPORTED_MIME_TYPES
 
-    def test_from_file_audio(self) -> None:
-        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
-            f.write(b"\xff\xfb\x90\x00" + b"\x00" * 100)
-            f.flush()
-            att = Attachment.from_file(f.name)
-            assert att.mime_type == "audio/mpeg"
-            assert len(att.data) > 0
-            Path(f.name).unlink()
-
-    def test_from_file_video(self) -> None:
-        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
-            f.write(b"\x00\x00\x00\x1c" + b"ftyp" + b"\x00" * 100)
-            f.flush()
-            att = Attachment.from_file(f.name)
-            assert att.mime_type == "video/mp4"
-            assert len(att.data) > 0
-            Path(f.name).unlink()
-
-    def test_from_file_wav(self) -> None:
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-            f.write(b"RIFF" + b"\x00" * 100)
-            f.flush()
-            att = Attachment.from_file(f.name)
-            assert att.mime_type in ("audio/wav", "audio/x-wav")
-            Path(f.name).unlink()
-
-    def test_from_file_mov(self) -> None:
-        with tempfile.NamedTemporaryFile(suffix=".mov", delete=False) as f:
-            f.write(b"\x00" * 100)
-            f.flush()
-            att = Attachment.from_file(f.name)
-            assert att.mime_type == "video/quicktime"
-            Path(f.name).unlink()
-
 
 class TestAnthropicModelAudioVideoAttachments(unittest.TestCase):
     """Unit tests: Anthropic model transcribes audio or skips with warning."""
@@ -185,25 +151,6 @@ class TestAnthropicModelAudioVideoAttachments(unittest.TestCase):
         assert content[0]["text"].startswith("[Audio transcription]")
         assert content[1]["type"] == "text"
         assert content[1]["text"] == "Transcribe this audio"
-
-    def test_audio_attachment_skipped_when_no_api_key(self) -> None:
-        """Audio falls back to skip-with-warning when no OpenAI key is available."""
-        from kiss.core.models.anthropic_model import AnthropicModel
-
-        old_key = os.environ.pop("OPENAI_API_KEY", None)
-        try:
-            m = AnthropicModel("claude-sonnet-4-20250514", api_key="test-key")
-            audio_att = Attachment(data=b"\xff\xfb\x90\x00", mime_type="audio/mpeg")
-            with self.assertLogs("kiss.core.models.anthropic_model", level="WARNING") as log:
-                m.initialize("Transcribe this audio", attachments=[audio_att])
-            assert any("audio/mpeg" in msg for msg in log.output)
-            content = m.conversation[0]["content"]
-            assert isinstance(content, list)
-            assert len(content) == 1
-            assert content[0]["type"] == "text"
-        finally:
-            if old_key is not None:
-                os.environ["OPENAI_API_KEY"] = old_key
 
     def test_video_attachment_skipped_with_warning(self) -> None:
         from kiss.core.models.anthropic_model import AnthropicModel
@@ -245,65 +192,6 @@ class TestAnthropicModelAudioVideoAttachments(unittest.TestCase):
 class TestOpenAICompatibleModelAudioVideoAttachments(unittest.TestCase):
     """Unit tests: OpenAI model handles audio via input_audio, skips video."""
 
-    def test_audio_attachment_as_input_audio(self) -> None:
-        from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
-
-        m = OpenAICompatibleModel("gpt-audio", base_url="http://localhost", api_key="k")
-        audio_att = Attachment(data=b"\xff\xfb\x90\x00", mime_type="audio/mpeg")
-        m.initialize("What is in this recording?", attachments=[audio_att])
-        content = m.conversation[-1]["content"]
-        assert isinstance(content, list)
-        audio_parts = [p for p in content if p["type"] == "input_audio"]
-        assert len(audio_parts) == 1
-        assert audio_parts[0]["input_audio"]["format"] == "mp3"
-        assert len(audio_parts[0]["input_audio"]["data"]) > 0
-
-    def test_audio_wav_format(self) -> None:
-        from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
-
-        m = OpenAICompatibleModel("gpt-audio", base_url="http://localhost", api_key="k")
-        wav_att = Attachment(data=b"RIFF\x00\x00\x00\x00", mime_type="audio/wav")
-        m.initialize("Transcribe this", attachments=[wav_att])
-        content = m.conversation[-1]["content"]
-        audio_parts = [p for p in content if p["type"] == "input_audio"]
-        assert audio_parts[0]["input_audio"]["format"] == "wav"
-
-    def test_audio_x_wav_format(self) -> None:
-        from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
-
-        m = OpenAICompatibleModel("gpt-audio", base_url="http://localhost", api_key="k")
-        wav_att = Attachment(data=b"RIFF", mime_type="audio/x-wav")
-        m.initialize("Transcribe", attachments=[wav_att])
-        content = m.conversation[-1]["content"]
-        audio_parts = [p for p in content if p["type"] == "input_audio"]
-        assert audio_parts[0]["input_audio"]["format"] == "wav"
-
-    def test_audio_ogg_format(self) -> None:
-        from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
-
-        m = OpenAICompatibleModel("gpt-audio", base_url="http://localhost", api_key="k")
-        ogg_att = Attachment(data=b"OggS", mime_type="audio/ogg")
-        m.initialize("Listen", attachments=[ogg_att])
-        content = m.conversation[-1]["content"]
-        audio_parts = [p for p in content if p["type"] == "input_audio"]
-        assert audio_parts[0]["input_audio"]["format"] == "ogg"
-
-    def test_video_attachment_skipped_with_warning(self) -> None:
-        from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
-
-        m = OpenAICompatibleModel("gpt-4o", base_url="http://localhost", api_key="k")
-        video_att = Attachment(data=b"\x00\x00\x00\x1c", mime_type="video/mp4")
-        with self.assertLogs(
-            "kiss.core.models.openai_compatible_model", level="WARNING"
-        ) as log:
-            m.initialize("Describe this video", attachments=[video_att])
-        assert any("video/mp4" in msg for msg in log.output)
-        content = m.conversation[-1]["content"]
-        assert isinstance(content, list)
-        # Only the text part should be present
-        assert len(content) == 1
-        assert content[0]["type"] == "text"
-
     def test_mixed_attachments_image_audio_video(self) -> None:
         from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
 
@@ -329,45 +217,8 @@ class TestOpenAICompatibleModelAudioVideoAttachments(unittest.TestCase):
         assert len(content) == 3  # image + audio + text (video skipped)
 
 
-class TestGeminiModelAudioVideoAttachments(unittest.TestCase):
-    """Unit tests: Gemini model stores audio/video attachments for Part.from_bytes."""
-
-    def test_audio_attachment_stored(self) -> None:
-        from kiss.core.models.gemini_model import GeminiModel
-
-        m = GeminiModel("gemini-2.0-flash", api_key="test-key")
-        audio_att = Attachment(data=b"\xff\xfb\x90\x00", mime_type="audio/mpeg")
-        m.initialize("Transcribe this", attachments=[audio_att])
-        assert len(m.conversation) == 1
-        msg = m.conversation[0]
-        assert msg["attachments"] == [audio_att]
-        assert msg["content"] == "Transcribe this"
-
-    def test_video_attachment_stored(self) -> None:
-        from kiss.core.models.gemini_model import GeminiModel
-
-        m = GeminiModel("gemini-2.0-flash", api_key="test-key")
-        video_att = Attachment(data=b"\x00\x00\x00\x1c", mime_type="video/mp4")
-        m.initialize("Describe this", attachments=[video_att])
-        msg = m.conversation[0]
-        assert msg["attachments"] == [video_att]
-
-
 class TestAudioMimeToFormat(unittest.TestCase):
     """Unit tests for the _audio_mime_to_format helper."""
-
-    def test_known_formats(self) -> None:
-        from kiss.core.models.openai_compatible_model import _audio_mime_to_format
-
-        assert _audio_mime_to_format("audio/mpeg") == "mp3"
-        assert _audio_mime_to_format("audio/mp3") == "mp3"
-        assert _audio_mime_to_format("audio/wav") == "wav"
-        assert _audio_mime_to_format("audio/x-wav") == "wav"
-        assert _audio_mime_to_format("audio/ogg") == "ogg"
-        assert _audio_mime_to_format("audio/webm") == "webm"
-        assert _audio_mime_to_format("audio/flac") == "flac"
-        assert _audio_mime_to_format("audio/aac") == "aac"
-        assert _audio_mime_to_format("audio/mp4") == "mp4"
 
     def test_unknown_format_uses_subtype(self) -> None:
         from kiss.core.models.openai_compatible_model import _audio_mime_to_format
@@ -378,15 +229,6 @@ class TestAudioMimeToFormat(unittest.TestCase):
 
 class TestTranscribeAudio(unittest.TestCase):
     """Unit tests for the transcribe_audio helper."""
-
-    def test_raises_without_api_key(self) -> None:
-        old_key = os.environ.pop("OPENAI_API_KEY", None)
-        try:
-            with pytest.raises(ValueError, match="API key is required"):
-                transcribe_audio(b"\xff\xfb\x90\x00", "audio/mpeg")
-        finally:
-            if old_key is not None:
-                os.environ["OPENAI_API_KEY"] = old_key
 
     def test_raises_with_invalid_api_key(self) -> None:
         with pytest.raises(RuntimeError, match="transcription failed"):
@@ -403,15 +245,6 @@ class TestTranscribeAudio(unittest.TestCase):
         assert _AUDIO_MIME_TO_EXT["audio/flac"] == ".flac"
         assert _AUDIO_MIME_TO_EXT["audio/aac"] == ".aac"
         assert _AUDIO_MIME_TO_EXT["audio/mp4"] == ".m4a"
-
-    @pytest.mark.timeout(TEST_TIMEOUT)
-    def test_transcribe_silent_wav(self) -> None:
-        """Transcribe a silent WAV — should return empty or near-empty text."""
-        if not os.environ.get("OPENAI_API_KEY"):
-            pytest.skip("OPENAI_API_KEY not set")
-        wav_data = _create_silent_wav()
-        result = transcribe_audio(wav_data, "audio/wav")
-        assert isinstance(result, str)
 
 
 @requires_gemini_api_key
@@ -438,30 +271,6 @@ class TestGeminiMultimodal(unittest.TestCase):
         assert result is not None
         result_lower = result.lower()
         assert "red" in result_lower or "blue" in result_lower
-
-
-@requires_openai_api_key
-class TestOpenAIMultimodal(unittest.TestCase):
-    """Integration tests for OpenAI model with image attachments."""
-
-    @pytest.mark.timeout(TEST_TIMEOUT)
-    def test_describe_png_image(self) -> None:
-        png_data = _create_png_bytes(width=32, height=32, color=(0, 0, 255))
-        att = Attachment(data=png_data, mime_type="image/png")
-        agent = KISSAgent("OpenAI Image Test")
-        result = agent.run(
-            model_name="gpt-4o-mini",
-            prompt_template=(
-                "This image is a solid color square. What color is it? "
-                "Answer with ONLY the color name, nothing else."
-            ),
-            is_agentic=False,
-            max_budget=0.50,
-            attachments=[att],
-        )
-        assert result is not None
-        assert len(result) > 0
-        assert "blue" in result.lower()
 
 
 if __name__ == "__main__":

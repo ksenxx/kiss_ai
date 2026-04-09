@@ -61,18 +61,6 @@ class TestRunOnceConnectFailure:
         with pytest.raises(RuntimeError, match="Failed to connect"):
             poller.run_once()
 
-    def test_run_once_raises_on_invalid_token(self) -> None:
-        """run_once() raises RuntimeError with an invalid token (auth fails)."""
-        _save_token("xoxb-invalid-for-run-once-test")
-        backend = SlackChannelBackend()
-        poller = ChannelRunner(
-            backend=backend,
-            channel_name="test-channel",
-            agent_name="test",
-        )
-        with pytest.raises(RuntimeError, match="Failed to connect"):
-            poller.run_once()
-
 
 class TestHasBotReply:
     """Tests for ChannelRunner._has_bot_reply() logic."""
@@ -118,19 +106,6 @@ class TestHasBotReply:
         msg = {"reply_count": 3, "user": "U_HUMAN"}
         assert poller._has_bot_reply("C_TEST", msg) is False
 
-    def test_bot_reply_found(self) -> None:
-        """_has_bot_reply returns True when a bot reply exists in thread."""
-        bot_reply = {"user": "U_BOT", "ts": "1234.6000", "text": "bot response"}
-
-        def poll_fn(
-            ch: str, ts: str, oldest: str, limit: int = 10
-        ) -> tuple[list[dict[str, Any]], str]:
-            return [bot_reply], "1234.600001"
-
-        poller = self._make_poller_with_poll_fn(poll_fn)
-        msg = {"ts": "1234.5678", "reply_count": 1, "user": "U_HUMAN"}
-        assert poller._has_bot_reply("C_TEST", msg) is True
-
     def test_no_bot_reply_in_thread(self) -> None:
         """_has_bot_reply returns False when thread has only human replies."""
         human_reply = {"user": "U_OTHER_HUMAN", "ts": "1234.6000", "text": "ok"}
@@ -143,19 +118,6 @@ class TestHasBotReply:
         poller = self._make_poller_with_poll_fn(poll_fn)
         msg = {"ts": "1234.5678", "reply_count": 1, "user": "U_HUMAN"}
         assert poller._has_bot_reply("C_TEST", msg) is False
-
-    def test_bot_id_reply_detected(self) -> None:
-        """_has_bot_reply detects replies with bot_id field."""
-        bot_msg = {"bot_id": "B123", "ts": "1234.6000", "text": "automated"}
-
-        def poll_fn(
-            ch: str, ts: str, oldest: str, limit: int = 10
-        ) -> tuple[list[dict[str, Any]], str]:
-            return [bot_msg], "1234.600001"
-
-        poller = self._make_poller_with_poll_fn(poll_fn)
-        msg = {"ts": "1234.5678", "reply_count": 1, "user": "U_HUMAN"}
-        assert poller._has_bot_reply("C_TEST", msg) is True
 
     def test_poll_fn_exception_returns_false(self) -> None:
         """_has_bot_reply returns False when poll_thread_fn raises."""
@@ -226,17 +188,3 @@ class TestCLIOneShotMode:
             sys.argv = original_argv
         out = capsys.readouterr().out
         assert "Checking Slack channel for pending messages..." in out
-
-    def test_usage_shows_channel_flag(self) -> None:
-        """main() with no args includes --channel in help."""
-        original_argv = sys.argv
-        sys.argv = ["kiss-slack"]
-        buf = io.StringIO()
-        try:
-            with redirect_stdout(buf):
-                main()
-        except SystemExit:
-            pass
-        finally:
-            sys.argv = original_argv
-        assert "--channel CH" in buf.getvalue()

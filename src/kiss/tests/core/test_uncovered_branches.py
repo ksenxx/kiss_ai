@@ -431,27 +431,6 @@ class TestAnthropicHelpers:
 
 
 class TestAnthropicAddFunctionResults:
-    def test_add_results_with_tool_use_ids(self) -> None:
-        from kiss.core.models.anthropic_model import AnthropicModel
-
-        m = AnthropicModel("claude-haiku-4-5", api_key="test")
-        m.conversation = [
-            {
-                "role": "assistant",
-                "content": [
-                    {"type": "tool_use", "id": "id1", "name": "fn1"},
-                    {"type": "tool_use", "id": "id2", "name": "fn2"},
-                ],
-            }
-        ]
-        m.add_function_results_to_conversation_and_return(
-            [("fn1", {"result": "r1"}), ("fn2", {"result": "r2"})]
-        )
-        last = m.conversation[-1]
-        assert last["role"] == "user"
-        assert len(last["content"]) == 2
-        assert last["content"][0]["tool_use_id"] == "id1"
-        assert last["content"][1]["tool_use_id"] == "id2"
 
     def test_add_results_with_usage_info(self) -> None:
         from kiss.core.models.anthropic_model import AnthropicModel

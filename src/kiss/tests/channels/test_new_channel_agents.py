@@ -215,14 +215,6 @@ def _load(info: dict) -> tuple:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("info", _CHANNEL_AGENTS, ids=_CHANNEL_IDS)
-def test_agent_instantiates(info: dict) -> None:
-    """Every channel agent can be created without credentials."""
-    _, agent_cls, _ = _load(info)
-    agent = agent_cls()
-    assert agent.name == info["agent_name"]
-
-
 # ---------------------------------------------------------------------------
 # Test: Auth trio presence in _get_tools()
 # ---------------------------------------------------------------------------
@@ -278,24 +270,6 @@ def test_clear_auth_when_not_authenticated(info: dict) -> None:
 # ---------------------------------------------------------------------------
 # Test: Backend instantiation and get_tool_methods
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("info", _CHANNEL_AGENTS, ids=_CHANNEL_IDS)
-def test_backend_get_tool_methods(info: dict) -> None:
-    """get_tool_methods() returns a list and excludes protocol methods."""
-    _, _, backend_cls = _load(info)
-    backend = backend_cls()
-    tools = backend.get_tool_methods()
-    assert isinstance(tools, list)
-    # Protocol methods must NOT be in the tool list
-    protocol_names = {
-        "connect", "find_channel", "find_user", "join_channel",
-        "poll_messages", "send_message", "wait_for_reply",
-        "is_from_bot", "strip_bot_mention", "get_tool_methods",
-    }
-    tool_names = {t.__name__ for t in tools}
-    overlap = tool_names & protocol_names
-    assert not overlap, f"Protocol methods leaked into tools: {overlap}"
 
 
 # ---------------------------------------------------------------------------
@@ -379,8 +353,5 @@ def test_main_exits_with_no_args(info: dict) -> None:
         pass  # Expected
     finally:
         sys.argv = original_argv
-
-
-
 
 

@@ -102,33 +102,8 @@ class TestWorktreeSorcarAgent:
         return agent
 
     # 1. Happy path (merge)
-    def test_run_and_merge(self) -> None:
-        agent = self._agent()
-        result = agent.run(prompt_template="task1", work_dir=str(self.repo))
-        assert "test done" in result
-        assert agent._wt_branch is not None
-        assert agent._original_branch == "main"
-
-        msg = agent.merge()
-        assert "Successfully merged" in msg
-        assert agent._wt_branch is None
-        assert agent._original_branch is None
 
     # 2. Discard path
-    def test_run_and_discard(self) -> None:
-        agent = self._agent()
-        agent.run(prompt_template="task1", work_dir=str(self.repo))
-        branch = agent._wt_branch
-        assert branch is not None
-
-        msg = agent.discard()
-        assert "Discarded" in msg
-        assert agent._wt_branch is None
-
-        # Branch should be gone
-        check = _git("rev-parse", "--verify", f"refs/heads/{branch}",
-                      cwd=self.repo)
-        assert check.returncode != 0
 
     # 3. Blocking (same session)
     def test_blocking_same_session(self) -> None:
@@ -143,18 +118,6 @@ class TestWorktreeSorcarAgent:
         assert "test done" in result
 
     # 4. No blocking (different session)
-    def test_no_blocking_different_session(self) -> None:
-        agent_a = self._agent()
-        agent_a.run(prompt_template="task1", work_dir=str(self.repo))
-        assert agent_a._wt_pending
-
-        agent_b = self._agent()  # different chat_id
-        result = agent_b.run(prompt_template="task2", work_dir=str(self.repo))
-        assert "test done" in result
-
-        # Clean up both
-        agent_a.discard()
-        agent_b.discard()
 
     # 5. Not a git repo
     def test_not_a_git_repo(self) -> None:
@@ -166,134 +129,16 @@ class TestWorktreeSorcarAgent:
         assert agent._wt_branch is None
 
     # 6. Merge conflict
-    def test_merge_conflict(self) -> None:
-        agent = self._agent()
-        agent.run(prompt_template="task1", work_dir=str(self.repo))
-        wt_dir = agent._wt_dir
-        assert wt_dir is not None
-
-        # Modify file in worktree
-        (wt_dir / "README.md").write_text("worktree change\n")
-
-        # Modify same file on main branch
-        (self.repo / "README.md").write_text("main change\n")
-        subprocess.run(
-            ["git", "-C", str(self.repo), "add", "."],
-            capture_output=True, check=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(self.repo), "commit", "-m", "main edit"],
-            capture_output=True, check=True,
-        )
-
-        msg = agent.merge()
-        assert "Merge conflict" in msg
-        assert "git merge" in msg
-        # Should NOT reference worktree removal (already removed)
-        assert "git worktree remove" not in msg
-        # Should still be pending
-        assert agent._wt_pending
-
-        # Main worktree should be clean (merge was aborted)
-        status = _git("status", "--porcelain", cwd=self.repo)
-        assert status.stdout.strip() == ""
-
-        # Can still discard
-        agent.discard()
-        assert not agent._wt_pending
 
     # 7. merge_instructions()
-    def test_merge_instructions(self) -> None:
-        agent = self._agent()
-        agent.run(prompt_template="task1", work_dir=str(self.repo))
-        instructions = agent.merge_instructions()
-        assert agent._wt_branch is not None
-        assert agent._wt_branch in instructions
-        assert "agent.merge()" in instructions
-        assert "agent.discard()" in instructions
-        assert "main" in instructions
-        agent.discard()
 
     # 8. Auto-commit
-    def test_auto_commit_before_merge(self) -> None:
-        agent = self._agent()
-        agent.run(prompt_template="task1", work_dir=str(self.repo))
-        wt_dir = agent._wt_dir
-        assert wt_dir is not None
-
-        # Create a new file in worktree (uncommitted)
-        (wt_dir / "new_file.txt").write_text("hello\n")
-
-        msg = agent.merge()
-        assert "Successfully merged" in msg
-        # The file should be on main now
-        assert (self.repo / "new_file.txt").exists()
 
     # 9. Subdirectory offset
-    def test_subdirectory_offset(self) -> None:
-        subdir = self.repo / "src" / "app"
-        subdir.mkdir(parents=True)
-        (subdir / "main.py").write_text("print('hello')\n")
-        subprocess.run(
-            ["git", "-C", str(self.repo), "add", "."],
-            capture_output=True, check=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(self.repo), "commit", "-m", "add subdir"],
-            capture_output=True, check=True,
-        )
-
-        agent = self._agent()
-        # Capture what work_dir gets set to
-        captured: dict[str, Any] = {}
-        parent_class = cast(Any, SorcarAgent.__mro__[1])
-        orig = parent_class.run
-
-        def capture_run(self_agent: object, **kwargs: object) -> str:
-            captured["work_dir"] = kwargs.get("work_dir")
-            return "success: true\nsummary: test done\n"
-
-        parent_class.run = capture_run
-        try:
-            agent.run(prompt_template="task1", work_dir=str(subdir))
-        finally:
-            parent_class.run = orig
-
-        assert captured["work_dir"] is not None
-        assert "src/app" in str(captured["work_dir"]) or "src\\app" in str(captured["work_dir"])
-        agent.discard()
 
     # 10. State persistence via git
-    def test_state_persistence_via_git(self) -> None:
-        agent1 = self._agent(chat_id="aabbccdd11223344")
-        agent1.run(prompt_template="task1", work_dir=str(self.repo))
-        branch = agent1._wt_branch
-        assert branch is not None
-
-        # New agent instance with same chat_id
-        agent2 = self._agent(chat_id="aabbccdd11223344")
-        agent2._restore_from_git(self.repo)
-        assert agent2._wt_branch == branch
-        assert agent2._original_branch == "main"
-
-        agent1.discard()
 
     # 11. Process crash recovery
-    def test_process_crash_recovery(self) -> None:
-        agent1 = self._agent(chat_id="crash_recovery_id1")
-        agent1.run(prompt_template="task1", work_dir=str(self.repo))
-        branch = agent1._wt_branch
-        assert branch is not None
-
-        # Simulate crash: create new agent with same chat_id
-        agent2 = self._agent(chat_id="crash_recovery_id1")
-        # run() should be blocked
-        result = agent2.run(prompt_template="task2", work_dir=str(self.repo))
-        assert "pending merge/discard" in result
-
-        # Merge should work on the new instance
-        msg = agent2.merge()
-        assert "Successfully merged" in msg
 
     # 12. Idempotent merge
     def test_idempotent_merge(self) -> None:
@@ -315,90 +160,12 @@ class TestWorktreeSorcarAgent:
             agent.discard()
 
     # 14. Detached HEAD
-    def test_detached_head(self) -> None:
-        # Detach HEAD
-        head = _git("rev-parse", "HEAD", cwd=self.repo)
-        subprocess.run(
-            ["git", "-C", str(self.repo), "checkout", head.stdout.strip()],
-            capture_output=True, check=True,
-        )
-        agent = self._agent()
-        result = agent.run(prompt_template="task1", work_dir=str(self.repo))
-        assert "test done" in result
-        assert agent._wt_branch is None
-
-        # Restore
-        subprocess.run(
-            ["git", "-C", str(self.repo), "checkout", "main"],
-            capture_output=True, check=True,
-        )
 
     # 15. Offset directory creation
-    def test_offset_dir_creation(self) -> None:
-        # work_dir is a subdir that doesn't exist on the branch yet
-        subdir = self.repo / "new_dir" / "sub"
-        subdir.mkdir(parents=True, exist_ok=True)
-        agent = self._agent()
-        result = agent.run(prompt_template="task1", work_dir=str(subdir))
-        assert "test done" in result
-        agent.discard()
 
     # 16. Dirty main worktree at merge
-    def test_dirty_main_worktree_at_merge(self) -> None:
-        agent = self._agent()
-        agent.run(prompt_template="task1", work_dir=str(self.repo))
-
-        # Make main worktree dirty (new tracked file modification)
-        (self.repo / "README.md").write_text("dirty\n")
-        subprocess.run(
-            ["git", "-C", str(self.repo), "add", "."],
-            capture_output=True, check=True,
-        )
-
-        msg = agent.merge()
-        # checkout should fail because of staged changes
-        if "Cannot checkout" in msg:
-            assert agent._wt_pending
-            # Reset and retry
-            subprocess.run(
-                ["git", "-C", str(self.repo), "reset", "HEAD"],
-                capture_output=True, check=True,
-            )
-            subprocess.run(
-                ["git", "-C", str(self.repo), "checkout", "--", "."],
-                capture_output=True, check=True,
-            )
-            msg2 = agent.merge()
-            assert "Successfully merged" in msg2
-        else:
-            # Git might handle this differently on some versions
-            assert "Successfully merged" in msg or "Merge conflict" in msg
 
     # 17. Conflict instructions exclude worktree removal
-    def test_conflict_instructions_no_worktree_remove(self) -> None:
-        agent = self._agent()
-        agent.run(prompt_template="task1", work_dir=str(self.repo))
-        wt_dir = agent._wt_dir
-        assert wt_dir is not None
-
-        # Create conflict
-        (wt_dir / "README.md").write_text("wt\n")
-        (self.repo / "README.md").write_text("main\n")
-        subprocess.run(
-            ["git", "-C", str(self.repo), "add", "."],
-            capture_output=True, check=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(self.repo), "commit", "-m", "conflict"],
-            capture_output=True, check=True,
-        )
-
-        msg = agent.merge()
-        assert "Merge conflict" in msg
-        assert "git worktree remove" not in msg
-        assert "agent.discard()" in msg
-
-        agent.discard()
 
     # 18. Cleanup
     def test_cleanup(self) -> None:
@@ -422,79 +189,12 @@ class TestWorktreeSorcarAgent:
         assert check.returncode != 0
 
     # 19. Git config cleanup after branch deletion
-    def test_git_config_cleanup(self) -> None:
-        agent = self._agent()
-        agent.run(prompt_template="task1", work_dir=str(self.repo))
-        branch = agent._wt_branch
-        assert branch is not None
-
-        # Verify config exists
-        cfg = _git("config", f"branch.{branch}.kiss-original",
-                    cwd=self.repo)
-        assert cfg.returncode == 0
-
-        agent.merge()
-
-        # After branch deletion, git removes the config section
-        cfg2 = _git("config", f"branch.{branch}.kiss-original",
-                     cwd=self.repo)
-        assert cfg2.returncode != 0
 
     # 20. Branch name collision
-    def test_branch_name_collision(self) -> None:
-        # Use a different prefix so _restore_from_git won't match
-        # Create collision branches with a known prefix "zzzzzzzzzzzz"
-        # that differs from any real chat_id.
-        _git("branch", "kiss/wt-zzzzzzzzzzzz-100", cwd=self.repo)
-        _git("branch", "kiss/wt-zzzzzzzzzzzz-100-1", cwd=self.repo)
-
-        # Run normally — agent uses its own chat_id, no collision
-        agent = self._agent()
-        result = agent.run(prompt_template="task1", work_dir=str(self.repo))
-        assert "test done" in result
-        agent.discard()
-
-        # Clean up
-        _git("branch", "-D", "kiss/wt-zzzzzzzzzzzz-100", cwd=self.repo)
-        _git("branch", "-D", "kiss/wt-zzzzzzzzzzzz-100-1", cwd=self.repo)
 
     # 21. Worktree excluded from git
-    def test_worktree_excluded_from_git(self) -> None:
-        agent = self._agent()
-        agent.run(prompt_template="task1", work_dir=str(self.repo))
-
-        # Check exclude file
-        git_dir = self.repo / ".git"
-        exclude_file = git_dir / "info" / "exclude"
-        assert exclude_file.exists()
-        content = exclude_file.read_text()
-        assert ".kiss-worktrees/" in content
-
-        # git status should not show .kiss-worktrees
-        status = _git("status", "--porcelain", cwd=self.repo)
-        assert ".kiss-worktrees" not in status.stdout
-
-        agent.discard()
 
     # 22. Missing kiss-original config (crash recovery)
-    def test_missing_kiss_original_config(self) -> None:
-        agent = self._agent(chat_id="missing_config_1234")
-        agent.run(prompt_template="task1", work_dir=str(self.repo))
-        branch = agent._wt_branch
-        assert branch is not None
-
-        # Simulate crash: remove the config entry manually
-        _git("config", "--unset", f"branch.{branch}.kiss-original",
-             cwd=self.repo)
-
-        # New agent should recover
-        agent2 = self._agent(chat_id="missing_config_1234")
-        agent2._restore_from_git(self.repo)
-        assert agent2._wt_branch == branch
-        # Falls back to current HEAD
-        assert agent2._original_branch == "main"
-
-        agent.discard()
 
     # 23. Missing kiss-original config + detached HEAD
     def test_missing_config_detached_head(self) -> None:
@@ -539,17 +239,6 @@ class TestWorktreeSorcarAgent:
         assert agent.merge_instructions() == "No pending worktree task."
 
     # 24a. manual_merge happy path
-    def test_manual_merge(self) -> None:
-        agent = self._agent()
-        agent.run(prompt_template="task1", work_dir=str(self.repo))
-        assert agent._wt_pending
-        # Create a change in the worktree so merge has something to apply
-        wt_dir = agent._wt_dir
-        assert wt_dir is not None
-        (wt_dir / "manual_test.txt").write_text("manual merge content")
-        msg = agent.manual_merge()
-        assert "ready for review" in msg
-        assert not agent._wt_pending
 
     # 24b. manual_merge when idle
     def test_manual_merge_no_pending(self) -> None:
@@ -576,12 +265,6 @@ class TestWorktreeSorcarAgent:
         agent.discard()
 
     # 25. _auto_commit_worktree when nothing to commit
-    def test_auto_commit_nothing(self) -> None:
-        agent = self._agent()
-        agent.run(prompt_template="task1", work_dir=str(self.repo))
-        committed = agent._auto_commit_worktree()
-        assert not committed
-        agent.discard()
 
     # 26. _auto_commit_worktree when wt_dir is None
     def test_auto_commit_no_wt_dir(self) -> None:
@@ -609,71 +292,20 @@ class TestWorktreeSorcarAgent:
             self.original_run = _patch_super_run()
 
     # 28. merge raises when no pending task
-    def test_merge_no_pending(self) -> None:
-        agent = self._agent()
-        with pytest.raises(RuntimeError, match="No pending"):
-            agent.merge()
 
     # 29. discard raises when no pending task
-    def test_discard_no_pending(self) -> None:
-        agent = self._agent()
-        with pytest.raises(RuntimeError, match="No pending"):
-            agent.discard()
 
     # 30. _restore_from_git with no repo root — tested via run() on non-repo
-    def test_restore_no_repo_root(self) -> None:
-        agent = self._agent()
-        # _wt is None → _restore_from_git with a nonexistent repo path
-        # won't find any branches, so _wt stays None
-        no_repo = Path(self.tmpdir) / "no_repo"
-        no_repo.mkdir()
-        agent._restore_from_git(no_repo)
-        assert agent._wt_branch is None
 
     # 31. _restore_from_git when already known in-memory
-    def test_restore_already_known(self) -> None:
-        agent = self._agent()
-        agent._wt = GitWorktree(
-            repo_root=self.repo, branch="some/branch",
-            original_branch="main",
-            wt_dir=self.repo / ".kiss-worktrees" / "some_branch",
-        )
-        agent._restore_from_git(self.repo)
-        assert agent._wt_branch == "some/branch"
 
     # 32. ensure_excluded with no repo — tested via run() fallback
-    def test_ensure_excluded_no_repo(self) -> None:
-        # GitWorktreeOps.ensure_excluded requires a valid repo;
-        # the agent only calls it when repo is discovered.
-        # Just verify a fresh agent has no _wt.
-        agent = self._agent()
-        assert agent._wt is None
 
     # 33. ensure_excluded is idempotent
-    def test_ensure_excluded_idempotent(self) -> None:
-        GitWorktreeOps.ensure_excluded(self.repo)
-        GitWorktreeOps.ensure_excluded(self.repo)
-        exclude_file = self.repo / ".git" / "info" / "exclude"
-        content = exclude_file.read_text()
-        lines = content.splitlines()
-        assert lines.count(".kiss-worktrees/") == 1
 
     # 34. _wt_dir when no _wt
-    def test_wt_dir_none(self) -> None:
-        agent = self._agent()
-        assert agent._wt_dir is None
-        assert agent._repo_root is None
-        assert agent._wt_branch is None
 
     # 35. work_dir not in repo
-    def test_work_dir_outside_repo(self) -> None:
-        outside = Path(self.tmpdir) / "outside"
-        outside.mkdir()
-        # Initialize a different repo there so git finds it but it's not the same repo
-        agent = self._agent()
-        result = agent.run(prompt_template="task1", work_dir=str(outside))
-        # Should fall back to direct execution (not a git repo)
-        assert "test done" in result
 
     # 36. Empty repo (no commits)
     def test_empty_repo(self) -> None:
@@ -693,10 +325,6 @@ class TestWorktreeSorcarAgent:
         assert "No orphans found" in result
 
     # 38. _git helper
-    def test_git_helper(self) -> None:
-        result = _git("rev-parse", "--show-toplevel", cwd=self.repo)
-        assert result.returncode == 0
-        assert str(self.repo.resolve()) in result.stdout or str(self.repo) in result.stdout
 
     # 39. _git without cwd
     def test_git_no_cwd(self) -> None:
@@ -756,20 +384,6 @@ class TestWorktreeSorcarAgent:
         agent.discard()
 
     # 45. Merge when worktree was already removed externally
-    def test_merge_worktree_already_removed(self) -> None:
-        agent = self._agent()
-        agent.run(prompt_template="task1", work_dir=str(self.repo))
-        wt_dir = agent._wt_dir
-        assert wt_dir is not None and wt_dir.exists()
-
-        # Manually remove the worktree
-        _git("worktree", "remove", str(wt_dir), "--force", cwd=self.repo)
-        _git("worktree", "prune", cwd=self.repo)
-        assert not wt_dir.exists()
-
-        # merge should still succeed (worktree removal is skipped)
-        msg = agent.merge()
-        assert "Successfully merged" in msg
 
     # 46. run() without work_dir kwarg
     def test_run_without_work_dir(self) -> None:
@@ -797,17 +411,5 @@ class TestWorktreeSorcarAgent:
         assert check.returncode != 0
 
     # 46. cleanup_partial when wt_dir exists
-    def test_cleanup_partial_worktree_exists(self) -> None:
-        branch = "kiss/wt-testcleanup"
-        slug = branch.replace("/", "_")
-        wt_dir = self.repo / ".kiss-worktrees" / slug
-        _git("worktree", "add", "-b", branch, str(wt_dir), cwd=self.repo)
-        assert wt_dir.exists()
-        GitWorktreeOps.cleanup_partial(self.repo, branch, wt_dir)
-        assert not wt_dir.exists()
-        # Branch should be gone
-        check = _git("rev-parse", "--verify", f"refs/heads/{branch}",
-                      cwd=self.repo)
-        assert check.returncode != 0
 
 

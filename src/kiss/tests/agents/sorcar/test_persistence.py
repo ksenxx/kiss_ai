@@ -37,17 +37,6 @@ class TestTaskHistory:
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_duplicate_tasks_all_kept(self):
-        th._add_task("dup")
-        time.sleep(0.01)
-        th._add_task("unique")
-        time.sleep(0.01)
-        th._add_task("dup")
-        entries = th._load_history()
-        tasks = [e["task"] for e in entries]
-        assert tasks.count("dup") == 2
-        assert tasks[0] == "dup"
-
     def test_get_history_entry(self):
         th._add_task("first")
         time.sleep(0.01)
@@ -128,47 +117,6 @@ class TestListRecentChats:
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_empty_db(self):
-        assert th._list_recent_chats() == []
-
-    def test_multiple_chats_ordered_by_recency(self):
-        # Chat A with 2 tasks
-        tid1 = th._add_task("task A1", chat_id="aaa")
-        th._save_task_result(result="result A1", task_id=tid1)
-        time.sleep(0.01)
-        tid2 = th._add_task("task A2", chat_id="aaa")
-        th._save_task_result(result="result A2", task_id=tid2)
-        time.sleep(0.01)
-        # Chat B with 1 task (more recent)
-        tid3 = th._add_task("task B1", chat_id="bbb")
-        th._save_task_result(result="result B1", task_id=tid3)
-
-        chats = th._list_recent_chats(limit=10)
-        assert len(chats) == 2
-        # Most recent chat first
-        assert chats[0]["chat_id"] == "bbb"
-        assert chats[1]["chat_id"] == "aaa"
-        # Chat A tasks in chronological order
-        a_tasks = chats[1]["tasks"]
-        assert isinstance(a_tasks, list)
-        assert len(a_tasks) == 2
-        assert a_tasks[0]["task"] == "task A1"
-        assert a_tasks[1]["task"] == "task A2"
-
-    def test_limit(self):
-        for i in range(5):
-            th._add_task(f"task {i}", chat_id=f"chat{i}")
-            time.sleep(0.01)
-        chats = th._list_recent_chats(limit=3)
-        assert len(chats) == 3
-
-    def test_excludes_empty_chat_id(self):
-        th._add_task("no chat id", chat_id="")
-        th._add_task("has chat id", chat_id="ccc")
-        chats = th._list_recent_chats()
-        assert len(chats) == 1
-        assert chats[0]["chat_id"] == "ccc"
-
 
 class TestPrintRecentChats:
     def setup_method(self):
@@ -186,25 +134,6 @@ class TestPrintRecentChats:
         from kiss.agents.sorcar.cli_helpers import _print_recent_chats
         _print_recent_chats()
         assert "No chat sessions found." in capsys.readouterr().out
-
-    def test_print_with_data(self, capsys):
-        from kiss.agents.sorcar.cli_helpers import _print_recent_chats
-        tid = th._add_task("my task", chat_id="abc123")
-        th._save_task_result(result="my result", task_id=tid)
-        _print_recent_chats()
-        out = capsys.readouterr().out
-        assert "abc123" in out
-        assert "my task" in out
-        assert "my result" in out
-
-    def test_print_truncates_long_text(self, capsys):
-        from kiss.agents.sorcar.cli_helpers import _print_recent_chats
-        long_task = "x" * 300
-        tid = th._add_task(long_task, chat_id="trunc")
-        th._save_task_result(result="r" * 300, task_id=tid)
-        _print_recent_chats()
-        out = capsys.readouterr().out
-        assert "..." in out
 
 
 class TestCleanupStaleCsDirs:

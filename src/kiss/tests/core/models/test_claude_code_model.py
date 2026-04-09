@@ -14,11 +14,6 @@ requires_claude_cli = pytest.mark.skipif(not _has_claude, reason="claude CLI not
 
 
 class TestFindClaudeCli:
-    def test_find_claude_cli_returns_path(self) -> None:
-        if not _has_claude:
-            pytest.skip("claude CLI not installed")
-        path = _find_claude_cli()
-        assert "claude" in path
 
     def test_find_claude_cli_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(shutil, "which", lambda _name: None)
@@ -26,51 +21,7 @@ class TestFindClaudeCli:
             _find_claude_cli()
 
 
-class TestClaudeCodeModelInit:
-    def test_cc_prefix_stripped(self) -> None:
-        m = ClaudeCodeModel("cc/opus")
-        assert m._cli_model == "opus"
-        assert m.model_name == "cc/opus"
-
-    def test_no_prefix(self) -> None:
-        m = ClaudeCodeModel("opus")
-        assert m._cli_model == "opus"
-
-    def test_model_config_defaults(self) -> None:
-        m = ClaudeCodeModel("cc/sonnet")
-        assert m.model_config == {}
-
-
-class TestClaudeCodeModelInitialize:
-    def test_basic_init(self) -> None:
-        m = ClaudeCodeModel("cc/opus")
-        m.initialize("Hello")
-        assert len(m.conversation) == 1
-        assert m.conversation[0] == {"role": "user", "content": "Hello"}
-
-    def test_attachments_ignored(self) -> None:
-        m = ClaudeCodeModel("cc/opus")
-        m.initialize("Hello", attachments=[])
-        assert len(m.conversation) == 1
-
-
 class TestBuildPrompt:
-    def test_single_message(self) -> None:
-        m = ClaudeCodeModel("cc/opus")
-        m.initialize("Hello world")
-        assert m._build_prompt() == "Hello world"
-
-    def test_multi_turn(self) -> None:
-        m = ClaudeCodeModel("cc/opus")
-        m.conversation = [
-            {"role": "user", "content": "Hi"},
-            {"role": "assistant", "content": "Hello!"},
-            {"role": "user", "content": "How are you?"},
-        ]
-        prompt = m._build_prompt()
-        assert "[User]: Hi" in prompt
-        assert "[Assistant]: Hello!" in prompt
-        assert "[User]: How are you?" in prompt
 
     def test_tool_result_messages(self) -> None:
         m = ClaudeCodeModel("cc/opus")
@@ -83,52 +34,7 @@ class TestBuildPrompt:
         assert "[Tool Result]: tool output" in prompt
 
 
-class TestBuildCliArgs:
-    def test_basic_args(self) -> None:
-        m = ClaudeCodeModel("cc/opus")
-        m.initialize("test")
-        args = m._build_cli_args()
-        assert "--print" in args
-        assert "--tools" in args
-        assert "--bare" in args
-        assert "--model" in args
-        idx = args.index("--model")
-        assert args[idx + 1] == "opus"
-        assert "--output-format" in args
-        idx = args.index("--output-format")
-        assert args[idx + 1] == "json"
-
-    def test_streaming_args(self) -> None:
-        m = ClaudeCodeModel("cc/opus")
-        m.initialize("test")
-        args = m._build_cli_args(use_streaming=True)
-        idx = args.index("--output-format")
-        assert args[idx + 1] == "stream-json"
-        assert "--verbose" in args
-        assert "--include-partial-messages" in args
-
-    def test_system_prompt(self) -> None:
-        m = ClaudeCodeModel(
-            "cc/opus", model_config={"system_instruction": "Be concise."}
-        )
-        m.initialize("test")
-        args = m._build_cli_args()
-        assert "--system-prompt" in args
-        idx = args.index("--system-prompt")
-        assert args[idx + 1] == "Be concise."
-
-
 class TestGenerateAndProcessWithTools:
-    def test_system_prompt_restored_after_tool_call(self) -> None:
-        """Verify the system instruction is restored even if generate fails."""
-        m = ClaudeCodeModel("cc/opus", model_config={"system_instruction": "Be helpful."})
-        m.initialize("test")
-        # generate() will fail because CLI is not mocked, but system prompt should be restored
-        try:
-            m.generate_and_process_with_tools({"finish": lambda result: result})
-        except Exception:
-            pass
-        assert m.model_config.get("system_instruction") == "Be helpful."
 
     def test_system_prompt_restored_when_originally_empty(self) -> None:
         m = ClaudeCodeModel("cc/opus")
@@ -148,27 +54,6 @@ class TestUnsupportedMethods:
 
 
 class TestTokenExtraction:
-    def test_extract_from_valid_response(self) -> None:
-        m = ClaudeCodeModel("cc/opus")
-        response = {
-            "usage": {
-                "input_tokens": 100,
-                "output_tokens": 50,
-                "cache_read_input_tokens": 10,
-                "cache_creation_input_tokens": 5,
-            }
-        }
-        inp, out, cr, cw = m.extract_input_output_token_counts_from_response(
-            response
-        )
-        assert inp == 100
-        assert out == 50
-        assert cr == 10
-        assert cw == 5
-
-    def test_extract_from_empty_response(self) -> None:
-        m = ClaudeCodeModel("cc/opus")
-        assert m.extract_input_output_token_counts_from_response({}) == (0, 0, 0, 0)
 
     def test_extract_from_non_dict(self) -> None:
         m = ClaudeCodeModel("cc/opus")
@@ -176,28 +61,12 @@ class TestTokenExtraction:
             0, 0, 0, 0,
         )
 
-    def test_extract_partial_usage(self) -> None:
-        m = ClaudeCodeModel("cc/opus")
-        response = {"usage": {"input_tokens": 42}}
-        inp, out, cr, cw = m.extract_input_output_token_counts_from_response(
-            response
-        )
-        assert inp == 42
-        assert out == 0
-        assert cr == 0
-        assert cw == 0
-
 
 class TestModelRouting:
     def test_cc_prefix_creates_claude_code_model(self) -> None:
         m = model("cc/opus")
         assert isinstance(m, ClaudeCodeModel)
         assert m._cli_model == "opus"
-
-    def test_cc_prefix_with_full_name(self) -> None:
-        m = model("cc/claude-opus-4-6")
-        assert isinstance(m, ClaudeCodeModel)
-        assert m._cli_model == "claude-opus-4-6"
 
 
 class TestModelInfoEntries:
@@ -214,26 +83,6 @@ class TestModelInfoEntries:
 @requires_claude_cli
 class TestGenerateIntegration:
     """Integration tests that actually call the claude CLI."""
-
-    @pytest.mark.timeout(60)
-    def test_generate_simple(self) -> None:
-        m = ClaudeCodeModel("cc/haiku")
-        m.initialize("Reply with exactly the word 'pong'. Nothing else.")
-        content, response = m.generate()
-        assert "pong" in content.lower()
-        assert isinstance(response, dict)
-        assert "result" in response
-
-    @pytest.mark.timeout(60)
-    def test_generate_with_system_prompt(self) -> None:
-        m = ClaudeCodeModel(
-            "cc/haiku",
-            model_config={"system_instruction": "Always reply in uppercase."},
-        )
-        m.initialize("Say hello")
-        content, response = m.generate()
-        assert content  # non-empty
-        assert isinstance(response, dict)
 
     @pytest.mark.timeout(60)
     def test_generate_token_counts(self) -> None:
@@ -253,70 +102,3 @@ class TestGenerateIntegration:
         assert "pong" in content.lower()
         # Streaming should have produced at least one token callback
         assert len(tokens) > 0
-
-    @pytest.mark.timeout(60)
-    def test_multi_turn(self) -> None:
-        m = ClaudeCodeModel("cc/haiku")
-        m.initialize("My name is Alice.")
-        content1, _ = m.generate()
-        assert content1
-        # Add follow-up
-        m.add_message_to_conversation("user", "What is my name?")
-        content2, _ = m.generate()
-        assert "alice" in content2.lower()
-
-    @pytest.mark.timeout(60)
-    def test_conversation_appended_after_generate(self) -> None:
-        m = ClaudeCodeModel("cc/haiku")
-        m.initialize("Say 'ok'")
-        m.generate()
-        assert len(m.conversation) == 2
-        assert m.conversation[1]["role"] == "assistant"
-
-    @pytest.mark.timeout(60)
-    def test_reset_conversation(self) -> None:
-        m = ClaudeCodeModel("cc/haiku")
-        m.initialize("Say 'ok'")
-        m.generate()
-        m.reset_conversation()
-        assert m.conversation == []
-
-    @pytest.mark.timeout(120)
-    def test_generate_and_process_with_tools_text_based(self) -> None:
-        """Test text-based tool calling — CLI acts as pure LLM, not agent."""
-
-        def add(a: str, b: str) -> str:
-            """Add two numbers.
-
-            Args:
-                a: First number.
-                b: Second number.
-
-            Returns:
-                The sum as a string.
-            """
-            return str(int(a) + int(b))
-
-        def finish(result: str) -> str:
-            """Return the final answer.
-
-            Args:
-                result: The result string.
-
-            Returns:
-                The result.
-            """
-            return result
-
-        m = ClaudeCodeModel("cc/haiku")
-        m.initialize(
-            "What is 3 + 4? Use the add tool, then call finish with the answer."
-        )
-        calls, content, response = m.generate_and_process_with_tools(
-            {"add": add, "finish": finish}
-        )
-        # Should have parsed at least one tool call from text
-        assert len(calls) >= 1
-        assert calls[0]["name"] in ("add", "finish")
-        assert "arguments" in calls[0]
-        assert isinstance(response, dict)

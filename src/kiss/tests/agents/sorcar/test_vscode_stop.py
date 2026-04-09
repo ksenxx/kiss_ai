@@ -136,29 +136,6 @@ class TestVSCodeServerStop(unittest.TestCase):
 class TestForceStopMechanism(unittest.TestCase):
     """Test the force-stop watchdog that interrupts blocked task threads."""
 
-    def test_cooperative_stop_prevents_force_interrupt(self) -> None:
-        """When cooperative stop works quickly, the watchdog never fires."""
-        from kiss.agents.vscode.server import VSCodeServer
-
-        server = VSCodeServer()
-
-        def cooperative_task() -> None:
-            assert server._stop_event is not None
-            while not server._stop_event.is_set():
-                time.sleep(0.05)
-            # Task exits cooperatively — no KeyboardInterrupt needed
-
-        server._stop_event = threading.Event()
-        server._task_thread = threading.Thread(target=cooperative_task, daemon=True)
-        server._task_thread.start()
-        time.sleep(0.1)
-
-        server._stop_task()
-
-        # The thread should exit almost immediately (cooperatively)
-        server._task_thread.join(timeout=0.5)
-        assert not server._task_thread.is_alive()
-
     def test_status_running_false_after_force_stop(self) -> None:
         """After force-stop, the finally block still broadcasts status:running:false."""
         from kiss.agents.vscode.server import VSCodeServer

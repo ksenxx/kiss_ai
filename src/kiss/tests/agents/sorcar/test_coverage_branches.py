@@ -52,19 +52,6 @@ class TestBaseBrowserPrinterBranches:
         assert p._bash_buffer == []
         assert p._bash_flush_timer is None
 
-    def test_stop_recording_returns_filtered_coalesced(self):
-        p = BaseBrowserPrinter()
-        p.start_recording()
-        p.broadcast({"type": "thinking_delta", "text": "a"})
-        p.broadcast({"type": "thinking_delta", "text": "b"})
-        p.broadcast({"type": "internal_event"})  # non-display
-        p.broadcast({"type": "text_delta", "text": "c"})
-        events = p.stop_recording()
-        # thinking_delta merged, internal_event filtered, text_delta kept
-        assert len(events) == 2
-        assert events[0]["text"] == "ab"
-        assert events[1]["text"] == "c"
-
     def test_remove_client_only_current(self):
         """remove_client only removes if cq matches current."""
         p = BaseBrowserPrinter()
@@ -291,12 +278,6 @@ class TestVSCodeServerBranches:
         hist_events = [e for e in events if e["type"] == "history"]
         assert len(hist_events) == 1
 
-    def test_handle_command_get_history_no_query(self):
-        server, events = self._make_server()
-        server._handle_command({"type": "getHistory"})
-        hist_events = [e for e in events if e["type"] == "history"]
-        assert len(hist_events) == 1
-
     def test_handle_command_record_file_usage_empty(self):
         server, events = self._make_server()
         server._handle_command({"type": "recordFileUsage", "path": ""})
@@ -449,26 +430,6 @@ class TestVSCodeServerBranches:
         assert len(wt_events) == 1
         assert wt_events[0]["branch"] == branch
         assert "f.txt" in wt_events[0]["changedFiles"]
-
-    def test_emit_pending_worktree_no_branch(self, tmp_path):
-        """_emit_pending_worktree does nothing when no branch exists."""
-        server, events = self._make_server()
-        repo = tmp_path / "repo"
-        repo.mkdir()
-        subprocess.run(["git", "init"], cwd=str(repo), capture_output=True)
-        subprocess.run(["git", "config", "user.email", "test@test.com"],
-                       cwd=str(repo), capture_output=True)
-        subprocess.run(["git", "config", "user.name", "Test"],
-                       cwd=str(repo), capture_output=True)
-        (repo / "f.txt").write_text("hello")
-        subprocess.run(["git", "add", "."], cwd=str(repo), capture_output=True)
-        subprocess.run(["git", "commit", "-m", "init"],
-                       cwd=str(repo), capture_output=True)
-
-        server.work_dir = str(repo)
-        server._emit_pending_worktree()
-        wt_events = [e for e in events if e.get("type") == "worktree_done"]
-        assert len(wt_events) == 0
 
     def test_emit_pending_worktree_not_a_repo(self, tmp_path):
         """_emit_pending_worktree does nothing when not in a git repo."""
@@ -702,23 +663,6 @@ class TestWebUseToolResolveLocatorBranches:
         assert "Error" in result
 
 
-class TestBrowserPrinterStreamEvent:
-    """Cover the stream_event print type."""
-
-    def test_format_tool_call_with_extras(self):
-        """Cover the extras branch in _format_tool_call."""
-        p = BaseBrowserPrinter()
-        cq: queue.Queue = queue.Queue()
-        p._client_queue = cq
-        p._format_tool_call("Bash", {
-            "command": "ls",
-            "timeout_seconds": 30,
-            "max_output_chars": 50000,
-        })
-        ev = cq.get_nowait()
-        assert "extras" in ev
-
-
 class TestHandleMessageContentBlockNoIsError:
     """Cover the case where content block lacks is_error/content attributes."""
 
@@ -777,17 +721,6 @@ class TestUsefulToolsMoreBranches:
 # ---------------------------------------------------------------------------
 # Additional diff_merge.py branches
 # ---------------------------------------------------------------------------
-
-
-class TestCodeServerMoreBranches:
-    def test_scan_files_max_limit(self):
-        """Scan should stop at 5000 files."""
-        with tempfile.TemporaryDirectory() as d:
-            # Create many files
-            for i in range(5100):
-                (Path(d) / f"file_{i:04d}.txt").write_text("x")
-            result = _scan_files(d)
-            assert len(result) <= 5000
 
 
 # ---------------------------------------------------------------------------

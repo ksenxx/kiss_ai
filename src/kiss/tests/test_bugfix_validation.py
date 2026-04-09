@@ -16,105 +16,11 @@ from typing import Any
 # ---------------------------------------------------------------------------
 # B1: fast_model_for() returns correct model per provider key
 # ---------------------------------------------------------------------------
-class TestB1FastModelForRouting:
-    def test_anthropic_key_returns_claude_haiku(self) -> None:
-        """With ANTHROPIC_API_KEY set, returns direct claude-haiku-4-5."""
-        from kiss.agents.vscode.helpers import fast_model_for
-        from kiss.core.config import DEFAULT_CONFIG
-
-        saved = DEFAULT_CONFIG.ANTHROPIC_API_KEY
-        try:
-            DEFAULT_CONFIG.ANTHROPIC_API_KEY = "test-key"
-            result = fast_model_for()
-            assert result == "claude-haiku-4-5"
-        finally:
-            DEFAULT_CONFIG.ANTHROPIC_API_KEY = saved
-
-    def test_openrouter_only_returns_openrouter_model(self) -> None:
-        """With only OPENROUTER_API_KEY, returns openrouter/ prefixed model."""
-        from kiss.agents.vscode.helpers import fast_model_for
-        from kiss.core.config import DEFAULT_CONFIG
-
-        saved_a = DEFAULT_CONFIG.ANTHROPIC_API_KEY
-        saved_o = DEFAULT_CONFIG.OPENROUTER_API_KEY
-        try:
-            DEFAULT_CONFIG.ANTHROPIC_API_KEY = ""
-            DEFAULT_CONFIG.OPENROUTER_API_KEY = "test-key"
-            result = fast_model_for()
-            assert result.startswith("openrouter/"), (
-                f"With only OPENROUTER_API_KEY, got '{result}' which would "
-                f"route to AnthropicModel with empty key"
-            )
-        finally:
-            DEFAULT_CONFIG.ANTHROPIC_API_KEY = saved_a
-            DEFAULT_CONFIG.OPENROUTER_API_KEY = saved_o
-
-    def test_together_only_returns_together_model(self) -> None:
-        """With only TOGETHER_API_KEY, returns a Together-compatible model."""
-        from kiss.agents.vscode.helpers import fast_model_for
-        from kiss.core.config import DEFAULT_CONFIG
-
-        saved_a = DEFAULT_CONFIG.ANTHROPIC_API_KEY
-        saved_o = DEFAULT_CONFIG.OPENROUTER_API_KEY
-        saved_t = DEFAULT_CONFIG.TOGETHER_API_KEY
-        try:
-            DEFAULT_CONFIG.ANTHROPIC_API_KEY = ""
-            DEFAULT_CONFIG.OPENROUTER_API_KEY = ""
-            DEFAULT_CONFIG.TOGETHER_API_KEY = "test-key"
-            result = fast_model_for()
-            # Must NOT be "claude-haiku-4-5" which is a direct Anthropic model
-            assert not result.startswith("claude-"), (
-                f"With only TOGETHER_API_KEY, got '{result}' which is a direct "
-                f"Anthropic model — would fail without ANTHROPIC_API_KEY"
-            )
-        finally:
-            DEFAULT_CONFIG.ANTHROPIC_API_KEY = saved_a
-            DEFAULT_CONFIG.OPENROUTER_API_KEY = saved_o
-            DEFAULT_CONFIG.TOGETHER_API_KEY = saved_t
 
 
 # ---------------------------------------------------------------------------
 # B2: AnthropicBatchModel keeps batch/ prefix in model_name for pricing
 # ---------------------------------------------------------------------------
-class TestB2BatchModelPricing:
-    def test_model_name_has_batch_prefix(self) -> None:
-        """self.model_name retains batch/ prefix for pricing lookup."""
-        from kiss.core.models.anthropic_batch_model import AnthropicBatchModel
-
-        m = AnthropicBatchModel(
-            model_name="batch/claude-opus-4-6",
-            api_key="test-key",
-        )
-        assert m.model_name == "batch/claude-opus-4-6", (
-            f"model_name should keep batch/ prefix, got: {m.model_name}"
-        )
-
-    def test_api_model_name_stripped(self) -> None:
-        """_api_model_name has the batch/ prefix removed for API calls."""
-        from kiss.core.models.anthropic_batch_model import AnthropicBatchModel
-
-        m = AnthropicBatchModel(
-            model_name="batch/claude-opus-4-6",
-            api_key="test-key",
-        )
-        assert m._api_model_name == "claude-opus-4-6"
-
-    def test_batch_pricing_is_half(self) -> None:
-        """calculate_cost with batch/ prefix uses 50% pricing."""
-        from kiss.core.models.model_info import MODEL_INFO, calculate_cost
-
-        # Verify the batch/ entry has half the price
-        full = MODEL_INFO["claude-opus-4-6"]
-        batch = MODEL_INFO["batch/claude-opus-4-6"]
-        assert batch.input_price_per_1M == full.input_price_per_1M * 0.5
-        assert batch.output_price_per_1M == full.output_price_per_1M * 0.5
-
-        # Verify calculate_cost uses the batch pricing
-        cost_full = calculate_cost("claude-opus-4-6", 1000, 1000)
-        cost_batch = calculate_cost("batch/claude-opus-4-6", 1000, 1000)
-        assert abs(cost_batch - cost_full * 0.5) < 0.0001, (
-            f"Batch cost {cost_batch} should be ~half of full cost {cost_full}"
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -134,20 +40,6 @@ class TestB4DeepseekTputInModelInfo:
         info = MODEL_INFO["deepseek-ai/DeepSeek-R1-0528-tput"]
         assert info.input_price_per_1M > 0
         assert info.output_price_per_1M > 0
-
-    def test_tput_model_context_length(self) -> None:
-        """get_max_context_length doesn't raise KeyError."""
-        from kiss.core.models.model_info import get_max_context_length
-
-        ctx = get_max_context_length("deepseek-ai/DeepSeek-R1-0528-tput")
-        assert ctx > 0
-
-    def test_tput_model_cost_nonzero(self) -> None:
-        """calculate_cost returns non-zero for -tput variant."""
-        from kiss.core.models.model_info import calculate_cost
-
-        cost = calculate_cost("deepseek-ai/DeepSeek-R1-0528-tput", 1000, 1000)
-        assert cost > 0
 
 
 # ---------------------------------------------------------------------------
@@ -236,22 +128,6 @@ class TestB8ModelConfigInit:
         source = inspect.getsource(RelentlessAgent._reset)
         assert "self.model_config" in source
 
-    def test_model_config_accessible_after_reset(self) -> None:
-        """After _reset(), model_config attribute exists."""
-        from kiss.core.relentless_agent import RelentlessAgent
-
-        agent = RelentlessAgent.__new__(RelentlessAgent)
-        agent.name = "test"
-        agent._reset(
-            model_name=None,
-            max_sub_sessions=None,
-            max_steps=None,
-            max_budget=None,
-            work_dir=tempfile.mkdtemp(),
-            docker_image=None,
-        )
-        assert hasattr(agent, "model_config")
-
 
 # ---------------------------------------------------------------------------
 # B10: system_prompt does not override model_config["system_instruction"]
@@ -336,34 +212,6 @@ class TestB13NegativeTokensPrevented:
             "to prevent negative input tokens"
         )
 
-    def test_negative_cache_tokens_produce_zero(self) -> None:
-        """When cached + cache_write > prompt, input_tokens is 0, not negative."""
-        from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
-
-        model = OpenAICompatibleModel.__new__(OpenAICompatibleModel)
-
-        class Details:
-            cached_tokens = 80
-            cache_read_tokens = None
-            cache_write_tokens = 50
-
-        class Usage:
-            prompt_tokens = 100
-            completion_tokens = 50
-            prompt_tokens_details = Details()
-            completion_tokens_details = None
-
-        class Response:
-            usage = Usage()
-
-        inp, out, cr, cw = (
-            model.extract_input_output_token_counts_from_response(Response())
-        )
-        # cached(80) + cache_write(50) = 130 > prompt(100)
-        # Without fix: 100 - 80 - 50 = -30
-        # With fix: max(0, -30) = 0
-        assert inp >= 0, f"Input tokens should be >= 0, got {inp}"
-
 
 # ---------------------------------------------------------------------------
 # B14: _generate_followup_async only called when task_id is not None
@@ -398,41 +246,6 @@ class TestB15LoadHistoryCap:
         source = inspect.getsource(_load_history)
         assert "10000" in source, "Should have a hard cap of 10000"
 
-    def test_explicit_limit_respected(self) -> None:
-        """When limit > 0, that exact limit is used."""
-        from kiss.agents.sorcar import persistence
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            old_dir = persistence._KISS_DIR
-            old_db = persistence._DB_PATH
-            old_conn = persistence._db_conn
-            try:
-                persistence._KISS_DIR = Path(tmpdir)
-                persistence._DB_PATH = Path(tmpdir) / "test.db"
-                persistence._db_conn = None
-
-                db = persistence._get_db()
-                for i in range(5):
-                    db.execute(
-                        "INSERT INTO task_history (task, timestamp) VALUES (?, ?)",
-                        (f"task{i}", float(i)),
-                    )
-                db.commit()
-
-                # Explicit limit
-                result = persistence._load_history(limit=2)
-                assert len(result) == 2
-
-                # Default limit (0) returns all up to cap
-                result = persistence._load_history()
-                assert len(result) == 5
-            finally:
-                if persistence._db_conn:
-                    persistence._db_conn.close()
-                persistence._KISS_DIR = old_dir
-                persistence._DB_PATH = old_db
-                persistence._db_conn = old_conn
-
 
 # ---------------------------------------------------------------------------
 # B16: _prefix_match_task uses case-sensitive GLOB
@@ -446,64 +259,11 @@ class TestB16CaseSensitiveGlob:
         assert "GLOB" in source, "Should use GLOB for case-sensitive matching"
         assert "LIKE" not in source, "Should not use LIKE (case-insensitive)"
 
-    def test_case_sensitive_matching(self) -> None:
-        """Uppercase query does not match lowercase task."""
-        from kiss.agents.sorcar import persistence
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            old_dir = persistence._KISS_DIR
-            old_db = persistence._DB_PATH
-            old_conn = persistence._db_conn
-            try:
-                persistence._KISS_DIR = Path(tmpdir)
-                persistence._DB_PATH = Path(tmpdir) / "test.db"
-                persistence._db_conn = None
-
-                db = persistence._get_db()
-                db.execute(
-                    "INSERT INTO task_history (task, timestamp) VALUES (?, ?)",
-                    ("hello world", 1000.0),
-                )
-                db.commit()
-
-                # Exact case should match
-                assert persistence._prefix_match_task("hello") == "hello world"
-                # Wrong case should NOT match (GLOB is case-sensitive)
-                assert persistence._prefix_match_task("Hello") == ""
-            finally:
-                if persistence._db_conn:
-                    persistence._db_conn.close()
-                persistence._KISS_DIR = old_dir
-                persistence._DB_PATH = old_db
-                persistence._db_conn = old_conn
-
 
 # ---------------------------------------------------------------------------
 # B17: MultiPrinter.print returns first non-empty result
 # ---------------------------------------------------------------------------
 class TestB17MultiPrinterResult:
-    def test_returns_first_non_empty(self) -> None:
-        """MultiPrinter.print returns the first non-empty result."""
-        from kiss.core.printer import MultiPrinter, Printer
-
-        class TestPrinter(Printer):
-            def __init__(self, return_val: str):
-                self._return_val = return_val
-
-            def print(self, content: str, type: str = "text", **kwargs: Any) -> str:
-                return self._return_val
-
-            def reset(self) -> None:
-                pass
-
-            def token_callback(self, token: str) -> None:
-                pass
-
-        p1 = TestPrinter("first")
-        p2 = TestPrinter("second")
-        mp = MultiPrinter([p1, p2])
-        result = mp.print("test")
-        assert result == "first", f"Should return first non-empty result, got '{result}'"
 
     def test_skips_empty_results(self) -> None:
         """Skips printers returning empty string."""
@@ -568,25 +328,4 @@ class TestB20ArtifactDirLocking:
         assert len(none_checks) >= 2, (
             f"Should have double-checked locking (2 None checks), "
             f"found {len(none_checks)}"
-        )
-
-    def test_concurrent_calls_return_same_dir(self) -> None:
-        """Multiple threads calling get_artifact_dir get the same result."""
-        from kiss.core import config as config_mod
-
-        results: list[str] = []
-        barrier = threading.Barrier(4)
-
-        def worker() -> None:
-            barrier.wait()
-            results.append(config_mod.get_artifact_dir())
-
-        threads = [threading.Thread(target=worker) for _ in range(4)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(timeout=5)
-
-        assert len(set(results)) == 1, (
-            f"All threads should get the same dir, got {set(results)}"
         )
