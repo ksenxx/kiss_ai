@@ -80,7 +80,7 @@ export class SorcarTab {
     // Use existing panel (restored by VSCode serializer) or create a new one
     this._panel = existingPanel ?? vscode.window.createWebviewPanel(
       'kissSorcar.chat',
-      'KS: new chat',
+      'new chat',
       rightmostColumn(),
       {
         enableScripts: true,
@@ -209,7 +209,7 @@ export class SorcarTab {
   private _updateTabTitle(task: string): void {
     this._lastTask = task;
     if (!task.trim()) {
-      this._panel.title = 'KS: new chat';
+      this._panel.title = 'new chat';
       return;
     }
     const firstLine = task.split('\n')[0].trim();
@@ -217,7 +217,7 @@ export class SorcarTab {
     const truncated = firstLine.length > maxLen
       ? firstLine.slice(0, maxLen) + '…'
       : firstLine;
-    this._panel.title = 'KS: ' + truncated;
+    this._panel.title = truncated;
   }
 
   private _startTask(prompt: string, model: string, activeFile?: string, attachments?: Attachment[]): void {
