@@ -66,6 +66,11 @@ header {
 }
 .dot.running { background: var(--green); animation: pulse 1.5s infinite; }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+.status-metric {
+  font-size: var(--fs-sm); color: var(--dim);
+  margin-left: 2px; white-space: nowrap;
+}
+.status-metric:not(:empty)::before { content: '·'; margin-right: 2px; }
 
 
 /* ── Task Panel ──────────────────────────────────────── */
