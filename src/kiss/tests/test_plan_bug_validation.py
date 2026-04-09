@@ -247,15 +247,15 @@ class TestWebhookDistinctPorts:
 
 
 # ---------------------------------------------------------------------------
-# §33: SORCAR.md anchored to _project_dir
+# §33: SORCAR.md anchored to _kiss_pkg_dir (package directory)
 # ---------------------------------------------------------------------------
 class TestSystemPromptAnchored:
-    def test_sorcar_path_uses_project_dir(self) -> None:
-        """SORCAR.md is resolved relative to _project_dir, not bare CWD."""
+    def test_sorcar_path_uses_pkg_dir(self) -> None:
+        """SORCAR.md is resolved relative to _kiss_pkg_dir, not bare CWD."""
         import kiss.core.base as base_mod
 
         source = inspect.getsource(base_mod)
-        assert '_project_dir / "SORCAR.md"' in source or "_project_dir / 'SORCAR.md'" in source
+        assert '_kiss_pkg_dir / "SORCAR.md"' in source or "_kiss_pkg_dir / 'SORCAR.md'" in source
 
 
 # ---------------------------------------------------------------------------

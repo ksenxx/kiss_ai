@@ -32,13 +32,7 @@ def _str_presenter(dumper: yaml.Dumper, data: str) -> ScalarNode:
 yaml.add_representer(str, _str_presenter)
 
 _kiss_pkg_dir = Path(__file__).parent.parent  # .../kiss/
-_project_dir = _kiss_pkg_dir.parent.parent  # .../  (project root in dev)
-# In dev mode SYSTEM.md is at the project root; in an installed wheel
-# it is force-included inside the kiss/ package directory.
-_system_md = _kiss_pkg_dir / "SYSTEM.md"
-if not _system_md.exists():
-    _system_md = _project_dir / "SYSTEM.md"
-SYSTEM_PROMPT = _system_md.read_text()
+SYSTEM_PROMPT = (_kiss_pkg_dir / "SYSTEM.md").read_text()
 
 if sys.platform == "win32":  # pragma: no branch
     if shutil.which("bash"):  # pragma: no branch
@@ -58,8 +52,6 @@ if sys.platform == "win32":  # pragma: no branch
         )
 
 _sorcar_path = _kiss_pkg_dir / "SORCAR.md"
-if not _sorcar_path.exists():
-    _sorcar_path = _project_dir / "SORCAR.md"
 if _sorcar_path.exists():  # pragma: no branch
     SYSTEM_PROMPT += "\n" + _sorcar_path.read_text()
 

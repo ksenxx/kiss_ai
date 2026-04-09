@@ -20,7 +20,7 @@ from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 
 logger = logging.getLogger(__name__)
 
-PROJECT_ROOT = Path(__file__).parent.parent.parent.parent.parent
+KISS_PKG_DIR = Path(__file__).parent.parent.parent  # .../kiss/
 
 AGENT_EVOLVER_PROMPT_PART1 = """
 You have to optimize an AI agent for long-running complex tasks.
@@ -30,10 +30,10 @@ You have to optimize an AI agent for long-running complex tasks.
   - The agent must be designed for **long-running, complex tasks** using
     the Agent API available at {kiss_folder}.  Specifically, you should
     look at {kiss_folder}/API.md and {kiss_folder}/README.md first, and
-    then look at code under the src folder as required.
-    {kiss_folder}/src/kiss/core/models/model_info.py contains information
+    then look at code under {kiss_folder} as required.
+    {kiss_folder}/core/models/model_info.py contains information
     about different LLM models and their context lengths, costs, etc.
-    Use {kiss_folder}/src/kiss/agents/sorcar/sorcar_agent.py
+    Use {kiss_folder}/agents/sorcar/sorcar_agent.py
     as the initial agent implementation.
   - The agent **MUST** be tested for success on the given task description.
 """
@@ -381,7 +381,7 @@ class ImproverAgent:
                     "task_description": task_description,
                     "work_dir": work_dir,
                     "previous_report": previous_report_text,
-                    "kiss_folder": str(PROJECT_ROOT),
+                    "kiss_folder": str(KISS_PKG_DIR),
                 },
                 work_dir=work_dir,
             )
