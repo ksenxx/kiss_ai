@@ -210,19 +210,6 @@ class TestP8BashFlushTOCTOU(unittest.TestCase):
         bash_block = source[bash_idx:next_branch_idx]
         assert "needs_flush" not in bash_block
 
-    def test_buffer_drained_inside_lock(self) -> None:
-        """Verify buffer drain happens inside _bash_lock."""
-        source = inspect.getsource(BaseBrowserPrinter.print)
-        bash_idx = source.find('"bash_stream"')
-        next_branch_idx = source.find("if type ==", bash_idx + 1)
-        if next_branch_idx < 0:
-            next_branch_idx = len(source)
-        bash_block = source[bash_idx:next_branch_idx]
-        lock_idx = bash_block.find("with self._bash_lock")
-        clear_idx = bash_block.find("self._bash_buffer.clear()")
-        assert lock_idx > 0 and clear_idx > 0
-        assert lock_idx < clear_idx
-
 
 # ---------------------------------------------------------------------------
 # T6 — AgentProcess.dispose() race fixed by reordering

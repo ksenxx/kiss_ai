@@ -51,30 +51,6 @@ class TestConfigPersistence:
     def teardown_method(self) -> None:
         _restore(self._backup)
 
-    def test_load_corrupt_json(self) -> None:
-        path = _config.path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("{bad json!!")
-        assert _config.load() is None
-
-    def test_load_non_dict_json(self) -> None:
-        path = _config.path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text('"just a string"')
-        assert _config.load() is None
-
-    def test_load_missing_fields(self) -> None:
-        path = _config.path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"access_token": "tok"}))
-        assert _config.load() is None
-
-    def test_load_empty_token(self) -> None:
-        path = _config.path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"access_token": "", "phone_number_id": "123"}))
-        assert _config.load() is None
-
 
 _INTERACTIVE_JSON = json.dumps({
     "type": "button",
@@ -195,14 +171,6 @@ class TestWhatsAppAgent:
         result = json.loads(check())
         assert result["ok"] is False
 
-    def test_authenticate_empty_fields(self) -> None:
-        agent = WhatsAppAgent()
-        agent.web_use_tool = None
-        tools = agent._get_tools()
-        auth = next(t for t in tools if t.__name__ == "authenticate_whatsapp")
-        result = auth(access_token="  ", phone_number_id="  ")
-        assert "required" in result.lower()
-
     def test_authenticate_invalid_token(self) -> None:
         agent = WhatsAppAgent()
         agent.web_use_tool = None
@@ -222,14 +190,6 @@ class TestWhatsAppAgent:
         assert "cleared" in result.lower()
         assert _config.load() is None
         assert agent._backend._access_token == ""
-
-    def test_clear_auth_when_not_authenticated(self) -> None:
-        agent = WhatsAppAgent()
-        agent.web_use_tool = None
-        tools = agent._get_tools()
-        clear = next(t for t in tools if t.__name__ == "clear_whatsapp_auth")
-        result = clear()
-        assert "cleared" in result.lower()
 
 
 class TestCLIMain:

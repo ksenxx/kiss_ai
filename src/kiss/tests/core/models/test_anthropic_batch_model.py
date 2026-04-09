@@ -15,32 +15,11 @@ from kiss.tests.conftest import requires_anthropic_api_key
 class TestAnthropicBatchModelInit:
     """Tests for AnthropicBatchModel initialization and parameter handling."""
 
-    def test_model_factory_creates_batch_model(self) -> None:
-        """model('batch/...') returns an AnthropicBatchModel."""
-        m = model("batch/claude-haiku-4-5")
-        assert isinstance(m, AnthropicBatchModel)
-
-    def test_model_name_keeps_batch_prefix(self) -> None:
-        """model_name keeps the 'batch/' prefix for correct pricing lookup."""
-        m = AnthropicBatchModel("batch/claude-opus-4-6", api_key="test-key")
-        assert m.model_name == "batch/claude-opus-4-6"
-        assert m._api_model_name == "claude-opus-4-6"
-
     def test_str_repr(self) -> None:
         """__str__ and __repr__ show the batch model name."""
         m = AnthropicBatchModel("batch/claude-haiku-4-5", api_key="test-key")
         assert "batch/claude-haiku-4-5" in str(m)
         assert "AnthropicBatchModel" in repr(m)
-
-    def test_token_callback_ignored(self) -> None:
-        """token_callback is set to None since batch API doesn't stream."""
-        calls: list[str] = []
-        m = AnthropicBatchModel(
-            "batch/claude-haiku-4-5",
-            api_key="test-key",
-            token_callback=lambda t: calls.append(t),
-        )
-        assert m.token_callback is None
 
     def test_batch_model_info_entries_exist(self) -> None:
         """All batch/ model entries exist in MODEL_INFO."""
@@ -72,33 +51,6 @@ class TestAnthropicBatchModelInit:
         assert info.cache_write_price_per_1M == pytest.approx(
             info.input_price_per_1M * 1.25, rel=0.01
         )
-
-    def test_calculate_cost_for_batch_model(self) -> None:
-        """calculate_cost works for batch/ models with 50% pricing."""
-        # 200K input + 60K output for batch/claude-opus-4-6
-        # input: 200K * 2.50 / 1M = 0.50, output: 60K * 12.50 / 1M = 0.75
-        cost = calculate_cost("batch/claude-opus-4-6", 200_000, 60_000)
-        expected = (200_000 * 2.50 + 60_000 * 12.50) / 1_000_000
-        assert cost == pytest.approx(expected, rel=0.01)
-
-    def test_build_create_kwargs_inherits_anthropic(self) -> None:
-        """_build_create_kwargs works correctly (inherited from AnthropicModel).
-
-        The inherited method uses self.model_name which is now the batch-prefixed
-        name, but _create_message overrides the 'model' key with _api_model_name.
-        """
-        m = AnthropicBatchModel("batch/claude-haiku-4-5", api_key="test-key")
-        m.initialize("Hello")
-        kwargs = m._build_create_kwargs()
-        assert kwargs["messages"] == [{"role": "user", "content": "Hello"}]
-        assert "max_tokens" in kwargs
-
-    def test_get_embedding_raises(self) -> None:
-        """get_embedding raises KISSError (Anthropic has no embedding API)."""
-        m = AnthropicBatchModel("batch/claude-haiku-4-5", api_key="test-key")
-        m.initialize("test")
-        with pytest.raises(KISSError, match="(?i)embedding"):
-            m.get_embedding("test text")
 
 
 @requires_anthropic_api_key

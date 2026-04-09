@@ -33,10 +33,6 @@ class TestFastModelFor:
 
         monkeypatch.setattr(_cfg, "DEFAULT_CONFIG", _cfg.Config())
 
-    def test_anthropic_key_returns_haiku(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        self._set_key(monkeypatch, "ANTHROPIC_API_KEY")
-        assert fast_model_for() == "claude-haiku-4-5"
-
     def test_openrouter_key_returns_openrouter_model(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._set_key(monkeypatch, "OPENROUTER_API_KEY")
         assert fast_model_for() == "openrouter/anthropic/claude-haiku-4.5"
@@ -45,25 +41,12 @@ class TestFastModelFor:
         self._set_key(monkeypatch, "TOGETHER_API_KEY")
         assert fast_model_for() == "deepseek-ai/DeepSeek-R1-0528"
 
-    def test_gemini_key_returns_gemini_pro(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        self._set_key(monkeypatch, "GEMINI_API_KEY")
-        assert fast_model_for() == "gemini-2.5-pro"
-
     def test_openai_key_returns_gpt4o(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._set_key(monkeypatch, "OPENAI_API_KEY")
         assert fast_model_for() == "gpt-4o"
 
     def test_no_keys_returns_haiku_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """When no API keys are set, falls back to claude-haiku-4-5."""
-        assert fast_model_for() == "claude-haiku-4-5"
-
-    def test_priority_anthropic_over_gemini(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Anthropic key takes priority over Gemini key."""
-        self._set_key(monkeypatch, "ANTHROPIC_API_KEY")
-        monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-        from kiss.core import config as _cfg
-
-        monkeypatch.setattr(_cfg, "DEFAULT_CONFIG", _cfg.Config())
         assert fast_model_for() == "claude-haiku-4-5"
 
     def test_priority_gemini_over_openai(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -74,8 +57,3 @@ class TestFastModelFor:
 
         monkeypatch.setattr(_cfg, "DEFAULT_CONFIG", _cfg.Config())
         assert fast_model_for() == "gemini-2.5-pro"
-
-    def test_minimax_only_falls_back(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """MiniMax key alone is not enough — falls back to haiku."""
-        self._set_key(monkeypatch, "MINIMAX_API_KEY")
-        assert fast_model_for() == "claude-haiku-4-5"

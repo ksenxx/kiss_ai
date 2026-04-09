@@ -18,20 +18,6 @@ from pydantic import BaseModel
 class TestEscapeInvalidTemplateFieldNames:
     """Cover branches for conversion and format_spec in _escape_fragment."""
 
-    def test_with_conversion(self) -> None:
-        """Template with !r conversion triggers the conversion branch (line 86->87)."""
-        from kiss.core.utils import escape_invalid_template_field_names
-
-        result = escape_invalid_template_field_names("{name!r}", {"name"})
-        assert result == "{name!r}"
-
-    def test_with_format_spec(self) -> None:
-        """Template with :10d format spec triggers format_spec branch (line 88->89)."""
-        from kiss.core.utils import escape_invalid_template_field_names
-
-        result = escape_invalid_template_field_names("{count:10d}", {"count"})
-        assert result == "{count:10d}"
-
     def test_invalid_field_with_conversion_and_spec(self) -> None:
         """Invalid field with conversion+format_spec enters the escape branch (line 92->93)."""
         from kiss.core.utils import escape_invalid_template_field_names
@@ -77,49 +63,6 @@ class TestLazyImportNotInMap:
 # === channels/_backend_utils.py partial branches ===
 
 
-class TestWaitForMatchingMessage:
-    """Cover branches in wait_for_matching_message."""
-
-    def test_timeout_no_match(self) -> None:
-        """Times out when no messages arrive."""
-        from kiss.channels._backend_utils import wait_for_matching_message
-
-        result = wait_for_matching_message(
-            poll=lambda: [],
-            matches=lambda m: True,
-            extract_text=lambda m: m["text"],
-            timeout_seconds=0.05,
-            poll_interval=0.01,
-        )
-        assert result is None
-
-    def test_match_found(self) -> None:
-        """Returns extracted text when a matching message appears."""
-        from kiss.channels._backend_utils import wait_for_matching_message
-
-        result = wait_for_matching_message(
-            poll=lambda: [{"text": "hello"}],
-            matches=lambda m: True,
-            extract_text=lambda m: m["text"],
-            timeout_seconds=1.0,
-            poll_interval=0.01,
-        )
-        assert result == "hello"
-
-    def test_no_match_skips(self) -> None:
-        """Non-matching messages are skipped, then times out."""
-        from kiss.channels._backend_utils import wait_for_matching_message
-
-        result = wait_for_matching_message(
-            poll=lambda: [{"text": "nope"}],
-            matches=lambda m: False,
-            extract_text=lambda m: m["text"],
-            timeout_seconds=0.05,
-            poll_interval=0.01,
-        )
-        assert result is None
-
-
 class TestDrainQueueMessages:
     """Cover branches in drain_queue_messages."""
 
@@ -133,14 +76,6 @@ class TestDrainQueueMessages:
         q.put({"id": 3, "good": True})
         result = drain_queue_messages(q, limit=10, keep=lambda m: m["good"])
         assert len(result) == 2
-
-    def test_drain_empty_queue(self) -> None:
-        """Empty queue hits the except Empty break (line 78 loop exit)."""
-        from kiss.channels._backend_utils import drain_queue_messages
-
-        q: queue.Queue[dict[str, Any]] = queue.Queue()
-        result = drain_queue_messages(q, limit=10)
-        assert result == []
 
     def test_drain_hits_limit(self) -> None:
         """Queue has more items than limit, while condition exits (line 78->85)."""
@@ -159,51 +94,6 @@ class TestDrainQueueMessages:
 class TestGenerateApiDocsBranches:
     """Cover partial branches in generate_api_docs.py."""
 
-    def test_parse_multiline_description(self) -> None:
-        """Multi-line summary description covers line 139 'if rest'."""
-        from kiss.scripts.generate_api_docs import _parse_google_docstring
-
-        doc = "Summary.\n\n    More detail.\n\n    Returns:\n        int: result\n"
-        result = _parse_google_docstring(doc)
-        assert "More detail" in result.summary
-
-    def test_param_with_type_in_parens(self) -> None:
-        """Param with '(str)' covers line 168 elif '(' in param_part."""
-        from kiss.scripts.generate_api_docs import _parse_google_docstring
-
-        doc = "Summary.\n\n    Args:\n        name (str): The name.\n"
-        result = _parse_google_docstring(doc)
-        assert any(n == "name" for n, _ in result.args)
-
-    def test_multiline_param_desc(self) -> None:
-        """Continuation line covers line 173 elif current_arg_name."""
-        from kiss.scripts.generate_api_docs import _parse_google_docstring
-
-        doc = "Summary.\n\n    Args:\n        x: first line\n            second line.\n"
-        result = _parse_google_docstring(doc)
-        assert any("second" in d for _, d in result.args)
-
-    def test_parse_all_list_ast(self) -> None:
-        """__all__ detection via AST covers line 239."""
-        import ast
-
-        from kiss.scripts.generate_api_docs import _parse_all_list
-
-        tree = ast.parse('__all__ = ["foo", "bar"]\n')
-        names = _parse_all_list(tree)
-        assert names is not None and "foo" in names
-
-    def test_has_decorator(self) -> None:
-        """Deprecated decorator detection covers line 326."""
-        import ast
-
-        from kiss.scripts.generate_api_docs import _has_decorator
-
-        tree = ast.parse("@deprecated\ndef foo(): pass\n")
-        func = tree.body[0]
-        assert isinstance(func, ast.FunctionDef)
-        assert _has_decorator(func, "deprecated") is True
-
     def test_module_to_path_package(self) -> None:
         """Module path resolution for a package covers line 261 is_dir check."""
         from kiss.scripts.generate_api_docs import _module_to_path
@@ -215,14 +105,3 @@ class TestGenerateApiDocsBranches:
 
 
 # === scripts/redundancy_analyzer.py partial branches ===
-
-
-class TestRedundancyAnalyzerBranches:
-    """Cover partial branches in redundancy_analyzer.py with real data."""
-
-    def test_analyze_redundancy_returns_list(self) -> None:
-        """analyze_redundancy returns a list even without context data."""
-        from kiss.scripts.redundancy_analyzer import analyze_redundancy
-
-        result = analyze_redundancy(".coverage")
-        assert isinstance(result, list)

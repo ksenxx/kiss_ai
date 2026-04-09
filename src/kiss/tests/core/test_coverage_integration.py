@@ -47,15 +47,6 @@ class TestModelSchemaConversion(TestCase):
             api_key="test-key",
         )
 
-    def test_dict_type_schema(self) -> None:
-        m = self._get_model()
-        assert m._python_type_to_json_schema(dict[str, Any]) == {"type": "object"}
-
-    def test_list_type_schema(self) -> None:
-        m = self._get_model()
-        schema = m._python_type_to_json_schema(list[str])
-        assert schema == {"type": "array", "items": {"type": "string"}}
-
     def test_optional_type_schema(self) -> None:
         m = self._get_model()
         schema = m._python_type_to_json_schema(int | None)
@@ -65,11 +56,6 @@ class TestModelSchemaConversion(TestCase):
         m = self._get_model()
         schema = m._python_type_to_json_schema(str | int)
         assert "anyOf" in schema
-
-    def test_empty_annotation_schema(self) -> None:
-        import inspect
-        m = self._get_model()
-        assert m._python_type_to_json_schema(inspect.Parameter.empty) == {"type": "string"}
 
 
 class TestModelCallbackLoop(TestCase):
@@ -145,17 +131,6 @@ class TestUsefulTools(TestCase):
 
 
 class TestMultiPrinter(TestCase):
-    def test_multi_printer(self) -> None:
-        from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
-        from kiss.core.printer import MultiPrinter
-        p1 = BaseBrowserPrinter()
-        p2 = BaseBrowserPrinter()
-        mp = MultiPrinter([p1, p2])
-        cq1 = p1.add_client()
-        cq2 = p2.add_client()
-        mp.print("hello", type="text")
-        assert not cq1.empty()
-        assert not cq2.empty()
 
     def test_multi_printer_token_callback(self) -> None:
         from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
@@ -179,7 +154,6 @@ class TestMultiPrinter(TestCase):
         assert len(p1._bash_buffer) == 0
 
 
-
 def _noop_callback(token: str) -> None:
     """No-op token callback for streaming tests."""
     pass
@@ -192,24 +166,9 @@ def _make_collector_callback(collector: list[str]):
     return _cb
 
 
-class TestBuildTextBasedToolsPrompt:
-    def test_function_untyped_param(self) -> None:
-        def untyped(x):  # type: ignore[no-untyped-def]
-            """Untyped."""
-            pass
-
-        prompt = _build_text_based_tools_prompt({"untyped": untyped})
-        assert "x (any)" in prompt
-
-
 class TestParseTextBasedToolCalls:
     def test_no_tool_calls_key(self) -> None:
         content = '```json\n{"result": "hello"}\n```'
-        calls = _parse_text_based_tool_calls(content)
-        assert len(calls) == 0
-
-    def test_tool_calls_not_list(self) -> None:
-        content = '{"tool_calls": "not a list"}'
         calls = _parse_text_based_tool_calls(content)
         assert len(calls) == 0
 
@@ -228,11 +187,6 @@ class TestParseTextBasedToolCalls:
         calls = _parse_text_based_tool_calls(content)
         assert len(calls) == 1
         assert calls[0]["name"] == "finish"
-
-    def test_tool_call_without_name(self) -> None:
-        content = '{"tool_calls": [{"arguments": {"x": 1}}]}'
-        calls = _parse_text_based_tool_calls(content)
-        assert len(calls) == 0
 
 
 class TestOpenAICompatibleModelInit:

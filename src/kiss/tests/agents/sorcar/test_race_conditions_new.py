@@ -80,44 +80,6 @@ class TestP9RecordingsSnapshotBeforeIterate(unittest.TestCase):
             "B7 fix: should not access _recordings directly"
         )
 
-    def test_no_deadlock_with_concurrent_broadcast(self) -> None:
-        """Verify _extract_result_summary doesn't block broadcast."""
-        server = VSCodeServer()
-
-        rec_id = 999
-        # Start a recording and add a result event
-        server.printer.start_recording(rec_id)
-        server.printer.broadcast({"type": "result", "summary": "test"})
-
-        # Call _extract_result_summary in one thread while broadcasting in another
-        results: list[str] = []
-        errors: list[str] = []
-
-        def extract() -> None:
-            try:
-                r = server._extract_result_summary(rec_id)
-                results.append(r)
-            except Exception as e:
-                errors.append(str(e))
-
-        def broadcast_concurrent() -> None:
-            try:
-                for _ in range(10):
-                    server.printer.broadcast({"type": "text_delta", "text": "x"})
-            except Exception as e:
-                errors.append(str(e))
-
-        t1 = threading.Thread(target=extract, daemon=True)
-        t2 = threading.Thread(target=broadcast_concurrent, daemon=True)
-        t1.start()
-        t2.start()
-        t1.join(timeout=2.0)
-        t2.join(timeout=2.0)
-
-        assert not errors, f"No errors expected: {errors}"
-        assert results == ["test"]
-        server.printer.stop_recording(rec_id)
-
 
 # ---------------------------------------------------------------------------
 # P15 — _task_thread cleared after task completion

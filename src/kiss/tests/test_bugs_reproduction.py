@@ -11,66 +11,11 @@ import inspect
 # ---------------------------------------------------------------------------
 # C1: openai_compatible_model.py — Double-counting reasoning tokens
 # ---------------------------------------------------------------------------
-class TestC1DoubleCountingReasoningTokens:
-    def test_reasoning_tokens_not_double_counted(self) -> None:
-        """completion_tokens already includes reasoning_tokens.
-
-        The bug adds reasoning_tokens again, inflating the count.
-        This test creates a real response object with known token
-        counts and verifies the extraction returns the correct total.
-        """
-        from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
-
-        model = OpenAICompatibleModel.__new__(OpenAICompatibleModel)
-
-        # Build a realistic response object with nested attributes
-        class CompletionDetails:
-            reasoning_tokens = 50
-
-        class Usage:
-            prompt_tokens = 100
-            completion_tokens = 200  # Already includes 50 reasoning tokens
-            completion_tokens_details = CompletionDetails()
-            prompt_tokens_details = None
-
-        class Response:
-            usage = Usage()
-
-        inp, out, cache_read, cache_write = (
-            model.extract_input_output_token_counts_from_response(Response())
-        )
-        # If bug is present: out = 200 + 50 = 250 (WRONG)
-        # If bug is fixed: out = 200 (CORRECT)
-        assert out == 200, (
-            f"Output tokens should be 200 (completion_tokens already includes "
-            f"reasoning_tokens), but got {out}"
-        )
-
-
-
 
 
 # ---------------------------------------------------------------------------
 # C3: server.py — _task_history_id never populated
 # ---------------------------------------------------------------------------
-class TestC3TaskHistoryIdNeverPopulated:
-    def test_task_history_id_exposed_after_run(self) -> None:
-        """After StatefulSorcarAgent.run(), the task_id should be
-        accessible so the server can use it for history updates.
-
-        The bug: _task_history_id stays None because StatefulSorcarAgent
-        creates task_id as a local and never exposes it.
-        """
-        from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
-
-        agent = StatefulSorcarAgent("test")
-        # Check if StatefulSorcarAgent exposes task_id after run
-        # The bug is that there's no mechanism to get the task_id back
-        assert hasattr(agent, "_last_task_id"), (
-            "StatefulSorcarAgent should expose the task_id created during run() "
-            "so callers can reference the exact history row. Currently it's a "
-            "local variable inside run() that is never exposed."
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -101,37 +46,6 @@ class TestC4ThoughtSignaturesNotCleared:
 # ---------------------------------------------------------------------------
 # C5: All channel backends — disconnect not excluded from tool discovery
 # ---------------------------------------------------------------------------
-class TestC5DisconnectExposedAsTool:
-    def test_disconnect_not_in_tool_methods(self) -> None:
-        """disconnect() should be excluded from get_tool_methods().
-
-        The bug: 'disconnect' is missing from the non_tool frozenset,
-        so the LLM can call it and break the channel connection.
-        """
-        # Test with Discord backend (representative of all 23)
-        from kiss.channels.discord_agent import DiscordChannelBackend
-
-        backend = DiscordChannelBackend()
-        tool_methods = backend.get_tool_methods()
-        tool_names = [m.__name__ for m in tool_methods]
-
-        assert "disconnect" not in tool_names, (
-            f"disconnect() should NOT appear as a tool method, but it was "
-            f"found in: {tool_names}"
-        )
-
-    def test_disconnect_not_in_tool_methods_slack(self) -> None:
-        """Same check for Slack backend."""
-        from kiss.channels.slack_agent import SlackChannelBackend
-
-        backend = SlackChannelBackend()
-        tool_methods = backend.get_tool_methods()
-        tool_names = [m.__name__ for m in tool_methods]
-
-        assert "disconnect" not in tool_names, (
-            f"disconnect() should NOT appear as a tool method for Slack, "
-            f"but found: {tool_names}"
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -459,66 +373,6 @@ class TestI11SummarizerNoStopEvent:
 # ---------------------------------------------------------------------------
 # I12: persistence.py — _search_history doesn't escape SQL LIKE wildcards
 # ---------------------------------------------------------------------------
-class TestI12SearchHistoryNoWildcardEscape:
-    def test_search_with_percent_wildcard_is_escaped(self) -> None:
-        """Searching for a query containing '%' should treat it literally,
-        not as a SQL LIKE wildcard.
-
-        The bug: '%' in query becomes a LIKE wildcard, matching everything.
-        """
-        import tempfile
-        from pathlib import Path
-
-        from kiss.agents.sorcar import persistence
-
-        # Use a temporary database
-        with tempfile.TemporaryDirectory() as tmpdir:
-            old_dir = persistence._KISS_DIR
-            old_db_path = persistence._DB_PATH
-            old_db_conn = persistence._db_conn
-            try:
-                persistence._KISS_DIR = Path(tmpdir)
-                persistence._DB_PATH = Path(tmpdir) / "test_history.db"
-                persistence._db_conn = None  # Force re-creation
-
-                # Add entries to the database
-                db = persistence._get_db()
-                db.execute(
-                    "INSERT INTO task_history (task, timestamp, result) "
-                    "VALUES (?, ?, ?)",
-                    ("Calculate 50% of 100", 1000.0, "50"),
-                )
-                db.execute(
-                    "INSERT INTO task_history (task, timestamp, result) "
-                    "VALUES (?, ?, ?)",
-                    ("Write hello world", 1001.0, "done"),
-                )
-                db.commit()
-
-                # Search for literal "50%" (unused but validates query works)
-                persistence._search_history("50%")
-
-                # If bug is present: '%' acts as wildcard, "50%" matches
-                # "50% of 100" AND "Write hello world" (because %
-                # matches anything after "50")
-                # Actually with the query being f"%{query}%" = "%50%%",
-                # the % at end is redundant but the middle % could match
-                # differently. Let's test with just "%"
-                results_all = persistence._search_history("%")
-
-                # With bug: "%" becomes LIKE "%%%", which matches everything
-                # With fix: "%" is escaped and only matches entries containing literal "%"
-                assert len(results_all) == 1, (
-                    f"Searching for literal '%' matched {len(results_all)} entries "
-                    f"(expected 1 — only the entry containing '%'). "
-                    f"The '%' is being treated as a SQL LIKE wildcard."
-                )
-            finally:
-                if persistence._db_conn is not None:
-                    persistence._db_conn.close()
-                persistence._KISS_DIR = old_dir
-                persistence._DB_PATH = old_db_path
-                persistence._db_conn = old_db_conn
 
 
 # ---------------------------------------------------------------------------

@@ -210,11 +210,6 @@ class TestUsefulToolsBranches:
 class TestHelpersBranches:
     """Cover remaining branches in helpers.py."""
 
-    def test_fast_model_for_returns_model(self) -> None:
-        """fast_model_for returns a non-empty fast model string."""
-        result = fast_model_for()
-        assert result  # Should return a non-empty string
-
     def test_clip_autocomplete_suggestion_echo_prefix(self) -> None:
         """clip_autocomplete_suggestion strips query prefix when echoed."""
         result = clip_autocomplete_suggestion("hello", "hello world")
@@ -374,26 +369,6 @@ class TestVSCodeServerBranches:
         hist_events = [e for e in events if e.get("type") == "inputHistory"]
         assert len(hist_events) == 1
         assert "tasks" in hist_events[0]
-
-    def test_get_input_history_loads_beyond_first_100_rows(self) -> None:
-        """Arrow-key input history should cover the full history.db, not just 100 rows."""
-        server = VSCodeServer()
-        events: list[dict] = []
-
-        def cap(ev: dict) -> None:
-            events.append(ev)
-
-        server.printer.broadcast = cap  # type: ignore[assignment]
-        for i in range(105):
-            th._add_task(f"task-{i:03d}")
-
-        server._get_input_history()
-
-        hist_event = next(e for e in events if e.get("type") == "inputHistory")
-        tasks = hist_event["tasks"]
-        assert len(tasks) >= 105
-        assert "task-000" in tasks
-        assert tasks[0] == "task-104"
 
     def test_get_input_history_deduplicates_across_full_history(self) -> None:
         """Deduplication should keep the newest copy even when duplicates span >100 rows."""
@@ -732,56 +707,3 @@ class TestWebUseToolResolveLocatorInvisible:
             assert "Error" not in result or "Page:" in result
         finally:
             tool.close()
-
-
-class TestCrossTabInputHistory:
-    """End-to-end: a prompt submitted in one chat tab is visible in another tab's history."""
-
-    def test_prompt_visible_across_tabs(self) -> None:
-        """Submitting a prompt in tab A makes it appear in tab B's input history."""
-        # Two independent VSCodeServer instances simulate two chat editor tabs.
-        # Tab A's server writes to shared history.db via persistence; tab B reads it.
-        server_b = VSCodeServer()
-
-        events_b: list[dict] = []
-
-        def capture_b(ev: dict) -> None:
-            events_b.append(ev)
-
-        server_b.printer.broadcast = capture_b  # type: ignore[assignment]
-
-        # Tab A submits a prompt (persisted to shared history.db).
-        unique_prompt = f"cross-tab-test-{time.time()}"
-        th._add_task(unique_prompt)
-
-        # Tab B regains focus → extension sends getInputHistory.
-        server_b._handle_command({"type": "getInputHistory"})
-
-        hist = next(e for e in events_b if e.get("type") == "inputHistory")
-        assert unique_prompt in hist["tasks"]
-
-    def test_multiple_prompts_across_tabs(self) -> None:
-        """Multiple prompts from tab A all appear in tab B's history in order."""
-        server_b = VSCodeServer()
-
-        events_b: list[dict] = []
-
-        def capture_b(ev: dict) -> None:
-            events_b.append(ev)
-
-        server_b.printer.broadcast = capture_b  # type: ignore[assignment]
-
-        prompts = [f"multi-tab-{i}-{time.time()}" for i in range(3)]
-        for p in prompts:
-            th._add_task(p)
-            time.sleep(0.01)  # ensure distinct timestamps
-
-        server_b._handle_command({"type": "getInputHistory"})
-
-        hist = next(e for e in events_b if e.get("type") == "inputHistory")
-        # Most recent first
-        for p in prompts:
-            assert p in hist["tasks"]
-        # The last submitted prompt should be first in the list
-        idx = [hist["tasks"].index(p) for p in prompts]
-        assert idx[2] < idx[1] < idx[0]

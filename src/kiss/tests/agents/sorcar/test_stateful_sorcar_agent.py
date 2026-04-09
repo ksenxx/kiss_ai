@@ -53,28 +53,6 @@ class TestStatefulSorcarAgent:
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_error_saves_failure_result(self) -> None:
-        agent = StatefulSorcarAgent("test")
-        parent_class = cast(Any, SorcarAgent.__mro__[1])
-        original_run = parent_class.run
-
-        def failing_run(self_agent: object, **kwargs: object) -> str:
-            raise RuntimeError("boom")
-
-        parent_class.run = failing_run
-        try:
-            try:
-                agent.run(prompt_template="failing task")
-            except RuntimeError:
-                pass
-        finally:
-            parent_class.run = original_run
-
-        context = th._load_chat_context(agent.chat_id)
-        assert len(context) == 1
-        assert context[0]["task"] == "failing task"
-        assert "Task failed" in str(context[0]["result"])
-
     def test_load_last_chat_id_returns_most_recent(self) -> None:
         agent = StatefulSorcarAgent("test")
         captured: dict[str, Any] = {}

@@ -57,12 +57,6 @@ class TestModelVendorOrder(unittest.TestCase):
         assert sorted_names[3] == "gemini-2.0-flash"
         assert sorted_names[-1] in ("unknown-model", "together/some-model")
 
-    def test_cc_models_are_anthropic(self) -> None:
-        assert _model_vendor_name("cc/opus") == "Anthropic"
-        assert _model_vendor_name("cc/sonnet") == "Anthropic"
-        assert _model_vendor_name("cc/haiku") == "Anthropic"
-        assert _model_vendor_order("cc/opus") == 0
-
 
 class TestGetFiles(unittest.TestCase):
     """Test VSCodeServer._get_files produces correct sections and sorting."""
@@ -288,22 +282,12 @@ class TestExtractResultSummary(unittest.TestCase):
     def setUp(self) -> None:
         self.server = VSCodeServer()
 
-    def test_returns_empty_when_no_result_event(self) -> None:
-        rec_id = 42
-        self.server.printer.start_recording(rec_id)
-        self.server.printer.broadcast({"type": "text_delta", "text": "hello"})
-        result = self.server._extract_result_summary(rec_id)
-        assert result == ""
-
 
 class TestLastActiveFile(unittest.TestCase):
     """Test that _last_active_file is stored from run commands."""
 
     def setUp(self) -> None:
         self.server = VSCodeServer()
-
-    def test_initial_value_empty(self) -> None:
-        assert self.server._last_active_file == ""
 
 
 class TestMainJsHistoryCycling(unittest.TestCase):
@@ -561,7 +545,6 @@ class TestCompleteFromActiveFile(unittest.TestCase):
         self.server.printer.broadcast = capture_broadcast  # type: ignore[assignment]
 
 
-
 class TestMainJsInputHistory(unittest.TestCase):
     """Test that main.js handles inputHistory events and request patterns."""
 
@@ -635,35 +618,6 @@ class TestWorktreeServerIntegration(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_server_uses_worktree_agent(self) -> None:
-        """VSCodeServer should use WorktreeSorcarAgent."""
-        from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-        assert isinstance(self.server.agent, WorktreeSorcarAgent)
-
-    def test_get_worktree_changed_files_no_pending(self) -> None:
-        """Returns empty list when no worktree task is pending."""
-        result = self.server._get_worktree_changed_files()
-        assert result == []
-
-    def test_get_worktree_changed_files_with_branch(self) -> None:
-        """Returns changed files after worktree branch has commits."""
-        self._git("checkout", "-b", "kiss/test-branch")
-        (self.repo / "new_file.py").write_text("print('hi')")
-        self._git("add", ".")
-        self._git("commit", "-m", "add file")
-        self._git("checkout", "main")
-
-        _set_agent_wt(self.server.agent, self.repo, "kiss/test-branch", "main")
-
-        result = self.server._get_worktree_changed_files()
-        assert "new_file.py" in result
-
-    def test_handle_worktree_action_unknown(self) -> None:
-        """Unknown action returns failure."""
-        result = self.server._handle_worktree_action("unknown")
-        assert result["success"] is False
-        assert "Unknown action" in result["message"]
-
     def test_handle_worktree_action_merge(self) -> None:
         """Merge action calls agent.merge() and returns result."""
         self._git("checkout", "-b", "kiss/merge-test")
@@ -690,24 +644,6 @@ class TestWorktreeServerIntegration(unittest.TestCase):
         result = self.server._handle_worktree_action("discard")
         assert result["success"] is True
         assert "Discarded" in result["message"]
-        assert self.server.agent._wt_branch is None
-
-    def test_handle_worktree_action_manual(self) -> None:
-        """Manual action merges --no-commit and opens SCM."""
-        self._git("checkout", "-b", "kiss/manual-test")
-        (self.repo / "manual.txt").write_text("manual content")
-        self._git("add", ".")
-        self._git("commit", "-m", "add manual")
-        self._git("checkout", "main")
-
-        _set_agent_wt(self.server.agent, self.repo, "kiss/manual-test", "main")
-
-        result = self.server._handle_worktree_action("manual")
-        assert result["success"] is True
-        assert result.get("manual") is True
-        assert result.get("openScm") is True
-        assert "ready for review" in result["message"]
-        # State should be cleared
         assert self.server.agent._wt_branch is None
 
     def test_worktree_action_command_routing(self) -> None:

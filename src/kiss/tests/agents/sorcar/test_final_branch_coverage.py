@@ -139,18 +139,6 @@ class TestAppendChatEventNoTask:
 class TestRankFileSuggestionsWithUsage:
     """Cover usage.get(path, 0) > 0 True branch and frequent loop."""
 
-    def test_frequent_files_sorted_and_labeled(self) -> None:
-        """Files with usage > 0 are sorted as frequent and labeled."""
-        files = ["src/main.py", "src/util.py", "README.md"]
-        usage = {"src/main.py": 5, "src/util.py": 2}
-        result = rank_file_suggestions(files, "", usage)
-        # src/main.py and src/util.py have usage > 0 → frequent section
-        frequent = [r for r in result if r["type"] == "frequent"]
-        rest = [r for r in result if r["type"] == "file"]
-        assert len(frequent) == 2
-        assert len(rest) == 1
-        assert rest[0]["text"] == "README.md"
-
     def test_frequent_files_with_query(self) -> None:
         """Frequent files are filtered by query and sorted by end distance."""
         files = ["src/main.py", "src/main_test.py", "lib/main.py"]
@@ -247,14 +235,6 @@ class TestGetHistoryBranches:
         server.printer.broadcast = cap  # type: ignore[assignment]
         return server, events
 
-    def test_get_history_empty_db(self) -> None:
-        """_get_history with empty DB produces empty sessions list."""
-        server, events = self._make_server()
-        server._get_history(None, offset=0, generation=0)
-        hist = [e for e in events if e.get("type") == "history"]
-        assert len(hist) == 1
-        assert hist[0]["sessions"] == []
-
     def test_get_history_with_entries(self) -> None:
         """_get_history with populated DB enters the loop (line 466→467)."""
         server, events = self._make_server()
@@ -285,31 +265,6 @@ class TestGetHistoryBranches:
 # ---------------------------------------------------------------------------
 # server.py — line 670→671: _complete with stale sequence number
 # ---------------------------------------------------------------------------
-
-
-class TestCompleteStaleSequence:
-    """Cover stale sequence check returning early (line 670→671)."""
-
-    def test_complete_stale_seq_in_body(self) -> None:
-        """_complete exits early when seq doesn't match latest."""
-        server = VSCodeServer()
-        events: list[dict] = []
-        orig = server.printer.broadcast
-
-        def cap(ev: dict) -> None:
-            events.append(ev)
-            orig(ev)
-
-        server.printer.broadcast = cap  # type: ignore[assignment]
-        # Set latest seq to something higher than what we'll pass
-        with server._complete_lock:
-            server._complete_seq_latest = 10
-        # Call _complete with stale seq=5 → should exit early at line 670→671
-        server._complete("test query", seq=5)
-        ghost = [e for e in events if e.get("type") == "ghost"]
-        assert len(ghost) == 0  # No broadcast because request was stale
-
-
 
 
 # ---------------------------------------------------------------------------

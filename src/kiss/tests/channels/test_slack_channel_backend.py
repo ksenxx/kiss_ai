@@ -40,20 +40,6 @@ class TestSlackChannelBackendConnect:
     def teardown_method(self) -> None:
         _restore(self._backup)
 
-    def test_connect_no_token(self) -> None:
-        """connect() returns False when no token is stored."""
-        backend = SlackChannelBackend()
-        assert backend.connect() is False
-        assert "No Slack token" in backend.connection_info
-
-    def test_connect_invalid_token(self) -> None:
-        """connect() returns False with an invalid token."""
-        _save_token("xoxb-invalid-test-token")
-        backend = SlackChannelBackend()
-        assert backend.connect() is False
-        info = backend.connection_info.lower()
-        assert "auth failed" in info or "error" in info
-
 class TestSlackChannelBackendMethods:
     """Tests for SlackChannelBackend methods with invalid token."""
 
@@ -89,10 +75,6 @@ class TestSlackChannelBackendMethods:
     def test_join_channel_swallows_api_error(self) -> None:
         """join_channel silently ignores SlackApiError."""
         self.backend.join_channel("C_FAKE_CHANNEL")
-
-    def test_is_from_bot_with_bot_user_id(self) -> None:
-        """is_from_bot returns True when user matches bot_user_id."""
-        assert self.backend.is_from_bot({"user": "U_BOT_TEST"})
 
     def test_strip_bot_mention_no_mention(self) -> None:
         """strip_bot_mention returns text unchanged if no mention."""

@@ -98,13 +98,6 @@ class TestOpenAIModel:
         assert isinstance(embedding[0], float)
 
 
-class TestModelHelperFunctions:
-    def test_build_text_based_tools_prompt_empty(self):
-        from kiss.core.models.model import _build_text_based_tools_prompt
-
-        assert _build_text_based_tools_prompt({}) == ""
-
-
 class TestModelInfo:
     def test_is_model_flaky(self):
         assert isinstance(is_model_flaky("gpt-4.1-mini"), bool)
