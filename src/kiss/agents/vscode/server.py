@@ -542,7 +542,6 @@ class VSCodeServer:
         """Replay recorded chat events for a previous task."""
         events = _load_task_chat_events(task)
         if not events:
-            self.printer.broadcast({"type": "error", "text": "No recorded events for this session"})
             return
         self.agent.resume_chat(task)
         self.printer.broadcast({"type": "task_events", "events": events, "task": task})
