@@ -716,13 +716,12 @@
     clearWorktreeBar();
     var bar = mkEl('div', 'wt-bar');
     var label = mkEl('span', 'wt-label');
-    label.textContent = 'Commit and Merge, Discard, or Do Nothing?';
+    label.textContent = 'Auto-commit and merge, Discard, or Do Nothing?';
     bar.appendChild(label);
 
     var btns = mkEl('div', 'wt-btns');
     var mergeBtn = mkEl('button', 'wt-btn wt-merge');
-    mergeBtn.textContent = 'Commit and Merge';
-    mergeBtn.dataset.tooltip = 'Commit changes and merge into ' + (ev.originalBranch || 'original');
+    mergeBtn.textContent = 'Auto-commit and merge';
     mergeBtn.addEventListener('click', function() {
       disableWtBtns();
       vscode.postMessage({ type: 'worktreeAction', action: 'merge' });
@@ -730,7 +729,6 @@
 
     var discardBtn = mkEl('button', 'wt-btn wt-discard');
     discardBtn.textContent = 'Discard';
-    discardBtn.dataset.tooltip = 'Delete the branch and worktree';
     discardBtn.addEventListener('click', function() {
       disableWtBtns();
       vscode.postMessage({ type: 'worktreeAction', action: 'discard' });
@@ -738,7 +736,6 @@
 
     var doNothingBtn = mkEl('button', 'wt-btn wt-donothing');
     doNothingBtn.textContent = 'Do Nothing';
-    doNothingBtn.dataset.tooltip = 'Keep the branch for later, no git operation';
     doNothingBtn.addEventListener('click', function() {
       disableWtBtns();
       vscode.postMessage({ type: 'worktreeAction', action: 'do_nothing' });
