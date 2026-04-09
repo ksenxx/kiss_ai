@@ -186,14 +186,19 @@ export function activate(context: vscode.ExtensionContext): void {
     })
   );
 
-  // Auto-open a chat tab on activation unless the serializer already restored
-  // tabs.  The serializer fires asynchronously after activate() returns, so we
-  // defer the check with a short timeout.
-  setTimeout(() => {
-    if (restoredCount === 0) {
-      tabManager!.createTab(true);
-    }
-  }, 200);
+  // Auto-open a chat tab only on the very first activation after installation.
+  // On subsequent launches, rely on VSCode's built-in tab serializer to restore
+  // previously open chat tabs.
+  const ACTIVATED_KEY = 'kissSorcar.hasBeenActivated';
+  const hasBeenActivated = context.globalState.get<boolean>(ACTIVATED_KEY, false);
+  if (!hasBeenActivated) {
+    context.globalState.update(ACTIVATED_KEY, true);
+    setTimeout(() => {
+      if (restoredCount === 0) {
+        tabManager!.createTab(true);
+      }
+    }, 200);
+  }
 
   // Auto-install dependencies in background
   ensureDependencies().catch(err => {
