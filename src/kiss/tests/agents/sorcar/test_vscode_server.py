@@ -587,6 +587,79 @@ class TestMainJsInputHistory(unittest.TestCase):
         assert "histCache.unshift(prompt)" in body
 
 
+class TestMainJsWorktreeToggle(unittest.TestCase):
+    """Test that main.js has the worktree toggle button wiring."""
+
+    _js: str = ""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
+        cls._js = (base / "vscode" / "media" / "main.js").read_text()
+
+    def test_has_worktree_toggle_btn_element(self) -> None:
+        assert "worktree-toggle-btn" in self._js
+
+    def test_toggle_adds_active_class(self) -> None:
+        assert "worktreeToggleBtn.classList.toggle('active')" in self._js
+
+    def test_worktree_toggle_btn_variable(self) -> None:
+        assert "worktreeToggleBtn" in self._js
+
+
+class TestMainCssWorktreeToggle(unittest.TestCase):
+    """Test that main.css has styles for the worktree toggle button."""
+
+    css: str
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
+        cls.css = (base / "vscode" / "media" / "main.css").read_text()
+
+    def test_has_worktree_toggle_btn_base_style(self) -> None:
+        assert "#worktree-toggle-btn" in self.css
+
+    def test_has_worktree_toggle_btn_active_style(self) -> None:
+        assert "#worktree-toggle-btn.active" in self.css
+
+    def test_active_uses_accent_color(self) -> None:
+        idx = self.css.index("#worktree-toggle-btn.active")
+        block = self.css[idx : idx + 200]
+        assert "accent" in block
+
+
+class TestSorcarTabWorktreeToggle(unittest.TestCase):
+    """Test that SorcarTab.ts HTML includes the worktree toggle button."""
+
+    html: str
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
+        cls.html = (base / "vscode" / "src" / "SorcarTab.ts").read_text()
+
+    def test_has_worktree_toggle_btn(self) -> None:
+        assert 'id="worktree-toggle-btn"' in self.html
+
+    def test_has_use_worktree_tooltip(self) -> None:
+        assert 'data-tooltip="Use worktree"' in self.html
+
+    def test_button_is_between_upload_and_history(self) -> None:
+        upload_idx = self.html.index('id="upload-btn"')
+        worktree_idx = self.html.index('id="worktree-toggle-btn"')
+        history_idx = self.html.index('id="history-btn"')
+        assert upload_idx < worktree_idx < history_idx
+
+    def test_has_tree_svg_icon(self) -> None:
+        """Button should have a git-branch-like tree SVG icon."""
+        idx = self.html.index('id="worktree-toggle-btn"')
+        # Look at the next 500 chars for the SVG
+        block = self.html[idx : idx + 500]
+        assert "<svg" in block
+        assert "viewBox" in block
+
+
 class TestWorktreeServerIntegration(unittest.TestCase):
     """Integration tests for worktree support in VSCodeServer."""
 

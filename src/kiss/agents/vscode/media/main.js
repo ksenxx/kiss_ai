@@ -64,6 +64,7 @@
   const ghostOverlay = document.getElementById('ghost-overlay');
   const inputContainer = document.getElementById('input-container');
   const inputClearBtn = document.getElementById('input-clear-btn');
+  const worktreeToggleBtn = document.getElementById('worktree-toggle-btn');
   const taskPanel = document.getElementById('task-panel');
 
 
@@ -845,6 +846,11 @@
       input.onchange = handleFileSelect;
       input.click();
     });
+    if (worktreeToggleBtn) {
+      worktreeToggleBtn.addEventListener('click', function() {
+        worktreeToggleBtn.classList.toggle('active');
+      });
+    }
     if (clearBtn) {
       clearBtn.addEventListener('click', function() {
         doClearChat();
