@@ -40,7 +40,7 @@ export type FromWebviewMessage =
   | { type: 'runPrompt' }
   | { type: 'focusEditor' }
   | { type: 'getInputHistory' }
-  | { type: 'worktreeAction'; action: 'merge' | 'discard' }
+  | { type: 'worktreeAction'; action: 'merge' | 'discard' | 'do_nothing' }
   | { type: 'resolveDroppedPaths'; uris: string[] };
 
 /** Messages from extension to webview (matches browser event protocol) */
@@ -104,6 +104,6 @@ export interface AgentCommand {
   path?: string;
   sessionId?: string;
   activeFileContent?: string;
-  action?: 'merge' | 'discard';
+  action?: 'merge' | 'discard' | 'do_nothing';
   useWorktree?: boolean;
 }

@@ -716,7 +716,7 @@
     clearWorktreeBar();
     var bar = mkEl('div', 'wt-bar');
     var label = mkEl('span', 'wt-label');
-    label.textContent = 'Commit and Merge or Discard?';
+    label.textContent = 'Commit and Merge, Discard, or Do Nothing?';
     bar.appendChild(label);
 
     var btns = mkEl('div', 'wt-btns');
@@ -736,8 +736,17 @@
       vscode.postMessage({ type: 'worktreeAction', action: 'discard' });
     });
 
+    var doNothingBtn = mkEl('button', 'wt-btn wt-donothing');
+    doNothingBtn.textContent = 'Do Nothing';
+    doNothingBtn.dataset.tooltip = 'Keep the branch for later, no git operation';
+    doNothingBtn.addEventListener('click', function() {
+      disableWtBtns();
+      vscode.postMessage({ type: 'worktreeAction', action: 'do_nothing' });
+    });
+
     btns.appendChild(mergeBtn);
     btns.appendChild(discardBtn);
+    btns.appendChild(doNothingBtn);
     bar.appendChild(btns);
 
     // Hide the input container and show the worktree bar in its place

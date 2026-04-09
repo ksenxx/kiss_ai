@@ -868,7 +868,7 @@ class VSCodeServer:
         server process restart where in-memory state was lost).
 
         Args:
-            action: One of ``"merge"``, ``"discard"``, or ``"manual"``.
+            action: One of ``"merge"``, ``"discard"``, or ``"do_nothing"``.
 
         Returns:
             Dict with ``success`` bool, ``message`` string, and
@@ -889,6 +889,9 @@ class VSCodeServer:
             return {"success": success, "message": msg}
         elif action == "discard":
             msg = wt.discard()
+            return {"success": True, "message": msg}
+        elif action == "do_nothing":
+            msg = wt.do_nothing()
             return {"success": True, "message": msg}
         return {"success": False, "message": f"Unknown action: {action}"}
 

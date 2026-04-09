@@ -445,7 +445,9 @@ export class SorcarTab {
           ? 'Committing and merging worktree…'
           : wtAction === 'discard'
             ? 'Discarding worktree…'
-            : 'Processing worktree action…';
+            : wtAction === 'do_nothing'
+              ? 'Finishing up…'
+              : 'Processing worktree action…';
         vscode.window.withProgress(
           { location: vscode.ProgressLocation.Notification, title: progressTitle },
           (progress) => {

@@ -1,8 +1,8 @@
 """Worktree-based agent that runs each task on an isolated git branch.
 
 Creates a ``git worktree`` for every task so the user's main working tree
-is never modified.  After the task the user chooses **merge**, **manual
-merge**, or **discard**.  The agent refuses further tasks in the same chat
+is never modified.  After the task the user chooses **merge**, **discard**,
+or **do nothing**.  The agent refuses further tasks in the same chat
 session until the branch is resolved.
 """
 
@@ -327,7 +327,7 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
 
         return task_result + "\n\n---\n" + self.merge_instructions()
 
-    # -- Merge / discard / manual merge ------------------------------------
+    # -- Merge / discard / do nothing --------------------------------------
 
     def merge(self) -> str:
         """Merge the task branch into the original branch.
@@ -409,13 +409,45 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         self._wt = None
         return f"Discarded branch '{wt.branch}'."
 
+    def do_nothing(self) -> str:
+        """Leave the worktree branch as-is without any git operation.
+
+        Clears the pending worktree state so the user regains control
+        and can start new tasks.  The branch and any committed work
+        remain in git for the user to merge or discard manually later.
+
+        Returns:
+            Informational message with the branch name.
+
+        Raises:
+            RuntimeError: If no worktree task is pending.
+        """
+        if self._wt is None:
+            raise RuntimeError("No pending worktree task")
+
+        wt = self._wt
+        if wt.wt_dir.exists():
+            self._auto_commit_worktree()
+            GitWorktreeOps.remove(wt.repo_root, wt.wt_dir)
+        GitWorktreeOps.prune(wt.repo_root)
+        if wt.original_branch:
+            GitWorktreeOps.checkout(wt.repo_root, wt.original_branch)
+        self._wt = None
+        return (
+            f"Left branch '{wt.branch}' as-is.  You can merge or "
+            f"delete it later:\n"
+            f"    git merge {wt.branch}\n"
+            f"    git branch -d {wt.branch}"
+        )
+
     # -- Instructions ------------------------------------------------------
 
     def merge_instructions(self) -> str:
-        """Return human-readable merge/discard instructions.
+        """Return human-readable merge/discard/do-nothing instructions.
 
         Returns:
-            Multi-line string with merge and discard instructions.
+            Multi-line string with merge, discard, and do-nothing
+            instructions.
         """
         if self._wt is None:
             return "No pending worktree task."
@@ -427,6 +459,8 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
             "    agent.merge()\n"
             "\nTo discard:\n"
             "    agent.discard()\n"
+            "\nTo do nothing (keep the branch for later):\n"
+            "    agent.do_nothing()\n"
             "\nOr manually:\n"
             f"    cd {wt.repo_root}\n"
             f"    git checkout {orig}\n"
@@ -504,12 +538,18 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
 
     if isinstance(agent, WorktreeSorcarAgent) and agent._wt_pending:
         while True:
-            choice = input("\n[c]ommit and merge / [d]iscard? ").strip().lower()
+            choice = (
+                input("\n[c]ommit and merge / [d]iscard / do [n]othing? ")
+                .strip().lower()
+            )
             if choice == "c":
                 print(agent.merge())
                 break
             if choice == "d":
                 print(agent.discard())
+                break
+            if choice == "n":
+                print(agent.do_nothing())
                 break
             print("Invalid choice.")
 

@@ -394,6 +394,7 @@ class TestVSCodeServerBranches:
     def test_emit_pending_worktree_with_branch(self, tmp_path):
         """_emit_pending_worktree emits worktree_done when branch exists."""
         server, events = self._make_server()
+        server._use_worktree = True
         repo = tmp_path / "repo"
         repo.mkdir()
         subprocess.run(["git", "init"], cwd=str(repo), capture_output=True)
@@ -405,8 +406,8 @@ class TestVSCodeServerBranches:
         subprocess.run(["git", "add", "."], cwd=str(repo), capture_output=True)
         subprocess.run(["git", "commit", "-m", "init"],
                        cwd=str(repo), capture_output=True)
-        # Create a branch matching the agent's chat_id
-        chat_id = server.agent._chat_id
+        # Create a branch matching the worktree agent's chat_id
+        chat_id = server._worktree_agent._chat_id
         branch = f"kiss/wt-{chat_id[:12]}-1234567890"
         subprocess.run(["git", "branch", branch],
                        cwd=str(repo), capture_output=True)

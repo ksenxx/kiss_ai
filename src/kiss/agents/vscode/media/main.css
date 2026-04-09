@@ -832,6 +832,14 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 .wt-discard:hover:not(:disabled) {
   background: color-mix(in srgb, var(--red) 20%, transparent);
 }
+.wt-donothing {
+  background: color-mix(in srgb, var(--dim) 10%, transparent);
+  border-color: color-mix(in srgb, var(--dim) 20%, transparent);
+  color: var(--dim);
+}
+.wt-donothing:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--dim) 20%, transparent);
+}
 .wt-result-ok {
   color: var(--green); padding: 8px 12px;
   border-left: 3px solid var(--green); margin: 6px 0;
