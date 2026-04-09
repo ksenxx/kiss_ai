@@ -155,11 +155,8 @@ class TestWorktreeWorkflow:
         assert _file_in_repo(self.repo, "new_file.txt")
         assert (self.repo / "new_file.txt").read_text() == "hello from worktree"
 
-    def test_merge_leaves_changes_uncommitted(self) -> None:
-        """After merge, changes are uncommitted working tree modifications.
-
-        This ensures VS Code's SCM panel shows the changes for review.
-        """
+    def test_merge_commits_changes(self) -> None:
+        """After merge, changes are committed on the original branch."""
         agent = self._agent()
         agent.run(prompt_template="task1", work_dir=str(self.repo))
 
@@ -174,16 +171,13 @@ class TestWorktreeWorkflow:
         assert _file_in_repo(self.repo, "new_file.txt")
         assert (self.repo / "README.md").read_text() == "modified\n"
 
-        # Changes are NOT committed — git status shows dirty working tree
+        # Changes ARE committed — git status shows clean working tree
         status = subprocess.run(
             ["git", "-C", str(self.repo), "status", "--porcelain"],
             capture_output=True, text=True,
         )
         porcelain = status.stdout.strip()
-        assert porcelain, "Working tree should be dirty after merge"
-        # Modified file should show as unstaged modification or untracked
-        assert "README.md" in porcelain
-        assert "new_file.txt" in porcelain
+        assert not porcelain, "Working tree should be clean after merge"
 
         # No MERGE_HEAD should exist (squash merge doesn't create one)
         merge_head = self.repo / ".git" / "MERGE_HEAD"
