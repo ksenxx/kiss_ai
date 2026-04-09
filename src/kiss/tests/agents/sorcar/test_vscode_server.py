@@ -699,25 +699,27 @@ class TestWorktreeServerIntegration(unittest.TestCase):
         self._git("commit", "-m", "add merged")
         self._git("checkout", "main")
 
-        _set_agent_wt(self.server.agent, self.repo, "kiss/merge-test", "main")
+        self.server._use_worktree = True
+        _set_agent_wt(self.server._worktree_agent, self.repo, "kiss/merge-test", "main")
 
         result = self.server._handle_worktree_action("merge")
         assert result["success"] is True
         assert "Successfully merged" in result["message"]
         # Branch should be cleaned up
-        assert self.server.agent._wt_branch is None
+        assert self.server._worktree_agent._wt_branch is None
 
     def test_handle_worktree_action_discard(self) -> None:
         """Discard action removes worktree branch."""
         self._git("checkout", "-b", "kiss/discard-test")
         self._git("checkout", "main")
 
-        _set_agent_wt(self.server.agent, self.repo, "kiss/discard-test", "main")
+        self.server._use_worktree = True
+        _set_agent_wt(self.server._worktree_agent, self.repo, "kiss/discard-test", "main")
 
         result = self.server._handle_worktree_action("discard")
         assert result["success"] is True
         assert "Discarded" in result["message"]
-        assert self.server.agent._wt_branch is None
+        assert self.server._worktree_agent._wt_branch is None
 
     def test_worktree_action_command_routing(self) -> None:
         """worktreeAction command is routed to _handle_worktree_action."""
@@ -727,12 +729,91 @@ class TestWorktreeServerIntegration(unittest.TestCase):
         self._git("commit", "-m", "add route")
         self._git("checkout", "main")
 
-        _set_agent_wt(self.server.agent, self.repo, "kiss/route-test", "main")
+        self.server._use_worktree = True
+        _set_agent_wt(self.server._worktree_agent, self.repo, "kiss/route-test", "main")
 
         self.server._handle_command({"type": "worktreeAction", "action": "merge"})
         wt_events = [e for e in self.events if e["type"] == "worktree_result"]
         assert len(wt_events) == 1
         assert wt_events[0]["success"] is True
+
+
+class TestAgentToggle(unittest.TestCase):
+    """Tests for worktree toggle switching between agents."""
+
+    _JS_PATH = Path(__file__).resolve().parents[3] / "agents" / "vscode" / "media" / "main.js"
+    _TS_PATH = Path(__file__).resolve().parents[3] / "agents" / "vscode" / "src" / "SorcarTab.ts"
+    _js: str
+    _ts: str
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._js = cls._JS_PATH.read_text()
+        cls._ts = cls._TS_PATH.read_text()
+
+    def test_server_defaults_to_stateful_agent(self) -> None:
+        """Server agent is StatefulSorcarAgent by default (worktree off)."""
+        from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
+        from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+
+        server = VSCodeServer()
+        assert server._use_worktree is False
+        assert isinstance(server.agent, StatefulSorcarAgent)
+        assert not isinstance(server.agent, WorktreeSorcarAgent)
+
+    def test_server_uses_worktree_agent_when_enabled(self) -> None:
+        """Server agent is WorktreeSorcarAgent when worktree mode is on."""
+        from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+
+        server = VSCodeServer()
+        server._use_worktree = True
+        assert isinstance(server.agent, WorktreeSorcarAgent)
+
+    def test_server_agent_switches_dynamically(self) -> None:
+        """Agent switches when _use_worktree is toggled."""
+        from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
+        from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+
+        server = VSCodeServer()
+        assert isinstance(server.agent, StatefulSorcarAgent)
+        assert not isinstance(server.agent, WorktreeSorcarAgent)
+        server._use_worktree = True
+        assert isinstance(server.agent, WorktreeSorcarAgent)
+        server._use_worktree = False
+        assert isinstance(server.agent, StatefulSorcarAgent)
+        assert not isinstance(server.agent, WorktreeSorcarAgent)
+
+    def test_js_sends_use_worktree_in_submit(self) -> None:
+        """main.js includes useWorktree in submit message."""
+        assert "useWorktree" in self._js
+        assert "worktreeToggleBtn.classList.contains('active')" in self._js
+
+    def test_ts_passes_use_worktree_to_start_task(self) -> None:
+        """SorcarTab.ts passes useWorktree to _startTask."""
+        assert "message.useWorktree" in self._ts
+        assert "useWorktree" in self._ts
+
+    def test_ts_start_task_includes_use_worktree(self) -> None:
+        """_startTask sends useWorktree in agent command."""
+        # Check that _startTask accepts useWorktree and passes it through
+        assert "useWorktree?: boolean" in self._ts
+        # Check it's included in the command object
+        lines = self._ts.split("\n")
+        in_start_task = False
+        found_use_worktree_in_command = False
+        for line in lines:
+            if "_startTask" in line and "useWorktree" in line:
+                in_start_task = True
+            if in_start_task and "useWorktree" in line and "sendCommand" not in line:
+                found_use_worktree_in_command = True
+        assert found_use_worktree_in_command
+
+    def test_worktree_action_rejected_when_not_enabled(self) -> None:
+        """Worktree action fails gracefully when worktree mode is off."""
+        server = VSCodeServer()
+        result = server._handle_worktree_action("merge")
+        assert result["success"] is False
+        assert "not enabled" in result["message"]
 
 
 if __name__ == "__main__":
