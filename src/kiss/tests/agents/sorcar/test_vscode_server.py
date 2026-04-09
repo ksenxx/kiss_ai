@@ -737,6 +737,38 @@ class TestWorktreeServerIntegration(unittest.TestCase):
         assert len(wt_events) == 1
         assert wt_events[0]["success"] is True
 
+    def test_merge_broadcasts_progress_before_result(self) -> None:
+        """Merge action broadcasts worktree_progress before worktree_result."""
+        self._git("checkout", "-b", "kiss/progress-test")
+        (self.repo / "progress.txt").write_text("progress content")
+        self._git("add", ".")
+        self._git("commit", "-m", "add progress")
+        self._git("checkout", "main")
+
+        self.server._use_worktree = True
+        _set_agent_wt(self.server._worktree_agent, self.repo, "kiss/progress-test", "main")
+
+        self.server._handle_command({"type": "worktreeAction", "action": "merge"})
+        progress_events = [e for e in self.events if e["type"] == "worktree_progress"]
+        assert len(progress_events) == 1
+        assert "Generating commit message" in progress_events[0]["message"]
+        # Progress must come before result
+        relevant = ("worktree_progress", "worktree_result")
+        types = [e["type"] for e in self.events if e["type"] in relevant]
+        assert types == ["worktree_progress", "worktree_result"]
+
+    def test_discard_does_not_broadcast_progress(self) -> None:
+        """Discard action does not broadcast worktree_progress."""
+        self._git("checkout", "-b", "kiss/no-progress-test")
+        self._git("checkout", "main")
+
+        self.server._use_worktree = True
+        _set_agent_wt(self.server._worktree_agent, self.repo, "kiss/no-progress-test", "main")
+
+        self.server._handle_command({"type": "worktreeAction", "action": "discard"})
+        progress_events = [e for e in self.events if e["type"] == "worktree_progress"]
+        assert len(progress_events) == 0
+
 
 class TestAgentToggle(unittest.TestCase):
     """Tests for worktree toggle switching between agents."""
@@ -859,6 +891,23 @@ class TestWorktreeActionNotifications(unittest.TestCase):
         # The code should branch on wtAction to pick the right message
         assert "wtAction === 'merge'" in self._ts
         assert "wtAction === 'discard'" in self._ts
+
+    def test_worktree_progress_field_exists(self) -> None:
+        """SorcarTab has a _worktreeProgress field for progress reporting."""
+        assert "_worktreeProgress" in self._ts
+
+    def test_worktree_progress_captured_in_with_progress(self) -> None:
+        """The progress reporter is captured in the withProgress callback."""
+        assert "this._worktreeProgress = progress" in self._ts
+
+    def test_worktree_progress_handler_updates_notification(self) -> None:
+        """worktree_progress messages update the progress notification."""
+        assert "worktree_progress" in self._ts
+        assert ".report(" in self._ts
+
+    def test_worktree_progress_cleared_on_result(self) -> None:
+        """_worktreeProgress is cleared when worktree_result arrives."""
+        assert "this._worktreeProgress = null" in self._ts
 
 
 if __name__ == "__main__":

@@ -60,6 +60,7 @@ export class SorcarTab {
   private _lastTask: string = '';
   private _worktreeDir: string = '';
   private _worktreeActionResolve: (() => void) | null = null;
+  private _worktreeProgress: vscode.Progress<{ message?: string }> | null = null;
 
   /** The underlying WebviewPanel (for reveal/focus tracking). */
   get panel(): vscode.WebviewPanel { return this._panel; }
@@ -137,11 +138,17 @@ export class SorcarTab {
           this._openWorktreeInScm(dir);
         }
       }
+      if (msg.type === 'worktree_progress') {
+        if (this._worktreeProgress) {
+          this._worktreeProgress.report({ message: (msg as any).message });
+        }
+      }
       if (msg.type === 'worktree_result') {
         if (this._worktreeActionResolve) {
           this._worktreeActionResolve();
           this._worktreeActionResolve = null;
         }
+        this._worktreeProgress = null;
         const result = msg as any;
         if (result.success) {
           vscode.window.showInformationMessage(result.message || 'Worktree action completed.');
@@ -441,7 +448,10 @@ export class SorcarTab {
             : 'Processing worktree action…';
         vscode.window.withProgress(
           { location: vscode.ProgressLocation.Notification, title: progressTitle },
-          () => new Promise<void>((resolve) => { this._worktreeActionResolve = resolve; }),
+          (progress) => {
+            this._worktreeProgress = progress;
+            return new Promise<void>((resolve) => { this._worktreeActionResolve = resolve; });
+          },
         );
         this._agentProcess.sendCommand({
           type: 'worktreeAction',

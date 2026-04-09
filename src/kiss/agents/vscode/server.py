@@ -880,6 +880,10 @@ class VSCodeServer:
         if not wt._wt_pending:
             self._ensure_worktree_state()
         if action == "merge":
+            self.printer.broadcast({
+                "type": "worktree_progress",
+                "message": "Generating commit message…",
+            })
             msg = wt.merge()
             success = "Successfully merged" in msg
             return {"success": success, "message": msg}
