@@ -38,7 +38,7 @@ from kiss.agents.sorcar.cli_helpers import (
 )
 from kiss.agents.sorcar.git_worktree import GitWorktree
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.agents.sorcar.worktree_sorcar_agent import _generate_commit_message
 from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 from kiss.agents.vscode.server import VSCodeServer
 
@@ -178,7 +178,7 @@ class TestPersistenceUncoveredBranches:
 
 
 # ---------------------------------------------------------------------------
-# worktree_sorcar_agent.py — _generate_worktree_commit_message branches
+# worktree_sorcar_agent.py — _generate_commit_message branches
 # ---------------------------------------------------------------------------
 
 
@@ -208,8 +208,7 @@ class TestWorktreeCommitMessageBranches:
             (repo / "f.txt").write_text("modified content")
             subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True)
 
-            agent = WorktreeSorcarAgent("test")
-            msg = agent._generate_worktree_commit_message(repo)
+            msg = _generate_commit_message(repo)
             assert isinstance(msg, str) and len(msg) > 0
         finally:
             _restore_db(saved)

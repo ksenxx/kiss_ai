@@ -178,6 +178,78 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
             GitWorktreeOps.remove(wt.repo_root, wt.wt_dir)
         GitWorktreeOps.prune(wt.repo_root)
 
+    # -- Worktree setup ----------------------------------------------------
+
+    def _try_setup_worktree(
+        self, repo: Path, work_dir_str: str | None,
+    ) -> Path | None:
+        """Create a worktree branch for the current task.
+
+        Returns the worktree-relative work directory on success, or
+        ``None`` if a worktree cannot be created (caller should fall
+        back to direct execution).
+
+        Side effect: sets ``self._wt`` on success.
+
+        Args:
+            repo: Git repo root path.
+            work_dir_str: Original ``work_dir`` kwarg (may be ``None``).
+
+        Returns:
+            Worktree work directory path, or ``None`` on failure.
+        """
+        original_branch = GitWorktreeOps.current_branch(repo)
+        if original_branch is None:
+            logger.warning("Detached HEAD, running task directly")
+            return None
+
+        if work_dir_str:
+            try:
+                offset = Path(work_dir_str).resolve().relative_to(
+                    repo.resolve())
+            except ValueError:  # pragma: no cover
+                logger.warning("work_dir not inside repo, running directly")
+                return None
+        else:
+            offset = Path(".")
+
+        try:
+            GitWorktreeOps.ensure_excluded(repo)
+        except Exception:  # pragma: no cover — filesystem permission error
+            logger.warning("Failed to update git exclude", exc_info=True)
+
+        # Generate branch name with collision avoidance
+        branch = f"kiss/wt-{self._chat_id[:12]}-{int(time.time())}"
+        base_branch = branch
+        suffix = 1
+        while GitWorktreeOps.branch_exists(repo, branch):  # pragma: no branch
+            branch = f"{base_branch}-{suffix}"
+            suffix += 1
+
+        slug = branch.replace("/", "_")
+        wt_dir = repo / ".kiss-worktrees" / slug
+
+        if not GitWorktreeOps.create(repo, branch, wt_dir):
+            # pragma: no cover — git worktree add failure
+            GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
+            return None
+
+        if not GitWorktreeOps.save_original_branch(repo, branch, original_branch):
+            # pragma: no cover — git config failure
+            GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
+            return None
+
+        self._wt = GitWorktree(
+            repo_root=repo,
+            branch=branch,
+            original_branch=original_branch,
+            wt_dir=wt_dir,
+        )
+
+        wt_work_dir = wt_dir / offset
+        wt_work_dir.mkdir(parents=True, exist_ok=True)
+        return wt_work_dir
+
     # -- Main entry point --------------------------------------------------
 
     def run(  # type: ignore[override]
@@ -227,65 +299,19 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
             })
             return blocked
 
-        original_branch = GitWorktreeOps.current_branch(repo)
-        if original_branch is None:
-            logger.warning("Detached HEAD, running task directly")
+        wt_work_dir = self._try_setup_worktree(repo, work_dir_str)
+        if wt_work_dir is None:
             return super().run(prompt_template=prompt_template, **kwargs)
-
-        if work_dir_str:
-            try:
-                offset = Path(work_dir_str).resolve().relative_to(
-                    repo.resolve())
-            except ValueError:  # pragma: no cover
-                logger.warning("work_dir not inside repo, running directly")
-                return super().run(prompt_template=prompt_template, **kwargs)
-        else:
-            offset = Path(".")
-
-        try:
-            GitWorktreeOps.ensure_excluded(repo)
-        except Exception:  # pragma: no cover — filesystem permission error
-            logger.warning("Failed to update git exclude", exc_info=True)
-
-        # Generate branch name with collision avoidance
-        branch = f"kiss/wt-{self._chat_id[:12]}-{int(time.time())}"
-        base_branch = branch
-        suffix = 1
-        while GitWorktreeOps.branch_exists(repo, branch):  # pragma: no branch
-            branch = f"{base_branch}-{suffix}"
-            suffix += 1
-
-        slug = branch.replace("/", "_")
-        wt_dir = repo / ".kiss-worktrees" / slug
-
-        if not GitWorktreeOps.create(repo, branch, wt_dir):
-            # pragma: no cover — git worktree add failure
-            GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
-            return super().run(prompt_template=prompt_template, **kwargs)
-
-        if not GitWorktreeOps.save_original_branch(repo, branch, original_branch):
-            # pragma: no cover — git config failure
-            GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
-            return super().run(prompt_template=prompt_template, **kwargs)
-
-        self._wt = GitWorktree(
-            repo_root=repo,
-            branch=branch,
-            original_branch=original_branch,
-            wt_dir=wt_dir,
-        )
 
         # Notify VS Code extension so the worktree appears in the SCM panel
         printer = kwargs.get("printer")
         if printer and hasattr(printer, "broadcast"):
             printer.broadcast({
                 "type": "worktree_created",
-                "worktreeDir": str(wt_dir),
-                "branch": branch,
+                "worktreeDir": str(self._wt_dir),
+                "branch": self._wt_branch,
             })
 
-        wt_work_dir = wt_dir / offset
-        wt_work_dir.mkdir(parents=True, exist_ok=True)
         kwargs["work_dir"] = str(wt_work_dir)
 
         try:
@@ -421,19 +447,6 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
             Summary of findings and any cleanup actions taken.
         """
         return GitWorktreeOps.cleanup_orphans(Path(repo_root))
-
-    # -- Generate commit message (backward compat for tests) ---------------
-
-    def _generate_worktree_commit_message(self, wt_dir: Path) -> str:
-        """Generate a commit message for worktree changes using an LLM.
-
-        Args:
-            wt_dir: The worktree directory containing staged changes.
-
-        Returns:
-            A commit message string.
-        """
-        return _generate_commit_message(wt_dir)
 
 
 def main() -> None:  # pragma: no cover – CLI entry point requires API
