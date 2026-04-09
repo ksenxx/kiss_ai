@@ -66,6 +66,8 @@
   const inputClearBtn = document.getElementById('input-clear-btn');
   const worktreeToggleBtn = document.getElementById('worktree-toggle-btn');
   const taskPanel = document.getElementById('task-panel');
+  const statusTokens = document.getElementById('status-tokens');
+  const statusBudget = document.getElementById('status-budget');
 
 
   function setTaskText(text) {
@@ -361,7 +363,10 @@
         + '<span>Cost <b>' + (ev.cost || 'N/A') + '</b></span>'
         + '</div></div><div class="rc-body md-body' + (usePre ? ' pre' : '') + '">' + rb + '</div>';
       hlBlock(rc);
-      target.appendChild(rc); break;
+      target.appendChild(rc);
+      if (statusTokens && ev.total_tokens) statusTokens.textContent = 'Tokens: ' + ev.total_tokens;
+      if (statusBudget && ev.cost && ev.cost !== 'N/A') statusBudget.textContent = ev.cost;
+      break;
     }
     case 'system_prompt':
     case 'prompt': {
@@ -380,7 +385,9 @@
     case 'usage_info': {
       var u = mkEl('div', 'ev usage');
       u.textContent = ev.text || '';
-      target.appendChild(u); break;
+      target.appendChild(u);
+      updateUsageMetrics(ev.text || '');
+      break;
     }
     }
   }
@@ -442,12 +449,27 @@
 
 
 
+  // --- Usage metrics (tokens / budget) in header ---
+  function updateUsageMetrics(text) {
+    if (!statusTokens || !statusBudget) return;
+    var tm = text.match(/Tokens:\s*([\d,]+)/);
+    var bm = text.match(/Budget:\s*\$([0-9.]+)/);
+    if (tm) statusTokens.textContent = 'Tokens: ' + tm[1];
+    if (bm) statusBudget.textContent = '$' + bm[1];
+  }
+
+  function clearUsageMetrics() {
+    if (statusTokens) statusTokens.textContent = '';
+    if (statusBudget) statusBudget.textContent = '';
+  }
+
   // --- Clear chat ---
   function resetChatUI() {
     clearOutput();
     resetOutputState();
     removeSpinner();
     clearWorktreeBar();
+    clearUsageMetrics();
     setTaskText('');
     vscode.setState(null);
     if (welcome) {

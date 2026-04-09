@@ -597,6 +597,8 @@ export class SorcarTab {
       <div class="status">
         <span class="dot" id="status-dot"></span>
         <span id="status-text">Ready</span>
+        <span id="status-tokens" class="status-metric"></span>
+        <span id="status-budget" class="status-metric"></span>
       </div>
     </header>
 
