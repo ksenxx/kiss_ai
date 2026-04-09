@@ -249,6 +249,31 @@ class GitWorktreeOps:
         return MergeResult.CONFLICT
 
     @staticmethod
+    def squash_merge_branch(repo: Path, branch: str) -> MergeResult:
+        """Squash-merge a branch, leaving changes as unstaged modifications.
+
+        Uses ``git merge --squash`` to apply all changes from *branch*
+        without creating a commit.  On success, runs ``git reset HEAD``
+        to move changes from the index to the working tree so they
+        appear as uncommitted modifications in the VS Code SCM panel.
+
+        On conflict, resets to a clean state with ``git reset --hard``.
+
+        Args:
+            repo: Git repo root path.
+            branch: Branch to squash-merge.
+
+        Returns:
+            :attr:`MergeResult.SUCCESS` or :attr:`MergeResult.CONFLICT`.
+        """
+        result = _git("merge", "--squash", branch, cwd=repo)
+        if result.returncode != 0:
+            _git("reset", "--hard", "HEAD", cwd=repo)
+            return MergeResult.CONFLICT
+        _git("reset", "HEAD", cwd=repo)
+        return MergeResult.SUCCESS
+
+    @staticmethod
     def manual_merge_branch(repo: Path, branch: str) -> ManualMergeResult:
         """Merge with ``--no-commit --no-ff`` for interactive review.
 

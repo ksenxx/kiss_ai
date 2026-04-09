@@ -330,7 +330,7 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
                 "Fix the issue and retry merge(), or call discard()."
             )
 
-        result = GitWorktreeOps.merge_branch(wt.repo_root, wt.branch)
+        result = GitWorktreeOps.squash_merge_branch(wt.repo_root, wt.branch)
 
         if result == MergeResult.SUCCESS:
             GitWorktreeOps.delete_branch(wt.repo_root, wt.branch)
