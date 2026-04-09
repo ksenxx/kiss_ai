@@ -4,11 +4,11 @@ Select a task below in sorcar editor and press cmd/ctrl-L to run the task in the
 
 ## increase test coverage
 
-can you write integration tests with no mocks or test doubles or fakes to achieve 100% branch coverage of the files under src/kiss/agents/vscode/, and src/kiss/agents/sorcar/? Please check the branch coverage first for the existing tests with the coverage tool by running 'uv run pytest -v' with a timeout of 900 second.  Fix tests or code if some tests fail. Then try to reach uncovered branches by crafting integration tests without any mocks, test doubles or fakes. You MUST repeat the task until you get 100% branch coverage or you cannot increase branch coverage after 3 tries.
+can you write integration tests with no mocks or test doubles or fakes to achieve 100% branch coverage of the files under src/kiss/agents/vscode/, and src/kiss/agents/sorcar/? Please check the branch coverage first for the existing tests with the coverage tool by running 'uv run pytest -v' with a timeout of 900 second.  Fix tests or code if some tests fail. Then try to reach uncovered branches by crafting integration tests without any mocks, test doubles or fakes. You MUST repeat the task until you get 100% branch coverage or you cannot increase branch coverage after 3 tries.  Do not add # pragma: no branch, and try to remove them from the code by write a test.
 
 ## code review
 
-find redundancy, duplication, AI slop, lack of elegant abstractions, and inconsistencies in the code of the project, and plan to fix them in plan.md. Make sure that you write tests for every change by writing integration tests with no mocks or test doubles to achieve 100% branch coverage. Do not modify code yet.
+find redundancy, duplication, AI slop, lack of elegant abstractions, and inconsistencies in the code of the project, and plan to fix them in WORK_DIR/redundancy.md. Make sure that you write tests for every change by writing integration tests with no mocks or test doubles to achieve 100% branch coverage. Do not modify code yet.
 
 ## documentation update
 
