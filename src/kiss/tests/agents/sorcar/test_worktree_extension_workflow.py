@@ -155,6 +155,40 @@ class TestWorktreeWorkflow:
         assert _file_in_repo(self.repo, "new_file.txt")
         assert (self.repo / "new_file.txt").read_text() == "hello from worktree"
 
+    def test_merge_leaves_changes_uncommitted(self) -> None:
+        """After merge, changes are uncommitted working tree modifications.
+
+        This ensures VS Code's SCM panel shows the changes for review.
+        """
+        agent = self._agent()
+        agent.run(prompt_template="task1", work_dir=str(self.repo))
+
+        wt_dir = agent._wt_dir
+        assert wt_dir is not None and wt_dir.exists()
+        (wt_dir / "new_file.txt").write_text("hello from worktree")
+        (wt_dir / "README.md").write_text("modified\n")
+
+        agent.merge()
+
+        # Files exist in working tree
+        assert _file_in_repo(self.repo, "new_file.txt")
+        assert (self.repo / "README.md").read_text() == "modified\n"
+
+        # Changes are NOT committed — git status shows dirty working tree
+        status = subprocess.run(
+            ["git", "-C", str(self.repo), "status", "--porcelain"],
+            capture_output=True, text=True,
+        )
+        porcelain = status.stdout.strip()
+        assert porcelain, "Working tree should be dirty after merge"
+        # Modified file should show as unstaged modification or untracked
+        assert "README.md" in porcelain
+        assert "new_file.txt" in porcelain
+
+        # No MERGE_HEAD should exist (squash merge doesn't create one)
+        merge_head = self.repo / ".git" / "MERGE_HEAD"
+        assert not merge_head.exists()
+
     def test_merge_restores_original_branch_as_head(self) -> None:
         """After merge, HEAD is the original branch."""
         agent = self._agent()
@@ -279,6 +313,13 @@ class TestWorktreeWorkflow:
         assert "Merge conflict" in msg
         assert agent._wt_pending  # still pending
         assert agent._wt_branch is not None
+
+        # After conflict, main worktree should be clean (reset --hard)
+        status = subprocess.run(
+            ["git", "-C", str(self.repo), "status", "--porcelain"],
+            capture_output=True, text=True,
+        )
+        assert not status.stdout.strip(), "Working tree should be clean after conflict"
 
         # Discard should work after conflict
         agent.discard()

@@ -1101,6 +1101,12 @@ ______________________________________________________________________
   - `branch`: Branch to merge.
   - **Returns:** :attr:`MergeResult.SUCCESS` or :attr:`MergeResult.CONFLICT`.
 
+- **squash_merge_branch** — Squash-merge a branch, leaving changes as unstaged modifications. Uses `git merge --squash` to apply all changes from *branch* without creating a commit. On success, runs `git reset HEAD` to move changes from the index to the working tree so they appear as uncommitted modifications in the VS Code SCM panel. On conflict, resets to a clean state with `git reset --hard`.<br/>`squash_merge_branch(repo: Path, branch: str) -> MergeResult`
+
+  - `repo`: Git repo root path.
+  - `branch`: Branch to squash-merge.
+  - **Returns:** :attr:`MergeResult.SUCCESS` or :attr:`MergeResult.CONFLICT`.
+
 - **manual_merge_branch** — Merge with `--no-commit --no-ff` for interactive review. On success (no conflicts), unstages changes via `git reset HEAD` so the user can selectively stage hunks.<br/>`manual_merge_branch(repo: Path, branch: str) -> ManualMergeResult`
 
   - `repo`: Git repo root path.
