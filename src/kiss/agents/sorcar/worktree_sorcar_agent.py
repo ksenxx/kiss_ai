@@ -450,13 +450,17 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
 
 
 def main() -> None:  # pragma: no cover – CLI entry point requires API
-    """Run WorktreeSorcarAgent from the command line."""
+    """Run WorktreeSorcarAgent or StatefulSorcarAgent from the command line.
+
+    Uses ``WorktreeSorcarAgent`` when the working directory is inside a
+    git repository, and ``StatefulSorcarAgent`` otherwise.
+    """
     import time as time_mod
 
     if len(sys.argv) <= 1:
         print(
             "Usage: sorcar [-m MODEL] [-e ENDPOINT] [-b BUDGET] "
-            "[-w WORK_DIR] [-t TASK] [-f FILE] [-n] [--chat-id ID] "
+            "[-w WORK_DIR] [-t TASK] [-f FILE] [-n] [-c ID] "
             "[-l] [--cleanup]"
         )
         sys.exit(1)
@@ -472,8 +476,10 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
         _print_recent_chats()
         sys.exit(0)
 
+    work_dir = args.work_dir or str(Path(".").resolve())
+    in_git_repo = GitWorktreeOps.discover_repo(Path(work_dir)) is not None
+
     if args.cleanup:
-        work_dir = args.work_dir or str(Path(".").resolve())
         repo = GitWorktreeOps.discover_repo(Path(work_dir))
         if repo is None:
             print("Not a git repo.")
@@ -481,7 +487,11 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
         print(WorktreeSorcarAgent.cleanup(repo))
         sys.exit(0)
 
-    agent = WorktreeSorcarAgent("Worktree Sorcar Agent")
+    if in_git_repo:
+        agent: StatefulSorcarAgent = WorktreeSorcarAgent("Worktree Sorcar Agent")
+    else:
+        agent = StatefulSorcarAgent("Stateful Sorcar Agent")
+
     run_kwargs = _build_run_kwargs(args)
     _apply_chat_args(agent, args, task=run_kwargs.get("prompt_template", ""))
 
@@ -492,7 +502,7 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
     print(result)
     _print_run_stats(agent, elapsed)
 
-    if agent._wt_pending:
+    if isinstance(agent, WorktreeSorcarAgent) and agent._wt_pending:
         while True:
             choice = input("\n[c]ommit and merge / [d]iscard? ").strip().lower()
             if choice == "c":

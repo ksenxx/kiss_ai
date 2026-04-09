@@ -386,3 +386,38 @@ class TestWorktreeSorcarAgent:
     # 46. cleanup_partial when wt_dir exists
 
 
+class TestCliAgentSelection:
+    """Verify that main() selects the correct agent based on git repo detection."""
+
+    def test_main_source_checks_git_repo(self) -> None:
+        import inspect
+        src = inspect.getsource(
+            __import__("kiss.agents.sorcar.worktree_sorcar_agent", fromlist=["main"]).main
+        )
+        assert "discover_repo" in src
+        assert "in_git_repo" in src
+
+    def test_main_source_creates_worktree_agent_when_in_repo(self) -> None:
+        import inspect
+        src = inspect.getsource(
+            __import__("kiss.agents.sorcar.worktree_sorcar_agent", fromlist=["main"]).main
+        )
+        assert 'if in_git_repo:' in src
+        assert 'WorktreeSorcarAgent(' in src
+
+    def test_main_source_creates_stateful_agent_when_not_in_repo(self) -> None:
+        import inspect
+        src = inspect.getsource(
+            __import__("kiss.agents.sorcar.worktree_sorcar_agent", fromlist=["main"]).main
+        )
+        assert 'else:' in src
+        assert 'StatefulSorcarAgent(' in src
+
+    def test_main_source_guards_merge_prompt_with_isinstance(self) -> None:
+        import inspect
+        src = inspect.getsource(
+            __import__("kiss.agents.sorcar.worktree_sorcar_agent", fromlist=["main"]).main
+        )
+        assert 'isinstance(agent, WorktreeSorcarAgent)' in src
+
+
