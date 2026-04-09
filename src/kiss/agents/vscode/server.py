@@ -833,10 +833,6 @@ class VSCodeServer:
         elif action == "discard":
             msg = self.agent.discard()
             return {"success": True, "message": msg}
-        elif action == "manual":
-            msg = self.agent.manual_merge()
-            success = "ready for review" in msg or "conflicts" in msg.lower()
-            return {"success": success, "message": msg, "manual": True, "openScm": True}
         return {"success": False, "message": f"Unknown action: {action}"}
 
     def _generate_commit_message(self) -> None:

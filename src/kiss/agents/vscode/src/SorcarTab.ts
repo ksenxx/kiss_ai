@@ -128,9 +128,7 @@ export class SorcarTab {
       if (msg.type === 'task_events' && (msg as any).task) {
         this._updateTabTitle((msg as any).task);
       }
-      if (msg.type === 'worktree_result' && (msg as any).openScm) {
-        vscode.commands.executeCommand('workbench.view.scm');
-      }
+
       this.sendToWebview(msg);
       if (msg.type === 'status') {
         this._isRunning = msg.running;

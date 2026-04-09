@@ -238,32 +238,6 @@ class TestWorktreeSorcarAgent:
         agent = self._agent()
         assert agent.merge_instructions() == "No pending worktree task."
 
-    # 24a. manual_merge happy path
-
-    # 24b. manual_merge when idle
-    def test_manual_merge_no_pending(self) -> None:
-        agent = self._agent()
-        with pytest.raises(RuntimeError, match="No pending"):
-            agent.manual_merge()
-
-    # 24c. manual_merge with unknown original branch
-    def test_manual_merge_unknown_original(self) -> None:
-        agent = self._agent()
-        agent.run(prompt_template="task1", work_dir=str(self.repo))
-        wt = agent._wt
-        assert wt is not None
-        agent._wt = GitWorktree(
-            repo_root=wt.repo_root, branch=wt.branch,
-            original_branch=None, wt_dir=wt.wt_dir,
-        )
-        msg = agent.manual_merge()
-        assert "Cannot merge" in msg
-        agent._wt = GitWorktree(
-            repo_root=wt.repo_root, branch=wt.branch,
-            original_branch="main", wt_dir=wt.wt_dir,
-        )
-        agent.discard()
-
     # 25. _auto_commit_worktree when nothing to commit
 
     # 26. _auto_commit_worktree when wt_dir is None

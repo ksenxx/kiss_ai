@@ -714,27 +714,17 @@
   function showWorktreeActions(ev) {
     clearWorktreeBar();
     var bar = mkEl('div', 'wt-bar');
-    var n = (ev.changedFiles || []).length;
     var label = mkEl('span', 'wt-label');
-    label.textContent = 'Branch ' + (ev.branch || '') + ' \u2014 '
-      + n + ' file' + (n !== 1 ? 's' : '') + ' changed';
+    label.textContent = 'Commit and Merge or Discard?';
     bar.appendChild(label);
 
     var btns = mkEl('div', 'wt-btns');
     var mergeBtn = mkEl('button', 'wt-btn wt-merge');
-    mergeBtn.textContent = 'Auto Merge';
-    mergeBtn.dataset.tooltip = 'Merge branch into ' + (ev.originalBranch || 'original');
+    mergeBtn.textContent = 'Commit and Merge';
+    mergeBtn.dataset.tooltip = 'Commit changes and merge into ' + (ev.originalBranch || 'original');
     mergeBtn.addEventListener('click', function() {
       disableWtBtns();
       vscode.postMessage({ type: 'worktreeAction', action: 'merge' });
-    });
-
-    var manualBtn = mkEl('button', 'wt-btn wt-manual');
-    manualBtn.textContent = 'Manual Merge';
-    manualBtn.dataset.tooltip = 'Show manual merge instructions';
-    manualBtn.addEventListener('click', function() {
-      disableWtBtns();
-      vscode.postMessage({ type: 'worktreeAction', action: 'manual' });
     });
 
     var discardBtn = mkEl('button', 'wt-btn wt-discard');
@@ -745,8 +735,7 @@
       vscode.postMessage({ type: 'worktreeAction', action: 'discard' });
     });
 
-    if (!ev.hasConflict) btns.appendChild(mergeBtn);
-    btns.appendChild(manualBtn);
+    btns.appendChild(mergeBtn);
     btns.appendChild(discardBtn);
     bar.appendChild(btns);
 

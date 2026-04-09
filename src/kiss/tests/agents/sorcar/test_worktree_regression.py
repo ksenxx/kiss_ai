@@ -112,50 +112,7 @@ class TestWorktreeRegression:
         return agent
 
     # -----------------------------------------------------------------------
-    # 1. manual_merge with conflicts — branch is preserved, state is cleared
-    # -----------------------------------------------------------------------
-    def test_manual_merge_conflict_preserves_branch(self) -> None:
-        """After manual_merge with conflict, the task branch is NOT deleted
-        so the user can still reference it.  But agent state IS cleared."""
-        agent = self._agent()
-        agent.run(prompt_template="t", work_dir=str(self.repo))
-        wt_dir = agent._wt_dir
-        branch = agent._wt_branch
-        assert wt_dir is not None and branch is not None
-
-        # Create conflicting changes
-        (wt_dir / "README.md").write_text("worktree\n")
-        (self.repo / "README.md").write_text("main\n")
-        subprocess.run(
-            ["git", "-C", str(self.repo), "add", "."],
-            capture_output=True,
-            check=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(self.repo), "commit", "-m", "main edit"],
-            capture_output=True,
-            check=True,
-        )
-
-        msg = agent.manual_merge()
-        assert "conflicts" in msg.lower()
-
-        # Agent state is cleared (no longer pending)
-        assert agent._wt_branch is None
-        assert agent._original_branch is None
-
-        # But the BRANCH still exists in git (not deleted on conflict)
-        check = _git(
-            "rev-parse", "--verify", f"refs/heads/{branch}", cwd=self.repo
-        )
-        assert check.returncode == 0, "Branch should be preserved on conflict"
-
-        # Clean up conflict state and branch
-        _git("merge", "--abort", cwd=self.repo)
-        _git("branch", "-D", branch, cwd=self.repo)
-
-    # -----------------------------------------------------------------------
-    # 2. manual_merge auto-commits before merging
+    # 2. manual_merge auto-commits before merging (removed)
     # -----------------------------------------------------------------------
 
     # -----------------------------------------------------------------------

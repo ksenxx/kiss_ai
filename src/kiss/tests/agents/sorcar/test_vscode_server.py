@@ -656,7 +656,7 @@ class TestWorktreeServerIntegration(unittest.TestCase):
 
         _set_agent_wt(self.server.agent, self.repo, "kiss/route-test", "main")
 
-        self.server._handle_command({"type": "worktreeAction", "action": "manual"})
+        self.server._handle_command({"type": "worktreeAction", "action": "merge"})
         wt_events = [e for e in self.events if e["type"] == "worktree_result"]
         assert len(wt_events) == 1
         assert wt_events[0]["success"] is True

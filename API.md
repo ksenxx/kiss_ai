@@ -1201,17 +1201,13 @@ ______________________________________________________________________
 
   - **Returns:** Success message, or error message if merge fails.
 
-- **discard** — Throw away the task branch and worktree. Every step is idempotent — safe to call multiple times.<br/>`discard() -> str`
+- **discard** — Throw away the task branch and worktree, checkout original. Every step is idempotent — safe to call multiple times.<br/>`discard() -> str`
 
   - **Returns:** Confirmation message.
 
-- **manual_merge** — Merge task branch with `--no-commit` for interactive review. Prepares changes in the main working tree so the user can selectively stage/discard individual hunks using VS Code's Source Control UI. Changes are left unstaged (via `git reset HEAD`) when there are no conflicts.<br/>`manual_merge() -> str`
-
-  - **Returns:** Human-readable status message.
-
 - **merge_instructions** — Return human-readable merge/discard instructions.<br/>`merge_instructions() -> str`
 
-  - **Returns:** Multi-line string with automatic merge, manual merge, and discard instructions.
+  - **Returns:** Multi-line string with merge and discard instructions.
 
 - **cleanup** — Scan for orphaned `kiss/wt-*` branches and worktrees.<br/>`cleanup(repo_root: Path | str) -> str`
 

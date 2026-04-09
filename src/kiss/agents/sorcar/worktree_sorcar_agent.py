@@ -352,7 +352,7 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         )
 
     def discard(self) -> str:
-        """Throw away the task branch and worktree.
+        """Throw away the task branch and worktree, checkout original.
 
         Every step is idempotent — safe to call multiple times.
 
@@ -368,67 +368,11 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         wt = self._wt
         GitWorktreeOps.remove(wt.repo_root, wt.wt_dir)
         GitWorktreeOps.prune(wt.repo_root)
+        if wt.original_branch:
+            GitWorktreeOps.checkout(wt.repo_root, wt.original_branch)
         GitWorktreeOps.delete_branch(wt.repo_root, wt.branch)
         self._wt = None
         return f"Discarded branch '{wt.branch}'."
-
-    def manual_merge(self) -> str:
-        """Merge task branch with ``--no-commit`` for interactive review.
-
-        Prepares changes in the main working tree so the user can
-        selectively stage/discard individual hunks using VS Code's
-        Source Control UI.  Changes are left unstaged (via
-        ``git reset HEAD``) when there are no conflicts.
-
-        Returns:
-            Human-readable status message.
-
-        Raises:
-            RuntimeError: If no worktree task is pending.
-        """
-        if self._wt is None:
-            raise RuntimeError("No pending worktree task to merge")
-
-        wt = self._wt
-
-        if wt.original_branch is None:
-            return (
-                "Cannot merge: original branch is unknown.  "
-                "Please merge manually:\n"
-                f"    git checkout <branch> && git merge {wt.branch}"
-            )
-
-        self._finalize_worktree()
-
-        if not GitWorktreeOps.checkout(wt.repo_root, wt.original_branch):
-            return (
-                f"Cannot checkout '{wt.original_branch}': "
-                f"{GitWorktreeOps.checkout_error(wt.repo_root, wt.original_branch)}\n"
-                "Fix the issue and retry, or call discard()."
-            )
-
-        branch_name = wt.branch
-        mr = GitWorktreeOps.manual_merge_branch(wt.repo_root, wt.branch)
-
-        if mr.status == MergeResult.MERGE_FAILED:
-            return (
-                "Merge failed: fix the issue and retry, or call discard()."
-            )
-
-        # Clean up branch and agent state
-        if not mr.has_conflicts:
-            GitWorktreeOps.delete_branch(wt.repo_root, wt.branch)
-        self._wt = None
-
-        if mr.has_conflicts:
-            return (
-                f"Merge of '{branch_name}' has conflicts. "
-                "Resolve them in Source Control, then commit."
-            )
-        return (
-            f"Changes from '{branch_name}' are ready for review. "
-            "Use Source Control to stage desired hunks and commit."
-        )
 
     # -- Instructions ------------------------------------------------------
 
@@ -436,8 +380,7 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         """Return human-readable merge/discard instructions.
 
         Returns:
-            Multi-line string with automatic merge, manual merge, and
-            discard instructions.
+            Multi-line string with merge and discard instructions.
         """
         if self._wt is None:
             return "No pending worktree task."
@@ -445,20 +388,15 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         orig = wt.original_branch or "<branch>"
         return (
             f"Task completed on branch: {wt.branch}\n"
-            "\nTo merge automatically:\n"
+            "\nTo commit and merge:\n"
             "    agent.merge()\n"
-            "\nTo merge manually:\n"
-            f"    cd {wt.repo_root}\n"
-            f"    git worktree remove {wt.wt_dir}\n"
-            f"    git checkout {orig}\n"
-            f"    git merge {wt.branch}\n"
-            f"    git branch -d {wt.branch}\n"
             "\nTo discard:\n"
             "    agent.discard()\n"
-            "    # or manually:\n"
+            "\nOr manually:\n"
             f"    cd {wt.repo_root}\n"
-            f"    git worktree remove {wt.wt_dir} --force\n"
-            f"    git branch -D {wt.branch}"
+            f"    git checkout {orig}\n"
+            f"    git merge {wt.branch}\n"
+            f"    git branch -d {wt.branch}"
         )
 
     # -- Cleanup -----------------------------------------------------------
@@ -534,15 +472,12 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
 
     if agent._wt_pending:
         while True:
-            choice = input("\n[m]erge / [d]iscard / [s]kip? ").strip().lower()
-            if choice == "m":
+            choice = input("\n[c]ommit and merge / [d]iscard? ").strip().lower()
+            if choice == "c":
                 print(agent.merge())
                 break
             if choice == "d":
                 print(agent.discard())
-                break
-            if choice == "s":
-                print("Skipped. Handle manually later.")
                 break
             print("Invalid choice.")
 

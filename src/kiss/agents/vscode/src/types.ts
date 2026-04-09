@@ -40,7 +40,7 @@ export type FromWebviewMessage =
   | { type: 'runPrompt' }
   | { type: 'focusEditor' }
   | { type: 'getInputHistory' }
-  | { type: 'worktreeAction'; action: 'merge' | 'discard' | 'manual' }
+  | { type: 'worktreeAction'; action: 'merge' | 'discard' }
   | { type: 'resolveDroppedPaths'; uris: string[] };
 
 /** Messages from extension to webview (matches browser event protocol) */
@@ -83,7 +83,7 @@ export type ToWebviewMessage =
   | { type: 'setTaskText'; text: string }
   | { type: 'focusInput' }
   | { type: 'worktree_done'; branch: string; worktreeDir: string; originalBranch: string; changedFiles: string[]; hasConflict?: boolean }
-  | { type: 'worktree_result'; success: boolean; message: string; manual?: boolean; openScm?: boolean }
+  | { type: 'worktree_result'; success: boolean; message: string }
   | { type: 'droppedPaths'; paths: string[] };
 
 /** Command sent to Python backend */
@@ -102,5 +102,5 @@ export interface AgentCommand {
   path?: string;
   sessionId?: string;
   activeFileContent?: string;
-  action?: 'merge' | 'discard' | 'manual';
+  action?: 'merge' | 'discard';
 }
