@@ -275,6 +275,15 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
             wt_dir=wt_dir,
         )
 
+        # Notify VS Code extension so the worktree appears in the SCM panel
+        printer = kwargs.get("printer")
+        if printer and hasattr(printer, "broadcast"):
+            printer.broadcast({
+                "type": "worktree_created",
+                "worktreeDir": str(wt_dir),
+                "branch": branch,
+            })
+
         wt_work_dir = wt_dir / offset
         wt_work_dir.mkdir(parents=True, exist_ok=True)
         kwargs["work_dir"] = str(wt_work_dir)

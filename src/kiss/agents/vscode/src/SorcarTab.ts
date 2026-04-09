@@ -58,6 +58,7 @@ export class SorcarTab {
   private _loadLastSession: boolean;
   private _sessionTask: string;
   private _lastTask: string = '';
+  private _worktreeDir: string = '';
 
   /** The underlying WebviewPanel (for reveal/focus tracking). */
   get panel(): vscode.WebviewPanel { return this._panel; }
@@ -127,6 +128,17 @@ export class SorcarTab {
       }
       if (msg.type === 'task_events' && (msg as any).task) {
         this._updateTabTitle((msg as any).task);
+      }
+      if (msg.type === 'worktree_created' || msg.type === 'worktree_done') {
+        const dir = (msg as any).worktreeDir;
+        if (dir) {
+          this._worktreeDir = dir;
+          this._openWorktreeInScm(dir);
+        }
+      }
+      if (msg.type === 'worktree_result' && (msg as any).success && this._worktreeDir) {
+        this._closeWorktreeInScm(this._worktreeDir);
+        this._worktreeDir = '';
       }
 
       this.sendToWebview(msg);
@@ -199,6 +211,36 @@ export class SorcarTab {
       filename: isPrompt ? path.basename(fpath) : '',
       path: fpath,
     } as ToWebviewMessage);
+  }
+
+  /**
+   * Open a worktree directory as a git repository in the VS Code SCM panel.
+   * Uses the built-in Git extension API to make the worktree visible.
+   */
+  private async _openWorktreeInScm(worktreeDir: string): Promise<void> {
+    try {
+      const gitExt = vscode.extensions.getExtension('vscode.git');
+      if (!gitExt) return;
+      const git = gitExt.isActive ? gitExt.exports : await gitExt.activate();
+      const api = git.getAPI(1);
+      if (api.openRepository) {
+        await api.openRepository(vscode.Uri.file(worktreeDir));
+      }
+    } catch (err) {
+      console.error('[kissSorcar] Failed to open worktree in SCM:', err);
+    }
+  }
+
+  /**
+   * Close a worktree repository from the VS Code SCM panel.
+   * Best-effort: the Git extension will also auto-detect removal.
+   */
+  private async _closeWorktreeInScm(worktreeDir: string): Promise<void> {
+    try {
+      await vscode.commands.executeCommand('git.close', vscode.Uri.file(worktreeDir));
+    } catch {
+      // git.close may not be available in all VS Code versions — ignored
+    }
   }
 
   /**
