@@ -41,6 +41,7 @@ from kiss.agents.sorcar.cli_helpers import (
     _print_recent_chats,
     _print_run_stats,
 )
+from kiss.agents.sorcar.git_worktree import GitWorktree
 from kiss.agents.sorcar.sorcar_agent import _resolve_task
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.agents.sorcar.useful_tools import UsefulTools
@@ -367,7 +368,6 @@ class TestWorktreeCommitMessageBranches:
             subprocess.run(["git", "commit", "-m", "init"], cwd=repo, capture_output=True)
 
             agent = WorktreeSorcarAgent("test")
-            agent._repo_root = repo
             # No staged changes -> diff --cached is empty -> fallback
             msg = agent._generate_worktree_commit_message(repo)
             assert msg == "kiss: auto-commit agent work"
@@ -398,7 +398,6 @@ class TestWorktreeCommitMessageBranches:
             subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True)
 
             agent = WorktreeSorcarAgent("test")
-            agent._repo_root = repo
             msg = agent._generate_worktree_commit_message(repo)
             assert isinstance(msg, str) and len(msg) > 0
         finally:
@@ -464,7 +463,6 @@ class TestWorktreeBranchCollision:
             subprocess.run(["git", "commit", "-m", "init"], cwd=repo, capture_output=True)
 
             agent = WorktreeSorcarAgent("test")
-            agent._repo_root = repo
             prefix = f"kiss/wt-{agent._chat_id[:12]}-"
             # Create branches for a wide range of timestamps to guarantee collision
             ts = int(time.time())
@@ -892,13 +890,13 @@ class TestVSCodeServerUncoveredBranches:
     def test_check_merge_conflict_no_branches(self) -> None:
         """_check_merge_conflict returns False when no wt_branch (line 733)."""
         server = VSCodeServer()
-        server.agent._wt_branch = None
+        server.agent._wt = None
         assert server._check_merge_conflict() is False
 
     def test_get_worktree_changed_files_no_branches(self) -> None:
         """_get_worktree_changed_files returns [] when no branches."""
         server = VSCodeServer()
-        server.agent._wt_branch = None
+        server.agent._wt = None
         assert server._get_worktree_changed_files() == []
 
     def test_check_merge_conflict_with_branches(self, tmp_path: Path) -> None:
@@ -925,9 +923,11 @@ class TestVSCodeServerUncoveredBranches:
             subprocess.run(["git", "checkout", "main"], cwd=repo, capture_output=True)
 
             server = VSCodeServer()
-            server.agent._wt_branch = "test-branch"
-            server.agent._original_branch = "main"
-            server.agent._repo_root = repo
+            server.agent._wt = GitWorktree(
+                repo_root=repo, branch="test-branch",
+                original_branch="main",
+                wt_dir=repo / ".kiss-worktrees" / "test-branch",
+            )
             server.work_dir = str(repo)
 
             result = server._check_merge_conflict()
@@ -966,9 +966,11 @@ class TestVSCodeServerUncoveredBranches:
             (repo / "f.txt").write_text("dirty local change")
 
             server = VSCodeServer()
-            server.agent._wt_branch = "test-branch"
-            server.agent._original_branch = "main"
-            server.agent._repo_root = repo
+            server.agent._wt = GitWorktree(
+                repo_root=repo, branch="test-branch",
+                original_branch="main",
+                wt_dir=repo / ".kiss-worktrees" / "test-branch",
+            )
             server.work_dir = str(repo)
 
             # Should detect overlap between dirty file and merge changeset
@@ -1003,9 +1005,11 @@ class TestVSCodeServerUncoveredBranches:
             subprocess.run([*git, "checkout", "main"], capture_output=True)
 
             server = VSCodeServer()
-            server.agent._wt_branch = "kiss/wt-test-123"
-            server.agent._original_branch = "main"
-            server.agent._repo_root = tmp_path
+            server.agent._wt = GitWorktree(
+                repo_root=tmp_path, branch="kiss/wt-test-123",
+                original_branch="main",
+                wt_dir=tmp_path / ".kiss-worktrees" / "kiss_wt-test-123",
+            )
             result = server._handle_worktree_action("manual")
             assert result["success"] is True
             assert result.get("manual") is True

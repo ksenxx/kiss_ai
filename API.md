@@ -31,6 +31,7 @@
     - [`kiss.agents.kiss_evolve`](#kissagentskiss_evolve)
   - [`kiss.docker`](#kissdocker)
     - [`kiss.docker.docker_manager`](#kissdockerdocker_manager)
+      - [`kiss.agents.sorcar.git_worktree`](#kissagentssorcargit_worktree)
       - [`kiss.agents.sorcar.stateful_sorcar_agent`](#kissagentssorcarstateful_sorcar_agent)
       - [`kiss.agents.sorcar.worktree_sorcar_agent`](#kissagentssorcarworktree_sorcar_agent)
     - [`kiss.agents.vscode`](#kissagentsvscode)
@@ -1028,6 +1029,128 @@ ______________________________________________________________________
   - **Returns:** The host port mapped to the container port, or None if not mapped.
 
 - **close** — Stop and remove the Docker container. Handles cleanup of both the container and any temporary directories created for shared volumes.<br/>`close() -> None`
+
+______________________________________________________________________
+
+#### `kiss.agents.sorcar.git_worktree` — *Git worktree operations and state.*
+
+##### `class GitWorktree` — Immutable snapshot of a pending worktree task.
+
+##### `class MergeResult(enum.Enum)` — Outcome of a merge operation.
+
+##### `class ManualMergeResult` — Outcome of a manual (--no-commit) merge operation.
+
+##### `class GitWorktreeOps` — Stateless helper class with all git worktree operations.
+
+- **discover_repo** — Find the git repo root containing *path*.<br/>`discover_repo(path: Path) -> Path | None`
+
+  - `path`: Directory to start searching from.
+  - **Returns:** The repo root path, or `None` if *path* is not in a repo.
+
+- **current_branch** — Return the current branch name, or `None` for detached HEAD.<br/>`current_branch(repo: Path) -> str | None`
+
+  - `repo`: Git repo root path.
+  - **Returns:** Branch name string, or `None` if HEAD is detached or empty.
+
+- **create** — Create a new worktree with a new branch.<br/>`create(repo: Path, branch: str, wt_dir: Path) -> bool`
+
+  - `repo`: Git repo root path.
+  - `branch`: New branch name to create.
+  - `wt_dir`: Directory for the new worktree.
+  - **Returns:** True if worktree was created successfully, False otherwise.
+
+- **remove** — Remove a worktree directory (best-effort, force).<br/>`remove(repo: Path, wt_dir: Path) -> None`
+
+  - `repo`: Git repo root path.
+  - `wt_dir`: Worktree directory to remove.
+
+- **prune** — Prune stale worktree bookkeeping entries.<br/>`prune(repo: Path) -> None`
+
+  - `repo`: Git repo root path.
+
+- **stage_all** — Stage all changes in the worktree (`git add -A`).<br/>`stage_all(wt_dir: Path) -> None`
+
+  - `wt_dir`: Worktree directory.
+
+- **commit_all** — Stage all changes and commit in the worktree.<br/>`commit_all(wt_dir: Path, message: str) -> bool`
+
+  - `wt_dir`: Worktree directory.
+  - `message`: Commit message.
+  - **Returns:** True if a commit was created, False if nothing to commit.
+
+- **staged_diff** — Return the staged diff text for the worktree.<br/>`staged_diff(wt_dir: Path) -> str`
+
+  - `wt_dir`: Worktree directory (must have staged changes).
+  - **Returns:** The diff text, or empty string if no staged changes.
+
+- **checkout** — Checkout a branch in the main worktree.<br/>`checkout(repo: Path, branch: str) -> bool`
+
+  - `repo`: Git repo root path.
+  - `branch`: Branch name to checkout.
+  - **Returns:** True if checkout succeeded, False otherwise.
+
+- **checkout_error** — Return the stderr from a failed checkout attempt.<br/>`checkout_error(repo: Path, branch: str) -> str`
+
+  - `repo`: Git repo root path.
+  - `branch`: Branch name that failed to checkout.
+  - **Returns:** The stderr text from the failed checkout.
+
+- **merge_branch** — Merge a branch into the current HEAD with `--no-edit`. On conflict, the merge is aborted to leave a clean worktree.<br/>`merge_branch(repo: Path, branch: str) -> MergeResult`
+
+  - `repo`: Git repo root path.
+  - `branch`: Branch to merge.
+  - **Returns:** :attr:`MergeResult.SUCCESS` or :attr:`MergeResult.CONFLICT`.
+
+- **manual_merge_branch** — Merge with `--no-commit --no-ff` for interactive review. On success (no conflicts), unstages changes via `git reset HEAD` so the user can selectively stage hunks.<br/>`manual_merge_branch(repo: Path, branch: str) -> ManualMergeResult`
+
+  - `repo`: Git repo root path.
+  - `branch`: Branch to merge.
+  - **Returns:** A :class:`ManualMergeResult` with status and conflict info.
+
+- **delete_branch** — Delete a branch and its git config section (best-effort). Tries `-d` first (safe delete), falls back to `-D` (force). Also removes the `branch.<name>.*` config section.<br/>`delete_branch(repo: Path, branch: str) -> None`
+
+  - `repo`: Git repo root path.
+  - `branch`: Branch name to delete.
+
+- **branch_exists** — Check if a branch exists.<br/>`branch_exists(repo: Path, branch: str) -> bool`
+
+  - `repo`: Git repo root path.
+  - `branch`: Branch name to check.
+  - **Returns:** True if the branch exists.
+
+- **ensure_excluded** — Add `.kiss-worktrees/` to local git exclude (not .gitignore). Uses `<git_common_dir>/info/exclude` so the agent never modifies any tracked file in the user's repo.<br/>`ensure_excluded(repo: Path) -> None`
+
+  - `repo`: Git repo root path.
+
+- **find_pending_branch** — Find the latest `kiss/wt-*` branch matching a prefix.<br/>`find_pending_branch(repo: Path, prefix: str) -> str | None`
+
+  - `repo`: Git repo root path.
+  - `prefix`: Branch name prefix (e.g. `kiss/wt-<chat_id[:12]>-`).
+  - **Returns:** The lexicographically last matching branch, or `None`.
+
+- **load_original_branch** — Load the original branch from git config.<br/>`load_original_branch(repo: Path, branch: str) -> str | None`
+
+  - `repo`: Git repo root path.
+  - `branch`: The worktree branch name.
+  - **Returns:** The original branch name, or `None` if not stored.
+
+- **save_original_branch** — Store the original branch in git config.<br/>`save_original_branch(repo: Path, branch: str, original: str) -> bool`
+
+  - `repo`: Git repo root path.
+  - `branch`: The worktree branch name.
+  - `original`: The original branch to store.
+  - **Returns:** True if config was saved successfully, False otherwise.
+
+- **cleanup_partial** — Remove a partially-created worktree and branch (best-effort).<br/>`cleanup_partial(repo: Path, branch: str, wt_dir: Path) -> None`
+
+  - `repo`: Git repo root path.
+  - `branch`: The branch name to delete.
+  - `wt_dir`: The worktree directory to remove.
+
+- **cleanup_orphans** — Scan for orphaned `kiss/wt-*` branches and worktrees.<br/>`cleanup_orphans(repo: Path) -> str`
+
+  - `repo`: Root of the git repository to scan.
+  - **Returns:** Summary of findings and any cleanup actions taken.
 
 ______________________________________________________________________
 

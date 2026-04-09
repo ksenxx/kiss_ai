@@ -13,8 +13,20 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from kiss.agents.sorcar.git_worktree import GitWorktree
 from kiss.agents.vscode.helpers import model_vendor
 from kiss.agents.vscode.server import VSCodeServer
+
+
+def _set_agent_wt(agent: object, repo: Path, branch: str, original: str) -> None:
+    """Helper to set agent._wt with a GitWorktree for testing."""
+    slug = branch.replace("/", "_")
+    agent._wt = GitWorktree(  # type: ignore[attr-defined]
+        repo_root=repo,
+        branch=branch,
+        original_branch=original,
+        wt_dir=repo / ".kiss-worktrees" / slug,
+    )
 
 
 def _model_vendor_name(name: str) -> str:
@@ -641,9 +653,7 @@ class TestWorktreeServerIntegration(unittest.TestCase):
         self._git("commit", "-m", "add file")
         self._git("checkout", "main")
 
-        self.server.agent._repo_root = self.repo
-        self.server.agent._wt_branch = "kiss/test-branch"
-        self.server.agent._original_branch = "main"
+        _set_agent_wt(self.server.agent, self.repo, "kiss/test-branch", "main")
 
         result = self.server._get_worktree_changed_files()
         assert "new_file.py" in result
@@ -662,9 +672,7 @@ class TestWorktreeServerIntegration(unittest.TestCase):
         self._git("commit", "-m", "add merged")
         self._git("checkout", "main")
 
-        self.server.agent._repo_root = self.repo
-        self.server.agent._wt_branch = "kiss/merge-test"
-        self.server.agent._original_branch = "main"
+        _set_agent_wt(self.server.agent, self.repo, "kiss/merge-test", "main")
 
         result = self.server._handle_worktree_action("merge")
         assert result["success"] is True
@@ -677,9 +685,7 @@ class TestWorktreeServerIntegration(unittest.TestCase):
         self._git("checkout", "-b", "kiss/discard-test")
         self._git("checkout", "main")
 
-        self.server.agent._repo_root = self.repo
-        self.server.agent._wt_branch = "kiss/discard-test"
-        self.server.agent._original_branch = "main"
+        _set_agent_wt(self.server.agent, self.repo, "kiss/discard-test", "main")
 
         result = self.server._handle_worktree_action("discard")
         assert result["success"] is True
@@ -694,9 +700,7 @@ class TestWorktreeServerIntegration(unittest.TestCase):
         self._git("commit", "-m", "add manual")
         self._git("checkout", "main")
 
-        self.server.agent._repo_root = self.repo
-        self.server.agent._wt_branch = "kiss/manual-test"
-        self.server.agent._original_branch = "main"
+        _set_agent_wt(self.server.agent, self.repo, "kiss/manual-test", "main")
 
         result = self.server._handle_worktree_action("manual")
         assert result["success"] is True
@@ -714,9 +718,7 @@ class TestWorktreeServerIntegration(unittest.TestCase):
         self._git("commit", "-m", "add route")
         self._git("checkout", "main")
 
-        self.server.agent._repo_root = self.repo
-        self.server.agent._wt_branch = "kiss/route-test"
-        self.server.agent._original_branch = "main"
+        _set_agent_wt(self.server.agent, self.repo, "kiss/route-test", "main")
 
         self.server._handle_command({"type": "worktreeAction", "action": "manual"})
         wt_events = [e for e in self.events if e["type"] == "worktree_result"]

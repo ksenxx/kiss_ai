@@ -571,12 +571,13 @@ class VSCodeServer:
         that ``merge()``/``discard()`` work even after a server process
         restart where in-memory state was lost.
         """
-        if self.agent._repo_root is None:
+        repo_root = self.agent._repo_root
+        if repo_root is None:
             toplevel = _git(self.work_dir, "rev-parse", "--show-toplevel")
             if toplevel.returncode != 0:
                 return
-            self.agent._repo_root = Path(toplevel.stdout.strip())
-        self.agent._restore_from_git()
+            repo_root = Path(toplevel.stdout.strip())
+        self.agent._restore_from_git(repo_root)
 
     def _generate_followup_async(
         self, task: str, result: str, model: str, gen: int, task_id: int | None

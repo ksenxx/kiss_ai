@@ -9,7 +9,6 @@ session until the branch is resolved.
 from __future__ import annotations
 
 import logging
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -24,30 +23,59 @@ from kiss.agents.sorcar.cli_helpers import (
     _print_recent_chats,
     _print_run_stats,
 )
+from kiss.agents.sorcar.git_worktree import (
+    GitWorktree,
+    GitWorktreeOps,
+    MergeResult,
+)
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.core.kiss_error import KISSError
 
 logger = logging.getLogger(__name__)
 
 
-def _git(
-    *args: str,
-    cwd: str | Path | None = None,
-) -> subprocess.CompletedProcess[str]:
-    """Run a git command, returning the CompletedProcess result.
+def _generate_commit_message(wt_dir: Path) -> str:
+    """Generate a commit message for worktree changes using an LLM.
+
+    Gets the staged diff and asks a fast model to produce a
+    conventional-commit-style message.  Returns a fallback message
+    on any failure.
 
     Args:
-        *args: Git sub-command and arguments (without the leading ``git``).
-        cwd: Working directory for the git command.
+        wt_dir: The worktree directory containing staged changes.
 
     Returns:
-        The completed process with stdout/stderr captured as text.
+        A commit message string.
     """
-    cmd = ["git"]
-    if cwd is not None:
-        cmd += ["-C", str(cwd)]
-    cmd += list(args)
-    return subprocess.run(cmd, capture_output=True, text=True)
+    fallback = "kiss: auto-commit agent work"
+    try:
+        diff_text = GitWorktreeOps.staged_diff(wt_dir)
+        if not diff_text:
+            return fallback
+
+        from kiss.agents.vscode.helpers import fast_model_for
+        from kiss.core.kiss_agent import KISSAgent
+
+        agent = KISSAgent("Commit Message Generator")
+        raw = agent.run(
+            model_name=fast_model_for(),
+            prompt_template=(
+                "Generate a concise git commit message for these "
+                "changes. Use conventional commit format with a "
+                "clear subject line (type: description) and "
+                "optionally a body with bullet points for multiple "
+                "changes. Return ONLY the commit message text, no "
+                "quotes or markdown fences.\n\n{context}"
+            ),
+            arguments={"context": f"Diff:\n{diff_text}"},
+            is_agentic=False,
+            verbose=False,
+        )
+        msg = raw.strip().strip('"').strip("'")
+        return msg if msg else fallback
+    except Exception:
+        logger.debug("Commit message generation failed", exc_info=True)
+        return fallback
 
 
 class WorktreeSorcarAgent(StatefulSorcarAgent):
@@ -58,186 +86,99 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
     instance attributes from git queries.
 
     Attributes:
-        _repo_root: Git repo root path, or ``None`` if not in a repo.
-        _wt_branch: Branch name of the current/pending worktree task,
-            or ``None`` when idle.
-        _original_branch: The branch the user was on when the task started.
+        _wt: The current/pending worktree state, or ``None`` when idle.
     """
 
     def __init__(self, name: str) -> None:
         super().__init__(name)
-        self._repo_root: Path | None = None
-        self._wt_branch: str | None = None
-        self._original_branch: str | None = None
+        self._wt: GitWorktree | None = None
+
+    # -- Derived properties (preserve public API) --------------------------
+
+    @property
+    def _repo_root(self) -> Path | None:
+        """Git repo root path, or ``None`` if not in a repo."""
+        return self._wt.repo_root if self._wt else None
+
+    @property
+    def _wt_branch(self) -> str | None:
+        """Branch name of the current/pending worktree task."""
+        return self._wt.branch if self._wt else None
+
+    @property
+    def _original_branch(self) -> str | None:
+        """The branch the user was on when the task started."""
+        return self._wt.original_branch if self._wt else None
 
     @property
     def _wt_pending(self) -> bool:
         """Whether a worktree task is pending merge/discard."""
-        return self._wt_branch is not None
+        return self._wt is not None
 
     @property
     def _wt_dir(self) -> Path | None:
-        """Worktree directory path, derived from repo root and branch name."""
-        if self._repo_root is None or self._wt_branch is None:
-            return None
-        slug = self._wt_branch.replace("/", "_")
-        return self._repo_root / ".kiss-worktrees" / slug
+        """Worktree directory path."""
+        return self._wt.wt_dir if self._wt else None
 
-    def _restore_from_git(self) -> None:
+    # -- State management --------------------------------------------------
+
+    def _restore_from_git(self, repo: Path) -> None:
         """Restore pending-branch state from git (no sidecar files).
 
         Queries git for any ``kiss/wt-<chat_id[:12]>-*`` branch.  If
-        found, restores ``_wt_branch`` and ``_original_branch`` from
-        ``git config``.  If the config entry is missing (crash between
-        worktree creation and config write), falls back to the current
-        HEAD branch of the main worktree.
+        found, restores state from ``git config``.  If the config entry
+        is missing (crash between worktree creation and config write),
+        falls back to the current HEAD branch of the main worktree.
+
+        Args:
+            repo: Git repo root path.
         """
-        if not self._repo_root:
-            return
-        if self._wt_branch:
+        if self._wt is not None:
             return
         prefix = f"kiss/wt-{self._chat_id[:12]}-"
-        result = _git(
-            "for-each-ref", "--format=%(refname:short)",
-            f"refs/heads/{prefix}*",
-            cwd=self._repo_root,
-        )
-        branches = result.stdout.strip().splitlines()
-        if not branches:
+        branch = GitWorktreeOps.find_pending_branch(repo, prefix)
+        if branch is None:
             return
-        self._wt_branch = sorted(branches)[-1]
-        orig = _git(
-            "config", f"branch.{self._wt_branch}.kiss-original",
-            cwd=self._repo_root,
-        )
-        self._original_branch = orig.stdout.strip() or None
-        if self._original_branch is None:
-            head = _git(
-                "rev-parse", "--abbrev-ref", "HEAD",
-                cwd=self._repo_root,
-            )
-            fallback = head.stdout.strip()
-            if fallback and fallback != "HEAD":
-                self._original_branch = fallback
 
-    def _ensure_worktree_excluded(self) -> None:
-        """Add ``.kiss-worktrees/`` to local git exclude (not .gitignore).
+        original = GitWorktreeOps.load_original_branch(repo, branch)
+        if original is None:
+            original = GitWorktreeOps.current_branch(repo)
 
-        Uses ``<git_common_dir>/info/exclude`` so the agent never modifies
-        any tracked file in the user's repo.
-        """
-        if self._repo_root is None:
-            return
-        result = _git(
-            "rev-parse", "--git-common-dir",
-            cwd=self._repo_root,
+        slug = branch.replace("/", "_")
+        wt_dir = repo / ".kiss-worktrees" / slug
+        self._wt = GitWorktree(
+            repo_root=repo,
+            branch=branch,
+            original_branch=original,
+            wt_dir=wt_dir,
         )
-        git_common = Path(result.stdout.strip())
-        if not git_common.is_absolute():  # pragma: no branch — always relative for main worktree
-            git_common = (self._repo_root / git_common).resolve()
-        exclude_file = git_common / "info" / "exclude"
-        exclude_file.parent.mkdir(parents=True, exist_ok=True)
-        entry = ".kiss-worktrees/"
-        if exclude_file.exists():
-            content = exclude_file.read_text()
-            if entry in content.splitlines():
-                return
-        with open(exclude_file, "a") as f:
-            f.write(f"\n{entry}\n")
+
+    # -- Auto-commit -------------------------------------------------------
 
     def _auto_commit_worktree(self) -> bool:
         """Commit any uncommitted changes in the worktree.
 
-        Generates a descriptive commit message using an LLM (fast model)
-        based on the staged diff.  Falls back to a generic message if
-        message generation fails.
-
         Returns:
             True if a commit was created, False if nothing to commit.
         """
-        wt_dir = self._wt_dir
-        if wt_dir is None or not wt_dir.exists():
+        if self._wt is None or not self._wt.wt_dir.exists():
             return False
-        _git("add", "-A", cwd=wt_dir)
-        diff = _git("diff", "--cached", "--quiet", cwd=wt_dir)
-        if diff.returncode == 0:
-            return False
-        msg = self._generate_worktree_commit_message(wt_dir)
-        _git("commit", "-m", msg, cwd=wt_dir)
-        return True
+        GitWorktreeOps.stage_all(self._wt.wt_dir)
+        msg = _generate_commit_message(self._wt.wt_dir)
+        return GitWorktreeOps.commit_all(self._wt.wt_dir, msg)
 
-    def _generate_worktree_commit_message(self, wt_dir: Path) -> str:
-        """Generate a commit message for worktree changes using an LLM.
+    # -- Shared preamble ---------------------------------------------------
 
-        Gets the staged diff and asks a fast model to produce a
-        conventional-commit-style message.  Returns a fallback message
-        on any failure.
+    def _finalize_worktree(self) -> None:
+        """Auto-commit, remove worktree, prune, checkout original."""
+        assert self._wt is not None
+        wt = self._wt
+        if wt.wt_dir.exists():
+            self._auto_commit_worktree()
+            GitWorktreeOps.remove(wt.repo_root, wt.wt_dir)
+        GitWorktreeOps.prune(wt.repo_root)
 
-        Args:
-            wt_dir: The worktree directory containing staged changes.
-
-        Returns:
-            A commit message string.
-        """
-        fallback = "kiss: auto-commit agent work"
-        try:
-            cached = _git("diff", "--cached", cwd=wt_dir)
-            diff_text = cached.stdout.strip()
-            if not diff_text:
-                return fallback
-
-            from kiss.agents.vscode.helpers import fast_model_for
-            from kiss.core.kiss_agent import KISSAgent
-
-            agent = KISSAgent("Commit Message Generator")
-            raw = agent.run(
-                model_name=fast_model_for(),
-                prompt_template=(
-                    "Generate a concise git commit message for these "
-                    "changes. Use conventional commit format with a "
-                    "clear subject line (type: description) and "
-                    "optionally a body with bullet points for multiple "
-                    "changes. Return ONLY the commit message text, no "
-                    "quotes or markdown fences.\n\n{context}"
-                ),
-                arguments={"context": f"Diff:\n{diff_text}"},
-                is_agentic=False,
-                verbose=False,
-            )
-            msg = raw.strip().strip('"').strip("'")
-            return msg if msg else fallback
-        except Exception:
-            logger.debug("Commit message generation failed", exc_info=True)
-            return fallback
-
-    def _cleanup_partial_worktree(self, branch: str, wt_dir: Path) -> None:
-        """Remove a partially-created worktree and branch (best-effort).
-
-        Args:
-            branch: The branch name to delete.
-            wt_dir: The worktree directory to remove.
-        """
-        if wt_dir.exists():
-            _git("worktree", "remove", str(wt_dir), "--force",
-                 cwd=self._repo_root)
-        _git("worktree", "prune", cwd=self._repo_root)
-        self._delete_branch(branch)
-
-    def _delete_branch(self, branch: str) -> None:
-        """Delete a branch and its git config section (best-effort).
-
-        Tries ``-d`` first (safe delete), falls back to ``-D`` (force)
-        if the safe delete fails, and removes the ``branch.<name>.*``
-        config section.
-
-        Args:
-            branch: The branch name to delete.
-        """
-        result = _git("branch", "-d", branch, cwd=self._repo_root)
-        if result.returncode != 0:
-            _git("branch", "-D", branch, cwd=self._repo_root)
-        _git("config", "--remove-section", f"branch.{branch}",
-             cwd=self._repo_root)
+    # -- Main entry point --------------------------------------------------
 
     def run(  # type: ignore[override]
         self,
@@ -265,101 +206,79 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         Returns:
             YAML string with 'success' and 'summary' keys.
         """
-        # Step 1: Determine discovery directory
         work_dir_str = kwargs.get("work_dir")
         discovery_dir = Path(work_dir_str) if work_dir_str else Path.cwd()
 
-        # Step 2: Discover repo root
-        toplevel = _git("rev-parse", "--show-toplevel", cwd=discovery_dir)
-        if toplevel.returncode != 0:
-            logger.warning("Not a git repo, running task directly: %s",
-                           toplevel.stderr.strip())
+        repo = GitWorktreeOps.discover_repo(discovery_dir)
+        if repo is None:
+            logger.warning("Not a git repo, running task directly")
             return super().run(prompt_template=prompt_template, **kwargs)
-        self._repo_root = Path(toplevel.stdout.strip())
 
-        # Step 3: Restore from git
-        self._restore_from_git()
+        self._restore_from_git(repo)
 
-        # Step 4: Check for pending branch
-        if self._wt_branch is not None:
+        if self._wt is not None:
             blocked: str = yaml.dump({
                 "success": False,
                 "summary": (
                     f"Cannot start a new task in this chat session: branch "
-                    f"'{self._wt_branch}' is pending merge/discard.\n\n"
+                    f"'{self._wt.branch}' is pending merge/discard.\n\n"
                     + self.merge_instructions()
                 ),
             })
             return blocked
 
-        # Step 5: Detect original branch
-        head_result = _git("rev-parse", "--abbrev-ref", "HEAD",
-                           cwd=self._repo_root)
-        original_branch = head_result.stdout.strip()
-        if not original_branch or original_branch == "HEAD":
+        original_branch = GitWorktreeOps.current_branch(repo)
+        if original_branch is None:
             logger.warning("Detached HEAD, running task directly")
             return super().run(prompt_template=prompt_template, **kwargs)
 
-        # Step 6: Compute subdirectory offset
         if work_dir_str:
             try:
                 offset = Path(work_dir_str).resolve().relative_to(
-                    self._repo_root.resolve())
-            except ValueError:  # pragma: no cover — defensive; discovery_dir = work_dir
+                    repo.resolve())
+            except ValueError:  # pragma: no cover
                 logger.warning("work_dir not inside repo, running directly")
                 return super().run(prompt_template=prompt_template, **kwargs)
         else:
             offset = Path(".")
 
-        # Step 7: Ensure .kiss-worktrees/ is excluded
         try:
-            self._ensure_worktree_excluded()
+            GitWorktreeOps.ensure_excluded(repo)
         except Exception:  # pragma: no cover — filesystem permission error
             logger.warning("Failed to update git exclude", exc_info=True)
 
-        # Step 8: Generate branch name and create worktree
+        # Generate branch name with collision avoidance
         branch = f"kiss/wt-{self._chat_id[:12]}-{int(time.time())}"
-        # Handle branch name collision
         base_branch = branch
         suffix = 1
-        while (  # pragma: no branch — timestamp collision extremely unlikely
-            _git("rev-parse", "--verify", f"refs/heads/{branch}",
-                 cwd=self._repo_root).returncode == 0
-        ):
+        while GitWorktreeOps.branch_exists(repo, branch):  # pragma: no branch
             branch = f"{base_branch}-{suffix}"
             suffix += 1
 
         slug = branch.replace("/", "_")
-        wt_dir = self._repo_root / ".kiss-worktrees" / slug
+        wt_dir = repo / ".kiss-worktrees" / slug
 
-        wt_result = _git("worktree", "add", "-b", branch, str(wt_dir),
-                         cwd=self._repo_root)
-        if wt_result.returncode != 0:  # pragma: no cover — git worktree add failure
-            logger.warning("Failed to create worktree, running directly: %s",
-                           wt_result.stderr.strip())
-            self._cleanup_partial_worktree(branch, wt_dir)
+        if not GitWorktreeOps.create(repo, branch, wt_dir):
+            # pragma: no cover — git worktree add failure
+            GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
             return super().run(prompt_template=prompt_template, **kwargs)
 
-        # Step 9: Store original branch in git config
-        config_result = _git("config",
-                             f"branch.{branch}.kiss-original", original_branch,
-                             cwd=self._repo_root)
-        if config_result.returncode != 0:  # pragma: no cover — git config failure
-            logger.warning("Failed to store original branch in git config: %s",
-                           config_result.stderr.strip())
-            self._cleanup_partial_worktree(branch, wt_dir)
+        if not GitWorktreeOps.save_original_branch(repo, branch, original_branch):
+            # pragma: no cover — git config failure
+            GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
             return super().run(prompt_template=prompt_template, **kwargs)
 
-        # Set state
-        self._wt_branch = branch
-        self._original_branch = original_branch
+        self._wt = GitWorktree(
+            repo_root=repo,
+            branch=branch,
+            original_branch=original_branch,
+            wt_dir=wt_dir,
+        )
 
-        # Step 10: Create offset directory and redirect work_dir
         wt_work_dir = wt_dir / offset
         wt_work_dir.mkdir(parents=True, exist_ok=True)
         kwargs["work_dir"] = str(wt_work_dir)
 
-        # Step 11: Run task
         try:
             task_result = super().run(
                 prompt_template=prompt_template, **kwargs)
@@ -371,8 +290,9 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
                 "summary": f"Task failed with error: {exc}",
             })
 
-        # Step 12: Append merge/discard instructions
         return task_result + "\n\n---\n" + self.merge_instructions()
+
+    # -- Merge / discard / manual merge ------------------------------------
 
     def merge(self) -> str:
         """Merge the task branch into the original branch.
@@ -387,67 +307,46 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         Raises:
             RuntimeError: If no worktree task is pending.
         """
-        if self._wt_branch is None:
+        if self._wt is None:
             raise RuntimeError("No pending worktree task to merge")
 
-        if self._original_branch is None:
+        wt = self._wt
+
+        if wt.original_branch is None:
             return (
                 "Cannot merge: original branch is unknown (likely due to a "
                 "crash during setup).  Please specify the target branch "
                 "manually:\n"
-                f"    git checkout <branch> && git merge {self._wt_branch}"
+                f"    git checkout <branch> && git merge {wt.branch}"
             )
 
-        wt_dir = self._wt_dir
+        self._finalize_worktree()
 
-        # Step 4: Remove worktree (auto-commit first)
-        if wt_dir is not None and wt_dir.exists():
-            self._auto_commit_worktree()
-            remove_result = _git("worktree", "remove", str(wt_dir),
-                                 "--force", cwd=self._repo_root)
-            if remove_result.returncode != 0:  # pragma: no cover — worktree lock/perm
-                logger.warning("worktree remove failed: %s",
-                               remove_result.stderr.strip())
-
-        # Step 5: Prune
-        _git("worktree", "prune", cwd=self._repo_root)
-
-        # Step 6: Checkout original branch
-        checkout = _git("checkout", self._original_branch,
-                        cwd=self._repo_root)
-        if checkout.returncode != 0:  # pragma: no cover — dirty main worktree
+        if not GitWorktreeOps.checkout(wt.repo_root, wt.original_branch):
+            # pragma: no cover — dirty main worktree
             return (
-                f"Cannot checkout '{self._original_branch}': "
-                f"{checkout.stderr.strip()}\n"
+                f"Cannot checkout '{wt.original_branch}': "
+                f"{GitWorktreeOps.checkout_error(wt.repo_root, wt.original_branch)}\n"
                 "Fix the issue and retry merge(), or call discard()."
             )
 
-        # Step 7: Merge
-        merge_result = _git("merge", self._wt_branch, "--no-edit",
-                            cwd=self._repo_root)
+        result = GitWorktreeOps.merge_branch(wt.repo_root, wt.branch)
 
-        if merge_result.returncode == 0:
-            # Step 8: Success — delete branch, reset state
-            self._delete_branch(self._wt_branch)
-            branch_name = self._wt_branch
-            self._wt_branch = None
-            self._original_branch = None
-            return f"Successfully merged branch '{branch_name}'."
+        if result == MergeResult.SUCCESS:
+            GitWorktreeOps.delete_branch(wt.repo_root, wt.branch)
+            self._wt = None
+            return f"Successfully merged branch '{wt.branch}'."
 
-        # Step 9: Merge conflict
-        _git("merge", "--abort", cwd=self._repo_root)
-        wt_branch = self._wt_branch
-        orig_branch = self._original_branch
-        repo = self._repo_root
+        # Conflict — state preserved so discard() still works
         return (
             "Merge conflict detected.  Resolve manually:\n"
-            f"    cd {repo}\n"
-            f"    git checkout {orig_branch}\n"
-            f"    git merge {wt_branch}\n"
+            f"    cd {wt.repo_root}\n"
+            f"    git checkout {wt.original_branch}\n"
+            f"    git merge {wt.branch}\n"
             "    # resolve conflicts in your editor\n"
             "    git add .\n"
             "    git commit\n"
-            f"    git branch -d {wt_branch}\n"
+            f"    git branch -d {wt.branch}\n"
             "\nOr discard the branch:\n"
             "    agent.discard()"
         )
@@ -463,28 +362,15 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         Raises:
             RuntimeError: If no worktree task is pending.
         """
-        if self._wt_branch is None:
+        if self._wt is None:
             raise RuntimeError("No pending worktree task to discard")
 
-        wt_dir = self._wt_dir
-        branch_name = self._wt_branch
-
-        # Step 3: Remove worktree
-        if wt_dir is not None and wt_dir.exists():
-            _git("worktree", "remove", str(wt_dir), "--force",
-                 cwd=self._repo_root)
-
-        # Step 4: Prune
-        _git("worktree", "prune", cwd=self._repo_root)
-
-        # Step 5: Delete branch
-        self._delete_branch(self._wt_branch)
-
-        # Step 6: Reset state
-        self._wt_branch = None
-        self._original_branch = None
-
-        return f"Discarded branch '{branch_name}'."
+        wt = self._wt
+        GitWorktreeOps.remove(wt.repo_root, wt.wt_dir)
+        GitWorktreeOps.prune(wt.repo_root)
+        GitWorktreeOps.delete_branch(wt.repo_root, wt.branch)
+        self._wt = None
+        return f"Discarded branch '{wt.branch}'."
 
     def manual_merge(self) -> str:
         """Merge task branch with ``--no-commit`` for interactive review.
@@ -500,65 +386,41 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         Raises:
             RuntimeError: If no worktree task is pending.
         """
-        if self._wt_branch is None:
+        if self._wt is None:
             raise RuntimeError("No pending worktree task to merge")
 
-        if self._original_branch is None:
+        wt = self._wt
+
+        if wt.original_branch is None:
             return (
                 "Cannot merge: original branch is unknown.  "
                 "Please merge manually:\n"
-                f"    git checkout <branch> && git merge {self._wt_branch}"
+                f"    git checkout <branch> && git merge {wt.branch}"
             )
 
-        wt_dir = self._wt_dir
+        self._finalize_worktree()
 
-        # Auto-commit and remove worktree
-        if wt_dir is not None and wt_dir.exists():
-            self._auto_commit_worktree()
-            remove_result = _git("worktree", "remove", str(wt_dir),
-                                 "--force", cwd=self._repo_root)
-            if remove_result.returncode != 0:  # pragma: no cover
-                logger.warning("worktree remove failed: %s",
-                               remove_result.stderr.strip())
-
-        _git("worktree", "prune", cwd=self._repo_root)
-
-        # Checkout original branch
-        checkout = _git("checkout", self._original_branch,
-                        cwd=self._repo_root)
-        if checkout.returncode != 0:
+        if not GitWorktreeOps.checkout(wt.repo_root, wt.original_branch):
             return (
-                f"Cannot checkout '{self._original_branch}': "
-                f"{checkout.stderr.strip()}\n"
+                f"Cannot checkout '{wt.original_branch}': "
+                f"{GitWorktreeOps.checkout_error(wt.repo_root, wt.original_branch)}\n"
                 "Fix the issue and retry, or call discard()."
             )
 
-        # Merge with --no-commit so user can review
-        branch_name = self._wt_branch
-        merge_result = _git("merge", "--no-commit", "--no-ff",
-                            self._wt_branch, cwd=self._repo_root)
+        branch_name = wt.branch
+        mr = GitWorktreeOps.manual_merge_branch(wt.repo_root, wt.branch)
 
-        has_conflicts = "CONFLICT" in (
-            merge_result.stdout + merge_result.stderr
-        )
-
-        if merge_result.returncode != 0 and not has_conflicts:
+        if mr.status == MergeResult.MERGE_FAILED:
             return (
-                f"Merge failed: {merge_result.stderr.strip()}\n"
-                "Fix the issue and retry, or call discard()."
+                "Merge failed: fix the issue and retry, or call discard()."
             )
-
-        if not has_conflicts:
-            # Unstage so user can selectively stage desired hunks
-            _git("reset", "HEAD", cwd=self._repo_root)
 
         # Clean up branch and agent state
-        if not has_conflicts:
-            self._delete_branch(self._wt_branch)
-        self._wt_branch = None
-        self._original_branch = None
+        if not mr.has_conflicts:
+            GitWorktreeOps.delete_branch(wt.repo_root, wt.branch)
+        self._wt = None
 
-        if has_conflicts:
+        if mr.has_conflicts:
             return (
                 f"Merge of '{branch_name}' has conflicts. "
                 "Resolve them in Source Control, then commit."
@@ -568,6 +430,8 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
             "Use Source Control to stage desired hunks and commit."
         )
 
+    # -- Instructions ------------------------------------------------------
+
     def merge_instructions(self) -> str:
         """Return human-readable merge/discard instructions.
 
@@ -575,28 +439,29 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
             Multi-line string with automatic merge, manual merge, and
             discard instructions.
         """
-        if self._wt_branch is None:
+        if self._wt is None:
             return "No pending worktree task."
-        wt_dir = self._wt_dir
-        orig = self._original_branch or "<branch>"
-        repo = self._repo_root or "."
+        wt = self._wt
+        orig = wt.original_branch or "<branch>"
         return (
-            f"Task completed on branch: {self._wt_branch}\n"
+            f"Task completed on branch: {wt.branch}\n"
             "\nTo merge automatically:\n"
             "    agent.merge()\n"
             "\nTo merge manually:\n"
-            f"    cd {repo}\n"
-            f"    git worktree remove {wt_dir}\n"
+            f"    cd {wt.repo_root}\n"
+            f"    git worktree remove {wt.wt_dir}\n"
             f"    git checkout {orig}\n"
-            f"    git merge {self._wt_branch}\n"
-            f"    git branch -d {self._wt_branch}\n"
+            f"    git merge {wt.branch}\n"
+            f"    git branch -d {wt.branch}\n"
             "\nTo discard:\n"
             "    agent.discard()\n"
             "    # or manually:\n"
-            f"    cd {repo}\n"
-            f"    git worktree remove {wt_dir} --force\n"
-            f"    git branch -D {self._wt_branch}"
+            f"    cd {wt.repo_root}\n"
+            f"    git worktree remove {wt.wt_dir} --force\n"
+            f"    git branch -D {wt.branch}"
         )
+
+    # -- Cleanup -----------------------------------------------------------
 
     @staticmethod
     def cleanup(repo_root: Path | str) -> str:
@@ -608,40 +473,20 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         Returns:
             Summary of findings and any cleanup actions taken.
         """
-        repo = Path(repo_root)
-        # List all kiss/wt-* branches
-        result = _git(
-            "for-each-ref", "--format=%(refname:short)",
-            "refs/heads/kiss/wt-*",
-            cwd=repo,
-        )
-        branches = result.stdout.strip().splitlines() if result.stdout.strip() else []
+        return GitWorktreeOps.cleanup_orphans(Path(repo_root))
 
-        # List worktrees
-        wt_result = _git("worktree", "list", "--porcelain", cwd=repo)
-        worktree_branches: set[str] = set()
-        for line in wt_result.stdout.splitlines():
-            if line.startswith("branch refs/heads/kiss/wt-"):
-                worktree_branches.add(line.split("refs/heads/")[1])
+    # -- Generate commit message (backward compat for tests) ---------------
 
-        orphan_branches = [b for b in branches if b not in worktree_branches]
-        lines = [f"Found {len(branches)} kiss/wt-* branch(es), "
-                 f"{len(worktree_branches)} active worktree(s)."]
+    def _generate_worktree_commit_message(self, wt_dir: Path) -> str:
+        """Generate a commit message for worktree changes using an LLM.
 
-        if orphan_branches:
-            lines.append(f"Orphaned branches (no worktree): {orphan_branches}")
-            for b in orphan_branches:
-                _git("branch", "-D", b, cwd=repo)
-                _git("config", "--remove-section", f"branch.{b}", cwd=repo)
-                lines.append(f"  Deleted: {b}")
+        Args:
+            wt_dir: The worktree directory containing staged changes.
 
-        _git("worktree", "prune", cwd=repo)
-        lines.append("Ran git worktree prune.")
-
-        if not orphan_branches:
-            lines.append("No orphans found.")
-
-        return "\n".join(lines)
+        Returns:
+            A commit message string.
+        """
+        return _generate_commit_message(wt_dir)
 
 
 def main() -> None:  # pragma: no cover – CLI entry point requires API
@@ -669,11 +514,11 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
 
     if args.cleanup:
         work_dir = args.work_dir or str(Path(".").resolve())
-        git_result = _git("rev-parse", "--show-toplevel", cwd=work_dir)
-        if git_result.returncode != 0:
+        repo = GitWorktreeOps.discover_repo(Path(work_dir))
+        if repo is None:
             print("Not a git repo.")
             sys.exit(1)
-        print(WorktreeSorcarAgent.cleanup(git_result.stdout.strip()))
+        print(WorktreeSorcarAgent.cleanup(repo))
         sys.exit(0)
 
     agent = WorktreeSorcarAgent("Worktree Sorcar Agent")

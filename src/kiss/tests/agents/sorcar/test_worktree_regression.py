@@ -19,11 +19,9 @@ from typing import Any, cast
 import pytest
 
 import kiss.agents.sorcar.persistence as th
+from kiss.agents.sorcar.git_worktree import GitWorktree, _git
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.sorcar.worktree_sorcar_agent import (
-    WorktreeSorcarAgent,
-    _git,
-)
+from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.kiss_error import KISSError
 
 # ---------------------------------------------------------------------------
@@ -382,8 +380,7 @@ class TestWorktreeRegression:
     # -----------------------------------------------------------------------
     def test_delete_branch_force_fallback(self) -> None:
         """When -d fails (unmerged branch), -D is used as fallback."""
-        agent = self._agent()
-        agent._repo_root = self.repo
+        from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 
         # Create a branch with a commit not on main (unmerged)
         _git("checkout", "-b", "unmerged-test", cwd=self.repo)
@@ -392,8 +389,8 @@ class TestWorktreeRegression:
         _git("commit", "-m", "unmerged commit", cwd=self.repo)
         _git("checkout", "main", cwd=self.repo)
 
-        # -d would fail because unmerged, but _delete_branch uses -D fallback
-        agent._delete_branch("unmerged-test")
+        # -d would fail because unmerged, but delete_branch uses -D fallback
+        GitWorktreeOps.delete_branch(self.repo, "unmerged-test")
         check = _git(
             "rev-parse", "--verify", "refs/heads/unmerged-test", cwd=self.repo
         )
@@ -513,8 +510,7 @@ class TestWorktreeRegression:
             cwd=self.repo,
         )
 
-        agent._repo_root = self.repo
-        agent._restore_from_git()
+        agent._restore_from_git(self.repo)
         assert agent._wt_branch == f"{prefix}-2000"
 
         # Clean up
@@ -531,14 +527,22 @@ class TestWorktreeRegression:
         branch = agent._wt_branch
         assert branch is not None
 
-        agent._original_branch = None
+        wt = agent._wt
+        assert wt is not None
+        agent._wt = GitWorktree(
+            repo_root=wt.repo_root, branch=wt.branch,
+            original_branch=None, wt_dir=wt.wt_dir,
+        )
         msg = agent.merge()
         assert "Cannot merge" in msg
         assert "original branch is unknown" in msg
         assert branch in msg  # should reference the task branch
 
         # Restore for cleanup
-        agent._original_branch = "main"
+        agent._wt = GitWorktree(
+            repo_root=wt.repo_root, branch=wt.branch,
+            original_branch="main", wt_dir=wt.wt_dir,
+        )
         agent.discard()
 
     # -----------------------------------------------------------------------

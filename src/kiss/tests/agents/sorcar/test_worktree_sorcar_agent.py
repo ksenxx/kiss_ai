@@ -11,11 +11,13 @@ from typing import Any, cast
 import pytest
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.sorcar.worktree_sorcar_agent import (
-    WorktreeSorcarAgent,
+from kiss.agents.sorcar.git_worktree import (
+    GitWorktree,
+    GitWorktreeOps,
     _git,
 )
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -270,8 +272,7 @@ class TestWorktreeSorcarAgent:
 
         # New agent instance with same chat_id
         agent2 = self._agent(chat_id="aabbccdd11223344")
-        agent2._repo_root = self.repo
-        agent2._restore_from_git()
+        agent2._restore_from_git(self.repo)
         assert agent2._wt_branch == branch
         assert agent2._original_branch == "main"
 
@@ -488,8 +489,7 @@ class TestWorktreeSorcarAgent:
 
         # New agent should recover
         agent2 = self._agent(chat_id="missing_config_1234")
-        agent2._repo_root = self.repo
-        agent2._restore_from_git()
+        agent2._restore_from_git(self.repo)
         assert agent2._wt_branch == branch
         # Falls back to current HEAD
         assert agent2._original_branch == "main"
@@ -515,8 +515,7 @@ class TestWorktreeSorcarAgent:
         )
 
         agent2 = self._agent(chat_id="detached_cfg_test")
-        agent2._repo_root = self.repo
-        agent2._restore_from_git()
+        agent2._restore_from_git(self.repo)
         assert agent2._wt_branch == branch
         assert agent2._original_branch is None
 
@@ -562,10 +561,18 @@ class TestWorktreeSorcarAgent:
     def test_manual_merge_unknown_original(self) -> None:
         agent = self._agent()
         agent.run(prompt_template="task1", work_dir=str(self.repo))
-        agent._original_branch = None
+        wt = agent._wt
+        assert wt is not None
+        agent._wt = GitWorktree(
+            repo_root=wt.repo_root, branch=wt.branch,
+            original_branch=None, wt_dir=wt.wt_dir,
+        )
         msg = agent.manual_merge()
         assert "Cannot merge" in msg
-        agent._original_branch = "main"
+        agent._wt = GitWorktree(
+            repo_root=wt.repo_root, branch=wt.branch,
+            original_branch="main", wt_dir=wt.wt_dir,
+        )
         agent.discard()
 
     # 25. _auto_commit_worktree when nothing to commit
@@ -613,45 +620,50 @@ class TestWorktreeSorcarAgent:
         with pytest.raises(RuntimeError, match="No pending"):
             agent.discard()
 
-    # 30. _restore_from_git with no repo root
+    # 30. _restore_from_git with no repo root — tested via run() on non-repo
     def test_restore_no_repo_root(self) -> None:
         agent = self._agent()
-        agent._repo_root = None
-        agent._restore_from_git()
+        # _wt is None → _restore_from_git with a nonexistent repo path
+        # won't find any branches, so _wt stays None
+        no_repo = Path(self.tmpdir) / "no_repo"
+        no_repo.mkdir()
+        agent._restore_from_git(no_repo)
         assert agent._wt_branch is None
 
     # 31. _restore_from_git when already known in-memory
     def test_restore_already_known(self) -> None:
         agent = self._agent()
-        agent._repo_root = self.repo
-        agent._wt_branch = "some/branch"
-        agent._restore_from_git()
+        agent._wt = GitWorktree(
+            repo_root=self.repo, branch="some/branch",
+            original_branch="main",
+            wt_dir=self.repo / ".kiss-worktrees" / "some_branch",
+        )
+        agent._restore_from_git(self.repo)
         assert agent._wt_branch == "some/branch"
 
-    # 32. _ensure_worktree_excluded when repo_root is None
+    # 32. ensure_excluded with no repo — tested via run() fallback
     def test_ensure_excluded_no_repo(self) -> None:
+        # GitWorktreeOps.ensure_excluded requires a valid repo;
+        # the agent only calls it when repo is discovered.
+        # Just verify a fresh agent has no _wt.
         agent = self._agent()
-        agent._repo_root = None
-        agent._ensure_worktree_excluded()  # should not raise
+        assert agent._wt is None
 
-    # 33. _ensure_worktree_excluded is idempotent
+    # 33. ensure_excluded is idempotent
     def test_ensure_excluded_idempotent(self) -> None:
-        agent = self._agent()
-        agent._repo_root = self.repo
-        agent._ensure_worktree_excluded()
-        agent._ensure_worktree_excluded()
+        GitWorktreeOps.ensure_excluded(self.repo)
+        GitWorktreeOps.ensure_excluded(self.repo)
         exclude_file = self.repo / ".git" / "info" / "exclude"
         content = exclude_file.read_text()
-        # Should appear only once in the lines
         lines = content.splitlines()
         assert lines.count(".kiss-worktrees/") == 1
 
-    # 34. _wt_dir when no repo or no branch
+    # 34. _wt_dir when no _wt
     def test_wt_dir_none(self) -> None:
         agent = self._agent()
         assert agent._wt_dir is None
-        agent._repo_root = self.repo
-        assert agent._wt_dir is None
+        assert agent._repo_root is None
+        assert agent._wt_branch is None
 
     # 35. work_dir not in repo
     def test_work_dir_outside_repo(self) -> None:
@@ -692,16 +704,14 @@ class TestWorktreeSorcarAgent:
         assert result.returncode == 0
         assert "git version" in result.stdout
 
-    # 40. _ensure_worktree_excluded when exclude file doesn't exist yet
+    # 40. ensure_excluded when exclude file doesn't exist yet
     def test_ensure_excluded_no_file(self) -> None:
-        agent = self._agent()
-        agent._repo_root = self.repo
         exclude_file = self.repo / ".git" / "info" / "exclude"
         if exclude_file.exists():
             exclude_file.unlink()
         if exclude_file.parent.exists():
             exclude_file.parent.rmdir()
-        agent._ensure_worktree_excluded()
+        GitWorktreeOps.ensure_excluded(self.repo)
         assert exclude_file.exists()
         assert ".kiss-worktrees/" in exclude_file.read_text()
 
@@ -775,30 +785,25 @@ class TestWorktreeSorcarAgent:
         finally:
             os.chdir(old_cwd)
 
-    # x. _cleanup_partial_worktree when wt_dir does not exist
+    # x. cleanup_partial when wt_dir does not exist
     def test_cleanup_partial_worktree_no_dir(self) -> None:
-        agent = self._agent()
-        agent._repo_root = self.repo
         branch = "kiss/wt-nocleanup"
         _git("branch", branch, cwd=self.repo)
         nonexistent = self.repo / ".kiss-worktrees" / "nonexistent"
-        agent._cleanup_partial_worktree(branch, nonexistent)
+        GitWorktreeOps.cleanup_partial(self.repo, branch, nonexistent)
         # Branch should be gone
         check = _git("rev-parse", "--verify", f"refs/heads/{branch}",
                       cwd=self.repo)
         assert check.returncode != 0
 
-    # 46. _cleanup_partial_worktree when wt_dir exists
+    # 46. cleanup_partial when wt_dir exists
     def test_cleanup_partial_worktree_exists(self) -> None:
-        agent = self._agent()
-        agent._repo_root = self.repo
-        # Create a worktree manually to test cleanup
         branch = "kiss/wt-testcleanup"
         slug = branch.replace("/", "_")
         wt_dir = self.repo / ".kiss-worktrees" / slug
         _git("worktree", "add", "-b", branch, str(wt_dir), cwd=self.repo)
         assert wt_dir.exists()
-        agent._cleanup_partial_worktree(branch, wt_dir)
+        GitWorktreeOps.cleanup_partial(self.repo, branch, wt_dir)
         assert not wt_dir.exists()
         # Branch should be gone
         check = _git("rev-parse", "--verify", f"refs/heads/{branch}",
