@@ -7,7 +7,6 @@ or test doubles are used.
 
 import inspect
 
-
 # ---------------------------------------------------------------------------
 # C1: openai_compatible_model.py — Double-counting reasoning tokens
 # ---------------------------------------------------------------------------

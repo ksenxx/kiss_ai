@@ -4,7 +4,7 @@ Select a task below in sorcar editor and press cmd/ctrl-L to run the task in the
 
 ## increase test coverage
 
-can you write integration tests with no mocks or test doubles or fakes to achieve 100% branch coverage of the files under src/kiss/agents/vscode/, and src/kiss/agents/sorcar/? Please check the branch coverage first for the existing tests with the coverage tool by running 'uv run pytest -v' with a timeout of 900 second.  Fix tests or code if some tests fail. Then try to reach uncovered branches by crafting integration tests without any mocks, test doubles or fakes. You MUST repeat the task until you get 100% branch coverage or you cannot increase branch coverage after 3 tries.  Do not add # pragma: no branch, and try to remove them from the code by write a test.
+can you write integration tests with no mocks or test doubles or fakes to achieve 100% branch coverage of the files under src/kiss/agents/vscode/, and src/kiss/agents/sorcar/? Please check the branch coverage first for the existing tests with the coverage tool by running 'uv run pytest -v' with a timeout of 900 second.  Fix tests or code if some tests fail. Then try to reach uncovered branches by crafting integration tests without any mocks, test doubles or fakes. You MUST repeat the task until you get 100% branch coverage or you cannot increase branch coverage after 3 tries. Do not add # pragma: no branch, and try to remove them from the code by write a test.
 
 ## code review
 

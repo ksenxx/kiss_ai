@@ -22,7 +22,6 @@ from kiss.channels.slack_agent import (
     _SLACK_DIR,
     SlackAgent,
     SlackChannelBackend,
-    _clear_token,
     _delete_workspace,
     _list_workspaces,
     _load_token,

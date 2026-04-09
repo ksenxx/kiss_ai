@@ -6,9 +6,8 @@ that submits a real batch request to the Anthropic API.
 
 import pytest
 
-from kiss.core.kiss_error import KISSError
 from kiss.core.models.anthropic_batch_model import AnthropicBatchModel
-from kiss.core.models.model_info import MODEL_INFO, calculate_cost, model
+from kiss.core.models.model_info import MODEL_INFO, model
 from kiss.tests.conftest import requires_anthropic_api_key
 
 

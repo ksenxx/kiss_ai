@@ -22,7 +22,6 @@ from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import (
     Model,
-    _build_text_based_tools_prompt,
     _parse_text_based_tool_calls,
 )
 from kiss.core.models.model_info import MODEL_INFO

@@ -8,12 +8,7 @@ No mocks, patches, fakes, or any form of test doubles.
 
 from __future__ import annotations
 
-import json
-import sys
-import threading
 from pathlib import Path
-
-import pytest
 
 from kiss.channels._channel_agent_utils import ChannelConfig
 from kiss.core.config import (

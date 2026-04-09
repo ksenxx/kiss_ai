@@ -12,7 +12,6 @@ import pytest
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.git_worktree import (
-    GitWorktree,
     GitWorktreeOps,
     _git,
 )

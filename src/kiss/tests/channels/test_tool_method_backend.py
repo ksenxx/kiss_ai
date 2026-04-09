@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from kiss.channels._channel_agent_utils import _NON_TOOL_METHODS, ToolMethodBackend
+from kiss.channels._channel_agent_utils import ToolMethodBackend
 from kiss.channels.bluebubbles_agent import BlueBubblesChannelBackend
 from kiss.channels.discord_agent import DiscordChannelBackend
 from kiss.channels.feishu_agent import FeishuChannelBackend

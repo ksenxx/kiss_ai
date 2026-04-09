@@ -31,7 +31,6 @@ from kiss.agents.vscode.browser_ui import (
     BaseBrowserPrinter,
     _coalesce_events,
 )
-from kiss.agents.vscode.diff_merge import _scan_files
 from kiss.agents.vscode.server import VSCodeServer
 
 # ---------------------------------------------------------------------------

@@ -6,9 +6,7 @@ integration for ``--channel``.
 
 from __future__ import annotations
 
-import io
 import sys
-from contextlib import redirect_stdout
 from typing import Any
 
 import pytest

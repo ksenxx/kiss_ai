@@ -24,10 +24,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
-import threading
-import time
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -35,16 +32,12 @@ from kiss.agents.sorcar import persistence as th
 from kiss.agents.sorcar.cli_helpers import (
     _apply_chat_args,
     _build_arg_parser,
-    _build_chat_arg_parser,
     _build_fallback_run_kwargs,
     _build_run_kwargs,
     _print_recent_chats,
-    _print_run_stats,
 )
 from kiss.agents.sorcar.git_worktree import GitWorktree
-from kiss.agents.sorcar.sorcar_agent import _resolve_task
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
-from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 from kiss.agents.vscode.server import VSCodeServer

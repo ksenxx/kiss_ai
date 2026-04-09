@@ -7,11 +7,7 @@ no mocks, patches, fakes, or test doubles.
 from __future__ import annotations
 
 import inspect
-import tempfile
-import threading
-from pathlib import Path
 from typing import Any
-
 
 # ---------------------------------------------------------------------------
 # B1: fast_model_for() returns correct model per provider key

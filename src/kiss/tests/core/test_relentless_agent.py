@@ -18,8 +18,6 @@ from kiss.core.relentless_agent import (
     TASK_PROMPT,
     RelentlessAgent,
     _detect_stall,
-    _extract_error_phrases,
-    _str_to_bool,
     finish,
 )
 from kiss.tests.conftest import requires_gemini_api_key

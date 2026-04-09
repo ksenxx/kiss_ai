@@ -19,7 +19,7 @@ from typing import Any, cast
 import pytest
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.git_worktree import GitWorktree, _git
+from kiss.agents.sorcar.git_worktree import _git
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.kiss_error import KISSError

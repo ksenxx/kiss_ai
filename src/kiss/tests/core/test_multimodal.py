@@ -3,10 +3,8 @@
 import io
 import os
 import struct
-import tempfile
 import unittest
 import zlib
-from pathlib import Path
 
 import pytest
 
@@ -14,7 +12,6 @@ from kiss.core.kiss_agent import KISSAgent
 from kiss.core.models.model import SUPPORTED_MIME_TYPES, Attachment, transcribe_audio
 from kiss.tests.conftest import (
     requires_gemini_api_key,
-    requires_openai_api_key,
 )
 
 TEST_TIMEOUT = 120

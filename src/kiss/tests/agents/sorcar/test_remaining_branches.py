@@ -26,7 +26,6 @@ from kiss.agents.sorcar.web_use_tool import WebUseTool
 from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 from kiss.agents.vscode.helpers import (
     clip_autocomplete_suggestion,
-    fast_model_for,
 )
 from kiss.agents.vscode.server import VSCodeServer
 
