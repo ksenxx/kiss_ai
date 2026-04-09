@@ -25,7 +25,21 @@ rm -rf "$DEST"
 mkdir -p "$DEST"
 
 # Copy root project files needed for uv run
-cp "$PROJECT_ROOT/pyproject.toml" "$DEST/"
+# Copy pyproject.toml but strip [tool.hatch.build.targets.wheel.force-include]
+# section — those paths reference root-level files (.dockerignore, .github, etc.)
+# that aren't copied to kiss_project/, causing hatchling editable builds to fail.
+python3 -c "
+import re, pathlib
+text = pathlib.Path('$PROJECT_ROOT/pyproject.toml').read_text()
+text = re.sub(
+    r'\n# Include all git-managed files outside src/kiss/ in the wheel\n'
+    r'\[tool\.hatch\.build\.targets\.wheel\.force-include\]\n'
+    r'(?:.*\n)*?(?=\n\[)',
+    '',
+    text,
+)
+pathlib.Path('$DEST/pyproject.toml').write_text(text)
+"
 cp "$PROJECT_ROOT/uv.lock" "$DEST/"
 cp "$PROJECT_ROOT/README.md" "$DEST/"
 cp "$PROJECT_ROOT/SYSTEM.md" "$DEST/"

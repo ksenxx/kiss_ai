@@ -221,7 +221,7 @@ class SorcarHarborAgent(BaseAgent):
             " && /root/.local/share/uv/tools"
             "/kiss-agent-framework/bin/python3 -c "
             '"import base64; from pathlib import Path; import kiss;'
-            " d = Path(kiss.__file__).parent.parent.parent;"
+            " d = Path(kiss.__file__).parent;"
             f' (d / \\"SYSTEM.md\\").write_text(base64.b64decode(\\"{b64}\\").decode())"',
             "write SYSTEM.md",
         )
