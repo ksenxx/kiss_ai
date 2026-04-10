@@ -756,10 +756,17 @@
     case 'adjacent_task_events':
       renderAdjacentTask(ev.direction, ev.task, ev.events || []);
       break;
-    case 'setTaskText':
+    case 'setTaskText': {
+      var stt = (ev.text || '').trim();
+      if (stt) {
+        currentTaskName = stt;
+        resetAdjacentState();
+        vscode.setState({ task: stt });
+        if (welcome) welcome.style.display = 'none';
+      }
       setTaskText(ev.text || '');
-      if (welcome) welcome.style.display = 'none';
       break;
+    }
     case 'appendToInput':
       if (ev.text) {
         inp.value = inp.value ? inp.value + '\n' + ev.text : ev.text;
@@ -1241,10 +1248,6 @@
     if (histCache[0] !== prompt) {
       histCache.unshift(prompt);
     }
-    currentTaskName = prompt;
-    resetAdjacentState();
-    setTaskText(prompt);
-    vscode.setState({ task: prompt });
     vscode.postMessage({
       type: 'submit',
       prompt: prompt,
@@ -1261,7 +1264,6 @@
     clearGhost();
     histIdx = -1;
     if (inputClearBtn) inputClearBtn.style.display = 'none';
-    if (welcome) welcome.style.display = 'none';
   }
 
   function showAskUserModal(question) {

@@ -910,5 +910,100 @@ class TestWorktreeActionNotifications(unittest.TestCase):
         assert "this._worktreeProgress = null" in self._ts
 
 
+class TestFilePathDoesNotPopulateTaskPanel(unittest.TestCase):
+    """Regression: typing a file path in the textbox and opening it must NOT
+    populate the fixed task panel.
+
+    Root cause was that sendMessage() in main.js used to set the task panel
+    text (setTaskText, currentTaskName, resetAdjacentState, vscode.setState)
+    *before* the extension determined whether to run a task or open a file.
+    The fix moved all task-panel state management into the 'setTaskText' event
+    handler, which is only sent by _startTask() — never by the file-open path.
+    """
+
+    _js: str = ""
+    _ts: str = ""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
+        cls._js = (base / "vscode" / "media" / "main.js").read_text()
+        cls._ts = (base / "vscode" / "src" / "SorcarTab.ts").read_text()
+
+    # -- main.js: sendMessage must NOT touch task panel state ----------------
+
+    def _get_send_message_body(self) -> str:
+        start = self._js.index("function sendMessage()")
+        end = self._js.index("\n  function ", start + 1)
+        return self._js[start:end]
+
+    def test_send_message_does_not_call_set_task_text(self) -> None:
+        body = self._get_send_message_body()
+        assert "setTaskText" not in body
+
+    def test_send_message_does_not_set_current_task_name(self) -> None:
+        body = self._get_send_message_body()
+        assert "currentTaskName" not in body
+
+    def test_send_message_does_not_call_reset_adjacent_state(self) -> None:
+        body = self._get_send_message_body()
+        assert "resetAdjacentState" not in body
+
+    def test_send_message_does_not_call_set_state(self) -> None:
+        body = self._get_send_message_body()
+        assert "vscode.setState" not in body
+
+    def test_send_message_does_not_hide_welcome(self) -> None:
+        body = self._get_send_message_body()
+        assert "welcome.style.display" not in body
+
+    # -- main.js: setTaskText event handler DOES manage task panel state -----
+
+    def _get_set_task_text_handler(self) -> str:
+        start = self._js.index("case 'setTaskText':")
+        end = self._js.index("break;", start) + len("break;")
+        return self._js[start:end]
+
+    def test_set_task_text_handler_sets_current_task_name(self) -> None:
+        body = self._get_set_task_text_handler()
+        assert "currentTaskName = stt" in body
+
+    def test_set_task_text_handler_calls_reset_adjacent_state(self) -> None:
+        body = self._get_set_task_text_handler()
+        assert "resetAdjacentState()" in body
+
+    def test_set_task_text_handler_calls_set_state(self) -> None:
+        body = self._get_set_task_text_handler()
+        assert "vscode.setState({ task: stt })" in body
+
+    def test_set_task_text_handler_hides_welcome(self) -> None:
+        body = self._get_set_task_text_handler()
+        assert "welcome.style.display = 'none'" in body
+
+    def test_set_task_text_handler_calls_set_task_text(self) -> None:
+        body = self._get_set_task_text_handler()
+        assert "setTaskText(ev.text" in body
+
+    # -- SorcarTab.ts: file-open path returns before _startTask --------------
+
+    def test_ts_file_open_returns_before_start_task(self) -> None:
+        """The submit handler opens the file and returns *before* _startTask."""
+        submit_idx = self._ts.index("case 'submit':")
+        submit_end = self._ts.index("break;", submit_idx)
+        submit_body = self._ts[submit_idx:submit_end]
+        # The file-open block must contain 'return' before _startTask
+        file_check_idx = submit_body.index("isFile()")
+        return_idx = submit_body.index("return;", file_check_idx)
+        start_task_idx = submit_body.index("this._startTask(")
+        assert return_idx < start_task_idx
+
+    def test_ts_start_task_sends_set_task_text(self) -> None:
+        """_startTask sends setTaskText to the webview (the only source)."""
+        start = self._ts.index("private _startTask(")
+        end = self._ts.index("\n  private ", start + 1)
+        body = self._ts[start:end]
+        assert "setTaskText" in body
+
+
 if __name__ == "__main__":
     unittest.main()
