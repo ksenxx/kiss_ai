@@ -498,6 +498,13 @@ export class SorcarTab {
     this._agentProcess.stop();
   }
 
+  /** Append text to the chat input and focus it. */
+  public async appendToInput(text: string): Promise<void> {
+    this._panel.reveal();
+    await new Promise(r => setTimeout(r, 150));
+    this.sendToWebview({ type: 'appendToInput', text });
+  }
+
   /** Reveal and focus the chat input. */
   public async focusChatInput(): Promise<void> {
     this._panel.reveal();
@@ -619,7 +626,7 @@ export class SorcarTab {
         <div id="input-wrap">
           <div id="input-text-wrap">
             <div id="ghost-overlay"></div>
-            <textarea id="task-input" placeholder="Ask anything... (@ for files, ${process.platform === 'darwin' ? '⌘' : 'Ctrl+'}D toggle between editor and chat, ${process.platform === 'darwin' ? '⌘' : 'Ctrl+'}T new chat, ${process.platform === 'darwin' ? '⌘' : 'Ctrl+'}E run selected text in editor as task)" rows="1"></textarea>
+            <textarea id="task-input" placeholder="Ask anything... (@ for files, ${process.platform === 'darwin' ? '⌘' : 'Ctrl+'}D toggle between editor and chat, ${process.platform === 'darwin' ? '⌘' : 'Ctrl+'}T new chat, ${process.platform === 'darwin' ? '⌘' : 'Ctrl+'}E run selected text as task, ${process.platform === 'darwin' ? '⌘' : 'Ctrl+'}L copy text to chat)" rows="1"></textarea>
             <button id="input-clear-btn" style="display:none;">&times;</button>
           </div>
         </div>

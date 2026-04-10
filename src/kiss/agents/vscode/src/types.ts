@@ -81,6 +81,7 @@ export type ToWebviewMessage =
   | { type: 'activeFileInfo'; isPrompt: boolean; filename: string; path: string }
   | { type: 'inputHistory'; tasks: string[] }
   | { type: 'setTaskText'; text: string }
+  | { type: 'appendToInput'; text: string }
   | { type: 'focusInput' }
   | { type: 'worktree_created'; worktreeDir: string; branch: string }
   | { type: 'worktree_done'; branch: string; worktreeDir: string; originalBranch: string; changedFiles: string[]; hasConflict?: boolean }

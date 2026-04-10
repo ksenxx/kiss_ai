@@ -577,6 +577,15 @@
       setTaskText(ev.text || '');
       if (welcome) welcome.style.display = 'none';
       break;
+    case 'appendToInput':
+      if (ev.text) {
+        inp.value = inp.value ? inp.value + '\n' + ev.text : ev.text;
+        inp.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      inp.focus();
+      setTimeout(function() { inp.focus(); }, 100);
+      setTimeout(function() { inp.focus(); }, 300);
+      break;
     case 'focusInput':
       inp.focus();
       setTimeout(function() { inp.focus(); }, 100);

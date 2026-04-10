@@ -79,6 +79,10 @@
       {
         "command": "kissSorcar.runSelection",
         "title": "KISS: Run Selection in Chat"
+      },
+      {
+        "command": "kissSorcar.insertSelectionToChat",
+        "title": "KISS: Insert Selection into Chat"
       }
     ],
     "menus": {
@@ -111,6 +115,11 @@
         "command": "kissSorcar.runSelection",
         "key": "ctrl+e",
         "mac": "cmd+e"
+      },
+      {
+        "command": "kissSorcar.insertSelectionToChat",
+        "key": "ctrl+l",
+        "mac": "cmd+l"
       }
     ],
     "configurationDefaults": {

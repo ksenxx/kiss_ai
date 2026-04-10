@@ -56,6 +56,25 @@ export function activate(context: vscode.ExtensionContext): void {
     })
   );
 
+  context.subscriptions.push(
+    vscode.commands.registerCommand('kissSorcar.insertSelectionToChat', () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) return;
+      const sel = editor.selection;
+      const text = editor.document.getText(sel);
+      if (!text || !text.trim()) {
+        vscode.window.showInformationMessage('No text selected');
+        return;
+      }
+      const filePath = vscode.workspace.asRelativePath(editor.document.uri);
+      const startLine = sel.start.line + 1;
+      const lineCount = sel.end.line - sel.start.line + 1;
+      const hunkRef = `WORK_DIR/${filePath}:@@ -${startLine},${lineCount} +${startLine},${lineCount} @@ `;
+      const tab = tabManager!.getActiveTab() || tabManager!.createTab();
+      tab.appendToInput(hunkRef);
+    })
+  );
+
   let _focusToggling = false;
   context.subscriptions.push(
     vscode.commands.registerCommand('kissSorcar.toggleFocus', async () => {
