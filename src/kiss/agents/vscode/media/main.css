@@ -89,7 +89,7 @@ header {
 /* ── Output Area ────────────────────────────────────── */
 #output {
   flex: 1; overflow-y: auto; overflow-x: hidden;
-  padding: 14px 12px 12px; scroll-behavior: smooth;
+  padding: 14px 12px 12px;
 }
 #welcome {
   display: flex; flex-direction: column; align-items: center;

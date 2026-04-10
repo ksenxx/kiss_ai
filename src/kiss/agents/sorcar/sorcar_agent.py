@@ -73,7 +73,52 @@ class SorcarAgent(RelentlessAgent):
         if self._use_web_tools and self.web_use_tool is None:
             self.web_use_tool = WebUseTool(wait_for_user_callback=self._wait_for_user_callback)
             tools.extend(self.web_use_tool.get_tools())
+        def run_parallel(tasks: list[str], max_workers: int | None = None) -> str:
+            """Run multiple independent tasks concurrently using parallel agents.
+
+            Spawns a separate SorcarAgent for each task string and executes
+            them in parallel threads.  Use this tool when you have two or
+            more **independent** sub-tasks that do not depend on each
+            other's results (e.g. summarising several files, researching
+            separate topics, running independent code changes).
+
+            Each parallel agent inherits the current model and working
+            directory.  Results are returned in the same order as the
+            input tasks.
+
+            **When NOT to use**: Do not use this for tasks that must run
+            sequentially or that depend on each other's output.
+
+            Args:
+                tasks: List of task description strings.  Each string is a
+                    complete, self-contained instruction that a fresh
+                    SorcarAgent can execute on its own.  Example::
+
+                        [
+                            "Read src/foo.py and summarize its purpose",
+                            "Read src/bar.py and summarize its purpose",
+                            "Find the current weather in San Francisco",
+                        ]
+                max_workers: Maximum number of concurrent threads.
+                    ``None`` (default) lets Python choose automatically.
+                    Set to a lower number to limit concurrency.
+
+            Returns:
+                A YAML-formatted string containing a list of result
+                objects, one per task, in the same order as the input.
+                Each result object has ``success`` and ``summary`` keys.
+            """
+            results = run_tasks_parallel(
+                tasks,
+                max_workers=max_workers,
+                model=getattr(self, "model_name", None),
+                work_dir=getattr(self, "work_dir", None),
+            )
+            result_str: str = yaml.dump(results, sort_keys=False)
+            return result_str
+
         tools.append(ask_user_question)
+        tools.append(run_parallel)
         return tools
 
     def perform_task(
