@@ -6,7 +6,7 @@ SorcarAgent code path.
 
 from __future__ import annotations
 
-from kiss.agents.sorcar.sorcar_agent import run_tasks_parallel
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent, run_tasks_parallel
 
 
 class TestRunTasksParallel:
@@ -39,3 +39,11 @@ class TestRunTasksParallel:
             )
         except ValueError:
             pass  # expected: ThreadPoolExecutor rejects max_workers=0
+
+    def test_run_parallel_tool_in_agent_tools(self) -> None:
+        """The run_parallel tool is included in SorcarAgent._get_tools()."""
+        agent = SorcarAgent("test")
+        agent._use_web_tools = False  # skip browser tools for speed
+        tools = agent._get_tools()
+        tool_names = [getattr(t, "__name__", "") for t in tools]
+        assert "run_parallel" in tool_names
