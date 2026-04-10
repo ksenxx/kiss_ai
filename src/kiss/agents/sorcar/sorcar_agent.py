@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -230,6 +231,64 @@ class SorcarAgent(RelentlessAgent):
             self.web_use_tool = None
             self._wait_for_user_callback = None
             self._ask_user_question_callback = None
+
+
+def run_tasks_parallel(
+    tasks: list[str],
+    max_workers: int | None = None,
+    model: str | None = None,
+    work_dir: str | None = None,
+) -> list[str]:
+    """Execute multiple SorcarAgent tasks concurrently using threads.
+
+    Each task gets its own ``SorcarAgent`` instance and runs in a separate
+    thread via :class:`~concurrent.futures.ThreadPoolExecutor`.  This is
+    ideal for I/O-bound workloads (LLM API calls, network requests) where
+    the GIL is released during I/O waits.
+
+    Args:
+        tasks: List of task description strings.  Each string is passed as
+            the ``prompt_template`` argument to :meth:`SorcarAgent.run`.
+            Example::
+
+                [
+                    "Summarize file A",
+                    "Summarize file B",
+                ]
+        max_workers: Maximum number of threads.  ``None`` lets
+            :class:`~concurrent.futures.ThreadPoolExecutor` pick a default
+            (typically ``min(32, cpu_count + 4)``).
+        model: LLM model name for all parallel agents.  ``None`` uses the
+            default from persistence (same as :meth:`SorcarAgent.run`).
+        work_dir: Working directory for all parallel agents.  ``None`` uses
+            the default (``artifact_dir/kiss_workdir``).
+
+    Returns:
+        List of YAML result strings in the **same order** as *tasks*.
+        Each string contains ``success`` and ``summary`` keys.  If a task
+        raises an unhandled exception the corresponding entry is a YAML
+        string with ``success: false`` and the traceback in ``summary``.
+    """
+
+    def _run_single(task: str) -> str:
+        agent = SorcarAgent(f"Parallel-{task[:40]}")
+        try:
+            result: str = agent.run(
+                prompt_template=task,
+                model_name=model,
+                work_dir=work_dir,
+            )
+            return result
+        except Exception as exc:
+            error_result: str = yaml.dump(
+                {"success": False, "summary": f"Unhandled exception: {exc}"},
+                sort_keys=False,
+            )
+            return error_result
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        results = list(pool.map(_run_single, tasks))
+    return results
 
 
 _DEFAULT_TASK = """

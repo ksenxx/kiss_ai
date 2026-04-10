@@ -897,6 +897,14 @@ ______________________________________________________________________
   - `ask_user_question_callback`: Optional callback used by the ask_user_question tool to collect a text response from the user.
   - **Returns:** YAML string with 'success' and 'summary' keys.
 
+**`run_tasks_parallel`** — Execute multiple SorcarAgent tasks concurrently using threads. Each task gets its own `SorcarAgent` instance and runs in a separate thread via :class:`~concurrent.futures.ThreadPoolExecutor`. This is ideal for I/O-bound workloads (LLM API calls, network requests) where the GIL is released during I/O waits.<br/>`def run_tasks_parallel(tasks: list[str], max_workers: int | None = None, model: str | None = None, work_dir: str | None = None) -> list[str]`
+
+- `tasks`: List of task description strings. Each string is passed as the `prompt_template` argument to :meth:`SorcarAgent.run`. Example:: [ "Summarize file A", "Summarize file B", ]
+- `max_workers`: Maximum number of threads. `None` lets :class:`~concurrent.futures.ThreadPoolExecutor` pick a default (typically `min(32, cpu_count + 4)`).
+- `model`: LLM model name for all parallel agents. `None` uses the default from persistence (same as :meth:`SorcarAgent.run`).
+- `work_dir`: Working directory for all parallel agents. `None` uses the default (`artifact_dir/kiss_workdir`).
+- **Returns:** List of YAML result strings in the **same order** as *tasks*. Each string contains `success` and `summary` keys. If a task raises an unhandled exception the corresponding entry is a YAML string with `success: false` and the traceback in `summary`.
+
 **`cli_wait_for_user`** — CLI callback for browser-action prompts (prints and waits for Enter).<br/>`def cli_wait_for_user(instruction: str, url: str) -> None`
 
 - `instruction`: What the user should do.
@@ -1860,6 +1868,14 @@ ______________________________________________________________________
   - `wait_for_user_callback`: Optional callback used by browser tools when user action is required.
   - `ask_user_question_callback`: Optional callback used by the ask_user_question tool to collect a text response from the user.
   - **Returns:** YAML string with 'success' and 'summary' keys.
+
+**`run_tasks_parallel`** — Execute multiple SorcarAgent tasks concurrently using threads. Each task gets its own `SorcarAgent` instance and runs in a separate thread via :class:`~concurrent.futures.ThreadPoolExecutor`. This is ideal for I/O-bound workloads (LLM API calls, network requests) where the GIL is released during I/O waits.<br/>`def run_tasks_parallel(tasks: list[str], max_workers: int | None = None, model: str | None = None, work_dir: str | None = None) -> list[str]`
+
+- `tasks`: List of task description strings. Each string is passed as the `prompt_template` argument to :meth:`SorcarAgent.run`. Example:: [ "Summarize file A", "Summarize file B", ]
+- `max_workers`: Maximum number of threads. `None` lets :class:`~concurrent.futures.ThreadPoolExecutor` pick a default (typically `min(32, cpu_count + 4)`).
+- `model`: LLM model name for all parallel agents. `None` uses the default from persistence (same as :meth:`SorcarAgent.run`).
+- `work_dir`: Working directory for all parallel agents. `None` uses the default (`artifact_dir/kiss_workdir`).
+- **Returns:** List of YAML result strings in the **same order** as *tasks*. Each string contains `success` and `summary` keys. If a task raises an unhandled exception the corresponding entry is a YAML string with `success: false` and the traceback in `summary`.
 
 **`cli_wait_for_user`** — CLI callback for browser-action prompts (prints and waits for Enter).<br/>`def cli_wait_for_user(instruction: str, url: str) -> None`
 
