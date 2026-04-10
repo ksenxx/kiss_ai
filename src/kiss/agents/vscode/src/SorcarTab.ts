@@ -448,11 +448,21 @@ export class SorcarTab {
             : wtAction === 'do_nothing'
               ? 'Finishing up…'
               : 'Processing worktree action…';
+        // RC7 fix: add timeout so Promise doesn't hang forever if process crashes
+        const worktreeTimeout = 120_000;
         vscode.window.withProgress(
           { location: vscode.ProgressLocation.Notification, title: progressTitle },
           (progress) => {
             this._worktreeProgress = progress;
-            return new Promise<void>((resolve) => { this._worktreeActionResolve = resolve; });
+            return new Promise<void>((resolve) => {
+              this._worktreeActionResolve = resolve;
+              setTimeout(() => {
+                if (this._worktreeActionResolve === resolve) {
+                  this._worktreeActionResolve = null;
+                  resolve();
+                }
+              }, worktreeTimeout);
+            });
           },
         );
         this._agentProcess.sendCommand({
@@ -562,6 +572,11 @@ export class SorcarTab {
   public dispose(): void {
     if (this._disposed) return;
     this._disposed = true;
+    // RC7 fix: resolve any pending worktree action promise on dispose
+    if (this._worktreeActionResolve) {
+      this._worktreeActionResolve();
+      this._worktreeActionResolve = null;
+    }
     this._agentProcess.dispose();
     this._onCommitMessage.dispose();
   }
@@ -602,10 +617,9 @@ export class SorcarTab {
         <span class="logo">\u2731 KISS Sorcar <span class="version">${getVersion()}</span></span>
       </div>
       <div class="status">
-        <span class="dot" id="status-dot"></span>
-        <span id="status-text">Ready</span>
         <span id="status-tokens" class="status-metric"></span>
         <span id="status-budget" class="status-metric"></span>
+        <span id="status-text">Ready</span>
       </div>
     </header>
 

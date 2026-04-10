@@ -179,6 +179,14 @@ export class AgentProcess extends EventEmitter {
 
       this.process.on('close', (code) => {
         console.log(`[AgentProcess] Process exited with code ${code}`);
+        // RC11 fix: flush any remaining buffer content
+        if (this.buffer.trim()) {
+          try {
+            const event = JSON.parse(this.buffer) as ToWebviewMessage;
+            this.emit('message', event);
+          } catch { /* not valid JSON — discard */ }
+        }
+        this.buffer = '';
         this.process = null;
         this.emit('message', { type: 'status', running: false } as ToWebviewMessage);
       });

@@ -60,14 +60,8 @@ header {
 .logo { font-size: var(--fs-base); font-weight: 600; color: var(--accent); }
 .version { font-size: inherit; font-weight: 400; opacity: 0.75; }
 .status { display: flex; align-items: center; gap: 6px; font-size: var(--fs-base); color: var(--dim); }
-.dot {
-  width: 7px; height: 7px; border-radius: 50%;
-  background: var(--dim); transition: background 0.2s;
-}
-.dot.running { background: var(--green); animation: pulse 1.5s infinite; }
-@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
 .status-metric {
-  font-size: var(--fs-sm); color: var(--dim);
+  color: var(--dim);
   margin-left: 2px; white-space: nowrap;
 }
 .status-metric:not(:empty)::before { content: '·'; margin-right: 2px; }

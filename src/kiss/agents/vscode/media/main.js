@@ -46,7 +46,7 @@
   const modelList = document.getElementById('model-list');
   const modelName = document.getElementById('model-name');
   const fileChips = document.getElementById('file-chips');
-  const statusDot = document.getElementById('status-dot');
+
   const statusText = document.getElementById('status-text');
   const historyBtn = document.getElementById('history-btn');
   const runPromptBtn = document.getElementById('run-prompt-btn');
@@ -452,11 +452,12 @@
   // --- Usage metrics (tokens / budget) in header ---
   function updateUsageMetrics(text) {
     if (!statusTokens || !statusBudget) return;
-    var tm = text.match(/Tokens:\s*(\d+\/\d+)/);
-    var bm = text.match(/Budget:\s*(\$[0-9.]+\/\$[0-9.]+)/);
+    var tm = text.match(/Tokens:\s*(\d+)\/\d+/);
+    var bm = text.match(/Budget:\s*(\$[0-9.]+)\/\$[0-9.]+/);
     var parts = [];
-    if (sm) parts.push(sm[1] + ' steps');
-    if (tm) parts.push(tm[1] + ' tokens');
+    if (tm) parts.push('tokens: ' + tm[1]);
+    if (bm) parts.push('budget: ' + bm[1]);
+    if (parts.length) statusTokens.textContent = parts.join(' ');
   }
 
   function clearUsageMetrics() {
@@ -672,7 +673,7 @@
     sendBtn.style.display = running ? 'none' : 'flex';
     stopBtn.style.display = running ? 'flex' : 'none';
     sendBtn.disabled = running;
-    statusDot.classList.toggle('running', running);
+
     if (clearBtn) clearBtn.disabled = running;
     if (historyBtn) historyBtn.disabled = running;
     if (runPromptBtn && running) runPromptBtn.disabled = true;

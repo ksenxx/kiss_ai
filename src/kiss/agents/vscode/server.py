@@ -109,6 +109,7 @@ class VSCodeServer:
         self._task_thread: threading.Thread | None = None
         self._task_generation = 0
         self._recording_id = 0
+        self._refresh_generation = 0
         self._complete_seq = itertools.count()
         self._complete_seq_latest = -1
         self._complete_lock = threading.Lock()
@@ -187,7 +188,9 @@ class VSCodeServer:
                     break
             self._user_answer_queue.put(cmd.get("answer", ""))
         elif cmd_type == "resumeSession":
-            if self._task_thread and self._task_thread.is_alive():
+            with self._state_lock:
+                running = self._task_thread and self._task_thread.is_alive()
+            if running:
                 return
             task = cmd.get("sessionId", "")
             if task:
@@ -240,7 +243,7 @@ class VSCodeServer:
         finally:
             with self._state_lock:
                 self._task_thread = None
-            self.printer.broadcast({"type": "status", "running": False})
+                self.printer.broadcast({"type": "status", "running": False})
 
     def _periodic_event_flush(self, rec_id: int, stop: threading.Event) -> None:
         """Periodically flush recorded events to DB for crash recovery.
@@ -256,7 +259,8 @@ class VSCodeServer:
             stop: Event signaled when the task completes normally.
         """
         while not stop.wait(self._flush_interval):
-            task_id = self.agent._last_task_id
+            with self._state_lock:
+                task_id = self.agent._last_task_id
             if task_id is not None:
                 events = self.printer.peek_recording(rec_id)
                 if events:
@@ -264,13 +268,10 @@ class VSCodeServer:
 
     def _run_task_inner(self, cmd: dict[str, Any]) -> None:
         """Inner implementation of _run_task (without the status guarantee)."""
-        self._use_worktree = bool(cmd.get("useWorktree", False))
         prompt = cmd.get("prompt", "")
         model = cmd.get("model") or self._selected_model
         work_dir = cmd.get("workDir") or self.work_dir
         active_file = cmd.get("activeFile")
-        with self._state_lock:
-            self._last_active_file = active_file or ""
         raw_attachments = cmd.get("attachments", [])
 
         attachments: list[Attachment] | None = None
@@ -282,25 +283,20 @@ class VSCodeServer:
                 data = base64.b64decode(data_b64)
                 attachments.append(Attachment(data=data, mime_type=mime))
 
-        self._stop_event = threading.Event()
-        self.printer._thread_local.stop_event = self._stop_event
-        # Drain stale answers from previous task (P2 fix)
-        while not self._user_answer_queue.empty():
-            try:
-                self._user_answer_queue.get_nowait()
-            except queue.Empty:  # pragma: no cover — race guard
-                break
-
-        self.printer.broadcast({"type": "clear"})
-
-        # Increment task generation so stale followups are suppressed (P12 fix)
+        # RC1+RC3+RC9: all state mutations under _state_lock
         with self._state_lock:
+            self._use_worktree = bool(cmd.get("useWorktree", False))
+            self._stop_event = threading.Event()
+            self._last_active_file = active_file or ""
             self._task_generation += 1
             gen = self._task_generation
+            self._recording_id += 1
+            rec_id = self._recording_id
+        self.printer._thread_local.stop_event = self._stop_event
+        # RC8: fresh queue per task (avoids drain race with userAnswer handler)
+        self._user_answer_queue = queue.Queue(maxsize=1)
 
-        # Use a unique recording ID instead of thread ident (P16 fix)
-        self._recording_id += 1
-        rec_id = self._recording_id
+        self.printer.broadcast({"type": "clear"})
 
         # start_recording inside try so stop_recording always runs (P14 fix)
         result_summary = "Agent Failed Abruptly"
@@ -370,7 +366,8 @@ class VSCodeServer:
                 )
                 self.printer.broadcast({"type": "tasks_updated"})
                 self.printer.reset()
-                self._stop_event = None
+                with self._state_lock:
+                    self._stop_event = None
                 self._refresh_file_cache()
                 if task_end_event:  # pragma: no branch — always set
                     self.printer.broadcast(task_end_event)
@@ -398,9 +395,12 @@ class VSCodeServer:
         or other I/O and never reaches a cooperative ``_check_stop()``
         call.
         """
-        if self._stop_event:
-            self._stop_event.set()
-        task_thread = self._task_thread
+        # RC1+RC2: read _stop_event and _task_thread atomically under lock
+        with self._state_lock:
+            stop_event = self._stop_event
+            task_thread = self._task_thread
+        if stop_event:
+            stop_event.set()
         if task_thread is not None and task_thread.is_alive():
             threading.Thread(
                 target=self._force_stop_thread,
@@ -549,6 +549,10 @@ class VSCodeServer:
 
     def _get_last_session(self) -> None:
         """Load the most recent task from history and replay its events."""
+        # RC12 fix: guard against concurrent running task
+        with self._state_lock:
+            if self._task_thread and self._task_thread.is_alive():
+                return
         entries = _load_history(limit=1)
         if entries:
             task = str(entries[0].get("task", ""))
@@ -623,15 +627,16 @@ class VSCodeServer:
                     task, result, fast_model_for()
                 )
                 if suggestion:  # pragma: no cover — requires LLM API call
-                    # P12 fix: only broadcast if still same task generation
-                    if not self._is_current_task_generation(gen):
-                        return  # pragma: no cover
-                    event: dict[str, object] = {
-                        "type": "followup_suggestion",
-                        "text": suggestion,
-                    }
-                    self.printer.broadcast(event)
-                    _append_chat_event(event, task_id=task_id, task=task)
+                    # RC6 fix: hold _state_lock across check + broadcast + persist
+                    with self._state_lock:
+                        if self._task_generation != gen:
+                            return  # pragma: no cover
+                        event: dict[str, object] = {
+                            "type": "followup_suggestion",
+                            "text": suggestion,
+                        }
+                        self.printer.broadcast(event)
+                        _append_chat_event(event, task_id=task_id, task=task)
             except Exception:  # pragma: no cover — LLM API error handler
                 logger.debug("Async followup generation failed", exc_info=True)
 
@@ -757,13 +762,20 @@ class VSCodeServer:
     def _refresh_file_cache(self) -> None:
         """Refresh the file cache from disk in a background thread.
 
-        Serves stale cache while refresh is in progress.
+        Serves stale cache while refresh is in progress.  Uses a
+        generation counter (RC4 fix) so a slow refresh never overwrites
+        a newer refresh's results.
         """
+        with self._state_lock:
+            self._refresh_generation += 1
+            gen = self._refresh_generation
+
         def _do_refresh() -> None:
             from kiss.agents.vscode.diff_merge import _scan_files
             result = _scan_files(self.work_dir)
             with self._state_lock:
-                self._file_cache = result
+                if self._refresh_generation == gen:
+                    self._file_cache = result
 
         threading.Thread(target=_do_refresh, daemon=True).start()
 

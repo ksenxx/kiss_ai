@@ -81,18 +81,15 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
                 self._bash_flush_timer = None
 
     def _flush_bash(self) -> None:
+        # RC5 fix: drain entirely inside lock, no generation TOCTOU
         with self._bash_lock:
-            gen = self._bash_generation
             if self._bash_flush_timer is not None:
                 self._bash_flush_timer.cancel()
                 self._bash_flush_timer = None
-            if self._bash_buffer:
-                text = "".join(self._bash_buffer)
-                self._bash_buffer.clear()
-                self._bash_last_flush = time.monotonic()
-            else:
-                text = ""
-        if text and gen == self._bash_generation:
+            text = "".join(self._bash_buffer) if self._bash_buffer else ""
+            self._bash_buffer.clear()
+            self._bash_last_flush = time.monotonic()
+        if text:
             self.broadcast({"type": "system_output", "text": text})
 
     def start_recording(self, recording_id: int | None = None) -> None:
