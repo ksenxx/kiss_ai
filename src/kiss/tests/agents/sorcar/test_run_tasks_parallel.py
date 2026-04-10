@@ -40,10 +40,19 @@ class TestRunTasksParallel:
         except ValueError:
             pass  # expected: ThreadPoolExecutor rejects max_workers=0
 
-    def test_run_parallel_tool_in_agent_tools(self) -> None:
-        """The run_parallel tool is included in SorcarAgent._get_tools()."""
+    def test_run_parallel_tool_in_agent_tools_when_parallel(self) -> None:
+        """The run_parallel tool is included when is_parallel is True."""
         agent = SorcarAgent("test")
-        agent._use_web_tools = False  # skip browser tools for speed
+        agent._use_web_tools = False
+        agent._is_parallel = True
         tools = agent._get_tools()
         tool_names = [getattr(t, "__name__", "") for t in tools]
         assert "run_parallel" in tool_names
+
+    def test_run_parallel_tool_excluded_by_default(self) -> None:
+        """The run_parallel tool is excluded when is_parallel is False (default)."""
+        agent = SorcarAgent("test")
+        agent._use_web_tools = False
+        tools = agent._get_tools()
+        tool_names = [getattr(t, "__name__", "") for t in tools]
+        assert "run_parallel" not in tool_names

@@ -85,6 +85,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Disable browser/web tools (terminal-only mode)",
     )
     parser.add_argument(
+        "-p", "--parallel",
+        action="store_true",
+        default=False,
+        help="Enable the run_parallel tool for concurrent sub-tasks",
+    )
+    parser.add_argument(
         "-t", "--task", type=str, default=None, help="Prompt template/task description"
     )
     parser.add_argument(
@@ -184,6 +190,7 @@ def _build_run_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "model_config": model_config,
         "work_dir": work_dir,
         "web_tools": not args.no_web,
+        "is_parallel": args.parallel,
         "verbose": args.verbose,
         "wait_for_user_callback": cli_wait_for_user,
         "ask_user_question_callback": cli_ask_user_question,
