@@ -160,6 +160,7 @@
 
     // Create a container for the adjacent task
     var container = mkEl('div', 'adjacent-task');
+    container.dataset.task = task;
     var separator = mkEl('div', 'adjacent-separator');
     var taskLabel = task.length > 80 ? task.substring(0, 80) + '…' : task;
     separator.innerHTML = '<span class="adjacent-sep-line"></span>'
@@ -583,11 +584,28 @@
       }
     }
   });
+  function updateVisibleTask() {
+    var adjacentTasks = O.querySelectorAll('.adjacent-task[data-task]');
+    if (!adjacentTasks.length) return;
+    var outputRect = O.getBoundingClientRect();
+    var checkY = outputRect.top + outputRect.height * 0.3;
+    var visibleTask = currentTaskName;
+    for (var i = 0; i < adjacentTasks.length; i++) {
+      var rect = adjacentTasks[i].getBoundingClientRect();
+      if (rect.top <= checkY && rect.bottom > checkY) {
+        visibleTask = adjacentTasks[i].dataset.task;
+        break;
+      }
+    }
+    setTaskText(visibleTask);
+  }
+
   O.addEventListener('scroll', function() {
     if (_scrollLock) {
       var atBottom = O.scrollTop + O.clientHeight >= O.scrollHeight - 150;
       if (atBottom) _scrollLock = false;
     }
+    updateVisibleTask();
   });
   new MutationObserver(function() { sb(); }).observe(O, { childList: true, subtree: true, characterData: true });
 
