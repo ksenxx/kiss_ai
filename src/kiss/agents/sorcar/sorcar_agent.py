@@ -29,6 +29,7 @@ class SorcarAgent(RelentlessAgent):
         self.docker_manager: Any = None
         self._wait_for_user_callback: Callable[[str, str], None] | None = None
         self._use_web_tools: bool = True
+        self._is_parallel: bool = False
 
     def _get_tools(self) -> list:
         """Build tool list, using DockerTools when docker_manager is active.
@@ -118,7 +119,8 @@ class SorcarAgent(RelentlessAgent):
             return result_str
 
         tools.append(ask_user_question)
-        tools.append(run_parallel)
+        if self._is_parallel:
+            tools.append(run_parallel)
         return tools
 
     def perform_task(
@@ -177,6 +179,7 @@ class SorcarAgent(RelentlessAgent):
         max_sub_sessions: int | None = None,
         docker_image: str | None = None,
         web_tools: bool = True,
+        is_parallel: bool = False,
         verbose: bool | None = None,
         current_editor_file: str | None = None,
         attachments: list[Attachment] | None = None,
@@ -199,6 +202,8 @@ class SorcarAgent(RelentlessAgent):
             docker_image: Docker image name to run tools inside a container.
             web_tools: Whether to include browser/web tools. Defaults to True.
                 Set to False for terminal-only environments.
+            is_parallel: Whether to include the run_parallel tool. Defaults to False.
+                When True, the agent can spawn parallel sub-agents for independent tasks.
             verbose: Whether to print output to console. Defaults to config verbose setting.
             current_editor_file: Path to the currently active editor file, appended to prompt.
             attachments: Optional file attachments (images, PDFs) for the initial prompt.
@@ -213,6 +218,7 @@ class SorcarAgent(RelentlessAgent):
         self._wait_for_user_callback = wait_for_user_callback
         self._ask_user_question_callback = ask_user_question_callback
         self._use_web_tools = web_tools
+        self._is_parallel = is_parallel
         # Lazy-initialized when web tools are first accessed via _get_tools()
         self.web_use_tool = None
         # Extract the per-thread stop event from the printer so UsefulTools
