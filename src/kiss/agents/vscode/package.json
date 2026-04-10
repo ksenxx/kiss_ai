@@ -109,8 +109,8 @@
       },
       {
         "command": "kissSorcar.runSelection",
-        "key": "cmd+l",
-        "mac": "cmd+l"
+        "key": "ctrl+e",
+        "mac": "cmd+e"
       }
     ],
     "configurationDefaults": {
