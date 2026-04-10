@@ -282,7 +282,7 @@ export class SorcarTab {
     this._panel.title = truncated;
   }
 
-  private _startTask(prompt: string, model: string, activeFile?: string, attachments?: Attachment[], useWorktree?: boolean): void {
+  private _startTask(prompt: string, model: string, activeFile?: string, attachments?: Attachment[], useWorktree?: boolean, useParallel?: boolean): void {
     const workDir = this._getWorkDir();
     const started = this._agentProcess.start(workDir);
     if (!started) {
@@ -301,6 +301,7 @@ export class SorcarTab {
       activeFile,
       attachments,
       useWorktree,
+      useParallel,
     });
   }
 
@@ -343,6 +344,7 @@ export class SorcarTab {
           this._getVisibleEditorFile() || undefined,
           message.attachments,
           message.useWorktree,
+          message.useParallel,
         );
         break;
       }
@@ -659,6 +661,9 @@ export class SorcarTab {
             </button>
             <button id="worktree-toggle-btn" data-tooltip="Use worktree">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 01-9 9"/></svg>
+            </button>
+            <button id="parallel-toggle-btn" data-tooltip="Use parallelism">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="4" x2="6" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/><line x1="18" y1="4" x2="18" y2="20"/></svg>
             </button>
             <button id="history-btn" data-tooltip="Task history">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">

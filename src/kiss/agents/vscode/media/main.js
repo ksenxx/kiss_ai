@@ -77,6 +77,7 @@
   const inputContainer = document.getElementById('input-container');
   const inputClearBtn = document.getElementById('input-clear-btn');
   const worktreeToggleBtn = document.getElementById('worktree-toggle-btn');
+  const parallelToggleBtn = document.getElementById('parallel-toggle-btn');
   const taskPanel = document.getElementById('task-panel');
   const statusTokens = document.getElementById('status-tokens');
   const statusBudget = document.getElementById('status-budget');
@@ -1078,6 +1079,11 @@
         worktreeToggleBtn.classList.toggle('active');
       });
     }
+    if (parallelToggleBtn) {
+      parallelToggleBtn.addEventListener('click', function() {
+        parallelToggleBtn.classList.toggle('active');
+      });
+    }
     if (clearBtn) {
       clearBtn.addEventListener('click', function() {
         doClearChat();
@@ -1255,7 +1261,8 @@
       attachments: attachments.map(function(a) {
         return { name: a.name, mimeType: a.type, data: a.data };
       }),
-      useWorktree: !!(worktreeToggleBtn && worktreeToggleBtn.classList.contains('active'))
+      useWorktree: !!(worktreeToggleBtn && worktreeToggleBtn.classList.contains('active')),
+      useParallel: !!(parallelToggleBtn && parallelToggleBtn.classList.contains('active'))
     });
     inp.value = '';
     inp.style.height = 'auto';

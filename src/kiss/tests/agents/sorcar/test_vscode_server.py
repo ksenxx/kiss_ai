@@ -910,6 +910,124 @@ class TestWorktreeActionNotifications(unittest.TestCase):
         assert "this._worktreeProgress = null" in self._ts
 
 
+class TestMainJsParallelToggle(unittest.TestCase):
+    """Test that main.js has the parallel toggle button wiring."""
+
+    _js: str = ""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
+        cls._js = (base / "vscode" / "media" / "main.js").read_text()
+
+    def test_has_parallel_toggle_btn_element(self) -> None:
+        assert "parallel-toggle-btn" in self._js
+
+    def test_toggle_adds_active_class(self) -> None:
+        assert "parallelToggleBtn.classList.toggle('active')" in self._js
+
+    def test_parallel_toggle_btn_variable(self) -> None:
+        assert "parallelToggleBtn" in self._js
+
+    def test_js_sends_use_parallel_in_submit(self) -> None:
+        """main.js includes useParallel in submit message."""
+        assert "useParallel" in self._js
+        assert "parallelToggleBtn.classList.contains('active')" in self._js
+
+
+class TestMainCssParallelToggle(unittest.TestCase):
+    """Test that main.css has styles for the parallel toggle button."""
+
+    css: str
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
+        cls.css = (base / "vscode" / "media" / "main.css").read_text()
+
+    def test_has_parallel_toggle_btn_base_style(self) -> None:
+        assert "#parallel-toggle-btn" in self.css
+
+    def test_has_parallel_toggle_btn_active_style(self) -> None:
+        assert "#parallel-toggle-btn.active" in self.css
+
+    def test_active_uses_accent_color(self) -> None:
+        idx = self.css.index("#parallel-toggle-btn.active")
+        block = self.css[idx : idx + 200]
+        assert "accent" in block
+
+
+class TestSorcarTabParallelToggle(unittest.TestCase):
+    """Test that SorcarTab.ts HTML includes the parallel toggle button."""
+
+    html: str
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
+        cls.html = (base / "vscode" / "src" / "SorcarTab.ts").read_text()
+
+    def test_has_parallel_toggle_btn(self) -> None:
+        assert 'id="parallel-toggle-btn"' in self.html
+
+    def test_has_use_parallelism_tooltip(self) -> None:
+        assert 'data-tooltip="Use parallelism"' in self.html
+
+    def test_button_is_between_worktree_and_history(self) -> None:
+        worktree_idx = self.html.index('id="worktree-toggle-btn"')
+        parallel_idx = self.html.index('id="parallel-toggle-btn"')
+        history_idx = self.html.index('id="history-btn"')
+        assert worktree_idx < parallel_idx < history_idx
+
+    def test_has_svg_icon(self) -> None:
+        """Button should have a parallel-lines SVG icon."""
+        idx = self.html.index('id="parallel-toggle-btn"')
+        block = self.html[idx : idx + 500]
+        assert "<svg" in block
+        assert "viewBox" in block
+
+    def test_ts_passes_use_parallel_to_start_task(self) -> None:
+        """SorcarTab.ts passes useParallel to _startTask."""
+        assert "message.useParallel" in self.html
+        assert "useParallel" in self.html
+
+    def test_ts_start_task_includes_use_parallel(self) -> None:
+        """_startTask sends useParallel in agent command."""
+        assert "useParallel?: boolean" in self.html
+        lines = self.html.split("\n")
+        in_start_task = False
+        found = False
+        for line in lines:
+            if "_startTask" in line and "useParallel" in line:
+                in_start_task = True
+            if in_start_task and "useParallel" in line and "sendCommand" not in line:
+                found = True
+        assert found
+
+
+class TestServerParallelToggle(unittest.TestCase):
+    """Tests for parallel toggle in VSCodeServer."""
+
+    def test_server_defaults_parallel_off(self) -> None:
+        """_use_parallel is False by default."""
+        server = VSCodeServer()
+        assert server._use_parallel is False
+
+    def test_server_parses_use_parallel_from_command(self) -> None:
+        """_run_task_inner sets _use_parallel from cmd dict."""
+        import inspect
+
+        src = inspect.getsource(VSCodeServer._run_task_inner)
+        assert 'useParallel' in src
+
+    def test_agent_run_receives_is_parallel(self) -> None:
+        """agent.run() call includes is_parallel=self._use_parallel."""
+        import inspect
+
+        src = inspect.getsource(VSCodeServer._run_task_inner)
+        assert "is_parallel" in src
+
+
 class TestFilePathDoesNotPopulateTaskPanel(unittest.TestCase):
     """Regression: typing a file path in the textbox and opening it must NOT
     populate the fixed task panel.

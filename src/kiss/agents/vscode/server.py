@@ -93,6 +93,7 @@ class VSCodeServer:
         self._stateful_agent = StatefulSorcarAgent("Sorcar VS Code")
         self._worktree_agent = WorktreeSorcarAgent("Sorcar VS Code")
         self._use_worktree = False
+        self._use_parallel = False
         self.work_dir = os.environ.get("KISS_WORKDIR", os.getcwd())
         self._stop_event: threading.Event | None = None
         self._user_answer_queue: queue.Queue[str] = queue.Queue(maxsize=1)
@@ -291,6 +292,7 @@ class VSCodeServer:
         # RC1+RC3+RC9: all state mutations under _state_lock
         with self._state_lock:
             self._use_worktree = bool(cmd.get("useWorktree", False))
+            self._use_parallel = bool(cmd.get("useParallel", False))
             self._stop_event = threading.Event()
             self._last_active_file = active_file or ""
             self._task_generation += 1
@@ -326,6 +328,7 @@ class VSCodeServer:
                     attachments=attachments,
                     wait_for_user_callback=self._wait_for_user,
                     ask_user_question_callback=self._ask_user_question,
+                    is_parallel=self._use_parallel,
                 )
                 self._task_history_id = self.agent._last_task_id
                 result_summary = self._extract_result_summary(rec_id) or "No summary available"

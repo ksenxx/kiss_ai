@@ -1849,7 +1849,7 @@ ______________________________________________________________________
   - `attachments`: Optional file attachments for the initial prompt.
   - **Returns:** YAML string with 'success' and 'summary' keys.
 
-- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, system_prompt: str | None = None, tools: list[Callable[..., Any]] | None = None, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, web_tools: bool = True, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list[Attachment] | None = None, wait_for_user_callback: Callable[[str, str], None] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> str`
+- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, system_prompt: str | None = None, tools: list[Callable[..., Any]] | None = None, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, web_tools: bool = True, is_parallel: bool = False, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list[Attachment] | None = None, wait_for_user_callback: Callable[[str, str], None] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> str`
 
   - `model_name`: LLM model to use. Defaults to config value.
   - `prompt_template`: Task prompt template with format placeholders.
@@ -1863,6 +1863,7 @@ ______________________________________________________________________
   - `max_sub_sessions`: Maximum continuation sub-sessions. Defaults to config value.
   - `docker_image`: Docker image name to run tools inside a container.
   - `web_tools`: Whether to include browser/web tools. Defaults to True. Set to False for terminal-only environments.
+  - `is_parallel`: Whether to include the run_parallel tool. Defaults to False. When True, the agent can spawn parallel sub-agents for independent tasks.
   - `verbose`: Whether to print output to console. Defaults to config verbose setting.
   - `current_editor_file`: Path to the currently active editor file, appended to prompt.
   - `attachments`: Optional file attachments (images, PDFs) for the initial prompt.

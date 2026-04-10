@@ -473,6 +473,19 @@ header {
   border-radius: 4px;
 }
 #worktree-toggle-btn.active:hover { color: var(--accent); }
+#parallel-toggle-btn {
+  background: none; border: none;
+  color: color-mix(in srgb, var(--fg) 50%, transparent); cursor: pointer;
+  padding: 4px; transition: color 0.15s, opacity 0.15s;
+  display: flex; align-items: center;
+}
+#parallel-toggle-btn:hover { color: color-mix(in srgb, var(--fg) 66%, transparent); }
+#parallel-toggle-btn.active {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-radius: 4px;
+}
+#parallel-toggle-btn.active:hover { color: var(--accent); }
 #history-btn, #run-prompt-btn {
   background: none; border: none;
   color: color-mix(in srgb, var(--fg) 50%, transparent); cursor: pointer;
