@@ -853,6 +853,45 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
   margin: 0;
 }
 
+/* ── Adjacent task (thread scroll) ──────────────────── */
+.adjacent-separator {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 16px 0 12px;
+  padding: 0 4px;
+}
+.adjacent-sep-line {
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+.adjacent-sep-label {
+  font-size: var(--fs-sm);
+  color: var(--dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 70%;
+  padding: 2px 8px;
+  background: var(--surface2);
+  border-radius: 4px;
+}
+.adjacent-loader {
+  text-align: center;
+  padding: 10px;
+  color: var(--dim);
+  font-size: var(--fs-sm);
+  font-style: italic;
+}
+.adjacent-task {
+  border-top: 1px solid var(--border);
+  padding-top: 4px;
+}
+.adjacent-task:first-child {
+  border-top: none;
+}
+
 /* ── Scrollbar ──────────────────────────────────────── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }

@@ -31,6 +31,18 @@
   var historyHasMore = true;
   var historyGeneration = 0;
 
+  // Adjacent task scroll state (Cursor-style chat thread navigation)
+  var currentTaskName = '';   // the originally loaded task
+  var oldestLoadedTask = '';  // topmost task in the view (for scrolling up)
+  var newestLoadedTask = '';  // bottommost task in the view (for scrolling down)
+  var adjacentLoading = false;
+  var noPrevTask = false;     // true when server says no prev exists
+  var noNextTask = false;     // true when server says no next exists
+  var overscrollAccum = 0;
+  var overscrollDir = '';
+  var overscrollTimer = null;
+  var OVERSCROLL_THRESHOLD = 150; // pixels of accumulated overscroll to trigger load
+
 
   // Elements
   const O = document.getElementById('output');
@@ -106,6 +118,113 @@
     lastToolName = '';
     pendingPanel = false;
     _scrollLock = false;
+  }
+
+  function resetAdjacentState() {
+    adjacentLoading = false;
+    oldestLoadedTask = currentTaskName;
+    newestLoadedTask = currentTaskName;
+    noPrevTask = false;
+    noNextTask = false;
+    overscrollAccum = 0;
+    overscrollDir = '';
+    if (overscrollTimer) { clearTimeout(overscrollTimer); overscrollTimer = null; }
+  }
+
+  function showAdjacentLoader(direction) {
+    removeAdjacentLoader();
+    var loader = mkEl('div', 'adjacent-loader');
+    loader.id = 'adjacent-loader';
+    loader.textContent = 'Loading ' + (direction === 'prev' ? 'previous' : 'next') + ' task…';
+    if (direction === 'prev') {
+      O.insertBefore(loader, O.firstChild);
+    } else {
+      O.appendChild(loader);
+    }
+  }
+
+  function removeAdjacentLoader() {
+    var el = document.getElementById('adjacent-loader');
+    if (el && el.parentNode) el.parentNode.removeChild(el);
+  }
+
+  function renderAdjacentTask(direction, task, events) {
+    removeAdjacentLoader();
+    adjacentLoading = false;
+
+    if (!task || !events || events.length === 0) {
+      if (direction === 'prev') noPrevTask = true;
+      else noNextTask = true;
+      return;
+    }
+
+    // Create a container for the adjacent task
+    var container = mkEl('div', 'adjacent-task');
+    var separator = mkEl('div', 'adjacent-separator');
+    var taskLabel = task.length > 80 ? task.substring(0, 80) + '…' : task;
+    separator.innerHTML = '<span class="adjacent-sep-line"></span>'
+      + '<span class="adjacent-sep-label">' + esc(taskLabel) + '</span>'
+      + '<span class="adjacent-sep-line"></span>';
+    container.appendChild(separator);
+
+    // Replay events into the container
+    var adjState = mkS();
+    var adjLlmPanel = null;
+    var adjLlmPanelState = mkS();
+    var adjLastToolName = '';
+    var adjPendingPanel = false;
+    events.forEach(function(ev) {
+      var t = ev.type;
+      if (t === 'task_done' || t === 'task_error' || t === 'task_stopped') {
+        // Render end status
+        if (t === 'task_error') {
+          var banner = mkEl('div', 'ev tr err');
+          banner.innerHTML = '<div class="rl fail">ERROR</div>' + esc(ev.text || 'Unknown error');
+          container.appendChild(banner);
+        } else if (t === 'task_stopped') {
+          var banner = mkEl('div', 'ev tr err');
+          banner.innerHTML = '<div class="rl fail">STOPPED</div>Agent execution stopped by user';
+          container.appendChild(banner);
+        }
+        return;
+      }
+      if (t === 'followup_suggestion') {
+        var fu = mkEl('div', 'followup-bar');
+        fu.innerHTML = '<span class="fu-label">Suggested next</span>'
+          + '<span class="fu-text">' + esc(ev.text) + '</span>';
+        container.appendChild(fu);
+        return;
+      }
+      // Mirror processOutputEvent logic
+      if (t === 'tool_call') {
+        adjLastToolName = ev.name || '';
+        adjLlmPanel = null; adjLlmPanelState = mkS(); adjPendingPanel = false;
+      }
+      if (t === 'tool_result' && adjLastToolName !== 'finish') { adjPendingPanel = true; }
+      if (adjPendingPanel && (t === 'thinking_start' || t === 'text_delta')) {
+        adjLlmPanel = mkEl('div', 'llm-panel');
+        container.appendChild(adjLlmPanel);
+        adjLlmPanelState = mkS(); adjPendingPanel = false;
+      }
+      var target = container, tState = adjState;
+      if (adjLlmPanel && (t === 'thinking_start' || t === 'thinking_delta' || t === 'thinking_end'
+        || t === 'text_delta' || t === 'text_end')) {
+        target = adjLlmPanel; tState = adjLlmPanelState;
+      }
+      handleOutputEvent(ev, target, tState);
+    });
+
+    if (direction === 'prev') {
+      // Save scroll position, prepend, then restore
+      var prevScrollHeight = O.scrollHeight;
+      O.insertBefore(container, O.firstChild);
+      var newScrollHeight = O.scrollHeight;
+      O.scrollTop += (newScrollHeight - prevScrollHeight);
+      oldestLoadedTask = task;
+    } else {
+      O.appendChild(container);
+      newestLoadedTask = task;
+    }
   }
 
   function clearOutput() {
@@ -426,6 +545,43 @@
 
   O.addEventListener('wheel', function(e) {
     if (isRunning && e.deltaY < 0) _scrollLock = true;
+
+    // Adjacent task loading via overscroll detection
+    if (!isRunning && !adjacentLoading && currentTaskName) {
+      var atTop = O.scrollTop <= 0;
+      var atBottom = O.scrollTop + O.clientHeight >= O.scrollHeight - 2;
+
+      if (atTop && e.deltaY < 0 && !noPrevTask && oldestLoadedTask) {
+        // Scrolling up at top — load task before the oldest loaded
+        if (overscrollDir !== 'prev') { overscrollAccum = 0; overscrollDir = 'prev'; }
+        overscrollAccum += Math.abs(e.deltaY);
+        clearTimeout(overscrollTimer);
+        overscrollTimer = setTimeout(function() { overscrollAccum = 0; overscrollDir = ''; }, 500);
+        if (overscrollAccum >= OVERSCROLL_THRESHOLD) {
+          overscrollAccum = 0;
+          overscrollDir = '';
+          adjacentLoading = true;
+          showAdjacentLoader('prev');
+          vscode.postMessage({ type: 'getAdjacentTask', task: oldestLoadedTask, direction: 'prev' });
+        }
+      } else if (atBottom && e.deltaY > 0 && !noNextTask && newestLoadedTask) {
+        // Scrolling down at bottom — load task after the newest loaded
+        if (overscrollDir !== 'next') { overscrollAccum = 0; overscrollDir = 'next'; }
+        overscrollAccum += Math.abs(e.deltaY);
+        clearTimeout(overscrollTimer);
+        overscrollTimer = setTimeout(function() { overscrollAccum = 0; overscrollDir = ''; }, 500);
+        if (overscrollAccum >= OVERSCROLL_THRESHOLD) {
+          overscrollAccum = 0;
+          overscrollDir = '';
+          adjacentLoading = true;
+          showAdjacentLoader('next');
+          vscode.postMessage({ type: 'getAdjacentTask', task: newestLoadedTask, direction: 'next' });
+        }
+      } else {
+        overscrollAccum = 0;
+        overscrollDir = '';
+      }
+    }
   });
   O.addEventListener('scroll', function() {
     if (_scrollLock) {
@@ -469,6 +625,8 @@
   function resetChatUI() {
     clearOutput();
     resetOutputState();
+    resetAdjacentState();
+    currentTaskName = '';
     removeSpinner();
     clearWorktreeBar();
     clearUsageMetrics();
@@ -569,11 +727,16 @@
       break;
     case 'task_events':
       if (ev.task) {
+        currentTaskName = ev.task;
+        resetAdjacentState();  // sets oldest/newest to currentTaskName
         setTaskText(ev.task);
         vscode.setState({ task: ev.task });
         if (welcome) welcome.style.display = 'none';
       }
       replayTaskEvents(ev.events || []);
+      break;
+    case 'adjacent_task_events':
+      renderAdjacentTask(ev.direction, ev.task, ev.events || []);
       break;
     case 'setTaskText':
       setTaskText(ev.text || '');
@@ -1060,6 +1223,8 @@
     if (histCache[0] !== prompt) {
       histCache.unshift(prompt);
     }
+    currentTaskName = prompt;
+    resetAdjacentState();
     setTaskText(prompt);
     vscode.setState({ task: prompt });
     vscode.postMessage({

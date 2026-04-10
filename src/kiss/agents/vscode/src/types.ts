@@ -41,7 +41,8 @@ export type FromWebviewMessage =
   | { type: 'focusEditor' }
   | { type: 'getInputHistory' }
   | { type: 'worktreeAction'; action: 'merge' | 'discard' | 'do_nothing' }
-  | { type: 'resolveDroppedPaths'; uris: string[] };
+  | { type: 'resolveDroppedPaths'; uris: string[] }
+  | { type: 'getAdjacentTask'; task: string; direction: 'prev' | 'next' };
 
 /** Messages from extension to webview (matches browser event protocol) */
 export type ToWebviewMessage =
@@ -87,11 +88,12 @@ export type ToWebviewMessage =
   | { type: 'worktree_done'; branch: string; worktreeDir: string; originalBranch: string; changedFiles: string[]; hasConflict?: boolean }
   | { type: 'worktree_progress'; message: string }
   | { type: 'worktree_result'; success: boolean; message: string }
-  | { type: 'droppedPaths'; paths: string[] };
+  | { type: 'droppedPaths'; paths: string[] }
+  | { type: 'adjacent_task_events'; direction: string; task: string; events: any[] };
 
 /** Command sent to Python backend */
 export interface AgentCommand {
-  type: 'run' | 'stop' | 'getModels' | 'selectModel' | 'getHistory' | 'getFiles' | 'userAnswer' | 'recordFileUsage' | 'resumeSession' | 'getLastSession' | 'complete' | 'refreshFiles' | 'newChat' | 'generateCommitMessage' | 'getInputHistory' | 'worktreeAction';
+  type: 'run' | 'stop' | 'getModels' | 'selectModel' | 'getHistory' | 'getFiles' | 'userAnswer' | 'recordFileUsage' | 'resumeSession' | 'getLastSession' | 'complete' | 'refreshFiles' | 'newChat' | 'generateCommitMessage' | 'getInputHistory' | 'worktreeAction' | 'getAdjacentTask';
   prompt?: string;
   model?: string;
   workDir?: string;
@@ -107,4 +109,6 @@ export interface AgentCommand {
   activeFileContent?: string;
   action?: 'merge' | 'discard' | 'do_nothing';
   useWorktree?: boolean;
+  task?: string;
+  direction?: 'prev' | 'next';
 }

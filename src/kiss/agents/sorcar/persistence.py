@@ -485,6 +485,70 @@ def _list_recent_chats(limit: int = 10) -> list[dict[str, object]]:
     return result
 
 
+def _get_adjacent_task_in_chat(
+    task: str, direction: str
+) -> dict[str, object] | None:
+    """Return the adjacent task within the same chat session.
+
+    Looks up the chat_id for *task*, then finds the previous or next
+    task in that chat (ordered by timestamp).
+
+    Args:
+        task: The current task description string.
+        direction: ``"prev"`` for the earlier task, ``"next"`` for the
+            later task in the same chat session.
+
+    Returns:
+        A dict with ``task`` (str) and ``events`` (list of event dicts),
+        or ``None`` if no adjacent task exists or the task has no
+        chat_id.
+    """
+    db = _get_db()
+    task_id = _most_recent_task_id(db, task)
+    if task_id is None:
+        return None
+    row = db.execute(
+        "SELECT chat_id, timestamp FROM task_history WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if not row or not row["chat_id"]:
+        return None
+    chat_id = row["chat_id"]
+    ts = row["timestamp"]
+
+    if direction == "prev":
+        adj = db.execute(
+            "SELECT id, task FROM task_history "
+            "WHERE chat_id = ? AND timestamp < ? "
+            "ORDER BY timestamp DESC LIMIT 1",
+            (chat_id, ts),
+        ).fetchone()
+    else:
+        adj = db.execute(
+            "SELECT id, task FROM task_history "
+            "WHERE chat_id = ? AND timestamp > ? "
+            "ORDER BY timestamp ASC LIMIT 1",
+            (chat_id, ts),
+        ).fetchone()
+
+    if not adj:
+        return None
+
+    adj_id = adj["id"]
+    adj_task = adj["task"]
+    event_rows = db.execute(
+        "SELECT event_json FROM events WHERE task_id = ? ORDER BY seq",
+        (adj_id,),
+    ).fetchall()
+    events: list[dict[str, object]] = []
+    for r in event_rows:
+        try:
+            events.append(json.loads(r["event_json"]))
+        except (json.JSONDecodeError, TypeError):
+            logger.debug("Exception caught", exc_info=True)
+    return {"task": adj_task, "events": events}
+
+
 def _load_chat_context(chat_id: str) -> list[_HistoryEntry]:
     """Load all tasks and results for a chat session in chronological order.
 

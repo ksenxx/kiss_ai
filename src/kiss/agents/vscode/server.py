@@ -22,6 +22,7 @@ from typing import Any
 
 from kiss.agents.sorcar.persistence import (
     _append_chat_event,
+    _get_adjacent_task_in_chat,
     _load_file_usage,
     _load_history,
     _load_last_model,
@@ -219,6 +220,10 @@ class VSCodeServer:
                 self._complete_queue.put((query, seq, snapshot_file, snapshot_content))
         elif cmd_type == "getInputHistory":
             self._get_input_history()
+        elif cmd_type == "getAdjacentTask":
+            self._get_adjacent_task(
+                cmd.get("task", ""), cmd.get("direction", "prev")
+            )
         elif cmd_type == "generateCommitMessage":
             threading.Thread(
                 target=self._generate_commit_message, daemon=True
@@ -905,6 +910,29 @@ class VSCodeServer:
             msg = wt.do_nothing()
             return {"success": True, "message": msg}
         return {"success": False, "message": f"Unknown action: {action}"}
+
+    def _get_adjacent_task(self, task: str, direction: str) -> None:
+        """Send events for the adjacent task in the same chat session.
+
+        Args:
+            task: Current task description string.
+            direction: ``"prev"`` or ``"next"``.
+        """
+        result = _get_adjacent_task_in_chat(task, direction)
+        if result:
+            self.printer.broadcast({
+                "type": "adjacent_task_events",
+                "direction": direction,
+                "task": result["task"],
+                "events": result["events"],
+            })
+        else:
+            self.printer.broadcast({
+                "type": "adjacent_task_events",
+                "direction": direction,
+                "task": "",
+                "events": [],
+            })
 
     def _generate_commit_message(self) -> None:
         """Generate a git commit message from current changes."""

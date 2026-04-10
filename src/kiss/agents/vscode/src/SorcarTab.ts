@@ -404,6 +404,10 @@ export class SorcarTab {
         this._agentProcess.sendCommand({ type: 'resumeSession', sessionId: message.id });
         break;
 
+      case 'getAdjacentTask':
+        this._agentProcess.sendCommand({ type: 'getAdjacentTask', task: (message as any).task, direction: (message as any).direction });
+        break;
+
       case 'getWelcomeSuggestions':
         this._sendWelcomeSuggestions();
         break;
