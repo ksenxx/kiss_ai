@@ -138,9 +138,7 @@ export function activate(context: vscode.ExtensionContext): void {
     _context?: unknown,
     token?: vscode.CancellationToken
   ): Thenable<void> | void => {
-    let tab = tabManager!.getActiveTab();
-    if (!tab) tab = tabManager!.createTab();
-    return tab.generateCommitMessage(token);
+    return tabManager!.generateCommitMessage(token);
   };
 
   context.subscriptions.push(

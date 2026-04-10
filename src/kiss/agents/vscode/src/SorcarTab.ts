@@ -740,6 +740,9 @@ export class TabManager {
   private _onCommitMessage = new vscode.EventEmitter<{ message: string; error?: string }>();
   /** Aggregated commit message events from all tabs. */
   public readonly onCommitMessage = this._onCommitMessage.event;
+  /** Standalone agent process for commit message generation when no tab is open. */
+  private _commitAgent: AgentProcess | null = null;
+  private _commitPending: boolean = false;
 
   constructor(extensionUri: vscode.Uri) {
     this._extensionUri = extensionUri;
@@ -778,6 +781,50 @@ export class TabManager {
     return tab;
   }
 
+  /**
+   * Generate a commit message without opening a new chat tab.
+   * Uses an existing tab's agent process if available, otherwise
+   * spawns a dedicated headless AgentProcess.
+   */
+  generateCommitMessage(token?: vscode.CancellationToken): Promise<void> {
+    // Prefer an existing tab (active or any open tab)
+    const tab = this._activeTab ?? this._tabs[this._tabs.length - 1];
+    if (tab) return tab.generateCommitMessage(token);
+
+    // No tabs open — use a standalone agent process
+    if (this._commitPending) return Promise.resolve();
+    this._commitPending = true;
+
+    const workDir = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
+    const model = vscode.workspace.getConfiguration('kissSorcar').get<string>('defaultModel') || getDefaultModel();
+
+    if (!this._commitAgent) {
+      this._commitAgent = new AgentProcess();
+      this._commitAgent.on('message', (msg: ToWebviewMessage) => {
+        if (msg.type === 'commitMessage') {
+          this._onCommitMessage.fire(msg as any);
+        }
+      });
+    }
+    this._commitAgent.start(workDir);
+    this._commitAgent.sendCommand({ type: 'generateCommitMessage', model });
+
+    return new Promise<void>((resolve) => {
+      let resolved = false;
+      const done = () => {
+        if (resolved) return;
+        resolved = true;
+        this._commitPending = false;
+        disposable.dispose();
+        clearTimeout(timer);
+        resolve();
+      };
+      const disposable = this._onCommitMessage.event(() => done());
+      token?.onCancellationRequested(() => done());
+      const timer = setTimeout(done, 30_000);
+    });
+  }
+
   /** Get the currently active (last focused) tab, or undefined. */
   getActiveTab(): SorcarTab | undefined {
     return this._activeTab;
@@ -790,6 +837,8 @@ export class TabManager {
     }
     this._tabs = [];
     this._activeTab = undefined;
+    this._commitAgent?.dispose();
+    this._commitAgent = null;
     this._onCommitMessage.dispose();
   }
 }
