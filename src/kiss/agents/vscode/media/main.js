@@ -452,10 +452,11 @@
   // --- Usage metrics (tokens / budget) in header ---
   function updateUsageMetrics(text) {
     if (!statusTokens || !statusBudget) return;
-    var tm = text.match(/Tokens:\s*([\d,]+)/);
-    var bm = text.match(/Budget:\s*\$([0-9.]+)/);
-    if (tm) statusTokens.textContent = 'Tokens: ' + tm[1];
-    if (bm) statusBudget.textContent = '$' + bm[1];
+    var tm = text.match(/Tokens:\s*(\d+\/\d+)/);
+    var bm = text.match(/Budget:\s*(\$[0-9.]+\/\$[0-9.]+)/);
+    var parts = [];
+    if (sm) parts.push(sm[1] + ' steps');
+    if (tm) parts.push(tm[1] + ' tokens');
   }
 
   function clearUsageMetrics() {
