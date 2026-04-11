@@ -212,11 +212,8 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
         self.broadcast(event)
 
     def _check_stop(self) -> None:
-        ev = getattr(self._thread_local, "stop_event", None)
-        if ev is not None:
-            if ev.is_set():
-                raise KeyboardInterrupt("Agent stop requested")
-        elif self.stop_event.is_set():
+        ev = getattr(self._thread_local, "stop_event", None) or self.stop_event
+        if ev.is_set():
             raise KeyboardInterrupt("Agent stop requested")
 
     def print(self, content: Any, type: str = "text", **kwargs: Any) -> str:

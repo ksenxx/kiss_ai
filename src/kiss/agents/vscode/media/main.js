@@ -174,58 +174,7 @@
     container.appendChild(separator);
 
     // Replay events into the container
-    var adjState = mkS();
-    var adjLlmPanel = null;
-    var adjLlmPanelState = mkS();
-    var adjLastToolName = '';
-    var adjPendingPanel = false;
-    events.forEach(function(ev) {
-      var t = ev.type;
-      if (t === 'task_done' || t === 'task_error' || t === 'task_stopped') {
-        // Render end status
-        if (t === 'task_error') {
-          var banner = mkEl('div', 'ev tr err');
-          banner.innerHTML = '<div class="rl fail">ERROR</div><div class="tr-content">' + esc(ev.text || 'Unknown error') + '</div>';
-          addCollapse(banner, banner.querySelector('.rl'));
-          container.appendChild(banner);
-        } else if (t === 'task_stopped') {
-          var banner = mkEl('div', 'ev tr err');
-          banner.innerHTML = '<div class="rl fail">STOPPED</div><div class="tr-content">Agent execution stopped by user</div>';
-          addCollapse(banner, banner.querySelector('.rl'));
-          container.appendChild(banner);
-        }
-        return;
-      }
-      if (t === 'followup_suggestion') {
-        var fu = mkEl('div', 'followup-bar');
-        fu.innerHTML = '<span class="fu-label">Suggested next</span>'
-          + '<span class="fu-text">' + esc(ev.text) + '</span>';
-        container.appendChild(fu);
-        return;
-      }
-      // Mirror processOutputEvent logic
-      if (t === 'tool_call') {
-        adjLastToolName = ev.name || '';
-        adjLlmPanel = null; adjLlmPanelState = mkS(); adjPendingPanel = false;
-      }
-      if (t === 'tool_result' && adjLastToolName !== 'finish') { adjPendingPanel = true; }
-      if (adjPendingPanel && (t === 'thinking_start' || t === 'text_delta')) {
-        adjLlmPanel = mkEl('div', 'llm-panel');
-        var aLHdr = mkEl('div', 'llm-panel-hdr');
-        aLHdr.textContent = 'Thoughts';
-        addCollapse(adjLlmPanel, aLHdr);
-        adjLlmPanel.appendChild(aLHdr);
-        container.appendChild(adjLlmPanel);
-        adjLlmPanelState = mkS(); adjPendingPanel = false;
-      }
-      var target = container, tState = adjState;
-      if (adjLlmPanel && (t === 'thinking_start' || t === 'thinking_delta' || t === 'thinking_end'
-        || t === 'text_delta' || t === 'text_end')) {
-        target = adjLlmPanel; tState = adjLlmPanelState;
-      }
-      handleOutputEvent(ev, target, tState);
-    });
-    collapseAllExceptResult(container);
+    replayEventsInto(container, events);
 
     if (direction === 'prev') {
       // Save scroll position, prepend, then restore
@@ -743,6 +692,12 @@
     if (statusBudget) statusBudget.textContent = '';
   }
 
+  function focusInputWithRetry() {
+    inp.focus();
+    setTimeout(function() { inp.focus(); }, 100);
+    setTimeout(function() { inp.focus(); }, 300);
+  }
+
   // --- Clear chat ---
   function resetChatUI() {
     clearOutput();
@@ -767,12 +722,16 @@
   }
 
   // --- Refresh history ---
+  function resetHistoryPagination() {
+    historyOffset = 0;
+    historyHasMore = true;
+    historyLoading = false;
+    historyGeneration++;
+  }
+
   function refreshHistory() {
     if (sidebar.classList.contains('open')) {
-      historyOffset = 0;
-      historyHasMore = true;
-      historyLoading = false;
-      historyGeneration++;
+      resetHistoryPagination();
       vscode.postMessage({ type: 'getHistory', query: historySearch.value, generation: historyGeneration });
     }
   }
@@ -876,14 +835,10 @@
         inp.value = inp.value ? inp.value + '\n' + ev.text : ev.text;
         inp.dispatchEvent(new Event('input', { bubbles: true }));
       }
-      inp.focus();
-      setTimeout(function() { inp.focus(); }, 100);
-      setTimeout(function() { inp.focus(); }, 300);
+      focusInputWithRetry();
       break;
     case 'focusInput':
-      inp.focus();
-      setTimeout(function() { inp.focus(); }, 100);
-      setTimeout(function() { inp.focus(); }, 300);
+      focusInputWithRetry();
       break;
 
     case 'inputHistory':
@@ -1035,19 +990,68 @@
   }
 
   // --- Task replay ---
+  function replayEventsInto(container, events, opts) {
+    var rState = mkS();
+    var rLlmPanel = null;
+    var rLlmPanelState = mkS();
+    var rLastToolName = '';
+    var rPendingPanel = false;
+    events.forEach(function(ev) {
+      var t = ev.type;
+      if (t === 'task_done' || t === 'task_error' || t === 'task_stopped') {
+        if (t === 'task_error') {
+          var banner = mkEl('div', 'ev tr err');
+          banner.innerHTML = '<div class="rl fail">ERROR</div><div class="tr-content">' + esc(ev.text || 'Unknown error') + '</div>';
+          addCollapse(banner, banner.querySelector('.rl'));
+          container.appendChild(banner);
+        } else if (t === 'task_stopped') {
+          var banner = mkEl('div', 'ev tr err');
+          banner.innerHTML = '<div class="rl fail">STOPPED</div><div class="tr-content">Agent execution stopped by user</div>';
+          addCollapse(banner, banner.querySelector('.rl'));
+          container.appendChild(banner);
+        }
+        return;
+      }
+      if (t === 'followup_suggestion') {
+        var fu = mkEl('div', 'followup-bar');
+        fu.innerHTML = '<span class="fu-label">Suggested next</span>'
+          + '<span class="fu-text">' + esc(ev.text) + '</span>';
+        if (opts && opts.onFollowupClick) {
+          fu.addEventListener('click', function() { opts.onFollowupClick(ev.text); });
+        }
+        container.appendChild(fu);
+        return;
+      }
+      if (t === 'tool_call') {
+        rLastToolName = ev.name || '';
+        rLlmPanel = null; rLlmPanelState = mkS(); rPendingPanel = false;
+      }
+      if (t === 'tool_result' && rLastToolName !== 'finish') { rPendingPanel = true; }
+      if (rPendingPanel && (t === 'thinking_start' || t === 'text_delta')) {
+        rLlmPanel = mkEl('div', 'llm-panel');
+        var lHdr = mkEl('div', 'llm-panel-hdr');
+        lHdr.textContent = 'Thoughts';
+        addCollapse(rLlmPanel, lHdr);
+        rLlmPanel.appendChild(lHdr);
+        container.appendChild(rLlmPanel);
+        rLlmPanelState = mkS(); rPendingPanel = false;
+      }
+      var target = container, tState = rState;
+      if (rLlmPanel && (t === 'thinking_start' || t === 'thinking_delta' || t === 'thinking_end'
+        || t === 'text_delta' || t === 'text_end')) {
+        target = rLlmPanel; tState = rLlmPanelState;
+      }
+      handleOutputEvent(ev, target, tState);
+    });
+    collapseAllExceptResult(container);
+  }
+
   function replayTaskEvents(events) {
     clearOutput();
     resetOutputState();
-    events.forEach(function(ev) {
-      var t = ev.type;
-      if (t === 'task_done' || t === 'task_error' || t === 'task_stopped'
-        || t === 'followup_suggestion') {
-        handleEvent(ev);
-        return;
-      }
-      processOutputEvent(ev);
+    replayEventsInto(O, events, {
+      onFollowupClick: function(text) { inp.value = text; syncClearBtn(); inp.focus(); }
     });
-    collapseAllExceptResult(O);
     sb();
   }
 
@@ -1303,10 +1307,7 @@
       });
     }
     historyBtn.addEventListener('click', function() {
-      historyOffset = 0;
-      historyHasMore = true;
-      historyLoading = false;
-      historyGeneration++;
+      resetHistoryPagination();
       sidebar.classList.add('open');
       sidebarOverlay.classList.add('open');
       vscode.postMessage({ type: 'getHistory', generation: historyGeneration });
@@ -1314,10 +1315,7 @@
     sidebarClose.addEventListener('click', closeSidebar);
     sidebarOverlay.addEventListener('click', closeSidebar);
     historySearch.addEventListener('input', function() {
-      historyOffset = 0;
-      historyHasMore = true;
-      historyLoading = false;
-      historyGeneration++;
+      resetHistoryPagination();
       vscode.postMessage({ type: 'getHistory', query: historySearch.value, generation: historyGeneration });
     });
     historyList.addEventListener('scroll', function() {

@@ -371,14 +371,7 @@ class VSCodeServer:
                 if self._use_worktree and self._worktree_agent._wt_pending:
                     changed = self._get_worktree_changed_files()
                     if changed:
-                        self.printer.broadcast({
-                            "type": "worktree_done",
-                            "branch": self._worktree_agent._wt_branch,
-                            "worktreeDir": str(self._worktree_agent._wt_dir),
-                            "originalBranch": self._worktree_agent._original_branch,
-                            "changedFiles": changed,
-                            "hasConflict": self._check_merge_conflict(),
-                        })
+                        self._broadcast_worktree_done(changed)
                     else:
                         self._worktree_agent.discard()
             except KeyboardInterrupt:
@@ -666,10 +659,7 @@ class VSCodeServer:
         if entries:
             task = str(entries[0].get("task", ""))
             if task:
-                events = _load_task_chat_events(task)
-                self.agent.resume_chat(task)
-                self.printer.broadcast({"type": "task_events", "events": events, "task": task})
-                self._emit_pending_worktree()
+                self._replay_session(task)
         self._restore_pending_merge()
 
     def _restore_pending_merge(self) -> None:
@@ -681,6 +671,22 @@ class VSCodeServer:
         webview shows the accept/reject toolbar.
         """
         self._start_merge_session(str(_merge_data_dir() / "pending-merge.json"))
+
+    def _broadcast_worktree_done(self, changed: list[str]) -> None:
+        """Broadcast a ``worktree_done`` event with the current worktree state.
+
+        Args:
+            changed: List of file paths changed in the worktree.
+        """
+        wt = self._worktree_agent
+        self.printer.broadcast({
+            "type": "worktree_done",
+            "branch": wt._wt_branch,
+            "worktreeDir": str(wt._wt_dir),
+            "originalBranch": wt._original_branch,
+            "changedFiles": changed,
+            "hasConflict": self._check_merge_conflict() if changed else False,
+        })
 
     def _emit_pending_worktree(self) -> None:
         """Emit ``worktree_done`` if the agent has a pending worktree branch.
@@ -696,14 +702,7 @@ class VSCodeServer:
         if not wt._wt_pending:
             return
         changed = self._get_worktree_changed_files()
-        self.printer.broadcast({
-            "type": "worktree_done",
-            "branch": wt._wt_branch,
-            "worktreeDir": str(wt._wt_dir),
-            "originalBranch": wt._original_branch,
-            "changedFiles": changed,
-            "hasConflict": self._check_merge_conflict() if changed else False,
-        })
+        self._broadcast_worktree_done(changed)
 
     def _ensure_worktree_state(self) -> None:
         """Restore agent worktree state from git if not already set.
@@ -1034,20 +1033,12 @@ class VSCodeServer:
             direction: ``"prev"`` or ``"next"``.
         """
         result = _get_adjacent_task_in_chat(task, direction)
-        if result:
-            self.printer.broadcast({
-                "type": "adjacent_task_events",
-                "direction": direction,
-                "task": result["task"],
-                "events": result["events"],
-            })
-        else:
-            self.printer.broadcast({
-                "type": "adjacent_task_events",
-                "direction": direction,
-                "task": "",
-                "events": [],
-            })
+        self.printer.broadcast({
+            "type": "adjacent_task_events",
+            "direction": direction,
+            "task": result["task"] if result else "",
+            "events": result["events"] if result else [],
+        })
 
     def _generate_commit_message(self) -> None:
         """Generate a git commit message from current changes."""

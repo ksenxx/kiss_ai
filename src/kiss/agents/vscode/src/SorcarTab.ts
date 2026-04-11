@@ -42,6 +42,31 @@ function getVersion(): string {
 }
 
 /**
+ * Create a Promise that resolves when a commit message event fires,
+ * cancellation is requested, or 30 seconds elapse — whichever comes first.
+ */
+function commitMessagePromise(
+  commitEvent: vscode.Event<{ message: string; error?: string }>,
+  onDone: () => void,
+  token?: vscode.CancellationToken,
+): Promise<void> {
+  return new Promise<void>((resolve) => {
+    let resolved = false;
+    const done = () => {
+      if (resolved) return;
+      resolved = true;
+      onDone();
+      disposable.dispose();
+      clearTimeout(timer);
+      resolve();
+    };
+    const disposable = commitEvent(() => done());
+    token?.onCancellationRequested(() => done());
+    const timer = setTimeout(done, 30_000);
+  });
+}
+
+/**
  * A single chat tab in the editor area.
  * Wraps a WebviewPanel and its own AgentProcess (Python subprocess).
  */
@@ -443,15 +468,19 @@ export class SorcarTab {
       }
 
       case 'mergeAction': {
+        const mergeDispatch: Record<string, () => void> = {
+          'accept': () => this._mergeManager.acceptChange(),
+          'reject': () => this._mergeManager.rejectChange(),
+          'prev': () => this._mergeManager.prevChange(),
+          'next': () => this._mergeManager.nextChange(),
+          'accept-all': () => this._mergeManager.acceptAll(),
+          'reject-all': () => this._mergeManager.rejectAll(),
+          'accept-file': () => this._mergeManager.acceptFile(),
+          'reject-file': () => this._mergeManager.rejectFile(),
+        };
         const mAction = (message as any).action;
-        if (mAction === 'accept') this._mergeManager.acceptChange();
-        else if (mAction === 'reject') this._mergeManager.rejectChange();
-        else if (mAction === 'prev') this._mergeManager.prevChange();
-        else if (mAction === 'next') this._mergeManager.nextChange();
-        else if (mAction === 'accept-all') this._mergeManager.acceptAll();
-        else if (mAction === 'reject-all') this._mergeManager.rejectAll();
-        else if (mAction === 'accept-file') this._mergeManager.acceptFile();
-        else if (mAction === 'reject-file') this._mergeManager.rejectFile();
+        const handler = mergeDispatch[mAction];
+        if (handler) handler();
         else if (mAction === 'all-done') {
           this._agentProcess.sendCommand({ type: 'mergeAction', action: 'all-done' });
         }
@@ -597,20 +626,11 @@ export class SorcarTab {
     this._agentProcess.start(this._getWorkDir());
     this._agentProcess.sendCommand({ type: 'generateCommitMessage', model: this._selectedModel });
 
-    return new Promise<void>((resolve) => {
-      let resolved = false;
-      const done = () => {
-        if (resolved) return;
-        resolved = true;
-        this._commitPending = false;
-        disposable.dispose();
-        clearTimeout(timer);
-        resolve();
-      };
-      const disposable = this._onCommitMessage.event(() => done());
-      token?.onCancellationRequested(() => done());
-      const timer = setTimeout(done, 30_000);
-    });
+    return commitMessagePromise(
+      this._onCommitMessage.event,
+      () => { this._commitPending = false; },
+      token,
+    );
   }
 
   /** Cleanup: kill agent process and dispose listeners. */
@@ -866,20 +886,11 @@ export class TabManager {
     this._commitAgent.start(workDir);
     this._commitAgent.sendCommand({ type: 'generateCommitMessage', model });
 
-    return new Promise<void>((resolve) => {
-      let resolved = false;
-      const done = () => {
-        if (resolved) return;
-        resolved = true;
-        this._commitPending = false;
-        disposable.dispose();
-        clearTimeout(timer);
-        resolve();
-      };
-      const disposable = this._onCommitMessage.event(() => done());
-      token?.onCancellationRequested(() => done());
-      const timer = setTimeout(done, 30_000);
-    });
+    return commitMessagePromise(
+      this._onCommitMessage.event,
+      () => { this._commitPending = false; },
+      token,
+    );
   }
 
   /** Get the currently active (last focused) tab, or undefined. */

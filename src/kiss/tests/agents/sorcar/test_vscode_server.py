@@ -1474,10 +1474,11 @@ class TestCollapsiblePanelsJS(unittest.TestCase):
         assert "addCollapse(llmPanel, lHdr)" in block
 
     def test_adjacent_llm_panel_calls_add_collapse(self) -> None:
-        """renderAdjacentTask also calls addCollapse on LLM panels."""
-        idx = self._js.index("var aLHdr = mkEl('div', 'llm-panel-hdr')")
-        block = self._js[idx : idx + 200]
-        assert "addCollapse(adjLlmPanel, aLHdr)" in block
+        """replayEventsInto calls addCollapse on LLM panels."""
+        idx = self._js.index("function replayEventsInto(")
+        end = self._js.index("\n  function ", idx + 10)
+        block = self._js[idx:end]
+        assert "addCollapse(rLlmPanel, lHdr)" in block
 
     # -- Result card is collapsible --
 
@@ -1821,18 +1822,18 @@ class TestCollapseAllExceptResultJS(unittest.TestCase):
         assert "classList.add('collapsed')" in block
 
     def test_called_in_replay_task_events(self) -> None:
-        """collapseAllExceptResult(O) is called in replayTaskEvents."""
+        """replayTaskEvents delegates to replayEventsInto which collapses."""
         idx = self._js.index("function replayTaskEvents(events)")
-        end = self._js.index("function ", idx + 10)
+        end = self._js.index("\n  function ", idx + 10)
         block = self._js[idx:end]
-        assert "collapseAllExceptResult(O)" in block
+        assert "replayEventsInto(O," in block
 
     def test_called_in_render_adjacent_task(self) -> None:
-        """collapseAllExceptResult(container) is called in renderAdjacentTask."""
+        """renderAdjacentTask delegates to replayEventsInto which collapses."""
         idx = self._js.index("function renderAdjacentTask(direction, task, events)")
         end = self._js.index("\n  function ", idx + 10)
         block = self._js[idx:end]
-        assert "collapseAllExceptResult(container)" in block
+        assert "replayEventsInto(container, events)" in block
 
     def test_not_called_during_live_streaming(self) -> None:
         """collapseAllExceptResult is NOT called in processOutputEvent."""
