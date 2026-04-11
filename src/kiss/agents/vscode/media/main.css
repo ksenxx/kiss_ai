@@ -123,10 +123,10 @@ header {
 }
 .think .lbl {
   font-size: var(--fs-md); font-weight: 600; text-transform: uppercase;
-  letter-spacing: .06em; color: var(--cyan); margin-bottom: 4px;
+  letter-spacing: .04em; color: var(--cyan); margin-bottom: 4px;
   display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none;
 }
-.think .lbl .arrow { transition: transform .2s; display: inline-block; }
+.think .lbl .arrow { transition: transform .2s; display: inline-block; font-size: 1.15em; }
 .think .lbl .arrow.collapsed { transform: rotate(-90deg); }
 .think .cnt {
   font-size: var(--fs-md); color: var(--dim); font-style: italic;
@@ -205,9 +205,8 @@ header {
 .tr.err { background: color-mix(in srgb, var(--red) 4%, transparent); border-color: color-mix(in srgb, var(--red) 20%, transparent); }
 .tr .rl {
   font-size: var(--fs-md); font-weight: 600; text-transform: uppercase;
-  letter-spacing: .06em; margin-bottom: 4px;
+  letter-spacing: .04em; margin-bottom: 4px;
 }
-.tr .rl.ok { color: var(--green); }
 .tr .rl.fail { color: var(--red); }
 
 /* Result card */
@@ -905,7 +904,7 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 /* ── Collapsible panels ─────────────────────────────── */
 .collapse-chv {
   display: inline-block; transition: transform 0.2s;
-  margin-right: 4px; flex-shrink: 0;
+  margin-right: 4px; flex-shrink: 0; font-size: 1.15em;
 }
 .collapsed .collapse-chv { transform: rotate(-90deg); }
 .collapse-preview {
@@ -917,7 +916,8 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 .collapsed .collapse-preview { display: inline; }
 
 .llm-panel-hdr {
-  font-size: var(--fs-md); color: var(--yellow);
+  font-size: var(--fs-md); font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
+  color: var(--yellow);
   display: flex; align-items: center; padding-bottom: 4px;
 }
 .llm-panel-hdr:hover { color: var(--fg); }
@@ -929,7 +929,8 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 .tr.collapsed .tr-content { display: none; }
 
 .usage-hdr {
-  font-size: var(--fs-sm); color: var(--dim);
+  font-size: var(--fs-md); font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
+  color: var(--dim);
   display: flex; align-items: center;
 }
 .usage-hdr:hover { color: var(--fg); }
@@ -938,7 +939,8 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 .merge-info.collapsed .merge-info-body { display: none; }
 
 .bash-panel-hdr {
-  font-size: var(--fs-md); color: var(--accent);
+  font-size: var(--fs-md); font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
+  color: var(--accent);
   display: flex; align-items: center; padding-bottom: 4px;
   white-space: normal;
 }

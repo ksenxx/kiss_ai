@@ -1460,12 +1460,12 @@ class TestCollapsiblePanelsJS(unittest.TestCase):
     # -- LLM panel is collapsible --
 
     def test_llm_panel_has_header(self) -> None:
-        """LLM panel gets a .llm-panel-hdr div with 'Response' label."""
+        """LLM panel gets a .llm-panel-hdr div with 'Thoughts' label."""
         assert "llm-panel-hdr" in self._js
-        # Verify it's created with 'Response' text
+        # Verify it's created with 'Thoughts' text
         idx = self._js.index("llm-panel-hdr")
         block = self._js[idx : idx + 200]
-        assert "Response" in block
+        assert "Thoughts" in block
 
     def test_llm_panel_calls_add_collapse(self) -> None:
         """processOutputEvent calls addCollapse on the LLM panel."""

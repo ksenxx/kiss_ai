@@ -14,6 +14,7 @@
   let modelDDIdx = -1;
   let attachments = [];
   let _scrollLock = false;
+  let _noScroll = false;
   let scrollRaf = 0;
   let acIdx = -1;
 
@@ -211,7 +212,7 @@
       if (adjPendingPanel && (t === 'thinking_start' || t === 'text_delta')) {
         adjLlmPanel = mkEl('div', 'llm-panel');
         var aLHdr = mkEl('div', 'llm-panel-hdr');
-        aLHdr.textContent = 'Response';
+        aLHdr.textContent = 'Thoughts';
         addCollapse(adjLlmPanel, aLHdr);
         adjLlmPanel.appendChild(aLHdr);
         container.appendChild(adjLlmPanel);
@@ -353,8 +354,10 @@
     headerEl.style.userSelect = 'none';
     headerEl.addEventListener('click', function(e) {
       e.stopPropagation();
+      _noScroll = true;
       panelEl.classList.toggle('collapsed');
       collapsePreview(panelEl);
+      setTimeout(function() { _noScroll = false; }, 0);
     });
   }
 
@@ -510,12 +513,23 @@
       var hadBash = !!tState.bashPanel;
       tState.bashPanel = null; tState.bashRaf = 0;
       if (hadBash && !ev.is_error) break;
-      var r = mkEl('div', 'ev tr' + (ev.is_error ? ' err' : ''));
-      var lb = ev.is_error ? 'FAILED' : 'OK';
-      var lc = ev.is_error ? 'fail' : 'ok';
-      r.innerHTML = '<div class="rl ' + lc + '">' + lb + '</div><div class="tr-content">' + esc(ev.content) + '</div>';
-      addCollapse(r, r.querySelector('.rl'));
-      target.appendChild(r); break;
+      if (ev.is_error) {
+        var r = mkEl('div', 'ev tr err');
+        r.innerHTML = '<div class="rl fail">FAILED</div><div class="tr-content">' + esc(ev.content) + '</div>';
+        addCollapse(r, r.querySelector('.rl'));
+        target.appendChild(r);
+      } else {
+        var op = mkEl('div', 'bash-panel');
+        var opHdr = mkEl('div', 'bash-panel-hdr');
+        opHdr.textContent = 'Output';
+        op.appendChild(opHdr);
+        var opContent = mkEl('div', 'bash-panel-content');
+        opContent.textContent = ev.content;
+        op.appendChild(opContent);
+        addCollapse(op, opHdr);
+        target.appendChild(op);
+      }
+      break;
     }
     case 'system_output': {
       if (tState.bashPanel) {
@@ -601,7 +615,7 @@
     if (pendingPanel && (t === 'thinking_start' || t === 'text_delta')) {
       llmPanel = mkEl('div', 'llm-panel');
       var lHdr = mkEl('div', 'llm-panel-hdr');
-      lHdr.textContent = 'Response';
+      lHdr.textContent = 'Thoughts';
       addCollapse(llmPanel, lHdr);
       llmPanel.appendChild(lHdr);
       O.appendChild(llmPanel);
@@ -621,7 +635,7 @@
   // --- Scrolling ---
 
   function sb() {
-    if (!_scrollLock && !scrollRaf) {
+    if (!_scrollLock && !_noScroll && !scrollRaf) {
       scrollRaf = requestAnimationFrame(function() {
         O.scrollTo({ top: O.scrollHeight, behavior: 'instant' });
         scrollRaf = 0;
