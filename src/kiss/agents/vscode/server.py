@@ -62,6 +62,26 @@ from kiss.core.models.model_info import MODEL_INFO, get_available_models, get_de
 
 logger = logging.getLogger(__name__)
 
+
+def parse_task_tags(text: str) -> list[str]:
+    """Parse ``<task>...</task>`` tags from *text* and return individual tasks.
+
+    When the input contains one or more ``<task>`` blocks with non-empty
+    content, each block's content is returned as a separate list element.
+    If no valid ``<task>`` blocks are found (or all are empty/whitespace),
+    the original *text* is returned as a single-element list so that
+    callers can always iterate without special-casing.
+
+    Args:
+        text: Input text potentially containing ``<task>...</task>`` tags.
+
+    Returns:
+        List of task strings.  Always contains at least one element.
+    """
+    tasks = [m.strip() for m in re.findall(r"<task>(.*?)</task>", text, re.DOTALL)]
+    tasks = [t for t in tasks if t]
+    return tasks if tasks else [text]
+
 ctypes.pythonapi.PyThreadState_SetAsyncExc.argtypes = [
     ctypes.c_ulong,
     ctypes.py_object,
@@ -353,35 +373,40 @@ class VSCodeServer:
         try:
             self.printer.start_recording(rec_id)
             self._task_history_id = None
-            try:
-                self.agent.run(
-                    prompt_template=prompt,
-                    model_name=model,
-                    work_dir=work_dir,
-                    printer=self.printer,
-                    current_editor_file=active_file,
-                    attachments=attachments,
-                    wait_for_user_callback=self._wait_for_user,
-                    ask_user_question_callback=self._ask_user_question,
-                    is_parallel=self._use_parallel,
-                )
-                self._task_history_id = self.agent._last_task_id
-                result_summary = self._extract_result_summary(rec_id) or "No summary available"
-                task_end_event = {"type": "task_done"}
-                if self._use_worktree and self._worktree_agent._wt_pending:
-                    changed = self._get_worktree_changed_files()
-                    if changed:
-                        self._broadcast_worktree_done(changed)
-                    else:
-                        self._worktree_agent.discard()
-            except KeyboardInterrupt:
-                self._task_history_id = self.agent._last_task_id
-                result_summary = "Task stopped by user"
-                task_end_event = {"type": "task_stopped"}
-            except Exception as e:  # pragma: no cover
-                self._task_history_id = self.agent._last_task_id
-                result_summary = f"Task failed: {e}"
-                task_end_event = {"type": "task_error", "text": str(e)}
+            subtasks = parse_task_tags(prompt)
+            for task_idx, task_prompt in enumerate(subtasks):
+                is_last = task_idx == len(subtasks) - 1
+                try:
+                    self.agent.run(
+                        prompt_template=task_prompt,
+                        model_name=model,
+                        work_dir=work_dir,
+                        printer=self.printer,
+                        current_editor_file=active_file,
+                        attachments=attachments,
+                        wait_for_user_callback=self._wait_for_user,
+                        ask_user_question_callback=self._ask_user_question,
+                        is_parallel=self._use_parallel,
+                    )
+                    self._task_history_id = self.agent._last_task_id
+                    result_summary = self._extract_result_summary(rec_id) or "No summary available"
+                    task_end_event = {"type": "task_done"}
+                    if is_last and self._use_worktree and self._worktree_agent._wt_pending:
+                        changed = self._get_worktree_changed_files()
+                        if changed:
+                            self._broadcast_worktree_done(changed)
+                        else:
+                            self._worktree_agent.discard()
+                except KeyboardInterrupt:
+                    self._task_history_id = self.agent._last_task_id
+                    result_summary = "Task stopped by user"
+                    task_end_event = {"type": "task_stopped"}
+                    break
+                except Exception as e:  # pragma: no cover
+                    self._task_history_id = self.agent._last_task_id
+                    result_summary = f"Task failed: {e}"
+                    task_end_event = {"type": "task_error", "text": str(e)}
+                    break
         except BaseException:  # pragma: no cover — async interrupt before inner try
             # P14: interrupt before inner try — ensure stop_recording runs
             task_end_event = task_end_event or {"type": "task_stopped"}
