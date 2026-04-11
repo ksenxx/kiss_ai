@@ -1565,6 +1565,100 @@ class TestCollapsiblePanelsJS(unittest.TestCase):
         assert "collapsed" not in body
 
 
+class TestAutoCollapseOlderPanelsJS(unittest.TestCase):
+    """Test that older collapsible panels are auto-collapsed during running."""
+
+    _js: str = ""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
+        cls._js = (base / "vscode" / "media" / "main.js").read_text()
+
+    # -- collapseOlderPanels function --
+
+    def test_has_collapse_older_panels_function(self) -> None:
+        assert "function collapseOlderPanels()" in self._js
+
+    def test_collapse_older_panels_checks_is_running(self) -> None:
+        """Only auto-collapses when the agent is running."""
+        idx = self._js.index("function collapseOlderPanels()")
+        end = self._js.index("\n  }", idx) + 4
+        body = self._js[idx:end]
+        assert "if (!isRunning) return;" in body
+
+    def test_collapse_older_panels_queries_scope_collapsible(self) -> None:
+        """Uses :scope > .collapsible to find direct children only."""
+        idx = self._js.index("function collapseOlderPanels()")
+        end = self._js.index("\n  }", idx) + 4
+        body = self._js[idx:end]
+        assert "querySelectorAll(':scope > .collapsible')" in body
+
+    def test_collapse_older_panels_keeps_last_expanded(self) -> None:
+        """Loop iterates to length-1, leaving the last panel expanded."""
+        idx = self._js.index("function collapseOlderPanels()")
+        end = self._js.index("\n  }", idx) + 4
+        body = self._js[idx:end]
+        assert "panels.length - 1" in body
+        assert "classList.add('collapsed')" in body
+
+    # -- addCollapse marks panels as collapsible --
+
+    def test_add_collapse_adds_collapsible_class(self) -> None:
+        """addCollapse adds 'collapsible' class to the panel element."""
+        idx = self._js.index("function addCollapse(")
+        end = self._js.index("\n  }", idx) + 4
+        body = self._js[idx:end]
+        assert "classList.add('collapsible')" in body
+
+    # -- collapseOlderPanels called in processOutputEvent --
+
+    def test_called_after_llm_panel_appended(self) -> None:
+        """collapseOlderPanels is called after O.appendChild(llmPanel)."""
+        idx = self._js.index("O.appendChild(llmPanel);")
+        block = self._js[idx : idx + 100]
+        assert "collapseOlderPanels()" in block
+
+    def test_called_after_handle_output_event_to_output(self) -> None:
+        """collapseOlderPanels is called when target === O after handleOutputEvent."""
+        idx = self._js.index("function processOutputEvent(")
+        end = self._js.index("\n  }", idx) + 4
+        body = self._js[idx:end]
+        assert "if (target === O) collapseOlderPanels();" in body
+
+    # -- collapseOlderPanels called in handleEvent --
+
+    def test_called_after_merge_info_appended(self) -> None:
+        """collapseOlderPanels is called after merge-info panel appended."""
+        idx = self._js.index("case 'merge_data':")
+        end = self._js.index("break;", idx) + len("break;")
+        body = self._js[idx:end]
+        assert "collapseOlderPanels()" in body
+
+    def test_called_after_error_banner_appended(self) -> None:
+        """collapseOlderPanels is called after error/stopped banner appended."""
+        idx = self._js.index("case 'task_error':\n")
+        end = self._js.index("break;", idx) + len("break;")
+        body = self._js[idx:end]
+        assert "collapseOlderPanels()" in body
+
+    # -- Not called during history replay --
+
+    def test_not_called_in_render_adjacent_task(self) -> None:
+        """collapseOlderPanels is NOT called in renderAdjacentTask."""
+        idx = self._js.index("function renderAdjacentTask(")
+        end = self._js.index("\n  }", idx) + 4
+        body = self._js[idx:end]
+        assert "collapseOlderPanels" not in body
+
+    def test_not_called_in_replay_task_events(self) -> None:
+        """collapseOlderPanels is NOT called in replayTaskEvents."""
+        idx = self._js.index("function replayTaskEvents(")
+        end = self._js.index("\n  }", idx) + 4
+        body = self._js[idx:end]
+        assert "collapseOlderPanels" not in body
+
+
 class TestCollapsiblePanelsCSS(unittest.TestCase):
     """Test that main.css has all required collapsible panel styles."""
 
@@ -1611,6 +1705,363 @@ class TestCollapsiblePanelsCSS(unittest.TestCase):
 
     def test_has_collapsible_section_comment(self) -> None:
         assert "Collapsible panels" in self._css
+
+    def test_bash_panel_hdr_style(self) -> None:
+        assert ".bash-panel-hdr" in self._css
+
+    def test_bash_panel_hdr_hover(self) -> None:
+        assert ".bash-panel-hdr:hover" in self._css
+
+    def test_bash_panel_collapsed_hides_content(self) -> None:
+        assert ".bash-panel.collapsed .bash-panel-content" in self._css
+
+    def test_bash_panel_content_has_max_height(self) -> None:
+        """max-height and overflow-y moved from .bash-panel to .bash-panel-content."""
+        idx = self._css.index(".bash-panel-content")
+        block = self._css[idx : idx + 300]
+        assert "max-height" in block
+        assert "overflow-y" in block
+
+    def test_bash_panel_no_max_height(self) -> None:
+        """The .bash-panel wrapper itself should not have max-height."""
+        # Find the .bash-panel { ... } block (not .bash-panel-content or -hdr)
+        import re
+
+        m = re.search(r"\.bash-panel\s*\{([^}]+)\}", self._css)
+        assert m is not None
+        block = m.group(1)
+        assert "max-height" not in block
+
+
+class TestBashPanelCollapsibleJS(unittest.TestCase):
+    """Test that bash panels are made collapsible in main.js."""
+
+    _js: str = ""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
+        cls._js = (base / "vscode" / "media" / "main.js").read_text()
+
+    def _tool_call_block(self) -> str:
+        """Extract the tool_call case block from handleOutputEvent."""
+        idx = self._js.index("case 'tool_call':")
+        end = self._js.index("case 'tool_result':", idx)
+        return self._js[idx:end]
+
+    def test_bash_panel_has_header(self) -> None:
+        """A bash-panel-hdr div is created inside bash-panel."""
+        block = self._tool_call_block()
+        assert "bash-panel-hdr" in block
+
+    def test_bash_panel_header_text_is_output(self) -> None:
+        """The bash-panel header displays 'Output'."""
+        block = self._tool_call_block()
+        assert "'Output'" in block
+
+    def test_bash_panel_has_content_div(self) -> None:
+        """A bash-panel-content div is created for streaming output."""
+        block = self._tool_call_block()
+        assert "bash-panel-content" in block
+
+    def test_bash_panel_calls_add_collapse(self) -> None:
+        """addCollapse is called on the bash-panel with the header."""
+        block = self._tool_call_block()
+        assert "addCollapse(bp, bpHdr)" in block
+
+    def test_bash_panel_state_points_to_content(self) -> None:
+        """tState.bashPanel is set to the content div, not the wrapper."""
+        block = self._tool_call_block()
+        assert "tState.bashPanel = bpContent" in block
+
+    def test_bash_panel_content_appended_to_wrapper(self) -> None:
+        """The content div is appended inside the bash-panel wrapper."""
+        block = self._tool_call_block()
+        assert "bp.appendChild(bpContent)" in block
+
+    def test_bash_panel_header_appended_before_content(self) -> None:
+        """Header is appended before content within the bash-panel."""
+        block = self._tool_call_block()
+        hdr_pos = block.index("bp.appendChild(bpHdr)")
+        content_pos = block.index("bp.appendChild(bpContent)")
+        assert hdr_pos < content_pos
+
+
+class TestCollapseAllExceptResultJS(unittest.TestCase):
+    """Test that loading a task collapses all panels except the Result panel."""
+
+    _js: str = ""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
+        cls._js = (base / "vscode" / "media" / "main.js").read_text()
+
+    def test_collapse_all_except_result_function_exists(self) -> None:
+        """collapseAllExceptResult function is defined."""
+        assert "function collapseAllExceptResult(container)" in self._js
+
+    def test_queries_collapsible_panels(self) -> None:
+        """Function queries .collapsible elements in the container."""
+        idx = self._js.index("function collapseAllExceptResult(container)")
+        block = self._js[idx : idx + 300]
+        assert "container.querySelectorAll('.collapsible')" in block
+
+    def test_skips_result_panels(self) -> None:
+        """Function skips panels that have the .rc class (Result)."""
+        idx = self._js.index("function collapseAllExceptResult(container)")
+        block = self._js[idx : idx + 300]
+        assert "classList.contains('rc')" in block
+
+    def test_collapses_non_result_panels(self) -> None:
+        """Function adds 'collapsed' class to non-Result panels."""
+        idx = self._js.index("function collapseAllExceptResult(container)")
+        block = self._js[idx : idx + 300]
+        assert "classList.add('collapsed')" in block
+
+    def test_called_in_replay_task_events(self) -> None:
+        """collapseAllExceptResult(O) is called in replayTaskEvents."""
+        idx = self._js.index("function replayTaskEvents(events)")
+        end = self._js.index("function ", idx + 10)
+        block = self._js[idx:end]
+        assert "collapseAllExceptResult(O)" in block
+
+    def test_called_in_render_adjacent_task(self) -> None:
+        """collapseAllExceptResult(container) is called in renderAdjacentTask."""
+        idx = self._js.index("function renderAdjacentTask(direction, task, events)")
+        end = self._js.index("\n  function ", idx + 10)
+        block = self._js[idx:end]
+        assert "collapseAllExceptResult(container)" in block
+
+    def test_not_called_during_live_streaming(self) -> None:
+        """collapseAllExceptResult is NOT called in processOutputEvent."""
+        idx = self._js.index("function processOutputEvent(ev)")
+        end = self._js.index("\n  function ", idx + 10)
+        block = self._js[idx:end]
+        assert "collapseAllExceptResult" not in block
+
+
+class TestDiffFilesDeletionAtStart(unittest.TestCase):
+    """Regression: _diff_files must produce correct hunk positions for
+    pure deletions at the beginning of a file.
+
+    Root cause: _diff_files returned new_start=1 (instead of 0) when
+    lines were deleted at the very start and the current file was non-empty.
+    This caused _hunk_to_dict to produce cs=1, so the MergeManager
+    inserted old (red) lines at position 1 instead of 0 — the deleted
+    lines appeared AFTER the first surviving line instead of BEFORE it.
+    """
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _write(self, name: str, text: str) -> str:
+        p = Path(self.tmpdir) / name
+        p.write_text(text)
+        return str(p)
+
+    def test_start_deletion_cs_is_zero(self) -> None:
+        """Deleting lines at the start must produce cs=0."""
+        from kiss.agents.vscode.diff_merge import _diff_files, _hunk_to_dict
+
+        base = self._write("base.txt", "A\nB\nC\nD\n")
+        current = self._write("current.txt", "C\nD\n")
+        hunks = _diff_files(base, current)
+        dicts = [_hunk_to_dict(*h) for h in hunks]
+        assert len(dicts) == 1
+        assert dicts[0]["cs"] == 0, f"Expected cs=0, got cs={dicts[0]['cs']}"
+        assert dicts[0]["bs"] == 0
+        assert dicts[0]["bc"] == 2
+        assert dicts[0]["cc"] == 0
+
+    def test_middle_deletion_cs_correct(self) -> None:
+        """Deleting lines in the middle must produce correct cs."""
+        from kiss.agents.vscode.diff_merge import _diff_files, _hunk_to_dict
+
+        base = self._write("base.txt", "A\nB\nC\nD\n")
+        current = self._write("current.txt", "A\nD\n")
+        hunks = _diff_files(base, current)
+        dicts = [_hunk_to_dict(*h) for h in hunks]
+        assert len(dicts) == 1
+        assert dicts[0]["cs"] == 1
+
+    def test_delete_all_cs_is_zero(self) -> None:
+        """Deleting all lines must produce cs=0."""
+        from kiss.agents.vscode.diff_merge import _diff_files, _hunk_to_dict
+
+        base = self._write("base.txt", "A\nB\n")
+        current = self._write("current.txt", "")
+        hunks = _diff_files(base, current)
+        dicts = [_hunk_to_dict(*h) for h in hunks]
+        assert len(dicts) == 1
+        assert dicts[0]["cs"] == 0
+
+    def test_start_deletion_single_line(self) -> None:
+        """Deleting a single line at the start produces cs=0."""
+        from kiss.agents.vscode.diff_merge import _diff_files, _hunk_to_dict
+
+        base = self._write("base.txt", "A\nB\nC\n")
+        current = self._write("current.txt", "B\nC\n")
+        hunks = _diff_files(base, current)
+        dicts = [_hunk_to_dict(*h) for h in hunks]
+        assert len(dicts) == 1
+        assert dicts[0]["cs"] == 0
+        assert dicts[0]["bc"] == 1
+
+    def test_end_deletion_cs_correct(self) -> None:
+        """Deleting lines at the end produces correct cs."""
+        from kiss.agents.vscode.diff_merge import _diff_files, _hunk_to_dict
+
+        base = self._write("base.txt", "A\nB\nC\n")
+        current = self._write("current.txt", "A\n")
+        hunks = _diff_files(base, current)
+        dicts = [_hunk_to_dict(*h) for h in hunks]
+        assert len(dicts) == 1
+        assert dicts[0]["cs"] == 1
+
+    def test_multiple_hunks_including_start(self) -> None:
+        """Multiple deletions including at the start all have correct cs."""
+        from kiss.agents.vscode.diff_merge import _diff_files, _hunk_to_dict
+
+        base = self._write("base.txt", "A\nB\nC\nD\nE\n")
+        current = self._write("current.txt", "C\n")
+        hunks = _diff_files(base, current)
+        dicts = [_hunk_to_dict(*h) for h in hunks]
+        # First hunk: deletion of A,B at start → cs=0
+        assert dicts[0]["cs"] == 0
+        assert dicts[0]["bc"] == 2
+
+    def test_start_insertion_cs_correct(self) -> None:
+        """Inserting lines at the start produces cs=0."""
+        from kiss.agents.vscode.diff_merge import _diff_files, _hunk_to_dict
+
+        base = self._write("base.txt", "B\nC\n")
+        current = self._write("current.txt", "A\nB\nC\n")
+        hunks = _diff_files(base, current)
+        dicts = [_hunk_to_dict(*h) for h in hunks]
+        assert len(dicts) == 1
+        assert dicts[0]["cs"] == 0
+        assert dicts[0]["cc"] == 1
+        assert dicts[0]["bc"] == 0
+
+    def test_replacement_at_start(self) -> None:
+        """Replacing lines at the start produces cs=0."""
+        from kiss.agents.vscode.diff_merge import _diff_files, _hunk_to_dict
+
+        base = self._write("base.txt", "A\nB\nC\n")
+        current = self._write("current.txt", "X\nY\nC\n")
+        hunks = _diff_files(base, current)
+        dicts = [_hunk_to_dict(*h) for h in hunks]
+        assert len(dicts) == 1
+        assert dicts[0]["cs"] == 0
+        assert dicts[0]["cc"] == 2
+        assert dicts[0]["bc"] == 2
+
+
+class TestWorktreeActionExceptionHandling(unittest.TestCase):
+    """Regression: worktree actions must always broadcast worktree_result,
+    even when the action raises an exception.
+
+    Root cause: _handle_worktree_action was called without try/except in
+    _handle_command, so a RuntimeError from wt.merge() (e.g. when _wt is
+    None) would prevent the worktree_result broadcast, causing the VS Code
+    UI to hang for the 120s timeout.
+    """
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.repo = Path(self.tmpdir) / "repo"
+        self.repo.mkdir()
+        subprocess.run(
+            ["git", "init"], cwd=self.repo, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.email", "test@test.com"],
+            cwd=self.repo, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Test"],
+            cwd=self.repo, capture_output=True,
+        )
+        (self.repo / "file.txt").write_text("hello")
+        subprocess.run(
+            ["git", "add", "."], cwd=self.repo, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "init"],
+            cwd=self.repo, capture_output=True,
+        )
+
+        self.server = VSCodeServer()
+        self.server.work_dir = str(self.repo)
+        self.events: list[dict] = []
+
+        def capture_broadcast(event: dict) -> None:
+            self.events.append(event)
+
+        self.server.printer.broadcast = capture_broadcast  # type: ignore[assignment]
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_merge_exception_still_broadcasts_result(self) -> None:
+        """worktree_result is broadcast even when merge raises RuntimeError."""
+        self.server._use_worktree = True
+        # Don't set up _wt — so wt.merge() raises RuntimeError
+        self.server._handle_command({"type": "worktreeAction", "action": "merge"})
+        results = [e for e in self.events if e["type"] == "worktree_result"]
+        assert len(results) == 1
+        assert results[0]["success"] is False
+        assert results[0]["message"]  # non-empty error message
+
+    def test_discard_exception_still_broadcasts_result(self) -> None:
+        """worktree_result is broadcast even when discard raises RuntimeError."""
+        self.server._use_worktree = True
+        self.server._handle_command({"type": "worktreeAction", "action": "discard"})
+        results = [e for e in self.events if e["type"] == "worktree_result"]
+        assert len(results) == 1
+        assert results[0]["success"] is False
+
+    def test_do_nothing_exception_still_broadcasts_result(self) -> None:
+        """worktree_result is broadcast even when do_nothing raises RuntimeError."""
+        self.server._use_worktree = True
+        self.server._handle_command({"type": "worktreeAction", "action": "do_nothing"})
+        results = [e for e in self.events if e["type"] == "worktree_result"]
+        assert len(results) == 1
+        assert results[0]["success"] is False
+
+    def test_successful_merge_still_works(self) -> None:
+        """Normal merge flow still works after the try/except addition."""
+        subprocess.run(
+            ["git", "checkout", "-b", "kiss/exc-test"],
+            cwd=self.repo, capture_output=True,
+        )
+        (self.repo / "new.txt").write_text("new content")
+        subprocess.run(
+            ["git", "add", "."], cwd=self.repo, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "add new"],
+            cwd=self.repo, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "checkout", "main"],
+            cwd=self.repo, capture_output=True,
+        )
+
+        self.server._use_worktree = True
+        _set_agent_wt(
+            self.server._worktree_agent,
+            self.repo, "kiss/exc-test", "main",
+        )
+
+        self.server._handle_command({"type": "worktreeAction", "action": "merge"})
+        results = [e for e in self.events if e["type"] == "worktree_result"]
+        assert len(results) == 1
+        assert results[0]["success"] is True
 
 
 if __name__ == "__main__":

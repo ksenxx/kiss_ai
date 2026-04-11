@@ -224,6 +224,7 @@
       }
       handleOutputEvent(ev, target, tState);
     });
+    collapseAllExceptResult(container);
 
     if (direction === 'prev') {
       // Save scroll position, prepend, then restore
@@ -332,6 +333,7 @@
   }
 
   function addCollapse(panelEl, headerEl) {
+    panelEl.classList.add('collapsible');
     var chv = mkEl('span', 'collapse-chv');
     chv.textContent = '\u25BE';
     headerEl.insertBefore(chv, headerEl.firstChild);
@@ -341,6 +343,23 @@
       e.stopPropagation();
       panelEl.classList.toggle('collapsed');
     });
+  }
+
+  function collapseAllExceptResult(container) {
+    var panels = container.querySelectorAll('.collapsible');
+    for (var i = 0; i < panels.length; i++) {
+      if (!panels[i].classList.contains('rc')) {
+        panels[i].classList.add('collapsed');
+      }
+    }
+  }
+
+  function collapseOlderPanels() {
+    if (!isRunning) return;
+    var panels = O.querySelectorAll(':scope > .collapsible');
+    for (var i = 0; i < panels.length - 1; i++) {
+      panels[i].classList.add('collapsed');
+    }
   }
 
   window.toggleTC = toggleTC;
@@ -453,7 +472,17 @@
       c.innerHTML = '<div class="tc-h" onclick="toggleTC(this)">' + h + '</div>'
         + '<div class="tc-b' + (b ? '' : ' hide') + '">' + body + '</div>';
       target.appendChild(c);
-      if (ev.command) { var bp = mkEl('div', 'bash-panel'); target.appendChild(bp); tState.bashPanel = bp; }
+      if (ev.command) {
+        var bp = mkEl('div', 'bash-panel');
+        var bpHdr = mkEl('div', 'bash-panel-hdr');
+        bpHdr.textContent = 'Output';
+        bp.appendChild(bpHdr);
+        var bpContent = mkEl('div', 'bash-panel-content');
+        bp.appendChild(bpContent);
+        addCollapse(bp, bpHdr);
+        target.appendChild(bp);
+        tState.bashPanel = bpContent;
+      }
       hlBlock(c);
       break;
     }
@@ -558,6 +587,7 @@
       addCollapse(llmPanel, lHdr);
       llmPanel.appendChild(lHdr);
       O.appendChild(llmPanel);
+      collapseOlderPanels();
       llmPanelState = mkS(); pendingPanel = false;
     }
     var target = O, tState = state;
@@ -566,6 +596,7 @@
       target = llmPanel; tState = llmPanelState;
     }
     handleOutputEvent(ev, target, tState);
+    if (target === O) collapseOlderPanels();
     if (target === llmPanel) llmPanel.scrollTop = llmPanel.scrollHeight;
   }
 
@@ -848,6 +879,7 @@
         + 'Use the merge toolbar to accept or reject changes.</div>';
       addCollapse(mc, mc.querySelector('.merge-info-hdr'));
       O.appendChild(mc);
+      collapseOlderPanels();
       break;
     }
     case 'merge_started':
@@ -898,6 +930,7 @@
         + '<div class="tr-content">' + esc(isErr ? (ev.text || 'Unknown error') : 'Agent execution stopped by user') + '</div>';
       addCollapse(banner, banner.querySelector('.rl'));
       O.appendChild(banner);
+      collapseOlderPanels();
       setReady(isErr ? 'Error' : 'Stopped');
       break;
     }
@@ -977,6 +1010,7 @@
       }
       processOutputEvent(ev);
     });
+    collapseAllExceptResult(O);
     sb();
   }
 

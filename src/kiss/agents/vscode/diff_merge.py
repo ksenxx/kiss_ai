@@ -270,11 +270,11 @@ def _diff_files(base_path: str, current_path: str) -> list[tuple[int, int, int, 
         old_count = i2 - i1
         new_count = j2 - j1
         if old_count == 0:
-            old_start = i1 if not base_lines or i1 > 0 else 1
+            old_start = i1
         else:
             old_start = i1 + 1
         if new_count == 0:
-            new_start = j1 if not current_lines or j1 > 0 else 1
+            new_start = j1
         else:
             new_start = j1 + 1
         hunks.append((old_start, old_count, new_start, new_count))

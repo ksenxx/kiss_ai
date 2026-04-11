@@ -243,7 +243,11 @@ class VSCodeServer:
             ).start()
         elif cmd_type == "worktreeAction":
             action = cmd.get("action", "")
-            result = self._handle_worktree_action(action)
+            try:
+                result = self._handle_worktree_action(action)
+            except Exception as e:
+                logger.debug("Worktree action error", exc_info=True)
+                result = {"success": False, "message": str(e)}
             self.printer.broadcast({"type": "worktree_result", **result})
         else:
             self.printer.broadcast({"type": "error", "text": f"Unknown command: {cmd_type}"})

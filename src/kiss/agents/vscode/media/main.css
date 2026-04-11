@@ -264,6 +264,8 @@ header {
 .bash-panel {
   background: rgba(0,0,0,0.35); border: 1px solid var(--border);
   border-radius: 8px; margin: 2px 0 8px; padding: 8px 10px;
+}
+.bash-panel-content {
   max-height: 200px; overflow-y: auto;
   font-family: var(--vscode-editor-font-family, monospace);
   font-size: var(--fs-md); line-height: 1.5; color: color-mix(in srgb, var(--fg) 70%, transparent);
@@ -933,6 +935,14 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 .usage.collapsed .usage-content { display: none; }
 
 .merge-info.collapsed .merge-info-body { display: none; }
+
+.bash-panel-hdr {
+  font-size: var(--fs-sm); color: var(--dim);
+  display: flex; align-items: center; padding-bottom: 4px;
+  white-space: normal;
+}
+.bash-panel-hdr:hover { color: var(--fg); }
+.bash-panel.collapsed .bash-panel-content { display: none; }
 
 /* ── Scrollbar ──────────────────────────────────────── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
