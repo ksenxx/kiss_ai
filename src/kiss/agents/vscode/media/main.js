@@ -356,6 +356,11 @@
       e.stopPropagation();
       _noScroll = true;
       panelEl.classList.toggle('collapsed');
+      if (panelEl.classList.contains('collapsed')) {
+        panelEl.classList.remove('user-pinned');
+      } else {
+        panelEl.classList.add('user-pinned');
+      }
       collapsePreview(panelEl);
       setTimeout(function() { _noScroll = false; }, 0);
     });
@@ -375,7 +380,7 @@
     if (!isRunning) return;
     var panels = O.querySelectorAll(':scope > .collapsible');
     for (var i = 0; i < panels.length - 1; i++) {
-      if (!panels[i].classList.contains('rc')) {
+      if (!panels[i].classList.contains('rc') && !panels[i].classList.contains('user-pinned')) {
         panels[i].classList.add('collapsed');
         collapsePreview(panels[i]);
       }
