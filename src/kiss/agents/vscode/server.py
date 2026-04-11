@@ -38,7 +38,16 @@ from kiss.agents.sorcar.persistence import (
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
-from kiss.agents.vscode.diff_merge import _git
+from kiss.agents.vscode.diff_merge import (
+    _capture_untracked,
+    _cleanup_merge_data,
+    _git,
+    _merge_data_dir,
+    _parse_diff_hunks,
+    _prepare_merge_view,
+    _save_untracked_base,
+    _snapshot_files,
+)
 from kiss.agents.vscode.helpers import (
     clean_llm_output,
     clip_autocomplete_suggestion,
@@ -109,6 +118,7 @@ class VSCodeServer:
         # Lock ordering: _state_lock < printer._lock < printer._stdout_lock < printer._bash_lock
         self._state_lock = threading.Lock()
         self._task_thread: threading.Thread | None = None
+        self._merging = False
         self._task_generation = 0
         self._recording_id = 0
         self._refresh_generation = 0
@@ -197,6 +207,8 @@ class VSCodeServer:
             task = cmd.get("sessionId", "")
             if task:
                 self._replay_session(task)
+        elif cmd_type == "mergeAction":
+            self._handle_merge_action(cmd.get("action", ""))
         elif cmd_type == "getLastSession":
             self._get_last_session()
         elif cmd_type == "newChat":
@@ -289,6 +301,17 @@ class VSCodeServer:
                 data = base64.b64decode(data_b64)
                 attachments.append(Attachment(data=data, mime_type=mime))
 
+        with self._state_lock:
+            if self._merging:
+                self.printer.broadcast(
+                    {
+                        "type": "error",
+                        "text": "Cannot run a task while merge review is in progress."
+                        " Accept or reject all changes first.",
+                    }
+                )
+                return
+
         # RC1+RC3+RC9: all state mutations under _state_lock
         with self._state_lock:
             self._use_worktree = bool(cmd.get("useWorktree", False))
@@ -304,6 +327,14 @@ class VSCodeServer:
         self._user_answer_queue = queue.Queue(maxsize=1)
 
         self.printer.broadcast({"type": "clear"})
+
+        # Git snapshot captures pre-task state (may be slow for large repos)
+        pre_hunks = _parse_diff_hunks(work_dir)
+        pre_untracked = _capture_untracked(work_dir)
+        pre_file_hashes = _snapshot_files(
+            work_dir, set(pre_hunks.keys()) | pre_untracked,
+        )
+        _save_untracked_base(work_dir, pre_untracked | set(pre_hunks.keys()))
 
         # start_recording inside try so stop_recording always runs (P14 fix)
         result_summary = "Agent Failed Abruptly"
@@ -376,6 +407,20 @@ class VSCodeServer:
                 self.printer.reset()
                 with self._state_lock:
                     self._stop_event = None
+                try:
+                    merge_dir = str(_merge_data_dir())
+                    merge_result = _prepare_merge_view(
+                        work_dir,
+                        merge_dir,
+                        pre_hunks,
+                        pre_untracked,
+                        pre_file_hashes,
+                    )
+                    if merge_result.get("status") == "opened":  # pragma: no cover
+                        merge_json = os.path.join(merge_dir, "pending-merge.json")
+                        self._start_merge_session(merge_json)
+                except BaseException:  # pragma: no cover — merge view error handler
+                    logger.debug("Merge view error", exc_info=True)
                 self._refresh_file_cache()
                 if task_end_event:  # pragma: no branch — always set
                     self.printer.broadcast(task_end_event)
@@ -392,6 +437,54 @@ class VSCodeServer:
                 logger.debug("Cleanup interrupted", exc_info=True)
                 if task_end_event:
                     self.printer.broadcast(task_end_event)
+
+    def _start_merge_session(self, merge_json_path: str) -> bool:
+        """Load merge data from disk and broadcast merge_data + merge_started events.
+
+        Args:
+            merge_json_path: Path to the pending-merge.json file.
+
+        Returns:
+            True if a merge session was started, False otherwise.
+        """
+        try:
+            with open(merge_json_path) as f:
+                merge_data = json.load(f)
+            files = merge_data.get("files", [])
+            if not files:
+                return False
+            total_hunks = sum(len(f.get("hunks", [])) for f in files)
+            if total_hunks == 0:
+                return False
+            with self._state_lock:
+                self._merging = True
+            self.printer.broadcast({
+                "type": "merge_data",
+                "data": merge_data,
+                "hunk_count": total_hunks,
+            })
+            self.printer.broadcast({"type": "merge_started"})
+            return True
+        except (OSError, json.JSONDecodeError, KeyError):
+            logger.debug("Failed to load merge data", exc_info=True)
+            return False
+
+    def _handle_merge_action(self, action: str) -> None:
+        """Handle merge accept/reject actions from the extension.
+
+        Only ``all-done`` triggers cleanup. Individual ``accept``/``reject``
+        actions are tracked on the TypeScript side; the Python server
+        only needs to know when the entire merge session is finished.
+        """
+        if action == "all-done":
+            self._finish_merge()
+
+    def _finish_merge(self) -> None:
+        """End the merge session: reset state, notify clients, clean up data."""
+        with self._state_lock:
+            self._merging = False
+        self.printer.broadcast({"type": "merge_ended"})
+        _cleanup_merge_data(str(_merge_data_dir()))
 
     def _stop_task(self) -> None:
         """Signal the agent to stop.
@@ -556,7 +649,11 @@ class VSCodeServer:
         self._emit_pending_worktree()
 
     def _get_last_session(self) -> None:
-        """Load the most recent task from history and replay its events."""
+        """Load the most recent task from history and replay its events.
+
+        Also restores any pending merge session from disk so that
+        merge-diff buttons reappear after a VS Code restart.
+        """
         # RC12 fix: guard against concurrent running task
         with self._state_lock:
             if self._task_thread and self._task_thread.is_alive():
@@ -569,6 +666,17 @@ class VSCodeServer:
                 self.agent.resume_chat(task)
                 self.printer.broadcast({"type": "task_events", "events": events, "task": task})
                 self._emit_pending_worktree()
+        self._restore_pending_merge()
+
+    def _restore_pending_merge(self) -> None:
+        """Restore a pending merge session from disk if one exists.
+
+        Reads ``pending-merge.json`` from the merge data directory and
+        sends ``merge_data`` and ``merge_started`` events so the VS Code
+        extension re-opens the merge view with decorations and the
+        webview shows the accept/reject toolbar.
+        """
+        self._start_merge_session(str(_merge_data_dir() / "pending-merge.json"))
 
     def _emit_pending_worktree(self) -> None:
         """Emit ``worktree_done`` if the agent has a pending worktree branch.

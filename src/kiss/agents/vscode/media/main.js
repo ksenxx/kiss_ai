@@ -99,6 +99,9 @@
     if (inputClearBtn) inputClearBtn.style.display = inp.value ? '' : 'none';
   }
 
+  // Merge state
+  let isMerging = false;
+
   // Streaming state (mirrors browser handleOutputEvent)
   let state = mkS();
   let lastToolName = '';
@@ -805,6 +808,26 @@
         }
       }
       break;
+    case 'merge_data': {
+      var mc = mkEl('div', 'ev merge-info');
+      mc.innerHTML = '<div style="color:var(--yellow);font-weight:600;font-size:var(--fs-base);margin-bottom:4px">'
+        + '\u2731 Reviewing ' + (ev.hunk_count || 0) + ' change(s)</div>'
+        + '<div style="font-size:var(--fs-md);color:var(--dim)">Red = old lines, Green = new lines. '
+        + 'Use the merge toolbar to accept or reject changes.</div>';
+      O.appendChild(mc);
+      break;
+    }
+    case 'merge_started':
+      isMerging = true;
+      showMergeToolbar();
+      updateInputDisabled();
+      sb();
+      break;
+    case 'merge_ended':
+      isMerging = false;
+      hideMergeToolbar();
+      updateInputDisabled();
+      break;
     case 'commitMessage':
       break;
     case 'droppedPaths':
@@ -853,15 +876,16 @@
   }
 
   function updateInputDisabled() {
-    inp.disabled = isRunning;
-    if (isRunning) { clearGhost(); hideAC(); }
+    var blocked = isRunning || isMerging;
+    inp.disabled = blocked;
+    if (blocked) { clearGhost(); hideAC(); }
   }
 
   function setRunningState(running) {
     isRunning = running;
     sendBtn.style.display = running ? 'none' : 'flex';
     stopBtn.style.display = running ? 'flex' : 'none';
-    sendBtn.disabled = running;
+    sendBtn.disabled = running || isMerging;
 
     if (clearBtn) clearBtn.disabled = running;
     if (historyBtn) historyBtn.disabled = running;
@@ -989,6 +1013,52 @@
     div.textContent = msg;
     O.appendChild(div);
     sb();
+  }
+
+  // --- Merge toolbar (shown in input area, replacing textarea) ---
+  function showMergeToolbar() {
+    if (document.getElementById('merge-toolbar')) return;
+    inputContainer.style.display = 'none';
+    var bar = mkEl('div', 'merge-toolbar-card');
+    bar.id = 'merge-toolbar';
+    bar.innerHTML =
+      '<div class="merge-toolbar-header">'
+      + '<span class="merge-toolbar-title">Review Changes</span>'
+      + '<span class="merge-toolbar-hint">Red = old \u00b7 Green = new</span>'
+      + '</div>'
+      + '<div class="merge-toolbar-actions">'
+      + '<div class="merge-toolbar-row">'
+      + '<button class="merge-btn merge-nav" id="merge-prev-btn">Prev</button>'
+      + '<button class="merge-btn merge-nav" id="merge-next-btn">Next</button>'
+      + '<button class="merge-btn merge-accept" id="merge-accept-btn">Accept</button>'
+      + '<button class="merge-btn merge-reject" id="merge-reject-btn">Reject</button>'
+      + '</div>'
+      + '<div class="merge-toolbar-row">'
+      + '<button class="merge-btn merge-accept" id="merge-accept-file-btn">Accept File</button>'
+      + '<button class="merge-btn merge-reject" id="merge-reject-file-btn">Reject File</button>'
+      + '<button class="merge-btn merge-accept" id="merge-accept-all-btn">Accept Rest</button>'
+      + '<button class="merge-btn merge-reject" id="merge-reject-all-btn">Reject Rest</button>'
+      + '</div>'
+      + '</div>';
+    document.getElementById('input-area').appendChild(bar);
+    var mergeActions = {
+      'merge-accept-btn': 'accept', 'merge-reject-btn': 'reject',
+      'merge-prev-btn': 'prev', 'merge-next-btn': 'next',
+      'merge-accept-file-btn': 'accept-file', 'merge-reject-file-btn': 'reject-file',
+      'merge-accept-all-btn': 'accept-all', 'merge-reject-all-btn': 'reject-all',
+    };
+    Object.keys(mergeActions).forEach(function(id) {
+      document.getElementById(id).addEventListener('click', function() {
+        vscode.postMessage({ type: 'mergeAction', action: mergeActions[id] });
+      });
+    });
+    sb();
+  }
+
+  function hideMergeToolbar() {
+    var bar = document.getElementById('merge-toolbar');
+    if (bar) bar.remove();
+    inputContainer.style.display = '';
   }
 
   // --- Init and event listeners ---

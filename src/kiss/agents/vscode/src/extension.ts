@@ -158,6 +158,15 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   }
 
+  // Merge commands
+  for (const cmd of ['acceptChange', 'rejectChange', 'prevChange', 'nextChange', 'acceptAll', 'rejectAll', 'acceptFile', 'rejectFile'] as const) {
+    context.subscriptions.push(
+      vscode.commands.registerCommand(`kissSorcar.${cmd}`, () => {
+        tabManager!.mergeManager[cmd]();
+      })
+    );
+  }
+
   // Auto-reload when this extension's files are replaced (e.g. VSIX reinstall).
   // fs.watchFile uses stat-polling so it works even when the file is deleted
   // and recreated, which is what happens during VSIX installation.

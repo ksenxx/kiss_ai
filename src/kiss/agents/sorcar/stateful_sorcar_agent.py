@@ -146,7 +146,7 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
     if len(sys.argv) <= 1:
         print(
             "Usage: stateful_sorcar_agent [-m MODEL] [-e ENDPOINT] [-b BUDGET] "
-            "[-w WORK_DIR] [-t TASK] [-f FILE] [-n] [--chat-id ID] [-l]"
+            "[-w WORK_DIR] [-t TASK] [-f FILE] [-n] [--chat-id ID] [-l] [-p]"
         )
         sys.exit(1)
 

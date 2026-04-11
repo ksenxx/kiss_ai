@@ -8,6 +8,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import { AgentProcess, findKissProject } from './AgentProcess';
+import { MergeManager } from './MergeManager';
 import { getDefaultModel } from './DependencyInstaller';
 import { FromWebviewMessage, ToWebviewMessage, Attachment, AgentCommand } from './types';
 
@@ -61,6 +62,8 @@ export class SorcarTab {
   private _worktreeDir: string = '';
   private _worktreeActionResolve: (() => void) | null = null;
   private _worktreeProgress: vscode.Progress<{ message?: string }> | null = null;
+  private _mergeManager: MergeManager;
+  private _mergeOwner: boolean = false;
 
   /** The underlying WebviewPanel (for reveal/focus tracking). */
   get panel(): vscode.WebviewPanel { return this._panel; }
@@ -73,11 +76,12 @@ export class SorcarTab {
    * @param existingPanel - Pre-created panel from the serializer.
    * @param sessionTask - Task identifier to restore a specific session.
    */
-  constructor(extensionUri: vscode.Uri, loadLastSession: boolean, private _onDispose: (tab: SorcarTab) => void, existingPanel?: vscode.WebviewPanel, sessionTask?: string) {
+  constructor(extensionUri: vscode.Uri, loadLastSession: boolean, private _onDispose: (tab: SorcarTab) => void, mergeManager: MergeManager, existingPanel?: vscode.WebviewPanel, sessionTask?: string) {
     this._extensionUri = extensionUri;
     this._loadLastSession = loadLastSession;
     this._sessionTask = sessionTask || '';
     this._agentProcess = new AgentProcess();
+    this._mergeManager = mergeManager;
     this._selectedModel = vscode.workspace.getConfiguration('kissSorcar').get<string>('defaultModel') || getDefaultModel();
 
     // Use existing panel (restored by VSCode serializer) or create a new one
@@ -130,6 +134,10 @@ export class SorcarTab {
       }
       if (msg.type === 'task_events' && (msg as any).task) {
         this._updateTabTitle((msg as any).task);
+      }
+      if (msg.type === 'merge_data') {
+        this._mergeOwner = true;
+        this._mergeManager.openMerge((msg as any).data);
       }
       if (msg.type === 'worktree_created' || msg.type === 'worktree_done') {
         const dir = (msg as any).worktreeDir;
@@ -428,6 +436,22 @@ export class SorcarTab {
         break;
       }
 
+      case 'mergeAction': {
+        const mAction = (message as any).action;
+        if (mAction === 'accept') this._mergeManager.acceptChange();
+        else if (mAction === 'reject') this._mergeManager.rejectChange();
+        else if (mAction === 'prev') this._mergeManager.prevChange();
+        else if (mAction === 'next') this._mergeManager.nextChange();
+        else if (mAction === 'accept-all') this._mergeManager.acceptAll();
+        else if (mAction === 'reject-all') this._mergeManager.rejectAll();
+        else if (mAction === 'accept-file') this._mergeManager.acceptFile();
+        else if (mAction === 'reject-file') this._mergeManager.rejectFile();
+        else if (mAction === 'all-done') {
+          this._agentProcess.sendCommand({ type: 'mergeAction', action: 'all-done' });
+        }
+        break;
+      }
+
       case 'generateCommitMessage':
         this.generateCommitMessage();
         break;
@@ -497,6 +521,15 @@ export class SorcarTab {
         break;
     }
   }
+
+  /** Notify the webview that all merge changes have been reviewed. */
+  public sendMergeAllDone(): void {
+    this._agentProcess.sendCommand({ type: 'mergeAction', action: 'all-done' });
+  }
+
+  /** Whether this tab owns the current merge session. */
+  get isMergeOwner(): boolean { return this._mergeOwner; }
+  set isMergeOwner(v: boolean) { this._mergeOwner = v; }
 
   /** Submit a task programmatically (e.g. from runSelection command). */
   public submitTask(prompt: string): void {
@@ -742,6 +775,7 @@ export class TabManager {
   private _tabs: SorcarTab[] = [];
   private _activeTab: SorcarTab | undefined;
   private _extensionUri: vscode.Uri;
+  private _mergeManager: MergeManager;
   private _onCommitMessage = new vscode.EventEmitter<{ message: string; error?: string }>();
   /** Aggregated commit message events from all tabs. */
   public readonly onCommitMessage = this._onCommitMessage.event;
@@ -749,8 +783,20 @@ export class TabManager {
   private _commitAgent: AgentProcess | null = null;
   private _commitPending: boolean = false;
 
+  /** The shared MergeManager for registering merge commands. */
+  get mergeManager(): MergeManager { return this._mergeManager; }
+
   constructor(extensionUri: vscode.Uri) {
     this._extensionUri = extensionUri;
+    this._mergeManager = new MergeManager();
+    this._mergeManager.on('allDone', () => {
+      // Route allDone to the merge owner tab
+      const owner = this._tabs.find(t => t.isMergeOwner) ?? this._activeTab;
+      if (owner) {
+        owner.sendMergeAllDone();
+        owner.isMergeOwner = false;
+      }
+    });
   }
 
   /**
@@ -768,7 +814,7 @@ export class TabManager {
       if (this._activeTab === disposed) {
         this._activeTab = this._tabs.length > 0 ? this._tabs[this._tabs.length - 1] : undefined;
       }
-    }, existingPanel, sessionTask);
+    }, this._mergeManager, existingPanel, sessionTask);
 
     this._tabs.push(tab);
     this._activeTab = tab;
@@ -842,6 +888,7 @@ export class TabManager {
     }
     this._tabs = [];
     this._activeTab = undefined;
+    this._mergeManager.dispose();
     this._commitAgent?.dispose();
     this._commitAgent = null;
     this._onCommitMessage.dispose();

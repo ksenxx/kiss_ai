@@ -64,6 +64,38 @@
         "title": "KISS: Stop Current Task"
       },
       {
+        "command": "kissSorcar.acceptChange",
+        "title": "KISS: Accept Change"
+      },
+      {
+        "command": "kissSorcar.rejectChange",
+        "title": "KISS: Reject Change"
+      },
+      {
+        "command": "kissSorcar.prevChange",
+        "title": "KISS: Previous Change"
+      },
+      {
+        "command": "kissSorcar.nextChange",
+        "title": "KISS: Next Change"
+      },
+      {
+        "command": "kissSorcar.acceptAll",
+        "title": "KISS: Accept All Changes"
+      },
+      {
+        "command": "kissSorcar.rejectAll",
+        "title": "KISS: Reject All Changes"
+      },
+      {
+        "command": "kissSorcar.acceptFile",
+        "title": "KISS: Accept File Changes"
+      },
+      {
+        "command": "kissSorcar.rejectFile",
+        "title": "KISS: Reject File Changes"
+      },
+      {
         "command": "kissSorcar.generateCommitMessage",
         "title": "KISS: Generate Commit Message",
         "icon": "$(sparkle)"

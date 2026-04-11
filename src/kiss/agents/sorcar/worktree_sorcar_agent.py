@@ -495,7 +495,7 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
         print(
             "Usage: sorcar [-m MODEL] [-e ENDPOINT] [-b BUDGET] "
             "[-w WORK_DIR] [-t TASK] [-f FILE] [-n] [-c ID] "
-            "[-l] [--cleanup]"
+            "[-l] [--cleanup] [-p]"
         )
         sys.exit(1)
 
