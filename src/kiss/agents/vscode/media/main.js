@@ -321,27 +321,40 @@
     if (typeof hljs !== 'undefined') el.querySelectorAll('pre code').forEach(function(bl) { hljs.highlightElement(bl); });
   }
 
-  function toggleTC(el) {
-    el.nextElementSibling.classList.toggle('hide');
-    el.querySelector('.chv').classList.toggle('open');
-  }
-
   function toggleThink(el) {
     var p = el.parentElement;
     p.querySelector('.cnt').classList.toggle('hidden');
     el.querySelector('.arrow').classList.toggle('collapsed');
   }
 
+  function collapsePreview(panelEl) {
+    var prev = panelEl.querySelector('.collapse-preview');
+    if (!prev) return;
+    if (!panelEl.classList.contains('collapsed')) { prev.textContent = ''; return; }
+    var txt = '';
+    for (var i = 0; i < panelEl.children.length; i++) {
+      var ch = panelEl.children[i];
+      if (ch.classList.contains('collapse-chv') || ch === prev
+        || ch.querySelector('.collapse-chv')) continue;
+      txt += (ch.textContent || '') + ' ';
+    }
+    txt = txt.replace(/\s+/g, ' ').trim();
+    prev.textContent = txt.length > 50 ? txt.substring(0, 50) + '\u2026' : txt;
+  }
+
   function addCollapse(panelEl, headerEl) {
     panelEl.classList.add('collapsible');
     var chv = mkEl('span', 'collapse-chv');
     chv.textContent = '\u25BE';
+    var prev = mkEl('span', 'collapse-preview');
     headerEl.insertBefore(chv, headerEl.firstChild);
+    headerEl.appendChild(prev);
     headerEl.style.cursor = 'pointer';
     headerEl.style.userSelect = 'none';
     headerEl.addEventListener('click', function(e) {
       e.stopPropagation();
       panelEl.classList.toggle('collapsed');
+      collapsePreview(panelEl);
     });
   }
 
@@ -350,6 +363,7 @@
     for (var i = 0; i < panels.length; i++) {
       if (!panels[i].classList.contains('rc')) {
         panels[i].classList.add('collapsed');
+        collapsePreview(panels[i]);
       }
     }
   }
@@ -358,11 +372,13 @@
     if (!isRunning) return;
     var panels = O.querySelectorAll(':scope > .collapsible');
     for (var i = 0; i < panels.length - 1; i++) {
-      panels[i].classList.add('collapsed');
+      if (!panels[i].classList.contains('rc')) {
+        panels[i].classList.add('collapsed');
+        collapsePreview(panels[i]);
+      }
     }
   }
 
-  window.toggleTC = toggleTC;
   window.toggleThink = toggleThink;
 
   function lineDiff(a, b) {
@@ -449,13 +465,14 @@
       if (tState.bashPanel && tState.bashBuf) { tState.bashPanel.textContent += tState.bashBuf; tState.bashBuf = ''; }
       tState.bashPanel = null; tState.bashRaf = 0;
       var c = mkEl('div', 'ev tc');
-      var h = '<span class="chv open">\u25B6</span><span class="tn">' + esc(ev.name) + '</span>';
+      var hdr = mkEl('div', 'tc-h');
+      hdr.textContent = ev.name || 'Tool';
+      var b = '';
       if (ev.path) {
         var ep = esc(ev.path).replace(/"/g, '&quot;');
-        h += '<span class="tp" data-path="' + ep + '"> ' + esc(ev.path) + '</span>';
+        b += '<div class="tc-arg"><span class="tc-arg-name">path:</span> <span class="tp" data-path="' + ep + '">' + esc(ev.path) + '</span></div>';
       }
-      if (ev.description) h += '<span class="td"> ' + esc(ev.description) + '</span>';
-      var b = '';
+      if (ev.description) b += '<div class="tc-arg"><span class="tc-arg-name">description:</span> ' + esc(ev.description) + '</div>';
       if (ev.command) b += '<pre><code class="language-bash">' + esc(ev.command) + '</code></pre>';
       if (ev.content) {
         var lc = ev.lang ? 'language-' + esc(ev.lang) : '';
@@ -468,9 +485,11 @@
         if (ev.new_string !== undefined) b += '<div class="diff-new">+ ' + esc(ev.new_string) + '</div>';
       }
       if (ev.extras) { for (var k in ev.extras) b += '<div class="extra">' + esc(k) + ': ' + esc(ev.extras[k]) + '</div>'; }
-      var body = b || '<em style="color:var(--dim)">No arguments</em>';
-      c.innerHTML = '<div class="tc-h" onclick="toggleTC(this)">' + h + '</div>'
-        + '<div class="tc-b' + (b ? '' : ' hide') + '">' + body + '</div>';
+      var tcBody = mkEl('div', 'tc-b');
+      tcBody.innerHTML = b || '<em style="color:var(--dim)">No arguments</em>';
+      c.appendChild(hdr);
+      c.appendChild(tcBody);
+      addCollapse(c, hdr);
       target.appendChild(c);
       if (ev.command) {
         var bp = mkEl('div', 'bash-panel');
@@ -535,7 +554,6 @@
         + '<span>Tokens <b>' + (ev.total_tokens || 0) + '</b></span>'
         + '<span>Cost <b>' + (ev.cost || 'N/A') + '</b></span>'
         + '</div></div><div class="rc-body md-body' + (usePre ? ' pre' : '') + '">' + rb + '</div>';
-      addCollapse(rc, rc.querySelector('.rc-h'));
       hlBlock(rc);
       target.appendChild(rc);
       if (statusTokens && ev.total_tokens) statusTokens.textContent = 'Tokens: ' + ev.total_tokens;

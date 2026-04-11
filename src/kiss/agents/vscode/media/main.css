@@ -152,35 +152,30 @@ header {
 /* Tool calls */
 .tc {
   border: 1px solid var(--border); border-radius: 8px; margin: 8px 0;
-  overflow: hidden; background: var(--surface); transition: box-shadow .2s;
+  overflow: hidden; background: var(--surface);
 }
-.tc:hover { box-shadow: 0 2px 12px rgba(0,0,0,.3); }
 .tc-h {
-  padding: 7px 10px; background: var(--surface2);
-  display: flex; align-items: center; gap: 10px;
-  cursor: pointer; user-select: none; flex-wrap: wrap;
+  padding: 6px 12px; font-size: var(--fs-md);
+  font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
+  background: color-mix(in srgb, var(--accent) 8%, transparent); color: var(--accent);
 }
-.tc-h:hover { background: color-mix(in srgb, var(--border) 80%, transparent); }
-.tc-h .chv {
-  color: var(--dim); transition: transform .2s; font-size: var(--fs-base); flex-shrink: 0;
-}
-.tc-h .chv.open { transform: rotate(90deg); }
-.tn { font-weight: 600; font-size: var(--fs-base); color: var(--accent); }
+.tc-h:hover { color: var(--fg); }
+.tc.collapsed > :not(.tc-h) { display: none; }
 .tp {
-  font-size: var(--fs-base); color: var(--cyan);
+  font-size: var(--fs-md); color: var(--cyan);
   font-family: var(--vscode-editor-font-family, monospace);
-  word-break: break-all; min-width: 0;
+  word-break: break-all;
 }
 .tp[data-path] { cursor: pointer; text-decoration: underline dotted; }
 .tp[data-path]:hover { color: color-mix(in srgb, var(--accent) 82%, transparent); text-decoration: underline solid; }
-.td { font-size: var(--fs-md); color: var(--dim); font-style: italic; word-break: break-word; min-width: 0; }
 .tc-b {
-  padding: 6px 10px; max-height: 200px; overflow-y: auto;
+  padding: 8px 12px; max-height: 200px; overflow-y: auto;
   font-family: var(--vscode-editor-font-family, monospace);
-  font-size: var(--fs-md); line-height: 1.5;
+  font-size: var(--fs-md); line-height: 1.5; word-break: break-word;
 }
-.tc-b.hide { display: none; }
 .tc-b pre { margin: 4px 0; white-space: pre-wrap; word-break: break-word; }
+.tc-arg { margin: 2px 0; color: var(--dim); }
+.tc-arg-name { color: var(--accent); font-weight: 500; }
 
 /* Diff rendering */
 .diff-old {
@@ -913,15 +908,21 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
   margin-right: 4px; flex-shrink: 0;
 }
 .collapsed .collapse-chv { transform: rotate(-90deg); }
+.collapse-preview {
+  display: none; color: var(--dim); font-weight: 400;
+  margin-left: 6px; font-size: var(--fs-sm);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  text-transform: none;
+}
+.collapsed .collapse-preview { display: inline; }
 
 .llm-panel-hdr {
-  font-size: var(--fs-sm); color: var(--dim);
+  font-size: var(--fs-md); color: var(--yellow);
   display: flex; align-items: center; padding-bottom: 4px;
 }
 .llm-panel-hdr:hover { color: var(--fg); }
 .llm-panel.collapsed > :not(.llm-panel-hdr) { display: none; }
 
-.rc.collapsed .rc-body { display: none; }
 .system-prompt.collapsed .system-prompt-body,
 .prompt.collapsed .prompt-body { display: none; }
 
@@ -937,7 +938,7 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 .merge-info.collapsed .merge-info-body { display: none; }
 
 .bash-panel-hdr {
-  font-size: var(--fs-sm); color: var(--dim);
+  font-size: var(--fs-md); color: var(--accent);
   display: flex; align-items: center; padding-bottom: 4px;
   white-space: normal;
 }

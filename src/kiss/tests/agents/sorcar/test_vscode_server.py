@@ -1481,9 +1481,9 @@ class TestCollapsiblePanelsJS(unittest.TestCase):
 
     # -- Result card is collapsible --
 
-    def test_result_card_calls_add_collapse(self) -> None:
-        """Result card calls addCollapse with .rc-h as the header."""
-        assert "addCollapse(rc, rc.querySelector('.rc-h'))" in self._js
+    def test_result_card_never_collapsible(self) -> None:
+        """Result card does NOT call addCollapse — it is always visible."""
+        assert "addCollapse(rc, rc.querySelector('.rc-h'))" not in self._js
 
     # -- System prompt / Prompt are collapsible --
 
@@ -1684,8 +1684,9 @@ class TestCollapsiblePanelsCSS(unittest.TestCase):
     def test_llm_panel_collapsed_hides_children(self) -> None:
         assert ".llm-panel.collapsed > :not(.llm-panel-hdr)" in self._css
 
-    def test_rc_collapsed_hides_body(self) -> None:
-        assert ".rc.collapsed .rc-body" in self._css
+    def test_rc_never_collapsed(self) -> None:
+        """Result card has no CSS collapse rule — it is always visible."""
+        assert ".rc.collapsed .rc-body" not in self._css
 
     def test_prompt_collapsed_hides_body(self) -> None:
         assert ".system-prompt.collapsed .system-prompt-body" in self._css
@@ -2062,6 +2063,24 @@ class TestWorktreeActionExceptionHandling(unittest.TestCase):
         results = [e for e in self.events if e["type"] == "worktree_result"]
         assert len(results) == 1
         assert results[0]["success"] is True
+
+
+class TestExtractExtrasNoTruncation(unittest.TestCase):
+    """Verify extract_extras does not truncate long argument values."""
+
+    def test_long_value_not_truncated(self):
+        from kiss.core.printer import extract_extras
+        long_val = "x" * 500
+        result = extract_extras({"custom_arg": long_val})
+        assert result == {"custom_arg": long_val}
+        assert "..." not in result["custom_arg"]
+
+    def test_known_keys_excluded(self):
+        from kiss.core.printer import extract_extras
+        result = extract_extras({
+            "file_path": "/a/b.py", "command": "ls", "extra": "val",
+        })
+        assert result == {"extra": "val"}
 
 
 if __name__ == "__main__":

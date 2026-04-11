@@ -116,17 +116,9 @@ def extract_extras(tool_input: dict) -> dict[str, str]:
         tool_input: Dictionary of tool call arguments.
 
     Returns:
-        dict[str, str]: Keys not in KNOWN_KEYS mapped to their string values
-            (truncated to 200 chars).
+        dict[str, str]: Keys not in KNOWN_KEYS mapped to their string values.
     """
-    extras: dict[str, str] = {}
-    for k, v in tool_input.items():
-        if k not in KNOWN_KEYS:
-            val = str(v)
-            if len(val) > 200:
-                val = val[:200] + "..."
-            extras[k] = val
-    return extras
+    return {k: str(v) for k, v in tool_input.items() if k not in KNOWN_KEYS}
 
 
 class StreamEventParser:

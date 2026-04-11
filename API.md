@@ -580,7 +580,7 @@ ______________________________________________________________________
 **`extract_extras`** — Extract non-standard keys from a tool input dict for display.<br/>`def extract_extras(tool_input: dict) -> dict[str, str]`
 
 - `tool_input`: Dictionary of tool call arguments.
-- **Returns:** dict\[str, str\]: Keys not in KNOWN_KEYS mapped to their string values (truncated to 200 chars).
+- **Returns:** dict\[str, str\]: Keys not in KNOWN_KEYS mapped to their string values.
 
 ______________________________________________________________________
 
@@ -4862,7 +4862,7 @@ ______________________________________________________________________
 **`extract_extras`** — Extract non-standard keys from a tool input dict for display.<br/>`def extract_extras(tool_input: dict) -> dict[str, str]`
 
 - `tool_input`: Dictionary of tool call arguments.
-- **Returns:** dict\[str, str\]: Keys not in KNOWN_KEYS mapped to their string values (truncated to 200 chars).
+- **Returns:** dict\[str, str\]: Keys not in KNOWN_KEYS mapped to their string values.
 
 ______________________________________________________________________
 
