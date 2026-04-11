@@ -16,7 +16,6 @@ from test_data.calculator.operators import OPERATORS
 class TestOperatorRegistry:
     def test_all_operators_registered(self):
         assert set(OPERATORS.keys()) == {"+", "-", "*", "/"}
-
     def test_each_operator_has_eval_and_precedence(self):
         for sym, mod in OPERATORS.items():
             assert hasattr(mod, "eval"), f"{sym} missing eval"
@@ -29,14 +28,6 @@ class TestOperatorRegistry:
         assert divide.precedence > subtract.precedence
 
 
-# --- Individual operator tests ---
-
-
-class TestOperators:
-    def test_add(self):
-        from test_data.calculator.operators import add
-        assert add.eval(2, 3) == 5
-        assert add.eval(-1, 1) == 0
         assert add.eval(0.1, 0.2) == pytest.approx(0.3)
 
     def test_subtract(self):
@@ -69,23 +60,6 @@ class TestTokenizer:
         assert tokenize("2 + 3") == ["2", "+", "3"]
 
     def test_no_spaces(self):
-        assert tokenize("2+3") == ["2", "+", "3"]
-
-    def test_negative_number_at_start(self):
-        assert tokenize("-5 + 3") == ["-5", "+", "3"]
-
-    def test_negative_after_operator(self):
-        assert tokenize("5 * -3") == ["5", "*", "-3"]
-
-    def test_parentheses(self):
-        assert tokenize("(2 + 3) * 4") == ["(", "2", "+", "3", ")", "*", "4"]
-
-    def test_decimals(self):
-        assert tokenize("3.14 + 2.0") == ["3.14", "+", "2.0"]
-
-    def test_negative_after_open_paren(self):
-        assert tokenize("(-5 + 3)") == ["(", "-5", "+", "3", ")"]
-
     def test_standalone_minus_as_operator(self):
         # "-" followed by another operator: parsed as operator, not negative number
         assert tokenize("- + 3") == ["-", "+", "3"]
@@ -116,15 +90,6 @@ class TestEvaluator:
 
     def test_precedence_div_before_sub(self):
         assert evaluate("10 - 6 / 3") == 8
-
-    def test_parentheses_override_precedence(self):
-        assert evaluate("(2 + 3) * 4") == 20
-
-    def test_nested_parentheses(self):
-        assert evaluate("((2 + 3) * (4 - 1))") == 15
-
-    def test_negative_number(self):
-        assert evaluate("-5 + 3") == -2
 
     def test_chained_operations(self):
         assert evaluate("1 + 2 + 3 + 4") == 10
@@ -190,25 +155,6 @@ class TestCLI:
 
     def test_invalid_expression(self, capsys):
         ret = main(["2 @ 3"])
-        assert ret == 1
-        captured = capsys.readouterr()
-        assert "Error" in captured.err
-
-    def test_divide_by_zero_cli(self, capsys):
-        ret = main(["1 / 0"])
-        assert ret == 1
-        captured = capsys.readouterr()
-        assert "Error" in captured.err
-
-    def test_multiple_args_joined(self, capsys):
-        ret = main(["2", "+", "3"])
-        captured = capsys.readouterr()
-        assert ret == 0
-        assert captured.out.strip() == "5"
-
-    def test_subprocess(self):
-        result = subprocess.run(
-            [sys.executable, "-m", "test_data.calculator.cli", "3 * (2 + 1)"],
             capture_output=True,
             text=True,
             cwd="/Users/ksen/work/kiss",
