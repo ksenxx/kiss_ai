@@ -223,7 +223,10 @@ export class MergeManager extends EventEmitter {
     );
     if (existing) return existing;
     const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(fp));
-    return vscode.window.showTextDocument(doc, { preview: false });
+    return vscode.window.showTextDocument(doc, {
+      preview: false,
+      viewColumn: vscode.ViewColumn.One,
+    });
   }
 
   private _afterHunkAction(fp: string): void {
@@ -361,7 +364,10 @@ export class MergeManager extends EventEmitter {
 
     const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(found.fp));
     if (this._navSeq !== seq) return;  // Superseded by newer navigation
-    const ed = await vscode.window.showTextDocument(doc, { preview: false });
+    const ed = await vscode.window.showTextDocument(doc, {
+      preview: false,
+      viewColumn: vscode.ViewColumn.One,
+    });
     if (this._navSeq !== seq) return;  // Superseded by newer navigation
     const ln = this._hunkLine(found.h);
     ed.revealRange(
@@ -499,17 +505,30 @@ export class MergeManager extends EventEmitter {
     }
     this._ms = {};
 
+    let firstFileFp: string | null = null;
+
     for (const f of data.files || []) {
       const currentUri = vscode.Uri.file(f.current);
       const doc = await vscode.workspace.openTextDocument(currentUri);
-      const ed = await vscode.window.showTextDocument(doc, { preview: false });
 
+      // Revert dirty documents to match on-disk state using WorkspaceEdit
+      // (works without a visible editor, unlike workbench.action.files.revert)
       if (doc.isDirty) {
         try {
-          await vscode.commands.executeCommand(
-            'workbench.action.files.revert'
+          const diskContent = fs.readFileSync(f.current, 'utf8');
+          const lastLine = doc.lineAt(doc.lineCount - 1);
+          const revertEdit = new vscode.WorkspaceEdit();
+          revertEdit.replace(
+            doc.uri,
+            new vscode.Range(0, 0, lastLine.range.end.line, lastLine.range.end.character),
+            diskContent,
           );
+          await vscode.workspace.applyEdit(revertEdit);
         } catch { /* ignore */ }
+      }
+
+      if (!firstFileFp) {
+        firstFileFp = f.current;
       }
 
       let baseLines: string[] = [];
@@ -521,20 +540,18 @@ export class MergeManager extends EventEmitter {
         .map((h) => ({ cs: h.cs, cc: h.cc, bs: h.bs, bc: h.bc }))
         .sort((a, b) => a.cs - b.cs);
 
+      // Batch all base-line insertions into a single WorkspaceEdit.
+      // Positions use the original document coordinates (pre-insertion);
+      // VS Code adjusts them automatically when applying atomically.
+      const wsEdit = new vscode.WorkspaceEdit();
       let offset = 0;
       const processed: ProcessedHunk[] = [];
 
       for (const h of hunks) {
         const old = h.bc > 0 ? baseLines.slice(h.bs, h.bs + h.bc) : [];
         if (old.length > 0) {
-          const il = h.cs + offset;
           const txt = old.join('\n') + '\n';
-          const ok = await ed.edit((eb) => {
-            eb.insert(new vscode.Position(il, 0), txt);
-          });
-          if (!ok) {
-            console.error(`[MergeManager] ed.edit failed in _doOpenMerge (insert at line ${il})`);
-          }
+          wsEdit.insert(doc.uri, new vscode.Position(h.cs, 0), txt);
         }
         processed.push({
           os: h.cs + offset,
@@ -546,41 +563,43 @@ export class MergeManager extends EventEmitter {
         offset += old.length;
       }
 
-      this._ms[f.current] = { basePath: f.base, hunks: processed };
-      this._refreshDeco(f.current);
-
-      if (processed.length > 0) {
-        ed.revealRange(
-          new vscode.Range(processed[0].os, 0, processed[0].os, 0),
-          vscode.TextEditorRevealType.InCenter
-        );
+      if (wsEdit.size > 0) {
+        const ok = await vscode.workspace.applyEdit(wsEdit);
+        if (!ok) {
+          console.error(`[MergeManager] applyEdit failed for ${f.current}`);
+        }
       }
+
+      this._ms[f.current] = { basePath: f.base, hunks: processed };
     }
 
-    // Navigate to first hunk
-    const firstFp = Object.keys(this._ms)[0];
-    if (firstFp && this._ms[firstFp].hunks.length) {
-      this._curHunk = { fp: firstFp, idx: 0 };
+    // Show only the first changed file in the editor (viewColumn: One
+    // avoids replacing the chat webview panel which lives in a later column)
+    // and navigate to its first hunk.
+    if (firstFileFp && this._ms[firstFileFp]?.hunks.length) {
+      this._curHunk = { fp: firstFileFp, idx: 0 };
       const firstDoc = await vscode.workspace.openTextDocument(
-        vscode.Uri.file(firstFp)
+        vscode.Uri.file(firstFileFp),
       );
       const firstEd = await vscode.window.showTextDocument(firstDoc, {
         preview: false,
+        viewColumn: vscode.ViewColumn.One,
       });
-      const fh = this._ms[firstFp].hunks[0];
+      const fh = this._ms[firstFileFp].hunks[0];
       const fl = fh.nc > 0 ? fh.ns : fh.os;
       firstEd.revealRange(
         new vscode.Range(fl, 0, fl, 0),
-        vscode.TextEditorRevealType.InCenter
+        vscode.TextEditorRevealType.InCenter,
       );
       firstEd.selection = new vscode.Selection(fl, 0, fl, 0);
+      this._refreshDeco(firstFileFp);
     } else {
       this._curHunk = null;
     }
 
     const fileCount = (data.files || []).length;
     vscode.window.showInformationMessage(
-      `Reviewing ${fileCount} file(s). Red = old, Blue = new. Use Accept / Reject.`
+      `Reviewing ${fileCount} file(s). Red = old, Blue = new. Use Accept / Reject.`,
     );
   }
 

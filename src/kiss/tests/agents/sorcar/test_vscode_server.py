@@ -1028,6 +1028,264 @@ class TestServerParallelToggle(unittest.TestCase):
         assert "is_parallel" in src
 
 
+class TestMergeSession(unittest.TestCase):
+    """Tests for _start_merge_session, _handle_merge_action, _finish_merge,
+    and _restore_pending_merge."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.merge_dir = Path(self.tmpdir) / "merge_dir"
+        self.merge_dir.mkdir()
+        self.server = VSCodeServer()
+        self.server.work_dir = self.tmpdir
+        self.events: list[dict] = []
+
+        def capture_broadcast(event: dict) -> None:
+            self.events.append(event)
+
+        self.server.printer.broadcast = capture_broadcast  # type: ignore[assignment]
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _write_merge_json(self, files: list[dict] | None = None) -> str:
+        """Write a pending-merge.json and return its path."""
+        import json as _json
+
+        if files is None:
+            # Create a dummy base file and current file for a real merge
+            base = self.merge_dir / "merge-temp" / "a.txt"
+            base.parent.mkdir(parents=True, exist_ok=True)
+            base.write_text("old line\n")
+            current = Path(self.tmpdir) / "a.txt"
+            current.write_text("new line\n")
+            files = [{
+                "name": "a.txt",
+                "base": str(base),
+                "current": str(current),
+                "hunks": [{"bs": 0, "bc": 1, "cs": 0, "cc": 1}],
+            }]
+        merge_json = self.merge_dir / "pending-merge.json"
+        merge_json.write_text(_json.dumps({"branch": "HEAD", "files": files}))
+        return str(merge_json)
+
+    def test_start_merge_session_broadcasts_merge_data_and_started(self) -> None:
+        """_start_merge_session broadcasts merge_data and merge_started events."""
+        path = self._write_merge_json()
+        result = self.server._start_merge_session(path)
+        assert result is True
+        types = [e["type"] for e in self.events]
+        assert "merge_data" in types
+        assert "merge_started" in types
+        # merge_data must come before merge_started
+        assert types.index("merge_data") < types.index("merge_started")
+        # Server is now in merging state
+        assert self.server._merging is True
+
+    def test_start_merge_session_includes_hunk_count(self) -> None:
+        """merge_data event includes correct hunk_count."""
+        path = self._write_merge_json()
+        self.server._start_merge_session(path)
+        md = [e for e in self.events if e["type"] == "merge_data"][0]
+        assert md["hunk_count"] == 1
+
+    def test_start_merge_session_returns_false_for_empty_files(self) -> None:
+        """Returns False when merge JSON has no files."""
+        path = self._write_merge_json(files=[])
+        result = self.server._start_merge_session(path)
+        assert result is False
+        assert self.server._merging is False
+
+    def test_start_merge_session_returns_false_for_zero_hunks(self) -> None:
+        """Returns False when all files have zero hunks."""
+        current = Path(self.tmpdir) / "b.txt"
+        current.write_text("content\n")
+        path = self._write_merge_json(files=[{
+            "name": "b.txt",
+            "base": str(current),
+            "current": str(current),
+            "hunks": [],
+        }])
+        result = self.server._start_merge_session(path)
+        assert result is False
+
+    def test_start_merge_session_returns_false_for_missing_file(self) -> None:
+        """Returns False when merge JSON file doesn't exist."""
+        result = self.server._start_merge_session("/nonexistent/merge.json")
+        assert result is False
+        assert self.server._merging is False
+
+    def test_start_merge_session_returns_false_for_invalid_json(self) -> None:
+        """Returns False when merge JSON is malformed."""
+        bad = self.merge_dir / "bad.json"
+        bad.write_text("not json")
+        result = self.server._start_merge_session(str(bad))
+        assert result is False
+
+    def test_handle_merge_action_all_done_finishes_merge(self) -> None:
+        """mergeAction all-done calls _finish_merge and resets state."""
+        path = self._write_merge_json()
+        self.server._start_merge_session(path)
+        self.events.clear()
+
+        self.server._handle_merge_action("all-done")
+        assert self.server._merging is False
+        types = [e["type"] for e in self.events]
+        assert "merge_ended" in types
+
+    def test_handle_merge_action_unknown_is_noop(self) -> None:
+        """Non-'all-done' actions are no-ops on the Python side."""
+        self.server._merging = True
+        self.server._handle_merge_action("accept")
+        # Still merging — only all-done finishes
+        assert self.server._merging is True
+
+    def test_finish_merge_cleans_up_data_dir(self) -> None:
+        """_finish_merge removes the merge data directory."""
+        import kiss.agents.vscode.diff_merge as dm
+        import kiss.agents.vscode.server as srv_mod
+
+        orig_dm = dm._merge_data_dir
+        orig_srv = srv_mod._merge_data_dir
+        dm._merge_data_dir = lambda: self.merge_dir  # type: ignore[assignment]
+        srv_mod._merge_data_dir = lambda: self.merge_dir  # type: ignore[assignment]
+        try:
+            path = self._write_merge_json()
+            self.server._start_merge_session(path)
+            assert self.merge_dir.exists()
+            self.server._finish_merge()
+            assert not self.merge_dir.exists()
+        finally:
+            dm._merge_data_dir = orig_dm  # type: ignore[assignment]
+            srv_mod._merge_data_dir = orig_srv  # type: ignore[assignment]
+
+    def test_merging_blocks_new_tasks(self) -> None:
+        """Cannot start a task while merge review is in progress."""
+        self.server._merging = True
+        # Simulate _run_task_inner rejecting a task
+        self.server._run_task_inner({"prompt": "test", "model": "m"})
+        errors = [e for e in self.events if e["type"] == "error"]
+        assert any("merge review" in e["text"] for e in errors)
+
+    def test_restore_pending_merge_from_disk(self) -> None:
+        """_restore_pending_merge re-opens a merge session from disk."""
+        import kiss.agents.vscode.diff_merge as dm
+        import kiss.agents.vscode.server as srv_mod
+
+        orig = dm._merge_data_dir
+        dm._merge_data_dir = lambda: self.merge_dir  # type: ignore[assignment]
+        # Also patch the imported reference in server module
+        orig_srv = srv_mod._merge_data_dir
+        srv_mod._merge_data_dir = lambda: self.merge_dir  # type: ignore[assignment]
+        try:
+            self._write_merge_json()
+            self.server._restore_pending_merge()
+            assert self.server._merging is True
+            types = [e["type"] for e in self.events]
+            assert "merge_data" in types
+        finally:
+            dm._merge_data_dir = orig  # type: ignore[assignment]
+            srv_mod._merge_data_dir = orig_srv  # type: ignore[assignment]
+
+    def test_merge_command_routing(self) -> None:
+        """mergeAction command is routed through _handle_command."""
+        path = self._write_merge_json()
+        self.server._start_merge_session(path)
+        self.events.clear()
+
+        import kiss.agents.vscode.diff_merge as dm
+        import kiss.agents.vscode.server as srv_mod
+
+        orig = dm._merge_data_dir
+        dm._merge_data_dir = lambda: self.merge_dir  # type: ignore[assignment]
+        orig_srv = srv_mod._merge_data_dir
+        srv_mod._merge_data_dir = lambda: self.merge_dir  # type: ignore[assignment]
+        try:
+            self.server._handle_command({"type": "mergeAction", "action": "all-done"})
+        finally:
+            dm._merge_data_dir = orig  # type: ignore[assignment]
+            srv_mod._merge_data_dir = orig_srv  # type: ignore[assignment]
+        assert self.server._merging is False
+        types = [e["type"] for e in self.events]
+        assert "merge_ended" in types
+
+
+class TestMergeDiffViewColumn(unittest.TestCase):
+    """Verify MergeManager opens files in ViewColumn.One to preserve the
+    chat webview, and only opens one file (not all changed files)."""
+
+    _ts: str = ""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
+        cls._ts = (base / "vscode" / "src" / "MergeManager.ts").read_text()
+
+    def _get_method_body(self, method: str) -> str:
+        """Extract from method definition to the next top-level member."""
+        # Find method definition line (e.g. "  private async _doOpenMerge(")
+        import re as _re
+
+        escaped = _re.escape(method)
+        pat = _re.compile(
+            rf"^\s+(?:private\s+|public\s+)?(?:async\s+)?{escaped}\(",
+            _re.MULTILINE,
+        )
+        m = pat.search(self._ts)
+        assert m, f"Method {method} not found"
+        start = m.start()
+        # Find the next top-level member declaration
+        for marker in ("\n  private ", "\n  public ", "\n  async ", "\n  dispose"):
+            try:
+                end = self._ts.index(marker, m.end())
+                return self._ts[start:end]
+            except ValueError:
+                continue
+        return self._ts[start:]
+
+    def test_do_open_merge_uses_view_column_one(self) -> None:
+        """_doOpenMerge passes viewColumn: vscode.ViewColumn.One to showTextDocument."""
+        body = self._get_method_body("_doOpenMerge")
+        assert "viewColumn: vscode.ViewColumn.One" in body
+
+    def test_do_open_merge_has_single_show_text_document(self) -> None:
+        """_doOpenMerge calls showTextDocument only once (for the first file),
+        not inside the for loop for every file."""
+        body = self._get_method_body("_doOpenMerge")
+        count = body.count("showTextDocument")
+        assert count == 1, f"Expected 1 showTextDocument call, got {count}"
+
+    def test_do_open_merge_uses_workspace_apply_edit(self) -> None:
+        """_doOpenMerge uses WorkspaceEdit for base-line insertions instead
+        of ed.edit() which requires a visible editor."""
+        body = self._get_method_body("_doOpenMerge")
+        assert "WorkspaceEdit" in body
+        assert "applyEdit" in body
+
+    def test_navigate_hunk_uses_view_column_one(self) -> None:
+        """_navigateHunk opens files in ViewColumn.One."""
+        body = self._get_method_body("_navigateHunk")
+        assert "viewColumn: vscode.ViewColumn.One" in body
+
+    def test_get_or_open_editor_uses_view_column_one(self) -> None:
+        """_getOrOpenEditor opens files in ViewColumn.One."""
+        body = self._get_method_body("_getOrOpenEditor")
+        assert "viewColumn: vscode.ViewColumn.One" in body
+
+    def test_do_open_merge_does_not_execute_revert_command(self) -> None:
+        """_doOpenMerge no longer calls executeCommand to revert
+        (which requires the document to be the active editor)."""
+        body = self._get_method_body("_doOpenMerge")
+        # The old code used executeCommand('workbench.action.files.revert').
+        # The new code uses WorkspaceEdit to revert dirty documents.
+        assert "executeCommand" not in body
+
+    def test_do_open_merge_tracks_first_file_fp(self) -> None:
+        """_doOpenMerge tracks firstFileFp to show only one file."""
+        body = self._get_method_body("_doOpenMerge")
+        assert "firstFileFp" in body
+
+
 class TestFilePathDoesNotPopulateTaskPanel(unittest.TestCase):
     """Regression: typing a file path in the textbox and opening it must NOT
     populate the fixed task panel.
