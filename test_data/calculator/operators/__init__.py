@@ -5,7 +5,6 @@ To add a new operator, create a module with `symbol`, `precedence`, and
 """
 
 from test_data.calculator.operators import add, divide, multiply, subtract
-
 OPERATORS: dict[str, object] = {
     add.symbol: add,
     subtract.symbol: subtract,
