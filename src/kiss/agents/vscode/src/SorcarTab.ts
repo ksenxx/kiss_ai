@@ -341,7 +341,10 @@ export class SorcarTab {
             this._isRunning = false;
             const uri = vscode.Uri.file(resolved);
             const doc = await vscode.workspace.openTextDocument(uri);
-            await vscode.window.showTextDocument(doc);
+            await vscode.window.showTextDocument(doc, {
+              preview: false,
+              viewColumn: vscode.ViewColumn.One,
+            });
             return;
           }
         }
@@ -400,7 +403,10 @@ export class SorcarTab {
           if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
             const uri = vscode.Uri.file(filePath);
             const doc = await vscode.workspace.openTextDocument(uri);
-            const editor = await vscode.window.showTextDocument(doc);
+            const editor = await vscode.window.showTextDocument(doc, {
+              preview: false,
+              viewColumn: vscode.ViewColumn.One,
+            });
             if (message.line !== undefined && message.line > 0) {
               const pos = new vscode.Position(message.line - 1, 0);
               editor.selection = new vscode.Selection(pos, pos);

@@ -1286,6 +1286,45 @@ class TestMergeDiffViewColumn(unittest.TestCase):
         assert "firstFileFp" in body
 
 
+class TestSorcarTabOpensFilesInLeftSplit(unittest.TestCase):
+    """Verify SorcarTab opens files in ViewColumn.One (the left split)
+    so they never replace the chat webview panel which lives in a later column."""
+
+    _ts: str = ""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
+        cls._ts = (base / "vscode" / "src" / "SorcarTab.ts").read_text()
+
+    def _extract_case_block(self, case_label: str) -> str:
+        """Extract a switch-case block from _handleMessage."""
+        import re as _re
+
+        pat = _re.compile(
+            rf"case\s+'{_re.escape(case_label)}'",
+            _re.MULTILINE,
+        )
+        m = pat.search(self._ts)
+        assert m, f"Case '{case_label}' not found"
+        start = m.start()
+        # Find the next case or closing brace
+        next_case = _re.search(r"\n\s+case\s+'", self._ts[m.end():])
+        if next_case:
+            return self._ts[start : m.end() + next_case.start()]
+        return self._ts[start:]
+
+    def test_open_file_uses_view_column_one(self) -> None:
+        """openFile handler opens files in ViewColumn.One."""
+        block = self._extract_case_block("openFile")
+        assert "viewColumn: vscode.ViewColumn.One" in block
+
+    def test_submit_file_path_uses_view_column_one(self) -> None:
+        """submit handler (file-path shortcut) opens files in ViewColumn.One."""
+        block = self._extract_case_block("submit")
+        assert "viewColumn: vscode.ViewColumn.One" in block
+
+
 class TestFilePathDoesNotPopulateTaskPanel(unittest.TestCase):
     """Regression: typing a file path in the textbox and opening it must NOT
     populate the fixed task panel.
