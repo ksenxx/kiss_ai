@@ -184,11 +184,13 @@
         // Render end status
         if (t === 'task_error') {
           var banner = mkEl('div', 'ev tr err');
-          banner.innerHTML = '<div class="rl fail">ERROR</div>' + esc(ev.text || 'Unknown error');
+          banner.innerHTML = '<div class="rl fail">ERROR</div><div class="tr-content">' + esc(ev.text || 'Unknown error') + '</div>';
+          addCollapse(banner, banner.querySelector('.rl'));
           container.appendChild(banner);
         } else if (t === 'task_stopped') {
           var banner = mkEl('div', 'ev tr err');
-          banner.innerHTML = '<div class="rl fail">STOPPED</div>Agent execution stopped by user';
+          banner.innerHTML = '<div class="rl fail">STOPPED</div><div class="tr-content">Agent execution stopped by user</div>';
+          addCollapse(banner, banner.querySelector('.rl'));
           container.appendChild(banner);
         }
         return;
@@ -208,6 +210,10 @@
       if (t === 'tool_result' && adjLastToolName !== 'finish') { adjPendingPanel = true; }
       if (adjPendingPanel && (t === 'thinking_start' || t === 'text_delta')) {
         adjLlmPanel = mkEl('div', 'llm-panel');
+        var aLHdr = mkEl('div', 'llm-panel-hdr');
+        aLHdr.textContent = 'Response';
+        addCollapse(adjLlmPanel, aLHdr);
+        adjLlmPanel.appendChild(aLHdr);
         container.appendChild(adjLlmPanel);
         adjLlmPanelState = mkS(); adjPendingPanel = false;
       }
@@ -324,6 +330,19 @@
     p.querySelector('.cnt').classList.toggle('hidden');
     el.querySelector('.arrow').classList.toggle('collapsed');
   }
+
+  function addCollapse(panelEl, headerEl) {
+    var chv = mkEl('span', 'collapse-chv');
+    chv.textContent = '\u25BE';
+    headerEl.insertBefore(chv, headerEl.firstChild);
+    headerEl.style.cursor = 'pointer';
+    headerEl.style.userSelect = 'none';
+    headerEl.addEventListener('click', function(e) {
+      e.stopPropagation();
+      panelEl.classList.toggle('collapsed');
+    });
+  }
+
   window.toggleTC = toggleTC;
   window.toggleThink = toggleThink;
 
@@ -446,7 +465,8 @@
       var r = mkEl('div', 'ev tr' + (ev.is_error ? ' err' : ''));
       var lb = ev.is_error ? 'FAILED' : 'OK';
       var lc = ev.is_error ? 'fail' : 'ok';
-      r.innerHTML = '<div class="rl ' + lc + '">' + lb + '</div>' + esc(ev.content);
+      r.innerHTML = '<div class="rl ' + lc + '">' + lb + '</div><div class="tr-content">' + esc(ev.content) + '</div>';
+      addCollapse(r, r.querySelector('.rl'));
       target.appendChild(r); break;
     }
     case 'system_output': {
@@ -486,6 +506,7 @@
         + '<span>Tokens <b>' + (ev.total_tokens || 0) + '</b></span>'
         + '<span>Cost <b>' + (ev.cost || 'N/A') + '</b></span>'
         + '</div></div><div class="rc-body md-body' + (usePre ? ' pre' : '') + '">' + rb + '</div>';
+      addCollapse(rc, rc.querySelector('.rc-h'));
       hlBlock(rc);
       target.appendChild(rc);
       if (statusTokens && ev.total_tokens) statusTokens.textContent = 'Tokens: ' + ev.total_tokens;
@@ -500,6 +521,7 @@
       var body = typeof marked !== 'undefined' ? marked.parse(ev.text || '') : esc(ev.text || '');
       el.innerHTML = '<div class="' + cls + '-h">' + label + '</div>'
         + '<div class="' + cls + '-body md-body">' + body + '</div>';
+      addCollapse(el, el.querySelector('.' + cls + '-h'));
       hlBlock(el);
       target.appendChild(el);
       var bodyEl = el.querySelector('.' + cls + '-body');
@@ -508,7 +530,13 @@
     }
     case 'usage_info': {
       var u = mkEl('div', 'ev usage');
-      u.textContent = ev.text || '';
+      var uHdr = mkEl('div', 'usage-hdr');
+      uHdr.textContent = 'Usage';
+      var uBody = mkEl('div', 'usage-content');
+      uBody.textContent = ev.text || '';
+      u.appendChild(uHdr);
+      u.appendChild(uBody);
+      addCollapse(u, uHdr);
       target.appendChild(u);
       updateUsageMetrics(ev.text || '');
       break;
@@ -525,6 +553,10 @@
     if (t === 'tool_result' && lastToolName !== 'finish') { pendingPanel = true; }
     if (pendingPanel && (t === 'thinking_start' || t === 'text_delta')) {
       llmPanel = mkEl('div', 'llm-panel');
+      var lHdr = mkEl('div', 'llm-panel-hdr');
+      lHdr.textContent = 'Response';
+      addCollapse(llmPanel, lHdr);
+      llmPanel.appendChild(lHdr);
       O.appendChild(llmPanel);
       llmPanelState = mkS(); pendingPanel = false;
     }
@@ -810,10 +842,11 @@
       break;
     case 'merge_data': {
       var mc = mkEl('div', 'ev merge-info');
-      mc.innerHTML = '<div style="color:var(--yellow);font-weight:600;font-size:var(--fs-base);margin-bottom:4px">'
+      mc.innerHTML = '<div class="merge-info-hdr" style="color:var(--yellow);font-weight:600;font-size:var(--fs-base);margin-bottom:4px">'
         + '\u2731 Reviewing ' + (ev.hunk_count || 0) + ' change(s)</div>'
-        + '<div style="font-size:var(--fs-md);color:var(--dim)">Red = old lines, Green = new lines. '
+        + '<div class="merge-info-body" style="font-size:var(--fs-md);color:var(--dim)">Red = old lines, Green = new lines. '
         + 'Use the merge toolbar to accept or reject changes.</div>';
+      addCollapse(mc, mc.querySelector('.merge-info-hdr'));
       O.appendChild(mc);
       break;
     }
@@ -862,7 +895,8 @@
       var isErr = t === 'task_error';
       var banner = mkEl('div', 'ev tr err');
       banner.innerHTML = '<div class="rl fail">' + (isErr ? 'ERROR' : 'STOPPED') + '</div>'
-        + esc(isErr ? (ev.text || 'Unknown error') : 'Agent execution stopped by user');
+        + '<div class="tr-content">' + esc(isErr ? (ev.text || 'Unknown error') : 'Agent execution stopped by user') + '</div>';
+      addCollapse(banner, banner.querySelector('.rl'));
       O.appendChild(banner);
       setReady(isErr ? 'Error' : 'Stopped');
       break;

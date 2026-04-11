@@ -905,6 +905,35 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
   border-top: none;
 }
 
+/* ── Collapsible panels ─────────────────────────────── */
+.collapse-chv {
+  display: inline-block; transition: transform 0.2s;
+  margin-right: 4px; flex-shrink: 0;
+}
+.collapsed .collapse-chv { transform: rotate(-90deg); }
+
+.llm-panel-hdr {
+  font-size: var(--fs-sm); color: var(--dim);
+  display: flex; align-items: center; padding-bottom: 4px;
+}
+.llm-panel-hdr:hover { color: var(--fg); }
+.llm-panel.collapsed > :not(.llm-panel-hdr) { display: none; }
+
+.rc.collapsed .rc-body { display: none; }
+.system-prompt.collapsed .system-prompt-body,
+.prompt.collapsed .prompt-body { display: none; }
+
+.tr.collapsed .tr-content { display: none; }
+
+.usage-hdr {
+  font-size: var(--fs-sm); color: var(--dim);
+  display: flex; align-items: center;
+}
+.usage-hdr:hover { color: var(--fg); }
+.usage.collapsed .usage-content { display: none; }
+
+.merge-info.collapsed .merge-info-body { display: none; }
+
 /* ── Scrollbar ──────────────────────────────────────── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }

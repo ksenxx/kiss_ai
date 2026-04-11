@@ -1420,5 +1420,198 @@ class TestFilePathDoesNotPopulateTaskPanel(unittest.TestCase):
         assert "setTaskText" in body
 
 
+class TestCollapsiblePanelsJS(unittest.TestCase):
+    """Test that main.js makes panels collapsible via addCollapse."""
+
+    _js: str = ""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
+        cls._js = (base / "vscode" / "media" / "main.js").read_text()
+
+    # -- addCollapse helper function --
+
+    def test_has_add_collapse_function(self) -> None:
+        assert "function addCollapse(panelEl, headerEl)" in self._js
+
+    def test_add_collapse_inserts_chevron(self) -> None:
+        """addCollapse inserts a .collapse-chv span into the header."""
+        idx = self._js.index("function addCollapse(")
+        end = self._js.index("\n  }", idx) + 4
+        body = self._js[idx:end]
+        assert "collapse-chv" in body
+        assert "insertBefore" in body
+
+    def test_add_collapse_toggles_collapsed_class(self) -> None:
+        """Clicking the header toggles 'collapsed' class on the panel."""
+        idx = self._js.index("function addCollapse(")
+        end = self._js.index("\n  }", idx) + 4
+        body = self._js[idx:end]
+        assert "classList.toggle('collapsed')" in body
+
+    def test_add_collapse_stops_propagation(self) -> None:
+        """Click handler calls stopPropagation to avoid side effects."""
+        idx = self._js.index("function addCollapse(")
+        end = self._js.index("\n  }", idx) + 4
+        body = self._js[idx:end]
+        assert "stopPropagation" in body
+
+    # -- LLM panel is collapsible --
+
+    def test_llm_panel_has_header(self) -> None:
+        """LLM panel gets a .llm-panel-hdr div with 'Response' label."""
+        assert "llm-panel-hdr" in self._js
+        # Verify it's created with 'Response' text
+        idx = self._js.index("llm-panel-hdr")
+        block = self._js[idx : idx + 200]
+        assert "Response" in block
+
+    def test_llm_panel_calls_add_collapse(self) -> None:
+        """processOutputEvent calls addCollapse on the LLM panel."""
+        idx = self._js.index("var lHdr = mkEl('div', 'llm-panel-hdr')")
+        block = self._js[idx : idx + 200]
+        assert "addCollapse(llmPanel, lHdr)" in block
+
+    def test_adjacent_llm_panel_calls_add_collapse(self) -> None:
+        """renderAdjacentTask also calls addCollapse on LLM panels."""
+        idx = self._js.index("var aLHdr = mkEl('div', 'llm-panel-hdr')")
+        block = self._js[idx : idx + 200]
+        assert "addCollapse(adjLlmPanel, aLHdr)" in block
+
+    # -- Result card is collapsible --
+
+    def test_result_card_calls_add_collapse(self) -> None:
+        """Result card calls addCollapse with .rc-h as the header."""
+        assert "addCollapse(rc, rc.querySelector('.rc-h'))" in self._js
+
+    # -- System prompt / Prompt are collapsible --
+
+    def test_prompt_calls_add_collapse(self) -> None:
+        """System prompt and prompt panels call addCollapse."""
+        assert "addCollapse(el, el.querySelector('.' + cls + '-h'))" in self._js
+
+    # -- Tool result is collapsible --
+
+    def test_tool_result_has_tr_content_wrapper(self) -> None:
+        """Tool result content is wrapped in .tr-content div."""
+        assert "tr-content" in self._js
+
+    def test_tool_result_calls_add_collapse(self) -> None:
+        """Tool result calls addCollapse with .rl as the header."""
+        assert "addCollapse(r, r.querySelector('.rl'))" in self._js
+
+    # -- Usage info is collapsible --
+
+    def test_usage_has_header_and_content(self) -> None:
+        """Usage info has .usage-hdr and .usage-content elements."""
+        assert "usage-hdr" in self._js
+        assert "usage-content" in self._js
+
+    def test_usage_calls_add_collapse(self) -> None:
+        """Usage info calls addCollapse with the header."""
+        assert "addCollapse(u, uHdr)" in self._js
+
+    # -- Error/stopped banners are collapsible --
+
+    def test_error_banner_has_tr_content(self) -> None:
+        """Error/stopped banners wrap content in .tr-content."""
+        # Find the task_error/task_stopped handler in handleEvent
+        idx = self._js.index("case 'task_error':")
+        block = self._js[idx : idx + 500]
+        assert "tr-content" in block
+
+    def test_error_banner_calls_add_collapse(self) -> None:
+        """Error/stopped banners call addCollapse."""
+        idx = self._js.index("case 'task_error':")
+        block = self._js[idx : idx + 500]
+        assert "addCollapse(banner, banner.querySelector('.rl'))" in block
+
+    def test_adjacent_error_banners_collapsible(self) -> None:
+        """Error banners in adjacent task replay are also collapsible."""
+        idx = self._js.index("'task_error') {")
+        block = self._js[idx : idx + 600]
+        assert "tr-content" in block
+        assert "addCollapse(banner" in block
+
+    # -- Merge info is collapsible --
+
+    def test_merge_info_has_header_and_body(self) -> None:
+        """Merge info uses .merge-info-hdr and .merge-info-body."""
+        assert "merge-info-hdr" in self._js
+        assert "merge-info-body" in self._js
+
+    def test_merge_info_calls_add_collapse(self) -> None:
+        """Merge info calls addCollapse with the header."""
+        assert "addCollapse(mc, mc.querySelector('.merge-info-hdr'))" in self._js
+
+    # -- Excluded panels are NOT collapsible --
+
+    def test_followup_bar_not_collapsible(self) -> None:
+        """Followup suggestion ('Suggested next') should NOT be collapsible."""
+        # Find the followup_suggestion handler
+        idx = self._js.index("case 'followup_suggestion':")
+        end = self._js.index("break;", idx) + len("break;")
+        body = self._js[idx:end]
+        assert "addCollapse" not in body
+        assert "collapsed" not in body
+
+    def test_task_panel_not_collapsible(self) -> None:
+        """The fixed task panel (setTaskText function) should NOT be collapsible."""
+        idx = self._js.index("function setTaskText(")
+        end = self._js.index("\n  }", idx) + 4
+        body = self._js[idx:end]
+        assert "addCollapse" not in body
+        assert "collapsed" not in body
+
+
+class TestCollapsiblePanelsCSS(unittest.TestCase):
+    """Test that main.css has all required collapsible panel styles."""
+
+    _css: str = ""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
+        cls._css = (base / "vscode" / "media" / "main.css").read_text()
+
+    def test_has_collapse_chv_style(self) -> None:
+        assert ".collapse-chv" in self._css
+
+    def test_collapse_chv_rotates_when_collapsed(self) -> None:
+        assert ".collapsed .collapse-chv" in self._css
+        idx = self._css.index(".collapsed .collapse-chv")
+        block = self._css[idx : idx + 100]
+        assert "rotate(-90deg)" in block
+
+    def test_llm_panel_hdr_style(self) -> None:
+        assert ".llm-panel-hdr" in self._css
+
+    def test_llm_panel_collapsed_hides_children(self) -> None:
+        assert ".llm-panel.collapsed > :not(.llm-panel-hdr)" in self._css
+
+    def test_rc_collapsed_hides_body(self) -> None:
+        assert ".rc.collapsed .rc-body" in self._css
+
+    def test_prompt_collapsed_hides_body(self) -> None:
+        assert ".system-prompt.collapsed .system-prompt-body" in self._css
+        assert ".prompt.collapsed .prompt-body" in self._css
+
+    def test_tr_collapsed_hides_content(self) -> None:
+        assert ".tr.collapsed .tr-content" in self._css
+
+    def test_usage_hdr_style(self) -> None:
+        assert ".usage-hdr" in self._css
+
+    def test_usage_collapsed_hides_content(self) -> None:
+        assert ".usage.collapsed .usage-content" in self._css
+
+    def test_merge_info_collapsed_hides_body(self) -> None:
+        assert ".merge-info.collapsed .merge-info-body" in self._css
+
+    def test_has_collapsible_section_comment(self) -> None:
+        assert "Collapsible panels" in self._css
+
+
 if __name__ == "__main__":
     unittest.main()
