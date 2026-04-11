@@ -19,6 +19,8 @@
   --yellow: var(--vscode-terminal-ansiYellow);
   --purple: var(--vscode-terminal-ansiMagenta);
   --cyan: var(--vscode-terminal-ansiCyan);
+  --orange: color-mix(in srgb, var(--yellow) 55%, var(--red));
+  --blue: var(--vscode-terminal-ansiBlue, #569cd6);
 
   --fs-xs:  0.636rem;  /* ~8px at 13px */
   --fs-sm:  0.818rem;  /* ~11px at 13px — labels */
@@ -122,7 +124,7 @@ header {
   background: color-mix(in srgb, var(--cyan) 4%, transparent); max-height: 200px; overflow-y: auto;
 }
 .think .lbl {
-  font-size: var(--fs-md); font-weight: 600; text-transform: uppercase;
+  font-size: var(--fs-sm); font-weight: 600; text-transform: uppercase;
   letter-spacing: .04em; color: var(--cyan); margin-bottom: 4px;
   display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none;
 }
@@ -155,9 +157,9 @@ header {
   overflow: hidden; background: var(--surface);
 }
 .tc-h {
-  padding: 6px 12px; font-size: var(--fs-md);
+  padding: 6px 12px; font-size: var(--fs-sm);
   font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
-  background: color-mix(in srgb, var(--accent) 8%, transparent); color: var(--accent);
+  background: color-mix(in srgb, var(--orange) 8%, transparent); color: var(--orange);
 }
 .tc-h:hover { color: var(--fg); }
 .tc.collapsed > :not(.tc-h) { display: none; }
@@ -204,7 +206,7 @@ header {
 }
 .tr.err { background: color-mix(in srgb, var(--red) 4%, transparent); border-color: color-mix(in srgb, var(--red) 20%, transparent); }
 .tr .rl {
-  font-size: var(--fs-md); font-weight: 600; text-transform: uppercase;
+  font-size: var(--fs-sm); font-weight: 600; text-transform: uppercase;
   letter-spacing: .04em; margin-bottom: 4px;
 }
 .tr .rl.fail { color: var(--red); }
@@ -237,7 +239,7 @@ header {
   overflow: hidden; background: var(--surface);
 }
 .system-prompt-h, .prompt-h {
-  padding: 6px 12px; font-size: var(--fs-md);
+  padding: 6px 12px; font-size: var(--fs-sm);
   font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
 }
 .system-prompt-h { background: color-mix(in srgb, var(--purple) 8%, transparent); color: var(--purple); }
@@ -916,7 +918,7 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 .collapsed .collapse-preview { display: inline; }
 
 .llm-panel-hdr {
-  font-size: var(--fs-md); font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
+  font-size: var(--fs-sm); font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
   color: var(--yellow);
   display: flex; align-items: center; padding-bottom: 4px;
 }
@@ -929,7 +931,7 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 .tr.collapsed .tr-content { display: none; }
 
 .usage-hdr {
-  font-size: var(--fs-md); font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
+  font-size: var(--fs-sm); font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
   color: var(--dim);
   display: flex; align-items: center;
 }
@@ -939,8 +941,8 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 .merge-info.collapsed .merge-info-body { display: none; }
 
 .bash-panel-hdr {
-  font-size: var(--fs-md); font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
-  color: var(--accent);
+  font-size: var(--fs-sm); font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
+  color: var(--blue);
   display: flex; align-items: center; padding-bottom: 4px;
   white-space: normal;
 }
