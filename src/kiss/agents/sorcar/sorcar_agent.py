@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -10,6 +11,9 @@ from typing import Any
 
 import yaml
 
+logger = logging.getLogger(__name__)
+
+from kiss.agents.sorcar.exa_search_tool import ExaSearchTool, is_available as exa_is_available
 from kiss.agents.sorcar.persistence import _load_last_model, _save_last_model
 from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.agents.sorcar.web_use_tool import WebUseTool
@@ -25,6 +29,7 @@ class SorcarAgent(RelentlessAgent):
     def __init__(self, name: str) -> None:
         super().__init__(name)
         self.web_use_tool: WebUseTool | None = None
+        self.exa_search_tool: ExaSearchTool | None = None
         self.docker_manager: Any = None
         self._wait_for_user_callback: Callable[[str, str], None] | None = None
         self._use_web_tools: bool = True
@@ -72,6 +77,14 @@ class SorcarAgent(RelentlessAgent):
         if self._use_web_tools and self.web_use_tool is None:
             self.web_use_tool = WebUseTool(wait_for_user_callback=self._wait_for_user_callback)
             tools.extend(self.web_use_tool.get_tools())
+        if self.exa_search_tool is None and exa_is_available():
+            try:
+                self.exa_search_tool = ExaSearchTool()
+                tools.extend(self.exa_search_tool.get_tools())
+            except Exception:
+                logger.debug("Failed to initialize Exa search tool", exc_info=True)
+        elif self.exa_search_tool is not None:
+            tools.extend(self.exa_search_tool.get_tools())
         tools.append(ask_user_question)
         return tools
 
@@ -222,6 +235,7 @@ class SorcarAgent(RelentlessAgent):
             if self.web_use_tool:
                 self.web_use_tool.close()
             self.web_use_tool = None
+            self.exa_search_tool = None
             self._wait_for_user_callback = None
             self._ask_user_question_callback = None
 

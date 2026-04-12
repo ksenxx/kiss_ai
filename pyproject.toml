@@ -53,6 +53,7 @@ dependencies = [
     "filelock>=3.25.2",
     "requests>=2.28.0",
     "harbor>=0.3.0",
+    "exa-py>=2.0.0",
 ]
 
 [build-system]
@@ -110,6 +111,11 @@ gemini = [
 # Dependencies for kiss.agents.sorcar (web tools)
 sorcar = [
     "playwright>=1.40.0",
+]
+
+# Exa AI-powered web search
+exa = [
+    "exa-py>=2.0.0",
 ]
 
 docker = [
@@ -244,6 +250,10 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["harbor", "harbor.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "exa_py.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
