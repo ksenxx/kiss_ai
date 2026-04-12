@@ -1708,14 +1708,9 @@ class TestCollapsiblePanelsCSS(unittest.TestCase):
     def test_has_collapsible_section_comment(self) -> None:
         assert "Collapsible panels" in self._css
 
-    def test_bash_panel_hdr_style(self) -> None:
-        assert ".bash-panel-hdr" in self._css
-
-    def test_bash_panel_hdr_hover(self) -> None:
-        assert ".bash-panel-hdr:hover" in self._css
-
-    def test_bash_panel_collapsed_hides_content(self) -> None:
-        assert ".bash-panel.collapsed .bash-panel-content" in self._css
+    def test_bash_panel_nested_in_tc(self) -> None:
+        """Output panel nested inside tool call has no border/radius."""
+        assert ".tc > .bash-panel" in self._css
 
     def test_bash_panel_content_has_max_height(self) -> None:
         """max-height and overflow-y moved from .bash-panel to .bash-panel-content."""
@@ -1736,7 +1731,7 @@ class TestCollapsiblePanelsCSS(unittest.TestCase):
 
 
 class TestBashPanelCollapsibleJS(unittest.TestCase):
-    """Test that bash panels are made collapsible in main.js."""
+    """Test that bash panels are nested inside tool call panels in main.js."""
 
     _js: str = ""
 
@@ -1751,25 +1746,26 @@ class TestBashPanelCollapsibleJS(unittest.TestCase):
         end = self._js.index("case 'tool_result':", idx)
         return self._js[idx:end]
 
-    def test_bash_panel_has_header(self) -> None:
-        """A bash-panel-hdr div is created inside bash-panel."""
+    def test_bash_panel_no_header(self) -> None:
+        """Bash panel has no header (output panel is headerless)."""
         block = self._tool_call_block()
-        assert "bash-panel-hdr" in block
+        assert "bash-panel-hdr" not in block
 
-    def test_bash_panel_header_text_is_output(self) -> None:
-        """The bash-panel header displays 'Output'."""
+    def test_bash_panel_not_collapsible(self) -> None:
+        """Bash panel does not call addCollapse."""
         block = self._tool_call_block()
-        assert "'Output'" in block
+        # addCollapse is called on the tool call panel (c, hdr), not on bash panel
+        assert "addCollapse(bp" not in block
 
     def test_bash_panel_has_content_div(self) -> None:
         """A bash-panel-content div is created for streaming output."""
         block = self._tool_call_block()
         assert "bash-panel-content" in block
 
-    def test_bash_panel_calls_add_collapse(self) -> None:
-        """addCollapse is called on the bash-panel with the header."""
+    def test_bash_panel_nested_in_tool_call(self) -> None:
+        """Bash panel is appended inside the tool call element, not target."""
         block = self._tool_call_block()
-        assert "addCollapse(bp, bpHdr)" in block
+        assert "c.appendChild(bp)" in block
 
     def test_bash_panel_state_points_to_content(self) -> None:
         """tState.bashPanel is set to the content div, not the wrapper."""
@@ -1781,12 +1777,37 @@ class TestBashPanelCollapsibleJS(unittest.TestCase):
         block = self._tool_call_block()
         assert "bp.appendChild(bpContent)" in block
 
-    def test_bash_panel_header_appended_before_content(self) -> None:
-        """Header is appended before content within the bash-panel."""
+    def test_last_tool_call_el_tracked(self) -> None:
+        """tState.lastToolCallEl is set to the tool call element."""
         block = self._tool_call_block()
-        hdr_pos = block.index("bp.appendChild(bpHdr)")
-        content_pos = block.index("bp.appendChild(bpContent)")
-        assert hdr_pos < content_pos
+        assert "tState.lastToolCallEl = c" in block
+
+    def test_tool_result_uses_last_tool_call_el(self) -> None:
+        """tool_result appends to lastToolCallEl when available."""
+        idx = self._js.index("case 'tool_result':")
+        end = self._js.index("case 'system_output':", idx)
+        block = self._js[idx:end]
+        assert "tState.lastToolCallEl || target" in block
+
+    def test_tool_result_no_header(self) -> None:
+        """tool_result output panel has no header."""
+        idx = self._js.index("case 'tool_result':")
+        end = self._js.index("case 'system_output':", idx)
+        block = self._js[idx:end]
+        assert "bash-panel-hdr" not in block
+
+    def test_tool_result_not_collapsible(self) -> None:
+        """tool_result output panel does not call addCollapse on bash-panel."""
+        idx = self._js.index("case 'tool_result':")
+        end = self._js.index("case 'system_output':", idx)
+        block = self._js[idx:end]
+        assert "addCollapse(op" not in block
+
+    def test_mks_has_last_tool_call_el(self) -> None:
+        """mkS() initializes lastToolCallEl to null."""
+        idx = self._js.index("function mkS()")
+        block = self._js[idx : idx + 200]
+        assert "lastToolCallEl: null" in block
 
 
 class TestCollapseAllExceptResultJS(unittest.TestCase):

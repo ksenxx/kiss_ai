@@ -261,6 +261,14 @@ header {
   background: rgba(0,0,0,0.35); border: 1px solid var(--border);
   border-radius: 8px; margin: 2px 0 8px; padding: 8px 10px;
 }
+.tc > .bash-panel {
+  border: none; border-radius: 0; margin: 0;
+  border-top: 1px solid var(--border);
+}
+.tc > .tr {
+  border: none; border-radius: 0; margin: 0;
+  border-top: 1px solid var(--border);
+}
 .bash-panel-content {
   max-height: 200px; overflow-y: auto;
   font-family: var(--vscode-editor-font-family, monospace);
@@ -944,14 +952,7 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 
 .merge-info.collapsed .merge-info-body { display: none; }
 
-.bash-panel-hdr {
-  font-size: var(--fs-sm); font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
-  color: var(--blue);
-  display: flex; align-items: center; padding-bottom: 4px;
-  white-space: normal;
-}
-.bash-panel-hdr:hover { color: var(--fg); }
-.bash-panel.collapsed .bash-panel-content { display: none; }
+
 
 /* ── Scrollbar ──────────────────────────────────────── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }

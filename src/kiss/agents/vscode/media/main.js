@@ -114,7 +114,7 @@
   let timerIv = null;
   let _spinnerTimer = null;
 
-  function mkS() { return { thinkEl: null, txtEl: null, bashPanel: null, bashBuf: '', bashRaf: 0 }; }
+  function mkS() { return { thinkEl: null, txtEl: null, bashPanel: null, bashBuf: '', bashRaf: 0, lastToolCallEl: null }; }
 
   function resetOutputState() {
     state = mkS();
@@ -449,15 +449,12 @@
       c.appendChild(tcBody);
       addCollapse(c, hdr);
       target.appendChild(c);
+      tState.lastToolCallEl = c;
       if (ev.command) {
         var bp = mkEl('div', 'bash-panel');
-        var bpHdr = mkEl('div', 'bash-panel-hdr');
-        bpHdr.textContent = 'Output';
-        bp.appendChild(bpHdr);
         var bpContent = mkEl('div', 'bash-panel-content');
         bp.appendChild(bpContent);
-        addCollapse(bp, bpHdr);
-        target.appendChild(bp);
+        c.appendChild(bp);
         tState.bashPanel = bpContent;
       }
       hlBlock(c);
@@ -468,21 +465,18 @@
       var hadBash = !!tState.bashPanel;
       tState.bashPanel = null; tState.bashRaf = 0;
       if (hadBash && !ev.is_error) break;
+      var resultTarget = tState.lastToolCallEl || target;
       if (ev.is_error) {
         var r = mkEl('div', 'ev tr err');
         r.innerHTML = '<div class="rl fail">FAILED</div><div class="tr-content">' + esc(ev.content) + '</div>';
         addCollapse(r, r.querySelector('.rl'));
-        target.appendChild(r);
+        resultTarget.appendChild(r);
       } else {
         var op = mkEl('div', 'bash-panel');
-        var opHdr = mkEl('div', 'bash-panel-hdr');
-        opHdr.textContent = 'Output';
-        op.appendChild(opHdr);
         var opContent = mkEl('div', 'bash-panel-content');
         opContent.textContent = ev.content;
         op.appendChild(opContent);
-        addCollapse(op, opHdr);
-        target.appendChild(op);
+        resultTarget.appendChild(op);
       }
       break;
     }
