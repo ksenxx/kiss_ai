@@ -356,6 +356,7 @@ ______________________________________________________________________
 **`model`** — Get a model instance based on model name prefix.<br/>`def model(model_name: str, model_config: dict[str, Any] | None = None, token_callback: TokenCallback | None = None) -> Model`
 
 - `model_name`: The name of the model (with provider prefix if applicable).
+- `model_name`: The name of the model (with provider prefix if applicable). Accepts harbor-style `provider/model` names (e.g. `openai/gpt-5.4`, `anthropic/claude-opus-4-6`) — the redundant provider prefix is stripped automatically.
 - `model_config`: Optional dictionary of model configuration parameters. If it contains "base_url", routing is bypassed and an OpenAICompatibleModel is built with that base_url and optional "api_key".
 - `token_callback`: Optional callback invoked with each streamed text token.
 - **Returns:** Model: An appropriate Model instance for the specified model.
@@ -2238,6 +2239,7 @@ ______________________________________________________________________
   - `environment`: The harbor execution environment.
 
 - **run** — Run sorcar with the task instruction inside the container. Pre-reads the verifier test script and injects it into the instruction so the agent sees exact assertions. After the first sorcar run, automatically runs the tests and retries once with failure output if tests don't pass.<br/>`async run(instruction: str, environment: BaseEnvironment, context: AgentContext) -> None`
+- **run** — Run sorcar with the task instruction inside the container. After the first sorcar run, automatically runs the task's test.sh and retries once with failure output if tests don't pass.<br/>`async run(instruction: str, environment: BaseEnvironment, context: AgentContext) -> None`
 
   - `instruction`: Natural language task description from harbor.
   - `environment`: The harbor execution environment.
@@ -2296,6 +2298,7 @@ ______________________________________________________________________
 - **test_skip_windows_311**<br/>`test_skip_windows_311() -> None`
 - **test_skip_ocaml_gc**<br/>`test_skip_ocaml_gc() -> None`
 - **test_non_skip_task_runs_normally** — A normal task runs which-check, pre-reads tests, runs sorcar, then verifies.<br/>`test_non_skip_task_runs_normally() -> None`
+- **test_non_skip_task_runs_normally** — A normal task runs which-check, sorcar, then verifies.<br/>`test_non_skip_task_runs_normally() -> None`
 
 ##### `class TestSetup` — Verify setup runs the expected installation steps.
 
@@ -4709,6 +4712,7 @@ ______________________________________________________________________
 **`model`** — Get a model instance based on model name prefix.<br/>`def model(model_name: str, model_config: dict[str, Any] | None = None, token_callback: TokenCallback | None = None) -> Model`
 
 - `model_name`: The name of the model (with provider prefix if applicable).
+- `model_name`: The name of the model (with provider prefix if applicable). Accepts harbor-style `provider/model` names (e.g. `openai/gpt-5.4`, `anthropic/claude-opus-4-6`) — the redundant provider prefix is stripped automatically.
 - `model_config`: Optional dictionary of model configuration parameters. If it contains "base_url", routing is bypassed and an OpenAICompatibleModel is built with that base_url and optional "api_key".
 - `token_callback`: Optional callback invoked with each streamed text token.
 - **Returns:** Model: An appropriate Model instance for the specified model.
@@ -5121,6 +5125,7 @@ ______________________________________________________________________
   - `environment`: The harbor execution environment.
 
 - **run** — Run sorcar with the task instruction inside the container. Pre-reads the verifier test script and injects it into the instruction so the agent sees exact assertions. After the first sorcar run, automatically runs the tests and retries once with failure output if tests don't pass.<br/>`async run(instruction: str, environment: BaseEnvironment, context: AgentContext) -> None`
+- **run** — Run sorcar with the task instruction inside the container. After the first sorcar run, automatically runs the task's test.sh and retries once with failure output if tests don't pass.<br/>`async run(instruction: str, environment: BaseEnvironment, context: AgentContext) -> None`
 
   - `instruction`: Natural language task description from harbor.
   - `environment`: The harbor execution environment.
@@ -5179,6 +5184,7 @@ ______________________________________________________________________
 - **test_skip_windows_311**<br/>`test_skip_windows_311() -> None`
 - **test_skip_ocaml_gc**<br/>`test_skip_ocaml_gc() -> None`
 - **test_non_skip_task_runs_normally** — A normal task runs which-check, pre-reads tests, runs sorcar, then verifies.<br/>`test_non_skip_task_runs_normally() -> None`
+- **test_non_skip_task_runs_normally** — A normal task runs which-check, sorcar, then verifies.<br/>`test_non_skip_task_runs_normally() -> None`
 
 ##### `class TestSetup` — Verify setup runs the expected installation steps.
 
