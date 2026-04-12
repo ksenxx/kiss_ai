@@ -687,3 +687,41 @@ def _parse_text_based_tool_calls(content: str) -> list[dict[str, Any]]:
         pass
 
     return function_calls
+
+
+# Patterns that match the FULL match (fenced or inline) for stripping
+_STRIP_PATTERNS = [
+    r"```json\s*\{[^`]*?\"tool_calls\"[^`]*?\}\s*```",  # fenced json
+    r"```\s*\{[^`]*?\"tool_calls\"[^`]*?\}\s*```",  # fenced generic
+    r"\{[^{}]*\"tool_calls\"\s*:\s*\[.*?\][^{}]*\}",  # inline
+]
+
+
+def _strip_text_based_tool_calls(content: str) -> str:
+    """Remove tool_calls JSON blocks from *content*, keeping surrounding text.
+
+    Uses the same heuristics as :func:`_parse_text_based_tool_calls` so that
+    exactly the blocks that would be parsed as tool calls are stripped.
+
+    If the entire content is a single JSON object with ``tool_calls``, an
+    empty string is returned.
+
+    Args:
+        content: The full model response text.
+
+    Returns:
+        The text with tool_calls JSON removed, stripped of leading/trailing
+        whitespace.
+    """
+    # Whole-content JSON case
+    try:
+        data = json.loads(content.strip())
+        if isinstance(data, dict) and "tool_calls" in data:
+            return ""
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    result = content
+    for pattern in _STRIP_PATTERNS:
+        result = re.sub(pattern, "", result, flags=re.DOTALL)
+    return result.strip()

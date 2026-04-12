@@ -2155,6 +2155,11 @@ ______________________________________________________________________
   - **Returns:** WorktreeSorcarAgent when worktree mode is enabled, StatefulSorcarAgent otherwise.
 
 - **run** — Main loop: read commands from stdin, execute them.<br/>`run() -> None`
+  **`parse_task_tags`** — Parse `<task>...</task>` tags from *text* and return individual tasks. When the input contains one or more `<task>` blocks with non-empty content, each block's content is returned as a separate list element. If no valid `<task>` blocks are found (or all are empty/whitespace), the original *text* is returned as a single-element list so that callers can always iterate without special-casing.<br/>`def parse_task_tags(text: str) -> list[str]`
+
+- `text`: Input text potentially containing `<task>...</task>` tags.
+
+- **Returns:** List of task strings. Always contains at least one element.
 
 ______________________________________________________________________
 
@@ -5033,6 +5038,11 @@ ______________________________________________________________________
   - **Returns:** WorktreeSorcarAgent when worktree mode is enabled, StatefulSorcarAgent otherwise.
 
 - **run** — Main loop: read commands from stdin, execute them.<br/>`run() -> None`
+  **`parse_task_tags`** — Parse `<task>...</task>` tags from *text* and return individual tasks. When the input contains one or more `<task>` blocks with non-empty content, each block's content is returned as a separate list element. If no valid `<task>` blocks are found (or all are empty/whitespace), the original *text* is returned as a single-element list so that callers can always iterate without special-casing.<br/>`def parse_task_tags(text: str) -> list[str]`
+
+- `text`: Input text potentially containing `<task>...</task>` tags.
+
+- **Returns:** List of task strings. Always contains at least one element.
 
 ______________________________________________________________________
 
