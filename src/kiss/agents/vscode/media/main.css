@@ -904,6 +904,9 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 }
 
 /* ── Collapsible panels ─────────────────────────────── */
+.collapse-header {
+  display: flex; align-items: center;
+}
 .collapse-chv {
   display: inline-block; transition: transform 0.2s;
   margin-right: 4px; flex-shrink: 0; font-size: 1.15em;
@@ -914,8 +917,9 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
   margin-left: 6px; font-size: var(--fs-sm);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   text-transform: none;
+  flex: 1; min-width: 0;
 }
-.collapsed .collapse-preview { display: inline; }
+.collapsed .collapse-preview { display: block; }
 
 .llm-panel-hdr {
   font-size: var(--fs-sm); font-weight: 600; text-transform: uppercase; letter-spacing: .04em;

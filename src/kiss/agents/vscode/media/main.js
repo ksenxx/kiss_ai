@@ -289,7 +289,7 @@
       txt += (ch.textContent || '') + ' ';
     }
     txt = txt.replace(/\s+/g, ' ').trim();
-    prev.textContent = txt.length > 50 ? txt.substring(0, 50) + '\u2026' : txt;
+    prev.textContent = txt;
   }
 
   function addCollapse(panelEl, headerEl) {
@@ -299,6 +299,7 @@
     var prev = mkEl('span', 'collapse-preview');
     headerEl.insertBefore(chv, headerEl.firstChild);
     headerEl.appendChild(prev);
+    headerEl.classList.add('collapse-header');
     headerEl.style.cursor = 'pointer';
     headerEl.style.userSelect = 'none';
     headerEl.addEventListener('click', function(e) {
