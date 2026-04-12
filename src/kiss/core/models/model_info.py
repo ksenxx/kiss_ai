@@ -706,6 +706,43 @@ def get_flaky_reason(model_name: str) -> str:
     return FLAKY_MODELS.get(model_name, "")
 
 
+def _strip_provider_prefix(model_name: str) -> str:
+    """Strip harbor-style provider prefixes that duplicate KISS's own routing.
+
+    Harbor (and other frameworks) pass model names as ``provider/model``
+    (e.g. ``openai/gpt-5.4``, ``anthropic/claude-opus-4-6``,
+    ``google/gemini-2.5-pro``).  KISS already routes by the model name
+    itself (``gpt-*`` → OpenAI, ``claude-*`` → Anthropic, etc.), so the
+    provider prefix is redundant and must be stripped.
+
+    Prefixes that KISS uses for its own routing (``openrouter/``,
+    ``openai/gpt-oss``, ``meta-llama/``, etc.) are NOT stripped — they
+    are already handled by the ``model()`` dispatch chain.
+
+    Args:
+        model_name: Model name, possibly with a ``provider/`` prefix.
+
+    Returns:
+        The model name with redundant provider prefix stripped.
+    """
+    # These prefixes are redundant: KISS routes the bare name correctly.
+    strip_prefixes = ("openai/", "anthropic/", "google/")
+    for prefix in strip_prefixes:
+        if model_name.startswith(prefix):
+            bare = model_name[len(prefix):]
+            # Only strip if the bare name would be handled by KISS's own
+            # routing (starts with a known model-family prefix) and is NOT
+            # a model that legitimately uses the provider/ prefix for a
+            # different backend (e.g. openai/gpt-oss → Together).
+            if bare.startswith(_OPENAI_PREFIXES) and not bare.startswith("gpt-oss"):
+                return bare
+            if bare.startswith("claude-"):
+                return bare
+            if bare.startswith("gemini-"):
+                return bare
+    return model_name
+
+
 def model(
     model_name: str,
     model_config: dict[str, Any] | None = None,
@@ -715,6 +752,9 @@ def model(
 
     Args:
         model_name: The name of the model (with provider prefix if applicable).
+            Accepts harbor-style ``provider/model`` names (e.g.
+            ``openai/gpt-5.4``, ``anthropic/claude-opus-4-6``) — the
+            redundant provider prefix is stripped automatically.
         model_config: Optional dictionary of model configuration parameters.
             If it contains "base_url", routing is bypassed and an OpenAICompatibleModel
             is built with that base_url and optional "api_key".
@@ -726,6 +766,7 @@ def model(
     Raises:
         KISSError: If the model name is not recognized.
     """
+    model_name = _strip_provider_prefix(model_name)
     if model_config and "base_url" in model_config:
         base_url = model_config["base_url"]
         api_key = model_config.get("api_key", "")
@@ -928,6 +969,7 @@ def calculate_cost(
         float: Cost in USD, or 0.0 if pricing is not available for the model.
     """
     info = MODEL_INFO.get(model_name)
+    info = MODEL_INFO.get(model_name) or MODEL_INFO.get(_strip_provider_prefix(model_name))
     if info is None:
         return 0.0
     cr_price = (
@@ -956,6 +998,9 @@ def get_max_context_length(model_name: str) -> int:
     Returns:
         int: Maximum context length in tokens.
     """
+    stripped = _strip_provider_prefix(model_name)
     if model_name in MODEL_INFO:
         return MODEL_INFO[model_name].context_length
+    if stripped in MODEL_INFO:
+        return MODEL_INFO[stripped].context_length
     raise KeyError(f"Model '{model_name}' not found in MODEL_INFO")
