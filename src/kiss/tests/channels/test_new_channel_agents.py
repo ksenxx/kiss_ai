@@ -16,7 +16,7 @@ import pytest
 # Channel agent metadata — each entry drives parameterized tests
 # ---------------------------------------------------------------------------
 
-_CHANNEL_AGENTS = [
+_CHANNEL_AGENTS: list[dict[str, str | bool]] = [
     {
         "module": "kiss.channels.telegram_agent",
         "agent_class": "TelegramAgent",

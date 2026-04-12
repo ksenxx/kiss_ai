@@ -2066,6 +2066,66 @@ class TestWorktreeActionExceptionHandling(unittest.TestCase):
         assert results[0]["success"] is True
 
 
+class TestRunningStateDisablesButtons(unittest.TestCase):
+    """Verify setRunningState disables the correct buttons when running.
+
+    When the agent is running, 'Attach files', 'Use worktree',
+    'Use parallelism', and 'Run current file as prompt' must be disabled.
+    'Task history' and 'New chat' must NOT be disabled.
+    """
+
+    js: str
+    css: str
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
+        cls.js = (base / "vscode" / "media" / "main.js").read_text()
+        cls.css = (base / "vscode" / "media" / "main.css").read_text()
+
+    # --- JS: buttons disabled when running ---
+
+    def test_upload_btn_disabled_when_running(self) -> None:
+        assert "if (uploadBtn) uploadBtn.disabled = running" in self.js
+
+    def test_worktree_btn_disabled_when_running(self) -> None:
+        assert "if (worktreeToggleBtn) worktreeToggleBtn.disabled = running" in self.js
+
+    def test_parallel_btn_disabled_when_running(self) -> None:
+        assert "if (parallelToggleBtn) parallelToggleBtn.disabled = running" in self.js
+
+    def test_run_prompt_btn_disabled_when_running(self) -> None:
+        assert "if (runPromptBtn && running) runPromptBtn.disabled = true" in self.js
+
+    # --- JS: history and new-chat NOT disabled ---
+
+    def test_history_btn_not_disabled_when_running(self) -> None:
+        assert "historyBtn.disabled" not in self.js
+
+    def test_clear_btn_not_disabled_when_running(self) -> None:
+        assert "clearBtn.disabled" not in self.js
+
+    # --- CSS: disabled styles for correct buttons ---
+
+    def test_css_upload_btn_disabled_style(self) -> None:
+        assert "#upload-btn:disabled" in self.css
+
+    def test_css_worktree_btn_disabled_style(self) -> None:
+        assert "#worktree-toggle-btn:disabled" in self.css
+
+    def test_css_parallel_btn_disabled_style(self) -> None:
+        assert "#parallel-toggle-btn:disabled" in self.css
+
+    def test_css_run_prompt_btn_disabled_style(self) -> None:
+        assert "#run-prompt-btn:disabled" in self.css
+
+    def test_css_no_history_btn_disabled_style(self) -> None:
+        assert "#history-btn:disabled" not in self.css
+
+    def test_css_no_clear_btn_disabled_style(self) -> None:
+        assert "#clear-btn:disabled" not in self.css
+
+
 class TestExtractExtrasNoTruncation(unittest.TestCase):
     """Verify extract_extras does not truncate long argument values."""
 

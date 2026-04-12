@@ -213,5 +213,3 @@ Read service logs for clues.
   responding immediately before calling finish().
 - When the test imports a Python module, that module must be installed in
   the SYSTEM Python (pip install), not in any isolated environment.
-
-

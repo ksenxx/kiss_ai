@@ -946,8 +946,9 @@
     stopBtn.style.display = running ? 'flex' : 'none';
     sendBtn.disabled = running || isMerging;
 
-    if (clearBtn) clearBtn.disabled = running;
-    if (historyBtn) historyBtn.disabled = running;
+    if (uploadBtn) uploadBtn.disabled = running;
+    if (worktreeToggleBtn) worktreeToggleBtn.disabled = running;
+    if (parallelToggleBtn) parallelToggleBtn.disabled = running;
     if (runPromptBtn && running) runPromptBtn.disabled = true;
     updateInputDisabled();
     if (running) {
