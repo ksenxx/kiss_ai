@@ -692,7 +692,7 @@ ______________________________________________________________________
 
 ##### `class WebUseTool` — Browser automation tool using non-headless Playwright Chromium.
 
-**Constructor:** `WebUseTool(viewport: tuple[int, int] = (1280, 900), user_data_dir: str | None = _DEFAULT_USER_DATA_DIR, wait_for_user_callback: Callable[[str, str], None] | None = None, headless: bool = False, **_kwargs: Any) -> None`
+**Constructor:** `WebUseTool(viewport: tuple[int, int] = (1280, 900), user_data_dir: str | None = _DEFAULT_USER_DATA_DIR, headless: bool = False, **_kwargs: Any) -> None`
 
 - **go_to_url** — Navigate the browser to a URL and return the page accessibility tree. Use when you need to open a new page or switch pages. Special values: "tab:list" returns a list of open tabs; "tab:N" switches to tab N (0-based).<br/>`go_to_url(url: str) -> str`
 
@@ -737,15 +737,9 @@ ______________________________________________________________________
 
   - **Returns:** "Browser closed." (always, even if nothing was open).
 
-- **ask_user_browser_action** — Navigate to a URL in Chromium and wait for the user to interact. Use when the agent needs the human to interact with a webpage directly — CAPTCHAs, 2FA/MFA, OAuth flows, cookie consent, or any complex interaction the agent cannot automate. The Playwright Chromium window is non-headless so the user can see and interact with it directly.<br/>`ask_user_browser_action(instruction: str, url: str = '') -> str`
-
-  - `instruction`: What the user should do (e.g. "Please solve the CAPTCHA").
-  - `url`: Optional URL to navigate to before handing control to the user.
-  - **Returns:** Updated accessibility tree after the user signals they are done.
-
 - **get_tools** — Return callable web tools for registration with an agent.<br/>`get_tools() -> list[Callable[..., str]]`
 
-  - **Returns:** List of callables: go_to_url, click, type_text, press_key, scroll, screenshot, get_page_content, ask_user_browser_action. Does not include close.
+  - **Returns:** List of callables: go_to_url, click, type_text, press_key, scroll, screenshot, get_page_content. Does not include close.
 
 ______________________________________________________________________
 
@@ -876,7 +870,7 @@ ______________________________________________________________________
   - `attachments`: Optional file attachments for the initial prompt.
   - **Returns:** YAML string with 'success' and 'summary' keys.
 
-- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, system_prompt: str | None = None, tools: list[Callable[..., Any]] | None = None, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, web_tools: bool = True, is_parallel: bool = False, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list[Attachment] | None = None, wait_for_user_callback: Callable[[str, str], None] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> str`
+- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, system_prompt: str | None = None, tools: list[Callable[..., Any]] | None = None, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, web_tools: bool = True, is_parallel: bool = False, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list[Attachment] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> str`
 
   - `model_name`: LLM model to use. Defaults to config value.
   - `prompt_template`: Task prompt template with format placeholders.
@@ -894,7 +888,6 @@ ______________________________________________________________________
   - `verbose`: Whether to print output to console. Defaults to config verbose setting.
   - `current_editor_file`: Path to the currently active editor file, appended to prompt.
   - `attachments`: Optional file attachments (images, PDFs) for the initial prompt.
-  - `wait_for_user_callback`: Optional callback used by browser tools when user action is required.
   - `ask_user_question_callback`: Optional callback used by the ask_user_question tool to collect a text response from the user.
   - **Returns:** YAML string with 'success' and 'summary' keys.
 
@@ -905,11 +898,6 @@ ______________________________________________________________________
 - `model`: LLM model name for all parallel agents. `None` uses the default from persistence (same as :meth:`SorcarAgent.run`).
 - `work_dir`: Working directory for all parallel agents. `None` uses the default (`artifact_dir/kiss_workdir`).
 - **Returns:** List of YAML result strings in the **same order** as *tasks*. Each string contains `success` and `summary` keys. If a task raises an unhandled exception the corresponding entry is a YAML string with `success: false` and the traceback in `summary`.
-
-**`cli_wait_for_user`** — CLI callback for browser-action prompts (prints and waits for Enter).<br/>`def cli_wait_for_user(instruction: str, url: str) -> None`
-
-- `instruction`: What the user should do.
-- `url`: Current browser URL (printed if non-empty).
 
 **`cli_ask_user_question`** — CLI callback for agent questions (prints and reads from stdin).<br/>`def cli_ask_user_question(question: str) -> str`
 
@@ -1849,7 +1837,7 @@ ______________________________________________________________________
   - `attachments`: Optional file attachments for the initial prompt.
   - **Returns:** YAML string with 'success' and 'summary' keys.
 
-- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, system_prompt: str | None = None, tools: list[Callable[..., Any]] | None = None, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, web_tools: bool = True, is_parallel: bool = False, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list[Attachment] | None = None, wait_for_user_callback: Callable[[str, str], None] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> str`
+- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, system_prompt: str | None = None, tools: list[Callable[..., Any]] | None = None, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, web_tools: bool = True, is_parallel: bool = False, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list[Attachment] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> str`
 
   - `model_name`: LLM model to use. Defaults to config value.
   - `prompt_template`: Task prompt template with format placeholders.
@@ -1867,7 +1855,6 @@ ______________________________________________________________________
   - `verbose`: Whether to print output to console. Defaults to config verbose setting.
   - `current_editor_file`: Path to the currently active editor file, appended to prompt.
   - `attachments`: Optional file attachments (images, PDFs) for the initial prompt.
-  - `wait_for_user_callback`: Optional callback used by browser tools when user action is required.
   - `ask_user_question_callback`: Optional callback used by the ask_user_question tool to collect a text response from the user.
   - **Returns:** YAML string with 'success' and 'summary' keys.
 
@@ -1878,11 +1865,6 @@ ______________________________________________________________________
 - `model`: LLM model name for all parallel agents. `None` uses the default from persistence (same as :meth:`SorcarAgent.run`).
 - `work_dir`: Working directory for all parallel agents. `None` uses the default (`artifact_dir/kiss_workdir`).
 - **Returns:** List of YAML result strings in the **same order** as *tasks*. Each string contains `success` and `summary` keys. If a task raises an unhandled exception the corresponding entry is a YAML string with `success: false` and the traceback in `summary`.
-
-**`cli_wait_for_user`** — CLI callback for browser-action prompts (prints and waits for Enter).<br/>`def cli_wait_for_user(instruction: str, url: str) -> None`
-
-- `instruction`: What the user should do.
-- `url`: Current browser URL (printed if non-empty).
 
 **`cli_ask_user_question`** — CLI callback for agent questions (prints and reads from stdin).<br/>`def cli_ask_user_question(question: str) -> str`
 
@@ -1960,7 +1942,7 @@ ______________________________________________________________________
 
 ##### `class WebUseTool` — Browser automation tool using non-headless Playwright Chromium.
 
-**Constructor:** `WebUseTool(viewport: tuple[int, int] = (1280, 900), user_data_dir: str | None = _DEFAULT_USER_DATA_DIR, wait_for_user_callback: Callable[[str, str], None] | None = None, headless: bool = False, **_kwargs: Any) -> None`
+**Constructor:** `WebUseTool(viewport: tuple[int, int] = (1280, 900), user_data_dir: str | None = _DEFAULT_USER_DATA_DIR, headless: bool = False, **_kwargs: Any) -> None`
 
 - **go_to_url** — Navigate the browser to a URL and return the page accessibility tree. Use when you need to open a new page or switch pages. Special values: "tab:list" returns a list of open tabs; "tab:N" switches to tab N (0-based).<br/>`go_to_url(url: str) -> str`
 
@@ -2005,15 +1987,9 @@ ______________________________________________________________________
 
   - **Returns:** "Browser closed." (always, even if nothing was open).
 
-- **ask_user_browser_action** — Navigate to a URL in Chromium and wait for the user to interact. Use when the agent needs the human to interact with a webpage directly — CAPTCHAs, 2FA/MFA, OAuth flows, cookie consent, or any complex interaction the agent cannot automate. The Playwright Chromium window is non-headless so the user can see and interact with it directly.<br/>`ask_user_browser_action(instruction: str, url: str = '') -> str`
-
-  - `instruction`: What the user should do (e.g. "Please solve the CAPTCHA").
-  - `url`: Optional URL to navigate to before handing control to the user.
-  - **Returns:** Updated accessibility tree after the user signals they are done.
-
 - **get_tools** — Return callable web tools for registration with an agent.<br/>`get_tools() -> list[Callable[..., str]]`
 
-  - **Returns:** List of callables: go_to_url, click, type_text, press_key, scroll, screenshot, get_page_content, ask_user_browser_action. Does not include close.
+  - **Returns:** List of callables: go_to_url, click, type_text, press_key, scroll, screenshot, get_page_content. Does not include close.
 
 ______________________________________________________________________
 

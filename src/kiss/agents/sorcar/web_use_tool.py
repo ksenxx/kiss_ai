@@ -1,8 +1,7 @@
 """Browser automation tool for LLM agents using Playwright.
 
-Uses non-headless Playwright Chromium for page analysis, automation
-(accessibility tree, clicking, typing, screenshots), and user interaction
-(ask_user_browser_action).
+Uses non-headless Playwright Chromium for page analysis and automation
+(accessibility tree, clicking, typing, screenshots).
 """
 
 from __future__ import annotations
@@ -77,13 +76,11 @@ class WebUseTool:
         self,
         viewport: tuple[int, int] = (1280, 900),
         user_data_dir: str | None = _DEFAULT_USER_DATA_DIR,
-        wait_for_user_callback: Callable[[str, str], None] | None = None,
         headless: bool = False,
         **_kwargs: Any,
     ) -> None:
         self.viewport = viewport
         self.user_data_dir = user_data_dir
-        self._wait_for_user_callback = wait_for_user_callback
         self._headless = headless
         self._playwright: Any = None
         self._browser: Any = None
@@ -411,35 +408,12 @@ class WebUseTool:
         self._elements = []
         return "Browser closed."
 
-    def ask_user_browser_action(self, instruction: str, url: str = "") -> str:
-        """Navigate to a URL in Chromium and wait for the user to interact.
-
-        Use when the agent needs the human to interact with a webpage directly —
-        CAPTCHAs, 2FA/MFA, OAuth flows, cookie consent, or any complex interaction
-        the agent cannot automate. The Playwright Chromium window is non-headless
-        so the user can see and interact with it directly.
-
-        Args:
-            instruction: What the user should do (e.g. "Please solve the CAPTCHA").
-            url: Optional URL to navigate to before handing control to the user.
-
-        Returns:
-            Updated accessibility tree after the user signals they are done.
-        """
-        self._ensure_browser()
-        if url:
-            self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            self._wait_for_stable()
-        if self._wait_for_user_callback:
-            self._wait_for_user_callback(instruction, url or self._page.url)
-        return self._get_ax_tree()
-
     def get_tools(self) -> list[Callable[..., str]]:
         """Return callable web tools for registration with an agent.
 
         Returns:
             List of callables: go_to_url, click, type_text, press_key, scroll, screenshot,
-            get_page_content, ask_user_browser_action. Does not include close."""
+            get_page_content. Does not include close."""
         return [
             self.go_to_url,
             self.click,
@@ -448,5 +422,4 @@ class WebUseTool:
             self.scroll,
             self.screenshot,
             self.get_page_content,
-            self.ask_user_browser_action,
         ]

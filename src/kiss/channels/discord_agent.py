@@ -606,7 +606,7 @@ class DiscordAgent(BaseChannelAgent, StatefulSorcarAgent):
             3. Copy the bot token shown.
             4. Enable any required Privileged Gateway Intents (Message Content, etc.).
             5. Call authenticate_discord(bot_token=<the token>).
-            Use ask_user_browser_action() for any login screens.
+            Use ask_user_question() if you need user help with login screens.
 
             Returns:
                 Page content of the Discord Developer Portal to begin navigation.

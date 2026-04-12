@@ -384,7 +384,6 @@ class VSCodeServer:
                         printer=self.printer,
                         current_editor_file=active_file,
                         attachments=attachments,
-                        wait_for_user_callback=self._wait_for_user,
                         ask_user_question_callback=self._ask_user_question,
                         is_parallel=self._use_parallel,
                     )
@@ -576,15 +575,6 @@ class VSCodeServer:
             except queue.Empty:
                 if stop.is_set():
                     raise KeyboardInterrupt("Stopped while waiting for user")
-
-    def _wait_for_user(self, instruction: str, url: str) -> None:
-        """Callback for browser action prompts."""
-        self.printer.broadcast({
-            "type": "waitForUser",
-            "instruction": instruction,
-            "url": url,
-        })
-        self._await_user_response()
 
     def _ask_user_question(self, question: str) -> str:
         """Callback for agent questions."""

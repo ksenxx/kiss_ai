@@ -243,7 +243,7 @@ The `SorcarAgent` ([`src/kiss/agents/sorcar/sorcar_agent.py`](../agents/sorcar/s
 
 SorcarAgent's job is to supply **tools**, **system instructions**, and **prompt enrichment** — the three things the RelentlessAgent is deliberately agnostic about.
 
-**Tools.** The `_get_tools()` method assembles the tool list that each sub-session receives: `Bash`, `Read`, `Edit`, `Write`, and `ask_user_question` for coding work and human-in-the-loop interaction, plus a full set of browser automation tools (`go_to_url`, `click`, `type_text`, `press_key`, `scroll`, `screenshot`, `get_page_content`, `ask_user_browser_action`) from `WebUseTool`. If a Docker image is configured, all four file and shell tools are swapped for Docker-isolated variants via `DockerTools`. The tool set is combined with any extra caller-supplied tools in `perform_task()`, and from that point the RelentlessAgent's sub-session loop takes over — each fresh `KISSAgent` session receives these tools unchanged.
+**Tools.** The `_get_tools()` method assembles the tool list that each sub-session receives: `Bash`, `Read`, `Edit`, `Write`, and `ask_user_question` for coding work and human-in-the-loop interaction, plus a full set of browser automation tools (`go_to_url`, `click`, `type_text`, `press_key`, `scroll`, `screenshot`, `get_page_content`) from `WebUseTool`. If a Docker image is configured, all four file and shell tools are swapped for Docker-isolated variants via `DockerTools`. The tool set is combined with any extra caller-supplied tools in `perform_task()`, and from that point the RelentlessAgent's sub-session loop takes over — each fresh `KISSAgent` session receives these tools unchanged.
 
 ```python
 def _get_tools(self) -> list:
@@ -258,7 +258,7 @@ def _get_tools(self) -> list:
     else:
         tools = [useful_tools.Bash, useful_tools.Read, useful_tools.Edit, useful_tools.Write]
     if self._use_web_tools and self.web_use_tool is None:
-        self.web_use_tool = WebUseTool(wait_for_user_callback=self._wait_for_user_callback)
+        self.web_use_tool = WebUseTool()
         tools.extend(self.web_use_tool.get_tools())
     tools.append(ask_user_question)
     return tools

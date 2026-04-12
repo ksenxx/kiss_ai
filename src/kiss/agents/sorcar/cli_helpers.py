@@ -16,7 +16,6 @@ from kiss.agents.sorcar.persistence import _list_recent_chats
 from kiss.agents.sorcar.sorcar_agent import (
     _resolve_task,
     cli_ask_user_question,
-    cli_wait_for_user,
 )
 
 if TYPE_CHECKING:
@@ -161,7 +160,6 @@ def _build_fallback_run_kwargs() -> dict[str, Any]:
     return {
         "prompt_template": " ".join(sys.argv[1:]) if len(sys.argv) > 1 else "",
         "work_dir": str(Path(".").resolve()),
-        "wait_for_user_callback": cli_wait_for_user,
         "ask_user_question_callback": cli_ask_user_question,
     }
 
@@ -192,7 +190,6 @@ def _build_run_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "web_tools": not args.no_web,
         "is_parallel": args.parallel,
         "verbose": args.verbose,
-        "wait_for_user_callback": cli_wait_for_user,
         "ask_user_question_callback": cli_ask_user_question,
     }
 

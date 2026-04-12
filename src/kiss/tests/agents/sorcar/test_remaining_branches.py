@@ -618,43 +618,6 @@ class TestWebUseToolEmptyNameLocator:
             tool.close()
 
 
-class TestWebUseToolAskUser:
-    """Cover ask_user_browser_action (lines 451-459)."""
-
-    def test_ask_user_browser_action_with_url(self, tmp_path: Path) -> None:
-        """ask_user_browser_action navigates to url and calls callback."""
-        callback_calls: list[tuple[str, str]] = []
-
-        def callback(instruction: str, url: str) -> None:
-            callback_calls.append((instruction, url))
-
-        html_file = tmp_path / "ask.html"
-        html_file.write_text('<html><body><p>Test page</p></body></html>')
-        tool = WebUseTool(wait_for_user_callback=callback, headless=True)
-        try:
-            tool._ensure_browser()
-            result = tool.ask_user_browser_action(
-                "Do something", url=f"file://{html_file}"
-            )
-            assert len(callback_calls) == 1
-            assert callback_calls[0][0] == "Do something"
-            assert "Page:" in result
-        finally:
-            tool.close()
-
-    def test_ask_user_browser_action_no_callback(self, tmp_path: Path) -> None:
-        """ask_user_browser_action works without a callback."""
-        tool = WebUseTool(headless=True)
-        try:
-            html_file = tmp_path / "ask3.html"
-            html_file.write_text('<html><body><p>Hello</p></body></html>')
-            tool.go_to_url(f"file://{html_file}")
-            result = tool.ask_user_browser_action("Do stuff")
-            assert "Page:" in result
-        finally:
-            tool.close()
-
-
 class TestSorcarAgentAttachmentNoParts:
     """Cover the 'if parts' False branch (line 190->199)."""
 

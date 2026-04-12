@@ -27,7 +27,6 @@ class SorcarAgent(RelentlessAgent):
         super().__init__(name)
         self.web_use_tool: WebUseTool | None = None
         self.docker_manager: Any = None
-        self._wait_for_user_callback: Callable[[str, str], None] | None = None
         self._use_web_tools: bool = True
         self._is_parallel: bool = False
 
@@ -72,7 +71,7 @@ class SorcarAgent(RelentlessAgent):
         else:
             tools = [useful_tools.Bash, useful_tools.Read, useful_tools.Edit, useful_tools.Write]
         if self._use_web_tools and self.web_use_tool is None:
-            self.web_use_tool = WebUseTool(wait_for_user_callback=self._wait_for_user_callback)
+            self.web_use_tool = WebUseTool()
             tools.extend(self.web_use_tool.get_tools())
         def run_parallel(tasks: list[str], max_workers: int | None = None) -> str:
             """Run multiple independent tasks concurrently using parallel agents.
@@ -183,7 +182,6 @@ class SorcarAgent(RelentlessAgent):
         verbose: bool | None = None,
         current_editor_file: str | None = None,
         attachments: list[Attachment] | None = None,
-        wait_for_user_callback: Callable[[str, str], None] | None = None,
         ask_user_question_callback: Callable[[str], str] | None = None,
     ) -> str:
         """Run the assistant agent with coding tools and browser automation.
@@ -207,15 +205,12 @@ class SorcarAgent(RelentlessAgent):
             verbose: Whether to print output to console. Defaults to config verbose setting.
             current_editor_file: Path to the currently active editor file, appended to prompt.
             attachments: Optional file attachments (images, PDFs) for the initial prompt.
-            wait_for_user_callback: Optional callback used by browser tools when user
-                action is required.
             ask_user_question_callback: Optional callback used by the ask_user_question
                 tool to collect a text response from the user.
 
         Returns:
             YAML string with 'success' and 'summary' keys.
         """
-        self._wait_for_user_callback = wait_for_user_callback
         self._ask_user_question_callback = ask_user_question_callback
         self._use_web_tools = web_tools
         self._is_parallel = is_parallel
@@ -280,7 +275,6 @@ class SorcarAgent(RelentlessAgent):
             if self.web_use_tool:
                 self.web_use_tool.close()
             self.web_use_tool = None
-            self._wait_for_user_callback = None
             self._ask_user_question_callback = None
 
 
@@ -367,19 +361,6 @@ def _resolve_task(args: argparse.Namespace) -> str:
         task: str = args.task
         return task
     return _DEFAULT_TASK
-
-
-def cli_wait_for_user(instruction: str, url: str) -> None:
-    """CLI callback for browser-action prompts (prints and waits for Enter).
-
-    Args:
-        instruction: What the user should do.
-        url: Current browser URL (printed if non-empty).
-    """
-    print(f"\n>>> Browser action needed: {instruction}")
-    if url:
-        print(f"    Current URL: {url}")
-    input("Press Enter when done... ")
 
 
 def cli_ask_user_question(question: str) -> str:

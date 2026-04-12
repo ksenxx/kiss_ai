@@ -994,7 +994,7 @@ class SlackAgent(BaseChannelAgent, StatefulSorcarAgent):
             3. Click "Install to Workspace" and approve the installation.
             4. Copy the "Bot User OAuth Token" (starts with xoxb-).
             5. Call authenticate_slack(token=<the token>).
-            Use ask_user_browser_action() for any login or workspace-selection screens.
+            Use ask_user_question() if you need user help with login or workspace-selection screens.
 
             Returns:
                 Page content of the Slack API portal to begin navigation.

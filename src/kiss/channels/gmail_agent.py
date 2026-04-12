@@ -992,7 +992,7 @@ class GmailAgent(BaseChannelAgent, StatefulSorcarAgent):
             "If credentials.json is missing, call start_gmail_browser_setup() to open "
             "Google Cloud Console, then use browser tools to create OAuth credentials "
             "autonomously. If credentials.json exists, call authenticate_gmail() directly. "
-            "Use ask_user_browser_action() for any Google account login screens. "
+            "Use ask_user_question() if you need user help with Google account login screens. "
             "Do NOT instruct the user to do these steps manually."
         )
         kwargs["system_prompt"] = (kwargs.get("system_prompt") or "") + channel_prompt
@@ -1021,7 +1021,7 @@ class GmailAgent(BaseChannelAgent, StatefulSorcarAgent):
                     return (
                         "Not authenticated with Gmail. A credentials.json file exists. "
                         "Call authenticate_gmail() to start the OAuth2 flow. "
-                        "Use ask_user_browser_action() if a browser login is required."
+                        "Use ask_user_question() if you need user help with a browser login."
                     )
                 return (
                     "Not authenticated with Gmail. Call start_gmail_browser_setup() "
@@ -1100,7 +1100,7 @@ class GmailAgent(BaseChannelAgent, StatefulSorcarAgent):
             5. Download the JSON file and save it to:
                ~/.kiss/channels/gmail/credentials.json
             6. Call authenticate_gmail() to complete the OAuth consent flow.
-            Use ask_user_browser_action() for any Google account login screens.
+            Use ask_user_question() if you need user help with Google account login screens.
 
             Returns:
                 Page content of Google Cloud Console to begin navigation.

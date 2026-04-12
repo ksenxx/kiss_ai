@@ -72,7 +72,6 @@ export type ToWebviewMessage =
   | { type: 'history'; sessions: SessionInfo[]; offset?: number; generation?: number }
   | { type: 'files'; files: Array<{type: string; text: string}> }
   | { type: 'askUser'; question: string }
-  | { type: 'waitForUser'; instruction: string; url: string }
   | { type: 'error'; text: string }
   | { type: 'followup_suggestion'; text: string }
   | { type: 'tasks_updated' }
