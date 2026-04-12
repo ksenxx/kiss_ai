@@ -1350,6 +1350,12 @@
       askUserModal.style.display = 'none';
       askUserInput.value = '';
     });
+    askUserInput.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        askUserSubmit.click();
+      }
+    });
 
 
 
