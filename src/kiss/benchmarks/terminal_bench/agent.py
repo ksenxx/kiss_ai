@@ -247,7 +247,7 @@ class SorcarHarborAgent(BaseAgent):
         escaped = shlex.quote(task)
         return await environment.exec(
             f'export PATH="/root/.local/bin:$PATH"'
-            f" && sorcar -t {escaped} -w /app --no-web -n {model_flag}",
+            f" && sorcar -t {escaped} -w /app --no-web --no-worktree -n {model_flag}",
             user="root",
             env=env,
         )
@@ -309,6 +309,13 @@ class SorcarHarborAgent(BaseAgent):
             result = await self._run_sorcar(
                 environment, retry_task, env, model_flag
             )
+            # Re-run tests after retry to get updated metadata.
+            test_result = await environment.exec(
+                "cd /app && bash test.sh 2>&1 | tail -80",
+                user="root",
+                timeout_sec=180,
+            )
+            test_out = test_result.stdout or ""
 
         passed, total = _parse_test_counts(test_out)
         context.metadata = {

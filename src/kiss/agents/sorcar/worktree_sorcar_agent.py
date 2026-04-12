@@ -504,6 +504,10 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
         "--cleanup", action="store_true",
         help="Scan for and clean up orphaned worktree branches",
     )
+    parser.add_argument(
+        "--no-worktree", action="store_true",
+        help="Disable git worktree isolation (run directly in work_dir)",
+    )
     args = parser.parse_args()
 
     if args.list_chat_id:
@@ -511,7 +515,10 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
         sys.exit(0)
 
     work_dir = args.work_dir or str(Path(".").resolve())
-    in_git_repo = GitWorktreeOps.discover_repo(Path(work_dir)) is not None
+    in_git_repo = (
+        not args.no_worktree
+        and GitWorktreeOps.discover_repo(Path(work_dir)) is not None
+    )
 
     if args.cleanup:
         repo = GitWorktreeOps.discover_repo(Path(work_dir))
