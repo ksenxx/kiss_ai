@@ -25,6 +25,16 @@ from kiss.tests.conftest import requires_gemini_api_key
 TEST_MODEL = "gemini-2.0-flash"
 
 
+def _docker_available() -> bool:
+    try:
+        import docker
+
+        docker.from_env().ping()
+        return True
+    except Exception:
+        return False
+
+
 class TestTemplateConstants(unittest.TestCase):
     """Tests that template strings contain the expected placeholders."""
 
@@ -110,6 +120,7 @@ class TestExceptionPaths(unittest.TestCase):
 
 
 @requires_gemini_api_key
+@unittest.skipUnless(_docker_available(), "Docker daemon not available")
 class TestRunBranches(unittest.TestCase):
     def test_with_docker(self) -> None:
         """Test the Docker path in run()."""
@@ -134,6 +145,7 @@ class TestRunBranches(unittest.TestCase):
 
 
 @requires_gemini_api_key
+@unittest.skipUnless(_docker_available(), "Docker daemon not available")
 class TestDockerStreamCallback(unittest.TestCase):
     """Test that docker_stream callback is invoked (covers line 292)."""
 

@@ -151,6 +151,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "required_params": ["server_url", "password"],
         "prompt_urls": ["https://bluebubbles.app"],
         "prompt_keywords": ["BlueBubbles"],
+        "macos_only": True,
     },
     {
         "module": "kiss.channels.imessage_agent",
@@ -161,6 +162,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "required_params": [],
         "prompt_urls": [],
         "prompt_keywords": ["iMessage", "macOS"],
+        "macos_only": True,
     },
     {
         "module": "kiss.channels.nextcloud_talk_agent",
@@ -308,6 +310,8 @@ def _get_tools(agent: Any) -> dict[str, Any]:
 @pytest.mark.parametrize("info", _AUTH_AGENTS, ids=_IDS)
 def test_authenticate_rejects_empty_required_params(info: dict[str, Any]) -> None:
     """authenticate_*() returns error when required params are empty strings."""
+    if info.get("macos_only") and sys.platform != "darwin":
+        pytest.skip("macOS-only agent")
     if not info["required_params"]:
         pytest.skip("No required params for this agent")
     agent = _get_agent(info)
@@ -344,6 +348,8 @@ def test_authenticate_rejects_empty_required_params(info: dict[str, Any]) -> Non
 @pytest.mark.parametrize("info", _AUTH_AGENTS, ids=_IDS)
 def test_authenticate_rejects_whitespace_params(info: dict[str, Any]) -> None:
     """authenticate_*() rejects whitespace-only strings for required params."""
+    if info.get("macos_only") and sys.platform != "darwin":
+        pytest.skip("macOS-only agent")
     if not info["required_params"]:
         pytest.skip("No required params for this agent")
     agent = _get_agent(info)
