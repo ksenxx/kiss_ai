@@ -29,9 +29,9 @@
   You can call the public API of PageDrop with curl:
 
 ```
-curl -X POST https://pagedrop.io/api/upload \
+curl -s -X POST https://pagedrop.io/api/upload \
   -H "Content-Type: application/json" \
-  -d '{"html": "<h1>Hello World</h1>", "ttl": "3d"}'
+  -d "$(jq -n --rawfile html /path/to/html/file '{html: $html, ttl: "7d"}')"
 ```
 
 - READ large files in chunks.
