@@ -28,6 +28,7 @@ from kiss.core.models.model import (
     TokenCallback,
     _build_text_based_tools_prompt,
     _parse_text_based_tool_calls,
+    _strip_text_based_tool_calls,
 )
 
 logger = logging.getLogger(__name__)
@@ -292,14 +293,30 @@ class ClaudeCodeModel(Model):
         )
         self.model_config = config
 
+        # Buffer streamed tokens so tool-call JSON can be stripped before
+        # it reaches the UI (Thoughts panel).  After generation the clean
+        # text is emitted via the original callback and the tool-calls are
+        # returned to the framework for proper Tool-panel rendering.
+        original_callback = self.token_callback
+        buffer: list[str] = []
+        if original_callback is not None:
+            self.token_callback = buffer.append
+
         try:
             content, response = self.generate()
         finally:
             self.model_config = original_config
+            self.token_callback = original_callback
 
         # generate() appended a plain assistant message — replace it with
         # one that includes tool_calls if any were found in the text.
         function_calls = _parse_text_based_tool_calls(content)
+
+        # Emit cleaned text (without tool-call JSON) to the UI
+        if original_callback is not None:
+            cleaned = _strip_text_based_tool_calls(content) if function_calls else content
+            if cleaned:
+                original_callback(cleaned)
 
         if function_calls:
             self._replace_last_assistant_with_tool_calls(content, function_calls)
