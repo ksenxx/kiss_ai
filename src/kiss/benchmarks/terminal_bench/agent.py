@@ -260,10 +260,9 @@ class SorcarHarborAgent(BaseAgent):
     ) -> None:
         """Run sorcar with the task instruction inside the container.
 
-        Pre-reads the verifier test script and injects it into the
-        instruction so the agent sees exact assertions.  After the
-        first sorcar run, automatically runs the tests and retries
-        once with failure output if tests don't pass.
+        After the first sorcar run, automatically runs the task's
+        test.sh and retries once with failure output if tests don't
+        pass.
 
         Args:
             instruction: Natural language task description from harbor.
@@ -289,24 +288,8 @@ class SorcarHarborAgent(BaseAgent):
         model_flag = f"-m {self.model_name}" if self.model_name else ""
         env = {k: v for k in _API_KEY_VARS if (v := os.environ.get(k, ""))}
 
-        # Pre-read the verifier test script so the agent sees every
-        # assertion, expected path, and expected value up front.
-        test_read = await environment.exec(
-            "cat /tests/test_outputs.py /tests/verify.sh"
-            " /app/test.sh 2>/dev/null | head -300",
-            user="root",
-        )
-        augmented = instruction
-        if test_read.stdout and test_read.stdout.strip():
-            augmented += (
-                "\n\n## VERIFIER TEST SCRIPT (your solution MUST pass ALL"
-                " these tests — read every assertion):\n```\n"
-                + test_read.stdout.strip()
-                + "\n```"
-            )
-
         # First sorcar run.
-        result = await self._run_sorcar(environment, augmented, env, model_flag)
+        result = await self._run_sorcar(environment, instruction, env, model_flag)
 
         # Auto-verify: run the test suite and retry once on failure.
         test_result = await environment.exec(

@@ -1,3 +1,5 @@
+# DO NOT CHEAT AT ANY COST
+
 # Terminal-Bench Instructions
 
 You are solving a task inside a Docker container for Terminal-Bench 2.0.
@@ -18,27 +20,20 @@ env | grep -i -E 'path|home|lang|key|port|host|url' | head -20
 ps aux --no-headers 2>/dev/null | head -10
 ```
 
-Then read the evaluation script — this defines success:
+Then read the task description, README, and any provided test script:
 
 ```bash
 cat test.sh 2>/dev/null
-cat tests/*.py 2>/dev/null
 cat README* INSTRUCTIONS* 2>/dev/null
 find . -maxdepth 3 -type f | head -50
 ```
 
-**CRITICAL: Read the FULL test/verifier script — not just the first
-screen.** If it was truncated, re-read specific sections with
-`sed -n 'START,ENDp' FILE`. Extract a mental checklist:
+**Do not read or rely on files in `/tests/` — those are verifier scripts
+managed by the harness and may be replaced at evaluation time.**
 
-- Every assertion and its exact expected value
-- Every file path that is checked (e.g. `/app/sqlite/`, `/app/result.txt`)
-- Every command the verifier runs (e.g. `subprocess.run(["sqlite3", ...])`)
-- Every service/port it connects to (e.g. `curl localhost:8080`)
-- The exact output format expected (trailing newlines, column order, etc.)
-
-Everything you do must serve passing that eval. Do NOT skip any part of
-the test file.
+If `test.sh` exists, read it fully (not just the first screen). If it
+was truncated, re-read specific sections with `sed -n 'START,ENDp' FILE`.
+Understand what it checks so you can verify your solution locally.
 
 ## Phase 2: Plan
 
@@ -218,3 +213,5 @@ Read service logs for clues.
   responding immediately before calling finish().
 - When the test imports a Python module, that module must be installed in
   the SYSTEM Python (pip install), not in any isolated environment.
+
+

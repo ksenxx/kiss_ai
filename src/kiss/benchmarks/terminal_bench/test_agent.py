@@ -137,19 +137,18 @@ class TestRunSkipsImpossibleTasks:
         assert ctx.metadata["reason"] == "OCaml garbage collector"
 
     def test_non_skip_task_runs_normally(self) -> None:
-        """A normal task runs which-check, pre-reads tests, runs sorcar, then verifies."""
+        """A normal task runs which-check, sorcar, then verifies."""
         agent = _make_agent()
         env = FakeEnvironment()
         ctx = FakeContext()
         asyncio.run(
             agent.run("Fix the bug in /app/main.py", env, ctx),  # type: ignore[arg-type]
         )
-        # 1: which sorcar, 2: cat test scripts, 3: sorcar -t ..., 4: bash test.sh
-        assert len(env.exec_calls) == 4
+        # 1: which sorcar, 2: sorcar -t ..., 3: bash test.sh
+        assert len(env.exec_calls) == 3
         assert "which sorcar" in env.exec_calls[0]
-        assert "cat" in env.exec_calls[1]
-        assert "sorcar" in env.exec_calls[2]
-        assert "test.sh" in env.exec_calls[3]
+        assert "sorcar" in env.exec_calls[1]
+        assert "test.sh" in env.exec_calls[2]
         assert ctx.metadata is not None
         assert "skipped" not in ctx.metadata
         assert ctx.metadata["return_code"] == 0
