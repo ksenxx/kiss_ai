@@ -2,15 +2,10 @@ FROM codercom/code-server:latest
 
 USER root
 
-# Install system dependencies
+# Install system dependencies (Playwright deps added after venv setup below)
 RUN apt-get update && apt-get install -y \
     git curl wget build-essential libssl-dev \
     ca-certificates gnupg \
-    # Playwright Chromium dependencies
-    libnss3 libatk-bridge2.0-0 libgbm1 libgtk-3-0 libasound2 \
-    libxshmfence1 libx11-xcb1 libxcomposite1 libxcursor1 \
-    libxdamage1 libxfixes3 libxi6 libxrandr2 libxrender1 \
-    libxtst6 fonts-liberation xdg-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv (detect architecture)
@@ -29,11 +24,22 @@ COPY --chown=coder:coder . /home/coder/kiss
 
 USER coder
 
+# Configure git defaults (tests assume "main" as default branch)
+RUN git config --global init.defaultBranch main \
+    && git config --global user.email "coder@kiss-sorcar" \
+    && git config --global user.name "KISS Sorcar"
+
 # Set up Python environment
 WORKDIR /home/coder/kiss
 RUN uv venv --python 3.13 && uv sync
 
-# Install Playwright Chromium
+# Install Playwright Chromium system dependencies (needs root for apt-get)
+USER root
+RUN /home/coder/kiss/.venv/bin/playwright install-deps chromium \
+    && rm -rf /var/lib/apt/lists/*
+USER coder
+
+# Install Playwright Chromium browser binary
 RUN uv run playwright install chromium
 
 # Install the VSIX extension into code-server

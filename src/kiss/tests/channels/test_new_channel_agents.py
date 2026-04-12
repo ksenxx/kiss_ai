@@ -115,6 +115,7 @@ _CHANNEL_AGENTS = [
         "auth_check": "check_bluebubbles_auth",
         "auth_set": "authenticate_bluebubbles",
         "auth_clear": "clear_bluebubbles_auth",
+        "macos_only": True,
     },
     {
         "module": "kiss.channels.imessage_agent",
@@ -124,6 +125,7 @@ _CHANNEL_AGENTS = [
         "auth_check": "check_imessage_auth",
         "auth_set": "authenticate_imessage",
         "auth_clear": "clear_imessage_auth",
+        "macos_only": True,
     },
     {
         "module": "kiss.channels.nextcloud_talk_agent",
@@ -228,6 +230,8 @@ def _load(info: dict) -> tuple:
 @pytest.mark.parametrize("info", _CHANNEL_AGENTS, ids=_CHANNEL_IDS)
 def test_check_auth_unauthenticated(info: dict) -> None:
     """check_*_auth() returns a helpful message when not configured."""
+    if info.get("macos_only") and sys.platform != "darwin":
+        pytest.skip("macOS-only agent")
     mod, agent_cls, _ = _load(info)
     clear_fn = getattr(mod, "_clear_config", None)
     if clear_fn:
