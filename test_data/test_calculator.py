@@ -27,7 +27,8 @@ class TestOperatorRegistry:
         assert multiply.precedence > add.precedence
         assert divide.precedence > subtract.precedence
 
-
+    def test_add(self):
+        from test_data.calculator.operators import add
         assert add.eval(0.1, 0.2) == pytest.approx(0.3)
 
     def test_subtract(self):
@@ -60,6 +61,8 @@ class TestTokenizer:
         assert tokenize("2 + 3") == ["2", "+", "3"]
 
     def test_no_spaces(self):
+        assert tokenize("2+3") == ["2", "+", "3"]
+
     def test_standalone_minus_as_operator(self):
         # "-" followed by another operator: parsed as operator, not negative number
         assert tokenize("- + 3") == ["-", "+", "3"]
@@ -155,9 +158,15 @@ class TestCLI:
 
     def test_invalid_expression(self, capsys):
         ret = main(["2 @ 3"])
+        assert ret == 1
+        captured = capsys.readouterr()
+        assert "Error" in captured.err
+
+    def test_subprocess_integration(self):
+        result = subprocess.run(
+            [sys.executable, "-m", "test_data.calculator.cli", "4 + 5"],
             capture_output=True,
             text=True,
-            cwd="/Users/ksen/work/kiss",
         )
         assert result.returncode == 0
         assert result.stdout.strip() == "9"
