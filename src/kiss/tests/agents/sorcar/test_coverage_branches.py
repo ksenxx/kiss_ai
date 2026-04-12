@@ -288,22 +288,6 @@ class TestVSCodeServerBranches:
         server._handle_command({"type": "resumeSession", "sessionId": ""})
         # Empty sessionId - no action
 
-    def test_wait_for_user(self):
-        server, events = self._make_server()
-        server._stop_event = threading.Event()
-        server.printer._thread_local.stop_event = server._stop_event
-
-        def answer():
-            time.sleep(0.1)
-            server._user_answer_queue.put("done")
-
-        t = threading.Thread(target=answer, daemon=True)
-        t.start()
-        server._wait_for_user("do something", "http://example.com")
-        t.join(timeout=1)
-        wfu = [e for e in events if e["type"] == "waitForUser"]
-        assert len(wfu) == 1
-
     def test_ask_user_question(self):
         server, events = self._make_server()
         server._stop_event = threading.Event()

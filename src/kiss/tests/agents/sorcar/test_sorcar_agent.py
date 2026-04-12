@@ -12,7 +12,6 @@ from kiss.agents.sorcar.sorcar_agent import (
     SorcarAgent,
     _resolve_task,
     cli_ask_user_question,
-    cli_wait_for_user,
 )
 from kiss.agents.sorcar.web_use_tool import WebUseTool
 from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
@@ -154,30 +153,6 @@ class TestCliAskUserQuestion:
         assert any("What is your name?" in s for s in captured)
 
 
-class TestCliWaitForUser:
-    def test_with_url(self, monkeypatch: object) -> None:
-        import builtins
-
-        captured: list[str] = []
-        monkeypatch.setattr(builtins, "print", lambda *a, **kw: captured.append(str(a)))  # type: ignore[attr-defined]
-        monkeypatch.setattr(builtins, "input", lambda prompt="": "")  # type: ignore[attr-defined]
-
-        cli_wait_for_user("Solve the CAPTCHA", "https://example.com")
-        assert any("Solve the CAPTCHA" in s for s in captured)
-        assert any("https://example.com" in s for s in captured)
-
-    def test_no_url(self, monkeypatch: object) -> None:
-        import builtins
-
-        captured: list[str] = []
-        monkeypatch.setattr(builtins, "print", lambda *a, **kw: captured.append(str(a)))  # type: ignore[attr-defined]
-        monkeypatch.setattr(builtins, "input", lambda prompt="": "")  # type: ignore[attr-defined]
-
-        cli_wait_for_user("Do something", "")
-        assert any("Do something" in s for s in captured)
-        assert not any("Current URL" in s for s in captured)
-
-
 class TestSorcarAgentCallbackWiring:
     def test_ask_user_question_without_callback(self) -> None:
         agent = SorcarAgent("test")
@@ -196,9 +171,6 @@ class TestSorcarAgentCallbackWiring:
         original_perform = parent_class.perform_task
         captured: dict[str, object] = {}
 
-        def wait_callback(instruction: str, url: str) -> None:
-            del instruction, url
-
         def ask_callback(question: str) -> str:
             return f"UI: {question}"
 
@@ -206,7 +178,6 @@ class TestSorcarAgentCallbackWiring:
             self: object, tools: list, attachments: list | None = None,
         ) -> str:
             del self, attachments
-            captured["wait"] = getattr(agent, "_wait_for_user_callback", None)
             captured["ask"] = getattr(agent, "_ask_user_question_callback", None)
             callables = [t for t in tools if callable(t)]
             ask_tool = next(t for t in callables if t.__name__ == "ask_user_question")
@@ -217,17 +188,14 @@ class TestSorcarAgentCallbackWiring:
         try:
             result = agent.run(
                 prompt_template="task",
-                wait_for_user_callback=wait_callback,
                 ask_user_question_callback=ask_callback,
             )
         finally:
             parent_class.perform_task = original_perform  # type: ignore[method-assign]
 
         assert "success: true" in result
-        assert captured["wait"] is wait_callback
         assert captured["ask"] is ask_callback
         assert captured["answer"] == "UI: hello"
-        assert getattr(agent, "_wait_for_user_callback", None) is None
         assert getattr(agent, "_ask_user_question_callback", None) is None
         assert agent.web_use_tool is None
 
