@@ -930,28 +930,6 @@
     setTimeout(function() { inp.focus(); }, 300);
   }
 
-  // --- Clear chat ---
-  function resetChatUI() {
-    clearOutput();
-    resetOutputState();
-    resetAdjacentState();
-    currentChatId = '';
-    currentTaskName = '';
-    removeSpinner();
-    clearWorktreeBar();
-    clearUsageMetrics();
-    setTaskText('');
-    if (welcome) {
-      welcome.style.display = '';
-      O.appendChild(welcome);
-    }
-    updateActiveTabTitle('new chat');
-  }
-
-  function doClearChat() {
-    createNewTab();
-  }
-
   // --- Refresh history ---
   function resetHistoryPagination() {
     historyOffset = 0;
@@ -973,7 +951,12 @@
     switch (t) {
     case 'status':
       if (ev.running) {
-        runningTabId = activeTabId;
+        // Only set runningTabId on the FIRST status:running:true.
+        // The TS _startTask sends one immediately (correct activeTabId),
+        // then Python sends a second one via the agent process pipe.
+        // If the user switches tabs before the second one arrives,
+        // activeTabId would be the wrong tab.  Guard with < 0 check.
+        if (runningTabId < 0) runningTabId = activeTabId;
       } else {
         runningTabId = -1;
       }
@@ -1002,8 +985,7 @@
       showSpinner();
       break;
     case 'clearChat':
-      resetChatUI();
-      vscode.postMessage({ type: 'getWelcomeSuggestions' });
+      createNewTab();
       break;
     case 'followup_suggestion': {
       var fu = mkEl('div', 'followup-bar');
