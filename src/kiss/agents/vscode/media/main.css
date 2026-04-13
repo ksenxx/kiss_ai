@@ -95,9 +95,17 @@ header {
   padding: 5px 8px;
   display: flex;
   align-items: center;
+  gap: 3px;
+  font-size: var(--fs-base);
   transition: color 0.15s;
 }
 #tab-bar > #history-btn:hover { color: var(--fg); }
+#tab-bar > #history-btn .history-chevron {
+  transition: transform 0.2s ease;
+}
+#tab-bar > #history-btn.open .history-chevron {
+  transform: rotate(90deg);
+}
 #tab-list::-webkit-scrollbar { display: none; }
 .chat-tab {
   display: flex;
@@ -704,7 +712,7 @@ header {
   background: var(--bg2);
   border-left: 1px solid var(--border);
   transform: translateX(100%);
-  transition: transform 0.25s ease;
+  transition: transform 0.2s ease;
   z-index: 200;
   padding: 16px;
   overflow: hidden;
@@ -714,7 +722,7 @@ header {
 #sidebar.open { transform: translateX(0); }
 #sidebar-overlay {
   position: fixed; inset: 0; background: rgba(0,0,0,0.5);
-  z-index: 199; opacity: 0; pointer-events: none; transition: opacity 0.25s;
+  z-index: 199; opacity: 0; pointer-events: none; transition: opacity 0.2s ease;
 }
 #sidebar-overlay.open { opacity: 1; pointer-events: auto; }
 #sidebar-close {

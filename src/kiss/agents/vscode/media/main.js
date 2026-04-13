@@ -1490,10 +1490,15 @@
       });
     }
     historyBtn.addEventListener('click', function() {
-      resetHistoryPagination();
-      sidebar.classList.add('open');
-      sidebarOverlay.classList.add('open');
-      vscode.postMessage({ type: 'getHistory', generation: historyGeneration });
+      if (sidebar.classList.contains('open')) {
+        closeSidebar();
+      } else {
+        resetHistoryPagination();
+        sidebar.classList.add('open');
+        sidebarOverlay.classList.add('open');
+        historyBtn.classList.add('open');
+        vscode.postMessage({ type: 'getHistory', generation: historyGeneration });
+      }
     });
     sidebarClose.addEventListener('click', closeSidebar);
     sidebarOverlay.addEventListener('click', closeSidebar);
@@ -1777,6 +1782,7 @@
   function closeSidebar() {
     sidebar.classList.remove('open');
     sidebarOverlay.classList.remove('open');
+    historyBtn.classList.remove('open');
   }
 
   function getAtCtx() {
