@@ -104,7 +104,7 @@ header {
   transition: transform 0.2s ease;
 }
 #tab-bar > #history-btn.open .history-chevron {
-  transform: rotate(90deg);
+  transform: rotate(-90deg);
 }
 #tab-list::-webkit-scrollbar { display: none; }
 .chat-tab {
