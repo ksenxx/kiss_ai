@@ -15,7 +15,7 @@ Fixed Python races:
   RC9 — _recording_id incremented inside _state_lock
   RC12 — _get_last_session guarded against concurrent running task
   RC13 — status running:false broadcast inside _state_lock
-  RC14 — _periodic_event_flush reads _last_task_id under _state_lock
+  RC14 — _periodic_event_flush reads _last_task_id (lock removed — redundant)
 """
 
 import inspect
@@ -520,13 +520,18 @@ class TestRC13StatusBroadcastInsideLock(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-class TestRC14PeriodicFlushReadsUnderLock(unittest.TestCase):
-    """RC14 fix: _periodic_event_flush reads _last_task_id under _state_lock."""
+class TestRC14PeriodicFlushReadsTaskId(unittest.TestCase):
+    """RC14: _periodic_event_flush reads _last_task_id directly (lockless).
 
-    def test_reads_under_lock(self) -> None:
-        """Verify _periodic_event_flush reads _last_task_id under _state_lock."""
+    The field is never written under _state_lock, so holding _state_lock
+    on the read provided zero synchronization.  Removed redundant lock.
+    """
+
+    def test_reads_task_id_without_lock(self) -> None:
+        """Verify _periodic_event_flush reads _last_task_id without _state_lock."""
         source = inspect.getsource(VSCodeServer._periodic_event_flush)
-        assert "_state_lock" in source
+        assert "_last_task_id" in source
+        assert "_state_lock" not in source
 
 
 # ---------------------------------------------------------------------------

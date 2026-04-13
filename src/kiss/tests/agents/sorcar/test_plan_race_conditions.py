@@ -1,7 +1,7 @@
 """Tests for race conditions documented in PLAN.md.
 
 Tests verify fixes for:
-- P3:  _complete_seq_latest TOCTOU (fixed with _complete_lock)
+- P3:  _complete_seq_latest stale-request guard (lockless — single writer/reader)
 - P8:  _bash_flush_timer duplicate flush (fixed by draining in lock)
 - P11: _last_active_file written under _state_lock in _run_task_inner
 - P12: Stale followup suppressed by _task_generation counter
@@ -163,33 +163,25 @@ class TestP14StartRecordingInsideTry(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# P3 — _complete_seq_latest TOCTOU fixed with _complete_lock
+# P3 — _complete_seq_latest stale-request guard (lockless)
 # ---------------------------------------------------------------------------
 
 class TestP3CompleteSeqTOCTOU(unittest.TestCase):
     """P3: _complete_seq_latest stale-request check.
 
-    The fix uses _complete_lock to check seq before doing work,
-    preventing stale requests from wasting computation.
+    Single writer (main thread) and single reader (worker thread) make a
+    lock redundant.  The seq guard itself still prevents stale requests.
     """
 
-    def test_complete_checks_seq_under_lock(self) -> None:
-        """Verify _complete() checks seq under _complete_lock before processing."""
+    def test_complete_checks_seq_before_processing(self) -> None:
+        """Verify _complete() checks seq against _complete_seq_latest."""
         source = inspect.getsource(VSCodeServer._complete)
-        assert "_complete_lock" in source
-        lock_idx = source.find("with self._complete_lock")
-        seq_check_idx = source.find("_complete_seq_latest", lock_idx)
-        assert lock_idx > 0 and seq_check_idx > 0
-        assert lock_idx < seq_check_idx
+        assert "_complete_seq_latest" in source
 
-    def test_seq_latest_write_under_lock(self) -> None:
-        """Verify _handle_command writes _complete_seq_latest under _complete_lock."""
+    def test_seq_latest_written_in_handle_command(self) -> None:
+        """Verify _handle_command writes _complete_seq_latest."""
         source = inspect.getsource(VSCodeServer._handle_command)
-        assign_idx = source.find("self._complete_seq_latest = seq")
-        assert assign_idx > 0
-        preceding = source[:assign_idx]
-        lock_idx = preceding.rfind("_complete_lock")
-        assert lock_idx > 0
+        assert "self._complete_seq_latest = seq" in source
 
 
 # ---------------------------------------------------------------------------

@@ -40,15 +40,14 @@ class TestPollerSessionResume:
 
 
 # ---------------------------------------------------------------------------
-# §22C: VSCodeServer._task_generation read under lock
+# §22C: _is_current_task_generation removed (dead code — never called)
 # ---------------------------------------------------------------------------
 class TestVSCodeTaskGenerationSync:
-    def test_is_current_task_generation_under_lock(self) -> None:
-        """_is_current_task_generation reads under _state_lock."""
+    def test_is_current_task_generation_removed(self) -> None:
+        """_is_current_task_generation was dead code and has been removed."""
         from kiss.agents.vscode.server import VSCodeServer
 
-        source = inspect.getsource(VSCodeServer._is_current_task_generation)
-        assert "_state_lock" in source
+        assert not hasattr(VSCodeServer, "_is_current_task_generation")
 
 
 # ---------------------------------------------------------------------------

@@ -143,6 +143,7 @@ class VSCodeServer:
         self._last_active_file: str = ""
         self._last_active_content: str = ""
         # Lock ordering: _state_lock < printer._lock < printer._stdout_lock < printer._bash_lock
+        # _complete_seq_latest is lockless: single writer (main thread), single reader (worker)
         self._state_lock = threading.Lock()
         self._task_threads: dict[int, threading.Thread] = {}
         self._merging = False
@@ -151,7 +152,6 @@ class VSCodeServer:
         self._refresh_generation = 0
         self._complete_seq = itertools.count()
         self._complete_seq_latest = -1
-        self._complete_lock = threading.Lock()
         self._complete_queue: queue.Queue[tuple[str, int, str, str]] = queue.Queue()
         self._complete_worker = threading.Thread(
             target=self._complete_worker_loop, daemon=True
@@ -263,8 +263,7 @@ class VSCodeServer:
                 snapshot_file = self._last_active_file
                 snapshot_content = self._last_active_content
             seq = next(self._complete_seq)
-            with self._complete_lock:
-                self._complete_seq_latest = seq
+            self._complete_seq_latest = seq
             if query:
                 self._complete_queue.put((query, seq, snapshot_file, snapshot_content))
         elif cmd_type == "getInputHistory":
@@ -323,8 +322,7 @@ class VSCodeServer:
             stop: Event signaled when the task completes normally.
         """
         while not stop.wait(self._flush_interval):
-            with self._state_lock:
-                task_id = self.agent._last_task_id
+            task_id = self.agent._last_task_id
             if task_id is not None:
                 events = self.printer.peek_recording(rec_id)
                 if events:
@@ -455,8 +453,6 @@ class VSCodeServer:
                 )
                 self.printer.broadcast({"type": "tasks_updated"})
                 self.printer.reset()
-                with self._state_lock:
-                    self._stop_events.pop(tab_id, None)
                 try:
                     merge_dir = str(_merge_data_dir())
                     merge_result = _prepare_merge_view(
@@ -832,11 +828,6 @@ class VSCodeServer:
 
         threading.Thread(target=_run, daemon=True).start()
 
-    def _is_current_task_generation(self, gen: int) -> bool:
-        """Return whether *gen* still matches the current task generation."""
-        with self._state_lock:
-            return self._task_generation == gen
-
     def _extract_result_summary(self, recording_id: int) -> str:
         """Extract result summary from the recorded events for the given recording.
 
@@ -934,9 +925,8 @@ class VSCodeServer:
             snapshot_file: Atomically-captured active file path.
             snapshot_content: Atomically-captured active file content.
         """
-        with self._complete_lock:
-            if seq >= 0 and seq != self._complete_seq_latest:
-                return
+        if seq >= 0 and seq != self._complete_seq_latest:
+            return
         if not query or len(query) < 2:
             self.printer.broadcast({"type": "ghost", "suggestion": "", "query": query})
             return
