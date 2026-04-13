@@ -526,8 +526,13 @@
       + '<span class="adjacent-sep-line"></span>';
     container.appendChild(separator);
 
-    // Replay events into the container
+    // Replay events into the container (save/restore header metrics so
+    // adjacent-task replay doesn't overwrite the current task's values)
+    var savedTokens = statusTokens ? statusTokens.textContent : '';
+    var savedBudget = statusBudget ? statusBudget.textContent : '';
     replayEventsInto(container, events);
+    if (statusTokens) statusTokens.textContent = savedTokens;
+    if (statusBudget) statusBudget.textContent = savedBudget;
 
     if (direction === 'prev') {
       // Save scroll position, prepend, then restore
@@ -1030,10 +1035,8 @@
     if (!statusTokens || !statusBudget) return;
     var tm = text.match(/Tokens:\s*(\d+)\/\d+/);
     var bm = text.match(/Budget:\s*(\$[0-9.]+)\/\$[0-9.]+/);
-    var parts = [];
-    if (tm) parts.push('tokens: ' + tm[1]);
-    if (bm) parts.push('budget: ' + bm[1]);
-    if (parts.length) statusTokens.textContent = parts.join(' ');
+    if (tm) statusTokens.textContent = 'tokens: ' + tm[1];
+    if (bm) statusBudget.textContent = bm[1];
   }
 
   function clearUsageMetrics() {
@@ -1425,6 +1428,7 @@
   function replayTaskEvents(events) {
     clearOutput();
     resetOutputState();
+    clearUsageMetrics();
     replayEventsInto(O, events, {
       onFollowupClick: function(text) { inp.value = text; syncClearBtn(); inp.focus(); }
     });
