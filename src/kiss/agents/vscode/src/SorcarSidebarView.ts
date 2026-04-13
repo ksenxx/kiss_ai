@@ -1,7 +1,7 @@
 /**
- * Secondary sidebar chat view for Sorcar.
- * Provides a WebviewViewProvider that renders the same chat UI as SorcarTab
- * but embedded in the VS Code secondary sidebar instead of an editor tab.
+ * Sidebar chat view for Sorcar.
+ * Provides a WebviewViewProvider that renders the chat UI in the
+ * VS Code secondary sidebar.
  */
 
 import * as vscode from 'vscode';
@@ -16,8 +16,7 @@ import { FromWebviewMessage, ToWebviewMessage, Attachment, AgentCommand } from '
 /**
  * WebviewViewProvider for the KISS Sorcar chat in the secondary sidebar.
  *
- * Hosts the same HTML/JS/CSS chat interface as the editor-area SorcarTab,
- * but in a sidebar panel. Has its own AgentProcess for independent operation.
+ * Hosts the chat HTML/JS/CSS interface with its own AgentProcess.
  */
 export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _view?: vscode.WebviewView;
@@ -501,6 +500,15 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       this._view.show(true);
       await new Promise(r => setTimeout(r, 150));
       this._sendToWebview({ type: 'focusInput' });
+    }
+  }
+
+  /** Append text to the chat input and focus it. */
+  public async appendToInput(text: string): Promise<void> {
+    if (this._view) {
+      this._view.show(true);
+      await new Promise(r => setTimeout(r, 150));
+      this._sendToWebview({ type: 'appendToInput', text });
     }
   }
 
