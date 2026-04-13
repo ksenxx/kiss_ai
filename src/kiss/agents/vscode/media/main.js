@@ -1134,6 +1134,7 @@
         if (cidTab) { cidTab.chatId = newChatId; persistTabState(); }
       } else {
         currentChatId = newChatId;
+        persistTabState();
       }
       break;
     }
@@ -1313,6 +1314,7 @@
     if (worktreeToggleBtn) worktreeToggleBtn.disabled = running;
     if (parallelToggleBtn) parallelToggleBtn.disabled = running;
     if (runPromptBtn && running) runPromptBtn.disabled = true;
+    if (modelBtn) { modelBtn.disabled = running; if (running) closeModelDD(); }
     updateInputDisabled();
     if (running) {
       startTimer();
@@ -1650,6 +1652,7 @@
     }
     modelBtn.addEventListener('click', function(e) {
       e.stopPropagation();
+      if (isRunning) return;
       if (modelDropdown.classList.contains('open')) { closeModelDD(); return; }
       modelDropdown.classList.add('open');
       modelSearch.value = '';

@@ -647,15 +647,6 @@ MODEL_INFO: dict[str, ModelInfo] = {
     # ==========================================================================
 }
 
-# Generate batch/ entries for all Claude models at 50% pricing.
-for _name, _info in list(MODEL_INFO.items()):
-    if _name.startswith("claude-") and _info.is_generation_supported:
-        MODEL_INFO[f"batch/{_name}"] = _mi(
-            _info.context_length,
-            _info.input_price_per_1M * 0.5,
-            _info.output_price_per_1M * 0.5,
-        )
-
 # Populate cache pricing for known providers.
 # Anthropic: cache_read = 10% of input, cache_write = 125% of input.
 # OpenRouter Anthropic: same as Anthropic (routes to Anthropic, supports prompt caching).
@@ -663,7 +654,7 @@ for _name, _info in list(MODEL_INFO.items()):
 for _name, _info in MODEL_INFO.items():
     if _info.cache_read_price_per_1M is not None:  # pragma: no cover – no models set explicit cr
         continue
-    if _name.startswith(("claude-", "batch/claude-", "openrouter/anthropic/")):
+    if _name.startswith(("claude-", "openrouter/anthropic/")):
         _info.cache_read_price_per_1M = _info.input_price_per_1M * 0.1
         _info.cache_write_price_per_1M = _info.input_price_per_1M * 1.25
     elif (
@@ -860,15 +851,6 @@ def model(
             model_config=model_config,
             token_callback=token_callback,
         )
-    if model_name.startswith("batch/"):
-        from kiss.core.models.anthropic_batch_model import AnthropicBatchModel
-
-        return AnthropicBatchModel(
-            model_name=model_name,
-            api_key=keys.ANTHROPIC_API_KEY,
-            model_config=model_config,
-            token_callback=token_callback,
-        )
     raise KISSError(f"Unknown model name: {model_name}")
 
 
@@ -882,7 +864,6 @@ def get_available_models() -> list[str]:
     keys = config_module.DEFAULT_CONFIG
     prefix_to_key = {
         "openrouter/": keys.OPENROUTER_API_KEY,
-        "batch/": keys.ANTHROPIC_API_KEY,
         "claude-": keys.ANTHROPIC_API_KEY,
         "gemini-": keys.GEMINI_API_KEY,
         "minimax-": keys.MINIMAX_API_KEY,

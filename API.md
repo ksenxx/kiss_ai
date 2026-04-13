@@ -101,7 +101,6 @@
             - [`kiss.agents.vscode.kiss_project.src.kiss.core.kiss_agent`](#kissagentsvscodekiss_projectsrckisscorekiss_agent)
             - [`kiss.agents.vscode.kiss_project.src.kiss.core.kiss_error`](#kissagentsvscodekiss_projectsrckisscorekiss_error)
             - [`kiss.agents.vscode.kiss_project.src.kiss.core.models`](#kissagentsvscodekiss_projectsrckisscoremodels)
-              - [`kiss.agents.vscode.kiss_project.src.kiss.core.models.anthropic_batch_model`](#kissagentsvscodekiss_projectsrckisscoremodelsanthropic_batch_model)
               - [`kiss.agents.vscode.kiss_project.src.kiss.core.models.anthropic_model`](#kissagentsvscodekiss_projectsrckisscoremodelsanthropic_model)
               - [`kiss.agents.vscode.kiss_project.src.kiss.core.models.claude_code_model`](#kissagentsvscodekiss_projectsrckisscoremodelsclaude_code_model)
               - [`kiss.agents.vscode.kiss_project.src.kiss.core.models.gemini_model`](#kissagentsvscodekiss_projectsrckisscoremodelsgemini_model)
@@ -155,7 +154,6 @@
     - [`kiss.channels.twitch_agent`](#kisschannelstwitch_agent)
     - [`kiss.channels.whatsapp_agent`](#kisschannelswhatsapp_agent)
     - [`kiss.channels.zalo_agent`](#kisschannelszalo_agent)
-      - [`kiss.core.models.anthropic_batch_model`](#kisscoremodelsanthropic_batch_model)
       - [`kiss.core.models.claude_code_model`](#kisscoremodelsclaude_code_model)
     - [`kiss.docker.docker_tools`](#kissdockerdocker_tools)
 
@@ -4457,19 +4455,6 @@ from kiss.agents.vscode.kiss_project.src.kiss.core.models import Attachment, Mod
 
 ______________________________________________________________________
 
-#### `kiss.agents.vscode.kiss_project.src.kiss.core.models.anthropic_batch_model` — *Anthropic Batch API model — routes requests through the Message Batches API.*
-
-##### `class AnthropicBatchModel(AnthropicModel)` — A model that uses the Anthropic Message Batches API for 50% cheaper inference.
-
-**Constructor:** `AnthropicBatchModel(model_name: str, api_key: str, model_config: dict[str, Any] | None = None, token_callback: TokenCallback | None = None)`
-
-- `model_name`: Full model name including `batch/` prefix.
-- `api_key`: The Anthropic API key for authentication.
-- `model_config`: Optional configuration. Recognised extra keys: - `poll_interval` (float): Seconds between polls (default 2.0). - `poll_timeout` (float): Max seconds to wait (default 86400).
-- `token_callback`: Ignored — batch API does not support streaming.
-
-______________________________________________________________________
-
 #### `kiss.agents.vscode.kiss_project.src.kiss.core.models.anthropic_model` — *Anthropic model implementation for Claude models.*
 
 ##### `class AnthropicModel(Model)` — A model that uses Anthropic's Messages API (Claude).
@@ -7174,19 +7159,6 @@ ______________________________________________________________________
 ##### `class ZaloAgent(BaseChannelAgent, StatefulSorcarAgent)` — StatefulSorcarAgent extended with Zalo OA API tools.
 
 **Constructor:** `ZaloAgent() -> None`
-
-______________________________________________________________________
-
-#### `kiss.core.models.anthropic_batch_model` — *Anthropic Batch API model — routes requests through the Message Batches API.*
-
-##### `class AnthropicBatchModel(AnthropicModel)` — A model that uses the Anthropic Message Batches API for 50% cheaper inference.
-
-**Constructor:** `AnthropicBatchModel(model_name: str, api_key: str, model_config: dict[str, Any] | None = None, token_callback: TokenCallback | None = None)`
-
-- `model_name`: Full model name including `batch/` prefix.
-- `api_key`: The Anthropic API key for authentication.
-- `model_config`: Optional configuration. Recognised extra keys: - `poll_interval` (float): Seconds between polls (default 2.0). - `poll_timeout` (float): Max seconds to wait (default 86400).
-- `token_callback`: Ignored — batch API does not support streaming.
 
 ______________________________________________________________________
 

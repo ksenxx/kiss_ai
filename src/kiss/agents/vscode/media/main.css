@@ -536,7 +536,8 @@ header {
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 300px;
   outline: none;
 }
-#model-btn:hover { border-color: color-mix(in srgb, var(--fg) 20%, transparent); color: color-mix(in srgb, var(--fg) 74%, transparent); }
+#model-btn:hover:not(:disabled) { border-color: color-mix(in srgb, var(--fg) 20%, transparent); color: color-mix(in srgb, var(--fg) 74%, transparent); }
+#model-btn:disabled { opacity: 0.45; cursor: default; pointer-events: none; }
 #model-btn svg { flex-shrink: 0; opacity: 0.55; }
 #upload-btn {
   background: color-mix(in srgb, var(--fg) 3%, transparent); color: color-mix(in srgb, var(--fg) 58%, transparent);
