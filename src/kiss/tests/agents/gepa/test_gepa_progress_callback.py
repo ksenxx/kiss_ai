@@ -91,6 +91,7 @@ def create_imperfect_evaluation_fn():
 class TestGEPAProgressCallbackWithMerge(unittest.TestCase):
     """Test progress callback with merge functionality."""
 
+    @pytest.mark.slow
     @pytest.mark.timeout(180)
     def test_callback_receives_merge_phase(self):
         """Test that callback receives MERGE phase updates when merge is enabled."""

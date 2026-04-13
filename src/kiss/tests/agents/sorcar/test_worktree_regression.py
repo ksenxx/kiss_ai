@@ -222,6 +222,7 @@ class TestWorktreeRegression:
     # -----------------------------------------------------------------------
     # 24. Full lifecycle: run → conflict merge → discard → run again
     # -----------------------------------------------------------------------
+    @pytest.mark.slow
     def test_full_lifecycle_conflict_then_new_task(self) -> None:
         """After merge conflict + discard, a new task can run in the same
         chat session."""

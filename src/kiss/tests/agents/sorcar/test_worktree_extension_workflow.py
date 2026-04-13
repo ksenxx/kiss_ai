@@ -158,6 +158,7 @@ class TestWorktreeWorkflow:
         assert _file_in_repo(self.repo, "new_file.txt")
         assert (self.repo / "new_file.txt").read_text() == "hello from worktree"
 
+    @pytest.mark.slow
     def test_merge_commits_changes(self) -> None:
         """After merge, changes are committed on the original branch."""
         agent = self._agent()
@@ -774,6 +775,7 @@ class TestServerWorktreeWorkflow:
 
         server._worktree_agent.discard()
 
+    @pytest.mark.slow
     def test_merge_commits_then_merges(self) -> None:
         """merge() should commit uncommitted changes, then merge."""
         server, events = _make_server(self.repo)

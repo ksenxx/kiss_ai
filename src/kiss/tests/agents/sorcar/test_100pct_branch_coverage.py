@@ -185,6 +185,7 @@ class TestPersistenceUncoveredBranches:
 class TestWorktreeCommitMessageBranches:
     """Cover commit message generation branches."""
 
+    @pytest.mark.slow
     def test_generate_commit_message_with_staged_changes(self, tmp_path: Path) -> None:
         """Commit message generation with staged changes exercises the LLM path.
 
