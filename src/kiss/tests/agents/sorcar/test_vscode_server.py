@@ -773,8 +773,14 @@ class TestWorktreeServerIntegration(unittest.TestCase):
 class TestAgentToggle(unittest.TestCase):
     """Tests for worktree toggle switching between agents."""
 
-    _JS_PATH = Path(__file__).resolve().parents[3] / "agents" / "vscode" / "media" / "main.js"
-    _TS_PATH = Path(__file__).resolve().parents[3] / "agents" / "vscode" / "src" / "SorcarTab.ts"
+    _JS_PATH = (
+        Path(__file__).resolve().parents[3]
+        / "agents" / "vscode" / "media" / "main.js"
+    )
+    _TS_PATH = (
+        Path(__file__).resolve().parents[3]
+        / "agents" / "vscode" / "src" / "SorcarSidebarView.ts"
+    )
     _js: str
     _ts: str
 
@@ -821,7 +827,7 @@ class TestAgentToggle(unittest.TestCase):
         assert "worktreeToggleBtn.classList.contains('active')" in self._js
 
     def test_ts_passes_use_worktree_to_start_task(self) -> None:
-        """SorcarTab.ts passes useWorktree to _startTask."""
+        """SorcarSidebarView.ts passes useWorktree to _startTask."""
         assert "message.useWorktree" in self._ts
         assert "useWorktree" in self._ts
 
@@ -851,7 +857,10 @@ class TestAgentToggle(unittest.TestCase):
 class TestWorktreeActionNotifications(unittest.TestCase):
     """Tests for VS Code notification behavior on worktree actions."""
 
-    _TS_PATH = Path(__file__).resolve().parents[3] / "agents" / "vscode" / "src" / "SorcarTab.ts"
+    _TS_PATH = (
+        Path(__file__).resolve().parents[3]
+        / "agents" / "vscode" / "src" / "SorcarSidebarView.ts"
+    )
     _ts: str
 
     @classmethod
@@ -859,7 +868,7 @@ class TestWorktreeActionNotifications(unittest.TestCase):
         cls._ts = cls._TS_PATH.read_text()
 
     def test_worktree_action_resolve_field_exists(self) -> None:
-        """SorcarTab has a _worktreeActionResolve field for progress tracking."""
+        """SorcarSidebarView has a _worktreeActionResolve field for progress tracking."""
         assert "_worktreeActionResolve" in self._ts
 
     def test_merge_shows_progress_notification(self) -> None:
@@ -893,7 +902,7 @@ class TestWorktreeActionNotifications(unittest.TestCase):
         assert "wtAction === 'discard'" in self._ts
 
     def test_worktree_progress_field_exists(self) -> None:
-        """SorcarTab has a _worktreeProgress field for progress reporting."""
+        """SorcarSidebarView has a _worktreeProgress field for progress reporting."""
         assert "_worktreeProgress" in self._ts
 
     def test_worktree_progress_captured_in_with_progress(self) -> None:
@@ -987,14 +996,18 @@ class TestSorcarTabParallelToggle(unittest.TestCase):
         assert "viewBox" in block
 
     def test_ts_passes_use_parallel_to_start_task(self) -> None:
-        """SorcarTab.ts passes useParallel to _startTask."""
-        assert "message.useParallel" in self.html
-        assert "useParallel" in self.html
+        """SorcarSidebarView.ts passes useParallel to _startTask."""
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
+        ts = (base / "vscode" / "src" / "SorcarSidebarView.ts").read_text()
+        assert "message.useParallel" in ts
+        assert "useParallel" in ts
 
     def test_ts_start_task_includes_use_parallel(self) -> None:
         """_startTask sends useParallel in agent command."""
-        assert "useParallel?: boolean" in self.html
-        lines = self.html.split("\n")
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
+        ts = (base / "vscode" / "src" / "SorcarSidebarView.ts").read_text()
+        assert "useParallel?: boolean" in ts
+        lines = ts.split("\n")
         in_start_task = False
         found = False
         for line in lines:
@@ -1287,15 +1300,14 @@ class TestMergeDiffViewColumn(unittest.TestCase):
 
 
 class TestSorcarTabOpensFilesInLeftSplit(unittest.TestCase):
-    """Verify SorcarTab opens files in ViewColumn.One (the left split)
-    so they never replace the chat webview panel which lives in a later column."""
+    """Verify SorcarSidebarView opens files in ViewColumn.One (the left split)."""
 
     _ts: str = ""
 
     @classmethod
     def setUpClass(cls) -> None:
         base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
-        cls._ts = (base / "vscode" / "src" / "SorcarTab.ts").read_text()
+        cls._ts = (base / "vscode" / "src" / "SorcarSidebarView.ts").read_text()
 
     def _extract_case_block(self, case_label: str) -> str:
         """Extract a switch-case block from _handleMessage."""
@@ -1343,7 +1355,7 @@ class TestFilePathDoesNotPopulateTaskPanel(unittest.TestCase):
     def setUpClass(cls) -> None:
         base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
         cls._js = (base / "vscode" / "media" / "main.js").read_text()
-        cls._ts = (base / "vscode" / "src" / "SorcarTab.ts").read_text()
+        cls._ts = (base / "vscode" / "src" / "SorcarSidebarView.ts").read_text()
 
     # -- main.js: sendMessage must NOT touch task panel state ----------------
 
@@ -1399,7 +1411,7 @@ class TestFilePathDoesNotPopulateTaskPanel(unittest.TestCase):
         body = self._get_set_task_text_handler()
         assert "setTaskText(ev.text" in body
 
-    # -- SorcarTab.ts: file-open path returns before _startTask --------------
+    # -- SorcarSidebarView.ts: file-open path returns before _startTask ------
 
     def test_ts_file_open_returns_before_start_task(self) -> None:
         """The submit handler opens the file and returns *before* _startTask."""
@@ -2364,12 +2376,6 @@ class TestBuildChatHtmlExported(unittest.TestCase):
     def test_get_version_exported(self) -> None:
         assert "export function getVersion()" in self._ts
 
-    def test_sorcar_tab_uses_build_chat_html(self) -> None:
-        """SorcarTab._getHtmlContent delegates to buildChatHtml."""
-        idx = self._ts.index("private _getHtmlContent(")
-        block = self._ts[idx : idx + 200]
-        assert "buildChatHtml(" in block
-
     def test_build_chat_html_returns_full_html(self) -> None:
         """buildChatHtml contains the full chat HTML template."""
         idx = self._ts.index("export function buildChatHtml(")
@@ -2380,16 +2386,14 @@ class TestBuildChatHtmlExported(unittest.TestCase):
         assert 'id="send-btn"' in block
 
 
-class TestSorcarSidebarViewMessageHandlingParity(unittest.TestCase):
-    """Verify SorcarSidebarView handles the same message types as SorcarTab."""
+class TestSorcarSidebarViewMessageHandling(unittest.TestCase):
+    """Verify SorcarSidebarView handles expected message types."""
 
-    _tab_ts: str = ""
     _sidebar_ts: str = ""
 
     @classmethod
     def setUpClass(cls) -> None:
         base = Path(__file__).resolve().parents[4] / "kiss" / "agents" / "vscode"
-        cls._tab_ts = (base / "src" / "SorcarTab.ts").read_text()
         cls._sidebar_ts = (base / "src" / "SorcarSidebarView.ts").read_text()
 
     @staticmethod
@@ -2398,22 +2402,35 @@ class TestSorcarSidebarViewMessageHandlingParity(unittest.TestCase):
         import re
 
         idx = ts.index("_handleMessage(")
-        # Find the end of the method (next private/public method or end of class)
         body = ts[idx:]
         return set(re.findall(r"case '(\w+)':", body))
 
-    def test_sidebar_handles_all_tab_message_types(self) -> None:
-        """SorcarSidebarView handles every message type that SorcarTab handles."""
-        tab_cases = self._extract_case_labels(self._tab_ts)
+    def test_sidebar_handles_required_message_types(self) -> None:
+        """SorcarSidebarView handles all required message types."""
         sidebar_cases = self._extract_case_labels(self._sidebar_ts)
-        missing = tab_cases - sidebar_cases
+        required = {
+            "ready", "submit", "stop", "selectModel", "getModels",
+            "newChat", "getInputHistory", "getHistory", "getFiles",
+            "userAnswer", "userActionDone", "recordFileUsage", "openFile",
+            "resumeSession", "getAdjacentTask", "getWelcomeSuggestions",
+            "complete", "mergeAction", "generateCommitMessage", "runPrompt",
+            "worktreeAction", "resolveDroppedPaths", "focusEditor",
+        }
+        missing = required - sidebar_cases
         assert not missing, f"Sidebar is missing message handlers: {missing}"
 
-    def test_sidebar_has_no_extra_message_types(self) -> None:
-        """SorcarSidebarView doesn't handle unknown message types not in SorcarTab."""
-        tab_cases = self._extract_case_labels(self._tab_ts)
+    def test_sidebar_has_no_unknown_message_types(self) -> None:
+        """SorcarSidebarView only handles known message types."""
         sidebar_cases = self._extract_case_labels(self._sidebar_ts)
-        extra = sidebar_cases - tab_cases
+        known = {
+            "ready", "submit", "stop", "selectModel", "getModels",
+            "newChat", "getInputHistory", "getHistory", "getFiles",
+            "userAnswer", "userActionDone", "recordFileUsage", "openFile",
+            "resumeSession", "getAdjacentTask", "getWelcomeSuggestions",
+            "complete", "mergeAction", "generateCommitMessage", "runPrompt",
+            "worktreeAction", "resolveDroppedPaths", "focusEditor",
+        }
+        extra = sidebar_cases - known
         assert not extra, f"Sidebar has extra message handlers: {extra}"
 
 
@@ -3043,6 +3060,609 @@ class TestSorcarSidebarViewComplete(unittest.TestCase):
         end = self._ts.index("break;", m.end())
         block = self._ts[m.start() : end]
         assert "activeFileContent:" in block
+
+
+class TestWebviewTabBarJS(unittest.TestCase):
+    """Test the in-webview tab bar JavaScript code in main.js.
+
+    Both the SorcarTab (editor tabs) and SorcarSidebarView (secondary bar)
+    share the same webview HTML/JS, which has its own tab management within
+    the webview.  The "New chat" button must add a new tab to the tab bar.
+    """
+
+    _js: str = ""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
+        cls._js = (base / "vscode" / "media" / "main.js").read_text()
+
+    # -- Tab data model --
+
+    def test_make_tab_function_exists(self) -> None:
+        assert "function makeTab(title)" in self._js
+
+    def test_make_tab_returns_object_with_id(self) -> None:
+        idx = self._js.index("function makeTab(title)")
+        end = self._js.index("\n  }", idx) + 4
+        body = self._js[idx:end]
+        assert "id:" in body
+        assert "tabIdCounter" in body
+
+    def test_make_tab_has_required_fields(self) -> None:
+        idx = self._js.index("function makeTab(title)")
+        end = self._js.index("\n  }", idx) + 4
+        body = self._js[idx:end]
+        for field in ("title:", "outputHTML:", "taskPanelHTML:",
+                      "taskName:", "welcomeVisible:"):
+            assert field in body, f"makeTab missing field {field}"
+
+    def test_tabs_array_exists(self) -> None:
+        assert "var tabs = [];" in self._js
+
+    def test_active_tab_id_exists(self) -> None:
+        assert "var activeTabId = -1;" in self._js
+
+    # -- Tab bar rendering --
+
+    def test_render_tab_bar_function_exists(self) -> None:
+        assert "function renderTabBar()" in self._js
+
+    def test_render_tab_bar_creates_chat_tab_elements(self) -> None:
+        idx = self._js.index("function renderTabBar()")
+        end = self._js.index("\n  function ", idx + 1)
+        body = self._js[idx:end]
+        assert "'chat-tab'" in body
+        assert "chat-tab-label" in body
+
+    def test_render_tab_bar_marks_active_tab(self) -> None:
+        idx = self._js.index("function renderTabBar()")
+        end = self._js.index("\n  function ", idx + 1)
+        body = self._js[idx:end]
+        assert "' active'" in body
+        assert "activeTabId" in body
+
+    def test_render_tab_bar_has_close_button(self) -> None:
+        idx = self._js.index("function renderTabBar()")
+        end = self._js.index("\n  function ", idx + 1)
+        body = self._js[idx:end]
+        assert "chat-tab-close" in body
+        assert "closeTab" in body
+
+    def test_render_tab_bar_has_add_button(self) -> None:
+        """The "+" button at the end of the tab list creates a new tab."""
+        idx = self._js.index("function renderTabBar()")
+        end = self._js.index("\n  function ", idx + 1)
+        body = self._js[idx:end]
+        assert "chat-tab-add" in body
+        assert "createNewTab" in body
+        assert "New chat" in body
+
+    # -- Creating a new tab --
+
+    def test_create_new_tab_function_exists(self) -> None:
+        assert "function createNewTab()" in self._js
+
+    def test_create_new_tab_saves_current_tab(self) -> None:
+        idx = self._js.index("function createNewTab()")
+        end = self._js.index("\n  function ", idx + 1)
+        body = self._js[idx:end]
+        assert "saveCurrentTab()" in body
+
+    def test_create_new_tab_creates_tab_via_make_tab(self) -> None:
+        idx = self._js.index("function createNewTab()")
+        end = self._js.index("\n  function ", idx + 1)
+        body = self._js[idx:end]
+        assert "makeTab(" in body
+
+    def test_create_new_tab_pushes_to_tabs_array(self) -> None:
+        idx = self._js.index("function createNewTab()")
+        end = self._js.index("\n  function ", idx + 1)
+        body = self._js[idx:end]
+        assert "tabs.push(" in body
+
+    def test_create_new_tab_sets_active_tab(self) -> None:
+        idx = self._js.index("function createNewTab()")
+        end = self._js.index("\n  function ", idx + 1)
+        body = self._js[idx:end]
+        assert "activeTabId = tab.id" in body
+
+    def test_create_new_tab_clears_output(self) -> None:
+        idx = self._js.index("function createNewTab()")
+        end = self._js.index("\n  function ", idx + 1)
+        body = self._js[idx:end]
+        assert "clearOutput()" in body
+
+    def test_create_new_tab_renders_tab_bar(self) -> None:
+        idx = self._js.index("function createNewTab()")
+        end = self._js.index("\n  function ", idx + 1)
+        body = self._js[idx:end]
+        assert "renderTabBar()" in body
+
+    def test_create_new_tab_persists_state(self) -> None:
+        idx = self._js.index("function createNewTab()")
+        end = self._js.index("\n  function ", idx + 1)
+        body = self._js[idx:end]
+        assert "persistTabState()" in body
+
+    def test_create_new_tab_sends_new_chat_to_backend(self) -> None:
+        idx = self._js.index("function createNewTab()")
+        end = self._js.index("\n  function ", idx + 1)
+        body = self._js[idx:end]
+        assert "type: 'newChat'" in body
+
+    def test_create_new_tab_shows_welcome(self) -> None:
+        idx = self._js.index("function createNewTab()")
+        end = self._js.index("\n  function ", idx + 1)
+        body = self._js[idx:end]
+        assert "welcome" in body
+        assert "getWelcomeSuggestions" in body
+
+    # -- Switching tabs --
+
+    def test_switch_to_tab_function_exists(self) -> None:
+        assert "function switchToTab(tabId)" in self._js
+
+    def test_switch_to_tab_saves_current_tab(self) -> None:
+        idx = self._js.index("function switchToTab(tabId)")
+        end = self._js.index("\n  function ", idx + 1)
+        body = self._js[idx:end]
+        assert "saveCurrentTab()" in body
+
+    def test_switch_to_tab_restores_tab(self) -> None:
+        idx = self._js.index("function switchToTab(tabId)")
+        end = self._js.index("\n  function ", idx + 1)
+        body = self._js[idx:end]
+        assert "restoreTab(tab)" in body
+
+    def test_switch_to_tab_renders_tab_bar(self) -> None:
+        idx = self._js.index("function switchToTab(tabId)")
+        end = self._js.index("\n  function ", idx + 1)
+        body = self._js[idx:end]
+        assert "renderTabBar()" in body
+
+    def test_switch_to_tab_resumes_session(self) -> None:
+        """Switching to a tab with a task resumes that session."""
+        idx = self._js.index("function switchToTab(tabId)")
+        end = self._js.index("\n  function ", idx + 1)
+        body = self._js[idx:end]
+        assert "resumeSession" in body
+
+    def test_switch_to_tab_noop_for_same_tab(self) -> None:
+        """Switching to the already active tab is a no-op."""
+        idx = self._js.index("function switchToTab(tabId)")
+        body = self._js[idx : idx + 100]
+        assert "if (tabId === activeTabId) return;" in body
+
+    # -- Closing tabs --
+
+    def test_close_tab_function_exists(self) -> None:
+        assert "function closeTab(tabId)" in self._js
+
+    def test_close_tab_prevents_last_tab_close(self) -> None:
+        """Cannot close the last remaining tab."""
+        idx = self._js.index("function closeTab(tabId)")
+        end = self._js.index("\n  function ", idx + 1)
+        body = self._js[idx:end]
+        assert "tabs.length <= 1" in body
+
+    def test_close_tab_switches_to_adjacent_tab(self) -> None:
+        idx = self._js.index("function closeTab(tabId)")
+        end = self._js.index("\n  function ", idx + 1)
+        body = self._js[idx:end]
+        assert "restoreTab(" in body
+
+    def test_close_tab_renders_tab_bar(self) -> None:
+        idx = self._js.index("function closeTab(tabId)")
+        end = self._js.index("\n  function ", idx + 1)
+        body = self._js[idx:end]
+        assert "renderTabBar()" in body
+
+    # -- Saving/restoring tab state --
+
+    def test_save_current_tab_function_exists(self) -> None:
+        assert "function saveCurrentTab()" in self._js
+
+    def test_save_current_tab_stores_output_html(self) -> None:
+        idx = self._js.index("function saveCurrentTab()")
+        end = self._js.index("\n  function ", idx + 1)
+        body = self._js[idx:end]
+        assert "tab.outputHTML = O.innerHTML" in body
+
+    def test_save_current_tab_stores_task_name(self) -> None:
+        idx = self._js.index("function saveCurrentTab()")
+        end = self._js.index("\n  function ", idx + 1)
+        body = self._js[idx:end]
+        assert "tab.taskName = currentTaskName" in body
+
+    def test_restore_tab_function_exists(self) -> None:
+        assert "function restoreTab(tab)" in self._js
+
+    def test_restore_tab_sets_active_tab_id(self) -> None:
+        idx = self._js.index("function restoreTab(tab)")
+        end = self._js.index("\n  function ", idx + 1)
+        body = self._js[idx:end]
+        assert "activeTabId = tab.id" in body
+
+    def test_restore_tab_restores_output_html(self) -> None:
+        idx = self._js.index("function restoreTab(tab)")
+        end = self._js.index("\n  function ", idx + 1)
+        body = self._js[idx:end]
+        assert "O.innerHTML = tab.outputHTML" in body
+
+    def test_restore_tab_restores_task_name(self) -> None:
+        idx = self._js.index("function restoreTab(tab)")
+        end = self._js.index("\n  function ", idx + 1)
+        body = self._js[idx:end]
+        assert "currentTaskName = tab.taskName" in body
+
+    # -- Tab title updates --
+
+    def test_update_active_tab_title_function_exists(self) -> None:
+        assert "function updateActiveTabTitle(title)" in self._js
+
+    def test_update_active_tab_title_truncates_long_titles(self) -> None:
+        idx = self._js.index("function updateActiveTabTitle(title)")
+        end = self._js.index("\n  function ", idx + 1)
+        body = self._js[idx:end]
+        assert "30" in body  # max length
+        assert "\\u2026" in body  # ellipsis
+
+    def test_update_active_tab_title_renders_tab_bar(self) -> None:
+        idx = self._js.index("function updateActiveTabTitle(title)")
+        end = self._js.index("\n  function ", idx + 1)
+        body = self._js[idx:end]
+        assert "renderTabBar()" in body
+
+    # -- Persistence --
+
+    def test_persist_tab_state_function_exists(self) -> None:
+        assert "function persistTabState()" in self._js
+
+    def test_persist_tab_state_uses_set_state(self) -> None:
+        idx = self._js.index("function persistTabState()")
+        end = self._js.index("\n  function ", idx + 1)
+        body = self._js[idx:end]
+        assert "vscode.setState(" in body
+
+    def test_persist_tab_state_saves_tabs_and_active_index(self) -> None:
+        idx = self._js.index("function persistTabState()")
+        end = self._js.index("\n  function ", idx + 1)
+        body = self._js[idx:end]
+        assert "tabs:" in body
+        assert "activeTabIndex:" in body
+
+    # -- Tab state restoration at startup --
+
+    def test_tabs_restored_from_saved_state(self) -> None:
+        """Tabs are restored from vscode.getState() on startup."""
+        assert "vscode.getState()" in self._js
+        assert "saved.tabs" in self._js
+
+    # -- New chat button creates a new tab --
+
+    def test_new_chat_button_calls_create_new_tab(self) -> None:
+        """The clear-btn (New chat) button calls createNewTab."""
+        idx = self._js.index("function doClearChat()")
+        end = self._js.index("\n  }", idx) + 4
+        body = self._js[idx:end]
+        assert "createNewTab()" in body
+
+
+class TestWebviewTabBarCSS(unittest.TestCase):
+    """Test the in-webview tab bar CSS styles."""
+
+    _css: str = ""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
+        cls._css = (base / "vscode" / "media" / "main.css").read_text()
+
+    def test_tab_bar_exists(self) -> None:
+        assert "#tab-bar" in self._css
+
+    def test_tab_bar_does_not_grow(self) -> None:
+        idx = self._css.index("#tab-bar")
+        block = self._css[idx : idx + 200]
+        assert "flex-shrink: 0" in block
+
+    def test_tab_bar_has_border(self) -> None:
+        idx = self._css.index("#tab-bar")
+        block = self._css[idx : idx + 200]
+        assert "border-bottom" in block
+
+    def test_tab_list_is_flex_with_horizontal_scroll(self) -> None:
+        idx = self._css.index("#tab-list")
+        block = self._css[idx : idx + 200]
+        assert "display: flex" in block
+        assert "overflow-x: auto" in block
+
+    def test_tab_list_hides_scrollbar(self) -> None:
+        assert "#tab-list::-webkit-scrollbar" in self._css
+
+    def test_chat_tab_base_style(self) -> None:
+        assert ".chat-tab" in self._css
+
+    def test_chat_tab_has_max_width(self) -> None:
+        """Tabs have a max-width to keep them compact."""
+        idx = self._css.index(".chat-tab {")
+        end = self._css.index("}", idx)
+        block = self._css[idx:end]
+        assert "max-width:" in block
+
+    def test_chat_tab_active_has_accent_color(self) -> None:
+        assert ".chat-tab.active" in self._css
+        idx = self._css.index(".chat-tab.active")
+        block = self._css[idx : idx + 200]
+        assert "accent" in block
+
+    def test_chat_tab_active_has_bottom_border(self) -> None:
+        idx = self._css.index(".chat-tab.active")
+        block = self._css[idx : idx + 200]
+        assert "border-bottom-color" in block
+
+    def test_chat_tab_label_has_ellipsis_overflow(self) -> None:
+        assert ".chat-tab-label" in self._css
+        idx = self._css.index(".chat-tab-label")
+        block = self._css[idx : idx + 200]
+        assert "text-overflow: ellipsis" in block
+
+    def test_chat_tab_close_is_hidden_by_default(self) -> None:
+        assert ".chat-tab-close" in self._css
+        idx = self._css.index(".chat-tab-close {")
+        end = self._css.index("}", idx)
+        block = self._css[idx:end]
+        assert "opacity: 0" in block
+
+    def test_chat_tab_close_visible_on_hover(self) -> None:
+        assert ".chat-tab:hover .chat-tab-close" in self._css
+
+    def test_chat_tab_add_button_style(self) -> None:
+        assert ".chat-tab-add" in self._css
+
+
+class TestWebviewTabBarHTML(unittest.TestCase):
+    """Test the tab bar HTML structure in buildChatHtml."""
+
+    _ts: str = ""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
+        cls._ts = (base / "vscode" / "src" / "SorcarTab.ts").read_text()
+
+    def test_html_has_tab_bar_div(self) -> None:
+        assert 'id="tab-bar"' in self._ts
+
+    def test_html_has_tab_list_div(self) -> None:
+        assert 'id="tab-list"' in self._ts
+
+    def test_tab_bar_is_before_output(self) -> None:
+        """Tab bar div appears before the output div in the HTML."""
+        tab_bar_idx = self._ts.index('id="tab-bar"')
+        output_idx = self._ts.index('id="output"')
+        assert tab_bar_idx < output_idx
+
+    def test_tab_bar_is_after_header(self) -> None:
+        """Tab bar div appears after the header."""
+        header_idx = self._ts.index("</header>")
+        tab_bar_idx = self._ts.index('id="tab-bar"')
+        assert header_idx < tab_bar_idx
+
+
+class TestSorcarSidebarViewFilePathDoesNotPopulateTaskPanel(unittest.TestCase):
+    """Verify SorcarSidebarView submit handler for file paths returns before
+    _startTask, matching SorcarTab behavior.
+
+    This is the sidebar equivalent of TestFilePathDoesNotPopulateTaskPanel.
+    """
+
+    _ts: str = ""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
+        cls._ts = (base / "vscode" / "src" / "SorcarSidebarView.ts").read_text()
+
+    def test_file_open_returns_before_start_task(self) -> None:
+        """The submit handler opens the file and returns *before* _startTask."""
+        submit_idx = self._ts.index("case 'submit':")
+        submit_end = self._ts.index("break;", submit_idx)
+        submit_body = self._ts[submit_idx:submit_end]
+        # The file-open block must contain 'return' before _startTask
+        file_check_idx = submit_body.index("isFile()")
+        return_idx = submit_body.index("return;", file_check_idx)
+        start_task_idx = submit_body.index("this._startTask(")
+        assert return_idx < start_task_idx
+
+    def test_start_task_sends_set_task_text(self) -> None:
+        """_startTask sends setTaskText to the webview (the only source)."""
+        idx = self._ts.index("private _startTask(")
+        # Find next method
+        end = self._ts.index("\n  private ", idx + 1)
+        body = self._ts[idx:end]
+        assert "setTaskText" in body
+
+    def test_submit_sets_is_running_false_for_file_open(self) -> None:
+        """File path open resets _isRunning to false."""
+        submit_idx = self._ts.index("case 'submit':")
+        submit_end = self._ts.index("break;", submit_idx)
+        submit_body = self._ts[submit_idx:submit_end]
+        file_check_idx = submit_body.index("isFile()")
+        return_idx = submit_body.index("return;", file_check_idx)
+        block = submit_body[file_check_idx:return_idx]
+        assert "this._isRunning = false" in block
+
+    def test_submit_checks_is_running_before_processing(self) -> None:
+        """Submit returns early if already running."""
+        submit_idx = self._ts.index("case 'submit':")
+        submit_end = self._ts.index("break;", submit_idx)
+        submit_body = self._ts[submit_idx:submit_end]
+        assert "if (this._isRunning) return;" in submit_body
+
+
+class TestSorcarSidebarViewNewChatBehavior(unittest.TestCase):
+    """Verify that SorcarSidebarView._handleMessage newChat is forwarded
+    to the agent process, matching the expected flow for tab management.
+    """
+
+    _ts: str = ""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
+        cls._ts = (base / "vscode" / "src" / "SorcarSidebarView.ts").read_text()
+
+    def test_new_chat_forwarded_to_agent(self) -> None:
+        """The newChat message type is forwarded to the agent process."""
+        assert "case 'newChat':" in self._ts
+
+    def test_pending_new_chat_on_stop(self) -> None:
+        """When task stops and _pendingNewChat is true, send newChat + clearChat."""
+        # Find the on('message') handler
+        idx = self._ts.index("this._agentProcess.on('message'")
+        end = self._ts.index("const workDir = this._getWorkDir()", idx)
+        body = self._ts[idx:end]
+        assert "_pendingNewChat" in body
+        assert "type: 'newChat'" in body
+        assert "type: 'clearChat'" in body
+
+
+class TestSidebarViewBehavior(unittest.TestCase):
+    """Verify SorcarSidebarView has key behaviors."""
+
+    _sidebar_ts: str = ""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents" / "vscode"
+        cls._sidebar_ts = (base / "src" / "SorcarSidebarView.ts").read_text()
+
+    def test_has_worktree_action_resolve_field(self) -> None:
+        assert "_worktreeActionResolve" in self._sidebar_ts
+
+    def test_has_worktree_progress_field(self) -> None:
+        assert "_worktreeProgress" in self._sidebar_ts
+
+    def test_has_merge_manager(self) -> None:
+        assert "_mergeManager" in self._sidebar_ts
+
+    def test_has_is_merge_owner(self) -> None:
+        assert "get isMergeOwner()" in self._sidebar_ts
+
+    def test_handles_all_done_from_merge_manager(self) -> None:
+        assert "this._mergeManager.on('allDone'" in self._sidebar_ts
+
+    def test_opens_merge_on_merge_data(self) -> None:
+        assert "this._mergeManager.openMerge(" in self._sidebar_ts
+
+    def test_has_generate_commit_message(self) -> None:
+        assert "generateCommitMessage(" in self._sidebar_ts
+
+    def test_sends_focus_input_on_ready(self) -> None:
+        idx = self._sidebar_ts.index("case 'ready':")
+        end = self._sidebar_ts.index("break;", idx) + len("break;")
+        block = self._sidebar_ts[idx:end]
+        assert "'focusInput'" in block
+
+    def test_sends_active_file_info_on_ready(self) -> None:
+        idx = self._sidebar_ts.index("case 'ready':")
+        end = self._sidebar_ts.index("break;", idx) + len("break;")
+        block = self._sidebar_ts[idx:end]
+        assert "_sendActiveFileInfo()" in block
+
+    def test_requests_models_on_ready(self) -> None:
+        idx = self._sidebar_ts.index("case 'ready':")
+        end = self._sidebar_ts.index("break;", idx) + len("break;")
+        block = self._sidebar_ts[idx:end]
+        assert "'getModels'" in block
+
+    def test_sends_welcome_suggestions_on_ready(self) -> None:
+        idx = self._sidebar_ts.index("case 'ready':")
+        end = self._sidebar_ts.index("break;", idx) + len("break;")
+        block = self._sidebar_ts[idx:end]
+        assert "_sendWelcomeSuggestions()" in block
+
+    def test_requests_input_history_on_ready(self) -> None:
+        idx = self._sidebar_ts.index("case 'ready':")
+        end = self._sidebar_ts.index("break;", idx) + len("break;")
+        block = self._sidebar_ts[idx:end]
+        assert "'getInputHistory'" in block
+
+    def test_passes_use_worktree_in_start_task(self) -> None:
+        idx = self._sidebar_ts.index("private _startTask(")
+        block = self._sidebar_ts[idx : idx + 200]
+        assert "useWorktree" in block
+
+    def test_passes_use_parallel_in_start_task(self) -> None:
+        idx = self._sidebar_ts.index("private _startTask(")
+        block = self._sidebar_ts[idx : idx + 200]
+        assert "useParallel" in block
+
+    def test_strips_work_dir_prefix_in_submit(self) -> None:
+        idx = self._sidebar_ts.index("case 'submit':")
+        end = self._sidebar_ts.index("break;", idx) + len("break;")
+        block = self._sidebar_ts[idx:end]
+        assert "WORK_DIR" in block
+
+    def test_resolves_file_paths_in_submit(self) -> None:
+        idx = self._sidebar_ts.index("case 'submit':")
+        end = self._sidebar_ts.index("break;", idx) + len("break;")
+        block = self._sidebar_ts[idx:end]
+        assert "path.resolve" in block
+
+    def test_has_worktree_timeout_120s(self) -> None:
+        assert "120_000" in self._sidebar_ts
+
+    def test_resolves_worktree_action_on_dispose(self) -> None:
+        idx = self._sidebar_ts.index("public dispose()")
+        end = self._sidebar_ts.index("\n  }", idx) + 4
+        body = self._sidebar_ts[idx:end]
+        assert "_worktreeActionResolve" in body
+
+    def test_filters_dropped_paths_outside_workdir(self) -> None:
+        import re
+
+        m = re.search(r"case\s+'resolveDroppedPaths':", self._sidebar_ts)
+        assert m
+        end = self._sidebar_ts.index("break;", m.end())
+        block = self._sidebar_ts[m.start() : end]
+        assert "'..'" in block
+
+    def test_opens_file_with_line_number(self) -> None:
+        import re
+
+        m = re.search(r"case\s+'openFile':", self._sidebar_ts)
+        assert m
+        end = self._sidebar_ts.index("break;", m.end())
+        block = self._sidebar_ts[m.start() : end]
+        assert "message.line" in block
+        assert "revealRange" in block
+
+    def test_handles_user_action_done_as_done(self) -> None:
+        import re
+
+        m = re.search(r"case\s+'userActionDone':", self._sidebar_ts)
+        assert m
+        end = self._sidebar_ts.index("break;", m.end())
+        block = self._sidebar_ts[m.start() : end]
+        assert "answer: 'done'" in block
+
+    def test_sends_complete_with_active_file_content(self) -> None:
+        import re
+
+        m = re.search(r"case\s+'complete':", self._sidebar_ts)
+        assert m
+        end = self._sidebar_ts.index("break;", m.end())
+        block = self._sidebar_ts[m.start() : end]
+        assert "activeFileContent" in block
+        assert "getText()" in block
+
+    def test_has_append_to_input_method(self) -> None:
+        """SorcarSidebarView has appendToInput for insertSelectionToChat."""
+        assert "appendToInput(" in self._sidebar_ts
+        assert "'appendToInput'" in self._sidebar_ts
 
 
 if __name__ == "__main__":

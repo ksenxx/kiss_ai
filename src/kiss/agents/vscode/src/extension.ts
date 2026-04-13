@@ -5,22 +5,22 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
-import { TabManager } from './SorcarTab';
 import { SorcarSidebarView } from './SorcarSidebarView';
+import { MergeManager } from './MergeManager';
 import { ensureDependencies, ensureLocalBinInPath } from './DependencyInstaller';
 
-let tabManager: TabManager | undefined;
 let sidebarView: SorcarSidebarView | undefined;
+let mergeManager: MergeManager | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
   ensureLocalBinInPath();
   console.log('KISS Sorcar extension activating...');
 
-  tabManager = new TabManager(context.extensionUri);
-  context.subscriptions.push({ dispose: () => tabManager?.dispose() });
+  mergeManager = new MergeManager();
+  context.subscriptions.push({ dispose: () => mergeManager?.dispose() });
 
   // --- Secondary sidebar chat view ---
-  sidebarView = new SorcarSidebarView(context.extensionUri, tabManager.mergeManager);
+  sidebarView = new SorcarSidebarView(context.extensionUri, mergeManager);
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(
       'kissSorcar.chatViewSecondary',
@@ -34,24 +34,20 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand('kissSorcar.openPanel', () => {
-      const tab = tabManager!.getActiveTab();
-      if (tab) {
-        tab.panel.reveal();
-      } else {
-        tabManager!.createTab();
-      }
+      sidebarView!.focusChatInput();
     })
   );
 
   context.subscriptions.push(
     vscode.commands.registerCommand('kissSorcar.newConversation', () => {
-      tabManager!.createTab();
+      sidebarView!.newConversation();
+      sidebarView!.focusChatInput();
     })
   );
 
   context.subscriptions.push(
     vscode.commands.registerCommand('kissSorcar.stopTask', () => {
-      tabManager!.getActiveTab()?.stopTask();
+      sidebarView!.stopTask();
     })
   );
 
@@ -64,8 +60,7 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.window.showInformationMessage('No text selected');
         return;
       }
-      const tab = tabManager!.createTab();
-      tab.submitTask(sel.trim());
+      sidebarView!.submitTask(sel.trim());
     })
   );
 
@@ -83,8 +78,7 @@ export function activate(context: vscode.ExtensionContext): void {
       const startLine = sel.start.line + 1;
       const lineCount = sel.end.line - sel.start.line + 1;
       const hunkRef = `WORK_DIR/${filePath}:@@ -${startLine},${lineCount} +${startLine},${lineCount} @@ `;
-      const tab = tabManager!.getActiveTab() || tabManager!.createTab();
-      tab.appendToInput(hunkRef);
+      sidebarView!.appendToInput(hunkRef);
     })
   );
 
@@ -94,18 +88,12 @@ export function activate(context: vscode.ExtensionContext): void {
       if (_focusToggling) return;
       _focusToggling = true;
       try {
-        const tab = tabManager!.getActiveTab();
-        if (tab && tab.panel.active) {
-          // Chat tab is currently focused → switch to text editor
+        if (sidebarView!.visible) {
+          // Sidebar is visible → focus the text editor
           await vscode.commands.executeCommand('workbench.action.focusFirstEditorGroup');
         } else {
-          // Text editor is focused → switch to chat tab
-          if (tab) {
-            await tab.focusChatInput();
-          } else {
-            const newTab = tabManager!.createTab();
-            await newTab.focusChatInput();
-          }
+          // Text editor is focused → show and focus the sidebar chat
+          await sidebarView!.focusChatInput();
         }
       } finally {
         _focusToggling = false;
@@ -137,16 +125,6 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   context.subscriptions.push(
-    tabManager.onCommitMessage((ev) => {
-      if (ev.error) {
-        vscode.window.showWarningMessage(`Commit message: ${ev.error}`);
-      } else if (ev.message) {
-        setScmMessage(ev.message);
-      }
-    })
-  );
-
-  context.subscriptions.push(
     sidebarView!.onCommitMessage((ev) => {
       if (ev.error) {
         vscode.window.showWarningMessage(`Commit message: ${ev.error}`);
@@ -161,7 +139,7 @@ export function activate(context: vscode.ExtensionContext): void {
     _context?: unknown,
     token?: vscode.CancellationToken
   ): Thenable<void> | void => {
-    return tabManager!.generateCommitMessage(token);
+    return sidebarView!.generateCommitMessage(token);
   };
 
   context.subscriptions.push(
@@ -185,7 +163,7 @@ export function activate(context: vscode.ExtensionContext): void {
   for (const cmd of ['acceptChange', 'rejectChange', 'prevChange', 'nextChange', 'acceptAll', 'rejectAll', 'acceptFile', 'rejectFile'] as const) {
     context.subscriptions.push(
       vscode.commands.registerCommand(`kissSorcar.${cmd}`, () => {
-        tabManager!.mergeManager[cmd]();
+        mergeManager![cmd]();
       })
     );
   }
@@ -202,9 +180,7 @@ export function activate(context: vscode.ExtensionContext): void {
   });
   context.subscriptions.push({ dispose: () => fs.unwatchFile(extJsPath) });
 
-  // Register tree view so the activity-bar icon creates a new chat tab on click.
-  // After creating the tab we close the sidebar, so the next click re-opens it
-  // (visibility flips true again) and the cycle repeats.
+  // Register tree view so the activity-bar icon opens the sidebar on click.
   const treeView = vscode.window.createTreeView('kissSorcar.chatView', {
     treeDataProvider: {
       getTreeItem: (el: string) => new vscode.TreeItem(el),
@@ -213,41 +189,12 @@ export function activate(context: vscode.ExtensionContext): void {
   });
   context.subscriptions.push(treeView);
 
-  let lastTabCreatedAt = Date.now(); // guards against double-creation on activation
   treeView.onDidChangeVisibility(e => {
-    if (e.visible && Date.now() - lastTabCreatedAt > 1000) {
-      lastTabCreatedAt = Date.now();
-      tabManager!.createTab();
+    if (e.visible) {
+      sidebarView!.focusChatInput();
       vscode.commands.executeCommand('workbench.action.closeSidebar');
     }
   });
-
-  // Restore chat tabs from the previous VSCode session.
-  // VSCode calls deserializeWebviewPanel for each saved panel of this viewType.
-  let restoredCount = 0;
-  context.subscriptions.push(
-    vscode.window.registerWebviewPanelSerializer('kissSorcar.chat', {
-      async deserializeWebviewPanel(panel: vscode.WebviewPanel, state: unknown) {
-        restoredCount++;
-        const task = (state as Record<string, unknown> | null)?.task as string | undefined;
-        tabManager!.createTab(true, panel, task);
-      },
-    })
-  );
-
-  // Auto-open a chat tab only on the very first activation after installation.
-  // On subsequent launches, rely on VSCode's built-in tab serializer to restore
-  // previously open chat tabs.
-  const ACTIVATED_KEY = 'kissSorcar.hasBeenActivated';
-  const hasBeenActivated = context.globalState.get<boolean>(ACTIVATED_KEY, false);
-  if (!hasBeenActivated) {
-    context.globalState.update(ACTIVATED_KEY, true);
-    setTimeout(() => {
-      if (restoredCount === 0) {
-        tabManager!.createTab(true);
-      }
-    }, 200);
-  }
 
   // Auto-install dependencies in background
   ensureDependencies().catch(err => {
@@ -262,9 +209,9 @@ export function activate(context: vscode.ExtensionContext): void {
 }
 
 export function deactivate(): void {
-  tabManager?.dispose();
-  tabManager = undefined;
   sidebarView?.dispose();
   sidebarView = undefined;
+  mergeManager?.dispose();
+  mergeManager = undefined;
   console.log('KISS Sorcar extension deactivated');
 }
