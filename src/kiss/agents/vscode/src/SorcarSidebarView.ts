@@ -137,7 +137,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           this._sendActiveFileInfo();
           if (this._pendingNewChat) {
             this._pendingNewChat = false;
-            this._agentProcess.sendCommand({ type: 'newChat' });
             this._sendToWebview({ type: 'clearChat' });
           }
           if (this._commitPending) {
@@ -510,7 +509,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       this._pendingNewChat = true;
       this._agentProcess.stop();
     } else {
-      this._agentProcess.sendCommand({ type: 'newChat' });
       this._sendToWebview({ type: 'clearChat' });
     }
   }
