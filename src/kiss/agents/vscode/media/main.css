@@ -71,6 +71,8 @@ header {
 
 /* ── Tab Bar ─────────────────────────────────────────── */
 #tab-bar {
+  display: flex;
+  align-items: center;
   flex-shrink: 0;
   border-bottom: 1px solid var(--border);
   background: var(--bg2);
@@ -78,10 +80,24 @@ header {
 }
 #tab-list {
   display: flex;
+  flex: 1;
+  min-width: 0;
   overflow-x: auto;
   scrollbar-width: none;
   -ms-overflow-style: none;
 }
+#tab-bar > #history-btn {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: var(--dim);
+  cursor: pointer;
+  padding: 5px 8px;
+  display: flex;
+  align-items: center;
+  transition: color 0.15s;
+}
+#tab-bar > #history-btn:hover { color: var(--fg); }
 #tab-list::-webkit-scrollbar { display: none; }
 .chat-tab {
   display: flex;
@@ -416,14 +432,7 @@ header {
   color: color-mix(in srgb, var(--fg) 50%, transparent);
 }
 
-/* Clear button */
-#clear-btn {
-  background: none; border: none;
-  color: color-mix(in srgb, var(--fg) 50%, transparent); cursor: pointer;
-  padding: 4px; transition: color 0.15s;
-  display: flex; align-items: center;
-}
-#clear-btn:hover { color: color-mix(in srgb, var(--fg) 66%, transparent); }
+
 
 /* Disabled state for textarea while agent is running or merge is active */
 #task-input:disabled {
@@ -556,13 +565,12 @@ header {
   border-radius: 4px;
 }
 #parallel-toggle-btn.active:hover { color: var(--accent); }
-#history-btn, #run-prompt-btn {
+#run-prompt-btn {
   background: none; border: none;
   color: color-mix(in srgb, var(--fg) 50%, transparent); cursor: pointer;
   padding: 4px; transition: color 0.15s, opacity 0.15s;
   display: flex; align-items: center;
 }
-#history-btn:hover { color: color-mix(in srgb, var(--fg) 66%, transparent); }
 #upload-btn:disabled, #worktree-toggle-btn:disabled, #parallel-toggle-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 #run-prompt-btn:not(:disabled) { color: color-mix(in srgb, var(--green) 72%, transparent); }
 #run-prompt-btn:not(:disabled):hover { color: color-mix(in srgb, var(--green) 91%, transparent); }

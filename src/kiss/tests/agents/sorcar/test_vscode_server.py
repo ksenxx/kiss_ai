@@ -645,11 +645,10 @@ class TestSorcarTabWorktreeToggle(unittest.TestCase):
     def test_has_use_worktree_tooltip(self) -> None:
         assert 'data-tooltip="Use worktree"' in self.html
 
-    def test_button_is_between_upload_and_history(self) -> None:
+    def test_button_is_after_upload(self) -> None:
         upload_idx = self.html.index('id="upload-btn"')
         worktree_idx = self.html.index('id="worktree-toggle-btn"')
-        history_idx = self.html.index('id="history-btn"')
-        assert upload_idx < worktree_idx < history_idx
+        assert upload_idx < worktree_idx
 
     def test_has_tree_svg_icon(self) -> None:
         """Button should have a git-branch-like tree SVG icon."""
@@ -982,11 +981,10 @@ class TestSorcarTabParallelToggle(unittest.TestCase):
     def test_has_use_parallelism_tooltip(self) -> None:
         assert 'data-tooltip="Use parallelism"' in self.html
 
-    def test_button_is_between_worktree_and_history(self) -> None:
+    def test_button_is_after_worktree(self) -> None:
         worktree_idx = self.html.index('id="worktree-toggle-btn"')
         parallel_idx = self.html.index('id="parallel-toggle-btn"')
-        history_idx = self.html.index('id="history-btn"')
-        assert worktree_idx < parallel_idx < history_idx
+        assert worktree_idx < parallel_idx
 
     def test_has_svg_icon(self) -> None:
         """Button should have a parallel-lines SVG icon."""

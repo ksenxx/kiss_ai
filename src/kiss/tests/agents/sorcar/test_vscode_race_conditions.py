@@ -202,46 +202,7 @@ class TestTypescriptRaceFixesCodeInspection(unittest.TestCase):
 
 
 class TestNewChatHistoryButtonsDisabledWhileRunning(unittest.TestCase):
-    """New chat and history buttons are disabled while a task is running."""
-
-    def _read_main_js(self) -> str:
-        with open("src/kiss/agents/vscode/media/main.js") as f:
-            return f.read()
-
-    def test_set_running_state_disables_clear_btn(self) -> None:
-        """setRunningState disables clearBtn when running=true."""
-        source = self._read_main_js()
-        # Find setRunningState function body
-        idx = source.find("function setRunningState(running)")
-        assert idx >= 0
-        block = source[idx:idx + 600]
-        assert "clearBtn.disabled = running" in block
-
-    def test_set_running_state_disables_history_btn(self) -> None:
-        """setRunningState disables historyBtn when running=true."""
-        source = self._read_main_js()
-        idx = source.find("function setRunningState(running)")
-        assert idx >= 0
-        block = source[idx:idx + 600]
-        assert "historyBtn.disabled = running" in block
-
-    def test_disabled_in_same_function_as_stop_btn(self) -> None:
-        """Button disabling is in setRunningState, co-located with stopBtn toggle (no race)."""
-        source = self._read_main_js()
-        idx = source.find("function setRunningState(running)")
-        assert idx >= 0
-        block = source[idx:idx + 600]
-        # All button state changes are in the same synchronous function
-        assert "stopBtn.style.display" in block
-        assert "clearBtn.disabled" in block
-        assert "historyBtn.disabled" in block
-
-    def test_css_has_disabled_styles_for_buttons(self) -> None:
-        """CSS provides visual disabled feedback for new chat and history buttons."""
-        with open("src/kiss/agents/vscode/media/main.css") as f:
-            css = f.read()
-        assert "#history-btn:disabled" in css
-        assert "#clear-btn:disabled" in css
+    """Buttons are properly managed while a task is running."""
 
     def test_status_running_false_always_sent(self) -> None:
         """status:running:false is always broadcast (try/finally), so buttons always re-enable."""

@@ -78,7 +78,11 @@ export function buildChatHtml(webview: vscode.Webview, extensionUri: vscode.Uri,
       </div>
     </header>
 
-    <div id="tab-bar"><div id="tab-list"></div></div>
+    <div id="tab-bar"><div id="tab-list"></div><button id="history-btn" data-tooltip="Task history">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+              </svg>
+            </button></div>
 
     <div id="task-panel"></div>
 
@@ -115,14 +119,6 @@ export function buildChatHtml(webview: vscode.Webview, extensionUri: vscode.Uri,
             </button>
             <button id="parallel-toggle-btn" data-tooltip="Use parallelism">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="4" x2="6" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/><line x1="18" y1="4" x2="18" y2="20"/></svg>
-            </button>
-            <button id="history-btn" data-tooltip="Task history">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
-              </svg>
-            </button>
-            <button id="clear-btn" data-tooltip="New chat">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
             </button>
             <button id="run-prompt-btn" data-tooltip="Run current file as prompt" disabled>
               <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none">

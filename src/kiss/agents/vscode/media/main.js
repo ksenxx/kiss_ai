@@ -261,7 +261,7 @@
   const sendBtn = document.getElementById('send-btn');
   const stopBtn = document.getElementById('stop-btn');
   const uploadBtn = document.getElementById('upload-btn');
-  const clearBtn = document.getElementById('clear-btn');
+
   const modelBtn = document.getElementById('model-btn');
   const modelDropdown = document.getElementById('model-dropdown');
   const modelSearch = document.getElementById('model-search');
@@ -1450,11 +1450,7 @@
         parallelToggleBtn.classList.toggle('active');
       });
     }
-    if (clearBtn) {
-      clearBtn.addEventListener('click', function() {
-        doClearChat();
-      });
-    }
+
     if (inputClearBtn) {
       inputClearBtn.addEventListener('click', function() {
         inp.value = '';
