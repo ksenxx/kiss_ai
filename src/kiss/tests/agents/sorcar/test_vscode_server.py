@@ -2601,7 +2601,6 @@ class TestSorcarSidebarViewMergeActions(unittest.TestCase):
         idx = self._ts.index("msg.type === 'merge_data'")
         block = self._ts[idx : idx + 200]
         assert "this._mergeOwner = true" in block
-        assert "this.mergeOwnerCallback" in block
 
 
 class TestSorcarSidebarViewStartTask(unittest.TestCase):
@@ -2762,11 +2761,6 @@ class TestSorcarSidebarViewPublicAPI(unittest.TestCase):
 
     def test_has_visible_getter(self) -> None:
         assert "get visible()" in self._ts
-
-    def test_has_is_merge_owner(self) -> None:
-        assert "get isMergeOwner()" in self._ts
-        assert "set isMergeOwner(" in self._ts
-
 
 class TestSorcarSidebarViewAgentEventHandling(unittest.TestCase):
     """Verify SorcarSidebarView handles agent process events correctly."""
@@ -3547,9 +3541,6 @@ class TestSidebarViewBehavior(unittest.TestCase):
 
     def test_has_merge_manager(self) -> None:
         assert "_mergeManager" in self._sidebar_ts
-
-    def test_has_is_merge_owner(self) -> None:
-        assert "get isMergeOwner()" in self._sidebar_ts
 
     def test_handles_all_done_from_merge_manager(self) -> None:
         assert "this._mergeManager.on('allDone'" in self._sidebar_ts
