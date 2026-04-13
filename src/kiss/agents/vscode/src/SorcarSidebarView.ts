@@ -35,9 +35,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _worktreeProgress: vscode.Progress<{ message?: string }> | null = null;
   private _disposed: boolean = false;
 
-  /** Callback to set this view as the merge owner in the extension. */
-  public mergeOwnerCallback?: (view: SorcarSidebarView) => void;
-
   constructor(extensionUri: vscode.Uri, mergeManager: MergeManager) {
     this._extensionUri = extensionUri;
     this._mergeManager = mergeManager;
@@ -101,7 +98,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       }
       if (msg.type === 'merge_data') {
         this._mergeOwner = true;
-        this.mergeOwnerCallback?.(this);
         this._mergeManager.openMerge((msg as any).data);
       }
       if (msg.type === 'worktree_created' || msg.type === 'worktree_done') {
@@ -159,10 +155,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   get visible(): boolean {
     return this._view?.visible ?? false;
   }
-
-  /** Whether this view is the merge session owner. */
-  get isMergeOwner(): boolean { return this._mergeOwner; }
-  set isMergeOwner(v: boolean) { this._mergeOwner = v; }
 
   private _getWorkDir(): string {
     const folders = vscode.workspace.workspaceFolders;

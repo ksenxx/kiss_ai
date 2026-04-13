@@ -959,25 +959,8 @@
     case 'askUser':
       showAskUserModal(ev.question);
       break;
-    case 'waitForUser':
-      showWaitForUser(ev.instruction, ev.url);
-      break;
     case 'error':
       addError(ev.text);
-      break;
-    case 'test_file_picker':
-      inp.value = '@'; syncClearBtn();
-      inp.selectionStart = inp.selectionEnd = 1;
-      inp.focus();
-      renderAutocomplete(ev.files || []);
-      break;
-    case 'test_model_picker':
-      allModels = ev.models || [];
-      if (ev.selected) { selectedModel = ev.selected; modelName.textContent = ev.selected; }
-      modelDropdown.classList.add('open');
-      modelSearch.value = '';
-      renderModelList('');
-      modelSearch.focus();
       break;
     case 'clear':
       clearOutput();
@@ -1660,23 +1643,6 @@
     askUserQuestion.textContent = question;
     askUserModal.style.display = 'flex';
     askUserInput.focus();
-  }
-
-  function showWaitForUser(instruction, url) {
-    var div = mkEl('div', 'ev user-action-card');
-    div.innerHTML =
-      '<div style="border:2px solid var(--yellow);border-radius:8px;padding:14px;margin:8px 0;background:color-mix(in srgb, var(--yellow) 8%, transparent)">'
-      + '<div style="font-weight:600;color:var(--yellow);margin-bottom:6px">\u23F8\uFE0F User Action Required</div>'
-      + '<div style="margin-bottom:10px">' + esc(instruction || '') + '</div>'
-      + '<button id="wait-user-done-btn" style="padding:6px 16px;background:var(--green);color:#000;'
-      + 'border:none;border-radius:6px;cursor:pointer;font-weight:600">I\'m Done</button></div>';
-    O.appendChild(div);
-    div.querySelector('#wait-user-done-btn').addEventListener('click', function() {
-      vscode.postMessage({ type: 'userActionDone' });
-      this.disabled = true;
-      this.textContent = 'Resumed';
-    });
-    sb();
   }
 
   function handleFileSelect(e) {
