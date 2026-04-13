@@ -80,7 +80,7 @@ export function buildChatHtml(webview: vscode.Webview, extensionUri: vscode.Uri,
 
     <div id="tab-bar"><div id="tab-list"></div><button id="history-btn">
               <svg class="history-chevron" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
-                <polyline points="9 18 15 12 9 6"/>
+                <polyline points="15 18 9 12 15 6"/>
               </svg>
               <span>History</span>
             </button></div>
