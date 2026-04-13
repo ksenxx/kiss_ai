@@ -1014,13 +1014,14 @@
   function startTimer() {
     if (!t0) t0 = Date.now();
     if (timerIv) clearInterval(timerIv);
+    statusText.style.color = 'var(--red)';
     timerIv = setInterval(function() {
       var s = Math.floor((Date.now() - t0) / 1000);
       var m = Math.floor(s / 60);
       statusText.textContent = 'Running ' + (m > 0 ? m + 'm ' : '') + s % 60 + 's';
     }, 1000);
   }
-  function stopTimer() { if (timerIv) { clearInterval(timerIv); timerIv = null; } }
+  function stopTimer() { if (timerIv) { clearInterval(timerIv); timerIv = null; } statusText.style.color = 'var(--green)'; }
 
 
 
