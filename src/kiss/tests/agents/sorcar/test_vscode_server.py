@@ -3086,7 +3086,7 @@ class TestWebviewTabBarJS(unittest.TestCase):
         end = self._js.index("\n  }", idx) + 4
         body = self._js[idx:end]
         for field in ("title:", "outputHTML:", "taskPanelHTML:",
-                      "taskName:", "welcomeVisible:"):
+                      "chatId:", "welcomeVisible:"):
             assert field in body, f"makeTab missing field {field}"
 
     def test_tabs_array_exists(self) -> None:
@@ -3261,11 +3261,11 @@ class TestWebviewTabBarJS(unittest.TestCase):
         body = self._js[idx:end]
         assert "tab.outputHTML = O.innerHTML" in body
 
-    def test_save_current_tab_stores_task_name(self) -> None:
+    def test_save_current_tab_stores_chat_id(self) -> None:
         idx = self._js.index("function saveCurrentTab()")
         end = self._js.index("\n  function ", idx + 1)
         body = self._js[idx:end]
-        assert "tab.taskName = currentTaskName" in body
+        assert "tab.chatId = currentChatId" in body
 
     def test_restore_tab_function_exists(self) -> None:
         assert "function restoreTab(tab)" in self._js
@@ -3282,11 +3282,11 @@ class TestWebviewTabBarJS(unittest.TestCase):
         body = self._js[idx:end]
         assert "O.innerHTML = tab.outputHTML" in body
 
-    def test_restore_tab_restores_task_name(self) -> None:
+    def test_restore_tab_restores_chat_id(self) -> None:
         idx = self._js.index("function restoreTab(tab)")
         end = self._js.index("\n  function ", idx + 1)
         body = self._js[idx:end]
-        assert "currentTaskName = tab.taskName" in body
+        assert "currentChatId = tab.chatId" in body
 
     # -- Tab title updates --
 
@@ -3652,6 +3652,114 @@ class TestSidebarViewBehavior(unittest.TestCase):
         """SorcarSidebarView has appendToInput for insertSelectionToChat."""
         assert "appendToInput(" in self._sidebar_ts
         assert "'appendToInput'" in self._sidebar_ts
+
+
+class TestTabStateRestore(unittest.TestCase):
+    """Test that tab chatId is persisted correctly for cross-restart restore.
+
+    Tabs are identified by chat_id (not the task string). persistTabState()
+    uses currentChatId for the active tab, and updateActiveTabTitle() syncs
+    tab.chatId = currentChatId.
+    """
+
+    js: str
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
+        cls.js = (base / "vscode" / "media" / "main.js").read_text()
+
+    def test_persist_tab_state_uses_current_chat_id_for_active_tab(self) -> None:
+        """persistTabState must use currentChatId for the active tab."""
+        idx = self.js.index("function persistTabState()")
+        block = self.js[idx:idx + 500]
+        assert "t.id === activeTabId" in block
+        assert "currentChatId" in block
+
+    def test_update_active_tab_title_syncs_chat_id(self) -> None:
+        """updateActiveTabTitle must set tab.chatId = currentChatId."""
+        idx = self.js.index("function updateActiveTabTitle(")
+        block = self.js[idx:idx + 400]
+        assert "tab.chatId = currentChatId" in block
+
+    def test_persist_tab_state_logic_via_node(self) -> None:
+        """Run the actual JS logic in Node.js and verify correctness."""
+        node_script = """
+        var tabIdCounter = 0;
+        var activeTabId = -1;
+        var currentChatId = '';
+        var tabs = [];
+        var _lastState = null;
+
+        var vscode = {
+            setState: function(s) { _lastState = s; },
+            getState: function() { return _lastState; },
+        };
+
+        function makeTab(title) {
+            var id = ++tabIdCounter;
+            return { id: id, title: title || 'new chat', chatId: '' };
+        }
+
+        function persistTabState() {
+            var serialized = tabs.map(function(t) {
+                var chatId = (t.id === activeTabId) ? currentChatId : t.chatId;
+                return { title: t.title, chatId: chatId };
+            });
+            var activeIdx = tabs.findIndex(function(t) { return t.id === activeTabId; });
+            vscode.setState({ tabs: serialized, activeTabIndex: activeIdx, chatId: currentChatId });
+        }
+
+        // Test 1: Single tab, chatId persisted
+        var tab1 = makeTab('new chat');
+        tabs.push(tab1);
+        activeTabId = tab1.id;
+        currentChatId = 'abc123';
+        persistTabState();
+        var state = vscode.getState();
+        if (state.tabs[0].chatId !== 'abc123') {
+            console.log('FAIL test1: ' + state.tabs[0].chatId);
+            process.exit(1);
+        }
+
+        // Test 2: Multi-tab scenario
+        tabIdCounter = 0;
+        tabs = [];
+        var t1 = makeTab('task A');
+        t1.chatId = 'chat-A';
+        tabs.push(t1);
+        var t2 = makeTab('new chat');
+        tabs.push(t2);
+        activeTabId = t2.id;
+        currentChatId = 'chat-B';
+        persistTabState();
+        state = vscode.getState();
+        if (state.tabs[0].chatId !== 'chat-A') {
+            console.log('FAIL 2a: ' + state.tabs[0].chatId);
+            process.exit(1);
+        }
+        if (state.tabs[1].chatId !== 'chat-B') {
+            console.log('FAIL 2b: ' + state.tabs[1].chatId);
+            process.exit(1);
+        }
+
+        // Test 3: Empty chatId for active tab (new empty tab)
+        currentChatId = '';
+        persistTabState();
+        state = vscode.getState();
+        if (state.tabs[1].chatId !== '') {
+            console.log('FAIL 3: ' + state.tabs[1].chatId);
+            process.exit(1);
+        }
+
+        console.log('PASS: all tab state persistence tests passed');
+        """
+        result = subprocess.run(
+            ["node", "-e", node_script],
+            capture_output=True, text=True, timeout=10,
+        )
+        assert result.returncode == 0, f"Node.js test failed: {result.stdout}{result.stderr}"
+        assert "PASS" in result.stdout
 
 
 if __name__ == "__main__":

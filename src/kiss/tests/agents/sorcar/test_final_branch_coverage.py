@@ -92,16 +92,22 @@ class TestSetLatestChatEventsEmpty:
 
     def test_set_empty_events(self) -> None:
         """Passing empty events list sets has_events=0 and skips insert."""
-        task_id = th._add_task("empty-events-task")
+        task_id = th._add_task("empty-events-task", chat_id="empty-ev-chat")
         # First set some events, then clear them
         th._set_latest_chat_events(
             [{"type": "text_delta", "text": "hello"}], task_id=task_id
         )
-        events = th._load_task_chat_events("empty-events-task")
+        result = th._load_latest_chat_events_by_chat_id("empty-ev-chat")
+        assert result is not None
+        events = result["events"]
+        assert isinstance(events, list)
         assert len(events) == 1
         # Now set empty events (line 380→385)
         th._set_latest_chat_events([], task_id=task_id)
-        events = th._load_task_chat_events("empty-events-task")
+        result = th._load_latest_chat_events_by_chat_id("empty-ev-chat")
+        assert result is not None
+        events = result["events"]
+        assert isinstance(events, list)
         assert len(events) == 0
 
 

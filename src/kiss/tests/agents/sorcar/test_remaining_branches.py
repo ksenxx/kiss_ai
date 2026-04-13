@@ -58,13 +58,11 @@ class TestPersistenceBranches:
         import shutil
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
-    def test_load_task_chat_events_bad_json(self) -> None:
-        """_load_task_chat_events handles corrupt event_json gracefully (lines 294-295)."""
+    def test_load_latest_chat_events_bad_json(self) -> None:
+        """_load_latest_chat_events_by_chat_id handles corrupt event_json gracefully."""
         db = th._get_db()
-        # Insert a task and then corrupt event data
-        th._add_task("corrupt-event-test")
-        task_id = th._most_recent_task_id(db, "corrupt-event-test")
-        assert task_id is not None
+        # Insert a task with chat_id and then corrupt event data
+        task_id = th._add_task("corrupt-event-test", chat_id="bad-json-chat")
         db.execute(
             "INSERT INTO events (task_id, seq, event_json) VALUES (?, ?, ?)",
             (task_id, 0, "NOT VALID JSON {{{"),
@@ -74,7 +72,10 @@ class TestPersistenceBranches:
             (task_id, 1, json.dumps({"type": "ok"})),
         )
         db.commit()
-        events = th._load_task_chat_events("corrupt-event-test")
+        result = th._load_latest_chat_events_by_chat_id("bad-json-chat")
+        assert result is not None
+        events = result["events"]
+        assert isinstance(events, list)
         # The bad JSON is skipped, the valid one is returned
         assert len(events) == 1
         assert events[0]["type"] == "ok"

@@ -128,9 +128,10 @@ class TestReplaySessionWithEvents:
             th._KISS_DIR = tmp_path
             th._DB_PATH = tmp_path / "history.db"
 
-            # Create a task with events
+            # Create a task with events (using a chat_id)
             task_text = "test-replay-session-task"
-            task_id = th._add_task(task_text)
+            chat_id = th._generate_chat_id()
+            task_id = th._add_task(task_text, chat_id=chat_id)
             test_events: list[dict[str, object]] = [
                 {"type": "text_delta", "text": "hello"},
                 {"type": "result", "summary": "done"},
@@ -147,8 +148,8 @@ class TestReplaySessionWithEvents:
 
             server.printer.broadcast = capture  # type: ignore[assignment]
 
-            # Call _replay_session — should find events and broadcast them
-            server._replay_session(task_text)
+            # Call _replay_session with chat_id
+            server._replay_session(chat_id)
 
             task_ev = [e for e in captured if e.get("type") == "task_events"]
             assert len(task_ev) == 1
