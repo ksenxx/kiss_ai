@@ -1387,9 +1387,9 @@ class TestFilePathDoesNotPopulateTaskPanel(unittest.TestCase):
         body = self._get_set_task_text_handler()
         assert "resetAdjacentState()" in body
 
-    def test_set_task_text_handler_calls_set_state(self) -> None:
+    def test_set_task_text_handler_persists_tab_state(self) -> None:
         body = self._get_set_task_text_handler()
-        assert "vscode.setState({ task: stt })" in body
+        assert "updateActiveTabTitle(stt)" in body
 
     def test_set_task_text_handler_hides_welcome(self) -> None:
         body = self._get_set_task_text_handler()
@@ -2378,6 +2378,671 @@ class TestBuildChatHtmlExported(unittest.TestCase):
         assert 'id="task-input"' in block
         assert 'id="output"' in block
         assert 'id="send-btn"' in block
+
+
+class TestSorcarSidebarViewMessageHandlingParity(unittest.TestCase):
+    """Verify SorcarSidebarView handles the same message types as SorcarTab."""
+
+    _tab_ts: str = ""
+    _sidebar_ts: str = ""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents" / "vscode"
+        cls._tab_ts = (base / "src" / "SorcarTab.ts").read_text()
+        cls._sidebar_ts = (base / "src" / "SorcarSidebarView.ts").read_text()
+
+    @staticmethod
+    def _extract_case_labels(ts: str) -> set[str]:
+        """Extract all case labels from the _handleMessage method."""
+        import re
+
+        idx = ts.index("_handleMessage(")
+        # Find the end of the method (next private/public method or end of class)
+        body = ts[idx:]
+        return set(re.findall(r"case '(\w+)':", body))
+
+    def test_sidebar_handles_all_tab_message_types(self) -> None:
+        """SorcarSidebarView handles every message type that SorcarTab handles."""
+        tab_cases = self._extract_case_labels(self._tab_ts)
+        sidebar_cases = self._extract_case_labels(self._sidebar_ts)
+        missing = tab_cases - sidebar_cases
+        assert not missing, f"Sidebar is missing message handlers: {missing}"
+
+    def test_sidebar_has_no_extra_message_types(self) -> None:
+        """SorcarSidebarView doesn't handle unknown message types not in SorcarTab."""
+        tab_cases = self._extract_case_labels(self._tab_ts)
+        sidebar_cases = self._extract_case_labels(self._sidebar_ts)
+        extra = sidebar_cases - tab_cases
+        assert not extra, f"Sidebar has extra message handlers: {extra}"
+
+
+class TestSorcarSidebarViewOpensFilesInLeftSplit(unittest.TestCase):
+    """Verify SorcarSidebarView opens files in ViewColumn.One like SorcarTab."""
+
+    _ts: str = ""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents" / "vscode"
+        cls._ts = (base / "src" / "SorcarSidebarView.ts").read_text()
+
+    def _extract_case_block(self, case_label: str) -> str:
+        """Extract a switch-case block from _handleMessage."""
+        import re as _re
+
+        pat = _re.compile(rf"case\s+'{_re.escape(case_label)}'", _re.MULTILINE)
+        m = pat.search(self._ts)
+        assert m, f"Case '{case_label}' not found"
+        start = m.start()
+        next_case = _re.search(r"\n\s+case\s+'", self._ts[m.end():])
+        if next_case:
+            return self._ts[start : m.end() + next_case.start()]
+        return self._ts[start:]
+
+    def test_submit_file_open_uses_view_column_one(self) -> None:
+        """submit handler opens file paths in ViewColumn.One."""
+        block = self._extract_case_block("submit")
+        assert "viewColumn: vscode.ViewColumn.One" in block
+
+    def test_open_file_uses_view_column_one(self) -> None:
+        """openFile handler opens files in ViewColumn.One."""
+        block = self._extract_case_block("openFile")
+        assert "viewColumn: vscode.ViewColumn.One" in block
+
+
+class TestSorcarSidebarViewWorktreeActions(unittest.TestCase):
+    """Verify SorcarSidebarView handles worktree actions with progress notifications."""
+
+    _ts: str = ""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents" / "vscode"
+        cls._ts = (base / "src" / "SorcarSidebarView.ts").read_text()
+
+    def test_worktree_action_resolve_field(self) -> None:
+        assert "_worktreeActionResolve" in self._ts
+
+    def test_worktree_progress_field(self) -> None:
+        assert "_worktreeProgress" in self._ts
+
+    def test_merge_shows_progress_notification(self) -> None:
+        assert "Committing and merging worktree" in self._ts
+
+    def test_discard_shows_progress_notification(self) -> None:
+        assert "Discarding worktree" in self._ts
+
+    def test_progress_title_varies_by_action(self) -> None:
+        assert "wtAction === 'merge'" in self._ts
+        assert "wtAction === 'discard'" in self._ts
+
+    def test_worktree_progress_reported(self) -> None:
+        """worktree_progress events update the progress notification."""
+        assert "worktree_progress" in self._ts
+        assert "_worktreeProgress.report(" in self._ts
+
+    def test_worktree_result_resolves_progress(self) -> None:
+        """worktree_result resolves the progress notification."""
+        assert "this._worktreeActionResolve();" in self._ts
+        assert "this._worktreeActionResolve = null;" in self._ts
+
+    def test_worktree_result_shows_info_or_error(self) -> None:
+        """Successful results show info, failures show error."""
+        assert "showInformationMessage" in self._ts
+        assert "showErrorMessage" in self._ts
+
+    def test_worktree_progress_cleared_on_result(self) -> None:
+        assert "this._worktreeProgress = null" in self._ts
+
+    def test_worktree_timeout(self) -> None:
+        """worktreeAction has a 120s timeout."""
+        assert "120_000" in self._ts
+
+    def test_worktree_created_opens_scm(self) -> None:
+        """worktree_created events open the worktree in SCM."""
+        assert "worktree_created" in self._ts
+        assert "_openWorktreeInScm" in self._ts
+
+    def test_worktree_result_closes_scm(self) -> None:
+        """Successful worktree_result closes the worktree in SCM."""
+        assert "_closeWorktreeInScm" in self._ts
+
+
+class TestSorcarSidebarViewMergeActions(unittest.TestCase):
+    """Verify SorcarSidebarView dispatches merge actions to MergeManager."""
+
+    _ts: str = ""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents" / "vscode"
+        cls._ts = (base / "src" / "SorcarSidebarView.ts").read_text()
+
+    def _get_merge_action_block(self) -> str:
+        import re
+
+        m = re.search(r"case\s+'mergeAction':", self._ts)
+        assert m
+        start = m.start()
+        end = self._ts.index("break;", start) + len("break;")
+        return self._ts[start:end]
+
+    def test_dispatches_accept(self) -> None:
+        block = self._get_merge_action_block()
+        assert "'accept'" in block
+        assert "acceptChange()" in block
+
+    def test_dispatches_reject(self) -> None:
+        block = self._get_merge_action_block()
+        assert "'reject'" in block
+        assert "rejectChange()" in block
+
+    def test_dispatches_prev(self) -> None:
+        block = self._get_merge_action_block()
+        assert "'prev'" in block
+        assert "prevChange()" in block
+
+    def test_dispatches_next(self) -> None:
+        block = self._get_merge_action_block()
+        assert "'next'" in block
+        assert "nextChange()" in block
+
+    def test_dispatches_accept_all(self) -> None:
+        block = self._get_merge_action_block()
+        assert "'accept-all'" in block
+        assert "acceptAll()" in block
+
+    def test_dispatches_reject_all(self) -> None:
+        block = self._get_merge_action_block()
+        assert "'reject-all'" in block
+        assert "rejectAll()" in block
+
+    def test_dispatches_accept_file(self) -> None:
+        block = self._get_merge_action_block()
+        assert "'accept-file'" in block
+        assert "acceptFile()" in block
+
+    def test_dispatches_reject_file(self) -> None:
+        block = self._get_merge_action_block()
+        assert "'reject-file'" in block
+        assert "rejectFile()" in block
+
+    def test_all_done_sent_to_agent(self) -> None:
+        """all-done action is sent to the agent process, not MergeManager."""
+        block = self._get_merge_action_block()
+        assert "'all-done'" in block
+        assert "sendCommand" in block
+
+    def test_merge_data_opens_merge(self) -> None:
+        """merge_data from agent opens merge via MergeManager."""
+        assert "this._mergeManager.openMerge(" in self._ts
+
+    def test_merge_data_sets_merge_owner(self) -> None:
+        """merge_data sets this view as the merge owner."""
+        # Find merge_data handler
+        idx = self._ts.index("msg.type === 'merge_data'")
+        block = self._ts[idx : idx + 200]
+        assert "this._mergeOwner = true" in block
+        assert "this.mergeOwnerCallback" in block
+
+
+class TestSorcarSidebarViewStartTask(unittest.TestCase):
+    """Verify SorcarSidebarView._startTask passes all parameters like SorcarTab."""
+
+    _ts: str = ""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents" / "vscode"
+        cls._ts = (base / "src" / "SorcarSidebarView.ts").read_text()
+
+    def _get_start_task_body(self) -> str:
+        idx = self._ts.index("private _startTask(")
+        end = self._ts.index("\n  private ", idx + 1)
+        return self._ts[idx:end]
+
+    def test_accepts_use_worktree(self) -> None:
+        body = self._get_start_task_body()
+        assert "useWorktree" in body
+
+    def test_accepts_use_parallel(self) -> None:
+        body = self._get_start_task_body()
+        assert "useParallel" in body
+
+    def test_accepts_attachments(self) -> None:
+        body = self._get_start_task_body()
+        assert "attachments" in body
+
+    def test_accepts_active_file(self) -> None:
+        body = self._get_start_task_body()
+        assert "activeFile" in body
+
+    def test_sends_set_task_text(self) -> None:
+        """_startTask sends setTaskText to the webview."""
+        body = self._get_start_task_body()
+        assert "setTaskText" in body
+
+    def test_sends_status_running(self) -> None:
+        """_startTask sends status running: true to the webview."""
+        body = self._get_start_task_body()
+        assert "running: true" in body
+
+    def test_sends_run_command(self) -> None:
+        """_startTask sends the 'run' command to the agent process."""
+        body = self._get_start_task_body()
+        assert "type: 'run'" in body
+
+    def test_submit_passes_worktree_and_parallel(self) -> None:
+        """submit case passes useWorktree and useParallel from message to _startTask."""
+        import re
+
+        m = re.search(r"case\s+'submit':", self._ts)
+        assert m
+        end = self._ts.index("break;", m.end())
+        block = self._ts[m.start() : end]
+        assert "message.useWorktree" in block
+        assert "message.useParallel" in block
+
+
+class TestSorcarSidebarViewPublicAPI(unittest.TestCase):
+    """Verify SorcarSidebarView exposes the required public methods."""
+
+    _ts: str = ""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents" / "vscode"
+        cls._ts = (base / "src" / "SorcarSidebarView.ts").read_text()
+
+    def test_has_submit_task(self) -> None:
+        """submitTask submits a task programmatically."""
+        assert "public submitTask(prompt: string)" in self._ts
+
+    def test_submit_task_calls_start_task(self) -> None:
+        idx = self._ts.index("public submitTask(")
+        end = self._ts.index("\n  }", idx) + 4
+        body = self._ts[idx:end]
+        assert "this._startTask(" in body
+
+    def test_submit_task_guards_against_running(self) -> None:
+        """submitTask returns early if already running."""
+        idx = self._ts.index("public submitTask(")
+        end = self._ts.index("\n  }", idx) + 4
+        body = self._ts[idx:end]
+        assert "this._isRunning" in body
+
+    def test_has_stop_task(self) -> None:
+        assert "public stopTask()" in self._ts
+
+    def test_stop_task_calls_agent_stop(self) -> None:
+        idx = self._ts.index("public stopTask()")
+        end = self._ts.index("\n  }", idx) + 4
+        body = self._ts[idx:end]
+        assert "this._agentProcess.stop()" in body
+
+    def test_has_focus_chat_input(self) -> None:
+        assert "public async focusChatInput()" in self._ts
+
+    def test_focus_chat_input_shows_view(self) -> None:
+        idx = self._ts.index("public async focusChatInput()")
+        end = self._ts.index("\n  }", idx) + 4
+        body = self._ts[idx:end]
+        assert "this._view.show(true)" in body
+
+    def test_focus_chat_input_sends_focus_input(self) -> None:
+        idx = self._ts.index("public async focusChatInput()")
+        end = self._ts.index("\n  }", idx) + 4
+        body = self._ts[idx:end]
+        assert "focusInput" in body
+
+    def test_has_new_conversation(self) -> None:
+        assert "public newConversation()" in self._ts
+
+    def test_new_conversation_stops_running_task(self) -> None:
+        """If running, newConversation stops and queues the new chat."""
+        idx = self._ts.index("public newConversation()")
+        end = self._ts.index("\n  }", idx) + 4
+        body = self._ts[idx:end]
+        assert "_pendingNewChat = true" in body
+        assert "this._agentProcess.stop()" in body
+
+    def test_new_conversation_sends_new_chat_when_idle(self) -> None:
+        """When idle, newConversation sends newChat directly."""
+        idx = self._ts.index("public newConversation()")
+        end = self._ts.index("\n  }", idx) + 4
+        body = self._ts[idx:end]
+        assert "type: 'newChat'" in body
+        assert "type: 'clearChat'" in body
+
+    def test_has_generate_commit_message(self) -> None:
+        assert "public generateCommitMessage(" in self._ts
+
+    def test_generate_commit_message_sends_command(self) -> None:
+        idx = self._ts.index("public generateCommitMessage(")
+        end = self._ts.index("\n  }", idx) + 4
+        body = self._ts[idx:end]
+        assert "type: 'generateCommitMessage'" in body
+
+    def test_has_send_merge_all_done(self) -> None:
+        assert "public sendMergeAllDone()" in self._ts
+
+    def test_send_merge_all_done_sends_command(self) -> None:
+        idx = self._ts.index("public sendMergeAllDone()")
+        end = self._ts.index("\n  }", idx) + 4
+        body = self._ts[idx:end]
+        assert "type: 'mergeAction'" in body
+        assert "'all-done'" in body
+
+    def test_has_dispose(self) -> None:
+        assert "public dispose()" in self._ts
+
+    def test_dispose_kills_agent_process(self) -> None:
+        idx = self._ts.index("public dispose()")
+        end = self._ts.index("\n  }", idx) + 4
+        body = self._ts[idx:end]
+        assert "this._agentProcess.dispose()" in body
+
+    def test_has_visible_getter(self) -> None:
+        assert "get visible()" in self._ts
+
+    def test_has_is_merge_owner(self) -> None:
+        assert "get isMergeOwner()" in self._ts
+        assert "set isMergeOwner(" in self._ts
+
+
+class TestSorcarSidebarViewAgentEventHandling(unittest.TestCase):
+    """Verify SorcarSidebarView handles agent process events correctly."""
+
+    _ts: str = ""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents" / "vscode"
+        cls._ts = (base / "src" / "SorcarSidebarView.ts").read_text()
+
+    def _get_message_handler_body(self) -> str:
+        """Get the on('message') handler body from resolveWebviewView."""
+        idx = self._ts.index("this._agentProcess.on('message'")
+        # Find the closing of this callback - look for the end
+        end = self._ts.index("const workDir = this._getWorkDir()", idx)
+        return self._ts[idx:end]
+
+    def test_forwards_commit_messages(self) -> None:
+        body = self._get_message_handler_body()
+        assert "msg.type === 'commitMessage'" in body
+        assert "_onCommitMessage.fire" in body
+
+    def test_updates_selected_model(self) -> None:
+        body = self._get_message_handler_body()
+        assert "msg.type === 'models'" in body
+        assert "this._selectedModel = (msg as any).selected" in body
+
+    def test_handles_merge_data(self) -> None:
+        body = self._get_message_handler_body()
+        assert "msg.type === 'merge_data'" in body
+
+    def test_handles_worktree_created(self) -> None:
+        body = self._get_message_handler_body()
+        assert "msg.type === 'worktree_created'" in body
+
+    def test_handles_worktree_done(self) -> None:
+        body = self._get_message_handler_body()
+        assert "msg.type === 'worktree_done'" in body
+
+    def test_handles_worktree_progress(self) -> None:
+        body = self._get_message_handler_body()
+        assert "msg.type === 'worktree_progress'" in body
+
+    def test_handles_worktree_result(self) -> None:
+        body = self._get_message_handler_body()
+        assert "msg.type === 'worktree_result'" in body
+
+    def test_forwards_all_messages_to_webview(self) -> None:
+        body = self._get_message_handler_body()
+        assert "this._sendToWebview(msg)" in body
+
+    def test_tracks_running_status(self) -> None:
+        body = self._get_message_handler_body()
+        assert "msg.type === 'status'" in body
+        assert "this._isRunning = msg.running" in body
+
+    def test_sends_active_file_info_on_stop(self) -> None:
+        """When status running=false, sends active file info."""
+        body = self._get_message_handler_body()
+        assert "_sendActiveFileInfo()" in body
+
+    def test_pending_new_chat_handled_on_stop(self) -> None:
+        """When status running=false and _pendingNewChat, sends newChat."""
+        body = self._get_message_handler_body()
+        assert "_pendingNewChat" in body
+        assert "type: 'newChat'" in body
+
+
+class TestSorcarSidebarViewReadyHandler(unittest.TestCase):
+    """Verify the 'ready' message handler sends all initialization messages."""
+
+    _ts: str = ""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents" / "vscode"
+        cls._ts = (base / "src" / "SorcarSidebarView.ts").read_text()
+
+    def _get_ready_block(self) -> str:
+        import re
+
+        m = re.search(r"case\s+'ready':", self._ts)
+        assert m
+        end = self._ts.index("break;", m.end()) + len("break;")
+        return self._ts[m.start() : end]
+
+    def test_sends_status(self) -> None:
+        block = self._get_ready_block()
+        assert "running: this._isRunning" in block
+
+    def test_requests_models(self) -> None:
+        block = self._get_ready_block()
+        assert "'getModels'" in block
+
+    def test_sends_welcome_suggestions(self) -> None:
+        block = self._get_ready_block()
+        assert "_sendWelcomeSuggestions()" in block
+
+    def test_requests_input_history(self) -> None:
+        block = self._get_ready_block()
+        assert "'getInputHistory'" in block
+
+    def test_requests_last_session(self) -> None:
+        block = self._get_ready_block()
+        assert "'getLastSession'" in block
+
+    def test_sends_active_file_info(self) -> None:
+        block = self._get_ready_block()
+        assert "_sendActiveFileInfo()" in block
+
+    def test_sends_focus_input(self) -> None:
+        block = self._get_ready_block()
+        assert "'focusInput'" in block
+
+
+class TestSorcarSidebarViewVisibilityHandler(unittest.TestCase):
+    """Verify the sidebar refreshes state when it becomes visible."""
+
+    _ts: str = ""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents" / "vscode"
+        cls._ts = (base / "src" / "SorcarSidebarView.ts").read_text()
+
+    def test_on_did_change_visibility_registered(self) -> None:
+        assert "onDidChangeVisibility" in self._ts
+
+    def test_visibility_requests_input_history(self) -> None:
+        """When view becomes visible, requests input history."""
+        idx = self._ts.index("onDidChangeVisibility")
+        block = self._ts[idx : idx + 200]
+        assert "'getInputHistory'" in block
+
+    def test_visibility_sends_active_file_info(self) -> None:
+        idx = self._ts.index("onDidChangeVisibility")
+        block = self._ts[idx : idx + 200]
+        assert "_sendActiveFileInfo()" in block
+
+
+class TestSorcarSidebarViewDisposeHandler(unittest.TestCase):
+    """Verify the sidebar cleans up on dispose."""
+
+    _ts: str = ""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents" / "vscode"
+        cls._ts = (base / "src" / "SorcarSidebarView.ts").read_text()
+
+    def test_on_did_dispose_registered(self) -> None:
+        assert "onDidDispose" in self._ts
+
+    def test_on_did_dispose_sets_disposed(self) -> None:
+        idx = self._ts.index("onDidDispose")
+        block = self._ts[idx : idx + 200]
+        assert "this._disposed = true" in block
+
+    def test_on_did_dispose_resolves_worktree_action(self) -> None:
+        """Dispose resolves any pending worktree action to prevent hangs."""
+        idx = self._ts.index("onDidDispose")
+        block = self._ts[idx : idx + 200]
+        assert "this._worktreeActionResolve" in block
+
+    def test_public_dispose_kills_agent(self) -> None:
+        idx = self._ts.index("public dispose()")
+        end = self._ts.index("\n  }", idx) + 4
+        body = self._ts[idx:end]
+        assert "this._agentProcess.dispose()" in body
+        assert "this._onCommitMessage.dispose()" in body
+
+    def test_send_to_webview_guards_disposed(self) -> None:
+        """_sendToWebview checks _disposed before posting."""
+        idx = self._ts.index("private _sendToWebview(")
+        end = self._ts.index("\n  }", idx) + 4
+        body = self._ts[idx:end]
+        assert "!this._disposed" in body
+
+
+class TestSorcarSidebarViewRunPrompt(unittest.TestCase):
+    """Verify the sidebar handles runPrompt for .md files."""
+
+    _ts: str = ""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents" / "vscode"
+        cls._ts = (base / "src" / "SorcarSidebarView.ts").read_text()
+
+    def test_run_prompt_case_exists(self) -> None:
+        assert "case 'runPrompt':" in self._ts
+
+    def test_run_prompt_checks_md_extension(self) -> None:
+        import re
+
+        m = re.search(r"case\s+'runPrompt':", self._ts)
+        assert m
+        end = self._ts.index("break;", m.end())
+        block = self._ts[m.start() : end]
+        assert ".md'" in block
+
+    def test_run_prompt_reads_content(self) -> None:
+        import re
+
+        m = re.search(r"case\s+'runPrompt':", self._ts)
+        assert m
+        end = self._ts.index("break;", m.end())
+        block = self._ts[m.start() : end]
+        assert "getText()" in block
+
+    def test_run_prompt_calls_start_task(self) -> None:
+        import re
+
+        m = re.search(r"case\s+'runPrompt':", self._ts)
+        assert m
+        end = self._ts.index("break;", m.end())
+        block = self._ts[m.start() : end]
+        assert "_startTask(" in block
+
+
+class TestSorcarSidebarViewResolveDroppedPaths(unittest.TestCase):
+    """Verify the sidebar resolves dropped file paths relative to work dir."""
+
+    _ts: str = ""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents" / "vscode"
+        cls._ts = (base / "src" / "SorcarSidebarView.ts").read_text()
+
+    def test_resolve_dropped_paths_case_exists(self) -> None:
+        assert "case 'resolveDroppedPaths':" in self._ts
+
+    def test_resolve_dropped_paths_sends_dropped_paths(self) -> None:
+        import re
+
+        m = re.search(r"case\s+'resolveDroppedPaths':", self._ts)
+        assert m
+        end = self._ts.index("break;", m.end())
+        block = self._ts[m.start() : end]
+        assert "'droppedPaths'" in block
+
+    def test_filters_out_parent_paths(self) -> None:
+        """Paths outside work dir (starting with ..) are filtered out."""
+        import re
+
+        m = re.search(r"case\s+'resolveDroppedPaths':", self._ts)
+        assert m
+        end = self._ts.index("break;", m.end())
+        block = self._ts[m.start() : end]
+        assert "'..'" in block
+
+
+class TestSorcarSidebarViewComplete(unittest.TestCase):
+    """Verify the sidebar handles the 'complete' message for autocompletion."""
+
+    _ts: str = ""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents" / "vscode"
+        cls._ts = (base / "src" / "SorcarSidebarView.ts").read_text()
+
+    def test_complete_case_exists(self) -> None:
+        assert "case 'complete':" in self._ts
+
+    def test_complete_sends_query(self) -> None:
+        import re
+
+        m = re.search(r"case\s+'complete':", self._ts)
+        assert m
+        end = self._ts.index("break;", m.end())
+        block = self._ts[m.start() : end]
+        assert "query: message.query" in block
+
+    def test_complete_sends_active_file(self) -> None:
+        import re
+
+        m = re.search(r"case\s+'complete':", self._ts)
+        assert m
+        end = self._ts.index("break;", m.end())
+        block = self._ts[m.start() : end]
+        assert "activeFile:" in block
+
+    def test_complete_sends_active_file_content(self) -> None:
+        import re
+
+        m = re.search(r"case\s+'complete':", self._ts)
+        assert m
+        end = self._ts.index("break;", m.end())
+        block = self._ts[m.start() : end]
+        assert "activeFileContent:" in block
 
 
 if __name__ == "__main__":

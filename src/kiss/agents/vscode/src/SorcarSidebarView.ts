@@ -44,6 +44,12 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     this._mergeManager = mergeManager;
     this._agentProcess = new AgentProcess();
     this._selectedModel = vscode.workspace.getConfiguration('kissSorcar').get<string>('defaultModel') || getDefaultModel();
+    this._mergeManager.on('allDone', () => {
+      if (this._mergeOwner) {
+        this.sendMergeAllDone();
+        this._mergeOwner = false;
+      }
+    });
   }
 
   /**
@@ -257,7 +263,11 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         this._agentProcess.sendCommand({ type: 'getModels' });
         this._sendWelcomeSuggestions();
         this._agentProcess.sendCommand({ type: 'getInputHistory' });
-        this._agentProcess.sendCommand({ type: 'getLastSession' });
+        if (message.activeTask) {
+          this._agentProcess.sendCommand({ type: 'resumeSession', sessionId: message.activeTask });
+        } else {
+          this._agentProcess.sendCommand({ type: 'getLastSession' });
+        }
         this._sendActiveFileInfo();
         this._sendToWebview({ type: 'focusInput' } as ToWebviewMessage);
         break;

@@ -31,7 +31,7 @@ export type FromWebviewMessage =
   | { type: 'userActionDone' }
   | { type: 'openFile'; path: string; line?: number }
   | { type: 'recordFileUsage'; path: string }
-  | { type: 'ready' }
+  | { type: 'ready'; activeTask?: string }
   | { type: 'resumeSession'; id: string }
   | { type: 'getWelcomeSuggestions' }
   | { type: 'complete'; query: string }

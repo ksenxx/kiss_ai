@@ -45,6 +45,215 @@
   var OVERSCROLL_THRESHOLD = 150; // pixels of accumulated overscroll to trigger load
 
 
+  // --- Chat tabs state ---
+  var tabIdCounter = 0;
+  var tabs = [];        // array of {id, title, outputHTML, taskPanelHTML, taskPanelVisible, taskName, statusTokensText, statusBudgetText, welcomeVisible}
+  var activeTabId = -1;
+
+  function makeTab(title) {
+    var id = ++tabIdCounter;
+    return {
+      id: id,
+      title: title || 'new chat',
+      outputHTML: '',
+      taskPanelHTML: '',
+      taskPanelVisible: false,
+      taskName: '',
+      statusTokensText: '',
+      statusBudgetText: '',
+      welcomeVisible: true,
+    };
+  }
+
+  function saveCurrentTab() {
+    var tab = tabs.find(function(t) { return t.id === activeTabId; });
+    if (!tab) return;
+    tab.outputHTML = O.innerHTML;
+    tab.taskPanelHTML = taskPanel ? taskPanel.textContent : '';
+    tab.taskPanelVisible = taskPanel ? taskPanel.classList.contains('visible') : false;
+    tab.taskName = currentTaskName;
+    tab.statusTokensText = statusTokens ? statusTokens.textContent : '';
+    tab.statusBudgetText = statusBudget ? statusBudget.textContent : '';
+    tab.welcomeVisible = welcome ? welcome.style.display !== 'none' : true;
+    persistTabState();
+  }
+
+  function restoreTab(tab) {
+    activeTabId = tab.id;
+    O.innerHTML = tab.outputHTML;
+    if (taskPanel) {
+      taskPanel.textContent = tab.taskPanelHTML;
+      if (tab.taskPanelVisible) taskPanel.classList.add('visible');
+      else taskPanel.classList.remove('visible');
+    }
+    currentTaskName = tab.taskName;
+    if (statusTokens) statusTokens.textContent = tab.statusTokensText;
+    if (statusBudget) statusBudget.textContent = tab.statusBudgetText;
+    // Welcome: either it exists in the output or we need to add it
+    if (welcome) {
+      if (tab.welcomeVisible) {
+        welcome.style.display = '';
+        if (!O.contains(welcome)) O.appendChild(welcome);
+      } else {
+        welcome.style.display = 'none';
+      }
+    }
+    resetOutputState();
+    resetAdjacentState();
+  }
+
+  function renderTabBar() {
+    var tabList = document.getElementById('tab-list');
+    var tabBar = document.getElementById('tab-bar');
+    if (!tabList || !tabBar) return;
+
+    // Always show the tab bar
+    tabBar.style.display = '';
+
+    tabList.innerHTML = '';
+    tabs.forEach(function(tab) {
+      var el = document.createElement('div');
+      el.className = 'chat-tab' + (tab.id === activeTabId ? ' active' : '');
+      el.dataset.tabId = tab.id;
+
+      var label = document.createElement('span');
+      label.className = 'chat-tab-label';
+      label.textContent = tab.title;
+      el.appendChild(label);
+
+      var closeBtn = document.createElement('span');
+      closeBtn.className = 'chat-tab-close';
+      closeBtn.textContent = '\u00d7';
+      closeBtn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        closeTab(tab.id);
+      });
+      el.appendChild(closeBtn);
+
+      el.addEventListener('click', function() {
+        switchToTab(tab.id);
+      });
+      tabList.appendChild(el);
+    });
+
+    // Add "+" button at the end of the tab list
+    var addBtn = document.createElement('div');
+    addBtn.className = 'chat-tab chat-tab-add';
+    addBtn.textContent = '+';
+    addBtn.title = 'New chat';
+    addBtn.addEventListener('click', function() {
+      createNewTab();
+    });
+    tabList.appendChild(addBtn);
+  }
+
+  function switchToTab(tabId) {
+    if (tabId === activeTabId) return;
+    saveCurrentTab();
+    var tab = tabs.find(function(t) { return t.id === tabId; });
+    if (!tab) return;
+    restoreTab(tab);
+    renderTabBar();
+    persistTabState();
+    // Tell backend to resume this tab's session
+    if (tab.taskName) {
+      vscode.postMessage({ type: 'resumeSession', id: tab.taskName });
+    } else {
+      vscode.postMessage({ type: 'newChat' });
+      vscode.postMessage({ type: 'getWelcomeSuggestions' });
+    }
+  }
+
+  function closeTab(tabId) {
+    if (tabs.length <= 1) return; // Don't close the last tab
+    var idx = tabs.findIndex(function(t) { return t.id === tabId; });
+    if (idx < 0) return;
+    tabs.splice(idx, 1);
+    if (activeTabId === tabId) {
+      // Switch to an adjacent tab
+      var newIdx = Math.min(idx, tabs.length - 1);
+      var newTab = tabs[newIdx];
+      restoreTab(newTab);
+      if (newTab.taskName) {
+        vscode.postMessage({ type: 'resumeSession', id: newTab.taskName });
+      } else {
+        vscode.postMessage({ type: 'newChat' });
+        vscode.postMessage({ type: 'getWelcomeSuggestions' });
+      }
+    }
+    renderTabBar();
+    persistTabState();
+  }
+
+  function createNewTab() {
+    saveCurrentTab();
+    var tab = makeTab('new chat');
+    tabs.push(tab);
+    activeTabId = tab.id;
+    // Reset UI for fresh tab
+    clearOutput();
+    resetOutputState();
+    resetAdjacentState();
+    currentTaskName = '';
+    removeSpinner();
+    clearWorktreeBar();
+    clearUsageMetrics();
+    setTaskText('');
+    if (welcome) {
+      welcome.style.display = '';
+      O.appendChild(welcome);
+    }
+    renderTabBar();
+    persistTabState();
+    vscode.postMessage({ type: 'newChat' });
+    vscode.postMessage({ type: 'getWelcomeSuggestions' });
+  }
+
+  function updateActiveTabTitle(title) {
+    var tab = tabs.find(function(t) { return t.id === activeTabId; });
+    if (!tab) return;
+    var t = (title || '').trim();
+    tab.title = t ? (t.length > 30 ? t.substring(0, 30) + '\u2026' : t) : 'new chat';
+    renderTabBar();
+    persistTabState();
+  }
+
+  /** Persist lightweight tab metadata via vscode.setState for cross-restart restore. */
+  function persistTabState() {
+    var serialized = tabs.map(function(t) {
+      return { title: t.title, taskName: t.taskName };
+    });
+    var activeIdx = tabs.findIndex(function(t) { return t.id === activeTabId; });
+    vscode.setState({ tabs: serialized, activeTabIndex: activeIdx, task: currentTaskName });
+  }
+
+  // Initialize tabs — restore from saved state if available, else create one default tab
+  var _restoredActiveTask = '';
+  (function() {
+    var saved = vscode.getState();
+    if (saved && saved.tabs && saved.tabs.length > 0) {
+      tabs = [];
+      tabIdCounter = 0;
+      saved.tabs.forEach(function(st) {
+        var tab = makeTab(st.title);
+        tab.taskName = st.taskName || '';
+        tabs.push(tab);
+      });
+      var idx = saved.activeTabIndex || 0;
+      if (idx >= 0 && idx < tabs.length) {
+        activeTabId = tabs[idx].id;
+        currentTaskName = tabs[idx].taskName || '';
+        _restoredActiveTask = currentTaskName;
+      } else {
+        activeTabId = tabs[0].id;
+      }
+    } else {
+      var initial = makeTab('new chat');
+      tabs.push(initial);
+      activeTabId = initial.id;
+    }
+  })();
+
   // Elements
   const O = document.getElementById('output');
   const welcome = document.getElementById('welcome');
@@ -703,17 +912,15 @@
     clearWorktreeBar();
     clearUsageMetrics();
     setTaskText('');
-    vscode.setState(null);
     if (welcome) {
       welcome.style.display = '';
       O.appendChild(welcome);
     }
+    updateActiveTabTitle('new chat');
   }
 
   function doClearChat() {
-    resetChatUI();
-    vscode.postMessage({ type: 'newChat' });
-    vscode.postMessage({ type: 'getWelcomeSuggestions' });
+    createNewTab();
   }
 
   // --- Refresh history ---
@@ -806,8 +1013,8 @@
         currentTaskName = ev.task;
         resetAdjacentState();  // sets oldest/newest to currentTaskName
         setTaskText(ev.task);
-        vscode.setState({ task: ev.task });
         if (welcome) welcome.style.display = 'none';
+        updateActiveTabTitle(ev.task);
       }
       replayTaskEvents(ev.events || []);
       break;
@@ -819,8 +1026,8 @@
       if (stt) {
         currentTaskName = stt;
         resetAdjacentState();
-        vscode.setState({ task: stt });
         if (welcome) welcome.style.display = 'none';
+        updateActiveTabTitle(stt);
       }
       setTaskText(ev.text || '');
       break;
@@ -1170,7 +1377,8 @@
 
   function init() {
     setupEventListeners();
-    vscode.postMessage({ type: 'ready' });
+    renderTabBar();
+    vscode.postMessage({ type: 'ready', activeTask: _restoredActiveTask });
   }
 
   function setupEventListeners() {

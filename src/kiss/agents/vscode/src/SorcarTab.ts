@@ -340,19 +340,21 @@ export class SorcarTab {
 
   private async _handleMessage(message: FromWebviewMessage): Promise<void> {
     switch (message.type) {
-      case 'ready':
+      case 'ready': {
         this.sendToWebview({ type: 'status', running: this._isRunning });
         this._agentProcess.sendCommand({ type: 'getModels' });
         this._sendWelcomeSuggestions();
         this._agentProcess.sendCommand({ type: 'getInputHistory' });
-        if (this._sessionTask) {
-          this._agentProcess.sendCommand({ type: 'resumeSession', sessionId: this._sessionTask });
+        const resumeTask = message.activeTask || this._sessionTask;
+        if (resumeTask) {
+          this._agentProcess.sendCommand({ type: 'resumeSession', sessionId: resumeTask });
         } else if (this._loadLastSession) {
           this._agentProcess.sendCommand({ type: 'getLastSession' });
         }
         this._sendActiveFileInfo();
         this.sendToWebview({ type: 'focusInput' } as ToWebviewMessage);
         break;
+      }
 
       case 'submit': {
         if (this._isRunning) return;
@@ -711,6 +713,8 @@ export function buildChatHtml(webview: vscode.Webview, extensionUri: vscode.Uri,
       </div>
     </header>
 
+    <div id="tab-bar"><div id="tab-list"></div></div>
+
     <div id="task-panel"></div>
 
     <div id="output">
@@ -829,8 +833,8 @@ export class TabManager {
     this._extensionUri = extensionUri;
     this._mergeManager = new MergeManager();
     this._mergeManager.on('allDone', () => {
-      // Route allDone to the merge owner tab
-      const owner = this._tabs.find(t => t.isMergeOwner) ?? this._activeTab;
+      // Route allDone to the merge owner tab (sidebar handles its own)
+      const owner = this._tabs.find(t => t.isMergeOwner);
       if (owner) {
         owner.sendMergeAllDone();
         owner.isMergeOwner = false;
