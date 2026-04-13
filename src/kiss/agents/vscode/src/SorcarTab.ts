@@ -145,7 +145,7 @@ export function buildChatHtml(webview: vscode.Webview, extensionUri: vscode.Uri,
     </div>
 
     <div id="sidebar">
-      <button id="sidebar-close" data-tooltip="Close sidebar">&times;</button>
+      <button id="sidebar-close">&times;</button>
       <div class="sidebar-section">
         <div class="sidebar-hdr">Recent Conversations</div>
         <input type="text" id="history-search" placeholder="Search history...">
