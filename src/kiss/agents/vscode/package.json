@@ -29,12 +29,27 @@
           "title": "KISS Sorcar",
           "icon": "media/kiss-icon.svg"
         }
+      ],
+      "secondarySidebar": [
+        {
+          "id": "kissSorcarSecondary",
+          "title": "KISS Sorcar",
+          "icon": "media/kiss-icon.svg",
+          "order": -100
+        }
       ]
     },
     "views": {
       "kissSorcarContainer": [
         {
           "id": "kissSorcar.chatView",
+          "name": "Chat"
+        }
+      ],
+      "kissSorcarSecondary": [
+        {
+          "type": "webview",
+          "id": "kissSorcar.chatViewSecondary",
           "name": "Chat"
         }
       ]

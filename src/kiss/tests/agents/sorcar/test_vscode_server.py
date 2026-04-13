@@ -2165,5 +2165,220 @@ class TestExtractExtrasNoTruncation(unittest.TestCase):
         assert result == {"extra": "val"}
 
 
+# ---------------------------------------------------------------------------
+# Secondary sidebar chat view tests
+# ---------------------------------------------------------------------------
+
+
+class TestSecondarySidebarPackageJson(unittest.TestCase):
+    """Verify package.json declares the secondary sidebar container and webview view."""
+
+    _pkg: dict
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        import json as _json
+
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents" / "vscode"
+        cls._pkg = _json.loads((base / "package.json").read_text())
+
+    def test_secondary_sidebar_container_exists(self) -> None:
+        containers = self._pkg["contributes"]["viewsContainers"]
+        assert "secondarySidebar" in containers
+        ids = [c["id"] for c in containers["secondarySidebar"]]
+        assert "kissSorcarSecondary" in ids
+
+    def test_secondary_sidebar_container_has_icon(self) -> None:
+        containers = self._pkg["contributes"]["viewsContainers"]["secondarySidebar"]
+        sec = [c for c in containers if c["id"] == "kissSorcarSecondary"][0]
+        assert "icon" in sec
+        assert "kiss-icon.svg" in sec["icon"]
+
+    def test_secondary_sidebar_container_has_negative_order(self) -> None:
+        """Negative order pushes the container to the top of the secondary sidebar."""
+        containers = self._pkg["contributes"]["viewsContainers"]["secondarySidebar"]
+        sec = [c for c in containers if c["id"] == "kissSorcarSecondary"][0]
+        assert sec.get("order", 0) < 0
+
+    def test_chat_view_secondary_declared(self) -> None:
+        views = self._pkg["contributes"]["views"]
+        assert "kissSorcarSecondary" in views
+        ids = [v["id"] for v in views["kissSorcarSecondary"]]
+        assert "kissSorcar.chatViewSecondary" in ids
+
+    def test_chat_view_secondary_is_webview_type(self) -> None:
+        views = self._pkg["contributes"]["views"]["kissSorcarSecondary"]
+        chat = [v for v in views if v["id"] == "kissSorcar.chatViewSecondary"][0]
+        assert chat.get("type") == "webview"
+
+    def test_primary_sidebar_still_exists(self) -> None:
+        """Primary sidebar (activity bar) container must still be present."""
+        containers = self._pkg["contributes"]["viewsContainers"]
+        assert "activitybar" in containers
+        ids = [c["id"] for c in containers["activitybar"]]
+        assert "kissSorcarContainer" in ids
+
+    def test_primary_chat_view_still_exists(self) -> None:
+        """Primary sidebar chat view must still be present."""
+        views = self._pkg["contributes"]["views"]
+        assert "kissSorcarContainer" in views
+        ids = [v["id"] for v in views["kissSorcarContainer"]]
+        assert "kissSorcar.chatView" in ids
+
+
+class TestSorcarSidebarViewTS(unittest.TestCase):
+    """Verify SorcarSidebarView.ts has the required structure."""
+
+    _ts: str = ""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents" / "vscode"
+        cls._ts = (base / "src" / "SorcarSidebarView.ts").read_text()
+
+    def test_file_exists(self) -> None:
+        assert len(self._ts) > 0
+
+    def test_implements_webview_view_provider(self) -> None:
+        assert "implements vscode.WebviewViewProvider" in self._ts
+
+    def test_has_resolve_webview_view(self) -> None:
+        assert "resolveWebviewView(" in self._ts
+
+    def test_imports_build_chat_html(self) -> None:
+        assert "buildChatHtml" in self._ts
+
+    def test_calls_build_chat_html(self) -> None:
+        assert "buildChatHtml(" in self._ts
+
+    def test_has_agent_process(self) -> None:
+        assert "AgentProcess" in self._ts
+
+    def test_has_handle_message(self) -> None:
+        assert "_handleMessage(" in self._ts
+
+    def test_handles_submit(self) -> None:
+        assert "case 'submit':" in self._ts
+
+    def test_handles_ready(self) -> None:
+        assert "case 'ready':" in self._ts
+
+    def test_handles_stop(self) -> None:
+        assert "case 'stop':" in self._ts
+
+    def test_has_start_task(self) -> None:
+        assert "_startTask(" in self._ts
+
+    def test_has_submit_task(self) -> None:
+        assert "submitTask(" in self._ts
+
+    def test_has_stop_task(self) -> None:
+        assert "stopTask(" in self._ts
+
+    def test_has_new_conversation(self) -> None:
+        assert "newConversation(" in self._ts
+
+    def test_has_focus_chat_input(self) -> None:
+        assert "focusChatInput(" in self._ts
+
+    def test_has_dispose(self) -> None:
+        assert "dispose()" in self._ts
+
+    def test_has_commit_message_event(self) -> None:
+        assert "onCommitMessage" in self._ts
+
+    def test_has_merge_manager(self) -> None:
+        assert "_mergeManager" in self._ts
+
+    def test_has_worktree_support(self) -> None:
+        assert "worktreeAction" in self._ts
+        assert "_worktreeActionResolve" in self._ts
+
+    def test_retains_context_when_hidden(self) -> None:
+        """resolveWebviewView sets retainContextWhenHidden-equivalent options."""
+        # The provider is registered with retainContextWhenHidden in extension.ts
+        # but the webview options are set in resolveWebviewView
+        assert "enableScripts: true" in self._ts
+
+    def test_opens_files_in_view_column_one(self) -> None:
+        assert "viewColumn: vscode.ViewColumn.One" in self._ts
+
+    def test_sends_active_file_info(self) -> None:
+        assert "_sendActiveFileInfo" in self._ts
+
+    def test_sends_welcome_suggestions(self) -> None:
+        assert "_sendWelcomeSuggestions" in self._ts
+
+
+class TestExtensionRegistersSecondaryView(unittest.TestCase):
+    """Verify extension.ts registers the SorcarSidebarView provider."""
+
+    _ts: str = ""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents" / "vscode"
+        cls._ts = (base / "src" / "extension.ts").read_text()
+
+    def test_imports_sorcar_sidebar_view(self) -> None:
+        assert "SorcarSidebarView" in self._ts
+
+    def test_registers_webview_view_provider(self) -> None:
+        assert "registerWebviewViewProvider" in self._ts
+        assert "kissSorcar.chatViewSecondary" in self._ts
+
+    def test_creates_sidebar_view_instance(self) -> None:
+        assert "new SorcarSidebarView(" in self._ts
+
+    def test_sidebar_view_retain_context(self) -> None:
+        assert "retainContextWhenHidden: true" in self._ts
+
+    def test_sidebar_commit_message_listener(self) -> None:
+        """Sidebar view's commit messages are forwarded to SCM."""
+        assert "sidebarView" in self._ts
+        assert "onCommitMessage" in self._ts
+
+    def test_sidebar_view_disposed_on_deactivate(self) -> None:
+        """sidebarView is disposed in the deactivate function."""
+        idx = self._ts.index("function deactivate()")
+        body = self._ts[idx:]
+        assert "sidebarView?.dispose()" in body
+
+
+class TestBuildChatHtmlExported(unittest.TestCase):
+    """Verify SorcarTab.ts exports the shared buildChatHtml function."""
+
+    _ts: str = ""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents" / "vscode"
+        cls._ts = (base / "src" / "SorcarTab.ts").read_text()
+
+    def test_build_chat_html_exported(self) -> None:
+        assert "export function buildChatHtml(" in self._ts
+
+    def test_get_nonce_exported(self) -> None:
+        assert "export function getNonce()" in self._ts
+
+    def test_get_version_exported(self) -> None:
+        assert "export function getVersion()" in self._ts
+
+    def test_sorcar_tab_uses_build_chat_html(self) -> None:
+        """SorcarTab._getHtmlContent delegates to buildChatHtml."""
+        idx = self._ts.index("private _getHtmlContent(")
+        block = self._ts[idx : idx + 200]
+        assert "buildChatHtml(" in block
+
+    def test_build_chat_html_returns_full_html(self) -> None:
+        """buildChatHtml contains the full chat HTML template."""
+        idx = self._ts.index("export function buildChatHtml(")
+        block = self._ts[idx:]
+        assert "<!DOCTYPE html>" in block
+        assert 'id="task-input"' in block
+        assert 'id="output"' in block
+        assert 'id="send-btn"' in block
+
+
 if __name__ == "__main__":
     unittest.main()

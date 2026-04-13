@@ -28,7 +28,7 @@ function rightmostColumn(): vscode.ViewColumn {
 }
 
 /** Read the KISS project version from ``_version.py`` on disk. */
-function getVersion(): string {
+export function getVersion(): string {
   try {
     const kissRoot = findKissProject();
     if (kissRoot) {
@@ -647,25 +647,48 @@ export class SorcarTab {
   }
 
   private _getHtmlContent(webview: vscode.Webview): string {
-    const nonce = this._getNonce();
+    return buildChatHtml(webview, this._extensionUri, this._selectedModel);
+  }
 
-    const styleUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this._extensionUri, 'media', 'main.css')
-    );
-    const hljsCssUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this._extensionUri, 'media', 'highlight-github-dark.min.css')
-    );
-    const hljsUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this._extensionUri, 'media', 'highlight.min.js')
-    );
-    const markedUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this._extensionUri, 'media', 'marked.min.js')
-    );
-    const scriptUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this._extensionUri, 'media', 'main.js')
-    );
+  private _getNonce(): string {
+    return getNonce();
+  }
+}
 
-    return `<!DOCTYPE html>
+/** Generate a random nonce string for Content Security Policy. */
+export function getNonce(): string {
+  let text = '';
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  for (let i = 0; i < 32; i++) {
+    text += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return text;
+}
+
+/**
+ * Build the full chat HTML for a Sorcar webview.
+ * Shared between editor tabs (SorcarTab) and sidebar views (SorcarSidebarView).
+ */
+export function buildChatHtml(webview: vscode.Webview, extensionUri: vscode.Uri, selectedModel: string): string {
+  const nonce = getNonce();
+
+  const styleUri = webview.asWebviewUri(
+    vscode.Uri.joinPath(extensionUri, 'media', 'main.css')
+  );
+  const hljsCssUri = webview.asWebviewUri(
+    vscode.Uri.joinPath(extensionUri, 'media', 'highlight-github-dark.min.css')
+  );
+  const hljsUri = webview.asWebviewUri(
+    vscode.Uri.joinPath(extensionUri, 'media', 'highlight.min.js')
+  );
+  const markedUri = webview.asWebviewUri(
+    vscode.Uri.joinPath(extensionUri, 'media', 'marked.min.js')
+  );
+  const scriptUri = webview.asWebviewUri(
+    vscode.Uri.joinPath(extensionUri, 'media', 'main.js')
+  );
+
+  return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -713,7 +736,7 @@ export class SorcarTab {
           <div id="model-picker">
             <button id="model-btn" data-tooltip="Select model">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3 7h7l-5.5 4 2 7L12 16l-6.5 4 2-7L2 9h7z"/></svg>
-              <span id="model-name">${this._selectedModel}</span>
+              <span id="model-name">${selectedModel}</span>
             </button>
             <button id="upload-btn" data-tooltip="Attach files">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
@@ -782,16 +805,6 @@ export class SorcarTab {
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;
-  }
-
-  private _getNonce(): string {
-    let text = '';
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-    for (let i = 0; i < 32; i++) {
-      text += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-    return text;
-  }
 }
 
 /**

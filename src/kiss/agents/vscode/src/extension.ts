@@ -6,9 +6,11 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import { TabManager } from './SorcarTab';
+import { SorcarSidebarView } from './SorcarSidebarView';
 import { ensureDependencies, ensureLocalBinInPath } from './DependencyInstaller';
 
 let tabManager: TabManager | undefined;
+let sidebarView: SorcarSidebarView | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
   ensureLocalBinInPath();
@@ -16,6 +18,17 @@ export function activate(context: vscode.ExtensionContext): void {
 
   tabManager = new TabManager(context.extensionUri);
   context.subscriptions.push({ dispose: () => tabManager?.dispose() });
+
+  // --- Secondary sidebar chat view ---
+  sidebarView = new SorcarSidebarView(context.extensionUri, tabManager.mergeManager);
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(
+      'kissSorcar.chatViewSecondary',
+      sidebarView,
+      { webviewOptions: { retainContextWhenHidden: true } },
+    )
+  );
+  context.subscriptions.push({ dispose: () => sidebarView?.dispose() });
 
   // --- Commands ---
 
@@ -133,6 +146,16 @@ export function activate(context: vscode.ExtensionContext): void {
     })
   );
 
+  context.subscriptions.push(
+    sidebarView!.onCommitMessage((ev) => {
+      if (ev.error) {
+        vscode.window.showWarningMessage(`Commit message: ${ev.error}`);
+      } else if (ev.message) {
+        setScmMessage(ev.message);
+      }
+    })
+  );
+
   const triggerCommitMessageGeneration = (
     _rootUri?: unknown,
     _context?: unknown,
@@ -241,5 +264,7 @@ export function activate(context: vscode.ExtensionContext): void {
 export function deactivate(): void {
   tabManager?.dispose();
   tabManager = undefined;
+  sidebarView?.dispose();
+  sidebarView = undefined;
   console.log('KISS Sorcar extension deactivated');
 }
