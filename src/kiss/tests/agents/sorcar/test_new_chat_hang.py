@@ -155,7 +155,14 @@ class TestTaskEndEventPersistence(unittest.TestCase):
             parent.run = saved
             self.original_run = _patch_run()
 
-        events = th._load_task_chat_events("test stop persist")
+        entries = th._load_history(limit=1)
+        assert entries
+        chat_id = str(entries[0].get("chat_id", ""))
+        assert chat_id
+        result = th._load_latest_chat_events_by_chat_id(chat_id)
+        assert result is not None
+        events = result["events"]
+        assert isinstance(events, list)
         types = [e.get("type") for e in events]
         assert "task_stopped" in types
 
@@ -205,8 +212,19 @@ class TestPeriodicEventFlush(unittest.TestCase):
             time.sleep(3)  # wait for at least 1 flush cycle
 
             # Events should be in DB while task is still running
-            events = th._load_task_chat_events("test periodic flush")
-            types = [e.get("type") for e in events]
+            entries = th._load_history()
+            flush_entry = next(
+                (e for e in entries if e["task"] == "test periodic flush"),
+                None,
+            )
+            assert flush_entry is not None
+            flush_chat_id = str(flush_entry.get("chat_id", ""))
+            assert flush_chat_id
+            result = th._load_latest_chat_events_by_chat_id(flush_chat_id)
+            assert result is not None
+            flush_events = result["events"]
+            assert isinstance(flush_events, list)
+            types = [e.get("type") for e in flush_events]
             assert "text_delta" in types, f"Expected text_delta in {types}"
 
             # Result should still be "Agent Failed Abruptly" (not overwritten)
@@ -227,11 +245,11 @@ class TestPeriodicEventFlush(unittest.TestCase):
 
 
 class TestTypescriptIsRunningFix(unittest.TestCase):
-    """Verify SorcarTab.ts sets _isRunning=false on task end events."""
+    """Verify SorcarSidebarView.ts sets _isRunning=false on task end events."""
 
     def test_is_running_updated_by_status_event(self) -> None:
         """_isRunning is reset by the status event handler (sent after task_done/stopped/error)."""
-        with open("src/kiss/agents/vscode/src/SorcarTab.ts") as f:
+        with open("src/kiss/agents/vscode/src/SorcarSidebarView.ts") as f:
             source = f.read()
         # The status handler manages _isRunning
         idx = source.find("msg.type === 'status'")

@@ -299,7 +299,7 @@ class TestRC7WorktreeActionTimeoutInspection(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        with open("src/kiss/agents/vscode/src/SorcarTab.ts") as f:
+        with open("src/kiss/agents/vscode/src/SorcarSidebarView.ts") as f:
             cls.ts = f.read()
 
     def test_timeout_on_worktree_promise(self) -> None:

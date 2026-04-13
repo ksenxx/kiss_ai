@@ -22,12 +22,12 @@ from typing import Any
 
 from kiss.agents.sorcar.persistence import (
     _append_chat_event,
-    _get_adjacent_task_in_chat,
+    _get_adjacent_task_by_chat_id,
     _load_file_usage,
     _load_history,
     _load_last_model,
+    _load_latest_chat_events_by_chat_id,
     _load_model_usage,
-    _load_task_chat_events,
     _prefix_match_task,
     _record_file_usage,
     _record_model_usage,
@@ -224,9 +224,9 @@ class VSCodeServer:
                 running = self._task_thread and self._task_thread.is_alive()
             if running:
                 return
-            task = cmd.get("sessionId", "")
-            if task:
-                self._replay_session(task)
+            chat_id = cmd.get("sessionId", "")
+            if chat_id:
+                self._replay_session(chat_id)
         elif cmd_type == "mergeAction":
             self._handle_merge_action(cmd.get("action", ""))
         elif cmd_type == "getLastSession":
@@ -255,7 +255,9 @@ class VSCodeServer:
             self._get_input_history()
         elif cmd_type == "getAdjacentTask":
             self._get_adjacent_task(
-                cmd.get("task", ""), cmd.get("direction", "prev")
+                cmd.get("chatId", ""),
+                cmd.get("task", ""),
+                cmd.get("direction", "prev"),
             )
         elif cmd_type == "generateCommitMessage":
             threading.Thread(
@@ -351,6 +353,10 @@ class VSCodeServer:
         self._user_answer_queue = queue.Queue(maxsize=1)
 
         self.printer.broadcast({"type": "clear"})
+        self.printer.broadcast({
+            "type": "chatId",
+            "chat_id": self.agent.chat_id,
+        })
 
         # Git snapshot captures pre-task state (may be slow for large repos)
         pre_hunks = _parse_diff_hunks(work_dir)
@@ -620,14 +626,15 @@ class VSCodeServer:
         for entry in entries:
             task = str(entry.get("task", ""))
             has_events = bool(entry.get("has_events", False))
+            chat_id = str(entry.get("chat_id", ""))
             sessions.append({
-                "id": task,
+                "id": chat_id,
                 "title": task[:50] + "..." if len(task) > 50 else task,
                 "timestamp": entry.get("timestamp", 0),
                 "preview": task,
                 "text": task,
                 "has_events": has_events,
-                "chat_id": entry.get("chat_id", ""),
+                "chat_id": chat_id,
             })
         self.printer.broadcast({
             "type": "history", "sessions": sessions,
@@ -651,13 +658,22 @@ class VSCodeServer:
                 tasks.append(task)
         self.printer.broadcast({"type": "inputHistory", "tasks": tasks})
 
-    def _replay_session(self, task: str) -> None:
-        """Replay recorded chat events for a previous task."""
-        events = _load_task_chat_events(task)
-        if not events:
+    def _replay_session(self, chat_id: str) -> None:
+        """Replay recorded chat events for a previous chat session.
+
+        Args:
+            chat_id: The chat session identifier to replay.
+        """
+        result = _load_latest_chat_events_by_chat_id(chat_id)
+        if not result or not result.get("events"):
             return
-        self.agent.resume_chat(task)
-        self.printer.broadcast({"type": "task_events", "events": events, "task": task})
+        self.agent.resume_chat_by_id(chat_id)
+        self.printer.broadcast({
+            "type": "task_events",
+            "events": result["events"],
+            "task": result["task"],
+            "chat_id": chat_id,
+        })
         self._emit_pending_worktree()
 
     def _get_last_session(self) -> None:
@@ -672,9 +688,9 @@ class VSCodeServer:
                 return
         entries = _load_history(limit=1)
         if entries:
-            task = str(entries[0].get("task", ""))
-            if task:
-                self._replay_session(task)
+            chat_id = str(entries[0].get("chat_id", ""))
+            if chat_id:
+                self._replay_session(chat_id)
         self._restore_pending_merge()
 
     def _restore_pending_merge(self) -> None:
@@ -1040,14 +1056,15 @@ class VSCodeServer:
             return {"success": True, "message": msg}
         return {"success": False, "message": f"Unknown action: {action}"}
 
-    def _get_adjacent_task(self, task: str, direction: str) -> None:
+    def _get_adjacent_task(self, chat_id: str, task: str, direction: str) -> None:
         """Send events for the adjacent task in the same chat session.
 
         Args:
-            task: Current task description string.
+            chat_id: The chat session identifier.
+            task: Current task description string (used as timestamp reference).
             direction: ``"prev"`` or ``"next"``.
         """
-        result = _get_adjacent_task_in_chat(task, direction)
+        result = _get_adjacent_task_by_chat_id(chat_id, task, direction)
         self.printer.broadcast({
             "type": "adjacent_task_events",
             "direction": direction,

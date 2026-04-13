@@ -31,7 +31,7 @@ export type FromWebviewMessage =
   | { type: 'userActionDone' }
   | { type: 'openFile'; path: string; line?: number }
   | { type: 'recordFileUsage'; path: string }
-  | { type: 'ready'; activeTask?: string }
+  | { type: 'ready'; activeChatId?: string }
   | { type: 'resumeSession'; id: string }
   | { type: 'getWelcomeSuggestions' }
   | { type: 'complete'; query: string }
@@ -43,7 +43,7 @@ export type FromWebviewMessage =
   | { type: 'getInputHistory' }
   | { type: 'worktreeAction'; action: 'merge' | 'discard' | 'do_nothing' }
   | { type: 'resolveDroppedPaths'; uris: string[] }
-  | { type: 'getAdjacentTask'; task: string; direction: 'prev' | 'next' };
+  | { type: 'getAdjacentTask'; chatId: string; task: string; direction: 'prev' | 'next' };
 
 /** Messages from extension to webview (matches browser event protocol) */
 export type ToWebviewMessage =
@@ -76,7 +76,8 @@ export type ToWebviewMessage =
   | { type: 'followup_suggestion'; text: string }
   | { type: 'tasks_updated' }
   | { type: 'welcome_suggestions'; suggestions: Array<{text: string; has_events: boolean}> }
-  | { type: 'task_events'; events: any[]; task?: string }
+  | { type: 'task_events'; events: any[]; task?: string; chat_id?: string }
+  | { type: 'chatId'; chat_id: string }
   | { type: 'ghost'; suggestion: string; query: string }
   | { type: 'merge_data'; data: any; hunk_count: number }
   | { type: 'merge_started' }
@@ -114,5 +115,6 @@ export interface AgentCommand {
   useWorktree?: boolean;
   useParallel?: boolean;
   task?: string;
+  chatId?: string;
   direction?: 'prev' | 'next';
 }

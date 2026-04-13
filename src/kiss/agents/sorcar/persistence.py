@@ -287,35 +287,6 @@ def _get_history_entry(idx: int) -> _HistoryEntry | None:
     return dict(row) if row else None
 
 
-def _load_task_chat_events(
-    task: str,
-) -> list[dict[str, object]]:
-    """Load chat events for a specific task.
-
-    Returns the events for the most recent run of *task*.
-
-    Args:
-        task: The task description string.
-
-    Returns:
-        List of chat event dicts, or empty list if none stored.
-    """
-    db = _get_db()
-    task_id = _most_recent_task_id(db, task)
-    if task_id is None:
-        return []
-    rows = db.execute(
-        "SELECT event_json FROM events WHERE task_id = ? ORDER BY seq",
-        (task_id,),
-    ).fetchall()
-    result: list[dict[str, object]] = []
-    for r in rows:
-        try:
-            result.append(json.loads(r["event_json"]))
-        except (json.JSONDecodeError, TypeError):
-            logger.debug("Exception caught", exc_info=True)
-    return result
-
 
 def _save_task_result(
     result: str,
@@ -485,35 +456,75 @@ def _list_recent_chats(limit: int = 10) -> list[dict[str, object]]:
     return result
 
 
-def _get_adjacent_task_in_chat(
-    task: str, direction: str
-) -> dict[str, object] | None:
-    """Return the adjacent task within the same chat session.
 
-    Looks up the chat_id for *task*, then finds the previous or next
-    task in that chat (ordered by timestamp).
+def _load_latest_chat_events_by_chat_id(
+    chat_id: str,
+) -> dict[str, object] | None:
+    """Load the latest task and its events for a chat session.
+
+    Finds the most recent task in the given chat session and returns
+    its task description string and recorded events.
 
     Args:
-        task: The current task description string.
+        chat_id: The chat session identifier.
+
+    Returns:
+        A dict with ``task`` (str) and ``events`` (list of event dicts),
+        or ``None`` if the chat_id is empty or has no tasks.
+    """
+    if not chat_id:
+        return None
+    db = _get_db()
+    row = db.execute(
+        "SELECT id, task FROM task_history "
+        "WHERE chat_id = ? ORDER BY timestamp DESC LIMIT 1",
+        (chat_id,),
+    ).fetchone()
+    if not row:
+        return None
+    task_id = row["id"]
+    task = row["task"]
+    event_rows = db.execute(
+        "SELECT event_json FROM events WHERE task_id = ? ORDER BY seq",
+        (task_id,),
+    ).fetchall()
+    events: list[dict[str, object]] = []
+    for r in event_rows:
+        try:
+            events.append(json.loads(r["event_json"]))
+        except (json.JSONDecodeError, TypeError):
+            logger.debug("Exception caught", exc_info=True)
+    return {"task": task, "events": events, "chat_id": chat_id}
+
+
+def _get_adjacent_task_by_chat_id(
+    chat_id: str, current_task: str, direction: str
+) -> dict[str, object] | None:
+    """Return the adjacent task within a chat session, relative to *current_task*.
+
+    Args:
+        chat_id: The chat session identifier.
+        current_task: The current task description string used to find
+            the reference timestamp within the chat.
         direction: ``"prev"`` for the earlier task, ``"next"`` for the
             later task in the same chat session.
 
     Returns:
         A dict with ``task`` (str) and ``events`` (list of event dicts),
-        or ``None`` if no adjacent task exists or the task has no
-        chat_id.
+        or ``None`` if no adjacent task exists.
     """
+    if not chat_id or not current_task:
+        return None
     db = _get_db()
-    task_id = _most_recent_task_id(db, task)
-    if task_id is None:
-        return None
+    # Find the timestamp of the current task within this chat
     row = db.execute(
-        "SELECT chat_id, timestamp FROM task_history WHERE id = ?",
-        (task_id,),
+        "SELECT id, timestamp FROM task_history "
+        "WHERE chat_id = ? AND task = ? "
+        "ORDER BY timestamp DESC LIMIT 1",
+        (chat_id, current_task),
     ).fetchone()
-    if not row or not row["chat_id"]:
+    if not row:
         return None
-    chat_id = row["chat_id"]
     ts = row["timestamp"]
 
     if direction == "prev":
