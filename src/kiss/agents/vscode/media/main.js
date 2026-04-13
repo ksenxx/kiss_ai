@@ -7,7 +7,7 @@
   // @ts-ignore - vscode is injected by the webview
   const vscode = acquireVsCodeApi();
 
-  // State
+  // State — isRunning mirrors the active tab's tab.isRunning for UI controls
   let isRunning = false;
   let selectedModel = 'claude-opus-4-6';
   let allModels = [];
@@ -48,51 +48,116 @@
 
   // --- Chat tabs state ---
   var tabIdCounter = 0;
-  var tabs = [];        // array of {id, title, outputHTML, taskPanelHTML, taskPanelVisible, chatId, statusTokensText, statusBudgetText, welcomeVisible}
+  var tabs = [];        // array of tab objects (see makeTab for fields)
   var activeTabId = -1;
-  var runningTabId = -1;  // which tab owns the currently running task (-1 = none)
 
   function makeTab(title) {
     var id = ++tabIdCounter;
     return {
       id: id,
       title: title || 'new chat',
-      outputHTML: '',
+      isRunning: false,
+      outputFragment: null,
       taskPanelHTML: '',
       taskPanelVisible: false,
       chatId: '',
       statusTokensText: '',
       statusBudgetText: '',
       welcomeVisible: true,
+      selectedModel: selectedModel,
+      attachments: [],
+      inputValue: '',
+      isMerging: false,
+      worktreeBarEl: null,
+      mergeToolbarEl: null,
+      t0: null,
+      streamState: null,
+      streamLlmPanel: null,
+      streamLlmPanelState: null,
+      streamLastToolName: '',
+      streamPendingPanel: false,
     };
+  }
+
+  /** Check if the active tab has a running task. */
+  function isActiveTabRunning() {
+    var tab = tabs.find(function(t) { return t.id === activeTabId; });
+    return tab ? tab.isRunning : false;
+  }
+
+  /** Find the tab object that owns a backend message by tabId. */
+  function findTabByEvt(ev) {
+    if (ev && ev.tabId !== undefined) {
+      return tabs.find(function(t) { return t.id === ev.tabId; }) || null;
+    }
+    return null;
   }
 
   function saveCurrentTab() {
     var tab = tabs.find(function(t) { return t.id === activeTabId; });
     if (!tab) return;
-    tab.outputHTML = O.innerHTML;
+    // Save welcome visibility and detach from O before capturing fragment
+    tab.welcomeVisible = welcome ? welcome.style.display !== 'none' : true;
+    if (welcome && welcome.parentNode === O) O.removeChild(welcome);
+    // Save DOM subtree as fragment (preserves element references for streaming state)
+    tab.outputFragment = document.createDocumentFragment();
+    while (O.firstChild) tab.outputFragment.appendChild(O.firstChild);
     tab.taskPanelHTML = taskPanel ? taskPanel.textContent : '';
     tab.taskPanelVisible = taskPanel ? taskPanel.classList.contains('visible') : false;
     tab.chatId = currentChatId;
     tab.statusTokensText = statusTokens ? statusTokens.textContent : '';
     tab.statusBudgetText = statusBudget ? statusBudget.textContent : '';
-    tab.welcomeVisible = welcome ? welcome.style.display !== 'none' : true;
+    // Save per-tab state
+    tab.selectedModel = selectedModel;
+    tab.attachments = attachments;
+    tab.inputValue = inp.value;
+    tab.isMerging = isMerging;
+    tab.isRunning = isActiveTabRunning();
+    tab.t0 = t0;
+    // Save streaming state (DOM refs preserved via fragment)
+    tab.streamState = state;
+    tab.streamLlmPanel = llmPanel;
+    tab.streamLlmPanelState = llmPanelState;
+    tab.streamLastToolName = lastToolName;
+    tab.streamPendingPanel = pendingPanel;
+    // Save worktree bar (detach from DOM)
+    if (worktreeBar && worktreeBar.parentNode) {
+      tab.worktreeBarEl = worktreeBar;
+      worktreeBar.parentNode.removeChild(worktreeBar);
+    } else {
+      tab.worktreeBarEl = null;
+    }
+    worktreeBar = null;
+    // Save merge toolbar (detach from DOM)
+    var mergeBar = document.getElementById('merge-toolbar');
+    if (mergeBar && mergeBar.parentNode) {
+      tab.mergeToolbarEl = mergeBar;
+      mergeBar.parentNode.removeChild(mergeBar);
+    } else {
+      tab.mergeToolbarEl = null;
+    }
+    // Restore inputContainer visibility (may have been hidden by worktree/merge bar)
+    if (inputContainer) inputContainer.style.display = '';
     persistTabState();
   }
 
   function restoreTab(tab) {
     activeTabId = tab.id;
-    O.innerHTML = tab.outputHTML;
+    // Restore DOM subtree from fragment (preserves element references)
+    O.innerHTML = '';
+    if (tab.outputFragment) {
+      O.appendChild(tab.outputFragment);
+      tab.outputFragment = null;
+    }
     if (taskPanel) {
       taskPanel.textContent = tab.taskPanelHTML;
       if (tab.taskPanelVisible) taskPanel.classList.add('visible');
       else taskPanel.classList.remove('visible');
     }
     currentChatId = tab.chatId || '';
-    currentTaskName = tab.taskPanelHTML || '';  // display text from task panel
+    currentTaskName = tab.taskPanelHTML || '';
     if (statusTokens) statusTokens.textContent = tab.statusTokensText;
     if (statusBudget) statusBudget.textContent = tab.statusBudgetText;
-    // Welcome: either it exists in the output or we need to add it
     if (welcome) {
       if (tab.welcomeVisible) {
         welcome.style.display = '';
@@ -101,7 +166,49 @@
         welcome.style.display = 'none';
       }
     }
-    resetOutputState();
+    // Restore per-tab state
+    selectedModel = tab.selectedModel || 'claude-opus-4-6';
+    if (modelName) modelName.textContent = selectedModel;
+    attachments = tab.attachments || [];
+    renderFileChips();
+    inp.value = tab.inputValue || '';
+    syncClearBtn();
+    inp.style.height = 'auto';
+    inp.style.height = Math.min(inp.scrollHeight, 200) + 'px';
+    isMerging = tab.isMerging || false;
+    t0 = tab.t0 || null;
+    // Restore streaming state (DOM refs valid since fragment preserves elements)
+    state = tab.streamState || mkS();
+    llmPanel = tab.streamLlmPanel || null;
+    llmPanelState = tab.streamLlmPanelState || mkS();
+    lastToolName = tab.streamLastToolName || '';
+    pendingPanel = tab.streamPendingPanel || false;
+    _scrollLock = false;
+    // Restore worktree bar
+    if (worktreeBar && worktreeBar.parentNode) worktreeBar.parentNode.removeChild(worktreeBar);
+    worktreeBar = null;
+    if (tab.worktreeBarEl) {
+      worktreeBar = tab.worktreeBarEl;
+      tab.worktreeBarEl = null;
+      var area = document.getElementById('input-area');
+      area.insertBefore(worktreeBar, area.firstChild);
+    }
+    // Restore merge toolbar
+    var existingMerge = document.getElementById('merge-toolbar');
+    if (existingMerge) existingMerge.remove();
+    if (tab.mergeToolbarEl) {
+      document.getElementById('input-area').appendChild(tab.mergeToolbarEl);
+      tab.mergeToolbarEl = null;
+    } else if (isMerging) {
+      showMergeToolbar();
+    }
+    // Set inputContainer visibility based on active bars
+    if (worktreeBar || document.getElementById('merge-toolbar')) {
+      if (inputContainer) inputContainer.style.display = 'none';
+    } else {
+      if (inputContainer) inputContainer.style.display = '';
+    }
+    updateInputDisabled();
     resetAdjacentState();
   }
 
@@ -158,10 +265,10 @@
     restoreTab(tab);
     renderTabBar();
     persistTabState();
-    // Update running state for the target tab
-    var isTabRunning = (tab.id === runningTabId);
-    setRunningState(isTabRunning);
-    if (!isTabRunning) {
+    // Restore running state for the target tab
+    setRunningState(tab.isRunning);
+    if (!tab.isRunning) {
+      t0 = null;
       stopTimer();
       removeSpinner();
       statusText.textContent = 'Ready';
@@ -185,10 +292,10 @@
       var newIdx = Math.min(idx, tabs.length - 1);
       var newTab = tabs[newIdx];
       restoreTab(newTab);
-      // Update running state for the new tab
-      var isNewTabRunning = (newTab.id === runningTabId);
-      setRunningState(isNewTabRunning);
-      if (!isNewTabRunning) {
+      // Restore running state for the new tab
+      setRunningState(newTab.isRunning);
+      if (!newTab.isRunning) {
+        t0 = null;
         stopTimer();
         removeSpinner();
         statusText.textContent = 'Ready';
@@ -219,6 +326,15 @@
     clearWorktreeBar();
     clearUsageMetrics();
     setTaskText('');
+    // Reset per-tab state for new tab (selectedModel inherited via makeTab)
+    attachments = [];
+    renderFileChips();
+    inp.value = '';
+    syncClearBtn();
+    inp.style.height = 'auto';
+    isMerging = false;
+    hideMergeToolbar();
+    t0 = null;
     if (welcome) {
       welcome.style.display = '';
       O.appendChild(welcome);
@@ -949,19 +1065,17 @@
   function handleEvent(ev) {
     var t = ev.type;
     switch (t) {
-    case 'status':
-      if (ev.running) {
-        // Only set runningTabId on the FIRST status:running:true.
-        // The TS _startTask sends one immediately (correct activeTabId),
-        // then Python sends a second one via the agent process pipe.
-        // If the user switches tabs before the second one arrives,
-        // activeTabId would be the wrong tab.  Guard with < 0 check.
-        if (runningTabId < 0) runningTabId = activeTabId;
-      } else {
-        runningTabId = -1;
+    case 'status': {
+      var evTab = findTabByEvt(ev);
+      if (evTab) {
+        evTab.isRunning = !!ev.running;
       }
-      setRunningState(ev.running);
+      // Update UI only when the event targets the active tab (or no tabId)
+      if (!evTab || evTab.id === activeTabId) {
+        setRunningState(ev.running);
+      }
       break;
+    }
     case 'models':
       allModels = ev.models || [];
       if (ev.selected) { selectedModel = ev.selected; modelName.textContent = ev.selected; }
@@ -979,15 +1093,20 @@
     case 'error':
       addError(ev.text);
       break;
-    case 'clear':
-      clearOutput();
-      resetOutputState();
-      showSpinner();
+    case 'clear': {
+      var evTabId = ev.tabId;
+      if (evTabId === undefined || evTabId === activeTabId) {
+        clearOutput();
+        resetOutputState();
+        showSpinner();
+      }
       break;
+    }
     case 'clearChat':
       createNewTab();
       break;
     case 'followup_suggestion': {
+      if (ev.tabId !== undefined && ev.tabId !== activeTabId) break;
       var fu = mkEl('div', 'followup-bar');
       fu.innerHTML = '<span class="fu-label">Suggested next</span>'
         + '<span class="fu-text">' + esc(ev.text) + '</span>';
@@ -1007,9 +1126,17 @@
     case 'welcome_suggestions':
       renderWelcomeSuggestions(ev.suggestions || []);
       break;
-    case 'chatId':
-      currentChatId = ev.chat_id || '';
+    case 'chatId': {
+      var newChatId = ev.chat_id || '';
+      if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
+        // Event is for a background tab; store chatId in that tab's saved state
+        var cidTab = tabs.find(function(t) { return t.id === ev.tabId; });
+        if (cidTab) { cidTab.chatId = newChatId; persistTabState(); }
+      } else {
+        currentChatId = newChatId;
+      }
       break;
+    }
     case 'task_events':
       if (ev.chat_id) currentChatId = ev.chat_id;
       if (ev.task) {
@@ -1026,13 +1153,25 @@
       break;
     case 'setTaskText': {
       var stt = (ev.text || '').trim();
-      if (stt) {
-        currentTaskName = stt;
-        resetAdjacentState();
-        if (welcome) welcome.style.display = 'none';
-        updateActiveTabTitle(stt);
+      if (ev.tabId === undefined || ev.tabId === activeTabId) {
+        if (stt) {
+          currentTaskName = stt;
+          resetAdjacentState();
+          if (welcome) welcome.style.display = 'none';
+          updateActiveTabTitle(stt);
+        }
+        setTaskText(ev.text || '');
+      } else if (stt) {
+        // Update background tab's saved title without touching active tab
+        var sttTab = tabs.find(function(t) { return t.id === ev.tabId; });
+        if (sttTab) {
+          sttTab.title = stt.length > 30 ? stt.substring(0, 30) + '\u2026' : stt;
+          sttTab.taskPanelHTML = stt;
+          sttTab.taskPanelVisible = true;
+          renderTabBar();
+          persistTabState();
+        }
       }
-      setTaskText(ev.text || '');
       break;
     }
     case 'appendToInput':
@@ -1069,6 +1208,7 @@
       }
       break;
     case 'merge_data': {
+      if (ev.tabId !== undefined && ev.tabId !== activeTabId) break;
       var mc = mkEl('div', 'ev merge-info');
       mc.innerHTML = '<div class="merge-info-hdr" style="color:var(--yellow);font-weight:600;font-size:var(--fs-base);margin-bottom:4px">'
         + '\u2731 Reviewing ' + (ev.hunk_count || 0) + ' change(s)</div>'
@@ -1080,12 +1220,22 @@
       break;
     }
     case 'merge_started':
+      if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
+        var mrt = tabs.find(function(t) { return t.id === ev.tabId; });
+        if (mrt) mrt.isMerging = true;
+        break;
+      }
       isMerging = true;
       showMergeToolbar();
       updateInputDisabled();
       sb();
       break;
     case 'merge_ended':
+      if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
+        var mrt2 = tabs.find(function(t) { return t.id === ev.tabId; });
+        if (mrt2) mrt2.isMerging = false;
+        break;
+      }
       isMerging = false;
       hideMergeToolbar();
       updateInputDisabled();
@@ -1114,26 +1264,34 @@
       handleWorktreeResult(ev);
       break;
     case 'task_done': {
-      var el = t0 ? Math.floor((Date.now() - t0) / 1000) : 0;
+      var doneT0 = t0;
+      if (!doneT0 && ev.tabId !== undefined) {
+        var rt = tabs.find(function(t) { return t.id === ev.tabId; });
+        if (rt) doneT0 = rt.t0;
+      }
+      var el = doneT0 ? Math.floor((Date.now() - doneT0) / 1000) : 0;
       var em = Math.floor(el / 60);
-      setReady('Done (' + (em > 0 ? em + 'm ' : '') + el % 60 + 's)');
+      setReady('Done (' + (em > 0 ? em + 'm ' : '') + el % 60 + 's)', ev.tabId);
       break;
     }
     case 'task_error':
     case 'task_stopped': {
       var isErr = t === 'task_error';
-      var banner = mkEl('div', 'ev tr err');
-      banner.innerHTML = '<div class="rl fail">' + (isErr ? 'ERROR' : 'STOPPED') + '</div>'
-        + '<div class="tr-content">' + esc(isErr ? (ev.text || 'Unknown error') : 'Agent execution stopped by user') + '</div>';
-      addCollapse(banner, banner.querySelector('.rl'));
-      O.appendChild(banner);
-      collapseOlderPanels();
-      setReady(isErr ? 'Error' : 'Stopped');
+      if (ev.tabId === undefined || ev.tabId === activeTabId) {
+        var banner = mkEl('div', 'ev tr err');
+        banner.innerHTML = '<div class="rl fail">' + (isErr ? 'ERROR' : 'STOPPED') + '</div>'
+          + '<div class="tr-content">' + esc(isErr ? (ev.text || 'Unknown error') : 'Agent execution stopped by user') + '</div>';
+        addCollapse(banner, banner.querySelector('.rl'));
+        O.appendChild(banner);
+        collapseOlderPanels();
+      }
+      setReady(isErr ? 'Error' : 'Stopped', ev.tabId);
       break;
     }
     default:
+      if (ev.tabId !== undefined && ev.tabId !== activeTabId) break;
       processOutputEvent(ev);
-      if (isRunning) showSpinner();
+      if (isActiveTabRunning()) showSpinner();
       break;
     }
     sb();
@@ -1161,14 +1319,21 @@
     }
   }
 
-  function setReady(label) {
-    runningTabId = -1;
-    t0 = null;
-    setRunningState(false);
-    stopTimer();
-    removeSpinner();
-    statusText.textContent = label || 'Ready';
-    inp.focus();
+  function setReady(label, tabId) {
+    // Mark the tab as no longer running
+    if (tabId !== undefined) {
+      var doneTab = tabs.find(function(t) { return t.id === tabId; });
+      if (doneTab) { doneTab.isRunning = false; doneTab.t0 = null; }
+    }
+    // Update UI only if the event targets the active tab (or no tabId)
+    if (tabId === undefined || tabId === activeTabId) {
+      t0 = null;
+      setRunningState(false);
+      stopTimer();
+      removeSpinner();
+      statusText.textContent = label || 'Ready';
+      inp.focus();
+    }
   }
 
   function addError(text) {
@@ -1647,6 +1812,7 @@
       type: 'submit',
       prompt: prompt,
       model: selectedModel,
+      tabId: activeTabId,
       attachments: attachments.map(function(a) {
         return { name: a.name, mimeType: a.type, data: a.data };
       }),

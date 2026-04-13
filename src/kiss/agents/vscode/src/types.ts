@@ -21,8 +21,8 @@ export interface SessionInfo {
 
 /** Messages from webview to extension */
 export type FromWebviewMessage =
-  | { type: 'submit'; prompt: string; model: string; attachments: Attachment[]; useWorktree?: boolean; useParallel?: boolean }
-  | { type: 'stop' }
+  | { type: 'submit'; prompt: string; model: string; attachments: Attachment[]; useWorktree?: boolean; useParallel?: boolean; tabId?: number }
+  | { type: 'stop'; tabId?: number }
   | { type: 'selectModel'; model: string }
   | { type: 'getModels' }
   | { type: 'getHistory'; query?: string; offset?: number; generation?: number }
@@ -117,4 +117,5 @@ export interface AgentCommand {
   task?: string;
   chatId?: string;
   direction?: 'prev' | 'next';
+  tabId?: number;
 }

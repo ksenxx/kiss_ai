@@ -1642,14 +1642,16 @@ class TestAutoCollapseOlderPanelsJS(unittest.TestCase):
     def test_called_after_merge_info_appended(self) -> None:
         """collapseOlderPanels is called after merge-info panel appended."""
         idx = self._js.index("case 'merge_data':")
-        end = self._js.index("break;", idx) + len("break;")
+        # Skip past early-return break to find the case's closing break
+        end = self._js.index("break;\n    }", idx) + len("break;\n    }")
         body = self._js[idx:end]
         assert "collapseOlderPanels()" in body
 
     def test_called_after_error_banner_appended(self) -> None:
         """collapseOlderPanels is called after error/stopped banner appended."""
         idx = self._js.index("case 'task_error':\n")
-        end = self._js.index("break;", idx) + len("break;")
+        # Skip past early-return break to find the case's closing break
+        end = self._js.index("break;\n    }", idx) + len("break;\n    }")
         body = self._js[idx:end]
         assert "collapseOlderPanels()" in body
 
@@ -2680,11 +2682,11 @@ class TestSorcarSidebarViewPublicAPI(unittest.TestCase):
         assert "this._startTask(" in body
 
     def test_submit_task_guards_against_running(self) -> None:
-        """submitTask returns early if already running."""
+        """submitTask calls _startTask which checks per-tab running state."""
         idx = self._ts.index("public submitTask(")
         end = self._ts.index("\n  }", idx) + 4
         body = self._ts[idx:end]
-        assert "this._isRunning" in body
+        assert "_startTask" in body
 
     def test_has_stop_task(self) -> None:
         assert "public stopTask()" in self._ts
@@ -2722,11 +2724,10 @@ class TestSorcarSidebarViewPublicAPI(unittest.TestCase):
         assert "this._agentProcess.stop()" in body
 
     def test_new_conversation_sends_new_chat_when_idle(self) -> None:
-        """When idle, newConversation sends newChat directly."""
+        """When idle, newConversation sends clearChat to webview."""
         idx = self._ts.index("public newConversation()")
         end = self._ts.index("\n  }", idx) + 4
         body = self._ts[idx:end]
-        assert "type: 'newChat'" in body
         assert "type: 'clearChat'" in body
 
     def test_has_generate_commit_message(self) -> None:
@@ -2814,7 +2815,7 @@ class TestSorcarSidebarViewAgentEventHandling(unittest.TestCase):
     def test_tracks_running_status(self) -> None:
         body = self._get_message_handler_body()
         assert "msg.type === 'status'" in body
-        assert "this._isRunning = msg.running" in body
+        assert "this._runningTabs" in body
 
     def test_sends_active_file_info_on_stop(self) -> None:
         """When status running=false, sends active file info."""
@@ -2822,10 +2823,10 @@ class TestSorcarSidebarViewAgentEventHandling(unittest.TestCase):
         assert "_sendActiveFileInfo()" in body
 
     def test_pending_new_chat_handled_on_stop(self) -> None:
-        """When status running=false and _pendingNewChat, sends newChat."""
+        """When status running=false and _pendingNewChat, sends clearChat."""
         body = self._get_message_handler_body()
         assert "_pendingNewChat" in body
-        assert "type: 'newChat'" in body
+        assert "type: 'clearChat'" in body
 
 
 class TestSorcarSidebarViewReadyHandler(unittest.TestCase):
@@ -2848,7 +2849,8 @@ class TestSorcarSidebarViewReadyHandler(unittest.TestCase):
 
     def test_sends_status(self) -> None:
         block = self._get_ready_block()
-        assert "running: this._isRunning" in block
+        assert "this._runningTabs" in block
+        assert "running: true" in block
 
     def test_requests_models(self) -> None:
         block = self._get_ready_block()
@@ -3085,8 +3087,11 @@ class TestWebviewTabBarJS(unittest.TestCase):
         idx = self._js.index("function makeTab(title)")
         end = self._js.index("\n  }", idx) + 4
         body = self._js[idx:end]
-        for field in ("title:", "outputHTML:", "taskPanelHTML:",
-                      "chatId:", "welcomeVisible:"):
+        for field in ("title:", "outputFragment:", "taskPanelHTML:",
+                      "chatId:", "welcomeVisible:", "selectedModel:",
+                      "attachments:", "inputValue:", "isMerging:",
+                      "t0:", "streamState:", "streamLastToolName:",
+                      "streamPendingPanel:"):
             assert field in body, f"makeTab missing field {field}"
 
     def test_tabs_array_exists(self) -> None:
@@ -3255,11 +3260,11 @@ class TestWebviewTabBarJS(unittest.TestCase):
     def test_save_current_tab_function_exists(self) -> None:
         assert "function saveCurrentTab()" in self._js
 
-    def test_save_current_tab_stores_output_html(self) -> None:
+    def test_save_current_tab_stores_output_fragment(self) -> None:
         idx = self._js.index("function saveCurrentTab()")
         end = self._js.index("\n  function ", idx + 1)
         body = self._js[idx:end]
-        assert "tab.outputHTML = O.innerHTML" in body
+        assert "tab.outputFragment = document.createDocumentFragment()" in body
 
     def test_save_current_tab_stores_chat_id(self) -> None:
         idx = self._js.index("function saveCurrentTab()")
@@ -3276,11 +3281,11 @@ class TestWebviewTabBarJS(unittest.TestCase):
         body = self._js[idx:end]
         assert "activeTabId = tab.id" in body
 
-    def test_restore_tab_restores_output_html(self) -> None:
+    def test_restore_tab_restores_output_fragment(self) -> None:
         idx = self._js.index("function restoreTab(tab)")
         end = self._js.index("\n  function ", idx + 1)
         body = self._js[idx:end]
-        assert "O.innerHTML = tab.outputHTML" in body
+        assert "tab.outputFragment" in body
 
     def test_restore_tab_restores_chat_id(self) -> None:
         idx = self._js.index("function restoreTab(tab)")
@@ -3334,9 +3339,9 @@ class TestWebviewTabBarJS(unittest.TestCase):
     # -- New chat button creates a new tab --
 
     def test_new_chat_button_calls_create_new_tab(self) -> None:
-        """The clear-btn (New chat) button calls createNewTab."""
-        idx = self._js.index("function doClearChat()")
-        end = self._js.index("\n  }", idx) + 4
+        """The clearChat handler creates a new tab."""
+        idx = self._js.index("case 'clearChat':")
+        end = self._js.index("break;", idx) + len("break;")
         body = self._js[idx:end]
         assert "createNewTab()" in body
 
@@ -3476,22 +3481,23 @@ class TestSorcarSidebarViewFilePathDoesNotPopulateTaskPanel(unittest.TestCase):
         body = self._ts[idx:end]
         assert "setTaskText" in body
 
-    def test_submit_sets_is_running_false_for_file_open(self) -> None:
-        """File path open resets _isRunning to false."""
+    def test_submit_file_open_returns_without_starting_task(self) -> None:
+        """File path open returns early without adding to _runningTabs."""
         submit_idx = self._ts.index("case 'submit':")
         submit_end = self._ts.index("break;", submit_idx)
         submit_body = self._ts[submit_idx:submit_end]
         file_check_idx = submit_body.index("isFile()")
         return_idx = submit_body.index("return;", file_check_idx)
         block = submit_body[file_check_idx:return_idx]
-        assert "this._isRunning = false" in block
+        # File open returns early — no _startTask call in this path
+        assert "_startTask" not in block
 
-    def test_submit_checks_is_running_before_processing(self) -> None:
-        """Submit returns early if already running."""
+    def test_submit_checks_per_tab_running_before_processing(self) -> None:
+        """Submit returns early if this tab is already running."""
         submit_idx = self._ts.index("case 'submit':")
         submit_end = self._ts.index("break;", submit_idx)
         submit_body = self._ts[submit_idx:submit_end]
-        assert "if (this._isRunning) return;" in submit_body
+        assert "this._runningTabs.has(tabId)" in submit_body
 
 
 class TestSorcarSidebarViewNewChatBehavior(unittest.TestCase):
@@ -3511,13 +3517,12 @@ class TestSorcarSidebarViewNewChatBehavior(unittest.TestCase):
         assert "case 'newChat':" in self._ts
 
     def test_pending_new_chat_on_stop(self) -> None:
-        """When task stops and _pendingNewChat is true, send newChat + clearChat."""
+        """When task stops and _pendingNewChat is true, send clearChat."""
         # Find the on('message') handler
         idx = self._ts.index("this._agentProcess.on('message'")
         end = self._ts.index("const workDir = this._getWorkDir()", idx)
         body = self._ts[idx:end]
         assert "_pendingNewChat" in body
-        assert "type: 'newChat'" in body
         assert "type: 'clearChat'" in body
 
 

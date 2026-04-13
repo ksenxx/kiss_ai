@@ -257,17 +257,17 @@ class TestVSCodeServerBranches:
 
     def test_handle_command_run_already_running(self):
         server, events = self._make_server()
-        # Simulate a running thread
+        # Simulate a running thread on tab 0
         t = threading.Thread(target=lambda: time.sleep(5), daemon=True)
         t.start()
-        server._task_thread = t
-        server._handle_command({"type": "run", "prompt": "test"})
+        server._task_threads[0] = t
+        server._handle_command({"type": "run", "prompt": "test", "tabId": 0})
         assert any("already running" in e.get("text", "") for e in events)
         t.join(timeout=0.1)
 
     def test_handle_command_stop_no_event(self):
         server, events = self._make_server()
-        server._stop_event = None
+        server._stop_events.clear()
         server._handle_command({"type": "stop"})
         # No crash
 
@@ -290,18 +290,22 @@ class TestVSCodeServerBranches:
 
     def test_ask_user_question(self):
         server, events = self._make_server()
-        server._stop_event = threading.Event()
-        server.printer._thread_local.stop_event = server._stop_event
+        stop_event = threading.Event()
+        server.printer._thread_local.stop_event = stop_event
+        # Set up per-tab queue for tab 1
+        tab_id = 1
+        server.printer._thread_local.tab_id = tab_id
+        user_q: queue.Queue[str] = queue.Queue(maxsize=1)
+        server._user_answer_queues[tab_id] = user_q
 
         def answer():
             time.sleep(0.1)
-            server._user_answer_queue.put("my answer")
+            user_q.put("my answer")
 
         t = threading.Thread(target=answer, daemon=True)
         t.start()
         result = server._ask_user_question("what?")
         t.join(timeout=1)
-        assert result == "my answer"
         assert result == "my answer"
         ask_events = [e for e in events if e["type"] == "askUser"]
         assert len(ask_events) == 1

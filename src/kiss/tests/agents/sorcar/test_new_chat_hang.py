@@ -96,7 +96,7 @@ class TestTaskEndEventOrdering(unittest.TestCase):
             "type": "run", "prompt": prompt,
             "model": "claude-opus-4-6", "workDir": self.tmpdir,
         })
-        t = self.server._task_thread
+        t = self.server._task_threads.get(0)
         assert t is not None
         t.join(timeout=10)
         assert not t.is_alive()
@@ -148,7 +148,7 @@ class TestTaskEndEventPersistence(unittest.TestCase):
                 "type": "run", "prompt": "test stop persist",
                 "model": "claude-opus-4-6", "workDir": self.tmpdir,
             })
-            t = self.server._task_thread
+            t = self.server._task_threads.get(0)
             assert t is not None
             t.join(timeout=10)
         finally:
@@ -237,7 +237,7 @@ class TestPeriodicEventFlush(unittest.TestCase):
             assert entry["result"] == "Agent Failed Abruptly"
 
             resume.set()
-            t = self.server._task_thread
+            t = self.server._task_threads.get(0)
             assert t is not None
             t.join(timeout=10)
         finally:
@@ -245,17 +245,17 @@ class TestPeriodicEventFlush(unittest.TestCase):
 
 
 class TestTypescriptIsRunningFix(unittest.TestCase):
-    """Verify SorcarSidebarView.ts sets _isRunning=false on task end events."""
+    """Verify SorcarSidebarView.ts tracks running tabs via _runningTabs set."""
 
-    def test_is_running_updated_by_status_event(self) -> None:
-        """_isRunning is reset by the status event handler (sent after task_done/stopped/error)."""
+    def test_running_tabs_updated_by_status_event(self) -> None:
+        """_runningTabs is updated by the status event handler."""
         with open("src/kiss/agents/vscode/src/SorcarSidebarView.ts") as f:
             source = f.read()
-        # The status handler manages _isRunning
+        # The status handler manages _runningTabs
         idx = source.find("msg.type === 'status'")
         assert idx >= 0, "status handler not found"
-        block = source[idx:idx + 200]
-        assert "this._isRunning = msg.running" in block
+        block = source[idx:idx + 300]
+        assert "this._runningTabs" in block
         # Python server always sends status:running:false after task end events
         with open("src/kiss/agents/vscode/server.py") as f:
             py_source = f.read()

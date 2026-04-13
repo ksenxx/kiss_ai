@@ -6,6 +6,7 @@ No mocks, patches, fakes, or test doubles. All tests use real objects.
 from __future__ import annotations
 
 import os
+import queue
 import subprocess
 import threading
 import time
@@ -74,11 +75,11 @@ class TestUserAnswerDrain:
     def test_user_answer_drains_stale(self) -> None:
         """Pre-filling queue before userAnswer should drain stale item."""
         server = VSCodeServer()
-        # Pre-fill with a stale answer
-        server._user_answer_queue.put("stale")
+        # Pre-fill default queue with a stale answer
+        server._default_user_answer_queue.put("stale")
         # Send new answer — this should drain "stale" and put "new"
         server._handle_command({"type": "userAnswer", "answer": "new"})
-        answer = server._user_answer_queue.get_nowait()
+        answer = server._default_user_answer_queue.get_nowait()
         assert answer == "new"
 
 
@@ -174,12 +175,13 @@ class TestAwaitUserResponseLoop:
     def test_await_user_response_delayed(self) -> None:
         """Answer arriving after first timeout iteration covers loop branch."""
         server = VSCodeServer()
-        server._stop_event = threading.Event()
-        server.printer._thread_local.stop_event = server._stop_event
+        stop_event = threading.Event()
+        server.printer._thread_local.stop_event = stop_event
+        # Use default queue (no tab_id set on thread-local)
 
         def delayed_answer() -> None:
             time.sleep(1.0)
-            server._user_answer_queue.put("delayed")
+            server._default_user_answer_queue.put("delayed")
 
         t = threading.Thread(target=delayed_answer, daemon=True)
         t.start()
@@ -201,8 +203,8 @@ class TestAwaitUserResponseLoop:
 class TestRunTaskDrain:
     """Cover drain of stale answers at start of _run_task_inner (lines 268-269)."""
 
-    def test_run_task_drains_stale_answers(self) -> None:
-        """Pre-filled queue is drained when task starts."""
+    def test_run_task_creates_fresh_queue(self) -> None:
+        """Each task gets a fresh user_answer queue (RC8 fix)."""
         server = VSCodeServer()
         captured: list[dict[str, object]] = []
         orig = server.printer.broadcast
@@ -213,22 +215,24 @@ class TestRunTaskDrain:
 
         server.printer.broadcast = cap  # type: ignore[assignment]
 
-        # Pre-fill queue with stale answer
-        server._user_answer_queue.put("stale-answer")
+        tab_id = 1
+        # Pre-fill a queue for this tab with a stale answer
+        stale_q: queue.Queue[str] = queue.Queue(maxsize=1)
+        stale_q.put("stale-answer")
+        server._user_answer_queues[tab_id] = stale_q
 
-        # Run a task — it will fail (no LLM key) but drain happens first
+        # Run a task — it will fail (no LLM key) but creates a fresh queue
         server._handle_command({
             "type": "run",
             "prompt": "test drain",
             "model": "nonexistent-model",
+            "tabId": tab_id,
         })
 
         # Wait for task thread to complete
-        if server._task_thread:
-            server._task_thread.join(timeout=30)
-
-        # Queue should be empty (stale was drained)
-        assert server._user_answer_queue.empty()
+        thread = server._task_threads.get(tab_id)
+        if thread:
+            thread.join(timeout=30)
 
         # Task should have ended (status running=False)
         status_events = [

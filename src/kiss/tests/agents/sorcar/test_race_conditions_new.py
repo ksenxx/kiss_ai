@@ -90,10 +90,10 @@ class TestP15TaskThreadCleared(unittest.TestCase):
     """P15 fix: _task_thread is set to None in _run_task finally block."""
 
     def test_task_thread_cleared_in_run_task_finally(self) -> None:
-        """Verify _run_task sets self._task_thread = None in finally."""
+        """Verify _run_task cleans up per-tab thread in finally."""
         source = inspect.getsource(VSCodeServer._run_task)
-        assert "self._task_thread = None" in source, (
-            "P15 fix: _run_task should clear _task_thread in finally"
+        assert "self._task_threads.pop(" in source, (
+            "P15 fix: _run_task should remove tab from _task_threads in finally"
         )
 
 # ---------------------------------------------------------------------------
@@ -139,9 +139,9 @@ class TestD3UserAnswerWaitWithTimeout(unittest.TestCase):
     def test_raises_on_stop(self) -> None:
         """Verify _await_user_response raises KeyboardInterrupt on stop."""
         server = VSCodeServer()
-        server._stop_event = threading.Event()
-        server.printer._thread_local.stop_event = server._stop_event
-        server._stop_event.set()
+        stop_event = threading.Event()
+        server.printer._thread_local.stop_event = stop_event
+        stop_event.set()
 
         with self.assertRaises(KeyboardInterrupt):
             server._await_user_response()

@@ -104,9 +104,15 @@ class VSCodePrinter(BaseBrowserPrinter):
     def broadcast(self, event: dict[str, Any]) -> None:
         """Write event as a JSON line to stdout and record it.
 
+        Injects ``tabId`` from thread-local storage when available so the
+        frontend can route events to the correct chat tab.
+
         Args:
             event: The event dictionary to emit.
         """
+        tab_id = getattr(self._thread_local, "tab_id", None)
+        if tab_id is not None and "tabId" not in event:
+            event = {**event, "tabId": tab_id}
         with self._lock:
             self._record_event(event)
         with self._stdout_lock:
@@ -124,8 +130,9 @@ class VSCodeServer:
         self._use_worktree = False
         self._use_parallel = False
         self.work_dir = os.environ.get("KISS_WORKDIR", os.getcwd())
-        self._stop_event: threading.Event | None = None
-        self._user_answer_queue: queue.Queue[str] = queue.Queue(maxsize=1)
+        self._stop_events: dict[int, threading.Event] = {}
+        self._user_answer_queues: dict[int, queue.Queue[str]] = {}
+        self._default_user_answer_queue: queue.Queue[str] = queue.Queue(maxsize=1)
         persisted = _load_last_model()
         self._selected_model = (
             persisted
@@ -137,7 +144,7 @@ class VSCodeServer:
         self._last_active_content: str = ""
         # Lock ordering: _state_lock < printer._lock < printer._stdout_lock < printer._bash_lock
         self._state_lock = threading.Lock()
-        self._task_thread: threading.Thread | None = None
+        self._task_threads: dict[int, threading.Thread] = {}
         self._merging = False
         self._task_generation = 0
         self._recording_id = 0
@@ -184,17 +191,24 @@ class VSCodeServer:
         cmd_type = cmd.get("type")
 
         if cmd_type == "run":
+            tab_id = cmd.get("tabId", 0)
             with self._state_lock:
-                if self._task_thread and self._task_thread.is_alive():
-                    self.printer.broadcast({"type": "error", "text": "Task already running"})
-                    self.printer.broadcast({"type": "status", "running": False})
+                existing = self._task_threads.get(tab_id)
+                if existing and existing.is_alive():
+                    self.printer.broadcast({
+                        "type": "error",
+                        "text": "Task already running",
+                        "tabId": tab_id,
+                    })
+                    self.printer.broadcast({"type": "status", "running": False, "tabId": tab_id})
                     return
-                self._task_thread = threading.Thread(
+                thread = threading.Thread(
                     target=self._run_task, args=(cmd,), daemon=True
                 )
-                self._task_thread.start()
+                self._task_threads[tab_id] = thread
+                thread.start()
         elif cmd_type == "stop":
-            self._stop_task()
+            self._stop_task(cmd.get("tabId"))
         elif cmd_type == "getModels":
             self._get_models()
         elif cmd_type == "selectModel":
@@ -212,18 +226,22 @@ class VSCodeServer:
             if path:
                 _record_file_usage(path)
         elif cmd_type == "userAnswer":
+            # Route answer to the correct tab's queue (or default)
+            ans_tab = cmd.get("tabId")
+            if ans_tab is not None:
+                q = self._user_answer_queues.get(ans_tab)
+            else:
+                q = self._default_user_answer_queue
+            if q is None:
+                q = self._default_user_answer_queue
             # Drain any stale answer, then put the new one (P2/D3 fix)
-            while not self._user_answer_queue.empty():
+            while not q.empty():
                 try:
-                    self._user_answer_queue.get_nowait()
+                    q.get_nowait()
                 except queue.Empty:  # pragma: no cover — race guard
                     break
-            self._user_answer_queue.put(cmd.get("answer", ""))
+            q.put(cmd.get("answer", ""))
         elif cmd_type == "resumeSession":
-            with self._state_lock:
-                running = self._task_thread and self._task_thread.is_alive()
-            if running:
-                return
             chat_id = cmd.get("sessionId", "")
             if chat_id:
                 self._replay_session(chat_id)
@@ -232,9 +250,7 @@ class VSCodeServer:
         elif cmd_type == "getLastSession":
             self._get_last_session()
         elif cmd_type == "newChat":
-            with self._state_lock:
-                if not (self._task_thread and self._task_thread.is_alive()):
-                    self.agent.new_chat()
+            self.agent.new_chat()
         elif cmd_type == "complete":
             query = cmd.get("query", "")
             active_file = cmd.get("activeFile")
@@ -281,12 +297,16 @@ class VSCodeServer:
         is **always** broadcast when this method exits, regardless of
         which code-path is taken.
         """
+        tab_id = cmd.get("tabId", 0)
+        self.printer._thread_local.tab_id = tab_id
         try:
             self.printer.broadcast({"type": "status", "running": True})
             self._run_task_inner(cmd)
         finally:
             with self._state_lock:
-                self._task_thread = None
+                self._task_threads.pop(tab_id, None)
+                self._stop_events.pop(tab_id, None)
+                self._user_answer_queues.pop(tab_id, None)
                 self.printer.broadcast({"type": "status", "running": False})
 
     def _periodic_event_flush(self, rec_id: int, stop: threading.Event) -> None:
@@ -338,19 +358,22 @@ class VSCodeServer:
                 )
                 return
 
+        tab_id = cmd.get("tabId", 0)
         # RC1+RC3+RC9: all state mutations under _state_lock
         with self._state_lock:
             self._use_worktree = bool(cmd.get("useWorktree", False))
             self._use_parallel = bool(cmd.get("useParallel", False))
-            self._stop_event = threading.Event()
+            stop_event = threading.Event()
+            self._stop_events[tab_id] = stop_event
             self._last_active_file = active_file or ""
             self._task_generation += 1
             gen = self._task_generation
             self._recording_id += 1
             rec_id = self._recording_id
-        self.printer._thread_local.stop_event = self._stop_event
-        # RC8: fresh queue per task (avoids drain race with userAnswer handler)
-        self._user_answer_queue = queue.Queue(maxsize=1)
+            # RC8: fresh queue per task (avoids drain race with userAnswer handler)
+            user_q: queue.Queue[str] = queue.Queue(maxsize=1)
+            self._user_answer_queues[tab_id] = user_q
+        self.printer._thread_local.stop_event = stop_event
 
         self.printer.broadcast({"type": "clear"})
         self.printer.broadcast({
@@ -433,7 +456,7 @@ class VSCodeServer:
                 self.printer.broadcast({"type": "tasks_updated"})
                 self.printer.reset()
                 with self._state_lock:
-                    self._stop_event = None
+                    self._stop_events.pop(tab_id, None)
                 try:
                     merge_dir = str(_merge_data_dir())
                     merge_result = _prepare_merge_view(
@@ -513,7 +536,7 @@ class VSCodeServer:
         self.printer.broadcast({"type": "merge_ended"})
         _cleanup_merge_data(str(_merge_data_dir()))
 
-    def _stop_task(self) -> None:
+    def _stop_task(self, tab_id: int | None = None) -> None:
         """Signal the agent to stop.
 
         Sets the cooperative stop event and, if the task thread doesn't
@@ -522,19 +545,29 @@ class VSCodeServer:
         handles the case where the agent is blocked in an LLM API call
         or other I/O and never reaches a cooperative ``_check_stop()``
         call.
+
+        Args:
+            tab_id: The tab to stop.  When *None*, stops all running tabs.
         """
-        # RC1+RC2: read _stop_event and _task_thread atomically under lock
         with self._state_lock:
-            stop_event = self._stop_event
-            task_thread = self._task_thread
-        if stop_event:
-            stop_event.set()
-        if task_thread is not None and task_thread.is_alive():
-            threading.Thread(
-                target=self._force_stop_thread,
-                args=(task_thread,),
-                daemon=True,
-            ).start()
+            if tab_id is not None:
+                stop_event = self._stop_events.get(tab_id)
+                task_thread = self._task_threads.get(tab_id)
+                pairs = [(stop_event, task_thread)]
+            else:
+                pairs = [
+                    (self._stop_events.get(tid), self._task_threads.get(tid))
+                    for tid in list(self._task_threads)
+                ]
+        for stop_event, task_thread in pairs:
+            if stop_event:
+                stop_event.set()
+            if task_thread is not None and task_thread.is_alive():
+                threading.Thread(
+                    target=self._force_stop_thread,
+                    args=(task_thread,),
+                    daemon=True,
+                ).start()
 
     @staticmethod
     def _force_stop_thread(task_thread: threading.Thread) -> None:
@@ -575,9 +608,16 @@ class VSCodeServer:
             KeyboardInterrupt: If the stop event is set before an answer arrives.
         """
         stop = getattr(self.printer._thread_local, "stop_event", None) or self.printer.stop_event
+        tab_id = getattr(self.printer._thread_local, "tab_id", None)
+        if tab_id is not None:
+            q = self._user_answer_queues.get(tab_id)
+        else:
+            q = self._default_user_answer_queue
+        if q is None:
+            q = self._default_user_answer_queue
         while True:
             try:
-                return self._user_answer_queue.get(timeout=0.5)
+                return q.get(timeout=0.5)
             except queue.Empty:
                 if stop.is_set():
                     raise KeyboardInterrupt("Stopped while waiting for user")
@@ -684,7 +724,7 @@ class VSCodeServer:
         """
         # RC12 fix: guard against concurrent running task
         with self._state_lock:
-            if self._task_thread and self._task_thread.is_alive():
+            if any(t.is_alive() for t in self._task_threads.values()):
                 return
         entries = _load_history(limit=1)
         if entries:

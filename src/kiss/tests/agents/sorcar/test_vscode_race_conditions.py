@@ -112,62 +112,50 @@ class TestRace14StatusBroadcastOrder(unittest.TestCase):
 class TestRace16GuardedNewChatResumeSession(unittest.TestCase):
     """Race 16 fix: newChat/resumeSession guarded when task is running."""
 
-    def test_newchat_blocked_when_task_running(self) -> None:
-        """Verify newChat is blocked when _task_thread is alive."""
+    def test_newchat_works_while_other_tab_running(self) -> None:
+        """newChat works even when another tab has a running task
+        (per-tab concurrent execution)."""
         server = VSCodeServer()
         original_id = server.agent._chat_id
 
-        # Simulate running task
+        # Simulate running task on tab 1
         stop = threading.Event()
-        server._task_thread = threading.Thread(target=lambda: stop.wait(), daemon=True)
-        server._task_thread.start()
+        thread = threading.Thread(target=lambda: stop.wait(), daemon=True)
+        thread.start()
+        server._task_threads[1] = thread
 
         try:
-            # newChat should be blocked
+            # newChat should work (per-tab — no global block)
             server._handle_command({"type": "newChat"})
-            assert server.agent._chat_id == original_id, (
-                "newChat should be blocked while task is running"
+            assert server.agent._chat_id != original_id, (
+                "newChat should create a new chat even while another tab is running"
             )
         finally:
             stop.set()
-            server._task_thread.join()
+            thread.join()
 
-    def test_resume_session_blocked_when_task_running(self) -> None:
-        """Verify resumeSession is blocked when _task_thread is alive."""
+    def test_resume_session_works_while_other_tab_running(self) -> None:
+        """resumeSession works even when another tab has a running task."""
         server = VSCodeServer()
-        original_id = server.agent._chat_id
 
         stop = threading.Event()
-        server._task_thread = threading.Thread(target=lambda: stop.wait(), daemon=True)
-        server._task_thread.start()
+        thread = threading.Thread(target=lambda: stop.wait(), daemon=True)
+        thread.start()
+        server._task_threads[1] = thread
 
         try:
+            # resumeSession should not crash (session may not exist)
             server._handle_command({"type": "resumeSession", "sessionId": "test"})
-            assert server.agent._chat_id == original_id, (
-                "resumeSession should be blocked while task is running"
-            )
         finally:
             stop.set()
-            server._task_thread.join()
+            thread.join()
 
-    def test_handler_source_has_running_check(self) -> None:
-        """Verify newChat handler checks _task_thread."""
+    def test_handler_source_has_per_tab_running_check(self) -> None:
+        """Verify submit handler checks per-tab running via _runningTabs
+        (not global _task_thread)."""
         source = inspect.getsource(VSCodeServer._handle_command)
-        # Find the newChat handler block
-        lines = source.split("\n")
-        in_newchat = False
-        newchat_block: list[str] = []
-        for line in lines:
-            if '"newChat"' in line:
-                in_newchat = True
-            elif in_newchat:
-                if line.strip().startswith("elif") or line.strip().startswith("else"):
-                    break
-                newchat_block.append(line)
-
-        block = "\n".join(newchat_block)
-        assert "_task_thread" in block, (
-            "newChat handler should check _task_thread"
+        assert "_task_threads" in source, (
+            "run handler should use per-tab _task_threads dict"
         )
 
 

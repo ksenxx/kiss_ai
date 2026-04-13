@@ -23,7 +23,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _agentProcess: AgentProcess;
   private _extensionUri: vscode.Uri;
   private _selectedModel: string;
-  private _isRunning: boolean = false;
+  private _runningTabs: Set<number> = new Set();
   private _pendingNewChat: boolean = false;
   private _mergeManager: MergeManager;
   private _mergeOwner: boolean = false;
@@ -132,8 +132,12 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
       this._sendToWebview(msg);
       if (msg.type === 'status') {
-        this._isRunning = msg.running;
-        if (!msg.running) {
+        const tabId = (msg as any).tabId as number | undefined;
+        if (msg.running) {
+          if (tabId !== undefined) this._runningTabs.add(tabId);
+        } else {
+          if (tabId !== undefined) this._runningTabs.delete(tabId);
+          else this._runningTabs.clear();
           this._sendActiveFileInfo();
           if (this._pendingNewChat) {
             this._pendingNewChat = false;
@@ -224,16 +228,16 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     } catch { /* ignored */ }
   }
 
-  private _startTask(prompt: string, model: string, activeFile?: string, attachments?: Attachment[], useWorktree?: boolean, useParallel?: boolean): void {
+  private _startTask(prompt: string, model: string, activeFile?: string, attachments?: Attachment[], useWorktree?: boolean, useParallel?: boolean, tabId?: number): void {
     const workDir = this._getWorkDir();
     const started = this._agentProcess.start(workDir);
     if (!started) {
-      this._isRunning = false;
-      this._sendToWebview({ type: 'status', running: false });
+      if (tabId !== undefined) this._runningTabs.delete(tabId);
+      this._sendToWebview({ type: 'status', running: false, tabId } as any);
       return;
     }
-    this._sendToWebview({ type: 'setTaskText', text: prompt } as ToWebviewMessage);
-    this._sendToWebview({ type: 'status', running: true });
+    this._sendToWebview({ type: 'setTaskText', text: prompt, tabId } as any);
+    this._sendToWebview({ type: 'status', running: true, tabId } as any);
     this._agentProcess.sendCommand({
       type: 'run',
       prompt,
@@ -243,13 +247,17 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       attachments,
       useWorktree,
       useParallel,
+      tabId,
     });
   }
 
   private async _handleMessage(message: FromWebviewMessage): Promise<void> {
     switch (message.type) {
       case 'ready':
-        this._sendToWebview({ type: 'status', running: this._isRunning });
+        // Send running state for each tab that has a running task
+        for (const tabId of this._runningTabs) {
+          this._sendToWebview({ type: 'status', running: true, tabId } as any);
+        }
         this._agentProcess.sendCommand({ type: 'getModels' });
         this._sendWelcomeSuggestions();
         this._agentProcess.sendCommand({ type: 'getInputHistory' });
@@ -263,15 +271,14 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         break;
 
       case 'submit': {
-        if (this._isRunning) return;
-        this._isRunning = true;
+        const tabId = (message as any).tabId as number | undefined;
+        if (tabId !== undefined && this._runningTabs.has(tabId)) return;
 
         const trimmed = message.prompt.trim();
         if (trimmed && !trimmed.includes('\n')) {
           const bare = trimmed.replace(/^WORK_DIR[/\\]/, '');
           const resolved = path.resolve(this._getWorkDir(), bare);
           if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
-            this._isRunning = false;
             const uri = vscode.Uri.file(resolved);
             const doc = await vscode.workspace.openTextDocument(uri);
             await vscode.window.showTextDocument(doc, {
@@ -282,6 +289,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           }
         }
 
+        if (tabId !== undefined) this._runningTabs.add(tabId);
         this._startTask(
           message.prompt,
           message.model,
@@ -289,13 +297,20 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           message.attachments,
           message.useWorktree,
           message.useParallel,
+          tabId,
         );
         break;
       }
 
-      case 'stop':
-        this._agentProcess.stop();
+      case 'stop': {
+        const stopTabId = (message as any).tabId as number | undefined;
+        if (stopTabId !== undefined) {
+          this._agentProcess.sendCommand({ type: 'stop', tabId: stopTabId });
+        } else {
+          this._agentProcess.stop();
+        }
         break;
+      }
 
       case 'selectModel':
         this._selectedModel = message.model;
@@ -400,14 +415,14 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         break;
 
       case 'runPrompt': {
-        if (this._isRunning) return;
+        // runPrompt doesn't have a tabId from the webview; allow if any tab is free
+        if (this._runningTabs.size > 0) return;
         const promptPath = this._getVisibleEditorFile();
         if (!promptPath || !promptPath.toLowerCase().endsWith('.md')) return;
         const promptDoc = vscode.workspace.textDocuments.find(d => d.uri.fsPath === promptPath);
         if (!promptDoc) return;
         const content = promptDoc.getText();
         if (!content.trim()) return;
-        this._isRunning = true;
         this._startTask(content, this._selectedModel, promptPath);
         break;
       }
@@ -471,8 +486,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
   /** Submit a task programmatically (e.g. from runSelection command). */
   public submitTask(prompt: string): void {
-    if (this._isRunning || !prompt.trim()) return;
-    this._isRunning = true;
+    if (!prompt.trim()) return;
     this._startTask(
       prompt.trim(),
       this._selectedModel,
@@ -505,7 +519,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
   /** Start a new conversation, stopping any running task first. */
   public newConversation(): void {
-    if (this._isRunning) {
+    if (this._runningTabs.size > 0) {
       this._pendingNewChat = true;
       this._agentProcess.stop();
     } else {

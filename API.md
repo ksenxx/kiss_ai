@@ -2119,7 +2119,7 @@ ______________________________________________________________________
 
 **Constructor:** `VSCodePrinter() -> None`
 
-- **broadcast** — Write event as a JSON line to stdout and record it.<br/>`broadcast(event: dict[str, Any]) -> None`
+- **broadcast** — Write event as a JSON line to stdout and record it. Injects `tabId` from thread-local storage when available so the frontend can route events to the correct chat tab.<br/>`broadcast(event: dict[str, Any]) -> None`
   - `event`: The event dictionary to emit.
 
 ##### `class VSCodeServer` — Backend server for VS Code extension.
@@ -5002,7 +5002,7 @@ ______________________________________________________________________
 
 **Constructor:** `VSCodePrinter() -> None`
 
-- **broadcast** — Write event as a JSON line to stdout and record it.<br/>`broadcast(event: dict[str, Any]) -> None`
+- **broadcast** — Write event as a JSON line to stdout and record it. Injects `tabId` from thread-local storage when available so the frontend can route events to the correct chat tab.<br/>`broadcast(event: dict[str, Any]) -> None`
   - `event`: The event dictionary to emit.
 
 ##### `class VSCodeServer` — Backend server for VS Code extension.
