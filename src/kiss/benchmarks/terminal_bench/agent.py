@@ -247,7 +247,7 @@ class SorcarHarborAgent(BaseAgent):
         escaped = shlex.quote(task)
         return await environment.exec(
             f'export PATH="/root/.local/bin:$PATH"'
-            f" && sorcar -t {escaped} -w /app --no-web --no-worktree -n {model_flag}",
+            f" && sorcar -t {escaped} -w /app --no-web -n {model_flag}",
             user="root",
             env=env,
         )

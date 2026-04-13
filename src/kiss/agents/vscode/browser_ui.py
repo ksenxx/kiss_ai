@@ -190,8 +190,7 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
 
     def has_clients(self) -> bool:
         """Return True if a client is currently connected."""
-        with self._lock:
-            return self._client_queue is not None
+        return self._client_queue is not None
 
     def _broadcast_result(
         self,

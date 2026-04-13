@@ -484,18 +484,21 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
 
 
 def main() -> None:  # pragma: no cover – CLI entry point requires API
-    """Run WorktreeSorcarAgent or StatefulSorcarAgent from the command line.
+    """Run SorcarAgent, StatefulSorcarAgent, or WorktreeSorcarAgent from the CLI.
 
-    Uses ``WorktreeSorcarAgent`` when the working directory is inside a
-    git repository, and ``StatefulSorcarAgent`` otherwise.
+    Uses ``--base-sorcar`` (default), ``--chat-sorcar``, or
+    ``--worktree-sorcar`` to select the agent type.
     """
     import time as time_mod
+
+    from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 
     if len(sys.argv) <= 1:
         print(
             "Usage: sorcar [-m MODEL] [-e ENDPOINT] [-b BUDGET] "
             "[-w WORK_DIR] [-t TASK] [-f FILE] [-n] [-c ID] "
-            "[-l] [--cleanup] [-p]"
+            "[-l] [--cleanup] [-p] "
+            "[--base-sorcar | --chat-sorcar | --worktree-sorcar]"
         )
         sys.exit(1)
 
@@ -504,9 +507,18 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
         "--cleanup", action="store_true",
         help="Scan for and clean up orphaned worktree branches",
     )
-    parser.add_argument(
-        "--no-worktree", action="store_true",
-        help="Disable git worktree isolation (run directly in work_dir)",
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--base-sorcar", action="store_true",
+        help="Use SorcarAgent (no chat persistence, no worktree; default)",
+    )
+    group.add_argument(
+        "--chat-sorcar", action="store_true",
+        help="Use StatefulSorcarAgent (chat persistence, no worktree)",
+    )
+    group.add_argument(
+        "--worktree-sorcar", action="store_true",
+        help="Use WorktreeSorcarAgent (chat persistence + worktree isolation)",
     )
     args = parser.parse_args()
 
@@ -515,10 +527,6 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
         sys.exit(0)
 
     work_dir = args.work_dir or str(Path(".").resolve())
-    in_git_repo = (
-        not args.no_worktree
-        and GitWorktreeOps.discover_repo(Path(work_dir)) is not None
-    )
 
     if args.cleanup:
         repo = GitWorktreeOps.discover_repo(Path(work_dir))
@@ -528,20 +536,28 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
         print(WorktreeSorcarAgent.cleanup(repo))
         sys.exit(0)
 
-    if in_git_repo:
-        agent: StatefulSorcarAgent = WorktreeSorcarAgent("Worktree Sorcar Agent")
-    else:
+    if args.worktree_sorcar:
+        agent: SorcarAgent = WorktreeSorcarAgent("Worktree Sorcar Agent")
+    elif args.chat_sorcar:
         agent = StatefulSorcarAgent("Stateful Sorcar Agent")
+    else:
+        agent = SorcarAgent("Sorcar Agent")
 
     run_kwargs = _build_run_kwargs(args)
-    _apply_chat_args(agent, args, task=run_kwargs.get("prompt_template", ""))
+    if isinstance(agent, StatefulSorcarAgent):
+        _apply_chat_args(agent, args, task=run_kwargs.get("prompt_template", ""))
 
     start_time = time_mod.time()
     result = agent.run(**run_kwargs)
     elapsed = time_mod.time() - start_time
 
     print(result)
-    _print_run_stats(agent, elapsed)
+    if isinstance(agent, StatefulSorcarAgent):
+        _print_run_stats(agent, elapsed)
+    else:
+        print(f"\nTime: {elapsed:.1f}s")
+        print(f"Cost: ${agent.budget_used:.4f}")
+        print(f"Total tokens: {agent.total_tokens_used}")
 
     if isinstance(agent, WorktreeSorcarAgent) and agent._wt_pending:
         while True:

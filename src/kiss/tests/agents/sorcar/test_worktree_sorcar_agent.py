@@ -387,31 +387,39 @@ class TestWorktreeSorcarAgent:
 
 
 class TestCliAgentSelection:
-    """Verify that main() selects the correct agent based on git repo detection."""
+    """Verify that main() selects the correct agent based on CLI flags."""
 
-    def test_main_source_checks_git_repo(self) -> None:
+    def test_main_source_has_agent_type_flags(self) -> None:
         import inspect
         src = inspect.getsource(
             __import__("kiss.agents.sorcar.worktree_sorcar_agent", fromlist=["main"]).main
         )
-        assert "discover_repo" in src
-        assert "in_git_repo" in src
+        assert "--worktree-sorcar" in src
+        assert "--chat-sorcar" in src
+        assert "--base-sorcar" in src
 
-    def test_main_source_creates_worktree_agent_when_in_repo(self) -> None:
+    def test_main_source_creates_worktree_agent_with_flag(self) -> None:
         import inspect
         src = inspect.getsource(
             __import__("kiss.agents.sorcar.worktree_sorcar_agent", fromlist=["main"]).main
         )
-        assert 'if in_git_repo:' in src
+        assert 'if args.worktree_sorcar:' in src
         assert 'WorktreeSorcarAgent(' in src
 
-    def test_main_source_creates_stateful_agent_when_not_in_repo(self) -> None:
+    def test_main_source_creates_stateful_agent_with_flag(self) -> None:
         import inspect
         src = inspect.getsource(
             __import__("kiss.agents.sorcar.worktree_sorcar_agent", fromlist=["main"]).main
         )
-        assert 'else:' in src
+        assert 'elif args.chat_sorcar:' in src
         assert 'StatefulSorcarAgent(' in src
+
+    def test_main_source_defaults_to_base_sorcar(self) -> None:
+        import inspect
+        src = inspect.getsource(
+            __import__("kiss.agents.sorcar.worktree_sorcar_agent", fromlist=["main"]).main
+        )
+        assert 'SorcarAgent("Sorcar Agent")' in src
 
     def test_main_source_guards_merge_prompt_with_isinstance(self) -> None:
         import inspect
@@ -419,5 +427,12 @@ class TestCliAgentSelection:
             __import__("kiss.agents.sorcar.worktree_sorcar_agent", fromlist=["main"]).main
         )
         assert 'isinstance(agent, WorktreeSorcarAgent)' in src
+
+    def test_main_source_uses_discover_repo_for_cleanup(self) -> None:
+        import inspect
+        src = inspect.getsource(
+            __import__("kiss.agents.sorcar.worktree_sorcar_agent", fromlist=["main"]).main
+        )
+        assert "discover_repo" in src
 
 
