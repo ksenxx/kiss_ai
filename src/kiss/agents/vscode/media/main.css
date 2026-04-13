@@ -63,7 +63,7 @@ header {
 .version { font-size: inherit; font-weight: 400; opacity: 0.75; }
 .status { display: flex; align-items: center; gap: 6px; font-size: var(--fs-base); color: var(--dim); }
 .status-metric {
-  color: var(--dim);
+  color: var(--purple);
   margin-left: 2px; white-space: nowrap;
 }
 .status-metric:not(:empty)::before { content: '·'; margin-right: 2px; }
