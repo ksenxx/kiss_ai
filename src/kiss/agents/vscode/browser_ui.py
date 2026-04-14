@@ -197,12 +197,14 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
         text: str,
         total_tokens: int = 0,
         cost: str = "N/A",
+        step_count: int = 0,
     ) -> None:
         event: dict[str, Any] = {
             "type": "result",
             "text": text or "(no result)",
             "total_tokens": total_tokens,
             "cost": cost,
+            "step_count": step_count,
         }
         parsed = parse_result_yaml(text) if text else None
         if parsed:
@@ -295,6 +297,7 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
                 str(content),
                 kwargs.get("total_tokens", 0),
                 kwargs.get("cost", "N/A"),
+                kwargs.get("step_count", 0),
             )
             return ""
         return ""

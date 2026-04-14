@@ -126,6 +126,7 @@
     tab.streamLlmPanelState = llmPanelState;
     tab.streamLastToolName = lastToolName;
     tab.streamPendingPanel = pendingPanel;
+    tab.streamStepCount = stepCount;
     // Save worktree bar (detach from DOM)
     if (worktreeBar && worktreeBar.parentNode) {
       tab.worktreeBarEl = worktreeBar;
@@ -190,6 +191,7 @@
     llmPanelState = tab.streamLlmPanelState || mkS();
     lastToolName = tab.streamLastToolName || '';
     pendingPanel = tab.streamPendingPanel || false;
+    stepCount = tab.streamStepCount || 0;
     _scrollLock = false;
     // Restore worktree bar
     if (worktreeBar && worktreeBar.parentNode) worktreeBar.parentNode.removeChild(worktreeBar);
@@ -484,6 +486,7 @@
   let llmPanel = null;
   let llmPanelState = mkS();
   let pendingPanel = false;
+  let stepCount = 0;
 
   let t0 = null;
   let timerIv = null;
@@ -497,6 +500,7 @@
     llmPanelState = mkS();
     lastToolName = '';
     pendingPanel = false;
+    stepCount = 0;
     _scrollLock = false;
   }
 
@@ -901,6 +905,7 @@
       target.appendChild(rc);
       if (statusTokens && ev.total_tokens) statusTokens.textContent = 'Tokens: ' + fmtN(ev.total_tokens);
       if (statusBudget && ev.cost && ev.cost !== 'N/A') statusBudget.textContent = 'Cost: ' + ev.cost;
+      if (ev.step_count) updateStepCount(ev.step_count);
       break;
     }
     case 'system_prompt':
@@ -940,6 +945,11 @@
     }
   }
 
+  function updateStepCount(count) {
+    stepCount = count;
+    if (statusSteps) statusSteps.textContent = 'Steps: ' + count;
+  }
+
   function processOutputEvent(ev) {
     var t = ev.type;
     if (t === 'tool_call') {
@@ -947,7 +957,12 @@
       llmPanel = null; llmPanelState = mkS(); pendingPanel = false;
     }
     if (t === 'tool_result' && lastToolName !== 'finish') { pendingPanel = true; }
+    // Count initial thinking as step 1
+    if (stepCount === 0 && (t === 'thinking_start' || t === 'text_delta')) {
+      updateStepCount(1);
+    }
     if (pendingPanel && (t === 'thinking_start' || t === 'text_delta')) {
+      updateStepCount(stepCount + 1);
       llmPanel = mkEl('div', 'llm-panel');
       var lHdr = mkEl('div', 'llm-panel-hdr');
       lHdr.textContent = 'Thoughts';
@@ -1063,13 +1078,17 @@
     if (!statusTokens || !statusBudget) return;
     var tm = text.match(/Tokens:\s*([\d,]+)\/[\d,]+/);
     var bm = text.match(/Budget:\s*(\$[0-9.]+)\/\$[0-9.]+/);
+    var sm = text.match(/Steps:\s*(\d+)\/\d+/);
     if (tm) statusTokens.textContent = 'Tokens: ' + tm[1];
     if (bm) statusBudget.textContent = 'Cost: ' + bm[1];
+    if (sm) updateStepCount(parseInt(sm[1], 10));
   }
 
   function clearUsageMetrics() {
     if (statusTokens) statusTokens.textContent = '';
     if (statusBudget) statusBudget.textContent = '';
+    if (statusSteps) statusSteps.textContent = '';
+    stepCount = 0;
   }
 
   function focusInputWithRetry() {
@@ -1481,6 +1500,17 @@
     replayEventsInto(O, events, {
       onFollowupClick: function(text) { inp.value = text; syncClearBtn(); inp.focus(); }
     });
+    // Count steps from replayed events: step 1 = first thinking, each llm-panel = +1
+    var rSteps = 0, rPending = false, rLastTool = '';
+    events.forEach(function(ev) {
+      var t = ev.type;
+      if (t === 'tool_call') { rLastTool = ev.name || ''; rPending = false; }
+      if (t === 'tool_result' && rLastTool !== 'finish') rPending = true;
+      if (rSteps === 0 && (t === 'thinking_start' || t === 'text_delta')) rSteps = 1;
+      if (rPending && (t === 'thinking_start' || t === 'text_delta')) { rSteps++; rPending = false; }
+      if (t === 'result' && ev.step_count) rSteps = ev.step_count;
+    });
+    if (rSteps > 0) updateStepCount(rSteps);
     sb();
   }
 
