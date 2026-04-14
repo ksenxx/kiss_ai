@@ -190,6 +190,7 @@ class RelentlessAgent(Base):
         self.model_name = model_name if model_name is not None else "claude-opus-4-6"
         self.budget_used: float = 0.0
         self.total_tokens_used: int = 0
+        self.total_steps: int = 0
         self.docker_image = docker_image
         self.docker_manager: Any = None
         self.task_description: str = ""
@@ -264,6 +265,7 @@ class RelentlessAgent(Base):
                 ):
                     self.budget_used += executor.budget_used
                     self.total_tokens_used += executor.total_tokens_used
+                    self.total_steps += executor.step_count
                     error_result: str = yaml.dump(
                         {"success": False, "is_continue": False, "summary": str(exc)},
                         sort_keys=False,
@@ -312,6 +314,7 @@ class RelentlessAgent(Base):
 
             self.budget_used += executor.budget_used
             self.total_tokens_used += executor.total_tokens_used
+            self.total_steps += executor.step_count
 
             try:
                 payload = yaml.safe_load(result)
