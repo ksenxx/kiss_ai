@@ -66,8 +66,44 @@ _HISTORY_SELECT = (
 _CLEAR_LAST_MODEL = "UPDATE model_usage SET is_last = 0 WHERE is_last = 1"
 
 
+_EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
+    "task_history": [
+        ("has_events", "INTEGER DEFAULT 0"),
+        ("result", "TEXT DEFAULT ''"),
+        ("chat_id", "TEXT DEFAULT ''"),
+        ("extra", "TEXT DEFAULT ''"),
+    ],
+    "model_usage": [
+        ("is_last", "INTEGER DEFAULT 0"),
+    ],
+    "file_usage": [
+        ("last_used", "REAL DEFAULT 0"),
+    ],
+}
+
+
+def _migrate_tables(conn: sqlite3.Connection) -> None:
+    """Add any columns missing from existing tables.
+
+    Compares each table's actual columns (via ``PRAGMA table_info``)
+    against ``_EXPECTED_COLUMNS`` and issues ``ALTER TABLE ADD COLUMN``
+    for any that are absent.  This handles schema upgrades when the
+    database was created by an older version of the code.
+    """
+    for table, columns in _EXPECTED_COLUMNS.items():
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        existing = {r[1] for r in rows}
+        for col_name, col_def in columns:
+            if col_name not in existing:
+                conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {col_name} {col_def}"
+                )
+    conn.commit()
+
+
 def _init_tables(conn: sqlite3.Connection) -> None:
-    """Create all tables and indexes if they do not exist."""
+    """Create all tables, migrate missing columns, and create indexes."""
+    # 1. Create tables (IF NOT EXISTS keeps old tables untouched).
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS task_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -78,35 +114,37 @@ def _init_tables(conn: sqlite3.Connection) -> None:
             chat_id TEXT DEFAULT '',
             extra TEXT DEFAULT ''
         );
-        CREATE INDEX IF NOT EXISTS idx_th_timestamp
-            ON task_history(timestamp);
-        CREATE INDEX IF NOT EXISTS idx_th_task
-            ON task_history(task);
-        CREATE INDEX IF NOT EXISTS idx_th_chat_id
-            ON task_history(chat_id);
-
         CREATE TABLE IF NOT EXISTS events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             task_id INTEGER NOT NULL REFERENCES task_history(id),
             seq INTEGER NOT NULL,
             event_json TEXT NOT NULL
         );
-        CREATE INDEX IF NOT EXISTS idx_ev_task_id
-            ON events(task_id);
-
         CREATE TABLE IF NOT EXISTS model_usage (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             model TEXT NOT NULL UNIQUE,
             count INTEGER DEFAULT 0,
             is_last INTEGER DEFAULT 0
         );
-
         CREATE TABLE IF NOT EXISTS file_usage (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             path TEXT NOT NULL UNIQUE,
             count INTEGER DEFAULT 0,
             last_used REAL DEFAULT 0
         );
+    """)
+    # 2. Add any columns missing from older schemas.
+    _migrate_tables(conn)
+    # 3. Create indexes (safe now that all columns exist).
+    conn.executescript("""
+        CREATE INDEX IF NOT EXISTS idx_th_timestamp
+            ON task_history(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_th_task
+            ON task_history(task);
+        CREATE INDEX IF NOT EXISTS idx_th_chat_id
+            ON task_history(chat_id);
+        CREATE INDEX IF NOT EXISTS idx_ev_task_id
+            ON events(task_id);
     """)
 
 

@@ -228,9 +228,9 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     } catch { /* ignored */ }
   }
 
-  private _startTask(prompt: string, model: string, activeFile?: string, attachments?: Attachment[], useWorktree?: boolean, useParallel?: boolean, tabId?: number): void {
-    const workDir = this._getWorkDir();
-    const started = this._agentProcess.start(workDir);
+  private _startTask(prompt: string, model: string, activeFile?: string, attachments?: Attachment[], useWorktree?: boolean, useParallel?: boolean, tabId?: number, workDir?: string): void {
+    const effectiveWorkDir = workDir || this._getWorkDir();
+    const started = this._agentProcess.start(effectiveWorkDir);
     if (!started) {
       if (tabId !== undefined) this._runningTabs.delete(tabId);
       this._sendToWebview({ type: 'status', running: false, tabId } as any);
@@ -242,7 +242,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       type: 'run',
       prompt,
       model,
-      workDir,
+      workDir: effectiveWorkDir,
       activeFile,
       attachments,
       useWorktree,
@@ -274,10 +274,13 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         const tabId = (message as any).tabId as number | undefined;
         if (tabId !== undefined && this._runningTabs.has(tabId)) return;
 
+        const tabWorkDir = (message as any).workDir as string | undefined;
+        const effectiveWorkDir = tabWorkDir || this._getWorkDir();
+
         const trimmed = message.prompt.trim();
         if (trimmed && !trimmed.includes('\n')) {
           const bare = trimmed.replace(/^WORK_DIR[/\\]/, '');
-          const resolved = path.resolve(this._getWorkDir(), bare);
+          const resolved = path.resolve(effectiveWorkDir, bare);
           if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
             const uri = vscode.Uri.file(resolved);
             const doc = await vscode.workspace.openTextDocument(uri);
@@ -298,6 +301,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           message.useWorktree,
           message.useParallel,
           tabId,
+          effectiveWorkDir,
         );
         break;
       }

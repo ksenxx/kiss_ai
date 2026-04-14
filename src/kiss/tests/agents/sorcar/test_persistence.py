@@ -221,6 +221,101 @@ class TestPrintRecentChats:
 
 
 
+class TestMigrateMissingColumns:
+    """Verify ALTER TABLE migration adds columns missing from old schemas."""
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.saved = _redirect(self.tmpdir)
+
+    def teardown_method(self):
+        if th._db_conn is not None:
+            th._db_conn.close()
+            th._db_conn = None
+        _restore(self.saved)
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _create_old_schema(self) -> None:
+        """Create a DB with the minimal old schema (missing newer columns)."""
+        import sqlite3
+
+        th._ensure_kiss_dir()
+        conn = sqlite3.connect(str(th._DB_PATH))
+        conn.executescript("""
+            CREATE TABLE task_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL NOT NULL,
+                task TEXT NOT NULL
+            );
+            CREATE TABLE events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL REFERENCES task_history(id),
+                seq INTEGER NOT NULL,
+                event_json TEXT NOT NULL
+            );
+            CREATE TABLE model_usage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                model TEXT NOT NULL UNIQUE,
+                count INTEGER DEFAULT 0
+            );
+            CREATE TABLE file_usage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                path TEXT NOT NULL UNIQUE,
+                count INTEGER DEFAULT 0
+            );
+        """)
+        # Insert a row using only the old columns
+        conn.execute(
+            "INSERT INTO task_history (timestamp, task) VALUES (?, ?)",
+            (time.time(), "old task"),
+        )
+        conn.commit()
+        conn.close()
+
+    def test_migration_adds_missing_columns(self):
+        self._create_old_schema()
+        # Opening the DB triggers _init_tables → _migrate_tables
+        task_id = th._add_task("new task", chat_id="chat123")
+        th._save_task_result("done", task_id=task_id)
+        th._save_task_extra({"model": "gpt-4o"}, task_id=task_id)
+        entries = th._load_history(limit=10)
+        assert len(entries) == 2
+        new_entry = entries[0]
+        assert new_entry["chat_id"] == "chat123"
+        assert new_entry["result"] == "done"
+        stored = json.loads(str(new_entry["extra"]))
+        assert stored["model"] == "gpt-4o"
+        # Old row should have defaults for the new columns
+        old_entry = entries[1]
+        assert old_entry["chat_id"] == ""
+        assert old_entry["extra"] == ""
+        assert old_entry["has_events"] == 0
+        assert old_entry["result"] == ""
+
+    def test_migration_model_usage_is_last(self):
+        self._create_old_schema()
+        th._save_last_model("claude-opus-4-6")
+        assert th._load_last_model() == "claude-opus-4-6"
+
+    def test_migration_file_usage_last_used(self):
+        self._create_old_schema()
+        th._record_file_usage("test.py")
+        usage = th._load_file_usage()
+        assert "test.py" in usage
+
+    def test_migration_idempotent(self):
+        """Running migration twice does not fail or duplicate columns."""
+        self._create_old_schema()
+        # First open triggers migration
+        th._add_task("first")
+        # Close and reopen to trigger migration again
+        th._close_db()
+        th._add_task("second")
+        entries = th._load_history(limit=10)
+        assert any(e["task"] == "first" for e in entries)
+        assert any(e["task"] == "second" for e in entries)
+
+
 class TestCleanupStaleCsDirs:
     def setup_method(self):
         self.tmpdir = tempfile.mkdtemp()

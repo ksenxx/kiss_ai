@@ -51,23 +51,22 @@ body {
 /* ── Header ─────────────────────────────────────────── */
 header {
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-start;
   align-items: center;
   padding: 8px 12px;
   border-bottom: 1px solid var(--border);
   background: var(--bg2);
   flex-shrink: 0;
 }
-.header-left { display: flex; align-items: center; gap: 12px; }
-.logo { font-size: var(--fs-base); font-weight: 600; color: var(--accent); }
-.version { font-size: inherit; font-weight: 400; opacity: 0.75; }
-.status { display: flex; align-items: center; gap: 6px; font-size: var(--fs-base); color: var(--dim); }
+.status { display: flex; align-items: center; gap: 6px; font-size: var(--fs-base); color: var(--dim); width: 100%; }
 .status-metric {
   font-size: var(--fs-sm);
   color: var(--cyan);
-  margin-left: 2px; white-space: nowrap;
+  white-space: nowrap;
 }
 .status-metric:not(:empty)::before { content: '·'; margin-right: 2px; }
+#status-tokens { margin-left: auto; }
+#status-text { color: var(--green); }
 
 
 /* ── Tab Bar ─────────────────────────────────────────── */
