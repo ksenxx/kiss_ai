@@ -307,54 +307,36 @@ class TestChatIdGuard(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.js = _MAIN_JS.read_text()
 
-    def test_chatid_guard_in_source(self) -> None:
-        idx = self.js.index("case 'chatId':")
+    def test_tab_id_changed_handler_in_source(self) -> None:
+        # tab_id_changed event re-keys the local tab id to match new chat_id
+        idx = self.js.index("case 'tab_id_changed':")
         block = self.js[idx : idx + 400]
-        assert "ev.tabId !== undefined && ev.tabId !== activeTabId" in block
-        assert "cidTab.chatId = newChatId" in block
+        assert "ev.oldTabId" in block
+        assert "ev.newTabId" in block
+        assert "chTab.id = newId" in block
 
-    def test_chatid_stored_in_running_tab_when_switched(self) -> None:
+    def test_tab_id_changed_updates_tab(self) -> None:
         result = _run_node(_make_test_script(r"""
-            var tabIdCounter = 0;
             var tabs = [];
-            var activeTabId = -1;
-            var runningTabId = -1;
-            var currentChatId = '';
-            var _savedState = null;
+            var activeTabId = 'tab-old';
 
-            function makeTab(title) {
-                var id = ++tabIdCounter;
-                return { id: id, title: title || 'new chat', chatId: '' };
-            }
-            function persistTabState() {
-                // stub
-            }
+            tabs.push({ id: 'tab-old', title: 'task tab' });
+            tabs.push({ id: 'tab-2', title: 'idle tab' });
 
-            // Create two tabs
-            var tab1 = makeTab('task tab'); tabs.push(tab1);
-            var tab2 = makeTab('idle tab'); tabs.push(tab2);
+            // Simulate tab_id_changed event
+            var oldId = 'tab-old';
+            var newId = 'new-chat-123';
+            var chTab = tabs.find(function(t) { return t.id === oldId; });
+            if (chTab) chTab.id = newId;
+            if (activeTabId === oldId) activeTabId = newId;
 
-            // Task running on tab 1, user viewing tab 2
-            activeTabId = tab2.id;
-            runningTabId = tab1.id;
-            currentChatId = 'old-chat';
-
-            // Backend sends chatId for the running task
-            var newChatId = 'new-chat-123';
-            if (runningTabId > 0 && activeTabId !== runningTabId) {
-                var runTab = tabs.find(function(t) { return t.id === runningTabId; });
-                if (runTab) { runTab.chatId = newChatId; }
-            } else {
-                currentChatId = newChatId;
-            }
-
-            // Verify: currentChatId unchanged, running tab has new chatId
-            if (currentChatId !== 'old-chat') {
-                process.stdout.write('FAIL: currentChatId was corrupted: ' + currentChatId);
+            // Verify: tab id updated, activeTabId updated
+            if (tabs[0].id !== 'new-chat-123') {
+                process.stdout.write('FAIL: tab id not updated: ' + tabs[0].id);
                 process.exit(1);
             }
-            if (tab1.chatId !== 'new-chat-123') {
-                process.stdout.write('FAIL: running tab chatId not set: ' + tab1.chatId);
+            if (activeTabId !== 'new-chat-123') {
+                process.stdout.write('FAIL: activeTabId not updated: ' + activeTabId);
                 process.exit(1);
             }
             process.stdout.write('PASS');
@@ -362,25 +344,28 @@ class TestChatIdGuard(unittest.TestCase):
         assert result.returncode == 0, result.stderr
         assert "PASS" in result.stdout
 
-    def test_chatid_set_normally_when_on_running_tab(self) -> None:
+    def test_tab_id_changed_non_active_tab(self) -> None:
         result = _run_node(_make_test_script(r"""
-            var tabIdCounter = 0;
             var tabs = [];
-            var activeTabId = 1;
-            var runningTabId = 1;
-            var currentChatId = '';
+            var activeTabId = 'tab-2';
 
-            tabs.push({ id: 1, title: 'task tab', chatId: '' });
+            tabs.push({ id: 'tab-1', title: 'task tab' });
+            tabs.push({ id: 'tab-2', title: 'active tab' });
 
-            var newChatId = 'direct-chat';
-            if (runningTabId > 0 && activeTabId !== runningTabId) {
-                // wrong tab path
-            } else {
-                currentChatId = newChatId;
+            // Simulate tab_id_changed for non-active tab
+            var oldId = 'tab-1';
+            var newId = 'new-chat-456';
+            var chTab = tabs.find(function(t) { return t.id === oldId; });
+            if (chTab) chTab.id = newId;
+            if (activeTabId === oldId) activeTabId = newId;
+
+            // activeTabId should remain unchanged
+            if (activeTabId !== 'tab-2') {
+                process.stdout.write('FAIL: activeTabId changed: ' + activeTabId);
+                process.exit(1);
             }
-
-            if (currentChatId !== 'direct-chat') {
-                process.stdout.write('FAIL: currentChatId not set');
+            if (tabs[0].id !== 'new-chat-456') {
+                process.stdout.write('FAIL: tab id not updated: ' + tabs[0].id);
                 process.exit(1);
             }
             process.stdout.write('PASS');
@@ -793,19 +778,12 @@ class TestSwitchBackResumesSession(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.js = _MAIN_JS.read_text()
 
-    def test_switch_to_tab_resumes_session_with_chat_id(self) -> None:
-        """switchToTab posts resumeSession when tab has a chatId."""
+    def test_switch_to_tab_resumes_session(self) -> None:
+        """switchToTab posts resumeSession with tab.id (which is the chat_id)."""
         idx = self.js.index("function switchToTab(")
         block = self.js[idx : idx + 800]
-        assert "tab.chatId" in block
+        assert "tab.id" in block
         assert "resumeSession" in block
-
-    def test_switch_to_tab_posts_new_chat_when_no_chat_id(self) -> None:
-        """switchToTab posts newChat + getWelcomeSuggestions for empty chatId."""
-        idx = self.js.index("function switchToTab(")
-        block = self.js[idx : idx + 800]
-        assert "newChat" in block
-        assert "getWelcomeSuggestions" in block
 
 
 class TestSwitchToTabRunningState(unittest.TestCase):
@@ -831,7 +809,6 @@ class TestSwitchToTabRunningState(unittest.TestCase):
         block = self.js[idx : idx + 800]
         assert "stopTimer()" in block
         assert "removeSpinner()" in block
-        assert "'Ready'" in block
 
 
 class TestCreateNewTabDuringRunningTask(unittest.TestCase):
@@ -1188,7 +1165,8 @@ class TestPerTabIsMerging(unittest.TestCase):
         idx = self.js.index("case 'merge_started':")
         block = self.js[idx : idx + 400]
         assert "ev.tabId !== undefined && ev.tabId !== activeTabId" in block
-        assert "switchToTab(ev.tabId)" in block
+        # Background tab merges no longer auto-switch; they update saved state
+        assert "bgMergeTab" in block
 
     def test_merge_ended_guard(self) -> None:
         idx = self.js.index("case 'merge_ended':")

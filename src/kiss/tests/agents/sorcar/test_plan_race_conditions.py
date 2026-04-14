@@ -22,38 +22,22 @@ from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 from kiss.agents.vscode.server import VSCodeServer
 
 # ---------------------------------------------------------------------------
-# P11 — _last_active_file written under _state_lock
+# P11 → S8 — _last_active_file no longer written in _run_task_inner
 # ---------------------------------------------------------------------------
 
 class TestP11LastActiveFileWithLock(unittest.TestCase):
-    """P11 fix: _run_task_inner writes _last_active_file under _state_lock."""
+    """S8 fix: _run_task_inner no longer writes _last_active_file.
 
-    def test_task_thread_writes_with_lock(self) -> None:
-        """Verify _run_task_inner writes _last_active_file inside _state_lock."""
+    The active file cache is now only updated via the ``complete``
+    command handler (on the main thread) so concurrent task threads
+    never stomp on each other's autocomplete context.
+    """
+
+    def test_run_task_inner_does_not_write_last_active_file(self) -> None:
+        """Verify _run_task_inner does NOT write _last_active_file."""
         source = inspect.getsource(VSCodeServer._run_task_inner)
-        assert 'self._last_active_file = active_file or ""' in source
-        # Find the assignment and verify it's inside a _state_lock context
-        lines = source.split("\n")
-        in_state_lock = False
-        state_lock_indent = 0
-        found_inside_lock = False
-        for line in lines:
-            stripped = line.strip()
-            if "with self._state_lock" in stripped:
-                in_state_lock = True
-                state_lock_indent = len(line) - len(line.lstrip())
-                continue
-            if in_state_lock:
-                current_indent = (
-                    len(line) - len(line.lstrip()) if stripped else state_lock_indent + 1
-                )
-                if current_indent <= state_lock_indent and stripped:
-                    in_state_lock = False
-            if 'self._last_active_file = active_file or ""' in stripped and in_state_lock:
-                found_inside_lock = True
-                break
-        assert found_inside_lock, (
-            "P11 fix: _last_active_file write should be INSIDE _state_lock"
+        assert 'self._last_active_file' not in source, (
+            "S8 fix: _run_task_inner must not write _last_active_file"
         )
 
 
@@ -65,18 +49,18 @@ class TestP12StaleFollowupSuppressed(unittest.TestCase):
     """P12 fix: _generate_followup_async checks _task_generation counter."""
 
     def test_generation_counter_in_followup(self) -> None:
-        """Verify _generate_followup_async checks _task_generation."""
+        """Verify _generate_followup_async checks task_generation."""
         source = inspect.getsource(VSCodeServer._generate_followup_async)
-        assert "_task_generation" in source, (
-            "P12 fix: _generate_followup_async should check _task_generation"
+        assert "task_generation" in source, (
+            "P12 fix: _generate_followup_async should check task_generation"
         )
         assert "gen" in source, "P12 fix: should accept gen parameter"
 
     def test_generation_counter_incremented_in_run_task_inner(self) -> None:
-        """Verify _run_task_inner increments _task_generation."""
+        """Verify _run_task_inner increments task_generation."""
         source = inspect.getsource(VSCodeServer._run_task_inner)
-        assert "_task_generation" in source, (
-            "P12 fix: _run_task_inner should increment _task_generation"
+        assert "task_generation" in source, (
+            "P12 fix: _run_task_inner should increment task_generation"
         )
 
     def test_followup_receives_gen_parameter(self) -> None:

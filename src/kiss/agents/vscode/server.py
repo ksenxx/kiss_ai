@@ -121,21 +121,67 @@ class VSCodePrinter(BaseBrowserPrinter):
             sys.stdout.flush()
 
 
+class _TabState:
+    """Per-tab state holding agent instances, runtime state, and settings.
+
+    Each chat tab gets its own ``StatefulSorcarAgent`` and
+    ``WorktreeSorcarAgent`` so concurrent tabs never share mutable agent
+    state (chat_id, last_task_id, worktree branch, etc.).  Runtime
+    state (stop event, task thread, answer queue, merge flag) also lives
+    here so the server needs only a single ``_tab_states`` dict.
+    """
+
+    __slots__ = (
+        "stateful_agent",
+        "worktree_agent",
+        "use_worktree",
+        "use_parallel",
+        "task_history_id",
+        "task_generation",
+        "selected_model",
+        "stop_event",
+        "task_thread",
+        "user_answer_queue",
+        "is_merging",
+    )
+
+    def __init__(self, tab_id: str, default_model: str) -> None:
+        self.stateful_agent = StatefulSorcarAgent("Sorcar VS Code")
+        self.stateful_agent._chat_id = tab_id
+        self.worktree_agent = WorktreeSorcarAgent("Sorcar VS Code")
+        self.worktree_agent._chat_id = tab_id
+        self.use_worktree: bool = False
+        self.use_parallel: bool = False
+        self.task_history_id: int | None = None
+        self.task_generation: int = 0
+        self.selected_model: str = default_model
+        self.stop_event: threading.Event | None = None
+        self.task_thread: threading.Thread | None = None
+        self.user_answer_queue: queue.Queue[str] | None = None
+        self.is_merging: bool = False
+
+    @property
+    def agent(self) -> StatefulSorcarAgent:
+        """Return the active agent based on the worktree toggle.
+
+        Returns:
+            WorktreeSorcarAgent when worktree mode is enabled,
+            StatefulSorcarAgent otherwise.
+        """
+        if self.use_worktree:
+            return self.worktree_agent
+        return self.stateful_agent
+
+
 class VSCodeServer:
     """Backend server for VS Code extension."""
 
     def __init__(self) -> None:
         self.printer = VSCodePrinter()
-        self._stateful_agent = StatefulSorcarAgent("Sorcar VS Code")
-        self._worktree_agent = WorktreeSorcarAgent("Sorcar VS Code")
-        self._use_worktree = False
-        self._use_parallel = False
+        self._tab_states: dict[str, _TabState] = {}
         self.work_dir = os.environ.get("KISS_WORKDIR", os.getcwd())
-        self._stop_events: dict[int, threading.Event] = {}
-        self._user_answer_queues: dict[int, queue.Queue[str]] = {}
-        self._default_user_answer_queue: queue.Queue[str] = queue.Queue(maxsize=1)
         persisted = _load_last_model()
-        self._selected_model = (
+        self._default_model = (
             persisted
             or os.environ.get("KISS_MODEL", "")
             or get_default_model()
@@ -146,9 +192,6 @@ class VSCodeServer:
         # Lock ordering: _state_lock < printer._lock < printer._stdout_lock < printer._bash_lock
         # _complete_seq_latest is lockless: single writer (main thread), single reader (worker)
         self._state_lock = threading.Lock()
-        self._task_threads: dict[int, threading.Thread] = {}
-        self._merging = False
-        self._task_generation = 0
         self._recording_id = 0
         self._refresh_generation = 0
         self._complete_seq = itertools.count()
@@ -158,20 +201,27 @@ class VSCodeServer:
             target=self._complete_worker_loop, daemon=True
         )
         self._complete_worker.start()
-        self._task_history_id: int | None = None
         self._flush_interval: float = 5  # seconds between crash-recovery flushes
 
-    @property
-    def agent(self) -> StatefulSorcarAgent:
-        """Return the currently active agent based on the worktree toggle.
+    def _get_tab(self, tab_id: str) -> _TabState:
+        """Get or create per-tab state for the given tab.
+
+        Each tab gets its own agent instances so concurrent tabs never
+        share mutable agent state (chat_id, task_id, worktree, etc.).
+        The tab_id is also used as the agent's chat_id, eliminating
+        the need for a separate identifier.
+
+        Args:
+            tab_id: The tab identifier (same as the agent's chat_id).
 
         Returns:
-            WorktreeSorcarAgent when worktree mode is enabled,
-            StatefulSorcarAgent otherwise.
+            The per-tab state object.
         """
-        if self._use_worktree:
-            return self._worktree_agent
-        return self._stateful_agent
+        tab = self._tab_states.get(tab_id)
+        if tab is None:
+            tab = _TabState(tab_id, self._default_model)
+            self._tab_states[tab_id] = tab
+        return tab
 
     def run(self) -> None:
         """Main loop: read commands from stdin, execute them."""
@@ -192,10 +242,10 @@ class VSCodeServer:
         cmd_type = cmd.get("type")
 
         if cmd_type == "run":
-            tab_id = cmd.get("tabId", 0)
+            tab_id = cmd.get("tabId", "")
+            tab = self._get_tab(tab_id)
             with self._state_lock:
-                existing = self._task_threads.get(tab_id)
-                if existing and existing.is_alive():
+                if tab.task_thread is not None and tab.task_thread.is_alive():
                     self.printer.broadcast({
                         "type": "error",
                         "text": "Task already running",
@@ -206,15 +256,18 @@ class VSCodeServer:
                 thread = threading.Thread(
                     target=self._run_task, args=(cmd,), daemon=True
                 )
-                self._task_threads[tab_id] = thread
+                tab.task_thread = thread
                 thread.start()
         elif cmd_type == "stop":
             self._stop_task(cmd.get("tabId"))
         elif cmd_type == "getModels":
             self._get_models()
         elif cmd_type == "selectModel":
-            model = cmd.get("model", self._selected_model)
-            self._selected_model = model
+            tab_id = cmd.get("tabId", "")
+            tab = self._get_tab(tab_id)
+            model = cmd.get("model", tab.selected_model)
+            tab.selected_model = model
+            self._default_model = model  # new tabs inherit latest selection
             _save_last_model(model)
         elif cmd_type == "getHistory":
             self._get_history(cmd.get("query"), cmd.get("offset", 0), cmd.get("generation", 0))
@@ -227,14 +280,13 @@ class VSCodeServer:
             if path:
                 _record_file_usage(path)
         elif cmd_type == "userAnswer":
-            # Route answer to the correct tab's queue (or default)
+            # Route answer to the correct tab's queue — require tabId
             ans_tab = cmd.get("tabId")
-            if ans_tab is not None:
-                q = self._user_answer_queues.get(ans_tab)
-            else:
-                q = self._default_user_answer_queue
+            ans_state = self._tab_states.get(ans_tab) if ans_tab is not None else None
+            q = ans_state.user_answer_queue if ans_state is not None else None
             if q is None:
-                q = self._default_user_answer_queue
+                logger.debug("userAnswer dropped: no queue for tabId=%s", ans_tab)
+                return
             # Drain any stale answer, then put the new one (P2/D3 fix)
             while not q.empty():
                 try:
@@ -245,13 +297,13 @@ class VSCodeServer:
         elif cmd_type == "resumeSession":
             chat_id = cmd.get("sessionId", "")
             if chat_id:
-                self._replay_session(chat_id)
+                self._replay_session(chat_id, cmd.get("tabId", ""))
         elif cmd_type == "mergeAction":
-            self._handle_merge_action(cmd.get("action", ""))
+            self._handle_merge_action(cmd.get("action", ""), cmd.get("tabId"))
         elif cmd_type == "getLastSession":
-            self._get_last_session()
+            self._get_last_session(cmd.get("tabId", ""))
         elif cmd_type == "newChat":
-            self.agent.new_chat()
+            self._new_chat(cmd.get("tabId", ""))
         elif cmd_type == "complete":
             query = cmd.get("query", "")
             active_file = cmd.get("activeFile")
@@ -270,8 +322,9 @@ class VSCodeServer:
         elif cmd_type == "getInputHistory":
             self._get_input_history()
         elif cmd_type == "getAdjacentTask":
+            adj_tab = self._get_tab(cmd.get("tabId", ""))
             self._get_adjacent_task(
-                cmd.get("chatId", ""),
+                adj_tab.agent.chat_id,
                 cmd.get("task", ""),
                 cmd.get("direction", "prev"),
             )
@@ -281,12 +334,13 @@ class VSCodeServer:
             ).start()
         elif cmd_type == "worktreeAction":
             action = cmd.get("action", "")
+            wt_tab_id = cmd.get("tabId", "")
             try:
-                result = self._handle_worktree_action(action)
+                result = self._handle_worktree_action(action, wt_tab_id)
             except Exception as e:
                 logger.debug("Worktree action error", exc_info=True)
                 result = {"success": False, "message": str(e)}
-            self.printer.broadcast({"type": "worktree_result", **result})
+            self.printer.broadcast({"type": "worktree_result", "tabId": wt_tab_id, **result})
         else:
             self.printer.broadcast({"type": "error", "text": f"Unknown command: {cmd_type}"})
 
@@ -297,19 +351,23 @@ class VSCodeServer:
         is **always** broadcast when this method exits, regardless of
         which code-path is taken.
         """
-        tab_id = cmd.get("tabId", 0)
+        tab_id = cmd.get("tabId", "")
         self.printer._thread_local.tab_id = tab_id
         try:
             self.printer.broadcast({"type": "status", "running": True})
             self._run_task_inner(cmd)
         finally:
             with self._state_lock:
-                self._task_threads.pop(tab_id, None)
-                self._stop_events.pop(tab_id, None)
-                self._user_answer_queues.pop(tab_id, None)
+                tab = self._tab_states.get(tab_id)
+                if tab is not None:
+                    tab.task_thread = None
+                    tab.stop_event = None
+                    tab.user_answer_queue = None
                 self.printer.broadcast({"type": "status", "running": False})
 
-    def _periodic_event_flush(self, rec_id: int, stop: threading.Event) -> None:
+    def _periodic_event_flush(
+        self, rec_id: int, stop: threading.Event, agent: StatefulSorcarAgent
+    ) -> None:
         """Periodically flush recorded events to DB for crash recovery.
 
         Runs in a background daemon thread.  Every ``_flush_interval``
@@ -321,9 +379,10 @@ class VSCodeServer:
         Args:
             rec_id: Recording ID to peek at.
             stop: Event signaled when the task completes normally.
+            agent: The per-tab agent whose ``_last_task_id`` to read.
         """
         while not stop.wait(self._flush_interval):
-            task_id = self.agent._last_task_id
+            task_id = agent._last_task_id
             if task_id is not None:
                 events = self.printer.peek_recording(rec_id)
                 if events:
@@ -332,7 +391,6 @@ class VSCodeServer:
     def _run_task_inner(self, cmd: dict[str, Any]) -> None:
         """Inner implementation of _run_task (without the status guarantee)."""
         prompt = cmd.get("prompt", "")
-        model = cmd.get("model") or self._selected_model
         work_dir = cmd.get("workDir") or self.work_dir
         active_file = cmd.get("activeFile")
         raw_attachments = cmd.get("attachments", [])
@@ -346,39 +404,35 @@ class VSCodeServer:
                 data = base64.b64decode(data_b64)
                 attachments.append(Attachment(data=data, mime_type=mime))
 
+        tab_id = cmd.get("tabId", "")
+        tab = self._get_tab(tab_id)
+        model = cmd.get("model") or tab.selected_model
         with self._state_lock:
-            if self._merging:
+            if tab.is_merging:
                 self.printer.broadcast(
                     {
                         "type": "error",
                         "text": "Cannot run a task while merge review is in progress."
                         " Accept or reject all changes first.",
+                        "tabId": tab_id,
                     }
                 )
                 return
-
-        tab_id = cmd.get("tabId", 0)
         # RC1+RC3+RC9: all state mutations under _state_lock
         with self._state_lock:
-            self._use_worktree = bool(cmd.get("useWorktree", False))
-            self._use_parallel = bool(cmd.get("useParallel", False))
+            tab.use_worktree = bool(cmd.get("useWorktree", False))
+            tab.use_parallel = bool(cmd.get("useParallel", False))
             stop_event = threading.Event()
-            self._stop_events[tab_id] = stop_event
-            self._last_active_file = active_file or ""
-            self._task_generation += 1
-            gen = self._task_generation
+            tab.stop_event = stop_event
+            tab.task_generation += 1
+            gen = tab.task_generation
             self._recording_id += 1
             rec_id = self._recording_id
             # RC8: fresh queue per task (avoids drain race with userAnswer handler)
-            user_q: queue.Queue[str] = queue.Queue(maxsize=1)
-            self._user_answer_queues[tab_id] = user_q
+            tab.user_answer_queue = queue.Queue(maxsize=1)
         self.printer._thread_local.stop_event = stop_event
 
-        self.printer.broadcast({"type": "clear"})
-        self.printer.broadcast({
-            "type": "chatId",
-            "chat_id": self.agent.chat_id,
-        })
+        self.printer.broadcast({"type": "clear", "chat_id": tab.agent.chat_id})
 
         # Git snapshot captures pre-task state (may be slow for large repos)
         pre_hunks = _parse_diff_hunks(work_dir)
@@ -394,18 +448,18 @@ class VSCodeServer:
         flush_stop = threading.Event()
         flush_thread = threading.Thread(
             target=self._periodic_event_flush,
-            args=(rec_id, flush_stop),
+            args=(rec_id, flush_stop, tab.agent),
             daemon=True,
         )
         flush_thread.start()
         try:
-            self.printer.start_recording(rec_id)
-            self._task_history_id = None
+            self.printer.start_recording(rec_id, tab_id=tab_id)
+            tab.task_history_id = None
             subtasks = parse_task_tags(prompt)
             for task_idx, task_prompt in enumerate(subtasks):
                 is_last = task_idx == len(subtasks) - 1
                 try:
-                    self.agent.run(
+                    tab.agent.run(
                         prompt_template=task_prompt,
                         model_name=model,
                         work_dir=work_dir,
@@ -413,24 +467,24 @@ class VSCodeServer:
                         current_editor_file=active_file,
                         attachments=attachments,
                         ask_user_question_callback=self._ask_user_question,
-                        is_parallel=self._use_parallel,
+                        is_parallel=tab.use_parallel,
                     )
-                    self._task_history_id = self.agent._last_task_id
+                    tab.task_history_id = tab.agent._last_task_id
                     result_summary = self._extract_result_summary(rec_id) or "No summary available"
                     task_end_event = {"type": "task_done"}
-                    if is_last and self._use_worktree and self._worktree_agent._wt_pending:
-                        changed = self._get_worktree_changed_files()
+                    if is_last and tab.use_worktree and tab.worktree_agent._wt_pending:
+                        changed = self._get_worktree_changed_files(tab_id)
                         if changed:
-                            self._broadcast_worktree_done(changed)
+                            self._broadcast_worktree_done(changed, tab_id)
                         else:
-                            self._worktree_agent.discard()
+                            tab.worktree_agent.discard()
                 except KeyboardInterrupt:
-                    self._task_history_id = self.agent._last_task_id
+                    tab.task_history_id = tab.agent._last_task_id
                     result_summary = "Task stopped by user"
                     task_end_event = {"type": "task_stopped"}
                     break
                 except Exception as e:  # pragma: no cover
-                    self._task_history_id = self.agent._last_task_id
+                    tab.task_history_id = tab.agent._last_task_id
                     result_summary = f"Task failed: {e}"
                     task_end_event = {"type": "task_error", "text": str(e)}
                     break
@@ -448,7 +502,7 @@ class VSCodeServer:
                     chat_events.append(task_end_event)
                 _set_latest_chat_events(
                     chat_events,
-                    task_id=self._task_history_id,
+                    task_id=tab.task_history_id,
                     task=prompt,
                     result=result_summary,
                 )
@@ -459,12 +513,12 @@ class VSCodeServer:
                         "model": model,
                         "work_dir": work_dir,
                         "version": __version__,
-                        "tokens": self.agent.total_tokens_used,
-                        "cost": round(self.agent.budget_used, 6),
-                        "is_parallel": self._use_parallel,
-                        "is_worktree": self._use_worktree,
+                        "tokens": tab.agent.total_tokens_used,
+                        "cost": round(tab.agent.budget_used, 6),
+                        "is_parallel": tab.use_parallel,
+                        "is_worktree": tab.use_worktree,
                     },
-                    task_id=self._task_history_id,
+                    task_id=tab.task_history_id,
                 )
                 self.printer.broadcast({"type": "tasks_updated"})
                 self.printer.reset()
@@ -485,15 +539,16 @@ class VSCodeServer:
                 self._refresh_file_cache()
                 if task_end_event:  # pragma: no branch — always set
                     self.printer.broadcast(task_end_event)
-                if self._task_history_id is not None:
+                if tab.task_history_id is not None:
                     self._generate_followup_async(
                         prompt,
                         result_summary,
                         model,
                         gen,
-                        self._task_history_id,
+                        tab.task_history_id,
+                        tab_id,
                     )
-                self._task_history_id = None
+                tab.task_history_id = None
             except BaseException:  # pragma: no cover — cleanup interrupted
                 logger.debug("Cleanup interrupted", exc_info=True)
                 if task_end_event:
@@ -517,8 +572,12 @@ class VSCodeServer:
             total_hunks = sum(len(f.get("hunks", [])) for f in files)
             if total_hunks == 0:
                 return False
+            tab_id = getattr(self.printer._thread_local, "tab_id", None)
             with self._state_lock:
-                self._merging = True
+                if tab_id is not None:
+                    tab = self._tab_states.get(tab_id)
+                    if tab is not None:
+                        tab.is_merging = True
             self.printer.broadcast({
                 "type": "merge_data",
                 "data": merge_data,
@@ -530,24 +589,42 @@ class VSCodeServer:
             logger.debug("Failed to load merge data", exc_info=True)
             return False
 
-    def _handle_merge_action(self, action: str) -> None:
+    def _handle_merge_action(self, action: str, tab_id: str | None = None) -> None:
         """Handle merge accept/reject actions from the extension.
 
         Only ``all-done`` triggers cleanup. Individual ``accept``/``reject``
         actions are tracked on the TypeScript side; the Python server
         only needs to know when the entire merge session is finished.
+
+        Args:
+            action: The merge action string (e.g. ``"all-done"``).
+            tab_id: The tab whose merge session is being finished.
         """
         if action == "all-done":
-            self._finish_merge()
+            self._finish_merge(tab_id)
 
-    def _finish_merge(self) -> None:
-        """End the merge session: reset state, notify clients, clean up data."""
+    def _finish_merge(self, tab_id: str | None = None) -> None:
+        """End the merge session for a specific tab.
+
+        Args:
+            tab_id: The tab whose merge session is finished. When *None*,
+                all merge sessions are cleared.
+        """
         with self._state_lock:
-            self._merging = False
-        self.printer.broadcast({"type": "merge_ended"})
+            if tab_id is not None:
+                tab = self._tab_states.get(tab_id)
+                if tab is not None:
+                    tab.is_merging = False
+            else:
+                for tab in self._tab_states.values():
+                    tab.is_merging = False
+        event: dict[str, Any] = {"type": "merge_ended"}
+        if tab_id is not None:
+            event["tabId"] = tab_id
+        self.printer.broadcast(event)
         _cleanup_merge_data(str(_merge_data_dir()))
 
-    def _stop_task(self, tab_id: int | None = None) -> None:
+    def _stop_task(self, tab_id: str | None = None) -> None:
         """Signal the agent to stop.
 
         Sets the cooperative stop event and, if the task thread doesn't
@@ -562,13 +639,12 @@ class VSCodeServer:
         """
         with self._state_lock:
             if tab_id is not None:
-                stop_event = self._stop_events.get(tab_id)
-                task_thread = self._task_threads.get(tab_id)
-                pairs = [(stop_event, task_thread)]
+                tab = self._tab_states.get(tab_id)
+                pairs = [(tab.stop_event, tab.task_thread)] if tab is not None else []
             else:
                 pairs = [
-                    (self._stop_events.get(tid), self._task_threads.get(tid))
-                    for tid in list(self._task_threads)
+                    (t.stop_event, t.task_thread)
+                    for t in self._tab_states.values()
                 ]
         for stop_event, task_thread in pairs:
             if stop_event:
@@ -620,18 +696,18 @@ class VSCodeServer:
         """
         stop = getattr(self.printer._thread_local, "stop_event", None) or self.printer.stop_event
         tab_id = getattr(self.printer._thread_local, "tab_id", None)
-        if tab_id is not None:
-            q = self._user_answer_queues.get(tab_id)
-        else:
-            q = self._default_user_answer_queue
-        if q is None:
-            q = self._default_user_answer_queue
+        tab = self._tab_states.get(tab_id) if tab_id is not None else None
+        q = tab.user_answer_queue if tab is not None else None
         while True:
-            try:
-                return q.get(timeout=0.5)
-            except queue.Empty:
-                if stop.is_set():
-                    raise KeyboardInterrupt("Stopped while waiting for user")
+            if q is not None:
+                try:
+                    return q.get(timeout=0.5)
+                except queue.Empty:
+                    pass
+            else:
+                stop.wait(timeout=0.5)
+            if stop.is_set():
+                raise KeyboardInterrupt("Stopped while waiting for user")
 
     def _ask_user_question(self, question: str) -> str:
         """Callback for agent questions."""
@@ -663,7 +739,7 @@ class VSCodeServer:
         self.printer.broadcast({
             "type": "models",
             "models": models_list,
-            "selected": self._selected_model,
+            "selected": self._default_model,
         })
 
     def _get_history(self, query: str | None, offset: int = 0, generation: int = 0) -> None:
@@ -709,40 +785,90 @@ class VSCodeServer:
                 tasks.append(task)
         self.printer.broadcast({"type": "inputHistory", "tasks": tasks})
 
-    def _replay_session(self, chat_id: str) -> None:
+    def _new_chat(self, tab_id: str) -> None:
+        """Start a new chat session, re-keying ``_tab_states``.
+
+        Generates a fresh chat_id via the agent's ``new_chat()`` and
+        moves the tab's state to the new key so that tab_id == chat_id
+        is maintained.  Broadcasts ``tab_id_changed`` so the frontend
+        can update its tab identifier.
+
+        Args:
+            tab_id: The current tab identifier (old key).
+        """
+        tab = self._tab_states.pop(tab_id, None)
+        if tab is None:
+            # Tab doesn't exist yet — just create a fresh one
+            self._get_tab(tab_id)
+            return
+        tab.stateful_agent.new_chat()
+        new_id = tab.stateful_agent.chat_id
+        tab.worktree_agent._chat_id = new_id
+        self._tab_states[new_id] = tab
+        self.printer.broadcast({
+            "type": "tab_id_changed",
+            "oldTabId": tab_id,
+            "newTabId": new_id,
+        })
+
+    def _replay_session(self, chat_id: str, tab_id: str = "") -> None:
         """Replay recorded chat events for a previous chat session.
+
+        Re-keys ``_tab_states`` so that the tab's key matches the
+        resumed session's chat_id (maintaining tab_id == chat_id).
 
         Args:
             chat_id: The chat session identifier to replay.
+            tab_id: The current tab identifier (old key in ``_tab_states``).
         """
         result = _load_latest_chat_events_by_chat_id(chat_id)
         if not result or not result.get("events"):
             return
-        self.agent.resume_chat_by_id(chat_id)
-        self.printer.broadcast({
+        # Re-key _tab_states: old tab_id → chat_id
+        if tab_id and tab_id != chat_id:
+            tab = self._tab_states.pop(tab_id, None)
+            if tab is None:
+                tab = _TabState(chat_id, self._default_model)
+            else:
+                tab.agent._chat_id = chat_id
+                tab.worktree_agent._chat_id = chat_id
+            self._tab_states[chat_id] = tab
+        else:
+            tab = self._get_tab(chat_id)
+        tab.agent.resume_chat_by_id(chat_id)
+        event: dict[str, Any] = {
             "type": "task_events",
             "events": result["events"],
             "task": result["task"],
             "chat_id": chat_id,
             "extra": result.get("extra", ""),
-        })
-        self._emit_pending_worktree()
+        }
+        if tab_id and tab_id != chat_id:
+            event["oldTabId"] = tab_id
+        self.printer.broadcast(event)
+        self._emit_pending_worktree(chat_id)
 
-    def _get_last_session(self) -> None:
+    def _get_last_session(self, tab_id: str = "") -> None:
         """Load the most recent task from history and replay its events.
 
         Also restores any pending merge session from disk so that
         merge-diff buttons reappear after a VS Code restart.
+
+        Args:
+            tab_id: The tab requesting the session.
         """
         # RC12 fix: guard against concurrent running task
         with self._state_lock:
-            if any(t.is_alive() for t in self._task_threads.values()):
+            if any(
+                t.task_thread is not None and t.task_thread.is_alive()
+                for t in self._tab_states.values()
+            ):
                 return
         entries = _load_history(limit=1)
         if entries:
             chat_id = str(entries[0].get("chat_id", ""))
             if chat_id:
-                self._replay_session(chat_id)
+                self._replay_session(chat_id, tab_id)
         self._restore_pending_merge()
 
     def _restore_pending_merge(self) -> None:
@@ -755,49 +881,58 @@ class VSCodeServer:
         """
         self._start_merge_session(str(_merge_data_dir() / "pending-merge.json"))
 
-    def _broadcast_worktree_done(self, changed: list[str]) -> None:
+    def _broadcast_worktree_done(self, changed: list[str], tab_id: str = "") -> None:
         """Broadcast a ``worktree_done`` event with the current worktree state.
 
         Args:
             changed: List of file paths changed in the worktree.
+            tab_id: The tab that owns the worktree.
         """
-        wt = self._worktree_agent
+        wt = self._get_tab(tab_id).worktree_agent
         self.printer.broadcast({
             "type": "worktree_done",
             "branch": wt._wt_branch,
             "worktreeDir": str(wt._wt_dir),
             "originalBranch": wt._original_branch,
             "changedFiles": changed,
-            "hasConflict": self._check_merge_conflict() if changed else False,
+            "hasConflict": self._check_merge_conflict(tab_id) if changed else False,
         })
 
-    def _emit_pending_worktree(self) -> None:
+    def _emit_pending_worktree(self, tab_id: str = "") -> None:
         """Emit ``worktree_done`` if the agent has a pending worktree branch.
 
         Called after replaying a session so that merge/discard buttons
         are shown whenever the worktree branch still exists — even if
         the agent was killed before it could emit the event originally.
+
+        Args:
+            tab_id: The tab to check for pending worktree.
         """
-        if not self._use_worktree:
+        tab = self._get_tab(tab_id)
+        if not tab.use_worktree:
             return
-        wt = self._worktree_agent
-        self._ensure_worktree_state()
+        wt = tab.worktree_agent
+        self._ensure_worktree_state(tab_id)
         if not wt._wt_pending:
             return
-        changed = self._get_worktree_changed_files()
-        self._broadcast_worktree_done(changed)
+        changed = self._get_worktree_changed_files(tab_id)
+        self._broadcast_worktree_done(changed, tab_id)
 
-    def _ensure_worktree_state(self) -> None:
+    def _ensure_worktree_state(self, tab_id: str = "") -> None:
         """Restore agent worktree state from git if not already set.
 
         Discovers the repo root and calls ``_restore_from_git()`` so
         that ``merge()``/``discard()`` work even after a server process
         restart where in-memory state was lost.
         Only applicable when using the worktree agent.
+
+        Args:
+            tab_id: The tab whose worktree state to restore.
         """
-        if not self._use_worktree:
+        tab = self._get_tab(tab_id)
+        if not tab.use_worktree:
             return
-        wt = self._worktree_agent
+        wt = tab.worktree_agent
         repo_root = wt._repo_root
         if repo_root is None:
             toplevel = _git(self.work_dir, "rev-parse", "--show-toplevel")
@@ -807,14 +942,20 @@ class VSCodeServer:
         wt._restore_from_git(repo_root)
 
     def _generate_followup_async(
-        self, task: str, result: str, model: str, gen: int, task_id: int | None
+        self,
+        task: str,
+        result: str,
+        model: str,
+        gen: int,
+        task_id: int | None,
+        tab_id: str = "",
     ) -> None:
         """Generate and broadcast a follow-up suggestion in a background thread.
 
         The suggestion is broadcast to the webview and also appended to
         the persisted chat events so it survives panel re-creation.
         Stale followups from a previous task are suppressed by checking
-        the generation counter.
+        the per-tab generation counter.
 
         Args:
             task: The completed task description.
@@ -822,16 +963,25 @@ class VSCodeServer:
             model: The model used for the task.
             gen: Task generation counter at time of launch.
             task_id: Stable history row id for the completed task.
+            tab_id: The tab that owns this followup.
         """
+        # Capture the owning tab so the background thread's broadcasts
+        # are tagged with the correct tabId (invariant: agent events go
+        # to their own tab).
+        owner_tab = getattr(self.printer._thread_local, "tab_id", None)
+
         def _run() -> None:
+            if owner_tab is not None:
+                self.printer._thread_local.tab_id = owner_tab
             try:
                 suggestion = generate_followup_text(
                     task, result, fast_model_for()
                 )
                 if suggestion:  # pragma: no cover — requires LLM API call
                     # RC6 fix: hold _state_lock across check + broadcast + persist
+                    tab = self._get_tab(tab_id)
                     with self._state_lock:
-                        if self._task_generation != gen:
+                        if tab.task_generation != gen:
                             return  # pragma: no cover
                         event: dict[str, object] = {
                             "type": "followup_suggestion",
@@ -988,7 +1138,7 @@ class VSCodeServer:
         ranked = rank_file_suggestions(cache, prefix, usage)
         self.printer.broadcast({"type": "files", "files": ranked})
 
-    def _check_merge_conflict(self) -> bool:
+    def _check_merge_conflict(self, tab_id: str = "") -> bool:
         """Check if merging the worktree branch into original would conflict.
 
         Checks two things:
@@ -997,12 +1147,16 @@ class VSCodeServer:
            with files modified by the merge (which would cause
            ``git merge`` to refuse the merge).
 
+        Args:
+            tab_id: The tab whose worktree to check.
+
         Returns:
             True if the merge would fail, False otherwise.
         """
-        if not self._use_worktree:
+        tab = self._get_tab(tab_id)
+        if not tab.use_worktree:
             return False
-        wt = self._worktree_agent
+        wt = tab.worktree_agent
         if not wt._wt_branch or not wt._original_branch:
             return False
         repo_root = str(wt._repo_root) if wt._repo_root else self.work_dir
@@ -1027,7 +1181,7 @@ class VSCodeServer:
         merge_set = set(merge_files.stdout.strip().splitlines())
         return bool(dirty_set & merge_set)
 
-    def _get_worktree_changed_files(self) -> list[str]:
+    def _get_worktree_changed_files(self, tab_id: str = "") -> list[str]:
         """List files changed in the worktree vs the original branch.
 
         Detects both committed changes on the worktree branch and
@@ -1037,12 +1191,16 @@ class VSCodeServer:
         edits and new files are included.  Falls back to a branch-
         to-branch diff when the worktree has already been removed.
 
+        Args:
+            tab_id: The tab whose worktree to check.
+
         Returns:
             Sorted deduplicated list of relative file paths.
         """
-        if not self._use_worktree:
+        tab = self._get_tab(tab_id)
+        if not tab.use_worktree:
             return []
-        wt = self._worktree_agent
+        wt = tab.worktree_agent
         if not wt._original_branch:
             return []
         wt_dir = wt._wt_dir
@@ -1068,7 +1226,7 @@ class VSCodeServer:
                       wt._wt_branch)
         return result.stdout.strip().splitlines() if result.returncode == 0 else []
 
-    def _handle_worktree_action(self, action: str) -> dict[str, Any]:
+    def _handle_worktree_action(self, action: str, tab_id: str = "") -> dict[str, Any]:
         """Execute a worktree merge/discard/manual action.
 
         Restores agent worktree state from git if needed (e.g. after a
@@ -1076,16 +1234,18 @@ class VSCodeServer:
 
         Args:
             action: One of ``"merge"``, ``"discard"``, or ``"do_nothing"``.
+            tab_id: The tab whose worktree to act on.
 
         Returns:
             Dict with ``success`` bool, ``message`` string, and
             optionally ``manual`` bool.
         """
-        if not self._use_worktree:
+        tab = self._get_tab(tab_id)
+        if not tab.use_worktree:
             return {"success": False, "message": "Worktree mode is not enabled"}
-        wt = self._worktree_agent
+        wt = tab.worktree_agent
         if not wt._wt_pending:
-            self._ensure_worktree_state()
+            self._ensure_worktree_state(tab_id)
         if action == "merge":
             self.printer.broadcast({
                 "type": "worktree_progress",

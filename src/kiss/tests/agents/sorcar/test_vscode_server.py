@@ -774,27 +774,29 @@ class TestWorktreeServerIntegration(unittest.TestCase):
         self._git("commit", "-m", "add merged")
         self._git("checkout", "main")
 
-        self.server._use_worktree = True
-        _set_agent_wt(self.server._worktree_agent, self.repo, "kiss/merge-test", "main")
+        tab = self.server._get_tab("0")
+        tab.use_worktree = True
+        _set_agent_wt(tab.worktree_agent, self.repo, "kiss/merge-test", "main")
 
-        result = self.server._handle_worktree_action("merge")
+        result = self.server._handle_worktree_action("merge", "0")
         assert result["success"] is True
         assert "Successfully merged" in result["message"]
         # Branch should be cleaned up
-        assert self.server._worktree_agent._wt_branch is None
+        assert self.server._get_tab("0").worktree_agent._wt_branch is None
 
     def test_handle_worktree_action_discard(self) -> None:
         """Discard action removes worktree branch."""
         self._git("checkout", "-b", "kiss/discard-test")
         self._git("checkout", "main")
 
-        self.server._use_worktree = True
-        _set_agent_wt(self.server._worktree_agent, self.repo, "kiss/discard-test", "main")
+        tab = self.server._get_tab("0")
+        tab.use_worktree = True
+        _set_agent_wt(tab.worktree_agent, self.repo, "kiss/discard-test", "main")
 
-        result = self.server._handle_worktree_action("discard")
+        result = self.server._handle_worktree_action("discard", "0")
         assert result["success"] is True
         assert "Discarded" in result["message"]
-        assert self.server._worktree_agent._wt_branch is None
+        assert self.server._get_tab("0").worktree_agent._wt_branch is None
 
     def test_worktree_action_command_routing(self) -> None:
         """worktreeAction command is routed to _handle_worktree_action."""
@@ -804,10 +806,11 @@ class TestWorktreeServerIntegration(unittest.TestCase):
         self._git("commit", "-m", "add route")
         self._git("checkout", "main")
 
-        self.server._use_worktree = True
-        _set_agent_wt(self.server._worktree_agent, self.repo, "kiss/route-test", "main")
+        self.server._get_tab("0").use_worktree = True
+        wt_agent = self.server._get_tab("0").worktree_agent
+        _set_agent_wt(wt_agent, self.repo, "kiss/route-test", "main")
 
-        self.server._handle_command({"type": "worktreeAction", "action": "merge"})
+        self.server._handle_command({"type": "worktreeAction", "action": "merge", "tabId": "0"})
         wt_events = [e for e in self.events if e["type"] == "worktree_result"]
         assert len(wt_events) == 1
         assert wt_events[0]["success"] is True
@@ -820,10 +823,11 @@ class TestWorktreeServerIntegration(unittest.TestCase):
         self._git("commit", "-m", "add progress")
         self._git("checkout", "main")
 
-        self.server._use_worktree = True
-        _set_agent_wt(self.server._worktree_agent, self.repo, "kiss/progress-test", "main")
+        tab = self.server._get_tab("0")
+        tab.use_worktree = True
+        _set_agent_wt(tab.worktree_agent, self.repo, "kiss/progress-test", "main")
 
-        self.server._handle_command({"type": "worktreeAction", "action": "merge"})
+        self.server._handle_command({"type": "worktreeAction", "action": "merge", "tabId": "0"})
         progress_events = [e for e in self.events if e["type"] == "worktree_progress"]
         assert len(progress_events) == 1
         assert "Generating commit message" in progress_events[0]["message"]
@@ -837,10 +841,11 @@ class TestWorktreeServerIntegration(unittest.TestCase):
         self._git("checkout", "-b", "kiss/no-progress-test")
         self._git("checkout", "main")
 
-        self.server._use_worktree = True
-        _set_agent_wt(self.server._worktree_agent, self.repo, "kiss/no-progress-test", "main")
+        tab = self.server._get_tab("0")
+        tab.use_worktree = True
+        _set_agent_wt(tab.worktree_agent, self.repo, "kiss/no-progress-test", "main")
 
-        self.server._handle_command({"type": "worktreeAction", "action": "discard"})
+        self.server._handle_command({"type": "worktreeAction", "action": "discard", "tabId": "0"})
         progress_events = [e for e in self.events if e["type"] == "worktree_progress"]
         assert len(progress_events) == 0
 
@@ -870,31 +875,34 @@ class TestAgentToggle(unittest.TestCase):
         from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
         server = VSCodeServer()
-        assert server._use_worktree is False
-        assert isinstance(server.agent, StatefulSorcarAgent)
-        assert not isinstance(server.agent, WorktreeSorcarAgent)
+        tab = server._get_tab("0")
+        assert tab.use_worktree is False
+        assert isinstance(tab.agent, StatefulSorcarAgent)
+        assert not isinstance(tab.agent, WorktreeSorcarAgent)
 
     def test_server_uses_worktree_agent_when_enabled(self) -> None:
         """Server agent is WorktreeSorcarAgent when worktree mode is on."""
         from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
         server = VSCodeServer()
-        server._use_worktree = True
-        assert isinstance(server.agent, WorktreeSorcarAgent)
+        tab = server._get_tab("0")
+        tab.use_worktree = True
+        assert isinstance(tab.agent, WorktreeSorcarAgent)
 
     def test_server_agent_switches_dynamically(self) -> None:
-        """Agent switches when _use_worktree is toggled."""
+        """Agent switches when use_worktree is toggled on _TabState."""
         from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
         from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
         server = VSCodeServer()
-        assert isinstance(server.agent, StatefulSorcarAgent)
-        assert not isinstance(server.agent, WorktreeSorcarAgent)
-        server._use_worktree = True
-        assert isinstance(server.agent, WorktreeSorcarAgent)
-        server._use_worktree = False
-        assert isinstance(server.agent, StatefulSorcarAgent)
-        assert not isinstance(server.agent, WorktreeSorcarAgent)
+        tab = server._get_tab("0")
+        assert isinstance(tab.agent, StatefulSorcarAgent)
+        assert not isinstance(tab.agent, WorktreeSorcarAgent)
+        tab.use_worktree = True
+        assert isinstance(tab.agent, WorktreeSorcarAgent)
+        tab.use_worktree = False
+        assert isinstance(tab.agent, StatefulSorcarAgent)
+        assert not isinstance(tab.agent, WorktreeSorcarAgent)
 
     def test_js_sends_use_worktree_in_submit(self) -> None:
         """main.js includes useWorktree in submit message."""
@@ -966,9 +974,9 @@ class TestWorktreeActionNotifications(unittest.TestCase):
 
     def test_progress_resolved_on_result(self) -> None:
         """The progress notification is resolved when worktree_result arrives."""
-        # Check that _worktreeActionResolve is called and nulled
-        assert "this._worktreeActionResolve();" in self._ts
-        assert "this._worktreeActionResolve = null;" in self._ts
+        # Check that _worktreeActionResolves map is used and cleaned up
+        assert "_worktreeActionResolves" in self._ts
+        assert ".delete(" in self._ts
 
     def test_progress_title_varies_by_action(self) -> None:
         """Progress title differs for merge vs discard actions."""
@@ -982,7 +990,8 @@ class TestWorktreeActionNotifications(unittest.TestCase):
 
     def test_worktree_progress_captured_in_with_progress(self) -> None:
         """The progress reporter is captured in the withProgress callback."""
-        assert "this._worktreeProgress = progress" in self._ts
+        assert "_worktreeProgresses" in self._ts
+        assert ".set(" in self._ts
 
     def test_worktree_progress_handler_updates_notification(self) -> None:
         """worktree_progress messages update the progress notification."""
@@ -990,8 +999,8 @@ class TestWorktreeActionNotifications(unittest.TestCase):
         assert ".report(" in self._ts
 
     def test_worktree_progress_cleared_on_result(self) -> None:
-        """_worktreeProgress is cleared when worktree_result arrives."""
-        assert "this._worktreeProgress = null" in self._ts
+        """_worktreeProgresses is cleaned up when worktree_result arrives."""
+        assert "_worktreeProgresses.delete(" in self._ts
 
 
 class TestMainJsParallelToggle(unittest.TestCase):
@@ -1096,9 +1105,9 @@ class TestServerParallelToggle(unittest.TestCase):
     """Tests for parallel toggle in VSCodeServer."""
 
     def test_server_defaults_parallel_off(self) -> None:
-        """_use_parallel is False by default."""
+        """use_parallel is False by default on new tab state."""
         server = VSCodeServer()
-        assert server._use_parallel is False
+        assert server._get_tab("0").use_parallel is False
 
     def test_server_parses_use_parallel_from_command(self) -> None:
         """_run_task_inner sets _use_parallel from cmd dict."""
@@ -1166,8 +1175,8 @@ class TestMergeSession(unittest.TestCase):
         assert "merge_started" in types
         # merge_data must come before merge_started
         assert types.index("merge_data") < types.index("merge_started")
-        # Server is now in merging state
-        assert self.server._merging is True
+        # Server is now in merging state (tab_id is None from main thread,
+        # so no tab's is_merging gets set by _start_merge_session)
 
     def test_start_merge_session_includes_hunk_count(self) -> None:
         """merge_data event includes correct hunk_count."""
@@ -1181,7 +1190,6 @@ class TestMergeSession(unittest.TestCase):
         path = self._write_merge_json(files=[])
         result = self.server._start_merge_session(path)
         assert result is False
-        assert self.server._merging is False
 
     def test_start_merge_session_returns_false_for_zero_hunks(self) -> None:
         """Returns False when all files have zero hunks."""
@@ -1200,7 +1208,6 @@ class TestMergeSession(unittest.TestCase):
         """Returns False when merge JSON file doesn't exist."""
         result = self.server._start_merge_session("/nonexistent/merge.json")
         assert result is False
-        assert self.server._merging is False
 
     def test_start_merge_session_returns_false_for_invalid_json(self) -> None:
         """Returns False when merge JSON is malformed."""
@@ -1216,16 +1223,15 @@ class TestMergeSession(unittest.TestCase):
         self.events.clear()
 
         self.server._handle_merge_action("all-done")
-        assert self.server._merging is False
         types = [e["type"] for e in self.events]
         assert "merge_ended" in types
 
     def test_handle_merge_action_unknown_is_noop(self) -> None:
         """Non-'all-done' actions are no-ops on the Python side."""
-        self.server._merging = True
+        self.server._get_tab("0").is_merging = True
         self.server._handle_merge_action("accept")
         # Still merging — only all-done finishes
-        assert self.server._merging is True
+        assert self.server._get_tab("0").is_merging is True
 
     def test_finish_merge_cleans_up_data_dir(self) -> None:
         """_finish_merge removes the merge data directory."""
@@ -1246,13 +1252,23 @@ class TestMergeSession(unittest.TestCase):
             dm._merge_data_dir = orig_dm  # type: ignore[assignment]
             srv_mod._merge_data_dir = orig_srv  # type: ignore[assignment]
 
-    def test_merging_blocks_new_tasks(self) -> None:
-        """Cannot start a task while merge review is in progress."""
-        self.server._merging = True
-        # Simulate _run_task_inner rejecting a task
-        self.server._run_task_inner({"prompt": "test", "model": "m"})
+    def test_merging_blocks_same_tab(self) -> None:
+        """Cannot start a task on the same tab that has a merge in progress."""
+        self.server._get_tab("5").is_merging = True
+        # Simulate _run_task_inner rejecting a task on the merging tab
+        self.server._run_task_inner({"prompt": "test", "model": "m", "tabId": "5"})
         errors = [e for e in self.events if e["type"] == "error"]
         assert any("merge review" in e["text"] for e in errors)
+
+    def test_merging_does_not_block_other_tabs(self) -> None:
+        """A merge on one tab does not block tasks on other tabs."""
+        self.server._get_tab("5").is_merging = True
+        # _run_task_inner on a different tab should NOT hit the merge error
+        self.events.clear()
+        self.server._run_task_inner({"prompt": "test", "model": "m", "tabId": "99"})
+        errors = [e for e in self.events if e["type"] == "error"]
+        # No "merge review" error for a different tab
+        assert not any("merge review" in e.get("text", "") for e in errors)
 
     def test_restore_pending_merge_from_disk(self) -> None:
         """_restore_pending_merge re-opens a merge session from disk."""
@@ -1267,7 +1283,6 @@ class TestMergeSession(unittest.TestCase):
         try:
             self._write_merge_json()
             self.server._restore_pending_merge()
-            assert self.server._merging is True
             types = [e["type"] for e in self.events]
             assert "merge_data" in types
         finally:
@@ -1292,7 +1307,6 @@ class TestMergeSession(unittest.TestCase):
         finally:
             dm._merge_data_dir = orig  # type: ignore[assignment]
             srv_mod._merge_data_dir = orig_srv  # type: ignore[assignment]
-        assert self.server._merging is False
         types = [e["type"] for e in self.events]
         assert "merge_ended" in types
 
@@ -2120,9 +2134,9 @@ class TestWorktreeActionExceptionHandling(unittest.TestCase):
 
     def test_merge_exception_still_broadcasts_result(self) -> None:
         """worktree_result is broadcast even when merge raises RuntimeError."""
-        self.server._use_worktree = True
+        self.server._get_tab("0").use_worktree = True
         # Don't set up _wt — so wt.merge() raises RuntimeError
-        self.server._handle_command({"type": "worktreeAction", "action": "merge"})
+        self.server._handle_command({"type": "worktreeAction", "action": "merge", "tabId": "0"})
         results = [e for e in self.events if e["type"] == "worktree_result"]
         assert len(results) == 1
         assert results[0]["success"] is False
@@ -2130,16 +2144,17 @@ class TestWorktreeActionExceptionHandling(unittest.TestCase):
 
     def test_discard_exception_still_broadcasts_result(self) -> None:
         """worktree_result is broadcast even when discard raises RuntimeError."""
-        self.server._use_worktree = True
-        self.server._handle_command({"type": "worktreeAction", "action": "discard"})
+        self.server._get_tab("0").use_worktree = True
+        self.server._handle_command({"type": "worktreeAction", "action": "discard", "tabId": "0"})
         results = [e for e in self.events if e["type"] == "worktree_result"]
         assert len(results) == 1
         assert results[0]["success"] is False
 
     def test_do_nothing_exception_still_broadcasts_result(self) -> None:
         """worktree_result is broadcast even when do_nothing raises RuntimeError."""
-        self.server._use_worktree = True
-        self.server._handle_command({"type": "worktreeAction", "action": "do_nothing"})
+        self.server._get_tab("0").use_worktree = True
+        cmd = {"type": "worktreeAction", "action": "do_nothing", "tabId": "0"}
+        self.server._handle_command(cmd)
         results = [e for e in self.events if e["type"] == "worktree_result"]
         assert len(results) == 1
         assert results[0]["success"] is False
@@ -2163,13 +2178,13 @@ class TestWorktreeActionExceptionHandling(unittest.TestCase):
             cwd=self.repo, capture_output=True,
         )
 
-        self.server._use_worktree = True
+        self.server._get_tab("0").use_worktree = True
         _set_agent_wt(
-            self.server._worktree_agent,
+            self.server._get_tab("0").worktree_agent,
             self.repo, "kiss/exc-test", "main",
         )
 
-        self.server._handle_command({"type": "worktreeAction", "action": "merge"})
+        self.server._handle_command({"type": "worktreeAction", "action": "merge", "tabId": "0"})
         results = [e for e in self.events if e["type"] == "worktree_result"]
         assert len(results) == 1
         assert results[0]["success"] is True
@@ -2573,12 +2588,12 @@ class TestSorcarSidebarViewWorktreeActions(unittest.TestCase):
     def test_worktree_progress_reported(self) -> None:
         """worktree_progress events update the progress notification."""
         assert "worktree_progress" in self._ts
-        assert "_worktreeProgress.report(" in self._ts
+        assert ".report(" in self._ts
 
     def test_worktree_result_resolves_progress(self) -> None:
-        """worktree_result resolves the progress notification."""
-        assert "this._worktreeActionResolve();" in self._ts
-        assert "this._worktreeActionResolve = null;" in self._ts
+        """worktree_result resolves the progress notification (per-tab maps)."""
+        assert "_worktreeActionResolves" in self._ts
+        assert ".delete(" in self._ts
 
     def test_worktree_result_shows_info_or_error(self) -> None:
         """Successful results show info, failures show error."""
@@ -2586,7 +2601,7 @@ class TestSorcarSidebarViewWorktreeActions(unittest.TestCase):
         assert "showErrorMessage" in self._ts
 
     def test_worktree_progress_cleared_on_result(self) -> None:
-        assert "this._worktreeProgress = null" in self._ts
+        assert "_worktreeProgresses.delete(" in self._ts
 
     def test_worktree_timeout(self) -> None:
         """worktreeAction has a 120s timeout."""
@@ -2672,11 +2687,11 @@ class TestSorcarSidebarViewMergeActions(unittest.TestCase):
         assert "this._mergeManager.openMerge(" in self._ts
 
     def test_merge_data_sets_merge_owner(self) -> None:
-        """merge_data sets this view as the merge owner."""
+        """merge_data pushes merge owner tab id from the event to the queue."""
         # Find merge_data handler
         idx = self._ts.index("msg.type === 'merge_data'")
-        block = self._ts[idx : idx + 200]
-        assert "this._mergeOwner = true" in block
+        block = self._ts[idx : idx + 300]
+        assert "_mergeOwnerTabIdQueue" in block
 
 
 class TestSorcarSidebarViewStartTask(unittest.TestCase):
@@ -2767,11 +2782,12 @@ class TestSorcarSidebarViewPublicAPI(unittest.TestCase):
     def test_has_stop_task(self) -> None:
         assert "public stopTask()" in self._ts
 
-    def test_stop_task_calls_agent_stop(self) -> None:
+    def test_stop_task_sends_trigger_stop(self) -> None:
+        """stopTask delegates to webview via triggerStop to include active tabId."""
         idx = self._ts.index("public stopTask()")
         end = self._ts.index("\n  }", idx) + 4
         body = self._ts[idx:end]
-        assert "this._agentProcess.stop()" in body
+        assert "triggerStop" in body
 
     def test_has_focus_chat_input(self) -> None:
         assert "public async focusChatInput()" in self._ts
@@ -2791,20 +2807,14 @@ class TestSorcarSidebarViewPublicAPI(unittest.TestCase):
     def test_has_new_conversation(self) -> None:
         assert "public newConversation()" in self._ts
 
-    def test_new_conversation_stops_running_task(self) -> None:
-        """If running, newConversation stops and queues the new chat."""
-        idx = self._ts.index("public newConversation()")
-        end = self._ts.index("\n  }", idx) + 4
-        body = self._ts[idx:end]
-        assert "_pendingNewChat = true" in body
-        assert "this._agentProcess.stop()" in body
-
-    def test_new_conversation_sends_new_chat_when_idle(self) -> None:
-        """When idle, newConversation sends clearChat to webview."""
+    def test_new_conversation_sends_clear_chat(self) -> None:
+        """newConversation sends clearChat to webview without stopping running tabs."""
         idx = self._ts.index("public newConversation()")
         end = self._ts.index("\n  }", idx) + 4
         body = self._ts[idx:end]
         assert "type: 'clearChat'" in body
+        # Should NOT stop the agent process (no interference with other tabs)
+        assert "this._agentProcess.stop()" not in body
 
     def test_has_generate_commit_message(self) -> None:
         assert "public generateCommitMessage(" in self._ts
@@ -2816,10 +2826,10 @@ class TestSorcarSidebarViewPublicAPI(unittest.TestCase):
         assert "type: 'generateCommitMessage'" in body
 
     def test_has_send_merge_all_done(self) -> None:
-        assert "public sendMergeAllDone()" in self._ts
+        assert "public sendMergeAllDone(" in self._ts
 
     def test_send_merge_all_done_sends_command(self) -> None:
-        idx = self._ts.index("public sendMergeAllDone()")
+        idx = self._ts.index("public sendMergeAllDone(")
         end = self._ts.index("\n  }", idx) + 4
         body = self._ts[idx:end]
         assert "type: 'mergeAction'" in body
@@ -2898,11 +2908,10 @@ class TestSorcarSidebarViewAgentEventHandling(unittest.TestCase):
         body = self._get_message_handler_body()
         assert "_sendActiveFileInfo()" in body
 
-    def test_pending_new_chat_handled_on_stop(self) -> None:
-        """When status running=false and _pendingNewChat, sends clearChat."""
+    def test_active_file_info_sent_on_stop(self) -> None:
+        """When status running=false, sends active file info."""
         body = self._get_message_handler_body()
-        assert "_pendingNewChat" in body
-        assert "type: 'clearChat'" in body
+        assert "_sendActiveFileInfo()" in body
 
 
 class TestSorcarSidebarViewReadyHandler(unittest.TestCase):
@@ -2997,10 +3006,10 @@ class TestSorcarSidebarViewDisposeHandler(unittest.TestCase):
         assert "this._disposed = true" in block
 
     def test_on_did_dispose_resolves_worktree_action(self) -> None:
-        """Dispose resolves any pending worktree action to prevent hangs."""
+        """Dispose resolves any pending worktree actions to prevent hangs."""
         idx = self._ts.index("onDidDispose")
-        block = self._ts[idx : idx + 200]
-        assert "this._worktreeActionResolve" in block
+        block = self._ts[idx : idx + 300]
+        assert "_worktreeActionResolves" in block
 
     def test_public_dispose_kills_agent(self) -> None:
         idx = self._ts.index("public dispose()")
@@ -3157,14 +3166,14 @@ class TestWebviewTabBarJS(unittest.TestCase):
         end = self._js.index("\n  }", idx) + 4
         body = self._js[idx:end]
         assert "id:" in body
-        assert "tabIdCounter" in body
+        assert "genTabId()" in body
 
     def test_make_tab_has_required_fields(self) -> None:
         idx = self._js.index("function makeTab(title)")
         end = self._js.index("\n  }", idx) + 4
         body = self._js[idx:end]
         for field in ("title:", "outputFragment:", "taskPanelHTML:",
-                      "chatId:", "welcomeVisible:", "selectedModel:",
+                      "welcomeVisible:", "selectedModel:",
                       "attachments:", "inputValue:", "isMerging:",
                       "t0:", "streamState:", "streamLastToolName:",
                       "streamPendingPanel:"):
@@ -3174,7 +3183,7 @@ class TestWebviewTabBarJS(unittest.TestCase):
         assert "var tabs = [];" in self._js
 
     def test_active_tab_id_exists(self) -> None:
-        assert "var activeTabId = -1;" in self._js
+        assert "var activeTabId = '';" in self._js
 
     # -- Tab bar rendering --
 
@@ -3343,11 +3352,11 @@ class TestWebviewTabBarJS(unittest.TestCase):
         body = self._js[idx:end]
         assert "tab.outputFragment = document.createDocumentFragment()" in body
 
-    def test_save_current_tab_stores_chat_id(self) -> None:
+    def test_save_current_tab_stores_per_tab_state(self) -> None:
         idx = self._js.index("function saveCurrentTab()")
         end = self._js.index("\n  function ", idx + 1)
         body = self._js[idx:end]
-        assert "tab.chatId = currentChatId" in body
+        assert "tab.selectedModel = selectedModel" in body
 
     def test_restore_tab_function_exists(self) -> None:
         assert "function restoreTab(tab)" in self._js
@@ -3363,12 +3372,6 @@ class TestWebviewTabBarJS(unittest.TestCase):
         end = self._js.index("\n  function ", idx + 1)
         body = self._js[idx:end]
         assert "tab.outputFragment" in body
-
-    def test_restore_tab_restores_chat_id(self) -> None:
-        idx = self._js.index("function restoreTab(tab)")
-        end = self._js.index("\n  function ", idx + 1)
-        body = self._js[idx:end]
-        assert "currentChatId = tab.chatId" in body
 
     # -- Tab title updates --
 
@@ -3518,11 +3521,12 @@ class TestWebviewTabBarHTML(unittest.TestCase):
         output_idx = self._ts.index('id="output"')
         assert tab_bar_idx < output_idx
 
-    def test_tab_bar_is_after_header(self) -> None:
-        """Tab bar div appears after the header."""
-        header_idx = self._ts.index("</header>")
+    def test_tab_status_bar_is_after_tab_bar(self) -> None:
+        """Per-tab status bar appears after the tab bar and before task panel."""
         tab_bar_idx = self._ts.index('id="tab-bar"')
-        assert header_idx < tab_bar_idx
+        status_bar_idx = self._ts.index('id="tab-status-bar"')
+        task_panel_idx = self._ts.index('id="task-panel"')
+        assert tab_bar_idx < status_bar_idx < task_panel_idx
 
 
 class TestSorcarSidebarViewFilePathDoesNotPopulateTaskPanel(unittest.TestCase):
@@ -3593,14 +3597,9 @@ class TestSorcarSidebarViewNewChatBehavior(unittest.TestCase):
         """The newChat message type is forwarded to the agent process."""
         assert "case 'newChat':" in self._ts
 
-    def test_pending_new_chat_on_stop(self) -> None:
-        """When task stops and _pendingNewChat is true, send clearChat."""
-        # Find the on('message') handler
-        idx = self._ts.index("this._agentProcess.on('message'")
-        end = self._ts.index("const workDir = this._getWorkDir()", idx)
-        body = self._ts[idx:end]
-        assert "_pendingNewChat" in body
-        assert "type: 'clearChat'" in body
+    def test_no_pending_new_chat_field(self) -> None:
+        """_pendingNewChat was removed — newConversation always sends clearChat."""
+        assert "_pendingNewChat" not in self._ts
 
 
 class TestSidebarViewBehavior(unittest.TestCase):
@@ -3737,11 +3736,10 @@ class TestSidebarViewBehavior(unittest.TestCase):
 
 
 class TestTabStateRestore(unittest.TestCase):
-    """Test that tab chatId is persisted correctly for cross-restart restore.
+    """Test that tab state is persisted correctly for cross-restart restore.
 
-    Tabs are identified by chat_id (not the task string). persistTabState()
-    uses currentChatId for the active tab, and updateActiveTabTitle() syncs
-    tab.chatId = currentChatId.
+    Tabs are identified by tab.id which IS the chat_id. persistTabState()
+    serializes tab.id as chatId, and updateActiveTabTitle() updates tab.title.
     """
 
     js: str
@@ -3751,25 +3749,24 @@ class TestTabStateRestore(unittest.TestCase):
         base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
         cls.js = (base / "vscode" / "media" / "main.js").read_text()
 
-    def test_persist_tab_state_uses_current_chat_id_for_active_tab(self) -> None:
-        """persistTabState must use currentChatId for the active tab."""
+    def test_persist_tab_state_serializes_tab_id_as_chat_id(self) -> None:
+        """persistTabState serializes tab.id as chatId for persistence."""
         idx = self.js.index("function persistTabState()")
         block = self.js[idx:idx + 500]
         assert "t.id === activeTabId" in block
-        assert "currentChatId" in block
+        assert "chatId: t.id" in block
 
-    def test_update_active_tab_title_syncs_chat_id(self) -> None:
-        """updateActiveTabTitle must set tab.chatId = currentChatId."""
+    def test_update_active_tab_title_renders_tab_bar(self) -> None:
+        """updateActiveTabTitle calls renderTabBar and persistTabState."""
         idx = self.js.index("function updateActiveTabTitle(")
         block = self.js[idx:idx + 400]
-        assert "tab.chatId = currentChatId" in block
+        assert "renderTabBar()" in block
+        assert "persistTabState()" in block
 
     def test_persist_tab_state_logic_via_node(self) -> None:
         """Run the actual JS logic in Node.js and verify correctness."""
         node_script = """
-        var tabIdCounter = 0;
-        var activeTabId = -1;
-        var currentChatId = '';
+        var activeTabId = '';
         var tabs = [];
         var _lastState = null;
 
@@ -3778,25 +3775,17 @@ class TestTabStateRestore(unittest.TestCase):
             getState: function() { return _lastState; },
         };
 
-        function makeTab(title) {
-            var id = ++tabIdCounter;
-            return { id: id, title: title || 'new chat', chatId: '' };
-        }
-
         function persistTabState() {
             var serialized = tabs.map(function(t) {
-                var chatId = (t.id === activeTabId) ? currentChatId : t.chatId;
-                return { title: t.title, chatId: chatId };
+                return { title: t.title, chatId: t.id };
             });
             var activeIdx = tabs.findIndex(function(t) { return t.id === activeTabId; });
-            vscode.setState({ tabs: serialized, activeTabIndex: activeIdx, chatId: currentChatId });
+            vscode.setState({ tabs: serialized, activeTabIndex: activeIdx });
         }
 
-        // Test 1: Single tab, chatId persisted
-        var tab1 = makeTab('new chat');
-        tabs.push(tab1);
-        activeTabId = tab1.id;
-        currentChatId = 'abc123';
+        // Test 1: Single tab, tab.id persisted as chatId
+        tabs.push({ id: 'abc123', title: 'new chat' });
+        activeTabId = 'abc123';
         persistTabState();
         var state = vscode.getState();
         if (state.tabs[0].chatId !== 'abc123') {
@@ -3805,15 +3794,10 @@ class TestTabStateRestore(unittest.TestCase):
         }
 
         // Test 2: Multi-tab scenario
-        tabIdCounter = 0;
         tabs = [];
-        var t1 = makeTab('task A');
-        t1.chatId = 'chat-A';
-        tabs.push(t1);
-        var t2 = makeTab('new chat');
-        tabs.push(t2);
-        activeTabId = t2.id;
-        currentChatId = 'chat-B';
+        tabs.push({ id: 'chat-A', title: 'task A' });
+        tabs.push({ id: 'chat-B', title: 'new chat' });
+        activeTabId = 'chat-B';
         persistTabState();
         state = vscode.getState();
         if (state.tabs[0].chatId !== 'chat-A') {
@@ -3822,15 +3806,6 @@ class TestTabStateRestore(unittest.TestCase):
         }
         if (state.tabs[1].chatId !== 'chat-B') {
             console.log('FAIL 2b: ' + state.tabs[1].chatId);
-            process.exit(1);
-        }
-
-        // Test 3: Empty chatId for active tab (new empty tab)
-        currentChatId = '';
-        persistTabState();
-        state = vscode.getState();
-        if (state.tabs[1].chatId !== '') {
-            console.log('FAIL 3: ' + state.tabs[1].chatId);
             process.exit(1);
         }
 

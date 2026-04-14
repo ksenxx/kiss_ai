@@ -108,7 +108,7 @@ def _file_in_repo(repo: Path, filename: str) -> bool:
 
 def _make_server(repo: Path) -> tuple[VSCodeServer, list[dict]]:
     server = VSCodeServer()
-    server._use_worktree = True
+    server._get_tab("0").use_worktree = True
     server.work_dir = str(repo)
     events: list[dict] = []
 
@@ -495,14 +495,14 @@ class TestServerWorktreeWorkflow:
 
         Returns the task branch name.
         """
-        server._worktree_agent.run(
+        server._get_tab("0").worktree_agent.run(
             prompt_template="task1", work_dir=str(self.repo)
         )
-        branch = server._worktree_agent._wt_branch
+        branch = server._get_tab("0").worktree_agent._wt_branch
         assert branch is not None
 
         if with_changes:
-            wt_dir = server._worktree_agent._wt_dir
+            wt_dir = server._get_tab("0").worktree_agent._wt_dir
             assert wt_dir is not None
             (wt_dir / "changed.txt").write_text("extension change")
             GitWorktreeOps.stage_all(wt_dir)
@@ -518,15 +518,15 @@ class TestServerWorktreeWorkflow:
         branch = self._setup_pending_worktree(server)
 
         # Simulate what _run_task_inner does after task
-        server._worktree_agent._auto_commit_worktree()
-        changed = server._get_worktree_changed_files()
+        server._get_tab("0").worktree_agent._auto_commit_worktree()
+        changed = server._get_worktree_changed_files("0")
         assert len(changed) > 0
 
         server.printer.broadcast({
             "type": "worktree_done",
-            "branch": server._worktree_agent._wt_branch,
-            "worktreeDir": str(server._worktree_agent._wt_dir),
-            "originalBranch": server._worktree_agent._original_branch,
+            "branch": server._get_tab("0").worktree_agent._wt_branch,
+            "worktreeDir": str(server._get_tab("0").worktree_agent._wt_dir),
+            "originalBranch": server._get_tab("0").worktree_agent._original_branch,
         })
 
         wt_events = [e for e in events if e["type"] == "worktree_done"]
@@ -536,7 +536,7 @@ class TestServerWorktreeWorkflow:
         assert ev["originalBranch"] is not None
         assert "worktreeDir" in ev
 
-        server._worktree_agent.discard()
+        server._get_tab("0").worktree_agent.discard()
 
     # -- Merge via server --------------------------------------------------
 
@@ -545,7 +545,7 @@ class TestServerWorktreeWorkflow:
         server, events = _make_server(self.repo)
         self._setup_pending_worktree(server)
 
-        result = server._handle_worktree_action("merge")
+        result = server._handle_worktree_action("merge", "0")
         assert result["success"] is True
         assert "Successfully merged" in result["message"]
 
@@ -554,16 +554,16 @@ class TestServerWorktreeWorkflow:
         server, events = _make_server(self.repo)
         self._setup_pending_worktree(server)
 
-        server._handle_worktree_action("merge")
-        assert server._worktree_agent._wt_branch is None
-        assert not server._worktree_agent._wt_pending
+        server._handle_worktree_action("merge", "0")
+        assert server._get_tab("0").worktree_agent._wt_branch is None
+        assert not server._get_tab("0").worktree_agent._wt_pending
 
     def test_server_merge_propagates_changes(self) -> None:
         """After merge via server, changes are on the original branch."""
         server, events = _make_server(self.repo)
         self._setup_pending_worktree(server)
 
-        server._handle_worktree_action("merge")
+        server._handle_worktree_action("merge", "0")
         assert _file_in_repo(self.repo, "changed.txt")
 
     # -- Discard via server ------------------------------------------------
@@ -573,7 +573,7 @@ class TestServerWorktreeWorkflow:
         server, events = _make_server(self.repo)
         self._setup_pending_worktree(server)
 
-        result = server._handle_worktree_action("discard")
+        result = server._handle_worktree_action("discard", "0")
         assert result["success"] is True
         assert "Discarded" in result["message"]
 
@@ -582,16 +582,16 @@ class TestServerWorktreeWorkflow:
         server, events = _make_server(self.repo)
         self._setup_pending_worktree(server)
 
-        server._handle_worktree_action("discard")
-        assert server._worktree_agent._wt_branch is None
-        assert not server._worktree_agent._wt_pending
+        server._handle_worktree_action("discard", "0")
+        assert server._get_tab("0").worktree_agent._wt_branch is None
+        assert not server._get_tab("0").worktree_agent._wt_pending
 
     def test_server_discard_does_not_propagate_changes(self) -> None:
         """After discard via server, changes are not on original branch."""
         server, events = _make_server(self.repo)
         self._setup_pending_worktree(server)
 
-        server._handle_worktree_action("discard")
+        server._handle_worktree_action("discard", "0")
         assert not _file_in_repo(self.repo, "changed.txt")
 
     # -- Do nothing via server ---------------------------------------------
@@ -601,7 +601,7 @@ class TestServerWorktreeWorkflow:
         server, events = _make_server(self.repo)
         self._setup_pending_worktree(server)
 
-        result = server._handle_worktree_action("do_nothing")
+        result = server._handle_worktree_action("do_nothing", "0")
         assert result["success"] is True
         assert "Left branch" in result["message"]
 
@@ -610,7 +610,7 @@ class TestServerWorktreeWorkflow:
         server, events = _make_server(self.repo)
         branch = self._setup_pending_worktree(server)
 
-        server._handle_worktree_action("do_nothing")
+        server._handle_worktree_action("do_nothing", "0")
         assert _branch_exists(self.repo, branch)
 
     def test_server_do_nothing_cleans_agent_state(self) -> None:
@@ -618,15 +618,15 @@ class TestServerWorktreeWorkflow:
         server, events = _make_server(self.repo)
         self._setup_pending_worktree(server)
 
-        server._handle_worktree_action("do_nothing")
-        assert not server._worktree_agent._wt_pending
+        server._handle_worktree_action("do_nothing", "0")
+        assert not server._get_tab("0").worktree_agent._wt_pending
 
     def test_server_do_nothing_does_not_propagate_changes(self) -> None:
         """After do_nothing via server, changes are not on original branch."""
         server, events = _make_server(self.repo)
         self._setup_pending_worktree(server)
 
-        server._handle_worktree_action("do_nothing")
+        server._handle_worktree_action("do_nothing", "0")
         assert not _file_in_repo(self.repo, "changed.txt")
 
     # -- Command routing ---------------------------------------------------
@@ -637,7 +637,7 @@ class TestServerWorktreeWorkflow:
         self._setup_pending_worktree(server)
 
         server._handle_command(
-            {"type": "worktreeAction", "action": "discard"}
+            {"type": "worktreeAction", "action": "discard", "tabId": "0"}
         )
         wt_results = [e for e in events if e["type"] == "worktree_result"]
         assert len(wt_results) == 1
@@ -646,7 +646,7 @@ class TestServerWorktreeWorkflow:
     def test_unknown_worktree_action_returns_error(self) -> None:
         """Unknown worktree action returns error result."""
         server, events = _make_server(self.repo)
-        result = server._handle_worktree_action("invalid")
+        result = server._handle_worktree_action("invalid", "0")
         assert result["success"] is False
         assert "Unknown action" in result["message"]
 
@@ -659,13 +659,13 @@ class TestServerWorktreeWorkflow:
         self._setup_pending_worktree(server, with_changes=False)
 
         # After auto-commit, there are no changed files vs original
-        server._worktree_agent._auto_commit_worktree()
-        changed = server._get_worktree_changed_files()
+        server._get_tab("0").worktree_agent._auto_commit_worktree()
+        changed = server._get_worktree_changed_files("0")
         assert len(changed) == 0
 
         # Server would auto-discard in _run_task_inner
-        server._worktree_agent.discard()
-        assert not server._worktree_agent._wt_pending
+        server._get_tab("0").worktree_agent.discard()
+        assert not server._get_tab("0").worktree_agent._wt_pending
 
     # -- Session replay restores pending worktree --------------------------
 
@@ -673,12 +673,12 @@ class TestServerWorktreeWorkflow:
         """_emit_pending_worktree re-emits worktree_done after restart."""
         server, events = _make_server(self.repo)
         branch = self._setup_pending_worktree(server)
-        original_branch = server._worktree_agent._original_branch
+        original_branch = server._get_tab("0").worktree_agent._original_branch
 
         # Simulate server restart: create new server, restore state
         server2, events2 = _make_server(self.repo)
-        server2._worktree_agent.resume_chat_by_id(server._worktree_agent._chat_id)
-        server2._emit_pending_worktree()
+        server2._get_tab("0").worktree_agent.resume_chat_by_id(server._get_tab("0").worktree_agent._chat_id)
+        server2._emit_pending_worktree("0")
 
         wt_events = [e for e in events2 if e["type"] == "worktree_done"]
         assert len(wt_events) == 1
@@ -686,7 +686,7 @@ class TestServerWorktreeWorkflow:
         assert wt_events[0]["originalBranch"] == original_branch
 
         # Clean up
-        server2._worktree_agent.discard()
+        server2._get_tab("0").worktree_agent.discard()
 
     # -- Merge conflict via server -----------------------------------------
 
@@ -700,13 +700,13 @@ class TestServerWorktreeWorkflow:
         _git("add", "-A", cwd=self.repo)
         _git("commit", "-m", "conflict on main", cwd=self.repo)
 
-        result = server._handle_worktree_action("merge")
+        result = server._handle_worktree_action("merge", "0")
         assert result["success"] is False
         assert "conflict" in result["message"].lower()
 
         # Agent still pending — can discard
-        assert server._worktree_agent._wt_pending
-        server._worktree_agent.discard()
+        assert server._get_tab("0").worktree_agent._wt_pending
+        server._get_tab("0").worktree_agent.discard()
 
     # -- Merge then new task -----------------------------------------------
 
@@ -714,28 +714,28 @@ class TestServerWorktreeWorkflow:
         """After merge via server, a new task can run."""
         server, events = _make_server(self.repo)
         self._setup_pending_worktree(server)
-        server._handle_worktree_action("merge")
+        server._handle_worktree_action("merge", "0")
 
         # New task should succeed
-        result = server._worktree_agent.run(
+        result = server._get_tab("0").worktree_agent.run(
             prompt_template="task2", work_dir=str(self.repo)
         )
         assert "test done" in result
-        assert server._worktree_agent._wt_pending
-        server._worktree_agent.discard()
+        assert server._get_tab("0").worktree_agent._wt_pending
+        server._get_tab("0").worktree_agent.discard()
 
     def test_discard_then_new_task_works(self) -> None:
         """After discard via server, a new task can run."""
         server, events = _make_server(self.repo)
         self._setup_pending_worktree(server)
-        server._handle_worktree_action("discard")
+        server._handle_worktree_action("discard", "0")
 
-        result = server._worktree_agent.run(
+        result = server._get_tab("0").worktree_agent.run(
             prompt_template="task2", work_dir=str(self.repo)
         )
         assert "test done" in result
-        assert server._worktree_agent._wt_pending
-        server._worktree_agent.discard()
+        assert server._get_tab("0").worktree_agent._wt_pending
+        server._get_tab("0").worktree_agent.discard()
 
     # -- Premature commit bug (changes must NOT be committed before user acts) --
 
@@ -746,19 +746,19 @@ class TestServerWorktreeWorkflow:
         the user can review them before choosing Commit and Merge.
         """
         server, events = _make_server(self.repo)
-        server._worktree_agent.run(
+        server._get_tab("0").worktree_agent.run(
             prompt_template="task1", work_dir=str(self.repo)
         )
 
-        wt_dir = server._worktree_agent._wt_dir
+        wt_dir = server._get_tab("0").worktree_agent._wt_dir
         assert wt_dir is not None and wt_dir.exists()
         # Simulate agent making changes (files written but NOT committed)
         (wt_dir / "agent_file.txt").write_text("agent wrote this")
 
         # Check: the worktree branch should have NO new commits beyond
         # what was on the original branch (the file is uncommitted)
-        branch = server._worktree_agent._wt_branch
-        original = server._worktree_agent._original_branch
+        branch = server._get_tab("0").worktree_agent._wt_branch
+        original = server._get_tab("0").worktree_agent._original_branch
         assert branch is not None and original is not None
         r = subprocess.run(
             ["git", "-C", str(self.repo), "rev-list", "--count",
@@ -770,29 +770,29 @@ class TestServerWorktreeWorkflow:
         )
 
         # The changed file detection should still find the uncommitted file
-        changed = server._get_worktree_changed_files()
+        changed = server._get_worktree_changed_files("0")
         assert "agent_file.txt" in changed
 
-        server._worktree_agent.discard()
+        server._get_tab("0").worktree_agent.discard()
 
     @pytest.mark.slow
     def test_merge_commits_then_merges(self) -> None:
         """merge() should commit uncommitted changes, then merge."""
         server, events = _make_server(self.repo)
-        server._worktree_agent.run(
+        server._get_tab("0").worktree_agent.run(
             prompt_template="task1", work_dir=str(self.repo)
         )
 
-        wt_dir = server._worktree_agent._wt_dir
+        wt_dir = server._get_tab("0").worktree_agent._wt_dir
         assert wt_dir is not None
         (wt_dir / "agent_file.txt").write_text("agent wrote this")
 
         # Before merge: no commits on the branch
-        branch = server._worktree_agent._wt_branch
+        branch = server._get_tab("0").worktree_agent._wt_branch
         assert branch is not None
 
         # Merge should auto-commit the changes and merge
-        result = server._handle_worktree_action("merge")
+        result = server._handle_worktree_action("merge", "0")
         assert result["success"] is True
 
         # File should now be on original branch
@@ -802,34 +802,34 @@ class TestServerWorktreeWorkflow:
     def test_discard_drops_uncommitted_changes(self) -> None:
         """discard() should throw away uncommitted worktree changes."""
         server, events = _make_server(self.repo)
-        server._worktree_agent.run(
+        server._get_tab("0").worktree_agent.run(
             prompt_template="task1", work_dir=str(self.repo)
         )
 
-        wt_dir = server._worktree_agent._wt_dir
+        wt_dir = server._get_tab("0").worktree_agent._wt_dir
         assert wt_dir is not None
         (wt_dir / "agent_file.txt").write_text("should be discarded")
 
-        server._handle_worktree_action("discard")
+        server._handle_worktree_action("discard", "0")
         assert not _file_in_repo(self.repo, "agent_file.txt")
 
     def test_get_worktree_changed_files_detects_uncommitted(self) -> None:
         """_get_worktree_changed_files() must detect uncommitted changes."""
         server, events = _make_server(self.repo)
-        server._worktree_agent.run(
+        server._get_tab("0").worktree_agent.run(
             prompt_template="task1", work_dir=str(self.repo)
         )
 
-        wt_dir = server._worktree_agent._wt_dir
+        wt_dir = server._get_tab("0").worktree_agent._wt_dir
         assert wt_dir is not None
         (wt_dir / "new.txt").write_text("new file")
         (wt_dir / "README.md").write_text("modified\n")
 
-        changed = server._get_worktree_changed_files()
+        changed = server._get_worktree_changed_files("0")
         assert "README.md" in changed
         assert "new.txt" in changed
 
-        server._worktree_agent.discard()
+        server._get_tab("0").worktree_agent.discard()
 
     def test_run_task_inner_does_not_auto_commit(self) -> None:
         """_run_task_inner must NOT call _auto_commit_worktree().
@@ -842,11 +842,11 @@ class TestServerWorktreeWorkflow:
         # The patched super().run() returns immediately without making
         # file changes, so we check the run_task_inner flow by verifying
         # the worktree has 0 branch commits.
-        server._worktree_agent.run(
+        server._get_tab("0").worktree_agent.run(
             prompt_template="task1", work_dir=str(self.repo)
         )
 
-        wt_dir = server._worktree_agent._wt_dir
+        wt_dir = server._get_tab("0").worktree_agent._wt_dir
         assert wt_dir is not None
 
         # Create files to simulate what the agent tool would have done
@@ -854,12 +854,12 @@ class TestServerWorktreeWorkflow:
 
         # Now simulate what _run_task_inner does after the task:
         # It should detect changes WITHOUT committing
-        changed = server._get_worktree_changed_files()
+        changed = server._get_worktree_changed_files("0")
         assert len(changed) > 0
 
         # Verify nothing was committed
-        branch = server._worktree_agent._wt_branch
-        original = server._worktree_agent._original_branch
+        branch = server._get_tab("0").worktree_agent._wt_branch
+        original = server._get_tab("0").worktree_agent._original_branch
         r = subprocess.run(
             ["git", "-C", str(self.repo), "rev-list", "--count",
              f"{original}..{branch}"],
@@ -867,4 +867,4 @@ class TestServerWorktreeWorkflow:
         )
         assert r.stdout.strip() == "0"
 
-        server._worktree_agent.discard()
+        server._get_tab("0").worktree_agent.discard()

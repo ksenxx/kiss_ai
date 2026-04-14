@@ -73,13 +73,17 @@ class TestUserAnswerDrain:
     """Cover drain-stale-answers path in userAnswer handler (lines 169-170)."""
 
     def test_user_answer_drains_stale(self) -> None:
-        """Pre-filling queue before userAnswer should drain stale item."""
+        """Pre-filling a tab queue before userAnswer should drain stale item."""
+        import queue as queue_mod
+
         server = VSCodeServer()
-        # Pre-fill default queue with a stale answer
-        server._default_user_answer_queue.put("stale")
+        # Create a per-tab queue and pre-fill it with a stale answer
+        q: queue_mod.Queue[str] = queue_mod.Queue(maxsize=1)
+        q.put("stale")
+        server._get_tab("7").user_answer_queue = q
         # Send new answer — this should drain "stale" and put "new"
-        server._handle_command({"type": "userAnswer", "answer": "new"})
-        answer = server._default_user_answer_queue.get_nowait()
+        server._handle_command({"type": "userAnswer", "answer": "new", "tabId": "7"})
+        answer = q.get_nowait()
         assert answer == "new"
 
 
@@ -174,14 +178,19 @@ class TestAwaitUserResponseLoop:
 
     def test_await_user_response_delayed(self) -> None:
         """Answer arriving after first timeout iteration covers loop branch."""
+        import queue as queue_mod
+
         server = VSCodeServer()
         stop_event = threading.Event()
         server.printer._thread_local.stop_event = stop_event
-        # Use default queue (no tab_id set on thread-local)
+        server.printer._thread_local.tab_id = "42"
+        # Create a per-tab queue
+        q: queue_mod.Queue[str] = queue_mod.Queue(maxsize=1)
+        server._get_tab("42").user_answer_queue = q
 
         def delayed_answer() -> None:
             time.sleep(1.0)
-            server._default_user_answer_queue.put("delayed")
+            q.put("delayed")
 
         t = threading.Thread(target=delayed_answer, daemon=True)
         t.start()
@@ -215,11 +224,11 @@ class TestRunTaskDrain:
 
         server.printer.broadcast = cap  # type: ignore[assignment]
 
-        tab_id = 1
+        tab_id = "1"
         # Pre-fill a queue for this tab with a stale answer
         stale_q: queue.Queue[str] = queue.Queue(maxsize=1)
         stale_q.put("stale-answer")
-        server._user_answer_queues[tab_id] = stale_q
+        server._get_tab(tab_id).user_answer_queue = stale_q
 
         # Run a task — it will fail (no LLM key) but creates a fresh queue
         server._handle_command({
@@ -230,7 +239,7 @@ class TestRunTaskDrain:
         })
 
         # Wait for task thread to complete
-        thread = server._task_threads.get(tab_id)
+        thread = server._get_tab(tab_id).task_thread
         if thread:
             thread.join(timeout=30)
 

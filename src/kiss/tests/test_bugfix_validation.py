@@ -190,11 +190,11 @@ class TestB14FollowupTaskIdGuard:
             if "_generate_followup_async" in line:
                 # Look backwards for the task_id check
                 for j in range(i - 1, max(i - 5, -1), -1):
-                    if "_task_history_id is not None" in lines[j]:
+                    if "task_history_id is not None" in lines[j]:
                         return  # Found the guard
                 assert False, (
                     "_generate_followup_async called without checking "
-                    "_task_history_id is not None"
+                    "task_history_id is not None"
                 )
 
 

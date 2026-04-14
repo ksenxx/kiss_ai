@@ -461,27 +461,27 @@ class TestBrowserUIBranches:
     """Cover remaining branches in browser_ui.py."""
 
     def test_bash_stream_cancel_existing_timer(self) -> None:
-        """Bash stream cancels existing timer when flush interval reached (lines 247-248).
+        """Bash stream cancels existing timer when flush interval reached.
 
-        To hit lines 247-248, we need _bash_flush_timer to be non-None
-        when the main flush branch fires (time.monotonic() - _bash_last_flush >= 0.1).
-
-        We set _bash_last_flush to a value that makes the next call enter the
-        main flush branch, and manually set a timer to simulate the state.
+        Sets up per-tab bash state with a pending timer and old last_flush,
+        then verifies the timer is cancelled and buffer is flushed.
         """
         p = BaseBrowserPrinter()
+        p._thread_local.tab_id = "0"
         cq: queue.Queue = queue.Queue()
         p._client_queue = cq
-        # Set last flush to a time well in the past so the next call will flush
-        p._bash_last_flush = time.monotonic() - 1.0
-        # Set a timer manually to simulate pending timer state
-        p._bash_flush_timer = threading.Timer(10.0, p._flush_bash)
-        p._bash_flush_timer.daemon = True
-        p._bash_flush_timer.start()
+        # Set up per-tab bash state with old last_flush and a pending timer
+        with p._bash_lock:
+            bs = p._get_bash()
+            bs.last_flush = time.monotonic() - 1.0
+            bs.timer = threading.Timer(10.0, p._flush_bash)
+            bs.timer.daemon = True
+            bs.timer.start()
         # Now call bash_stream — should enter main flush branch, cancel timer
         p.print("line1\n", type="bash_stream")
         # Timer should be cancelled and set to None
-        assert p._bash_flush_timer is None
+        with p._bash_lock:
+            assert p._get_bash().timer is None
         events = []
         while not cq.empty():
             events.append(cq.get_nowait())

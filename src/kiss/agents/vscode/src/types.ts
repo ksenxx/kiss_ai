@@ -21,29 +21,29 @@ export interface SessionInfo {
 
 /** Messages from webview to extension */
 export type FromWebviewMessage =
-  | { type: 'submit'; prompt: string; model: string; attachments: Attachment[]; useWorktree?: boolean; useParallel?: boolean; tabId?: number }
-  | { type: 'stop'; tabId?: number }
-  | { type: 'selectModel'; model: string }
+  | { type: 'submit'; prompt: string; model: string; attachments: Attachment[]; useWorktree?: boolean; useParallel?: boolean; tabId?: string }
+  | { type: 'stop'; tabId?: string }
+  | { type: 'selectModel'; model: string; tabId?: string }
   | { type: 'getModels' }
   | { type: 'getHistory'; query?: string; offset?: number; generation?: number }
   | { type: 'getFiles'; prefix: string }
-  | { type: 'userAnswer'; answer: string }
+  | { type: 'userAnswer'; answer: string; tabId?: string }
   | { type: 'userActionDone' }
   | { type: 'openFile'; path: string; line?: number }
   | { type: 'recordFileUsage'; path: string }
-  | { type: 'ready'; activeChatId?: string }
-  | { type: 'resumeSession'; id: string }
+  | { type: 'ready'; activeChatId?: string; tabId?: string }
+  | { type: 'resumeSession'; id: string; tabId?: string }
   | { type: 'getWelcomeSuggestions' }
   | { type: 'complete'; query: string }
   | { type: 'mergeAction'; action: string }
-  | { type: 'newChat' }
+  | { type: 'newChat'; tabId?: string }
   | { type: 'generateCommitMessage' }
   | { type: 'runPrompt' }
   | { type: 'focusEditor' }
   | { type: 'getInputHistory' }
   | { type: 'worktreeAction'; action: 'merge' | 'discard' | 'do_nothing' }
   | { type: 'resolveDroppedPaths'; uris: string[] }
-  | { type: 'getAdjacentTask'; chatId: string; task: string; direction: 'prev' | 'next' };
+  | { type: 'getAdjacentTask'; tabId?: string; task: string; direction: 'prev' | 'next' };
 
 /** Messages from extension to webview (matches browser event protocol) */
 export type ToWebviewMessage =
@@ -60,7 +60,7 @@ export type ToWebviewMessage =
   | { type: 'system_prompt'; text: string }
   | { type: 'prompt'; text: string }
   // Lifecycle events
-  | { type: 'clear' }
+  | { type: 'clear'; chat_id?: string }
   | { type: 'clearChat' }
   | { type: 'task_done' }
   | { type: 'task_error'; text: string }
@@ -76,7 +76,6 @@ export type ToWebviewMessage =
   | { type: 'tasks_updated' }
   | { type: 'welcome_suggestions'; suggestions: Array<{text: string; has_events: boolean}> }
   | { type: 'task_events'; events: any[]; task?: string; chat_id?: string }
-  | { type: 'chatId'; chat_id: string }
   | { type: 'ghost'; suggestion: string; query: string }
   | { type: 'merge_data'; data: any; hunk_count: number }
   | { type: 'merge_started' }
@@ -92,7 +91,8 @@ export type ToWebviewMessage =
   | { type: 'worktree_progress'; message: string }
   | { type: 'worktree_result'; success: boolean; message: string }
   | { type: 'droppedPaths'; paths: string[] }
-  | { type: 'adjacent_task_events'; direction: string; task: string; events: any[] };
+  | { type: 'adjacent_task_events'; direction: string; task: string; events: any[] }
+  | { type: 'triggerStop' };
 
 /** Command sent to Python backend */
 export interface AgentCommand {
@@ -114,7 +114,6 @@ export interface AgentCommand {
   useWorktree?: boolean;
   useParallel?: boolean;
   task?: string;
-  chatId?: string;
   direction?: 'prev' | 'next';
-  tabId?: number;
+  tabId?: string;
 }

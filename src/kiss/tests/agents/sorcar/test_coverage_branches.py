@@ -42,13 +42,17 @@ class TestBaseBrowserPrinterBranches:
 
     def test_reset_clears_bash_buffer_and_timer(self):
         p = BaseBrowserPrinter()
-        p._bash_buffer.append("some text")
-        # Set up a timer
-        p._bash_flush_timer = threading.Timer(10.0, lambda: None)
-        p._bash_flush_timer.start()
+        p._thread_local.tab_id = "0"
+        with p._bash_lock:
+            bs = p._get_bash()
+            bs.buffer.append("some text")
+            bs.timer = threading.Timer(10.0, lambda: None)
+            bs.timer.start()
         p.reset()
-        assert p._bash_buffer == []
-        assert p._bash_flush_timer is None
+        with p._bash_lock:
+            bs = p._get_bash()
+            assert bs.buffer == []
+            assert bs.timer is None
 
     def test_remove_client_only_current(self):
         """remove_client only removes if cq matches current."""
@@ -259,14 +263,14 @@ class TestVSCodeServerBranches:
         # Simulate a running thread on tab 0
         t = threading.Thread(target=lambda: time.sleep(5), daemon=True)
         t.start()
-        server._task_threads[0] = t
-        server._handle_command({"type": "run", "prompt": "test", "tabId": 0})
+        server._get_tab("0").task_thread = t
+        server._handle_command({"type": "run", "prompt": "test", "tabId": "0"})
         assert any("already running" in e.get("text", "") for e in events)
         t.join(timeout=0.1)
 
     def test_handle_command_stop_no_event(self):
         server, events = self._make_server()
-        server._stop_events.clear()
+        # No tab has a stop event — stop is a no-op
         server._handle_command({"type": "stop"})
         # No crash
 
@@ -292,10 +296,10 @@ class TestVSCodeServerBranches:
         stop_event = threading.Event()
         server.printer._thread_local.stop_event = stop_event
         # Set up per-tab queue for tab 1
-        tab_id = 1
+        tab_id = "1"
         server.printer._thread_local.tab_id = tab_id
         user_q: queue.Queue[str] = queue.Queue(maxsize=1)
-        server._user_answer_queues[tab_id] = user_q
+        server._get_tab(tab_id).user_answer_queue = user_q
 
         def answer():
             time.sleep(0.1)
@@ -381,7 +385,8 @@ class TestVSCodeServerBranches:
     def test_emit_pending_worktree_with_branch(self, tmp_path):
         """_emit_pending_worktree emits worktree_done when branch exists."""
         server, events = self._make_server()
-        server._use_worktree = True
+        tab = server._get_tab("0")
+        tab.use_worktree = True
         repo = tmp_path / "repo"
         repo.mkdir()
         subprocess.run(["git", "init"], cwd=str(repo), capture_output=True)
@@ -394,7 +399,7 @@ class TestVSCodeServerBranches:
         subprocess.run(["git", "commit", "-m", "init"],
                        cwd=str(repo), capture_output=True)
         # Create a branch matching the worktree agent's chat_id
-        chat_id = server._worktree_agent._chat_id
+        chat_id = tab.worktree_agent._chat_id
         branch = f"kiss/wt-{chat_id[:12]}-1234567890"
         subprocess.run(["git", "branch", branch],
                        cwd=str(repo), capture_output=True)
@@ -412,7 +417,7 @@ class TestVSCodeServerBranches:
                        cwd=str(repo), capture_output=True)
 
         server.work_dir = str(repo)
-        server._emit_pending_worktree()
+        server._emit_pending_worktree("0")
         wt_events = [e for e in events if e.get("type") == "worktree_done"]
         assert len(wt_events) == 1
         assert wt_events[0]["branch"] == branch

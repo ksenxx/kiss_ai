@@ -29,6 +29,9 @@
   let ghostTimer = null;
   let currentGhost = '';
 
+  // Track which tab asked a user question so the answer routes correctly
+  let askUserTabId = null;
+
   // Infinite scroll state for history sidebar
   var historyOffset = 0;
   var historyLoading = false;
@@ -36,7 +39,7 @@
   var historyGeneration = 0;
 
   // Adjacent task scroll state (Cursor-style chat thread navigation)
-  var currentChatId = '';     // chat session identifier
+  // currentChatId removed: tab.id === chat_id (unified)
   var currentTaskName = '';   // the originally loaded task
   var oldestLoadedTask = '';  // topmost task in the view (for scrolling up)
   var newestLoadedTask = '';  // bottommost task in the view (for scrolling down)
@@ -50,20 +53,28 @@
 
 
   // --- Chat tabs state ---
-  var tabIdCounter = 0;
+  /** Generate a UUID v4 string for tab identification. */
+  function genTabId() {
+    if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+      var r = Math.random() * 16 | 0;
+      return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+    });
+  }
+
   var tabs = [];        // array of tab objects (see makeTab for fields)
-  var activeTabId = -1;
+  var activeTabId = '';
 
   function makeTab(title) {
-    var id = ++tabIdCounter;
     return {
-      id: id,
+      id: genTabId(),
       title: title || 'new chat',
       isRunning: false,
       outputFragment: null,
       taskPanelHTML: '',
       taskPanelVisible: false,
-      chatId: '',
+      statusTextContent: 'Ready',
+      statusTextColor: 'var(--green)',
       statusTokensText: '',
       statusBudgetText: '',
       statusStepsText: '',
@@ -109,7 +120,8 @@
     while (O.firstChild) tab.outputFragment.appendChild(O.firstChild);
     tab.taskPanelHTML = taskPanel ? taskPanel.textContent : '';
     tab.taskPanelVisible = taskPanel ? taskPanel.classList.contains('visible') : false;
-    tab.chatId = currentChatId;
+    tab.statusTextContent = statusText ? statusText.textContent : 'Ready';
+    tab.statusTextColor = statusText ? statusText.style.color : 'var(--green)';
     tab.statusTokensText = statusTokens ? statusTokens.textContent : '';
     tab.statusBudgetText = statusBudget ? statusBudget.textContent : '';
     tab.statusStepsText = statusSteps ? statusSteps.textContent : '';
@@ -161,8 +173,8 @@
       if (tab.taskPanelVisible) taskPanel.classList.add('visible');
       else taskPanel.classList.remove('visible');
     }
-    currentChatId = tab.chatId || '';
     currentTaskName = tab.taskPanelHTML || '';
+    if (statusText) { statusText.textContent = tab.statusTextContent || 'Ready'; statusText.style.color = tab.statusTextColor || 'var(--green)'; }
     if (statusTokens) statusTokens.textContent = tab.statusTokensText;
     if (statusBudget) statusBudget.textContent = tab.statusBudgetText;
     if (statusSteps) statusSteps.textContent = tab.statusStepsText;
@@ -292,15 +304,9 @@
       t0 = null;
       stopTimer();
       removeSpinner();
-      statusText.textContent = 'Ready';
     }
-    // Tell backend to resume this tab's session
-    if (tab.chatId) {
-      vscode.postMessage({ type: 'resumeSession', id: tab.chatId });
-    } else {
-      vscode.postMessage({ type: 'newChat' });
-      vscode.postMessage({ type: 'getWelcomeSuggestions' });
-    }
+    // Tell backend to resume this tab's session (tab.id === chat_id)
+    vscode.postMessage({ type: 'resumeSession', id: tab.id, tabId: activeTabId });
   }
 
   function closeTab(tabId) {
@@ -323,14 +329,8 @@
         t0 = null;
         stopTimer();
         removeSpinner();
-        statusText.textContent = 'Ready';
       }
-      if (newTab.chatId) {
-        vscode.postMessage({ type: 'resumeSession', id: newTab.chatId });
-      } else {
-        vscode.postMessage({ type: 'newChat' });
-        vscode.postMessage({ type: 'getWelcomeSuggestions' });
-      }
+      vscode.postMessage({ type: 'resumeSession', id: newTab.id, tabId: activeTabId });
     }
     renderTabBar();
     persistTabState();
@@ -404,7 +404,6 @@
     clearOutput();
     resetOutputState();
     resetAdjacentState();
-    currentChatId = '';
     currentTaskName = '';
     removeSpinner();
     clearWorktreeBar();
@@ -430,7 +429,7 @@
     setRunningState(false);
     stopTimer();
     statusText.textContent = 'Ready';
-    vscode.postMessage({ type: 'newChat' });
+    vscode.postMessage({ type: 'newChat', tabId: activeTabId });
     vscode.postMessage({ type: 'getWelcomeSuggestions' });
   }
 
@@ -439,7 +438,6 @@
     if (!tab) return;
     var t = (title || '').trim();
     tab.title = t ? (t.length > 30 ? t.substring(0, 30) + '\u2026' : t) : 'new chat';
-    tab.chatId = currentChatId;
     renderTabBar();
     persistTabState();
   }
@@ -447,13 +445,12 @@
   /** Persist lightweight tab metadata via vscode.setState for cross-restart restore. */
   function persistTabState() {
     var serialized = tabs.map(function(t) {
-      // Always use currentChatId for the active tab so the persisted
+      // Always use activeTabId for the active tab so the persisted
       // chatId stays in sync even when saveCurrentTab() hasn't run.
-      var chatId = (t.id === activeTabId) ? currentChatId : t.chatId;
-      return { title: t.title, chatId: chatId };
+      return { title: t.title, chatId: t.id };
     });
     var activeIdx = tabs.findIndex(function(t) { return t.id === activeTabId; });
-    vscode.setState({ tabs: serialized, activeTabIndex: activeIdx, chatId: currentChatId });
+    vscode.setState({ tabs: serialized, activeTabIndex: activeIdx, chatId: activeTabId });
   }
 
   // Initialize tabs — restore from saved state if available, else create one default tab
@@ -462,17 +459,16 @@
     var saved = vscode.getState();
     if (saved && saved.tabs && saved.tabs.length > 0) {
       tabs = [];
-      tabIdCounter = 0;
       saved.tabs.forEach(function(st) {
         var tab = makeTab(st.title);
-        tab.chatId = st.chatId || '';
+        // Restore tab.id from persisted chatId (tab_id === chat_id)
+        if (st.chatId) tab.id = st.chatId;
         tabs.push(tab);
       });
       var idx = saved.activeTabIndex || 0;
       if (idx >= 0 && idx < tabs.length) {
         activeTabId = tabs[idx].id;
-        currentChatId = tabs[idx].chatId || '';
-        _restoredActiveChatId = currentChatId;
+        _restoredActiveChatId = activeTabId;
       } else {
         activeTabId = tabs[0].id;
       }
@@ -1053,7 +1049,7 @@
     if (isRunning && e.deltaY < 0) _scrollLock = true;
 
     // Adjacent task loading via overscroll detection
-    if (!isRunning && !adjacentLoading && currentChatId && currentTaskName) {
+    if (!isRunning && !adjacentLoading && activeTabId && currentTaskName) {
       var atTop = O.scrollTop <= 0;
       var atBottom = O.scrollTop + O.clientHeight >= O.scrollHeight - 2;
 
@@ -1068,7 +1064,7 @@
           overscrollDir = '';
           adjacentLoading = true;
           showAdjacentLoader('prev');
-          vscode.postMessage({ type: 'getAdjacentTask', chatId: currentChatId, task: oldestLoadedTask, direction: 'prev' });
+          vscode.postMessage({ type: 'getAdjacentTask', tabId: activeTabId, task: oldestLoadedTask, direction: 'prev' });
         }
       } else if (atBottom && e.deltaY > 0 && !noNextTask && newestLoadedTask) {
         // Scrolling down at bottom — load task after the newest loaded
@@ -1081,7 +1077,7 @@
           overscrollDir = '';
           adjacentLoading = true;
           showAdjacentLoader('next');
-          vscode.postMessage({ type: 'getAdjacentTask', chatId: currentChatId, task: newestLoadedTask, direction: 'next' });
+          vscode.postMessage({ type: 'getAdjacentTask', tabId: activeTabId, task: newestLoadedTask, direction: 'next' });
         }
       } else {
         overscrollAccum = 0;
@@ -1195,9 +1191,11 @@
       renderAutocomplete(ev.files || []);
       break;
     case 'askUser':
+      askUserTabId = ev.tabId !== undefined ? ev.tabId : activeTabId;
       showAskUserModal(ev.question);
       break;
     case 'error':
+      if (ev.tabId !== undefined && ev.tabId !== activeTabId) break;
       addError(ev.text);
       break;
     case 'clear': {
@@ -1233,20 +1231,24 @@
     case 'welcome_suggestions':
       renderWelcomeSuggestions(ev.suggestions || []);
       break;
-    case 'chatId': {
-      var newChatId = ev.chat_id || '';
-      if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
-        // Event is for a background tab; store chatId in that tab's saved state
-        var cidTab = tabs.find(function(t) { return t.id === ev.tabId; });
-        if (cidTab) { cidTab.chatId = newChatId; persistTabState(); }
-      } else {
-        currentChatId = newChatId;
-        persistTabState();
-      }
+    case 'tab_id_changed': {
+      // Backend re-keyed tab: update local tab id to match new chat_id
+      var oldId = ev.oldTabId;
+      var newId = ev.newTabId;
+      var chTab = tabs.find(function(t) { return t.id === oldId; });
+      if (chTab) chTab.id = newId;
+      if (activeTabId === oldId) activeTabId = newId;
+      renderTabBar();
+      persistTabState();
       break;
     }
     case 'task_events':
-      if (ev.chat_id) currentChatId = ev.chat_id;
+      // Re-key tab if the backend moved it to a new chat_id
+      if (ev.oldTabId && ev.chat_id && ev.oldTabId !== ev.chat_id) {
+        var teTab = tabs.find(function(t) { return t.id === ev.oldTabId; });
+        if (teTab) teTab.id = ev.chat_id;
+        if (activeTabId === ev.oldTabId) activeTabId = ev.chat_id;
+      }
       if (ev.task) {
         currentTaskName = ev.task;
         resetAdjacentState();  // sets oldest/newest to currentTaskName
@@ -1305,6 +1307,9 @@
       }
       break;
     }
+    case 'triggerStop':
+      vscode.postMessage({ type: 'stop', tabId: activeTabId });
+      break;
     case 'appendToInput':
       if (ev.text) {
         inp.value = inp.value ? inp.value + '\n' + ev.text : ev.text;
@@ -1352,7 +1357,10 @@
     }
     case 'merge_started':
       if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
-        switchToTab(ev.tabId);
+        // Background tab's merge: update its saved state without switching
+        var bgMergeTab = tabs.find(function(t) { return t.id === ev.tabId; });
+        if (bgMergeTab) bgMergeTab.isMerging = true;
+        break;
       }
       isMerging = true;
       showMergeToolbar();
@@ -1594,21 +1602,21 @@
     mergeBtn.textContent = 'Auto-commit and merge';
     mergeBtn.addEventListener('click', function() {
       disableWtBtns();
-      vscode.postMessage({ type: 'worktreeAction', action: 'merge' });
+      vscode.postMessage({ type: 'worktreeAction', action: 'merge', tabId: activeTabId });
     });
 
     var discardBtn = mkEl('button', 'wt-btn wt-discard');
     discardBtn.textContent = 'Discard';
     discardBtn.addEventListener('click', function() {
       disableWtBtns();
-      vscode.postMessage({ type: 'worktreeAction', action: 'discard' });
+      vscode.postMessage({ type: 'worktreeAction', action: 'discard', tabId: activeTabId });
     });
 
     var doNothingBtn = mkEl('button', 'wt-btn wt-donothing');
     doNothingBtn.textContent = 'Do Nothing';
     doNothingBtn.addEventListener('click', function() {
       disableWtBtns();
-      vscode.postMessage({ type: 'worktreeAction', action: 'do_nothing' });
+      vscode.postMessage({ type: 'worktreeAction', action: 'do_nothing', tabId: activeTabId });
     });
 
     btns.appendChild(mergeBtn);
@@ -1673,7 +1681,7 @@
     };
     Object.keys(mergeActions).forEach(function(id) {
       document.getElementById(id).addEventListener('click', function() {
-        vscode.postMessage({ type: 'mergeAction', action: mergeActions[id] });
+        vscode.postMessage({ type: 'mergeAction', action: mergeActions[id], tabId: activeTabId });
       });
     });
     sb();
@@ -1690,7 +1698,7 @@
   function init() {
     setupEventListeners();
     renderTabBar();
-    vscode.postMessage({ type: 'ready', activeChatId: _restoredActiveChatId });
+    vscode.postMessage({ type: 'ready', activeChatId: _restoredActiveChatId, tabId: activeTabId });
   }
 
   function setupEventListeners() {
@@ -1759,7 +1767,7 @@
     inp.addEventListener('blur', function() { clearGhost(); hideAC(); });
     autocomplete.addEventListener('mousedown', function(e) { e.preventDefault(); });
     stopBtn.addEventListener('click', function() {
-      vscode.postMessage({ type: 'stop' });
+      vscode.postMessage({ type: 'stop', tabId: activeTabId });
     });
     uploadBtn.addEventListener('click', function() {
       var input = document.createElement('input');
@@ -1863,9 +1871,12 @@
     });
     askUserSubmit.addEventListener('click', function() {
       var answer = askUserInput.value;
-      vscode.postMessage({ type: 'userAnswer', answer: answer });
+      var msg = { type: 'userAnswer', answer: answer };
+      if (askUserTabId !== null) msg.tabId = askUserTabId;
+      vscode.postMessage(msg);
       askUserModal.style.display = 'none';
       askUserInput.value = '';
+      askUserTabId = null;
     });
     askUserInput.addEventListener('keydown', function(e) {
       if (e.key === 'Enter') {
@@ -2045,7 +2056,7 @@
     modelName.textContent = name;
     closeModelDD();
     renderModelList('');
-    vscode.postMessage({ type: 'selectModel', model: name });
+    vscode.postMessage({ type: 'selectModel', model: name, tabId: activeTabId });
   }
 
   function closeModelDD() {
@@ -2097,7 +2108,7 @@
       div.addEventListener('click', function() {
         if (s.has_events && (s.chat_id || s.id)) {
           setTaskText(s.preview || s.title || '');
-          vscode.postMessage({ type: 'resumeSession', id: s.chat_id || s.id });
+          vscode.postMessage({ type: 'resumeSession', id: s.chat_id || s.id, tabId: activeTabId });
         } else {
           inp.value = s.preview || s.title || ''; syncClearBtn();
           inp.focus();

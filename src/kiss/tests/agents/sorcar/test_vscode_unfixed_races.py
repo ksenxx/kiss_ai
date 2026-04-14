@@ -36,47 +36,48 @@ class TestRC1StopEventProtected(unittest.TestCase):
     """RC1 fix: _stop_event read/write is now protected by _state_lock."""
 
     def test_stop_event_created_inside_lock(self) -> None:
-        """Verify _stop_events[tab_id] assignment is inside a _state_lock block."""
+        """Verify tab.stop_event assignment is inside a _state_lock block."""
         source = inspect.getsource(VSCodeServer._run_task_inner)
         lines = source.split("\n")
         for i, line in enumerate(lines):
-            if "self._stop_events[" in line.strip() and "=" in line:
+            if "tab.stop_event" in line.strip() and "=" in line:
                 in_lock = False
                 for j in range(i - 1, max(0, i - 15), -1):
                     if "_state_lock" in lines[j]:
                         in_lock = True
                         break
                 assert in_lock, (
-                    "_stop_events[tab_id] assignment should be inside _state_lock"
+                    "tab.stop_event assignment should be inside _state_lock"
                 )
                 return
-        self.fail("Could not find _stop_events assignment in _run_task_inner")
+        self.fail("Could not find tab.stop_event assignment in _run_task_inner")
 
     def test_stop_event_cleared_inside_lock(self) -> None:
-        """Verify _stop_events.pop(tab_id) is in _run_task finally block."""
+        """Verify tab.stop_event = None is in _run_task finally block."""
         source = inspect.getsource(VSCodeServer._run_task)
-        assert "self._stop_events.pop(" in source, (
-            "_stop_events.pop(tab_id) should be in _run_task finally"
+        assert "tab.stop_event = None" in source, (
+            "tab.stop_event = None should be in _run_task finally"
         )
 
     def test_stop_task_reads_under_lock(self) -> None:
-        """Verify _stop_task reads _stop_events under _state_lock."""
+        """Verify _stop_task reads tab.stop_event under _state_lock."""
         source = inspect.getsource(VSCodeServer._stop_task)
         assert "_state_lock" in source, (
-            "_stop_task should use _state_lock to read _stop_events"
+            "_stop_task should use _state_lock to read tab.stop_event"
         )
-        assert "self._stop_events.get(" in source
+        assert "tab.stop_event" in source
 
     def test_stop_task_atomic_read(self) -> None:
         """Demonstrate that _stop_task reads stop event atomically."""
         server = VSCodeServer()
-        tab_id = 1
+        tab_id = "1"
+        tab = server._get_tab(tab_id)
         with server._state_lock:
-            server._stop_events[tab_id] = threading.Event()
+            tab.stop_event = threading.Event()
         # _stop_task reads under lock
         server._stop_task(tab_id)
         # The stop event should be set
-        assert server._stop_events[tab_id].is_set()
+        assert tab.stop_event.is_set()
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +113,7 @@ class TestRC2TaskThreadProtected(unittest.TestCase):
         stop = threading.Event()
         thread = threading.Thread(target=lambda: stop.wait(), daemon=True)
         thread.start()
-        server._task_threads[99] = thread
+        server._get_tab("99").task_thread = thread
 
         try:
             # resumeSession should still proceed (per-tab isolation)
@@ -120,7 +121,7 @@ class TestRC2TaskThreadProtected(unittest.TestCase):
         finally:
             stop.set()
             thread.join()
-            server._task_threads.pop(99, None)
+            server._get_tab("99").task_thread = None
 
 
 # ---------------------------------------------------------------------------
@@ -129,24 +130,24 @@ class TestRC2TaskThreadProtected(unittest.TestCase):
 
 
 class TestRC3UseWorktreeProtected(unittest.TestCase):
-    """RC3 fix: _use_worktree is set inside _state_lock in _run_task_inner."""
+    """RC3 fix: use_worktree is set inside _state_lock in _run_task_inner."""
 
     def test_use_worktree_written_inside_lock(self) -> None:
-        """Verify _use_worktree is set inside _state_lock."""
+        """Verify use_worktree is set inside _state_lock."""
         source = inspect.getsource(VSCodeServer._run_task_inner)
         lines = source.split("\n")
         for i, line in enumerate(lines):
-            if "self._use_worktree" in line and "=" in line:
+            if "tab.use_worktree" in line and "=" in line:
                 in_lock = False
                 for j in range(i - 1, max(0, i - 15), -1):
                     if "_state_lock" in lines[j]:
                         in_lock = True
                         break
                 assert in_lock, (
-                    "_use_worktree should be set inside _state_lock (RC3 fix)"
+                    "use_worktree should be set inside _state_lock (RC3 fix)"
                 )
                 return
-        self.fail("Could not find _use_worktree assignment")
+        self.fail("Could not find tab.use_worktree assignment")
 
 
 # ---------------------------------------------------------------------------
@@ -230,11 +231,13 @@ class TestRC5FlushBashNoGenerationTOCTOU(unittest.TestCase):
                 broadcasts.append(event)
 
         printer = TestPrinter()
+        printer._thread_local.tab_id = "0"
 
-        # Fill the buffer and reset
+        # Fill the per-tab buffer and reset
         with printer._bash_lock:
-            printer._bash_buffer.append("stale output")
-        printer.reset()  # clears buffer and increments generation
+            bs = printer._get_bash()
+            bs.buffer.append("stale output")
+        printer.reset()  # clears buffer
         printer._flush_bash()  # should not broadcast anything
 
         sys_outputs = [e for e in broadcasts if e.get("type") == "system_output"]
@@ -259,12 +262,13 @@ class TestRC6FollowupAtomicCheckAndBroadcast(unittest.TestCase):
     def test_toctou_prevented(self) -> None:
         """Demonstrate the generation check + broadcast are atomic."""
         server = VSCodeServer()
+        tab = server._get_tab("0")
         with server._state_lock:
-            server._task_generation = 1
+            tab.task_generation = 1
 
         # Simulate followup thread checking under lock
         with server._state_lock:
-            matches = server._task_generation == 1
+            matches = tab.task_generation == 1
         assert matches
 
         # New task can't change generation while lock is held
@@ -322,24 +326,25 @@ class TestRC8FreshQueuePerTask(unittest.TestCase):
     def test_fresh_queue_created(self) -> None:
         """Verify _run_task_inner creates a fresh per-tab Queue."""
         source = inspect.getsource(VSCodeServer._run_task_inner)
-        assert "self._user_answer_queues[tab_id]" in source, (
+        assert "tab.user_answer_queue" in source, (
             "_run_task_inner should create a fresh per-tab Queue (RC8 fix)"
         )
 
     def test_answer_not_stolen_by_new_task(self) -> None:
         """Demonstrate that per-tab queues prevent answer theft."""
         server = VSCodeServer()
-        tab_id = 1
+        tab_id = "1"
+        tab = server._get_tab(tab_id)
         old_queue: queue.Queue[str] = queue.Queue(maxsize=1)
         old_queue.put("user_answer")
-        server._user_answer_queues[tab_id] = old_queue
+        tab.user_answer_queue = old_queue
 
         # New task creates a fresh queue for the same tab
         new_queue: queue.Queue[str] = queue.Queue(maxsize=1)
-        server._user_answer_queues[tab_id] = new_queue
+        tab.user_answer_queue = new_queue
 
         # Old answer is in the old queue, not the new one
-        assert server._user_answer_queues[tab_id].empty()
+        assert tab.user_answer_queue.empty()
         assert not old_queue.empty()
         assert old_queue.get_nowait() == "user_answer"
 
@@ -444,10 +449,10 @@ class TestRC11StdoutBufferFlushOnClose(unittest.TestCase):
 class TestRC12GetLastSessionGuarded(unittest.TestCase):
     """RC12 fix: _get_last_session guards against concurrent running task."""
 
-    def test_has_task_threads_check(self) -> None:
-        """Verify _get_last_session checks _task_threads."""
+    def test_has_task_thread_check(self) -> None:
+        """Verify _get_last_session checks tab.task_thread."""
         source = inspect.getsource(VSCodeServer._get_last_session)
-        assert "_task_threads" in source
+        assert "task_thread" in source
         assert "_state_lock" in source
 
     def test_blocked_when_running(self) -> None:
@@ -459,7 +464,7 @@ class TestRC12GetLastSessionGuarded(unittest.TestCase):
         stop = threading.Event()
         thread = threading.Thread(target=lambda: stop.wait(), daemon=True)
         thread.start()
-        server._task_threads[0] = thread
+        server._get_tab("0").task_thread = thread
 
         try:
             server._get_last_session()
@@ -471,7 +476,7 @@ class TestRC12GetLastSessionGuarded(unittest.TestCase):
         finally:
             stop.set()
             thread.join()
-            server._task_threads.pop(0, None)
+            server._get_tab("0").task_thread = None
 
 
 # ---------------------------------------------------------------------------
