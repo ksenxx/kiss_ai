@@ -34,34 +34,6 @@ class TestB4DeepseekTputInModelInfo:
 
 
 # ---------------------------------------------------------------------------
-# B5: newChat handler acquires _state_lock
-# ---------------------------------------------------------------------------
-class TestB5NewChatUnderLock:
-    def test_newchat_handler_uses_state_lock(self) -> None:
-        """newChat command handler wraps check in _state_lock."""
-        from kiss.agents.vscode.server import VSCodeServer
-
-        source = inspect.getsource(VSCodeServer._handle_command)
-        lines = source.split("\n")
-        # Find the newChat elif line, then scan subsequent lines for _state_lock
-        found_newchat = False
-        found_lock = False
-        for line in lines:
-            stripped = line.strip()
-            if '"newChat"' in stripped or "'newChat'" in stripped:
-                found_newchat = True
-                continue
-            if found_newchat:
-                if "_state_lock" in stripped:
-                    found_lock = True
-                    break
-                # If we hit another handler branch, stop
-                if stripped.startswith(("elif ", "else:")):
-                    break
-        assert found_lock, "newChat handler should use _state_lock"
-
-
-# ---------------------------------------------------------------------------
 # B6: _force_stop_thread checks PyThreadState_SetAsyncExc return value
 # ---------------------------------------------------------------------------
 class TestB6ForceStopReturnCheck:

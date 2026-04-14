@@ -887,12 +887,12 @@ class VSCodeServer:
             except OSError:
                 return ""
 
-        # If the query ends with whitespace the user has moved past the word;
-        # don't complete a word that is no longer being typed.
-        if query != query.rstrip():
+        # If the query ends with a non-word character the user has moved past
+        # the identifier; don't complete a word that is no longer being typed.
+        if query and not (query[-1].isalnum() or query[-1] == "_" or query[-1] == "."):
             return ""
         # Extract the trailing token (may include dots for chains)
-        m = re.search(r"([\w][\w.]*)[^\w]*$", query)
+        m = re.search(r"([\w][\w.]*)$", query)
         if not m:
             return ""
         partial = m.group(1)

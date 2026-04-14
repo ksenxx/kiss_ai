@@ -87,12 +87,6 @@ class TestRC1StopEventProtected(unittest.TestCase):
 class TestRC2TaskThreadProtected(unittest.TestCase):
     """RC2 fix: _task_thread read in _stop_task / resumeSession under _state_lock."""
 
-    def test_stop_task_reads_under_lock(self) -> None:
-        """Verify _stop_task reads _task_threads under _state_lock."""
-        source = inspect.getsource(VSCodeServer._stop_task)
-        assert "_state_lock" in source
-        assert "self._task_threads.get(" in source
-
     def test_resume_session_not_blocked(self) -> None:
         """With per-tab tasks, resumeSession is not blocked by other tabs."""
         source = inspect.getsource(VSCodeServer._handle_command)

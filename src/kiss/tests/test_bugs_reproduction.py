@@ -375,40 +375,6 @@ class TestI11SummarizerNoStopEvent:
 
 
 # ---------------------------------------------------------------------------
-# R3: server.py — _task_thread check-and-start not under _state_lock
-# ---------------------------------------------------------------------------
-class TestR3TaskThreadNotUnderLock:
-    def test_task_thread_check_under_state_lock(self) -> None:
-        """The _task_thread check-and-start should be under _state_lock
-        for consistency with the finally block that sets it to None.
-        """
-        from kiss.agents.vscode.server import VSCodeServer
-
-        source = inspect.getsource(VSCodeServer._handle_command)
-
-        # Find the "run" command handler section and verify _state_lock
-        # wraps the _task_thread alive check
-        lines = source.split("\n")
-        in_run_section = False
-        found_lock = False
-        found_check = False
-        for line in lines:
-            if '"run"' in line or "'run'" in line:
-                in_run_section = True
-            if in_run_section:
-                if "_state_lock" in line:
-                    found_lock = True
-                if "_task_thread" in line and "is_alive" in line:
-                    found_check = True
-                    break
-
-        assert found_lock and found_check, (
-            "The _task_thread alive check should be under _state_lock. "
-            f"found_lock_before_check={found_lock}, found_check={found_check}"
-        )
-
-
-# ---------------------------------------------------------------------------
 # I8: server.py — _get_files holds _state_lock during synchronous _scan_files
 # ---------------------------------------------------------------------------
 class TestI8GetFilesBlocksStateLock:

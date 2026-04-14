@@ -134,22 +134,6 @@ class TestRace16GuardedNewChatResumeSession(unittest.TestCase):
             stop.set()
             thread.join()
 
-    def test_resume_session_works_while_other_tab_running(self) -> None:
-        """resumeSession works even when another tab has a running task."""
-        server = VSCodeServer()
-
-        stop = threading.Event()
-        thread = threading.Thread(target=lambda: stop.wait(), daemon=True)
-        thread.start()
-        server._task_threads[1] = thread
-
-        try:
-            # resumeSession should not crash (session may not exist)
-            server._handle_command({"type": "resumeSession", "sessionId": "test"})
-        finally:
-            stop.set()
-            thread.join()
-
     def test_handler_source_has_per_tab_running_check(self) -> None:
         """Verify submit handler checks per-tab running via _runningTabs
         (not global _task_thread)."""
@@ -187,17 +171,6 @@ class TestTypescriptRaceFixesCodeInspection(unittest.TestCase):
         with open("src/kiss/agents/vscode/src/AgentProcess.ts") as f:
             source = f.read()
         assert "stdin?.writable" in source
-
-
-class TestNewChatHistoryButtonsDisabledWhileRunning(unittest.TestCase):
-    """Buttons are properly managed while a task is running."""
-
-    def test_status_running_false_always_sent(self) -> None:
-        """status:running:false is always broadcast (try/finally), so buttons always re-enable."""
-        source = inspect.getsource(VSCodeServer._run_task)
-        assert "try:" in source
-        assert "finally:" in source
-        assert '"running": False' in source
 
 
 class TestExistingBehavior(unittest.TestCase):

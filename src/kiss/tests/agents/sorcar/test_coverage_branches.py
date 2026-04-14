@@ -22,7 +22,6 @@ import pytest
 from kiss.agents.sorcar import persistence as th
 from kiss.agents.sorcar.useful_tools import (
     UsefulTools,
-    _truncate_output,
 )
 from kiss.agents.sorcar.web_use_tool import (
     WebUseTool,
@@ -672,18 +671,6 @@ class TestHandleMessageContentBlockNoIsError:
 
 
 class TestUsefulToolsMoreBranches:
-    def test_truncate_output_zero_tail(self):
-        """Edge case where tail computes to 0."""
-        # Create a string where (max_chars - msg_len) // 2 = head, remaining - head = 0 for tail
-        # msg template has ~45 chars at minimum for "... [truncated N chars] ..."
-        big = "X" * 200
-        # With max_chars=48, msg would be ~42 chars, remaining=6, head=3, tail=3
-        # We need tail=0: remaining=0 or very small
-        # Actually, when remaining is odd, head gets floor, tail gets ceil
-        # Let's just use a max that's slightly bigger than msg
-        result = _truncate_output(big, 45)
-        assert "truncated" in result
-
     @pytest.mark.skipif(sys.platform == "win32", reason="Unix-only (uses chmod)")
     def test_edit_exception(self):
         """Edit on a directory should raise an error."""

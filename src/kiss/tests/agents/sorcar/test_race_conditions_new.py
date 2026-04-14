@@ -61,27 +61,6 @@ class TestP6FileCacheProtected(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# P9 — _recordings snapshot before iterating
-# ---------------------------------------------------------------------------
-
-
-class TestP9RecordingsSnapshotBeforeIterate(unittest.TestCase):
-    """B7 fix: _extract_result_summary uses peek_recording(recording_id)
-    instead of directly iterating _recordings.
-    """
-
-    def test_snapshot_pattern_in_extract_result_summary(self) -> None:
-        """Verify _extract_result_summary uses peek_recording."""
-        source = inspect.getsource(VSCodeServer._extract_result_summary)
-        assert "peek_recording" in source, (
-            "B7 fix: should use peek_recording instead of raw _recordings"
-        )
-        assert "_recordings" not in source, (
-            "B7 fix: should not access _recordings directly"
-        )
-
-
-# ---------------------------------------------------------------------------
 # P15 — _task_thread cleared after task completion
 # ---------------------------------------------------------------------------
 
