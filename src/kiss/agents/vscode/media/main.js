@@ -1035,8 +1035,8 @@
     if (!statusTokens || !statusBudget) return;
     var tm = text.match(/Tokens:\s*(\d+)\/\d+/);
     var bm = text.match(/Budget:\s*(\$[0-9.]+)\/\$[0-9.]+/);
-    if (tm) statusTokens.textContent = 'tokens: ' + tm[1];
-    if (bm) statusBudget.textContent = bm[1];
+    if (tm) statusTokens.textContent = 'Tokens: ' + tm[1];
+    if (bm) statusBudget.textContent = 'Budget: ' + bm[1];
   }
 
   function clearUsageMetrics() {
