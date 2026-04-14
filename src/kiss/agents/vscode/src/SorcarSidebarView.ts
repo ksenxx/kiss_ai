@@ -505,6 +505,11 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
   /** Focus the chat input in the sidebar. */
   public async focusChatInput(): Promise<void> {
+    if (!this._view) {
+      // Webview not yet resolved — trigger resolution by focusing the view
+      await vscode.commands.executeCommand('kissSorcar.chatViewSecondary.focus');
+      await new Promise(r => setTimeout(r, 200));
+    }
     if (this._view) {
       this._view.show(true);
       await new Promise(r => setTimeout(r, 150));
