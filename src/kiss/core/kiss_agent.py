@@ -300,6 +300,14 @@ class KISSAgent(Base):
         self._update_tokens_and_budget_from_response(response)
         usage_info = self._get_usage_info_string()
         self.model.set_usage_info_for_messages(usage_info)
+        if self.printer:
+            self.printer.print(
+                usage_info,
+                type="usage_info",
+                total_tokens=self.total_tokens_used,
+                cost=f"${self.budget_used:.4f}",
+                total_steps=self.step_count,
+            )
 
         if not function_calls:  # pragma: no cover – requires LLM returning zero tool calls
             self._add_message(

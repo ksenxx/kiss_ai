@@ -68,6 +68,9 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
         self.stop_event = threading.Event()
         self._thread_local = threading.local()
         self._recordings: dict[int, list[dict[str, Any]]] = {}
+        self.tokens_offset: int = 0
+        self.budget_offset: float = 0.0
+        self.steps_offset: int = 0
 
     def reset(self) -> None:
         """Reset internal streaming and tool-parsing state for a new turn."""
@@ -290,6 +293,24 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
                         "is_error": kwargs.get("is_error", False),
                     }
                 )
+            return ""
+        if type == "usage_info":
+            raw_tokens = kwargs.get("total_tokens", 0)
+            raw_cost = kwargs.get("cost", "N/A")
+            raw_steps = kwargs.get("total_steps", 0)
+            total_tokens = raw_tokens + self.tokens_offset
+            total_steps = raw_steps + self.steps_offset
+            if isinstance(raw_cost, str) and raw_cost.startswith("$"):
+                total_cost = f"${float(raw_cost[1:]) + self.budget_offset:.4f}"
+            else:
+                total_cost = raw_cost
+            self.broadcast({
+                "type": "usage_info",
+                "text": str(content),
+                "total_tokens": total_tokens,
+                "cost": total_cost,
+                "total_steps": total_steps,
+            })
             return ""
         if type == "result":
             self.broadcast({"type": "text_end"})

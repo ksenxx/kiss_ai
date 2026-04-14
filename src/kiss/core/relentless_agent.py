@@ -234,6 +234,10 @@ class RelentlessAgent(Base):
         )
         system_prompt = self.system_prompt + important_instructions
         for session in range(self.max_sub_sessions):
+            if self.printer:
+                self.printer.tokens_offset = self.total_tokens_used  # type: ignore[attr-defined]
+                self.printer.budget_offset = self.budget_used  # type: ignore[attr-defined]
+                self.printer.steps_offset = self.total_steps  # type: ignore[attr-defined]
             executor = KISSAgent(f"{self.name} Session-{session}")
             try:
                 result = executor.run(
