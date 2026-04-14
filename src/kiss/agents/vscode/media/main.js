@@ -2102,13 +2102,13 @@
       div.className = 'sidebar-item';
       var itemText = s.title || s.preview || 'Untitled';
       div.textContent = itemText;
-      div.dataset.tooltip = s.text || itemText;
-      div.style.backgroundColor = chatIdBgColor(s.chat_id || String(s.id));
+      div.dataset.tooltip = s.preview || itemText;
+      div.style.backgroundColor = chatIdBgColor(String(s.id));
       div.style.color = '#000';
       div.addEventListener('click', function() {
-        if (s.has_events && (s.chat_id || s.id)) {
+        if (s.has_events && s.id) {
           setTaskText(s.preview || s.title || '');
-          vscode.postMessage({ type: 'resumeSession', id: s.chat_id || s.id, tabId: activeTabId });
+          vscode.postMessage({ type: 'resumeSession', id: s.id, tabId: activeTabId });
         } else {
           inp.value = s.preview || s.title || ''; syncClearBtn();
           inp.focus();

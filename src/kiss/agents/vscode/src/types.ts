@@ -16,7 +16,6 @@ export interface SessionInfo {
   timestamp: number;
   preview: string;
   has_events?: boolean;
-  chat_id?: string;
 }
 
 /** Messages from webview to extension */
