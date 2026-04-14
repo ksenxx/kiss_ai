@@ -391,6 +391,82 @@ class TestMainJsInfiniteScroll(unittest.TestCase):
                "function renderHistory" in self.js
 
 
+class TestHistoryPanelSearchOnOpen(unittest.TestCase):
+    """Test that opening the history panel uses existing search text.
+
+    Regression: the historyBtn click handler used to send getHistory without
+    the ``query`` parameter, ignoring text already in the search box.  The fix
+    adds ``query: historySearch.value`` so the server filters results even on
+    the initial open.
+    """
+
+    _js: str = ""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
+        cls._js = (base / "vscode" / "media" / "main.js").read_text()
+
+    def _get_history_btn_click_body(self) -> str:
+        """Extract the historyBtn click handler body."""
+        idx = self._js.index("historyBtn.addEventListener('click',")
+        # Find the matching closing of this handler — look for next top-level
+        # addEventListener on a different element
+        end = self._js.index("sidebarClose.addEventListener(", idx)
+        return self._js[idx:end]
+
+    def test_history_btn_click_sends_query(self) -> None:
+        """historyBtn click handler includes query: historySearch.value."""
+        body = self._get_history_btn_click_body()
+        assert "query: historySearch.value" in body, (
+            "historyBtn click handler must send query: historySearch.value "
+            "so existing search text filters the results on panel open"
+        )
+
+    def test_all_get_history_calls_include_query(self) -> None:
+        """Every getHistory postMessage includes query: historySearch.value.
+
+        This ensures no code path accidentally sends getHistory without the
+        query parameter, which would discard the user's current search text.
+        """
+        import re
+
+        # Find all lines that post a getHistory message
+        pattern = re.compile(r"postMessage\(\{[^}]*type:\s*'getHistory'[^}]*\}")
+        matches = pattern.findall(self._js)
+        assert len(matches) >= 3, (
+            f"Expected at least 3 getHistory calls (btn click, input, scroll), "
+            f"found {len(matches)}"
+        )
+        for m in matches:
+            assert "query: historySearch.value" in m, (
+                f"getHistory call missing query parameter: {m}"
+            )
+
+    def test_server_filters_history_with_query(self) -> None:
+        """VSCodeServer._get_history passes query to _search_history."""
+        server = VSCodeServer()
+        events: list[dict] = []
+        server.printer.broadcast = lambda ev: events.append(ev)  # type: ignore[assignment]
+
+        # Call with a query — should not crash and should broadcast history
+        server._get_history("some search text", offset=0, generation=1)
+        assert len(events) == 1
+        assert events[0]["type"] == "history"
+        assert events[0]["generation"] == 1
+
+    def test_server_returns_unfiltered_without_query(self) -> None:
+        """VSCodeServer._get_history returns unfiltered results when query is None."""
+        server = VSCodeServer()
+        events: list[dict] = []
+        server.printer.broadcast = lambda ev: events.append(ev)  # type: ignore[assignment]
+
+        server._get_history(None, offset=0, generation=0)
+        assert len(events) == 1
+        assert events[0]["type"] == "history"
+        assert isinstance(events[0]["sessions"], list)
+
+
 class TestMainCssInfiniteScroll(unittest.TestCase):
     """Test main.css has infinite scroll and responsive sidebar styles."""
 

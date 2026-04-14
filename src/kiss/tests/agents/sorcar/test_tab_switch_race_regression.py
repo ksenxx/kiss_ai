@@ -1154,11 +1154,12 @@ class TestPerTabInputValue(unittest.TestCase):
         assert "inp.value = tab.inputValue" in body
         assert "syncClearBtn()" in body
 
-    def test_create_new_tab_clears_input(self) -> None:
+    def test_create_new_tab_preserves_input(self) -> None:
         idx = self.js.index("function createNewTab()")
         end = self.js.index("\n  function ", idx + 1)
         body = self.js[idx:end]
-        assert "inp.value = ''" in body
+        assert "var pendingText = inp.value" in body
+        assert "inp.value = pendingText" in body
 
 
 class TestPerTabIsMerging(unittest.TestCase):
@@ -1183,11 +1184,11 @@ class TestPerTabIsMerging(unittest.TestCase):
         assert "isMerging = tab.isMerging" in body
         assert "updateInputDisabled()" in body
 
-    def test_merge_started_guard(self) -> None:
+    def test_merge_started_switches_tab(self) -> None:
         idx = self.js.index("case 'merge_started':")
         block = self.js[idx : idx + 400]
         assert "ev.tabId !== undefined && ev.tabId !== activeTabId" in block
-        assert "mrt" in block  # running tab lookup variable
+        assert "switchToTab(ev.tabId)" in block
 
     def test_merge_ended_guard(self) -> None:
         idx = self.js.index("case 'merge_ended':")

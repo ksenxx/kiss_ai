@@ -312,6 +312,8 @@
   }
 
   function createNewTab() {
+    // Preserve any typed text so it carries over to the new tab
+    var pendingText = inp.value || '';
     saveCurrentTab();
     var tab = makeTab('new chat');
     tabs.push(tab);
@@ -329,9 +331,10 @@
     // Reset per-tab state for new tab (selectedModel inherited via makeTab)
     attachments = [];
     renderFileChips();
-    inp.value = '';
+    inp.value = pendingText;
     syncClearBtn();
     inp.style.height = 'auto';
+    inp.style.height = Math.min(inp.scrollHeight, 200) + 'px';
     isMerging = false;
     hideMergeToolbar();
     t0 = null;
@@ -878,7 +881,7 @@
       hlBlock(rc);
       target.appendChild(rc);
       if (statusTokens && ev.total_tokens) statusTokens.textContent = 'Tokens: ' + ev.total_tokens;
-      if (statusBudget && ev.cost && ev.cost !== 'N/A') statusBudget.textContent = ev.cost;
+      if (statusBudget && ev.cost && ev.cost !== 'N/A') statusBudget.textContent = 'Cost: ' + ev.cost;
       break;
     }
     case 'system_prompt':
@@ -1013,7 +1016,7 @@
     }
     updateVisibleTask();
   });
-  new MutationObserver(function() { sb(); }).observe(O, { childList: true, subtree: true, characterData: true });
+  new MutationObserver(function() { if (isRunning) sb(); }).observe(O, { childList: true, subtree: true, characterData: true });
 
   // --- Timer ---
   function startTimer() {
@@ -1036,7 +1039,7 @@
     var tm = text.match(/Tokens:\s*(\d+)\/\d+/);
     var bm = text.match(/Budget:\s*(\$[0-9.]+)\/\$[0-9.]+/);
     if (tm) statusTokens.textContent = 'Tokens: ' + tm[1];
-    if (bm) statusBudget.textContent = 'Budget: ' + bm[1];
+    if (bm) statusBudget.textContent = 'Cost: ' + bm[1];
   }
 
   function clearUsageMetrics() {
@@ -1226,9 +1229,7 @@
     }
     case 'merge_started':
       if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
-        var mrt = tabs.find(function(t) { return t.id === ev.tabId; });
-        if (mrt) mrt.isMerging = true;
-        break;
+        switchToTab(ev.tabId);
       }
       isMerging = true;
       showMergeToolbar();
@@ -1297,9 +1298,9 @@
       if (ev.tabId !== undefined && ev.tabId !== activeTabId) break;
       processOutputEvent(ev);
       if (isActiveTabRunning()) showSpinner();
+      sb();
       break;
     }
-    sb();
   }
 
   function updateInputDisabled() {
@@ -1692,7 +1693,7 @@
         sidebar.classList.add('open');
         sidebarOverlay.classList.add('open');
         historyBtn.classList.add('open');
-        vscode.postMessage({ type: 'getHistory', generation: historyGeneration });
+        vscode.postMessage({ type: 'getHistory', query: historySearch.value, generation: historyGeneration });
       }
     });
     sidebarClose.addEventListener('click', closeSidebar);
