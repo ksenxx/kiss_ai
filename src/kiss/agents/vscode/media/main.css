@@ -162,14 +162,14 @@ header {
 /* ── Task Panel ──────────────────────────────────────── */
 #task-panel {
   flex-shrink: 0;
-  max-height: calc(var(--vscode-editor-font-size) * 1.2 * 1.6 * 3 + 12px);
+  max-height: calc(var(--vscode-editor-font-size) * 1.6 * 3 + 12px);
   overflow-y: auto;
   margin: 8px 10px 0;
   padding: 8px 12px;
   border: 2px solid rgba(255,200,0,0.5);
   border-radius: 8px;
   background: color-mix(in srgb, var(--accent) 4%, transparent);
-  font-size: calc(var(--vscode-editor-font-size) * 1.2);
+  font-size: var(--vscode-editor-font-size);
   color: var(--fg);
   white-space: pre-wrap;
   word-break: break-word;
@@ -942,29 +942,6 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
   border-left: 3px solid var(--red); margin: 6px 0;
 }
 /* ── Adjacent task (thread scroll) ──────────────────── */
-.adjacent-separator {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin: 16px 0 12px;
-  padding: 0 4px;
-}
-.adjacent-sep-line {
-  flex: 1;
-  height: 1px;
-  background: var(--border);
-}
-.adjacent-sep-label {
-  font-size: var(--fs-sm);
-  color: var(--dim);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 70%;
-  padding: 2px 8px;
-  background: var(--surface2);
-  border-radius: 4px;
-}
 .adjacent-loader {
   text-align: center;
   padding: 10px;

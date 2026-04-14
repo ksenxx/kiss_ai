@@ -221,7 +221,7 @@ export async function ensureDependencies(): Promise<void> {
         }
 
         // 7. Install Playwright Chromium
-        progress.report({ message: 'Installing Chromium browser...' });
+        progress.report({ message: 'Installing dependencies...' });
         await runAsync(
           uvPath,
           ['run', 'python', '-m', 'playwright', 'install', 'chromium'],
