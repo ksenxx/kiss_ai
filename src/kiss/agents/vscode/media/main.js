@@ -1154,6 +1154,25 @@
         if (welcome) welcome.style.display = 'none';
         updateActiveTabTitle(ev.task);
       }
+      if (ev.extra) {
+        try {
+          var extra = JSON.parse(ev.extra);
+          if (extra.model) {
+            selectedModel = extra.model;
+            if (modelName) modelName.textContent = selectedModel;
+            var curTab = tabs.find(function(t) { return t.id === activeTabId; });
+            if (curTab) curTab.selectedModel = selectedModel;
+          }
+          if (worktreeToggleBtn) {
+            if (extra.is_worktree) worktreeToggleBtn.classList.add('active');
+            else worktreeToggleBtn.classList.remove('active');
+          }
+          if (parallelToggleBtn) {
+            if (extra.is_parallel) parallelToggleBtn.classList.add('active');
+            else parallelToggleBtn.classList.remove('active');
+          }
+        } catch (e) { /* ignore malformed extra */ }
+      }
       replayTaskEvents(ev.events || []);
       break;
     case 'adjacent_task_events':

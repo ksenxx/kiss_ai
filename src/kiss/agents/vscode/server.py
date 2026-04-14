@@ -724,6 +724,7 @@ class VSCodeServer:
             "events": result["events"],
             "task": result["task"],
             "chat_id": chat_id,
+            "extra": result.get("extra", ""),
         })
         self._emit_pending_worktree()
 

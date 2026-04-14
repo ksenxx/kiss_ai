@@ -498,14 +498,15 @@ def _load_latest_chat_events_by_chat_id(
         chat_id: The chat session identifier.
 
     Returns:
-        A dict with ``task`` (str) and ``events`` (list of event dicts),
+        A dict with ``task`` (str), ``events`` (list of event dicts),
+        ``chat_id`` (str), and ``extra`` (str, JSON metadata),
         or ``None`` if the chat_id is empty or has no tasks.
     """
     if not chat_id:
         return None
     db = _get_db()
     row = db.execute(
-        "SELECT id, task FROM task_history "
+        "SELECT id, task, extra FROM task_history "
         "WHERE chat_id = ? ORDER BY timestamp DESC LIMIT 1",
         (chat_id,),
     ).fetchone()
@@ -513,6 +514,7 @@ def _load_latest_chat_events_by_chat_id(
         return None
     task_id = row["id"]
     task = row["task"]
+    extra_str = row["extra"] or ""
     event_rows = db.execute(
         "SELECT event_json FROM events WHERE task_id = ? ORDER BY seq",
         (task_id,),
@@ -523,7 +525,7 @@ def _load_latest_chat_events_by_chat_id(
             events.append(json.loads(r["event_json"]))
         except (json.JSONDecodeError, TypeError):
             logger.debug("Exception caught", exc_info=True)
-    return {"task": task, "events": events, "chat_id": chat_id}
+    return {"task": task, "events": events, "chat_id": chat_id, "extra": extra_str}
 
 
 def _get_adjacent_task_by_chat_id(

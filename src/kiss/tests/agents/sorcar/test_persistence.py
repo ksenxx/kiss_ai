@@ -76,6 +76,18 @@ class TestChatEvents:
         assert isinstance(events, list)
         assert events == [{"a": 1}]
 
+    def test_load_chat_events_includes_extra(self):
+        task_id = th._add_task("extra-task", chat_id="cid_extra")
+        th._set_latest_chat_events([{"b": 2}], task_id=task_id)
+        extra = {"model": "gpt-4o", "is_worktree": True, "is_parallel": False}
+        th._save_task_extra(extra, task_id=task_id)
+        result = th._load_latest_chat_events_by_chat_id("cid_extra")
+        assert result is not None
+        loaded = json.loads(str(result["extra"]))
+        assert loaded["model"] == "gpt-4o"
+        assert loaded["is_worktree"] is True
+        assert loaded["is_parallel"] is False
+
     def test_save_task_result_no_matching_task(self):
         th._save_task_result(result="result", task="nonexistent")
         # Should not raise; just returns early
