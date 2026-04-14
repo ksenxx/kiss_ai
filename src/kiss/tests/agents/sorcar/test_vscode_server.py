@@ -3312,12 +3312,13 @@ class TestWebviewTabBarJS(unittest.TestCase):
     def test_close_tab_function_exists(self) -> None:
         assert "function closeTab(tabId)" in self._js
 
-    def test_close_tab_prevents_last_tab_close(self) -> None:
-        """Cannot close the last remaining tab."""
+    def test_close_last_tab_creates_new_chat(self) -> None:
+        """Closing the last tab creates a fresh new chat."""
         idx = self._js.index("function closeTab(tabId)")
         end = self._js.index("\n  function ", idx + 1)
         body = self._js[idx:end]
-        assert "tabs.length <= 1" in body
+        assert "tabs.length === 0" in body
+        assert "createNewTab()" in body
 
     def test_close_tab_switches_to_adjacent_tab(self) -> None:
         idx = self._js.index("function closeTab(tabId)")

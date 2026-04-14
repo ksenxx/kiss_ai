@@ -71,6 +71,7 @@
       worktreeBarEl: null,
       mergeToolbarEl: null,
       t0: null,
+      workDir: '',
       streamState: null,
       streamLlmPanel: null,
       streamLlmPanelState: null,
@@ -283,11 +284,15 @@
   }
 
   function closeTab(tabId) {
-    if (tabs.length <= 1) return; // Don't close the last tab
     var idx = tabs.findIndex(function(t) { return t.id === tabId; });
     if (idx < 0) return;
     tabs.splice(idx, 1);
     if (activeTabId === tabId) {
+      if (tabs.length === 0) {
+        // Last tab closed — open a fresh new chat
+        createNewTab();
+        return;
+      }
       // Switch to an adjacent tab
       var newIdx = Math.min(idx, tabs.length - 1);
       var newTab = tabs[newIdx];
@@ -1163,6 +1168,10 @@
             var curTab = tabs.find(function(t) { return t.id === activeTabId; });
             if (curTab) curTab.selectedModel = selectedModel;
           }
+          if (extra.work_dir) {
+            var wdTab = tabs.find(function(t) { return t.id === activeTabId; });
+            if (wdTab) wdTab.workDir = extra.work_dir;
+          }
           if (worktreeToggleBtn) {
             if (extra.is_worktree) worktreeToggleBtn.classList.add('active');
             else worktreeToggleBtn.classList.remove('active');
@@ -1836,7 +1845,8 @@
     if (histCache[0] !== prompt) {
       histCache.unshift(prompt);
     }
-    vscode.postMessage({
+    var curTab = tabs.find(function(t) { return t.id === activeTabId; });
+    var msg = {
       type: 'submit',
       prompt: prompt,
       model: selectedModel,
@@ -1846,7 +1856,9 @@
       }),
       useWorktree: !!(worktreeToggleBtn && worktreeToggleBtn.classList.contains('active')),
       useParallel: !!(parallelToggleBtn && parallelToggleBtn.classList.contains('active'))
-    });
+    };
+    if (curTab && curTab.workDir) msg.workDir = curTab.workDir;
+    vscode.postMessage(msg);
     inp.value = '';
     inp.style.height = 'auto';
     attachments = [];
