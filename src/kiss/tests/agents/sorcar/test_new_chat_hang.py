@@ -95,8 +95,9 @@ class TestTaskEndEventOrdering(unittest.TestCase):
         self.server._handle_command({
             "type": "run", "prompt": prompt,
             "model": "claude-opus-4-6", "workDir": self.tmpdir,
+            "tabId": "0",
         })
-        t = self.server._task_threads.get(0)
+        t = self.server._get_tab("0").task_thread
         assert t is not None
         t.join(timeout=10)
         assert not t.is_alive()
@@ -107,7 +108,7 @@ class TestTaskEndEventOrdering(unittest.TestCase):
         with self.lock:
             self.events.clear()
 
-        self.server._handle_command({"type": "newChat"})
+        self.server._handle_command({"type": "newChat", "tabId": "0"})
         self._run_and_wait("task 2")
 
         with self.lock:
@@ -147,8 +148,9 @@ class TestTaskEndEventPersistence(unittest.TestCase):
             self.server._handle_command({
                 "type": "run", "prompt": "test stop persist",
                 "model": "claude-opus-4-6", "workDir": self.tmpdir,
+                "tabId": "0",
             })
-            t = self.server._task_threads.get(0)
+            t = self.server._get_tab("0").task_thread
             assert t is not None
             t.join(timeout=10)
         finally:
@@ -207,6 +209,7 @@ class TestPeriodicEventFlush(unittest.TestCase):
             self.server._handle_command({
                 "type": "run", "prompt": "test periodic flush",
                 "model": "claude-opus-4-6", "workDir": self.tmpdir,
+                "tabId": "0",
             })
             import time
             time.sleep(3)  # wait for at least 1 flush cycle
@@ -237,7 +240,7 @@ class TestPeriodicEventFlush(unittest.TestCase):
             assert entry["result"] == "Agent Failed Abruptly"
 
             resume.set()
-            t = self.server._task_threads.get(0)
+            t = self.server._get_tab("0").task_thread
             assert t is not None
             t.join(timeout=10)
         finally:

@@ -147,10 +147,13 @@ class TestMultiPrinter(TestCase):
         from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
         from kiss.core.printer import MultiPrinter
         p1 = BaseBrowserPrinter()
+        p1._thread_local.tab_id = "0"
         mp = MultiPrinter([p1])
-        p1._bash_buffer.append("x")
+        with p1._bash_lock:
+            p1._get_bash().buffer.append("x")
         mp.reset()
-        assert len(p1._bash_buffer) == 0
+        with p1._bash_lock:
+            assert len(p1._get_bash().buffer) == 0
 
 
 def _noop_callback(token: str) -> None:

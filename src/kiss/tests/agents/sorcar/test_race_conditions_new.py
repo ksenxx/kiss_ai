@@ -71,8 +71,8 @@ class TestP15TaskThreadCleared(unittest.TestCase):
     def test_task_thread_cleared_in_run_task_finally(self) -> None:
         """Verify _run_task cleans up per-tab thread in finally."""
         source = inspect.getsource(VSCodeServer._run_task)
-        assert "self._task_threads.pop(" in source, (
-            "P15 fix: _run_task should remove tab from _task_threads in finally"
+        assert "tab.task_thread = None" in source, (
+            "P15 fix: _run_task should clear tab.task_thread in finally"
         )
 
 # ---------------------------------------------------------------------------

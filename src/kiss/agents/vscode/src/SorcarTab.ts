@@ -67,21 +67,21 @@ export function buildChatHtml(webview: vscode.Webview, extensionUri: vscode.Uri,
 </head>
 <body>
   <div id="app">
-    <header>
-      <div class="status">
-        <span id="status-text">Ready</span>
-        <span id="status-tokens" class="status-metric"></span>
-        <span id="status-budget" class="status-metric"></span>
-        <span id="status-steps" class="status-metric"></span>
-      </div>
-    </header>
-
     <div id="tab-bar"><div id="tab-list"></div><button id="history-btn">
               <svg class="history-chevron" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
                 <polyline points="15 18 9 12 15 6"/>
               </svg>
               <span>History</span>
             </button></div>
+
+    <div id="tab-status-bar">
+      <div class="status">
+        <span id="status-text">Ready</span>
+        <span id="status-tokens" class="status-metric"></span>
+        <span id="status-budget" class="status-metric"></span>
+        <span id="status-steps" class="status-metric"></span>
+      </div>
+    </div>
 
     <div id="task-panel"></div>
 

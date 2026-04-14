@@ -608,11 +608,24 @@ ______________________________________________________________________
 
 **Constructor:** `BaseBrowserPrinter() -> None`
 
+- **tokens_offset** — Per-thread token offset for usage_info events.<br/>`tokens_offset() -> int` *(property)*
+
+- **tokens_offset**<br/>`tokens_offset(value: int) -> None`
+
+- **budget_offset** — Per-thread budget offset for usage_info events.<br/>`budget_offset() -> float` *(property)*
+
+- **budget_offset**<br/>`budget_offset(value: float) -> None`
+
+- **steps_offset** — Per-thread steps offset for usage_info events.<br/>`steps_offset() -> int` *(property)*
+
+- **steps_offset**<br/>`steps_offset(value: int) -> None`
+
 - **reset** — Reset internal streaming and tool-parsing state for a new turn.<br/>`reset() -> None`
 
-- **start_recording** — Start recording broadcast events. Uses an explicit *recording_id* to avoid thread-ID reuse corruption. Falls back to thread ident when no ID is given (backward compat).<br/>`start_recording(recording_id: int | None = None) -> None`
+- **start_recording** — Start recording broadcast events. Uses an explicit *recording_id* to avoid thread-ID reuse corruption. Falls back to thread ident when no ID is given (backward compat). When *tab_id* is provided, only events whose `tabId` matches are recorded. Events without a `tabId` are still recorded to all active recordings.<br/>`start_recording(recording_id: int | None = None, tab_id: str | None = None) -> None`
 
   - `recording_id`: Unique identifier for this recording session.
+  - `tab_id`: Optional tab owner — restricts which events are recorded.
 
 - **stop_recording** — Stop recording and return its display events.<br/>`stop_recording(recording_id: int | None = None) -> list[dict[str, Any]]`
 
@@ -2035,11 +2048,24 @@ ______________________________________________________________________
 
 **Constructor:** `BaseBrowserPrinter() -> None`
 
+- **tokens_offset** — Per-thread token offset for usage_info events.<br/>`tokens_offset() -> int` *(property)*
+
+- **tokens_offset**<br/>`tokens_offset(value: int) -> None`
+
+- **budget_offset** — Per-thread budget offset for usage_info events.<br/>`budget_offset() -> float` *(property)*
+
+- **budget_offset**<br/>`budget_offset(value: float) -> None`
+
+- **steps_offset** — Per-thread steps offset for usage_info events.<br/>`steps_offset() -> int` *(property)*
+
+- **steps_offset**<br/>`steps_offset(value: int) -> None`
+
 - **reset** — Reset internal streaming and tool-parsing state for a new turn.<br/>`reset() -> None`
 
-- **start_recording** — Start recording broadcast events. Uses an explicit *recording_id* to avoid thread-ID reuse corruption. Falls back to thread ident when no ID is given (backward compat).<br/>`start_recording(recording_id: int | None = None) -> None`
+- **start_recording** — Start recording broadcast events. Uses an explicit *recording_id* to avoid thread-ID reuse corruption. Falls back to thread ident when no ID is given (backward compat). When *tab_id* is provided, only events whose `tabId` matches are recorded. Events without a `tabId` are still recorded to all active recordings.<br/>`start_recording(recording_id: int | None = None, tab_id: str | None = None) -> None`
 
   - `recording_id`: Unique identifier for this recording session.
+  - `tab_id`: Optional tab owner — restricts which events are recorded.
 
 - **stop_recording** — Stop recording and return its display events.<br/>`stop_recording(recording_id: int | None = None) -> list[dict[str, Any]]`
 
@@ -2122,10 +2148,6 @@ ______________________________________________________________________
 ##### `class VSCodeServer` — Backend server for VS Code extension.
 
 **Constructor:** `VSCodeServer() -> None`
-
-- **agent** — Return the currently active agent based on the worktree toggle.<br/>`agent() -> StatefulSorcarAgent` *(property)*
-
-  - **Returns:** WorktreeSorcarAgent when worktree mode is enabled, StatefulSorcarAgent otherwise.
 
 - **run** — Main loop: read commands from stdin, execute them.<br/>`run() -> None`
   **`parse_task_tags`** — Parse `<task>...</task>` tags from *text* and return individual tasks. When the input contains one or more `<task>` blocks with non-empty content, each block's content is returned as a separate list element. If no valid `<task>` blocks are found (or all are empty/whitespace), the original *text* is returned as a single-element list so that callers can always iterate without special-casing.<br/>`def parse_task_tags(text: str) -> list[str]`
@@ -4991,10 +5013,6 @@ ______________________________________________________________________
 ##### `class VSCodeServer` — Backend server for VS Code extension.
 
 **Constructor:** `VSCodeServer() -> None`
-
-- **agent** — Return the currently active agent based on the worktree toggle.<br/>`agent() -> StatefulSorcarAgent` *(property)*
-
-  - **Returns:** WorktreeSorcarAgent when worktree mode is enabled, StatefulSorcarAgent otherwise.
 
 - **run** — Main loop: read commands from stdin, execute them.<br/>`run() -> None`
   **`parse_task_tags`** — Parse `<task>...</task>` tags from *text* and return individual tasks. When the input contains one or more `<task>` blocks with non-empty content, each block's content is returned as a separate list element. If no valid `<task>` blocks are found (or all are empty/whitespace), the original *text* is returned as a single-element list so that callers can always iterate without special-casing.<br/>`def parse_task_tags(text: str) -> list[str]`

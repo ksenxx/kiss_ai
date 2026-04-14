@@ -166,14 +166,15 @@ class TestPeriodicEventFlushEarlyExits:
     def test_flush_with_no_task_id(self) -> None:
         """Flush loop exits early when agent._last_task_id is None."""
         server = VSCodeServer()
-        server.agent._last_task_id = None
+        agent = server._get_tab("0").agent
+        agent._last_task_id = None
         stop = threading.Event()
         server._flush_interval = 0.05  # very fast flush
         rec_id = 999
         server.printer.start_recording(rec_id)
         # Run flush loop briefly — should skip because task_id is None
         t = threading.Thread(
-            target=server._periodic_event_flush, args=(rec_id, stop), daemon=True
+            target=server._periodic_event_flush, args=(rec_id, stop, agent), daemon=True
         )
         t.start()
         time.sleep(0.15)  # allow 2-3 flush cycles
@@ -187,15 +188,16 @@ class TestPeriodicEventFlushEarlyExits:
         saved = _redirect(tmpdir)
         try:
             server = VSCodeServer()
+            agent = server._get_tab("0").agent
             task_id = th._add_task("flush-test")
-            server.agent._last_task_id = task_id
+            agent._last_task_id = task_id
             stop = threading.Event()
             server._flush_interval = 0.05
             rec_id = 888
             server.printer.start_recording(rec_id)
             # Don't broadcast anything → events empty → line 241→237
             t = threading.Thread(
-                target=server._periodic_event_flush, args=(rec_id, stop), daemon=True
+                target=server._periodic_event_flush, args=(rec_id, stop, agent), daemon=True
             )
             t.start()
             time.sleep(0.15)

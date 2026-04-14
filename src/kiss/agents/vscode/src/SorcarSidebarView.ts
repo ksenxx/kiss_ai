@@ -23,16 +23,16 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _agentProcess: AgentProcess;
   private _extensionUri: vscode.Uri;
   private _selectedModel: string;
-  private _runningTabs: Set<number> = new Set();
-  private _pendingNewChat: boolean = false;
+  private _runningTabs: Set<string> = new Set();
+
   private _mergeManager: MergeManager;
-  private _mergeOwner: boolean = false;
+  private _mergeOwnerTabIdQueue: string[] = [];
   private _onCommitMessage = new vscode.EventEmitter<{ message: string; error?: string }>();
   public readonly onCommitMessage = this._onCommitMessage.event;
-  private _commitPending: boolean = false;
-  private _worktreeDir: string = '';
-  private _worktreeActionResolve: (() => void) | null = null;
-  private _worktreeProgress: vscode.Progress<{ message?: string }> | null = null;
+  private _commitPendingTabs: Set<string> = new Set();
+  private _worktreeDirs: Map<string, string> = new Map();
+  private _worktreeActionResolves: Map<string, () => void> = new Map();
+  private _worktreeProgresses: Map<string, vscode.Progress<{ message?: string }>> = new Map();
   private _disposed: boolean = false;
 
   constructor(extensionUri: vscode.Uri, mergeManager: MergeManager) {
@@ -41,9 +41,9 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     this._agentProcess = new AgentProcess();
     this._selectedModel = vscode.workspace.getConfiguration('kissSorcar').get<string>('defaultModel') || getDefaultModel();
     this._mergeManager.on('allDone', () => {
-      if (this._mergeOwner) {
-        this.sendMergeAllDone();
-        this._mergeOwner = false;
+      const tabId = this._mergeOwnerTabIdQueue.shift();
+      if (tabId !== undefined) {
+        this.sendMergeAllDone(tabId);
       }
     });
   }
@@ -83,10 +83,9 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
     webviewView.onDidDispose(() => {
       this._disposed = true;
-      if (this._worktreeActionResolve) {
-        this._worktreeActionResolve();
-        this._worktreeActionResolve = null;
-      }
+      for (const resolve of this._worktreeActionResolves.values()) resolve();
+      this._worktreeActionResolves.clear();
+      this._worktreeProgresses.clear();
     });
 
     this._agentProcess.on('message', (msg: ToWebviewMessage) => {
@@ -97,53 +96,71 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         this._selectedModel = (msg as any).selected;
       }
       if (msg.type === 'merge_data') {
-        this._mergeOwner = true;
+        const mergeTabId = (msg as any).tabId as string | undefined;
+        if (mergeTabId !== undefined) {
+          this._mergeOwnerTabIdQueue.push(mergeTabId);
+        }
         this._mergeManager.openMerge((msg as any).data);
       }
       if (msg.type === 'worktree_created' || msg.type === 'worktree_done') {
         const dir = (msg as any).worktreeDir;
+        const wtTabId = (msg as any).tabId as string | undefined;
         if (dir) {
-          this._worktreeDir = dir;
+          if (wtTabId !== undefined) {
+            this._worktreeDirs.set(wtTabId, dir);
+          }
           this._openWorktreeInScm(dir);
         }
       }
       if (msg.type === 'worktree_progress') {
-        if (this._worktreeProgress) {
-          this._worktreeProgress.report({ message: (msg as any).message });
+        const wpTabId = (msg as any).tabId as string | undefined;
+        const progress = wpTabId !== undefined
+          ? this._worktreeProgresses.get(wpTabId)
+          : this._worktreeProgresses.values().next().value;
+        if (progress) {
+          progress.report({ message: (msg as any).message });
         }
       }
       if (msg.type === 'worktree_result') {
-        if (this._worktreeActionResolve) {
-          this._worktreeActionResolve();
-          this._worktreeActionResolve = null;
+        const wrTabId = (msg as any).tabId as string | undefined;
+        if (wrTabId !== undefined) {
+          const resolve = this._worktreeActionResolves.get(wrTabId);
+          if (resolve) {
+            resolve();
+            this._worktreeActionResolves.delete(wrTabId);
+          }
+          this._worktreeProgresses.delete(wrTabId);
+        } else {
+          // Fallback: resolve all pending
+          for (const resolve of this._worktreeActionResolves.values()) resolve();
+          this._worktreeActionResolves.clear();
+          this._worktreeProgresses.clear();
         }
-        this._worktreeProgress = null;
         const result = msg as any;
         if (result.success) {
           vscode.window.showInformationMessage(result.message || 'Worktree action completed.');
         } else {
           vscode.window.showErrorMessage(result.message || 'Worktree action failed.');
         }
-        if (result.success && this._worktreeDir) {
-          this._closeWorktreeInScm(this._worktreeDir);
-          this._worktreeDir = '';
+        if (result.success && wrTabId !== undefined) {
+          const wtDir = this._worktreeDirs.get(wrTabId);
+          if (wtDir) {
+            this._closeWorktreeInScm(wtDir);
+            this._worktreeDirs.delete(wrTabId);
+          }
         }
       }
 
       this._sendToWebview(msg);
       if (msg.type === 'status') {
-        const tabId = (msg as any).tabId as number | undefined;
+        const tabId = (msg as any).tabId as string | undefined;
         if (msg.running) {
           if (tabId !== undefined) this._runningTabs.add(tabId);
         } else {
           if (tabId !== undefined) this._runningTabs.delete(tabId);
           else this._runningTabs.clear();
           this._sendActiveFileInfo();
-          if (this._pendingNewChat) {
-            this._pendingNewChat = false;
-            this._sendToWebview({ type: 'clearChat' });
-          }
-          if (this._commitPending) {
+          if (this._commitPendingTabs.size > 0) {
             this._onCommitMessage.fire({ message: '', error: 'Process stopped' });
           }
         }
@@ -228,7 +245,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     } catch { /* ignored */ }
   }
 
-  private _startTask(prompt: string, model: string, activeFile?: string, attachments?: Attachment[], useWorktree?: boolean, useParallel?: boolean, tabId?: number, workDir?: string): void {
+  private _startTask(prompt: string, model: string, activeFile?: string, attachments?: Attachment[], useWorktree?: boolean, useParallel?: boolean, tabId?: string, workDir?: string): void {
     const effectiveWorkDir = workDir || this._getWorkDir();
     const started = this._agentProcess.start(effectiveWorkDir);
     if (!started) {
@@ -262,16 +279,16 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         this._sendWelcomeSuggestions();
         this._agentProcess.sendCommand({ type: 'getInputHistory' });
         if (message.activeChatId) {
-          this._agentProcess.sendCommand({ type: 'resumeSession', sessionId: message.activeChatId });
+          this._agentProcess.sendCommand({ type: 'resumeSession', sessionId: message.activeChatId, tabId: (message as any).tabId });
         } else {
-          this._agentProcess.sendCommand({ type: 'getLastSession' });
+          this._agentProcess.sendCommand({ type: 'getLastSession', tabId: (message as any).tabId });
         }
         this._sendActiveFileInfo();
         this._sendToWebview({ type: 'focusInput' } as ToWebviewMessage);
         break;
 
       case 'submit': {
-        const tabId = (message as any).tabId as number | undefined;
+        const tabId = (message as any).tabId as string | undefined;
         if (tabId !== undefined && this._runningTabs.has(tabId)) return;
 
         const tabWorkDir = (message as any).workDir as string | undefined;
@@ -307,7 +324,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       }
 
       case 'stop': {
-        const stopTabId = (message as any).tabId as number | undefined;
+        const stopTabId = (message as any).tabId as string | undefined;
         if (stopTabId !== undefined) {
           this._agentProcess.sendCommand({ type: 'stop', tabId: stopTabId });
         } else {
@@ -318,13 +335,16 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
       case 'selectModel':
         this._selectedModel = message.model;
-        this._agentProcess.sendCommand({ type: 'selectModel', model: message.model });
+        this._agentProcess.sendCommand({ type: 'selectModel', model: message.model, tabId: (message as any).tabId });
         break;
 
       case 'getModels':
-      case 'newChat':
       case 'getInputHistory':
         this._agentProcess.sendCommand({ type: message.type } as AgentCommand);
+        break;
+
+      case 'newChat':
+        this._agentProcess.sendCommand({ type: 'newChat', tabId: (message as any).tabId });
         break;
 
       case 'getHistory':
@@ -336,7 +356,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         break;
 
       case 'userAnswer':
-        this._agentProcess.sendCommand({ type: 'userAnswer', answer: message.answer });
+        this._agentProcess.sendCommand({ type: 'userAnswer', answer: message.answer, tabId: message.tabId });
         break;
 
       case 'userActionDone':
@@ -369,11 +389,11 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         break;
 
       case 'resumeSession':
-        this._agentProcess.sendCommand({ type: 'resumeSession', sessionId: message.id });
+        this._agentProcess.sendCommand({ type: 'resumeSession', sessionId: message.id, tabId: (message as any).tabId });
         break;
 
       case 'getAdjacentTask':
-        this._agentProcess.sendCommand({ type: 'getAdjacentTask', chatId: (message as any).chatId, task: (message as any).task, direction: (message as any).direction });
+        this._agentProcess.sendCommand({ type: 'getAdjacentTask', tabId: (message as any).tabId, task: (message as any).task, direction: (message as any).direction });
         break;
 
       case 'getWelcomeSuggestions':
@@ -433,6 +453,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
       case 'worktreeAction': {
         const wtAction = (message as any).action;
+        const wtTabId = (message as any).tabId as string | undefined;
         const progressTitle = wtAction === 'merge'
           ? 'Committing and merging worktree…'
           : wtAction === 'discard'
@@ -444,12 +465,16 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         vscode.window.withProgress(
           { location: vscode.ProgressLocation.Notification, title: progressTitle },
           (progress) => {
-            this._worktreeProgress = progress;
+            if (wtTabId !== undefined) {
+              this._worktreeProgresses.set(wtTabId, progress);
+            }
             return new Promise<void>((resolve) => {
-              this._worktreeActionResolve = resolve;
+              if (wtTabId !== undefined) {
+                this._worktreeActionResolves.set(wtTabId, resolve);
+              }
               setTimeout(() => {
-                if (this._worktreeActionResolve === resolve) {
-                  this._worktreeActionResolve = null;
+                if (wtTabId !== undefined && this._worktreeActionResolves.get(wtTabId) === resolve) {
+                  this._worktreeActionResolves.delete(wtTabId);
                   resolve();
                 }
               }, worktreeTimeout);
@@ -459,6 +484,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         this._agentProcess.sendCommand({
           type: 'worktreeAction',
           action: wtAction,
+          tabId: wtTabId,
         });
         break;
       }
@@ -484,8 +510,8 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   }
 
   /** Notify the agent that all merge changes have been reviewed. */
-  public sendMergeAllDone(): void {
-    this._agentProcess.sendCommand({ type: 'mergeAction', action: 'all-done' });
+  public sendMergeAllDone(tabId?: string): void {
+    this._agentProcess.sendCommand({ type: 'mergeAction', action: 'all-done', tabId });
   }
 
   /** Submit a task programmatically (e.g. from runSelection command). */
@@ -498,9 +524,9 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     );
   }
 
-  /** Stop the currently running task. */
+  /** Stop the currently running task in the active tab. */
   public stopTask(): void {
-    this._agentProcess.stop();
+    this._sendToWebview({ type: 'triggerStop' } as ToWebviewMessage);
   }
 
   /** Focus the chat input in the sidebar. */
@@ -526,22 +552,21 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     }
   }
 
-  /** Start a new conversation, stopping any running task first. */
+  /** Start a new conversation in a new tab (without affecting running tabs). */
   public newConversation(): void {
-    if (this._runningTabs.size > 0) {
-      this._pendingNewChat = true;
-      this._agentProcess.stop();
-    } else {
-      this._sendToWebview({ type: 'clearChat' });
-    }
+    this._sendToWebview({ type: 'clearChat' });
   }
 
   /**
    * Generate a commit message using this view's agent process.
+   *
+   * @param token Optional cancellation token.
+   * @param tabId Optional tab ID — each tab can independently request a
+   *              commit message without blocking other tabs.
    */
-  public generateCommitMessage(token?: vscode.CancellationToken): Promise<void> {
-    if (this._commitPending) return Promise.resolve();
-    this._commitPending = true;
+  public generateCommitMessage(token?: vscode.CancellationToken, tabId: string = ''): Promise<void> {
+    if (this._commitPendingTabs.has(tabId)) return Promise.resolve();
+    this._commitPendingTabs.add(tabId);
     this._agentProcess.start(this._getWorkDir());
     this._agentProcess.sendCommand({ type: 'generateCommitMessage', model: this._selectedModel });
 
@@ -550,7 +575,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       const done = () => {
         if (resolved) return;
         resolved = true;
-        this._commitPending = false;
+        this._commitPendingTabs.delete(tabId);
         disposable.dispose();
         clearTimeout(timer);
         resolve();
@@ -564,10 +589,9 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   /** Cleanup: kill agent process and dispose listeners. */
   public dispose(): void {
     this._disposed = true;
-    if (this._worktreeActionResolve) {
-      this._worktreeActionResolve();
-      this._worktreeActionResolve = null;
-    }
+    for (const resolve of this._worktreeActionResolves.values()) resolve();
+    this._worktreeActionResolves.clear();
+    this._worktreeProgresses.clear();
     this._agentProcess.dispose();
     this._onCommitMessage.dispose();
   }

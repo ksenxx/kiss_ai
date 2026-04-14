@@ -143,7 +143,7 @@ class TestForceStopMechanism(unittest.TestCase):
         server = VSCodeServer()
         events: list[dict] = []
         lock = threading.Lock()
-        tab_id = 1
+        tab_id = "1"
 
         def capture(e: dict) -> None:
             with lock:
@@ -162,9 +162,10 @@ class TestForceStopMechanism(unittest.TestCase):
                 server.printer.broadcast({"type": "status", "running": False})
 
         stop_event = threading.Event()
-        server._stop_events[tab_id] = stop_event
+        tab = server._get_tab(tab_id)
+        tab.stop_event = stop_event
         thread = threading.Thread(target=blocking_task, daemon=True)
-        server._task_threads[tab_id] = thread
+        tab.task_thread = thread
         thread.start()
         time.sleep(0.1)
 

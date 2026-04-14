@@ -168,7 +168,7 @@ class TestMultiTaskIntegration(unittest.TestCase):
 
     def test_is_last_guards_worktree(self) -> None:
         """Worktree broadcast only happens on the last subtask."""
-        assert "if is_last and self._use_worktree" in self._src
+        assert "if is_last and tab.use_worktree" in self._src
 
     def test_interrupt_breaks_loop(self) -> None:
         """KeyboardInterrupt breaks out of the subtask loop."""
@@ -220,7 +220,7 @@ class TestMultiTaskIntegration(unittest.TestCase):
 
     def test_recording_spans_all_subtasks(self) -> None:
         """start_recording is before the loop, stop_recording is after."""
-        start_pos = self._src.index("self.printer.start_recording(rec_id)")
+        start_pos = self._src.index("self.printer.start_recording(rec_id, tab_id=tab_id)")
         loop_pos = self._src.index("for task_idx, task_prompt in enumerate(subtasks):")
         assert start_pos < loop_pos
         # stop_recording is in the finally block, after the loop
