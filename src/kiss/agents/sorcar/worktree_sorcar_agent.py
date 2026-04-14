@@ -18,7 +18,7 @@ import yaml
 
 from kiss.agents.sorcar.cli_helpers import (
     _apply_chat_args,
-    _build_chat_arg_parser,
+    _build_arg_parser,
     _build_run_kwargs,
     _print_recent_chats,
     _print_run_stats,
@@ -486,40 +486,14 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
 def main() -> None:  # pragma: no cover – CLI entry point requires API
     """Run SorcarAgent, StatefulSorcarAgent, or WorktreeSorcarAgent from the CLI.
 
-    Uses ``--base-sorcar`` (default), ``--chat-sorcar``, or
-    ``--worktree-sorcar`` to select the agent type.
+    Uses ``--use-chat`` or ``--use-worktree`` to select the agent
+    type.  Defaults to base SorcarAgent when neither flag is given.
     """
     import time as time_mod
 
     from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 
-    if len(sys.argv) <= 1:
-        print(
-            "Usage: sorcar [-m MODEL] [-e ENDPOINT] [-b BUDGET] "
-            "[-w WORK_DIR] [-t TASK] [-f FILE] [-n] [-c ID] "
-            "[-l] [--cleanup] [-p] "
-            "[--base-sorcar | --chat-sorcar | --worktree-sorcar]"
-        )
-        sys.exit(1)
-
-    parser = _build_chat_arg_parser()
-    parser.add_argument(
-        "--cleanup", action="store_true",
-        help="Scan for and clean up orphaned worktree branches",
-    )
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument(
-        "--base-sorcar", action="store_true",
-        help="Use SorcarAgent (no chat persistence, no worktree; default)",
-    )
-    group.add_argument(
-        "--chat-sorcar", action="store_true",
-        help="Use StatefulSorcarAgent (chat persistence, no worktree)",
-    )
-    group.add_argument(
-        "--worktree-sorcar", action="store_true",
-        help="Use WorktreeSorcarAgent (chat persistence + worktree isolation)",
-    )
+    parser = _build_arg_parser()
     args = parser.parse_args()
 
     if args.list_chat_id:
@@ -536,9 +510,9 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
         print(WorktreeSorcarAgent.cleanup(repo))
         sys.exit(0)
 
-    if args.worktree_sorcar:
+    if args.use_worktree:
         agent: SorcarAgent = WorktreeSorcarAgent("Worktree Sorcar Agent")
-    elif args.chat_sorcar:
+    elif args.use_chat:
         agent = StatefulSorcarAgent("Stateful Sorcar Agent")
     else:
         agent = SorcarAgent("Sorcar Agent")

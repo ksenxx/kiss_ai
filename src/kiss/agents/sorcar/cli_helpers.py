@@ -1,8 +1,7 @@
-"""Shared CLI helpers for stateful Sorcar agent entry points.
+"""Shared CLI helpers for Sorcar agent entry points.
 
-Provides argument parsing, chat-session arg handling, run-kwarg
-construction, and post-run statistics printing — shared by
-``stateful_sorcar_agent.main()`` and ``worktree_sorcar_agent.main()``.
+Provides argument parsing, chat-session handling, run-kwarg construction,
+and post-run statistics.
 """
 
 from __future__ import annotations
@@ -29,24 +28,15 @@ def _print_recent_chats() -> None:
         print("No chat sessions found.")
         return
     for entry in reversed(chats):
-        chat_id = entry["chat_id"]
-        tasks = entry["tasks"]
-        assert isinstance(tasks, list)
         print(f"\n{'=' * 72}")
-        print(f"Chat ID: {chat_id}")
+        print(f"Chat ID: {entry['chat_id']}")
         print(f"{'=' * 72}")
+        tasks: list[dict[str, object]] = entry["tasks"]  # type: ignore[assignment]
         for i, t in enumerate(tasks, 1):
-            assert isinstance(t, dict)
-            ts = t.get("timestamp", 0)
-            assert isinstance(ts, (int, float))
+            ts = float(t.get("timestamp", 0))  # type: ignore[arg-type]
             dt = datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
-            task_text = str(t.get("task", ""))
-            result_text = str(t.get("result", ""))
-            # Truncate long texts for display
-            if len(task_text) > 200:
-                task_text = task_text[:200] + "..."
-            if len(result_text) > 200:
-                result_text = result_text[:200] + "..."
+            task_text = str(t.get("task", ""))[:200]
+            result_text = str(t.get("result", ""))[:200]
             print(f"\n  Task {i} [{dt}]:")
             print(f"    {task_text}")
             if result_text:
@@ -55,11 +45,7 @@ def _print_recent_chats() -> None:
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
-    """Build and return the base argument parser for agent CLI entry points.
-
-    Returns:
-        Configured ArgumentParser instance.
-    """
+    """Build the CLI argument parser for all Sorcar agent entry points."""
     parser = argparse.ArgumentParser(description="Run SorcarAgent demo")
     parser.add_argument(
         "-m", "--model_name", type=str, default="claude-opus-4-6", help="LLM model name"
@@ -78,48 +64,42 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Print output to console",
     )
     parser.add_argument(
-        "--no-web",
-        action="store_true",
-        default=False,
+        "--no-web", action="store_true", default=False,
         help="Disable browser/web tools (terminal-only mode)",
     )
     parser.add_argument(
-        "-p", "--parallel",
-        action="store_true",
-        default=False,
-        help="Enable the run_parallel tool for concurrent sub-tasks",
+        "-p", "--parallel", action="store_true", default=False,
+        help="Enable parallel subagents",
     )
     parser.add_argument(
-        "-t", "--task", type=str, default=None, help="Prompt template/task description"
+        "-t", "--task", type=str, default=None, help="Task description"
     )
     parser.add_argument(
         "-f", "--file", type=str, default=None,
         help="Path to a file whose contents to use as the task",
     )
-    return parser
-
-
-def _build_chat_arg_parser() -> argparse.ArgumentParser:
-    """Build arg parser with chat-session CLI options.
-
-    Extends :func:`_build_arg_parser` with ``-n``, ``--chat-id``, and
-    ``-l`` flags shared by all stateful agent entry points.
-
-    Returns:
-        Configured ArgumentParser instance.
-    """
-    parser = _build_arg_parser()
     parser.add_argument(
-        "-n", "--new", action="store_true",
-        help="Start a new chat session",
+        "-n", "--new", action="store_true", help="Start a new chat session",
     )
     parser.add_argument(
-        "-c", "--chat-id", type=str, default=None,
-        help="Resume a chat session by ID",
+        "-c", "--chat-id", type=str, default=None, help="Resume a chat session by ID",
     )
     parser.add_argument(
         "-l", "--list-chat-id", action="store_true",
         help="List the last 10 chat sessions with tasks and results",
+    )
+    parser.add_argument(
+        "--cleanup", action="store_true",
+        help="Scan for and clean up orphaned worktree branches",
+    )
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--use-chat", action="store_true",
+        help="Use chat mode",
+    )
+    group.add_argument(
+        "--use-worktree", action="store_true",
+        help="Use both chat mode and git worktree for isolation (for advanced users)",
     )
     return parser
 
@@ -129,16 +109,7 @@ def _apply_chat_args(
     args: argparse.Namespace,
     task: str = "",
 ) -> None:
-    """Apply ``-n`` and ``--chat-id`` args to an agent.
-
-    When neither ``-n`` nor ``--chat-id`` is given and *task* is provided,
-    attempts to resume a previous chat session for the same task description.
-
-    Args:
-        agent: The stateful agent to configure.
-        args: Parsed argparse namespace with ``new`` and ``chat_id``.
-        task: Task description used to look up a previous session.
-    """
+    """Apply ``-n`` / ``--chat-id`` args to *agent*, or resume by *task*."""
     if args.new:
         agent.new_chat()
     elif args.chat_id:
@@ -147,32 +118,8 @@ def _apply_chat_args(
         agent.resume_chat(task)
 
 
-def _build_fallback_run_kwargs() -> dict[str, Any]:
-    """Build run kwargs when argparse fails (treats all argv as task text).
-
-    Used as fallback when CLI arguments don't match the expected format.
-
-    Returns:
-        Dictionary ready to pass to ``agent.run(**kwargs)``.
-    """
-    import sys
-
-    return {
-        "prompt_template": " ".join(sys.argv[1:]) if len(sys.argv) > 1 else "",
-        "work_dir": str(Path(".").resolve()),
-        "ask_user_question_callback": cli_ask_user_question,
-    }
-
-
 def _build_run_kwargs(args: argparse.Namespace) -> dict[str, Any]:
-    """Build ``run()`` keyword arguments from parsed CLI args.
-
-    Args:
-        args: Parsed argparse namespace.
-
-    Returns:
-        Dictionary ready to pass to ``agent.run(**kwargs)``.
-    """
+    """Build ``agent.run()`` keyword arguments from parsed CLI args."""
     task_description = _resolve_task(args)
     work_dir = args.work_dir or str(Path(".").resolve())
     Path(work_dir).mkdir(parents=True, exist_ok=True)
@@ -195,12 +142,7 @@ def _build_run_kwargs(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _print_run_stats(agent: StatefulSorcarAgent, elapsed: float) -> None:
-    """Print post-run statistics.
-
-    Args:
-        agent: The agent that just finished running.
-        elapsed: Wall-clock seconds the run took.
-    """
+    """Print post-run statistics (chat ID, time, cost, tokens)."""
     print(f"\nChat ID: {agent.chat_id}")
     print(f"Time: {elapsed:.1f}s")
     print(f"Cost: ${agent.budget_used:.4f}")

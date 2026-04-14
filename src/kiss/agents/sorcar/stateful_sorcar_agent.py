@@ -7,18 +7,10 @@ management — the same workflow that the VS Code extension performs in
 
 from __future__ import annotations
 
-import sys
 from typing import Any
 
 import yaml
 
-from kiss.agents.sorcar.cli_helpers import (
-    _apply_chat_args,
-    _build_chat_arg_parser,
-    _build_run_kwargs,
-    _print_recent_chats,
-    _print_run_stats,
-)
 from kiss.agents.sorcar.persistence import (
     _add_task,
     _generate_chat_id,
@@ -154,33 +146,4 @@ class StatefulSorcarAgent(SorcarAgent):
             )
 
 
-def main() -> None:  # pragma: no cover – CLI entry point requires API
-    """Run StatefulSorcarAgent from the command line with chat persistence."""
-    import time as time_mod
 
-    if len(sys.argv) <= 1:
-        print(
-            "Usage: stateful_sorcar_agent [-m MODEL] [-e ENDPOINT] [-b BUDGET] "
-            "[-w WORK_DIR] [-t TASK] [-f FILE] [-n] [--chat-id ID] [-l] [-p]"
-        )
-        sys.exit(1)
-
-    parser = _build_chat_arg_parser()
-    args = parser.parse_args()
-
-    if args.list_chat_id:
-        _print_recent_chats()
-        sys.exit(0)
-
-    agent = StatefulSorcarAgent("Stateful Sorcar Agent")
-    _apply_chat_args(agent, args)
-
-    start_time = time_mod.time()
-    agent.run(**_build_run_kwargs(args))
-    elapsed = time_mod.time() - start_time
-
-    _print_run_stats(agent, elapsed)
-
-
-if __name__ == "__main__":
-    main()

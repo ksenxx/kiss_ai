@@ -389,21 +389,22 @@ class TestWorktreeSorcarAgent:
 class TestCliAgentSelection:
     """Verify that main() selects the correct agent based on CLI flags."""
 
-    def test_main_source_has_agent_type_flags(self) -> None:
+    def test_main_arg_parser_has_agent_type_flags(self) -> None:
         import inspect
-        src = inspect.getsource(
-            __import__("kiss.agents.sorcar.worktree_sorcar_agent", fromlist=["main"]).main
-        )
-        assert "--worktree-sorcar" in src
-        assert "--chat-sorcar" in src
-        assert "--base-sorcar" in src
+
+        from kiss.agents.sorcar.cli_helpers import _build_arg_parser
+
+        src = inspect.getsource(_build_arg_parser)
+        assert "--use-worktree" in src
+        assert "--use-chat" in src
+        assert "--base-sorcar" not in src
 
     def test_main_source_creates_worktree_agent_with_flag(self) -> None:
         import inspect
         src = inspect.getsource(
             __import__("kiss.agents.sorcar.worktree_sorcar_agent", fromlist=["main"]).main
         )
-        assert 'if args.worktree_sorcar:' in src
+        assert 'if args.use_worktree:' in src
         assert 'WorktreeSorcarAgent(' in src
 
     def test_main_source_creates_stateful_agent_with_flag(self) -> None:
@@ -411,10 +412,10 @@ class TestCliAgentSelection:
         src = inspect.getsource(
             __import__("kiss.agents.sorcar.worktree_sorcar_agent", fromlist=["main"]).main
         )
-        assert 'elif args.chat_sorcar:' in src
+        assert 'elif args.use_chat:' in src
         assert 'StatefulSorcarAgent(' in src
 
-    def test_main_source_defaults_to_base_sorcar(self) -> None:
+    def test_main_source_defaults_to_sorcar_agent(self) -> None:
         import inspect
         src = inspect.getsource(
             __import__("kiss.agents.sorcar.worktree_sorcar_agent", fromlist=["main"]).main

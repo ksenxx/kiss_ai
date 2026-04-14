@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import sys
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -376,48 +375,4 @@ def cli_ask_user_question(question: str) -> str:
     return input("Your answer: ")
 
 
-def main() -> None:  # pragma: no cover – CLI entry point requires API
-    import time as time_mod
 
-    from kiss.agents.sorcar.cli_helpers import (
-        _build_arg_parser,
-        _build_fallback_run_kwargs,
-        _build_run_kwargs,
-    )
-
-    if len(sys.argv) <= 1:
-        print("Usage: sorcar_agent.py [-m MODEL_NAME] [-e ENDPOINT] [-b MAX_BUDGET] "
-              "[-w WORK_DIR] [-v true/false] "
-              "[-t TASK_DESCRIPTION] [-f TASK_FILE]")
-        sys.exit(1)
-    parser = _build_arg_parser()
-    agent = SorcarAgent("Sorcar Agent")
-    try:
-        args = parser.parse_args()
-    except Exception:
-        run_kwargs = _build_fallback_run_kwargs()
-    else:
-        run_kwargs = _build_run_kwargs(args)
-
-    start_time = time_mod.time()
-    result = agent.run(**run_kwargs)
-    elapsed = time_mod.time() - start_time
-
-    print("FINAL RESULT:")
-    try:
-        result_data = yaml.safe_load(result)
-    except Exception:
-        result_data = None
-    if isinstance(result_data, dict):
-        print("Completed successfully: " + str(result_data.get("success", False)))
-        print(result_data.get("summary", result))
-    else:
-        print(result)
-    print(f"Work directory was: {run_kwargs.get('work_dir', '.')}")
-    print(f"Time: {elapsed:.1f}s")
-    print(f"Cost: ${agent.budget_used:.4f}")
-    print(f"Total tokens: {agent.total_tokens_used}")
-
-
-if __name__ == "__main__":
-    main()

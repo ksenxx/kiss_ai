@@ -463,7 +463,7 @@ def channel_main(
 
     from kiss.agents.sorcar.cli_helpers import (
         _apply_chat_args,
-        _build_chat_arg_parser,
+        _build_arg_parser,
         _build_run_kwargs,
         _print_recent_chats,
         _print_run_stats,
@@ -480,7 +480,7 @@ def channel_main(
         print(" ".join(parts))
         sys.exit(1)
 
-    parser = _build_chat_arg_parser()
+    parser = _build_arg_parser()
     parser.add_argument(
         "--workspace",
         default="default",

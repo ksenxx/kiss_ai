@@ -22,7 +22,6 @@ import queue
 import shutil
 import sqlite3
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 
@@ -32,7 +31,6 @@ from kiss.agents.sorcar import persistence as th
 from kiss.agents.sorcar.cli_helpers import (
     _apply_chat_args,
     _build_arg_parser,
-    _build_fallback_run_kwargs,
     _build_run_kwargs,
     _print_recent_chats,
 )
@@ -93,7 +91,6 @@ class TestCliHelpers:
             _print_recent_chats()
             out = capsys.readouterr().out
             assert "Chat ID:" in out
-            assert "..." in out  # truncated long text
         finally:
             _restore_db(saved)
 
@@ -117,21 +114,6 @@ class TestCliHelpers:
             _apply_chat_args(agent, args, task="")
         finally:
             _restore_db(saved)
-
-    def test_build_fallback_run_kwargs(self) -> None:
-        """_build_fallback_run_kwargs builds kwargs from sys.argv."""
-        old_argv = sys.argv
-        try:
-            sys.argv = ["prog", "hello", "world"]
-            kwargs = _build_fallback_run_kwargs()
-            assert kwargs["prompt_template"] == "hello world"
-            assert "work_dir" in kwargs
-
-            sys.argv = ["prog"]
-            kwargs2 = _build_fallback_run_kwargs()
-            assert kwargs2["prompt_template"] == ""
-        finally:
-            sys.argv = old_argv
 
     def test_build_run_kwargs(self) -> None:
         """_build_run_kwargs builds kwargs from parsed args."""
