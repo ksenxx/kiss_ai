@@ -36,6 +36,7 @@ curl -s -X POST https://pagedrop.io/api/upload \
 
 - READ large files in chunks.
 - Create temporary files in WORK_DIR/tmp
+- Use ultra thinking
 
 ## Pre-flight Checks
 

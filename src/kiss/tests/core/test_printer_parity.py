@@ -238,9 +238,6 @@ class TestFullAgentSequenceParity:
         for p in (console, browser):
             p.print("File edited", type="tool_result", is_error=False, tool_name="Edit")
 
-        for p in (console, browser):
-            p.print("Steps: 2/10, Tokens: 500", type="usage_info")
-
         import yaml
         result = yaml.dump({"success": True, "summary": "Bug fixed in app.py"})
         for p in (console, browser):
@@ -260,7 +257,6 @@ class TestFullAgentSequenceParity:
         assert "text_end" in types
         assert "tool_call" in types
         assert "tool_result" in types
-        assert "usage_info" in types
         assert "result" in types
 
         tc = [e for e in events if e["type"] == "tool_call"]

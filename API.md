@@ -187,7 +187,7 @@ ______________________________________________________________________
 
 **Constructor:** `KISSAgent(name: str) -> None`
 
-- **run** — Runs the agent's main ReAct loop to solve the task.<br/>`run(model_name: str, prompt_template: str, arguments: dict[str, str] | None = None, system_prompt: str = '', tools: list[Callable[..., Any]] | None = None, is_agentic: bool = True, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, printer: Printer | None = None, verbose: bool | None = None, attachments: list[Attachment] | None = None, session_info: str = '') -> str`
+- **run** — Runs the agent's main ReAct loop to solve the task.<br/>`run(model_name: str, prompt_template: str, arguments: dict[str, str] | None = None, system_prompt: str = '', tools: list[Callable[..., Any]] | None = None, is_agentic: bool = True, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, printer: Printer | None = None, verbose: bool | None = None, attachments: list[Attachment] | None = None) -> str`
 
   - `model_name`: The name of the model to use for the agent.
   - `prompt_template`: The prompt template for the agent.
@@ -201,7 +201,6 @@ ______________________________________________________________________
   - `printer`: Optional printer for streaming output. Default is None.
   - `verbose`: Whether to print output to console. Default is None (verbose enabled).
   - `attachments`: Optional file attachments (images, PDFs) to include in the initial prompt. Default is None.
-  - `session_info`: Sub-session label string (e.g. "Session: 1/5") to include in usage info output. Default is empty string.
   - **Returns:** str: The result of the agent's task.
 
 - **finish** — The agent must call this function with the final answer to the task.<br/>`finish(result: str) -> str`
@@ -528,7 +527,7 @@ ______________________________________________________________________
 - **print** — Render content to the output destination.<br/>`print(content: Any, type: str = 'text', **kwargs: Any) -> str`
 
   - `content`: The content to display.
-  - `type`: Content type (e.g. "text", "prompt", "stream_event", "tool_call", "tool_result", "result", "usage_info", "message").
+  - `type`: Content type (e.g. "text", "prompt", "stream_event", "tool_call", "tool_result", "result", "message").
   - `**kwargs`: Additional type-specific options (e.g. tool_input, is_error).
   - **Returns:** str: Any extracted text (e.g. streamed text deltas), or empty string.
 
@@ -593,7 +592,7 @@ ______________________________________________________________________
 - **print** — Render content to the console using Rich formatting.<br/>`print(content: Any, type: str = 'text', **kwargs: Any) -> str`
 
   - `content`: The content to display.
-  - `type`: Content type (e.g. "text", "prompt", "stream_event", "tool_call", "tool_result", "result", "usage_info", "message").
+  - `type`: Content type (e.g. "text", "prompt", "stream_event", "tool_call", "tool_result", "result", "message").
   - `**kwargs`: Additional options such as tool_input, is_error, cost, total_tokens.
   - **Returns:** str: Extracted text from stream events, or empty string.
 
@@ -642,7 +641,7 @@ ______________________________________________________________________
 - **print** — Render content by broadcasting SSE events to connected browser clients.<br/>`print(content: Any, type: str = 'text', **kwargs: Any) -> str`
 
   - `content`: The content to display.
-  - `type`: Content type (e.g. "text", "prompt", "stream_event", "tool_call", "tool_result", "result", "usage_info", "message").
+  - `type`: Content type (e.g. "text", "prompt", "stream_event", "tool_call", "tool_result", "result", "message").
   - `**kwargs`: Additional options such as tool_input, is_error, cost, total_tokens.
   - **Returns:** str: Extracted text from stream events, or empty string.
 
@@ -2069,7 +2068,7 @@ ______________________________________________________________________
 - **print** — Render content by broadcasting SSE events to connected browser clients.<br/>`print(content: Any, type: str = 'text', **kwargs: Any) -> str`
 
   - `content`: The content to display.
-  - `type`: Content type (e.g. "text", "prompt", "stream_event", "tool_call", "tool_result", "result", "usage_info", "message").
+  - `type`: Content type (e.g. "text", "prompt", "stream_event", "tool_call", "tool_result", "result", "message").
   - `**kwargs`: Additional options such as tool_input, is_error, cost, total_tokens.
   - **Returns:** str: Extracted text from stream events, or empty string.
 
@@ -4355,7 +4354,7 @@ ______________________________________________________________________
 
 **Constructor:** `KISSAgent(name: str) -> None`
 
-- **run** — Runs the agent's main ReAct loop to solve the task.<br/>`run(model_name: str, prompt_template: str, arguments: dict[str, str] | None = None, system_prompt: str = '', tools: list[Callable[..., Any]] | None = None, is_agentic: bool = True, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, printer: Printer | None = None, verbose: bool | None = None, attachments: list[Attachment] | None = None, session_info: str = '') -> str`
+- **run** — Runs the agent's main ReAct loop to solve the task.<br/>`run(model_name: str, prompt_template: str, arguments: dict[str, str] | None = None, system_prompt: str = '', tools: list[Callable[..., Any]] | None = None, is_agentic: bool = True, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, printer: Printer | None = None, verbose: bool | None = None, attachments: list[Attachment] | None = None) -> str`
 
   - `model_name`: The name of the model to use for the agent.
   - `prompt_template`: The prompt template for the agent.
@@ -4369,7 +4368,6 @@ ______________________________________________________________________
   - `printer`: Optional printer for streaming output. Default is None.
   - `verbose`: Whether to print output to console. Default is None (verbose enabled).
   - `attachments`: Optional file attachments (images, PDFs) to include in the initial prompt. Default is None.
-  - `session_info`: Sub-session label string (e.g. "Session: 1/5") to include in usage info output. Default is empty string.
   - **Returns:** str: The result of the agent's task.
 
 - **finish** — The agent must call this function with the final answer to the task.<br/>`finish(result: str) -> str`
@@ -4752,7 +4750,7 @@ ______________________________________________________________________
 - **print** — Render content to the console using Rich formatting.<br/>`print(content: Any, type: str = 'text', **kwargs: Any) -> str`
 
   - `content`: The content to display.
-  - `type`: Content type (e.g. "text", "prompt", "stream_event", "tool_call", "tool_result", "result", "usage_info", "message").
+  - `type`: Content type (e.g. "text", "prompt", "stream_event", "tool_call", "tool_result", "result", "message").
   - `**kwargs`: Additional options such as tool_input, is_error, cost, total_tokens.
   - **Returns:** str: Extracted text from stream events, or empty string.
 
@@ -4778,7 +4776,7 @@ ______________________________________________________________________
 - **print** — Render content to the output destination.<br/>`print(content: Any, type: str = 'text', **kwargs: Any) -> str`
 
   - `content`: The content to display.
-  - `type`: Content type (e.g. "text", "prompt", "stream_event", "tool_call", "tool_result", "result", "usage_info", "message").
+  - `type`: Content type (e.g. "text", "prompt", "stream_event", "tool_call", "tool_result", "result", "message").
   - `**kwargs`: Additional type-specific options (e.g. tool_input, is_error).
   - **Returns:** str: Any extracted text (e.g. streamed text deltas), or empty string.
 

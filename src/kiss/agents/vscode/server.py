@@ -94,7 +94,7 @@ class VSCodePrinter(BaseBrowserPrinter):
 
     Inherits from BaseBrowserPrinter to get identical event parsing and
     emission (thinking_start/delta/end, text_delta/end, tool_call,
-    tool_result, system_output, result, usage_info). Overrides
+    tool_result, system_output, result). Overrides
     broadcast() to write JSON lines to stdout instead of SSE queues.
     """
 

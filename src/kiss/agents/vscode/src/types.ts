@@ -59,7 +59,6 @@ export type ToWebviewMessage =
   | { type: 'result'; text?: string; summary?: string; success?: boolean; total_tokens?: number; cost?: string }
   | { type: 'system_prompt'; text: string }
   | { type: 'prompt'; text: string }
-  | { type: 'usage_info'; text: string }
   // Lifecycle events
   | { type: 'clear' }
   | { type: 'clearChat' }

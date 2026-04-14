@@ -17,7 +17,7 @@ from kiss.core.printer import (
 _DISPLAY_EVENT_TYPES = frozenset({
     "clear", "thinking_start", "thinking_delta", "thinking_end",
     "text_delta", "text_end", "tool_call", "tool_result",
-    "system_output", "result", "system_prompt", "prompt", "usage_info",
+    "system_output", "result", "system_prompt", "prompt",
     "task_done", "task_error", "task_stopped",
     "followup_suggestion",
 })
@@ -221,7 +221,7 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
         Args:
             content: The content to display.
             type: Content type (e.g. "text", "prompt", "stream_event",
-                "tool_call", "tool_result", "result", "usage_info", "message").
+                "tool_call", "tool_result", "result", "message").
             **kwargs: Additional options such as tool_input, is_error, cost,
                 total_tokens.
 
@@ -247,9 +247,6 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
             return self.parse_stream_event(content)
         if type == "message":
             self._handle_message(content, **kwargs)
-            return ""
-        if type == "usage_info":
-            self.broadcast({"type": "usage_info", "text": str(content).strip()})
             return ""
         if type == "bash_stream":
             text = ""

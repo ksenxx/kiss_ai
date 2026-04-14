@@ -219,7 +219,7 @@ class Printer(ABC):
         Args:
             content: The content to display.
             type: Content type (e.g. "text", "prompt", "stream_event",
-                "tool_call", "tool_result", "result", "usage_info", "message").
+                "tool_call", "tool_result", "result", "message").
             **kwargs: Additional type-specific options (e.g. tool_input, is_error).
 
         Returns:

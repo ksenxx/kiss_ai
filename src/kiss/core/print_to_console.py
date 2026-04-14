@@ -64,7 +64,7 @@ class ConsolePrinter(StreamEventParser, Printer):
         Args:
             content: The content to display.
             type: Content type (e.g. "text", "prompt", "stream_event",
-                "tool_call", "tool_result", "result", "usage_info", "message").
+                "tool_call", "tool_result", "result", "message").
             **kwargs: Additional options such as tool_input, is_error, cost,
                 total_tokens.
 
@@ -102,17 +102,6 @@ class ConsolePrinter(StreamEventParser, Printer):
         if type == "message":
             self._handle_message(content, **kwargs)
             return ""
-        if type == "usage_info":
-            self._flush_newline()
-            self._console.print(
-                Panel(
-                    Text(str(content).strip(), style="dim italic"),
-                    border_style="dim",
-                    padding=(0, 1),
-                    expand=True,
-                )
-            )
-            return ""
         if type == "bash_stream":
             self._file.write(str(content))
             self._file.flush()
@@ -138,7 +127,7 @@ class ConsolePrinter(StreamEventParser, Printer):
                 Panel(
                     body,
                     title="Result",
-                    subtitle=f"tokens={total_tokens}  cost={cost}",
+                    subtitle=f"tokens={total_tokens:,}  cost={cost}",
                     border_style="bold green",
                     padding=(1, 2),
                 )
@@ -246,7 +235,7 @@ class ConsolePrinter(StreamEventParser, Printer):
                 Panel(
                     body,
                     title="Result",
-                    subtitle=(f"tokens={total_tokens_used}  cost={cost_str}"),
+                    subtitle=(f"tokens={total_tokens_used:,}  cost={cost_str}"),
                     border_style="bold green",
                     padding=(1, 2),
                 )

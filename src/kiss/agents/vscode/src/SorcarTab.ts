@@ -72,6 +72,7 @@ export function buildChatHtml(webview: vscode.Webview, extensionUri: vscode.Uri,
         <span id="status-text">Ready</span>
         <span id="status-tokens" class="status-metric"></span>
         <span id="status-budget" class="status-metric"></span>
+        <span id="status-steps" class="status-metric"></span>
       </div>
     </header>
 

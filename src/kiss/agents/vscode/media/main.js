@@ -7,6 +7,9 @@
   // @ts-ignore - vscode is injected by the webview
   const vscode = acquireVsCodeApi();
 
+  /** Format a number with thousand separators (e.g. 12345 → "12,345"). */
+  function fmtN(n) { return Number(n).toLocaleString('en-US'); }
+
   // State — isRunning mirrors the active tab's tab.isRunning for UI controls
   let isRunning = false;
   let selectedModel = 'claude-opus-4-6';
@@ -63,6 +66,7 @@
       chatId: '',
       statusTokensText: '',
       statusBudgetText: '',
+      statusStepsText: '',
       welcomeVisible: true,
       selectedModel: selectedModel,
       attachments: [],
@@ -108,6 +112,7 @@
     tab.chatId = currentChatId;
     tab.statusTokensText = statusTokens ? statusTokens.textContent : '';
     tab.statusBudgetText = statusBudget ? statusBudget.textContent : '';
+    tab.statusStepsText = statusSteps ? statusSteps.textContent : '';
     // Save per-tab state
     tab.selectedModel = selectedModel;
     tab.attachments = attachments;
@@ -159,6 +164,7 @@
     currentTaskName = tab.taskPanelHTML || '';
     if (statusTokens) statusTokens.textContent = tab.statusTokensText;
     if (statusBudget) statusBudget.textContent = tab.statusBudgetText;
+    if (statusSteps) statusSteps.textContent = tab.statusStepsText;
     if (welcome) {
       if (tab.welcomeVisible) {
         welcome.style.display = '';
@@ -443,6 +449,7 @@
   const taskPanel = document.getElementById('task-panel');
   const statusTokens = document.getElementById('status-tokens');
   const statusBudget = document.getElementById('status-budget');
+  const statusSteps = document.getElementById('status-steps');
 
 
   function setTaskText(text) {
@@ -880,12 +887,12 @@
         rb += esc((ev.text || '(no result)').replace(/\n{3,}/g, '\n\n').trim());
       }
       rc.innerHTML = '<div class="rc-h"><h3>Result</h3><div class="rs">'
-        + '<span>Tokens <b>' + (ev.total_tokens || 0) + '</b></span>'
+        + '<span>Tokens <b>' + fmtN(ev.total_tokens || 0) + '</b></span>'
         + '<span>Cost <b>' + (ev.cost || 'N/A') + '</b></span>'
         + '</div></div><div class="rc-body md-body' + (usePre ? ' pre' : '') + '">' + rb + '</div>';
       hlBlock(rc);
       target.appendChild(rc);
-      if (statusTokens && ev.total_tokens) statusTokens.textContent = 'Tokens: ' + ev.total_tokens;
+      if (statusTokens && ev.total_tokens) statusTokens.textContent = 'Tokens: ' + fmtN(ev.total_tokens);
       if (statusBudget && ev.cost && ev.cost !== 'N/A') statusBudget.textContent = 'Cost: ' + ev.cost;
       break;
     }
@@ -914,7 +921,13 @@
       u.appendChild(uBody);
       addCollapse(u, uHdr);
       target.appendChild(u);
-      updateUsageMetrics(ev.text || '');
+      if (ev.total_tokens != null && ev.cost != null) {
+        if (statusTokens) statusTokens.textContent = 'Tokens: ' + fmtN(ev.total_tokens);
+        if (statusBudget && ev.cost !== 'N/A') statusBudget.textContent = 'Cost: ' + ev.cost;
+        if (statusSteps && ev.total_steps != null) statusSteps.textContent = 'Steps: ' + ev.total_steps;
+      } else {
+        updateUsageMetrics(ev.text || '');
+      }
       break;
     }
     }
@@ -1041,7 +1054,7 @@
   // --- Usage metrics (tokens / budget) in header ---
   function updateUsageMetrics(text) {
     if (!statusTokens || !statusBudget) return;
-    var tm = text.match(/Tokens:\s*(\d+)\/\d+/);
+    var tm = text.match(/Tokens:\s*([\d,]+)\/[\d,]+/);
     var bm = text.match(/Budget:\s*(\$[0-9.]+)\/\$[0-9.]+/);
     if (tm) statusTokens.textContent = 'Tokens: ' + tm[1];
     if (bm) statusBudget.textContent = 'Cost: ' + bm[1];

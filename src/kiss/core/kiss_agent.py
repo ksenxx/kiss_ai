@@ -57,6 +57,7 @@ class KISSAgent(Base):
 
     def __init__(self, name: str) -> None:
         super().__init__(name)
+        self.step_offset = 0
 
     def _reset(
         self,
@@ -67,7 +68,6 @@ class KISSAgent(Base):
         model_config: dict[str, Any] | None,
         printer: Printer | None = None,
         verbose: bool | None = None,
-        session_info: str = "",
     ) -> None:
         self.model_name = model_name
         self.verbose = verbose if verbose is not None else True
@@ -95,7 +95,6 @@ class KISSAgent(Base):
         self.step_count = 0
         self.total_tokens_used = 0
         self.budget_used = 0.0
-        self.session_info = session_info
         self.run_start_timestamp = int(time.time())
 
     def _set_prompt(
@@ -137,7 +136,6 @@ class KISSAgent(Base):
         printer: Printer | None = None,
         verbose: bool | None = None,
         attachments: list[Attachment] | None = None,
-        session_info: str = "",
     ) -> str:
         """
         Runs the agent's main ReAct loop to solve the task.
@@ -164,8 +162,6 @@ class KISSAgent(Base):
                 Default is None (verbose enabled).
             attachments (list[Attachment] | None): Optional file attachments (images, PDFs)
                 to include in the initial prompt. Default is None.
-            session_info (str): Sub-session label string (e.g. "Session: 1/5") to
-                include in usage info output. Default is empty string.
 
         Returns:
             str: The result of the agent's task.
@@ -182,7 +178,6 @@ class KISSAgent(Base):
                 model_config,
                 printer,
                 verbose,
-                session_info=session_info,
             )
 
             if not self.is_agentic and tools is not None:
@@ -318,9 +313,6 @@ class KISSAgent(Base):
             self.model.add_message_to_conversation("user", retry_msg)
             return None
 
-        if self.printer:
-            self.printer.print(usage_info, type="usage_info")
-
         call_reprs = []
         function_results: list[tuple[str, dict[str, Any]]] = []
         finish_result: str | None = None
@@ -446,14 +438,10 @@ class KISSAgent(Base):
             max_tokens = get_max_context_length(self.model.model_name)
             capped_tokens = self.total_tokens_used % max_tokens
             global_max = 200.0
-            session_part = (
-                f"{self.session_info}, " if self.session_info else ""
-            )
             global_budget_used = Base.get_global_budget_used()
             return (
-                f"{session_part}"
                 f"Steps: {self.step_count}/{self.max_steps}, "
-                f"Tokens: {capped_tokens}/{max_tokens}, "
+                f"Tokens: {capped_tokens:,}/{max_tokens:,}, "
                 f"Budget: ${self.budget_used:.4f}/${self.max_budget:.2f}, "
                 f"Global Budget: ${global_budget_used:.4f}/${global_max:.2f}"
             )
