@@ -469,7 +469,6 @@ class VSCodeServer:
                         ask_user_question_callback=self._ask_user_question,
                         is_parallel=tab.use_parallel,
                     )
-                    tab.task_history_id = tab.agent._last_task_id
                     result_summary = self._extract_result_summary(rec_id) or "No summary available"
                     task_end_event = {"type": "task_done"}
                     if is_last and tab.use_worktree and tab.worktree_agent._wt_pending:
@@ -479,15 +478,15 @@ class VSCodeServer:
                         else:
                             tab.worktree_agent.discard()
                 except KeyboardInterrupt:
-                    tab.task_history_id = tab.agent._last_task_id
                     result_summary = "Task stopped by user"
                     task_end_event = {"type": "task_stopped"}
                     break
                 except Exception as e:  # pragma: no cover
-                    tab.task_history_id = tab.agent._last_task_id
                     result_summary = f"Task failed: {e}"
                     task_end_event = {"type": "task_error", "text": str(e)}
                     break
+                finally:
+                    tab.task_history_id = tab.agent._last_task_id
         except BaseException:  # pragma: no cover — async interrupt before inner try
             # P14: interrupt before inner try — ensure stop_recording runs
             task_end_event = task_end_event or {"type": "task_stopped"}
@@ -759,9 +758,7 @@ class VSCodeServer:
                 "title": task[:50] + "..." if len(task) > 50 else task,
                 "timestamp": entry.get("timestamp", 0),
                 "preview": task,
-                "text": task,
                 "has_events": has_events,
-                "chat_id": chat_id,
             })
         self.printer.broadcast({
             "type": "history", "sessions": sessions,
