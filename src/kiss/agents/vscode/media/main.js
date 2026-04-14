@@ -545,12 +545,6 @@
     // Create a container for the adjacent task
     var container = mkEl('div', 'adjacent-task');
     container.dataset.task = task;
-    var separator = mkEl('div', 'adjacent-separator');
-    var taskLabel = task.length > 80 ? task.substring(0, 80) + '…' : task;
-    separator.innerHTML = '<span class="adjacent-sep-line"></span>'
-      + '<span class="adjacent-sep-label">' + esc(taskLabel) + '</span>'
-      + '<span class="adjacent-sep-line"></span>';
-    container.appendChild(separator);
 
     // Replay events into the container (save/restore header metrics so
     // adjacent-task replay doesn't overwrite the current task's values)
