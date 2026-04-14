@@ -252,6 +252,11 @@
       el.addEventListener('click', function() {
         switchToTab(tab.id);
       });
+      el.addEventListener('contextmenu', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        showTabContextMenu(e.clientX, e.clientY, tab.id);
+      });
       tabList.appendChild(el);
     });
 
@@ -330,6 +335,63 @@
     renderTabBar();
     persistTabState();
   }
+
+  // --- Tab context menu ---
+  var tabCtxMenu = document.createElement('div');
+  tabCtxMenu.id = 'tab-context-menu';
+  document.body.appendChild(tabCtxMenu);
+
+  function closeTabContextMenu() {
+    tabCtxMenu.classList.remove('open');
+  }
+
+  function showTabContextMenu(x, y, tabId) {
+    tabCtxMenu.innerHTML = '';
+    var items = [
+      { label: 'Close', action: function() { closeTab(tabId); } },
+      { label: 'Close Others', action: function() {
+        var ids = tabs.filter(function(t) { return t.id !== tabId; }).map(function(t) { return t.id; });
+        if (tabId !== activeTabId) switchToTab(tabId);
+        ids.forEach(function(id) { closeTab(id); });
+      }},
+      { label: 'Close All', action: function() {
+        var ids = tabs.map(function(t) { return t.id; });
+        ids.forEach(function(id) { closeTab(id); });
+      }},
+      { label: 'Close Inactive', action: function() {
+        var ids = tabs.filter(function(t) { return !t.isRunning; }).map(function(t) { return t.id; });
+        ids.forEach(function(id) { closeTab(id); });
+      }},
+    ];
+    items.forEach(function(item) {
+      var el = document.createElement('div');
+      el.className = 'tab-ctx-item';
+      el.textContent = item.label;
+      el.addEventListener('click', function() {
+        closeTabContextMenu();
+        item.action();
+      });
+      tabCtxMenu.appendChild(el);
+    });
+    // Position the menu, clamping to viewport
+    tabCtxMenu.classList.add('open');
+    var mw = tabCtxMenu.offsetWidth;
+    var mh = tabCtxMenu.offsetHeight;
+    var px = Math.min(x, window.innerWidth - mw - 4);
+    var py = Math.min(y, window.innerHeight - mh - 4);
+    tabCtxMenu.style.left = Math.max(0, px) + 'px';
+    tabCtxMenu.style.top = Math.max(0, py) + 'px';
+  }
+
+  document.addEventListener('click', function() { closeTabContextMenu(); });
+  document.addEventListener('contextmenu', function(e) {
+    if (!e.target.closest('#tab-context-menu') && !e.target.closest('.chat-tab')) {
+      closeTabContextMenu();
+    }
+  });
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') closeTabContextMenu();
+  });
 
   function createNewTab() {
     // Preserve any typed text so it carries over to the new tab

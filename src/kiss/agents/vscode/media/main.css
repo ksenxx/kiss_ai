@@ -158,6 +158,26 @@ header {
   padding: 4px 0;
   flex-shrink: 0;
 }
+#tab-context-menu {
+  position: fixed;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+  z-index: 200;
+  min-width: 160px;
+  padding: 4px 0;
+  display: none;
+}
+#tab-context-menu.open { display: block; }
+.tab-ctx-item {
+  padding: 5px 14px;
+  font-size: var(--fs-base);
+  color: var(--fg);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tab-ctx-item:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
 
 /* ── Task Panel ──────────────────────────────────────── */
 #task-panel {
