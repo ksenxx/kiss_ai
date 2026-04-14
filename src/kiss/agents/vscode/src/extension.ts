@@ -189,10 +189,13 @@ export function activate(context: vscode.ExtensionContext): void {
   });
   context.subscriptions.push(treeView);
 
-  treeView.onDidChangeVisibility(e => {
+  treeView.onDidChangeVisibility(async (e) => {
     if (e.visible) {
-      sidebarView!.focusChatInput();
-      vscode.commands.executeCommand('workbench.action.closeSidebar');
+      // Switch primary sidebar away from the KS tree view so the icon never
+      // toggles/closes the sidebar on repeated clicks.
+      await vscode.commands.executeCommand('workbench.view.explorer');
+      // Show the KISS Sorcar chat in the secondary sidebar
+      await sidebarView!.focusChatInput();
     }
   });
 

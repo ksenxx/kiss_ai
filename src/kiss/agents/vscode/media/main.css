@@ -83,6 +83,7 @@ header {
   flex: 1;
   min-width: 0;
   overflow-x: auto;
+  overflow-y: hidden;
   scrollbar-width: none;
   -ms-overflow-style: none;
 }
@@ -155,6 +156,7 @@ header {
   min-width: 28px;
   max-width: 28px;
   padding: 4px 0;
+  flex-shrink: 0;
 }
 
 /* ── Task Panel ──────────────────────────────────────── */

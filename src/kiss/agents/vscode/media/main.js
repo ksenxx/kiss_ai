@@ -253,15 +253,22 @@
       tabList.appendChild(el);
     });
 
-    // Add "+" button at the end of the tab list
-    var addBtn = document.createElement('div');
-    addBtn.className = 'chat-tab chat-tab-add';
-    addBtn.textContent = '+';
-    addBtn.title = 'New chat';
-    addBtn.addEventListener('click', function() {
-      createNewTab();
-    });
-    tabList.appendChild(addBtn);
+    // Add "+" button as a direct child of tab-bar (between tab-list and history-btn)
+    var existingAdd = tabBar.querySelector('.chat-tab-add');
+    if (!existingAdd) {
+      var addBtn = document.createElement('div');
+      addBtn.className = 'chat-tab chat-tab-add';
+      addBtn.textContent = '+';
+      addBtn.title = 'New chat';
+      addBtn.addEventListener('click', function() {
+        createNewTab();
+      });
+      tabBar.insertBefore(addBtn, document.getElementById('history-btn'));
+    }
+
+    // Scroll the active tab into view
+    var activeEl = tabList.querySelector('.chat-tab.active');
+    if (activeEl) activeEl.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }
 
   function switchToTab(tabId) {
