@@ -170,7 +170,7 @@
       }
     ],
     "configurationDefaults": {
-      "notifications.defaultPosition": "bottom-left"
+      "workbench.notifications.position": "bottom-left"
     },
     "configuration": {
       "title": "KISS Sorcar",
