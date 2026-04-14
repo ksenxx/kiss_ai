@@ -45,6 +45,9 @@ cp "$PROJECT_ROOT/README.md" "$DEST/"
 cp "$PROJECT_ROOT/SYSTEM.md" "$DEST/"
 cp "$PROJECT_ROOT/SORCAR.md" "$DEST/"
 
+# Copy LICENSE to the extension directory so vsce package can find it
+cp "$PROJECT_ROOT/LICENSE" "$SCRIPT_DIR/LICENSE"
+
 # Copy all git-tracked src/kiss/ files, excluding VS Code extension build
 # artifacts (tsconfig, TS sources, node configs) that would confuse the
 # TypeScript language server when nested inside kiss_project/.
