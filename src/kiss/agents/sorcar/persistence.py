@@ -59,7 +59,7 @@ def _close_db() -> None:
 
 
 _HISTORY_SELECT = (
-    "SELECT id, timestamp, task, has_events, result, chat_id "
+    "SELECT id, timestamp, task, has_events, result, chat_id, extra "
     "FROM task_history "
 )
 
@@ -75,7 +75,8 @@ def _init_tables(conn: sqlite3.Connection) -> None:
             task TEXT NOT NULL,
             has_events INTEGER DEFAULT 0,
             result TEXT DEFAULT '',
-            chat_id TEXT DEFAULT ''
+            chat_id TEXT DEFAULT '',
+            extra TEXT DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS idx_th_timestamp
             ON task_history(timestamp);
@@ -308,6 +309,34 @@ def _save_task_result(
         db.execute(
             "UPDATE task_history SET result = ? WHERE id = ?",
             (result, resolved_task_id),
+        )
+        db.commit()
+
+
+def _save_task_extra(
+    extra: dict[str, object],
+    task_id: int | None = None,
+    task: str | None = None,
+) -> None:
+    """Save extra metadata for a task as a JSON string.
+
+    Stores a JSON-serialized dict in the ``extra`` column of
+    ``task_history``.  Typical keys: ``model``, ``work_dir``,
+    ``version``, ``tokens``, ``cost``, ``is_parallel``, ``is_worktree``.
+
+    Args:
+        extra: Dictionary of metadata to persist.
+        task_id: Stable row id to update when available.
+        task: Fallback task description string for legacy callers.
+    """
+    db = _get_db()
+    with _db_lock:
+        resolved_task_id = task_id if task_id is not None else _most_recent_task_id(db, task)
+        if resolved_task_id is None:
+            return
+        db.execute(
+            "UPDATE task_history SET extra = ? WHERE id = ?",
+            (json.dumps(extra), resolved_task_id),
         )
         db.commit()
 

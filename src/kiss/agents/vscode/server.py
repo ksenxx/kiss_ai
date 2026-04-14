@@ -32,6 +32,7 @@ from kiss.agents.sorcar.persistence import (
     _record_file_usage,
     _record_model_usage,
     _save_last_model,
+    _save_task_extra,
     _search_history,
     _set_latest_chat_events,
 )
@@ -450,6 +451,20 @@ class VSCodeServer:
                     task_id=self._task_history_id,
                     task=prompt,
                     result=result_summary,
+                )
+                from kiss._version import __version__
+
+                _save_task_extra(
+                    {
+                        "model": model,
+                        "work_dir": work_dir,
+                        "version": __version__,
+                        "tokens": self.agent.total_tokens_used,
+                        "cost": round(self.agent.budget_used, 6),
+                        "is_parallel": self._use_parallel,
+                        "is_worktree": self._use_worktree,
+                    },
+                    task_id=self._task_history_id,
                 )
                 self.printer.broadcast({"type": "tasks_updated"})
                 self.printer.reset()

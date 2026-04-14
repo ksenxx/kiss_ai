@@ -24,6 +24,7 @@ from kiss.agents.sorcar.persistence import (
     _generate_chat_id,
     _load_chat_context,
     _load_task_chat_id,
+    _save_task_extra,
     _save_task_result,
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
@@ -137,6 +138,20 @@ class StatefulSorcarAgent(SorcarAgent):
             raise
         finally:
             _save_task_result(task_id=task_id, result=result_summary)
+            from kiss._version import __version__
+
+            _save_task_extra(
+                {
+                    "model": getattr(self, "model_name", ""),
+                    "work_dir": getattr(self, "work_dir", ""),
+                    "version": __version__,
+                    "tokens": self.total_tokens_used,
+                    "cost": round(self.budget_used, 6),
+                    "is_parallel": self._is_parallel,
+                    "is_worktree": type(self).__name__ == "WorktreeSorcarAgent",
+                },
+                task_id=task_id,
+            )
 
 
 def main() -> None:  # pragma: no cover – CLI entry point requires API

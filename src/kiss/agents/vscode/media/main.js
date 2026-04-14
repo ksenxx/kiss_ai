@@ -945,7 +945,7 @@
   // --- Scrolling ---
 
   function sb() {
-    if (!_scrollLock && !_noScroll && !scrollRaf) {
+    if (!_scrollLock && !_noScroll && !scrollRaf && !(welcome && welcome.style.display !== 'none')) {
       scrollRaf = requestAnimationFrame(function() {
         O.scrollTo({ top: O.scrollHeight, behavior: 'instant' });
         scrollRaf = 0;
