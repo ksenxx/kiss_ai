@@ -15,7 +15,6 @@ import socket
 import sqlite3
 import threading
 import time
-import uuid
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -70,7 +69,7 @@ _EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
     "task_history": [
         ("has_events", "INTEGER DEFAULT 0"),
         ("result", "TEXT DEFAULT ''"),
-        ("chat_id", "TEXT DEFAULT ''"),
+        ("chat_id", "INTEGER DEFAULT 0"),
         ("extra", "TEXT DEFAULT ''"),
     ],
     "model_usage": [
@@ -89,6 +88,9 @@ def _migrate_tables(conn: sqlite3.Connection) -> None:
     against ``_EXPECTED_COLUMNS`` and issues ``ALTER TABLE ADD COLUMN``
     for any that are absent.  This handles schema upgrades when the
     database was created by an older version of the code.
+
+    Also migrates old TEXT chat_ids (UUID hex strings) to INTEGER
+    (first task's row id) for existing databases.
     """
     for table, columns in _EXPECTED_COLUMNS.items():
         rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
@@ -98,6 +100,28 @@ def _migrate_tables(conn: sqlite3.Connection) -> None:
                 conn.execute(
                     f"ALTER TABLE {table} ADD COLUMN {col_name} {col_def}"
                 )
+    # Migrate old TEXT chat_ids to INTEGER (first task's row id).
+    # This handles databases created before the chat_id type change.
+    old_ids = conn.execute(
+        "SELECT DISTINCT chat_id FROM task_history "
+        "WHERE typeof(chat_id) = 'text' AND chat_id != ''"
+    ).fetchall()
+    for r in old_ids:
+        old_cid = r[0]
+        first = conn.execute(
+            "SELECT MIN(id) AS first_id FROM task_history WHERE chat_id = ?",
+            (old_cid,),
+        ).fetchone()
+        if first and first["first_id"]:
+            conn.execute(
+                "UPDATE task_history SET chat_id = ? WHERE chat_id = ?",
+                (first["first_id"], old_cid),
+            )
+    # Convert empty strings and NULLs to 0
+    conn.execute(
+        "UPDATE task_history SET chat_id = 0 "
+        "WHERE chat_id = '' OR chat_id IS NULL"
+    )
     conn.commit()
 
 
@@ -111,7 +135,7 @@ def _init_tables(conn: sqlite3.Connection) -> None:
             task TEXT NOT NULL,
             has_events INTEGER DEFAULT 0,
             result TEXT DEFAULT '',
-            chat_id TEXT DEFAULT '',
+            chat_id INTEGER DEFAULT 0,
             extra TEXT DEFAULT ''
         );
         CREATE TABLE IF NOT EXISTS events (
@@ -196,36 +220,22 @@ def _most_recent_task_id(db: sqlite3.Connection, task: str | None) -> int | None
     return row["id"] if row else None
 
 
-def _generate_chat_id() -> str:
-    """Generate a unique hex chat session ID. Thread-safe.
+def _add_task(task: str, chat_id: int = 0) -> tuple[int, int]:
+    """Append a task to the history and return ``(task_id, chat_id)``.
 
-    Produces a 32-character lowercase hex string via UUID4 and verifies
-    it does not already exist in the task_history table before returning.
-    """
-    db = _get_db()
-    with _db_lock:
-        while True:
-            candidate = uuid.uuid4().hex
-            row = db.execute(
-                "SELECT 1 FROM task_history WHERE chat_id = ? LIMIT 1",
-                (candidate,),
-            ).fetchone()
-            if row is None:  # pragma: no branch — UUID4 collision virtually impossible
-                return candidate
+    When *chat_id* is ``0`` (new session), the inserted row's own ``id``
+    is used as the chat session identifier (self-referencing first task).
+    Otherwise the given *chat_id* is stored directly (continuation task).
 
-
-def _add_task(task: str, chat_id: str = "") -> int:
-    """Append a task to the history and return its row id. Thread-safe.
-
-    Single-statement write protected by ``_db_lock`` so callers can rely on
-    the returned row id for subsequent updates.
+    Thread-safe: all writes are protected by ``_db_lock``.
 
     Args:
         task: The task description string.
-        chat_id: Chat session identifier to associate this task with.
+        chat_id: Chat session identifier.  ``0`` starts a new session.
 
     Returns:
-        The inserted ``task_history.id`` value.
+        ``(task_id, chat_id)`` — the inserted row id and the
+        (possibly newly-assigned) chat session identifier.
     """
     db = _get_db()
     with _db_lock:
@@ -233,10 +243,43 @@ def _add_task(task: str, chat_id: str = "") -> int:
             "INSERT INTO task_history (timestamp, task, chat_id, result) VALUES (?, ?, ?, ?)",
             (time.time(), task, chat_id, "Agent Failed Abruptly"),
         )
-        db.commit()
         row_id = cursor.lastrowid
         if row_id is None:  # pragma: no cover
             raise RuntimeError("sqlite did not return lastrowid")
+        if chat_id == 0:
+            chat_id = row_id
+            db.execute(
+                "UPDATE task_history SET chat_id = ? WHERE id = ?",
+                (chat_id, row_id),
+            )
+        db.commit()
+        return row_id, chat_id
+
+
+def _allocate_chat_id() -> int:
+    """Pre-allocate a chat session id without keeping a task row.
+
+    Inserts a temporary row to advance the ``AUTOINCREMENT`` counter,
+    records its ``id``, then deletes it.  SQLite's ``AUTOINCREMENT``
+    guarantees the returned id will never be reused by a future insert.
+
+    This is used by ``WorktreeSorcarAgent`` to name worktree branches
+    *before* the first task in a session is persisted.
+
+    Returns:
+        A unique integer suitable for use as a ``chat_id``.
+    """
+    db = _get_db()
+    with _db_lock:
+        cursor = db.execute(
+            "INSERT INTO task_history (timestamp, task, chat_id, result) "
+            "VALUES (0, '', 0, '')",
+        )
+        row_id = cursor.lastrowid
+        if row_id is None:  # pragma: no cover
+            raise RuntimeError("sqlite did not return lastrowid")
+        db.execute("DELETE FROM task_history WHERE id = ?", (row_id,))
+        db.commit()
         return row_id
 
 
@@ -449,27 +492,27 @@ def _append_chat_event(
         db.commit()
 
 
-def _load_task_chat_id(task: str) -> str:
-    """Return the chat_id for the most recent run of *task*, or ``""``.
+def _load_task_chat_id(task: str) -> int:
+    """Return the chat_id for the most recent run of *task*, or ``0``.
 
     Args:
         task: The task description string.
 
     Returns:
-        The chat_id string, or empty string if not found.
+        The integer chat_id, or ``0`` if not found.
     """
     db = _get_db()
     task_id = _most_recent_task_id(db, task)
     if task_id is None:
-        return ""
+        return 0
     row = db.execute(
         "SELECT chat_id FROM task_history WHERE id = ?", (task_id,)
     ).fetchone()
-    return row["chat_id"] if row and row["chat_id"] else ""
+    return int(row["chat_id"]) if row and row["chat_id"] else 0
 
 
-def _load_last_chat_id() -> str:
-    """Return the chat_id of the most recently added task, or ``""``.
+def _load_last_chat_id() -> int:
+    """Return the chat_id of the most recently added task, or ``0``.
 
     Useful for resuming the last CLI session without manually tracking
     the chat_id.
@@ -478,7 +521,7 @@ def _load_last_chat_id() -> str:
     row = db.execute(
         "SELECT chat_id FROM task_history ORDER BY timestamp DESC LIMIT 1"
     ).fetchone()
-    return row["chat_id"] if row and row["chat_id"] else ""
+    return int(row["chat_id"]) if row and row["chat_id"] else 0
 
 
 def _list_recent_chats(limit: int = 10) -> list[dict[str, object]]:
@@ -493,14 +536,14 @@ def _list_recent_chats(limit: int = 10) -> list[dict[str, object]]:
         limit: Maximum number of chat sessions to return.
 
     Returns:
-        List of dicts, each with ``chat_id`` (str) and ``tasks``
+        List of dicts, each with ``chat_id`` (int) and ``tasks``
         (list of dicts with ``task``, ``result``, ``timestamp``).
     """
     db = _get_db()
     # Get the most recent chat_ids by their latest task timestamp
     chat_rows = db.execute(
         "SELECT chat_id, MAX(timestamp) AS latest "
-        "FROM task_history WHERE chat_id != '' "
+        "FROM task_history WHERE chat_id != 0 "
         "GROUP BY chat_id ORDER BY latest DESC LIMIT ?",
         (limit,),
     ).fetchall()
@@ -525,7 +568,7 @@ def _list_recent_chats(limit: int = 10) -> list[dict[str, object]]:
 
 
 def _load_latest_chat_events_by_chat_id(
-    chat_id: str,
+    chat_id: int,
 ) -> dict[str, object] | None:
     """Load the latest task and its events for a chat session.
 
@@ -533,12 +576,12 @@ def _load_latest_chat_events_by_chat_id(
     its task description string and recorded events.
 
     Args:
-        chat_id: The chat session identifier.
+        chat_id: The integer chat session identifier.
 
     Returns:
         A dict with ``task`` (str), ``events`` (list of event dicts),
-        ``chat_id`` (str), and ``extra`` (str, JSON metadata),
-        or ``None`` if the chat_id is empty or has no tasks.
+        ``chat_id`` (int), and ``extra`` (str, JSON metadata),
+        or ``None`` if chat_id is ``0`` or has no tasks.
     """
     if not chat_id:
         return None
@@ -567,12 +610,12 @@ def _load_latest_chat_events_by_chat_id(
 
 
 def _get_adjacent_task_by_chat_id(
-    chat_id: str, current_task: str, direction: str
+    chat_id: int, current_task: str, direction: str
 ) -> dict[str, object] | None:
     """Return the adjacent task within a chat session, relative to *current_task*.
 
     Args:
-        chat_id: The chat session identifier.
+        chat_id: The integer chat session identifier.
         current_task: The current task description string used to find
             the reference timestamp within the chat.
         direction: ``"prev"`` for the earlier task, ``"next"`` for the
@@ -629,11 +672,11 @@ def _get_adjacent_task_by_chat_id(
     return {"task": adj_task, "events": events}
 
 
-def _load_chat_context(chat_id: str) -> list[_HistoryEntry]:
+def _load_chat_context(chat_id: int) -> list[_HistoryEntry]:
     """Load all tasks and results for a chat session in chronological order.
 
     Args:
-        chat_id: The chat session identifier.
+        chat_id: The integer chat session identifier.
 
     Returns:
         List of dicts with ``task`` and ``result`` keys, ordered by

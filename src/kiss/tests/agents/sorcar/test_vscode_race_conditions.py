@@ -117,7 +117,8 @@ class TestRace16GuardedNewChatResumeSession(unittest.TestCase):
         (per-tab concurrent execution)."""
         server = VSCodeServer()
         tab0 = server._get_tab("0")
-        original_id = tab0.agent._chat_id
+        # Set a non-zero chat_id to verify newChat resets it
+        tab0.agent._chat_id = 42
 
         # Simulate running task on tab 1
         stop = threading.Event()
@@ -128,8 +129,8 @@ class TestRace16GuardedNewChatResumeSession(unittest.TestCase):
         try:
             # newChat should work (per-tab — no global block)
             server._handle_command({"type": "newChat", "tabId": "0"})
-            assert tab0.agent._chat_id != original_id, (
-                "newChat should create a new chat even while another tab is running"
+            assert tab0.agent._chat_id == 0, (
+                "newChat should reset chat_id to 0 even while another tab is running"
             )
         finally:
             stop.set()

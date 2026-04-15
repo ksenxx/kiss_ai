@@ -3303,12 +3303,13 @@ class TestWebviewTabBarJS(unittest.TestCase):
         body = self._js[idx:end]
         assert "renderTabBar()" in body
 
-    def test_switch_to_tab_resumes_session(self) -> None:
-        """Switching to a tab with a task resumes that session."""
+    def test_switch_to_tab_restores_dom(self) -> None:
+        """Switching to a tab restores DOM from saved fragment (no backend call)."""
         idx = self._js.index("function switchToTab(tabId)")
         end = self._js.index("\n  function ", idx + 1)
         body = self._js[idx:end]
-        assert "resumeSession" in body
+        assert "restoreTab(tab)" in body
+        assert "setRunningState(tab.isRunning)" in body
 
     def test_switch_to_tab_noop_for_same_tab(self) -> None:
         """Switching to the already active tab is a no-op."""

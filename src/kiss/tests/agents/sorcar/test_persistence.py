@@ -68,20 +68,20 @@ class TestChatEvents:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_set_events_no_task(self):
-        task_id = th._add_task("latest", chat_id="cid1")
+        task_id, _ = th._add_task("latest", chat_id=1004)
         th._set_latest_chat_events([{"a": 1}], task_id=task_id)
-        result = th._load_latest_chat_events_by_chat_id("cid1")
+        result = th._load_latest_chat_events_by_chat_id(1004)
         assert result is not None
         events = result["events"]
         assert isinstance(events, list)
         assert events == [{"a": 1}]
 
     def test_load_chat_events_includes_extra(self):
-        task_id = th._add_task("extra-task", chat_id="cid_extra")
+        task_id, _ = th._add_task("extra-task", chat_id=1005)
         th._set_latest_chat_events([{"b": 2}], task_id=task_id)
         extra = {"model": "gpt-4o", "is_worktree": True, "is_parallel": False}
         th._save_task_extra(extra, task_id=task_id)
-        result = th._load_latest_chat_events_by_chat_id("cid_extra")
+        result = th._load_latest_chat_events_by_chat_id(1005)
         assert result is not None
         loaded = json.loads(str(result["extra"]))
         assert loaded["model"] == "gpt-4o"
@@ -106,7 +106,7 @@ class TestSaveTaskExtra:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_save_and_load_extra(self):
-        task_id = th._add_task("extra test task", chat_id="cid-extra")
+        task_id, _ = th._add_task("extra test task", chat_id=1002)
         extra = {
             "model": "claude-opus-4-6",
             "work_dir": "/tmp/test",
@@ -145,7 +145,7 @@ class TestSaveTaskExtra:
         assert entries[0]["extra"] == ""
 
     def test_extra_in_search_results(self):
-        task_id = th._add_task("searchable extra", chat_id="cid-s")
+        task_id, _ = th._add_task("searchable extra", chat_id=1003)
         th._save_task_extra({"model": "test-model"}, task_id=task_id)
         results = th._search_history("searchable")
         assert len(results) == 1
@@ -153,7 +153,7 @@ class TestSaveTaskExtra:
         assert stored["model"] == "test-model"
 
     def test_extra_in_get_history_entry(self):
-        task_id = th._add_task("entry extra", chat_id="cid-e")
+        task_id, _ = th._add_task("entry extra", chat_id=1001)
         th._save_task_extra({"tokens": 999}, task_id=task_id)
         entry = th._get_history_entry(0)
         assert entry is not None
@@ -275,19 +275,19 @@ class TestMigrateMissingColumns:
     def test_migration_adds_missing_columns(self):
         self._create_old_schema()
         # Opening the DB triggers _init_tables → _migrate_tables
-        task_id = th._add_task("new task", chat_id="chat123")
+        task_id, _ = th._add_task("new task", chat_id=1000)
         th._save_task_result("done", task_id=task_id)
         th._save_task_extra({"model": "gpt-4o"}, task_id=task_id)
         entries = th._load_history(limit=10)
         assert len(entries) == 2
         new_entry = entries[0]
-        assert new_entry["chat_id"] == "chat123"
+        assert new_entry["chat_id"] == 1000
         assert new_entry["result"] == "done"
         stored = json.loads(str(new_entry["extra"]))
         assert stored["model"] == "gpt-4o"
         # Old row should have defaults for the new columns
         old_entry = entries[1]
-        assert old_entry["chat_id"] == ""
+        assert old_entry["chat_id"] == 0
         assert old_entry["extra"] == ""
         assert old_entry["has_events"] == 0
         assert old_entry["result"] == ""

@@ -11,7 +11,7 @@ export interface Attachment {
 
 /** Session/conversation info */
 export interface SessionInfo {
-  id: string;
+  id: number;
   title: string;
   timestamp: number;
   preview: string;
@@ -30,8 +30,8 @@ export type FromWebviewMessage =
   | { type: 'userActionDone' }
   | { type: 'openFile'; path: string; line?: number }
   | { type: 'recordFileUsage'; path: string }
-  | { type: 'ready'; activeChatId?: string; tabId?: string }
-  | { type: 'resumeSession'; id: string; tabId?: string }
+  | { type: 'ready'; tabId?: string }
+  | { type: 'resumeSession'; id: number; tabId?: string }
   | { type: 'getWelcomeSuggestions' }
   | { type: 'complete'; query: string }
   | { type: 'mergeAction'; action: string }
@@ -59,7 +59,7 @@ export type ToWebviewMessage =
   | { type: 'system_prompt'; text: string }
   | { type: 'prompt'; text: string }
   // Lifecycle events
-  | { type: 'clear'; chat_id?: string }
+  | { type: 'clear'; chat_id?: number }
   | { type: 'clearChat' }
   | { type: 'task_done' }
   | { type: 'task_error'; text: string }
@@ -74,7 +74,7 @@ export type ToWebviewMessage =
   | { type: 'followup_suggestion'; text: string }
   | { type: 'tasks_updated' }
   | { type: 'welcome_suggestions'; suggestions: Array<{text: string; has_events: boolean}> }
-  | { type: 'task_events'; events: any[]; task?: string; chat_id?: string }
+  | { type: 'task_events'; events: any[]; task?: string; chat_id?: number }
   | { type: 'ghost'; suggestion: string; query: string }
   | { type: 'merge_data'; data: any; hunk_count: number }
   | { type: 'merge_started' }
@@ -107,7 +107,7 @@ export interface AgentCommand {
   prefix?: string;
   answer?: string;
   path?: string;
-  sessionId?: string;
+  sessionId?: number;
   activeFileContent?: string;
   action?: 'merge' | 'discard' | 'do_nothing' | 'all-done';
   useWorktree?: boolean;

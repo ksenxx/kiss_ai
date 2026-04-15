@@ -78,8 +78,7 @@ class TestCliHelpers:
         """_print_recent_chats with populated chats prints session data."""
         saved = _redirect_db(str(tmp_path))
         try:
-            chat_id = th._generate_chat_id()
-            th._add_task("task one", chat_id=chat_id)
+            _, chat_id = th._add_task("task one")
             th._save_task_result(result="result one", task="task one")
             # Add a task with long text to hit truncation branches
             long_text = "X" * 300
@@ -99,9 +98,9 @@ class TestCliHelpers:
         saved = _redirect_db(str(tmp_path))
         try:
             agent = StatefulSorcarAgent("test")
-            args = argparse.Namespace(new=False, chat_id="deadbeef1234")
+            args = argparse.Namespace(new=False, chat_id=1000)
             _apply_chat_args(agent, args)
-            assert agent.chat_id == "deadbeef1234"
+            assert agent.chat_id == 1000
         finally:
             _restore_db(saved)
 

@@ -39,7 +39,7 @@
   var historyGeneration = 0;
 
   // Adjacent task scroll state (Cursor-style chat thread navigation)
-  // currentChatId removed: tab.id === chat_id (unified)
+  // Tab.id is a frontend-only UUID string; chat_id is an int assigned by the DB.
   var currentTaskName = '';   // the originally loaded task
   var oldestLoadedTask = '';  // topmost task in the view (for scrolling up)
   var newestLoadedTask = '';  // bottommost task in the view (for scrolling down)
@@ -305,8 +305,8 @@
       stopTimer();
       removeSpinner();
     }
-    // Tell backend to resume this tab's session (tab.id === chat_id)
-    vscode.postMessage({ type: 'resumeSession', id: tab.id, tabId: activeTabId });
+    // No backend message needed: the DOM is restored from the saved fragment
+    // and each tab already has its own agent state keyed by tabId.
   }
 
   function closeTab(tabId) {
@@ -330,7 +330,7 @@
         stopTimer();
         removeSpinner();
       }
-      vscode.postMessage({ type: 'resumeSession', id: newTab.id, tabId: activeTabId });
+      // No backend message needed: DOM restored from fragment, backend tab state persists.
     }
     renderTabBar();
     persistTabState();
@@ -454,21 +454,21 @@
   }
 
   // Initialize tabs — restore from saved state if available, else create one default tab
-  var _restoredActiveChatId = '';
+  // (no _restoredActiveChatId needed; backend always uses getLastSession)
   (function() {
     var saved = vscode.getState();
     if (saved && saved.tabs && saved.tabs.length > 0) {
       tabs = [];
       saved.tabs.forEach(function(st) {
         var tab = makeTab(st.title);
-        // Restore tab.id from persisted chatId (tab_id === chat_id)
+        // Restore tab.id from persisted chatId (frontend tab identifier)
         if (st.chatId) tab.id = st.chatId;
         tabs.push(tab);
       });
       var idx = saved.activeTabIndex || 0;
       if (idx >= 0 && idx < tabs.length) {
         activeTabId = tabs[idx].id;
-        _restoredActiveChatId = activeTabId;
+        // Tab IDs restored from persisted state
       } else {
         activeTabId = tabs[0].id;
       }
@@ -1231,24 +1231,7 @@
     case 'welcome_suggestions':
       renderWelcomeSuggestions(ev.suggestions || []);
       break;
-    case 'tab_id_changed': {
-      // Backend re-keyed tab: update local tab id to match new chat_id
-      var oldId = ev.oldTabId;
-      var newId = ev.newTabId;
-      var chTab = tabs.find(function(t) { return t.id === oldId; });
-      if (chTab) chTab.id = newId;
-      if (activeTabId === oldId) activeTabId = newId;
-      renderTabBar();
-      persistTabState();
-      break;
-    }
     case 'task_events':
-      // Re-key tab if the backend moved it to a new chat_id
-      if (ev.oldTabId && ev.chat_id && ev.oldTabId !== ev.chat_id) {
-        var teTab = tabs.find(function(t) { return t.id === ev.oldTabId; });
-        if (teTab) teTab.id = ev.chat_id;
-        if (activeTabId === ev.oldTabId) activeTabId = ev.chat_id;
-      }
       if (ev.task) {
         currentTaskName = ev.task;
         resetAdjacentState();  // sets oldest/newest to currentTaskName
@@ -1698,7 +1681,7 @@
   function init() {
     setupEventListeners();
     renderTabBar();
-    vscode.postMessage({ type: 'ready', activeChatId: _restoredActiveChatId, tabId: activeTabId });
+    vscode.postMessage({ type: 'ready', tabId: activeTabId });
   }
 
   function setupEventListeners() {

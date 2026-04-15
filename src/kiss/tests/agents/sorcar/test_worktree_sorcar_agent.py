@@ -94,7 +94,7 @@ class TestWorktreeSorcarAgent:
         _restore_db(self.db_saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def _agent(self, chat_id: str | None = None) -> WorktreeSorcarAgent:
+    def _agent(self, chat_id: int | None = None) -> WorktreeSorcarAgent:
         agent = WorktreeSorcarAgent("test")
         if chat_id:
             agent.resume_chat_by_id(chat_id)
@@ -197,7 +197,7 @@ class TestWorktreeSorcarAgent:
 
     # 23. Missing kiss-original config + detached HEAD
     def test_missing_config_detached_head(self) -> None:
-        agent = self._agent(chat_id="detached_cfg_test")
+        agent = self._agent(chat_id=1000)
         agent.run(prompt_template="task1", work_dir=str(self.repo))
         branch = agent._wt_branch
         assert branch is not None
@@ -213,7 +213,7 @@ class TestWorktreeSorcarAgent:
             capture_output=True, check=True,
         )
 
-        agent2 = self._agent(chat_id="detached_cfg_test")
+        agent2 = self._agent(chat_id=1000)
         agent2._restore_from_git(self.repo)
         assert agent2._wt_branch == branch
         assert agent2._original_branch is None
@@ -323,7 +323,7 @@ class TestWorktreeSorcarAgent:
         wt_base = self.repo / ".kiss-worktrees"
         wt_base.mkdir(exist_ok=True)
         # Create a file that blocks directory creation
-        blocker = wt_base / f"kiss_wt-{agent.chat_id[:12]}-99999999999"
+        blocker = wt_base / f"kiss_wt-{agent.chat_id}-99999999999"
         blocker.write_text("blocker")
         # Run should fall back to direct execution when worktree add fails
         # (can't create worktree dir because a file exists with that name)
@@ -335,7 +335,7 @@ class TestWorktreeSorcarAgent:
         # by making the target a regular file
         import time as t
         ts = int(t.time())
-        branch_name = f"kiss/wt-{agent.chat_id[:12]}-{ts}"
+        branch_name = f"kiss/wt-{agent.chat_id}-{ts}"
         slug = branch_name.replace("/", "_")
         target = wt_base / slug
         target.mkdir(parents=True, exist_ok=True)

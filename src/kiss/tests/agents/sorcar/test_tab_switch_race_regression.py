@@ -298,82 +298,6 @@ class TestClearGuard(unittest.TestCase):
         assert "PASS" in result.stdout
 
 
-class TestChatIdGuard(unittest.TestCase):
-    """chatId handler: stores in running tab's saved state when on wrong tab."""
-
-    js: str
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.js = _MAIN_JS.read_text()
-
-    def test_tab_id_changed_handler_in_source(self) -> None:
-        # tab_id_changed event re-keys the local tab id to match new chat_id
-        idx = self.js.index("case 'tab_id_changed':")
-        block = self.js[idx : idx + 400]
-        assert "ev.oldTabId" in block
-        assert "ev.newTabId" in block
-        assert "chTab.id = newId" in block
-
-    def test_tab_id_changed_updates_tab(self) -> None:
-        result = _run_node(_make_test_script(r"""
-            var tabs = [];
-            var activeTabId = 'tab-old';
-
-            tabs.push({ id: 'tab-old', title: 'task tab' });
-            tabs.push({ id: 'tab-2', title: 'idle tab' });
-
-            // Simulate tab_id_changed event
-            var oldId = 'tab-old';
-            var newId = 'new-chat-123';
-            var chTab = tabs.find(function(t) { return t.id === oldId; });
-            if (chTab) chTab.id = newId;
-            if (activeTabId === oldId) activeTabId = newId;
-
-            // Verify: tab id updated, activeTabId updated
-            if (tabs[0].id !== 'new-chat-123') {
-                process.stdout.write('FAIL: tab id not updated: ' + tabs[0].id);
-                process.exit(1);
-            }
-            if (activeTabId !== 'new-chat-123') {
-                process.stdout.write('FAIL: activeTabId not updated: ' + activeTabId);
-                process.exit(1);
-            }
-            process.stdout.write('PASS');
-        """))
-        assert result.returncode == 0, result.stderr
-        assert "PASS" in result.stdout
-
-    def test_tab_id_changed_non_active_tab(self) -> None:
-        result = _run_node(_make_test_script(r"""
-            var tabs = [];
-            var activeTabId = 'tab-2';
-
-            tabs.push({ id: 'tab-1', title: 'task tab' });
-            tabs.push({ id: 'tab-2', title: 'active tab' });
-
-            // Simulate tab_id_changed for non-active tab
-            var oldId = 'tab-1';
-            var newId = 'new-chat-456';
-            var chTab = tabs.find(function(t) { return t.id === oldId; });
-            if (chTab) chTab.id = newId;
-            if (activeTabId === oldId) activeTabId = newId;
-
-            // activeTabId should remain unchanged
-            if (activeTabId !== 'tab-2') {
-                process.stdout.write('FAIL: activeTabId changed: ' + activeTabId);
-                process.exit(1);
-            }
-            if (tabs[0].id !== 'new-chat-456') {
-                process.stdout.write('FAIL: tab id not updated: ' + tabs[0].id);
-                process.exit(1);
-            }
-            process.stdout.write('PASS');
-        """))
-        assert result.returncode == 0, result.stderr
-        assert "PASS" in result.stdout
-
-
 class TestSetTaskTextGuard(unittest.TestCase):
     """setTaskText handler: updates running tab's saved state on wrong tab."""
 
@@ -769,8 +693,8 @@ class TestFullTabSwitchScenario(unittest.TestCase):
         assert "PASS" in result.stdout
 
 
-class TestSwitchBackResumesSession(unittest.TestCase):
-    """When switching back to the running tab's tab, state is replayed."""
+class TestSwitchBackRestoresDOM(unittest.TestCase):
+    """When switching back to a tab, the DOM is restored from the saved fragment."""
 
     js: str
 
@@ -778,12 +702,12 @@ class TestSwitchBackResumesSession(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.js = _MAIN_JS.read_text()
 
-    def test_switch_to_tab_resumes_session(self) -> None:
-        """switchToTab posts resumeSession with tab.id (which is the chat_id)."""
+    def test_switch_to_tab_restores_from_fragment(self) -> None:
+        """switchToTab restores DOM from saved fragment, no backend message needed."""
         idx = self.js.index("function switchToTab(")
         block = self.js[idx : idx + 800]
-        assert "tab.id" in block
-        assert "resumeSession" in block
+        assert "restoreTab(tab)" in block
+        assert "setRunningState(tab.isRunning)" in block
 
 
 class TestSwitchToTabRunningState(unittest.TestCase):

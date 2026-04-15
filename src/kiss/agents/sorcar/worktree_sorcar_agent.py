@@ -28,6 +28,7 @@ from kiss.agents.sorcar.git_worktree import (
     GitWorktreeOps,
     MergeResult,
 )
+from kiss.agents.sorcar.persistence import _allocate_chat_id
 from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.core.kiss_error import KISSError
 
@@ -125,9 +126,9 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
     def _restore_from_git(self, repo: Path) -> None:
         """Restore pending-branch state from git (no sidecar files).
 
-        Queries git for any ``kiss/wt-<chat_id[:12]>-*`` branch.  If
-        found, restores state from ``git config``.  If the config entry
-        is missing (crash between worktree creation and config write),
+        Queries git for any ``kiss/wt-<chat_id>-*`` branch.  If found,
+        restores state from ``git config``.  If the config entry is
+        missing (crash between worktree creation and config write),
         falls back to the current HEAD branch of the main worktree.
 
         Args:
@@ -135,7 +136,7 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         """
         if self._wt is not None:
             return
-        prefix = f"kiss/wt-{self._chat_id[:12]}-"
+        prefix = f"kiss/wt-{self._chat_id}-"
         branch = GitWorktreeOps.find_pending_branch(repo, prefix)
         if branch is None:
             return
@@ -219,7 +220,7 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
             logger.warning("Failed to update git exclude", exc_info=True)
 
         # Generate branch name with collision avoidance
-        branch = f"kiss/wt-{self._chat_id[:12]}-{int(time.time())}"
+        branch = f"kiss/wt-{self._chat_id}-{int(time.time())}"
         base_branch = branch
         suffix = 1
         while GitWorktreeOps.branch_exists(repo, branch):  # pragma: no branch
@@ -298,6 +299,13 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
                 ),
             })
             return blocked
+
+        # Pre-allocate a chat_id so the worktree branch name is stable.
+        # Without this, _chat_id would still be 0 here and the branch
+        # would be named kiss/wt-0-<ts>, but _add_task in super().run()
+        # would then assign a different id, breaking _restore_from_git.
+        if self._chat_id == 0:
+            self._chat_id = _allocate_chat_id()
 
         wt_work_dir = self._try_setup_worktree(repo, work_dir_str)
         if wt_work_dir is None:

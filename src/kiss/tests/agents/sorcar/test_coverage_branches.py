@@ -226,7 +226,7 @@ class TestTaskHistoryBranches:
             self._restore_db(saved)
 
     def test_load_chat_context_empty_id(self):
-        assert th._load_chat_context("") == []
+        assert th._load_chat_context(0) == []
 
     def test_cleanup_stale_cs_dirs_no_port_file(self, tmp_path):
         """When sorcar-data exists but no cs-port file, clean up."""
@@ -400,7 +400,7 @@ class TestVSCodeServerBranches:
                        cwd=str(repo), capture_output=True)
         # Create a branch matching the worktree agent's chat_id
         chat_id = tab.worktree_agent._chat_id
-        branch = f"kiss/wt-{chat_id[:12]}-1234567890"
+        branch = f"kiss/wt-{chat_id}-1234567890"
         subprocess.run(["git", "branch", branch],
                        cwd=str(repo), capture_output=True)
         # Store the original branch in git config

@@ -117,7 +117,7 @@ class TestRC2TaskThreadProtected(unittest.TestCase):
 
         try:
             # resumeSession should still proceed (per-tab isolation)
-            server._handle_command({"type": "resumeSession", "sessionId": "test"})
+            server._handle_command({"type": "resumeSession", "sessionId": "999999"})
         finally:
             stop.set()
             thread.join()

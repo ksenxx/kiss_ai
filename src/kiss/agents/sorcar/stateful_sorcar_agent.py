@@ -13,7 +13,6 @@ import yaml
 
 from kiss.agents.sorcar.persistence import (
     _add_task,
-    _generate_chat_id,
     _load_chat_context,
     _load_task_chat_id,
     _save_task_extra,
@@ -33,17 +32,17 @@ class StatefulSorcarAgent(SorcarAgent):
 
     def __init__(self, name: str) -> None:
         super().__init__(name)
-        self._chat_id = _generate_chat_id()
+        self._chat_id: int = 0
         self._last_task_id: int | None = None
 
     @property
-    def chat_id(self) -> str:
-        """Return the current chat session ID."""
+    def chat_id(self) -> int:
+        """Return the current chat session ID (0 means new session)."""
         return self._chat_id
 
     def new_chat(self) -> None:
         """Reset to a new chat session (equivalent to VS Code 'Clear')."""
-        self._chat_id = _generate_chat_id()
+        self._chat_id = 0
 
     def resume_chat(self, task: str) -> None:
         """Resume a previous chat session by looking up the task's chat_id.
@@ -58,11 +57,11 @@ class StatefulSorcarAgent(SorcarAgent):
         if chat_id:
             self.resume_chat_by_id(chat_id)
 
-    def resume_chat_by_id(self, chat_id: str) -> None:
+    def resume_chat_by_id(self, chat_id: int) -> None:
         """Resume a chat session using a stable chat identifier.
 
         Args:
-            chat_id: Persisted chat session identifier to resume.
+            chat_id: Integer chat session identifier to resume.
         """
         if chat_id:
             self._chat_id = chat_id
@@ -112,7 +111,7 @@ class StatefulSorcarAgent(SorcarAgent):
             YAML string with 'success' and 'summary' keys.
         """
         agent_prompt = self.build_chat_prompt(prompt_template)
-        task_id = _add_task(prompt_template, chat_id=self._chat_id)
+        task_id, self._chat_id = _add_task(prompt_template, chat_id=self._chat_id)
         self._last_task_id = task_id
 
         result_summary = ""

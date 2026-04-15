@@ -1252,7 +1252,7 @@ ______________________________________________________________________
 
 **Constructor:** `StatefulSorcarAgent(name: str) -> None`
 
-- **chat_id** — Return the current chat session ID.<br/>`chat_id() -> str` *(property)*
+- **chat_id** — Return the current chat session ID (0 means new session).<br/>`chat_id() -> int` *(property)*
 
 - **new_chat** — Reset to a new chat session (equivalent to VS Code 'Clear').<br/>`new_chat() -> None`
 
@@ -1260,9 +1260,9 @@ ______________________________________________________________________
 
   - `task`: The task description string to look up.
 
-- **resume_chat_by_id** — Resume a chat session using a stable chat identifier.<br/>`resume_chat_by_id(chat_id: str) -> None`
+- **resume_chat_by_id** — Resume a chat session using a stable chat identifier.<br/>`resume_chat_by_id(chat_id: int) -> None`
 
-  - `chat_id`: Persisted chat session identifier to resume.
+  - `chat_id`: Integer chat session identifier to resume.
 
 - **build_chat_prompt** — Load chat context and augment prompt with previous tasks/results.<br/>`build_chat_prompt(prompt: str) -> str`
 

@@ -278,11 +278,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         this._agentProcess.sendCommand({ type: 'getModels' });
         this._sendWelcomeSuggestions();
         this._agentProcess.sendCommand({ type: 'getInputHistory' });
-        if (message.activeChatId) {
-          this._agentProcess.sendCommand({ type: 'resumeSession', sessionId: message.activeChatId, tabId: (message as any).tabId });
-        } else {
-          this._agentProcess.sendCommand({ type: 'getLastSession', tabId: (message as any).tabId });
-        }
+        this._agentProcess.sendCommand({ type: 'getLastSession', tabId: (message as any).tabId });
         this._sendActiveFileInfo();
         this._sendToWebview({ type: 'focusInput' } as ToWebviewMessage);
         break;

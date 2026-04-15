@@ -147,9 +147,7 @@ class _TabState:
 
     def __init__(self, tab_id: str, default_model: str) -> None:
         self.stateful_agent = StatefulSorcarAgent("Sorcar VS Code")
-        self.stateful_agent._chat_id = tab_id
         self.worktree_agent = WorktreeSorcarAgent("Sorcar VS Code")
-        self.worktree_agent._chat_id = tab_id
         self.use_worktree: bool = False
         self.use_parallel: bool = False
         self.task_history_id: int | None = None
@@ -208,11 +206,11 @@ class VSCodeServer:
 
         Each tab gets its own agent instances so concurrent tabs never
         share mutable agent state (chat_id, task_id, worktree, etc.).
-        The tab_id is also used as the agent's chat_id, eliminating
-        the need for a separate identifier.
+        The tab_id is a frontend string identifier; the agent's chat_id
+        is an integer assigned by the database on first task insertion.
 
         Args:
-            tab_id: The tab identifier (same as the agent's chat_id).
+            tab_id: The frontend tab identifier string.
 
         Returns:
             The per-tab state object.
@@ -295,7 +293,8 @@ class VSCodeServer:
                     break
             q.put(cmd.get("answer", ""))
         elif cmd_type == "resumeSession":
-            chat_id = cmd.get("sessionId", "")
+            raw_id = cmd.get("sessionId")
+            chat_id = int(raw_id) if raw_id else 0
             if chat_id:
                 self._replay_session(chat_id, cmd.get("tabId", ""))
         elif cmd_type == "mergeAction":
@@ -752,7 +751,7 @@ class VSCodeServer:
         for entry in entries:
             task = str(entry.get("task", ""))
             has_events = bool(entry.get("has_events", False))
-            chat_id = str(entry.get("chat_id", ""))
+            chat_id = int(str(entry.get("chat_id", 0) or 0))
             sessions.append({
                 "id": chat_id,
                 "title": task[:50] + "..." if len(task) > 50 else task,
@@ -783,67 +782,43 @@ class VSCodeServer:
         self.printer.broadcast({"type": "inputHistory", "tasks": tasks})
 
     def _new_chat(self, tab_id: str) -> None:
-        """Start a new chat session, re-keying ``_tab_states``.
+        """Start a new chat session for the given tab.
 
-        Generates a fresh chat_id via the agent's ``new_chat()`` and
-        moves the tab's state to the new key so that tab_id == chat_id
-        is maintained.  Broadcasts ``tab_id_changed`` so the frontend
-        can update its tab identifier.
+        Resets the agent's ``chat_id`` to ``0`` so the next task starts
+        a fresh session.  The tab_id (frontend key) does not change.
 
         Args:
-            tab_id: The current tab identifier (old key).
+            tab_id: The frontend tab identifier.
         """
-        tab = self._tab_states.pop(tab_id, None)
-        if tab is None:
-            # Tab doesn't exist yet — just create a fresh one
-            self._get_tab(tab_id)
-            return
+        tab = self._get_tab(tab_id)
         tab.stateful_agent.new_chat()
-        new_id = tab.stateful_agent.chat_id
-        tab.worktree_agent._chat_id = new_id
-        self._tab_states[new_id] = tab
-        self.printer.broadcast({
-            "type": "tab_id_changed",
-            "oldTabId": tab_id,
-            "newTabId": new_id,
-        })
+        tab.worktree_agent._chat_id = 0
 
-    def _replay_session(self, chat_id: str, tab_id: str = "") -> None:
+    def _replay_session(self, chat_id: int, tab_id: str = "") -> None:
         """Replay recorded chat events for a previous chat session.
 
-        Re-keys ``_tab_states`` so that the tab's key matches the
-        resumed session's chat_id (maintaining tab_id == chat_id).
+        Sets the tab's agent chat_id to match the resumed session.
+        The tab_id (frontend key in ``_tab_states``) does not change.
 
         Args:
-            chat_id: The chat session identifier to replay.
-            tab_id: The current tab identifier (old key in ``_tab_states``).
+            chat_id: The integer chat session identifier to replay.
+            tab_id: The frontend tab identifier.
         """
         result = _load_latest_chat_events_by_chat_id(chat_id)
         if not result or not result.get("events"):
             return
-        # Re-key _tab_states: old tab_id → chat_id
-        if tab_id and tab_id != chat_id:
-            tab = self._tab_states.pop(tab_id, None)
-            if tab is None:
-                tab = _TabState(chat_id, self._default_model)
-            else:
-                tab.agent._chat_id = chat_id
-                tab.worktree_agent._chat_id = chat_id
-            self._tab_states[chat_id] = tab
-        else:
-            tab = self._get_tab(chat_id)
+        tab = self._get_tab(tab_id) if tab_id else self._get_tab(str(chat_id))
         tab.agent.resume_chat_by_id(chat_id)
-        event: dict[str, Any] = {
+        tab.worktree_agent._chat_id = chat_id
+        self.printer.broadcast({
             "type": "task_events",
             "events": result["events"],
             "task": result["task"],
             "chat_id": chat_id,
             "extra": result.get("extra", ""),
-        }
-        if tab_id and tab_id != chat_id:
-            event["oldTabId"] = tab_id
-        self.printer.broadcast(event)
-        self._emit_pending_worktree(chat_id)
+            "tabId": tab_id,
+        })
+        self._emit_pending_worktree(tab_id)
 
     def _get_last_session(self, tab_id: str = "") -> None:
         """Load the most recent task from history and replay its events.
@@ -863,7 +838,7 @@ class VSCodeServer:
                 return
         entries = _load_history(limit=1)
         if entries:
-            chat_id = str(entries[0].get("chat_id", ""))
+            chat_id = int(str(entries[0].get("chat_id", 0) or 0))
             if chat_id:
                 self._replay_session(chat_id, tab_id)
         self._restore_pending_merge()
@@ -1259,11 +1234,11 @@ class VSCodeServer:
             return {"success": True, "message": msg}
         return {"success": False, "message": f"Unknown action: {action}"}
 
-    def _get_adjacent_task(self, chat_id: str, task: str, direction: str) -> None:
+    def _get_adjacent_task(self, chat_id: int, task: str, direction: str) -> None:
         """Send events for the adjacent task in the same chat session.
 
         Args:
-            chat_id: The chat session identifier.
+            chat_id: The integer chat session identifier.
             task: Current task description string (used as timestamp reference).
             direction: ``"prev"`` or ``"next"``.
         """

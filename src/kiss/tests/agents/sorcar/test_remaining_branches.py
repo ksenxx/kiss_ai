@@ -62,7 +62,7 @@ class TestPersistenceBranches:
         """_load_latest_chat_events_by_chat_id handles corrupt event_json gracefully."""
         db = th._get_db()
         # Insert a task with chat_id and then corrupt event data
-        task_id = th._add_task("corrupt-event-test", chat_id="bad-json-chat")
+        task_id, _ = th._add_task("corrupt-event-test", chat_id=1000)
         db.execute(
             "INSERT INTO events (task_id, seq, event_json) VALUES (?, ?, ?)",
             (task_id, 0, "NOT VALID JSON {{{"),
@@ -72,7 +72,7 @@ class TestPersistenceBranches:
             (task_id, 1, json.dumps({"type": "ok"})),
         )
         db.commit()
-        result = th._load_latest_chat_events_by_chat_id("bad-json-chat")
+        result = th._load_latest_chat_events_by_chat_id(1000)
         assert result is not None
         events = result["events"]
         assert isinstance(events, list)
@@ -444,7 +444,8 @@ class TestStatefulSorcarAgentBranches:
         from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
         agent = StatefulSorcarAgent("test")
         # Add a task with empty result to the agent's chat
-        task_id = th._add_task("task with no result", chat_id=agent._chat_id)
+        task_id, chat_id = th._add_task("task with no result", chat_id=0)
+        agent._chat_id = chat_id
         th._save_task_result("", task_id)
         prompt = agent.build_chat_prompt("new task")
         assert "### Task 1" in prompt
