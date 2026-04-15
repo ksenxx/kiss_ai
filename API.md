@@ -604,61 +604,34 @@ ______________________________________________________________________
 
 #### `kiss.agents.vscode.browser_ui` — *Shared browser UI components for KISS agent viewers.*
 
-##### `class BaseBrowserPrinter(StreamEventParser, Printer)`
+##### `class BaseBrowserPrinter(StreamEventParser, Printer)` — Base printer for browser-based UIs.
 
 **Constructor:** `BaseBrowserPrinter() -> None`
 
-- **tokens_offset** — Per-thread token offset for usage_info events.<br/>`tokens_offset() -> int` *(property)*
-
-- **tokens_offset**<br/>`tokens_offset(value: int) -> None`
-
-- **budget_offset** — Per-thread budget offset for usage_info events.<br/>`budget_offset() -> float` *(property)*
-
-- **budget_offset**<br/>`budget_offset(value: float) -> None`
-
-- **steps_offset** — Per-thread steps offset for usage_info events.<br/>`steps_offset() -> int` *(property)*
-
-- **steps_offset**<br/>`steps_offset(value: int) -> None`
-
 - **reset** — Reset internal streaming and tool-parsing state for a new turn.<br/>`reset() -> None`
 
-- **start_recording** — Start recording broadcast events. Uses an explicit *recording_id* to avoid thread-ID reuse corruption. Falls back to thread ident when no ID is given (backward compat). When *tab_id* is provided, only events whose `tabId` matches are recorded. Events without a `tabId` are still recorded to all active recordings.<br/>`start_recording(recording_id: int | None = None, tab_id: str | None = None) -> None`
+- **start_recording** — Start recording broadcast events.<br/>`start_recording() -> None`
 
-  - `recording_id`: Unique identifier for this recording session.
-  - `tab_id`: Optional tab owner — restricts which events are recorded.
+- **stop_recording** — Stop recording and return its display events.<br/>`stop_recording() -> list[dict[str, Any]]`
 
-- **stop_recording** — Stop recording and return its display events.<br/>`stop_recording(recording_id: int | None = None) -> list[dict[str, Any]]`
-
-  - `recording_id`: The recording ID passed to start_recording.
   - **Returns:** List of display-relevant events with consecutive deltas merged.
 
-- **peek_recording** — Return a snapshot of the current recording without stopping it. Used for periodic crash-recovery flushes: the caller can persist a snapshot of events to the database while recording continues.<br/>`peek_recording(recording_id: int) -> list[dict[str, Any]]`
+- **peek_recording** — Return a snapshot of the current recording without stopping it. Used for periodic crash-recovery flushes: the caller can persist a snapshot of events to the database while recording continues.<br/>`peek_recording() -> list[dict[str, Any]]`
 
-  - `recording_id`: The recording ID passed to start_recording.
   - **Returns:** List of display-relevant events with consecutive deltas merged.
 
-- **broadcast** — Send an SSE event dict to the connected client. The event is also appended to every active per-thread recording.<br/>`broadcast(event: dict[str, Any]) -> None`
+- **broadcast** — Broadcast an event and record it.<br/>`broadcast(event: dict[str, Any]) -> None`
 
   - `event`: The event dictionary to broadcast.
 
-- **add_client** — Register the SSE client and return its event queue. Only one client is supported. A new connection replaces any previous one.<br/>`add_client() -> queue.Queue[dict[str, Any]]`
-
-  - **Returns:** queue.Queue\[dict[str, Any]\]: A queue that will receive broadcast events.
-
-- **remove_client** — Unregister the SSE client's event queue. Only clears the queue if *cq* is the current client (handles reconnection races where the old connection tears down after a new one has already connected).<br/>`remove_client(cq: queue.Queue[dict[str, Any]]) -> None`
-
-  - `cq`: The client queue to remove.
-
-- **has_clients** — Return True if a client is currently connected.<br/>`has_clients() -> bool`
-
-- **print** — Render content by broadcasting SSE events to connected browser clients.<br/>`print(content: Any, type: str = 'text', **kwargs: Any) -> str`
+- **print** — Render content by broadcasting events to connected clients.<br/>`print(content: Any, type: str = 'text', **kwargs: Any) -> str`
 
   - `content`: The content to display.
   - `type`: Content type (e.g. "text", "prompt", "stream_event", "tool_call", "tool_result", "result", "message").
   - `**kwargs`: Additional options such as tool_input, is_error, cost, total_tokens.
   - **Returns:** str: Extracted text from stream events, or empty string.
 
-- **token_callback** — Broadcast a streamed token as an SSE delta event to browser clients.<br/>`token_callback(token: str) -> None`
+- **token_callback** — Broadcast a streamed token as a delta event.<br/>`token_callback(token: str) -> None`
 
   - `token`: The text token to broadcast.
 
@@ -1889,7 +1862,7 @@ ______________________________________________________________________
 
 **Constructor:** `StatefulSorcarAgent(name: str) -> None`
 
-- **chat_id** — Return the current chat session ID.<br/>`chat_id() -> str` *(property)*
+- **chat_id** — Return the current chat session ID (0 means new session).<br/>`chat_id() -> int` *(property)*
 
 - **new_chat** — Reset to a new chat session (equivalent to VS Code 'Clear').<br/>`new_chat() -> None`
 
@@ -1897,9 +1870,9 @@ ______________________________________________________________________
 
   - `task`: The task description string to look up.
 
-- **resume_chat_by_id** — Resume a chat session using a stable chat identifier.<br/>`resume_chat_by_id(chat_id: str) -> None`
+- **resume_chat_by_id** — Resume a chat session using a stable chat identifier.<br/>`resume_chat_by_id(chat_id: int) -> None`
 
-  - `chat_id`: Persisted chat session identifier to resume.
+  - `chat_id`: Integer chat session identifier to resume.
 
 - **build_chat_prompt** — Load chat context and augment prompt with previous tasks/results.<br/>`build_chat_prompt(prompt: str) -> str`
 
@@ -2044,61 +2017,34 @@ ______________________________________________________________________
 
 #### `kiss.agents.vscode.kiss_project.src.kiss.agents.vscode.browser_ui` — *Shared browser UI components for KISS agent viewers.*
 
-##### `class BaseBrowserPrinter(StreamEventParser, Printer)`
+##### `class BaseBrowserPrinter(StreamEventParser, Printer)` — Base printer for browser-based UIs.
 
 **Constructor:** `BaseBrowserPrinter() -> None`
 
-- **tokens_offset** — Per-thread token offset for usage_info events.<br/>`tokens_offset() -> int` *(property)*
-
-- **tokens_offset**<br/>`tokens_offset(value: int) -> None`
-
-- **budget_offset** — Per-thread budget offset for usage_info events.<br/>`budget_offset() -> float` *(property)*
-
-- **budget_offset**<br/>`budget_offset(value: float) -> None`
-
-- **steps_offset** — Per-thread steps offset for usage_info events.<br/>`steps_offset() -> int` *(property)*
-
-- **steps_offset**<br/>`steps_offset(value: int) -> None`
-
 - **reset** — Reset internal streaming and tool-parsing state for a new turn.<br/>`reset() -> None`
 
-- **start_recording** — Start recording broadcast events. Uses an explicit *recording_id* to avoid thread-ID reuse corruption. Falls back to thread ident when no ID is given (backward compat). When *tab_id* is provided, only events whose `tabId` matches are recorded. Events without a `tabId` are still recorded to all active recordings.<br/>`start_recording(recording_id: int | None = None, tab_id: str | None = None) -> None`
+- **start_recording** — Start recording broadcast events.<br/>`start_recording() -> None`
 
-  - `recording_id`: Unique identifier for this recording session.
-  - `tab_id`: Optional tab owner — restricts which events are recorded.
+- **stop_recording** — Stop recording and return its display events.<br/>`stop_recording() -> list[dict[str, Any]]`
 
-- **stop_recording** — Stop recording and return its display events.<br/>`stop_recording(recording_id: int | None = None) -> list[dict[str, Any]]`
-
-  - `recording_id`: The recording ID passed to start_recording.
   - **Returns:** List of display-relevant events with consecutive deltas merged.
 
-- **peek_recording** — Return a snapshot of the current recording without stopping it. Used for periodic crash-recovery flushes: the caller can persist a snapshot of events to the database while recording continues.<br/>`peek_recording(recording_id: int) -> list[dict[str, Any]]`
+- **peek_recording** — Return a snapshot of the current recording without stopping it. Used for periodic crash-recovery flushes: the caller can persist a snapshot of events to the database while recording continues.<br/>`peek_recording() -> list[dict[str, Any]]`
 
-  - `recording_id`: The recording ID passed to start_recording.
   - **Returns:** List of display-relevant events with consecutive deltas merged.
 
-- **broadcast** — Send an SSE event dict to the connected client. The event is also appended to every active per-thread recording.<br/>`broadcast(event: dict[str, Any]) -> None`
+- **broadcast** — Broadcast an event and record it.<br/>`broadcast(event: dict[str, Any]) -> None`
 
   - `event`: The event dictionary to broadcast.
 
-- **add_client** — Register the SSE client and return its event queue. Only one client is supported. A new connection replaces any previous one.<br/>`add_client() -> queue.Queue[dict[str, Any]]`
-
-  - **Returns:** queue.Queue\[dict[str, Any]\]: A queue that will receive broadcast events.
-
-- **remove_client** — Unregister the SSE client's event queue. Only clears the queue if *cq* is the current client (handles reconnection races where the old connection tears down after a new one has already connected).<br/>`remove_client(cq: queue.Queue[dict[str, Any]]) -> None`
-
-  - `cq`: The client queue to remove.
-
-- **has_clients** — Return True if a client is currently connected.<br/>`has_clients() -> bool`
-
-- **print** — Render content by broadcasting SSE events to connected browser clients.<br/>`print(content: Any, type: str = 'text', **kwargs: Any) -> str`
+- **print** — Render content by broadcasting events to connected clients.<br/>`print(content: Any, type: str = 'text', **kwargs: Any) -> str`
 
   - `content`: The content to display.
   - `type`: Content type (e.g. "text", "prompt", "stream_event", "tool_call", "tool_result", "result", "message").
   - `**kwargs`: Additional options such as tool_input, is_error, cost, total_tokens.
   - **Returns:** str: Extracted text from stream events, or empty string.
 
-- **token_callback** — Broadcast a streamed token as an SSE delta event to browser clients.<br/>`token_callback(token: str) -> None`
+- **token_callback** — Broadcast a streamed token as a delta event.<br/>`token_callback(token: str) -> None`
 
   - `token`: The text token to broadcast.
 

@@ -170,17 +170,16 @@ class TestPeriodicEventFlushEarlyExits:
         agent._last_task_id = None
         stop = threading.Event()
         server._flush_interval = 0.05  # very fast flush
-        rec_id = 999
-        server.printer.start_recording(rec_id)
+        server.printer.start_recording()
         # Run flush loop briefly — should skip because task_id is None
         t = threading.Thread(
-            target=server._periodic_event_flush, args=(rec_id, stop, agent), daemon=True
+            target=server._periodic_event_flush, args=(stop, agent), daemon=True
         )
         t.start()
         time.sleep(0.15)  # allow 2-3 flush cycles
         stop.set()
         t.join(timeout=2)
-        server.printer.stop_recording(rec_id)
+        server.printer.stop_recording()
 
     def test_flush_with_empty_events(self) -> None:
         """Flush loop skips DB write when events list is empty."""
@@ -193,17 +192,16 @@ class TestPeriodicEventFlushEarlyExits:
             agent._last_task_id = task_id
             stop = threading.Event()
             server._flush_interval = 0.05
-            rec_id = 888
-            server.printer.start_recording(rec_id)
+            server.printer.start_recording()
             # Don't broadcast anything → events empty → line 241→237
             t = threading.Thread(
-                target=server._periodic_event_flush, args=(rec_id, stop, agent), daemon=True
+                target=server._periodic_event_flush, args=(stop, agent), daemon=True
             )
             t.start()
             time.sleep(0.15)
             stop.set()
             t.join(timeout=2)
-            server.printer.stop_recording(rec_id)
+            server.printer.stop_recording()
         finally:
             if th._db_conn is not None:
                 th._db_conn.close()

@@ -7,30 +7,23 @@ Feeds identical print() calls to both printers and verifies:
 """
 
 import io
-import queue
 from types import SimpleNamespace
 
 from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 from kiss.core.print_to_console import ConsolePrinter
 
 
-def _drain(q: queue.Queue) -> list[dict]:
-    events = []
-    while True:
-        try:
-            events.append(q.get_nowait())
-        except queue.Empty:
-            break
-    return events
-
-
 def _make_printers():
     buf = io.StringIO()
     console = ConsolePrinter(file=buf)
     browser = BaseBrowserPrinter()
-    bq: queue.Queue = queue.Queue()
-    browser._client_queue = bq
-    return console, buf, browser, bq
+    browser.start_recording()
+    return console, buf, browser
+
+
+def _drain(browser: BaseBrowserPrinter) -> list[dict]:
+    """Stop recording and return all recorded events."""
+    return browser.stop_recording()
 
 
 def _event(evt_dict):
@@ -41,11 +34,11 @@ class TestPrintReturnValueParity:
     """Both printers must return the same string from print() for every type."""
 
     def test_text_returns_empty(self):
-        console, _, browser, _ = _make_printers()
+        console, _, browser = _make_printers()
         assert console.print("hello", type="text") == browser.print("hello", type="text")
 
     def test_unknown_type_returns_empty(self):
-        console, _, browser, _ = _make_printers()
+        console, _, browser = _make_printers()
         r1 = console.print("x", type="nonexistent_type")
         r2 = browser.print("x", type="nonexistent_type")
         assert r1 == r2 == ""
@@ -55,7 +48,7 @@ class TestStreamEventReturnParity:
     """Both printers must return the same extracted text from stream events."""
 
     def test_unknown_event_type(self):
-        console, _, browser, _ = _make_printers()
+        console, _, browser = _make_printers()
         ev = _event({"type": "message_start"})
         r1 = console.print(ev, type="stream_event")
         r2 = browser.print(ev, type="stream_event")
@@ -66,12 +59,12 @@ class TestToolCallContentParity:
     """Both printers show the same tool call details."""
 
     def test_bash_with_command_and_description(self):
-        console, buf, browser, bq = _make_printers()
+        console, buf, browser = _make_printers()
         ti = {"command": "pytest -x", "description": "Run tests"}
         console.print("Bash", type="tool_call", tool_input=ti)
         browser.print("Bash", type="tool_call", tool_input=ti)
         out = buf.getvalue()
-        events = _drain(bq)
+        events = _drain(browser)
         tc_events = [e for e in events if e["type"] == "tool_call"]
         assert len(tc_events) == 1
         ev = tc_events[0]
@@ -83,7 +76,7 @@ class TestToolCallContentParity:
         assert ev["description"] == "Run tests"
 
     def test_edit_with_old_new_string(self):
-        console, buf, browser, bq = _make_printers()
+        console, buf, browser = _make_printers()
         ti = {
             "file_path": "app.py",
             "old_string": "x = 1",
@@ -92,7 +85,7 @@ class TestToolCallContentParity:
         console.print("Edit", type="tool_call", tool_input=ti)
         browser.print("Edit", type="tool_call", tool_input=ti)
         out = buf.getvalue()
-        events = _drain(bq)
+        events = _drain(browser)
         tc_events = [e for e in events if e["type"] == "tool_call"]
         ev = tc_events[0]
         assert "x = 1" in out
@@ -106,12 +99,12 @@ class TestToolResultContentParity:
 
     def test_truncation_applied_on_error(self):
         from kiss.core.printer import MAX_RESULT_LEN
-        console, buf, browser, bq = _make_printers()
+        console, buf, browser = _make_printers()
         long_content = "x" * (MAX_RESULT_LEN * 2)
         console.print(long_content, type="tool_result", is_error=True, tool_name="Read")
         browser.print(long_content, type="tool_result", is_error=True, tool_name="Read")
         out = buf.getvalue()
-        events = _drain(bq)
+        events = _drain(browser)
         tr_events = [e for e in events if e["type"] == "tool_result"]
         assert "... (truncated) ..." in out
         assert "... (truncated) ..." in tr_events[0]["content"]
@@ -121,23 +114,23 @@ class TestMessageParity:
     """Both printers handle message objects the same way."""
 
     def test_tool_output_message(self):
-        console, buf, browser, bq = _make_printers()
+        console, buf, browser = _make_printers()
         msg = SimpleNamespace(subtype="tool_output", data={"content": "command output\n"})
         console.print(msg, type="message")
         browser.print(msg, type="message")
         out = buf.getvalue()
-        events = _drain(bq)
+        events = _drain(browser)
         assert "command output" in out
         so_events = [e for e in events if e["type"] == "system_output"]
         assert so_events[0]["text"] == "command output\n"
 
     def test_result_message(self):
-        console, buf, browser, bq = _make_printers()
+        console, buf, browser = _make_printers()
         msg = SimpleNamespace(result="completed successfully")
         console.print(msg, type="message", budget_used=0.02, total_tokens_used=200)
         browser.print(msg, type="message", budget_used=0.02, total_tokens_used=200)
         out = buf.getvalue()
-        events = _drain(bq)
+        events = _drain(browser)
         assert "completed successfully" in out
         assert "$0.0200" in out
         r_events = [e for e in events if e["type"] == "result"]
@@ -146,23 +139,23 @@ class TestMessageParity:
         assert r_events[0]["total_tokens"] == 200
 
     def test_error_content_block_message(self):
-        console, buf, browser, bq = _make_printers()
+        console, buf, browser = _make_printers()
         block = SimpleNamespace(is_error=True, content="something broke")
         msg = SimpleNamespace(content=[block])
         console.print(msg, type="message")
         browser.print(msg, type="message")
         out = buf.getvalue()
-        events = _drain(bq)
+        events = _drain(browser)
         assert "something broke" in out
         tr_events = [e for e in events if e["type"] == "tool_result"]
         assert tr_events[0]["is_error"] is True
 
     def test_empty_tool_output_produces_nothing(self):
-        console, buf, browser, bq = _make_printers()
+        console, buf, browser = _make_printers()
         msg = SimpleNamespace(subtype="tool_output", data={"content": ""})
         console.print(msg, type="message")
         browser.print(msg, type="message")
-        events = _drain(bq)
+        events = _drain(browser)
         assert len(events) == 0
 
 
@@ -170,10 +163,10 @@ class TestTokenCallbackParity:
     """Both printers handle token_callback the same way."""
 
     def test_empty_token_no_broadcast(self):
-        console, _, browser, bq = _make_printers()
+        console, _, browser = _make_printers()
         console.token_callback("")
         browser.token_callback("")
-        events = _drain(bq)
+        events = _drain(browser)
         assert len(events) == 0
 
 
@@ -181,7 +174,7 @@ class TestFullAgentSequenceParity:
     """Simulate a full agent execution and verify both printers get the same content."""
 
     def test_full_sequence(self):
-        console, buf, browser, bq = _make_printers()
+        console, buf, browser = _make_printers()
 
         for p in (console, browser):
             p.print("Fix the bug in app.py", type="prompt")
@@ -249,7 +242,7 @@ class TestFullAgentSequenceParity:
         assert "app.py" in out
         assert "Bug fixed" in out
 
-        events = _drain(bq)
+        events = _drain(browser)
         types = [e["type"] for e in events]
         assert "prompt" in types
         assert "thinking_start" in types

@@ -9,14 +9,7 @@ import queue
 import threading
 from pathlib import Path
 
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 from kiss.core.base import Base
-
-
-def _subscribe(printer: BaseBrowserPrinter) -> queue.Queue:
-    q: queue.Queue = queue.Queue()
-    printer._client_queue = q
-    return q
 
 
 def _drain(q: queue.Queue) -> list[dict]:

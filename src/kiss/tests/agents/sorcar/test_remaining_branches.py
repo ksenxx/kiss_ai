@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import os
-import queue
 import socket
 import subprocess
 import sys
@@ -469,37 +468,31 @@ class TestBrowserUIBranches:
         """
         p = BaseBrowserPrinter()
         p._thread_local.tab_id = "0"
-        cq: queue.Queue = queue.Queue()
-        p._client_queue = cq
-        # Set up per-tab bash state with old last_flush and a pending timer
+        # Set up bash state with old last_flush and a pending timer
         with p._bash_lock:
-            bs = p._get_bash()
+            bs = p._bash_state
             bs.last_flush = time.monotonic() - 1.0
             bs.timer = threading.Timer(10.0, p._flush_bash)
             bs.timer.daemon = True
             bs.timer.start()
+        p.start_recording()
         # Now call bash_stream — should enter main flush branch, cancel timer
         p.print("line1\n", type="bash_stream")
         # Timer should be cancelled and set to None
         with p._bash_lock:
-            assert p._get_bash().timer is None
-        events = []
-        while not cq.empty():
-            events.append(cq.get_nowait())
+            assert p._bash_state.timer is None
+        events = p.stop_recording()
         output_events = [e for e in events if e.get("type") == "system_output"]
         assert len(output_events) == 1
 
     def test_print_tool_result_non_core_tool(self) -> None:
         """Non-core tool result is hidden unless is_error (line 273->281)."""
         p = BaseBrowserPrinter()
-        cq: queue.Queue = queue.Queue()
-        p._client_queue = cq
+        p.start_recording()
         # Simulate tool_result for a non-core tool
         p.print("some result", type="tool_result", tool_name="custom_tool", is_error=False)
         # No tool_result event should be broadcast for non-core, non-error
-        events = []
-        while not cq.empty():
-            events.append(cq.get_nowait())
+        events = p.stop_recording()
         tool_results = [e for e in events if e.get("type") == "tool_result"]
         assert len(tool_results) == 0
 

@@ -3,7 +3,6 @@ CLI callbacks, callback wiring, bash streaming, and autocomplete clipping."""
 
 from __future__ import annotations
 
-import queue
 from pathlib import Path
 from typing import Any, cast
 
@@ -216,16 +215,6 @@ class TestBuildArgParser:
         assert args.verbose is False
         assert args.task == "hello world"
 
-def _drain(q: queue.Queue) -> list[dict]:
-    events: list[dict] = []
-    while True:
-        try:
-            events.append(q.get_nowait())
-        except queue.Empty:
-            break
-    return events
-
-
 class TestSorcarBashStreaming:
     def test_multiline_bash_streams_all_lines(self):
         agent = SorcarAgent("test")
@@ -233,7 +222,7 @@ class TestSorcarBashStreaming:
         bash_tool = tools[0]
 
         printer = BaseBrowserPrinter()
-        cq = printer.add_client()
+        printer.start_recording()
         agent.printer = printer
 
         result = bash_tool(
@@ -243,7 +232,7 @@ class TestSorcarBashStreaming:
         printer._flush_bash()
 
         assert "line1" in result
-        events = _drain(cq)
+        events = printer.stop_recording()
         sys_text = "".join(e["text"] for e in events if e["type"] == "system_output")
         assert "line1" in sys_text
         assert "line2" in sys_text

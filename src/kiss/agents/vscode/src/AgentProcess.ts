@@ -130,9 +130,12 @@ export class AgentProcess extends EventEmitter {
   private process: ChildProcess | null = null;
   private kissProjectPath: string | null = null;
   private buffer: string = '';
+  /** Tab ID this process is associated with (empty for shared processes). */
+  public readonly tabId: string;
 
-  constructor() {
+  constructor(tabId: string = '') {
     super();
+    this.tabId = tabId;
   }
 
   /**

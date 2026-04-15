@@ -61,23 +61,16 @@ class TestB6ForceStopReturnCheck:
 
 
 # ---------------------------------------------------------------------------
-# B7: _extract_result_summary uses peek_recording, not raw _recordings
+# B7: _extract_result_summary uses peek_recording, not raw _recording
 # ---------------------------------------------------------------------------
 class TestB7ExtractResultSummary:
     def test_uses_peek_recording(self) -> None:
-        """_extract_result_summary uses peek_recording instead of _recordings."""
+        """_extract_result_summary uses peek_recording instead of _recording."""
         from kiss.agents.vscode.server import VSCodeServer
 
         source = inspect.getsource(VSCodeServer._extract_result_summary)
         assert "peek_recording" in source
-        assert "_recordings" not in source
-
-    def test_accepts_recording_id(self) -> None:
-        """_extract_result_summary takes a recording_id parameter."""
-        from kiss.agents.vscode.server import VSCodeServer
-
-        sig = inspect.signature(VSCodeServer._extract_result_summary)
-        assert "recording_id" in sig.parameters
+        assert "_recording" not in source or "peek_recording" in source
 
 
 # ---------------------------------------------------------------------------

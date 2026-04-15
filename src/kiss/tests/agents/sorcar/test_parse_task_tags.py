@@ -220,11 +220,11 @@ class TestMultiTaskIntegration(unittest.TestCase):
 
     def test_recording_spans_all_subtasks(self) -> None:
         """start_recording is before the loop, stop_recording is after."""
-        start_pos = self._src.index("self.printer.start_recording(rec_id, tab_id=tab_id)")
+        start_pos = self._src.index("self.printer.start_recording()")
         loop_pos = self._src.index("for task_idx, task_prompt in enumerate(subtasks):")
         assert start_pos < loop_pos
         # stop_recording is in the finally block, after the loop
-        stop_pos = self._src.index("self.printer.stop_recording(rec_id)")
+        stop_pos = self._src.index("self.printer.stop_recording()")
         assert stop_pos > loop_pos
 
 
