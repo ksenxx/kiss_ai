@@ -120,6 +120,19 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
         with self._lock:
             self._recording = []
 
+    @staticmethod
+    def _filter_and_coalesce(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Filter to display events and merge consecutive deltas.
+
+        Args:
+            raw: Unfiltered list of recorded events.
+
+        Returns:
+            Display-relevant events with consecutive deltas merged.
+        """
+        filtered = [e for e in raw if e.get("type") in _DISPLAY_EVENT_TYPES]
+        return _coalesce_events(filtered)
+
     def stop_recording(self) -> list[dict[str, Any]]:
         """Stop recording and return its display events.
 
@@ -129,8 +142,7 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
         with self._lock:
             raw = self._recording or []
             self._recording = None
-        filtered = [e for e in raw if e.get("type") in _DISPLAY_EVENT_TYPES]
-        return _coalesce_events(filtered)
+        return self._filter_and_coalesce(raw)
 
     def peek_recording(self) -> list[dict[str, Any]]:
         """Return a snapshot of the current recording without stopping it.
@@ -143,8 +155,7 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
         """
         with self._lock:
             raw = list(self._recording) if self._recording is not None else []
-        filtered = [e for e in raw if e.get("type") in _DISPLAY_EVENT_TYPES]
-        return _coalesce_events(filtered)
+        return self._filter_and_coalesce(raw)
 
     def _record_event(self, event: dict[str, Any]) -> None:
         """Append event to the active recording if one exists.

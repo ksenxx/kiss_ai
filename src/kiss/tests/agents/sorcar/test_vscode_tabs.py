@@ -528,7 +528,7 @@ class TestFollowupAsyncTabId(unittest.TestCase):
         old_stdout = sys.stdout
         sys.stdout = buf
         try:
-            server._generate_followup_async("task", "result", "model", None, "0")
+            server._generate_followup_async("task", "result", None)
             # Wait for the background thread to finish
             time.sleep(2)
         finally:

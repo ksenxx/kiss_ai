@@ -238,6 +238,18 @@ export class MergeManager extends EventEmitter {
     }
   }
 
+  private async _delLinesWithRetry(
+    ed: vscode.TextEditor,
+    start: number,
+    count: number
+  ): Promise<boolean> {
+    let ok = await this._delLines(ed, start, count);
+    if (!ok) {
+      ok = await this._delLines(ed, start, count);
+    }
+    return ok;
+  }
+
   private async _applyHunkAction(
     fp: string,
     idx: number,
@@ -249,10 +261,7 @@ export class MergeManager extends EventEmitter {
     const h = s.hunks[idx];
     if (h[countProp] > 0) {
       const ed = await this._getOrOpenEditor(fp);
-      let ok = await this._delLines(ed, h[startProp], h[countProp]);
-      if (!ok) {
-        ok = await this._delLines(ed, h[startProp], h[countProp]);
-      }
+      const ok = await this._delLinesWithRetry(ed, h[startProp], h[countProp]);
       if (!ok) {
         vscode.window.showWarningMessage('Failed to apply change. Please try again.');
         return;
@@ -387,12 +396,9 @@ export class MergeManager extends EventEmitter {
     const ed = await this._getOrOpenEditor(fp);
     for (let i = s.hunks.length - 1; i >= 0; i--) {
       if (s.hunks[i][countProp] > 0) {
-        let ok = await this._delLines(ed, s.hunks[i][startProp], s.hunks[i][countProp]);
+        const ok = await this._delLinesWithRetry(ed, s.hunks[i][startProp], s.hunks[i][countProp]);
         if (!ok) {
-          ok = await this._delLines(ed, s.hunks[i][startProp], s.hunks[i][countProp]);
-          if (!ok) {
-            console.error(`[MergeManager] Failed to delete hunk ${i} lines in ${fp}`);
-          }
+          console.error(`[MergeManager] Failed to delete hunk ${i} lines in ${fp}`);
         }
       }
     }
