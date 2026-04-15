@@ -114,6 +114,7 @@
           - [`kiss.agents.vscode.kiss_project.src.kiss.docker`](#kissagentsvscodekiss_projectsrckissdocker)
             - [`kiss.agents.vscode.kiss_project.src.kiss.docker.docker_manager`](#kissagentsvscodekiss_projectsrckissdockerdocker_manager)
             - [`kiss.agents.vscode.kiss_project.src.kiss.docker.docker_tools`](#kissagentsvscodekiss_projectsrckissdockerdocker_tools)
+          - [`kiss.agents.vscode.node_modules.flatted.python.flatted`](#kissagentsvscodenode_modulesflattedpythonflatted)
       - [`kiss.agents.vscode.server`](#kissagentsvscodeserver)
   - [`kiss.benchmarks`](#kissbenchmarks)
     - [`kiss.benchmarks.generate_dashboard`](#kissbenchmarksgenerate_dashboard)
@@ -4944,6 +4945,14 @@ ______________________________________________________________________
   - `old_string`: Exact text to find and replace.
   - `new_string`: Replacement text, must differ from old_string.
   - `replace_all`: If True, replace all occurrences.
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.node_modules.flatted.python.flatted`
+
+**`parse`**<br/>`def parse(value, *args, **kwargs)`
+
+**`stringify`**<br/>`def stringify(value, *args, **kwargs)`
 
 ______________________________________________________________________
 
