@@ -249,7 +249,7 @@ class TestRC7WorktreeActionTimeoutInspection(unittest.TestCase):
         # Find the dispose method
         idx = self.ts.index("public dispose()")
         block = self.ts[idx:idx + 400]
-        assert "_worktreeActionResolve" in block, (
+        assert "_resolveAllWorktreeActions" in block, (
             "dispose() should resolve pending worktree promise (RC7 fix)"
         )
 
@@ -270,10 +270,10 @@ class TestRC8FreshQueuePerTask(unittest.TestCase):
         )
 
     def test_fresh_queue_created(self) -> None:
-        """Verify _run_task_inner creates a fresh per-tab Queue."""
-        source = inspect.getsource(VSCodeServer._run_task_inner)
+        """Verify _handle_command creates a fresh per-tab Queue before thread start."""
+        source = inspect.getsource(VSCodeServer._handle_command)
         assert "tab.user_answer_queue" in source, (
-            "_run_task_inner should create a fresh per-tab Queue (RC8 fix)"
+            "_handle_command should create a fresh per-tab Queue (RC8+RC-NEW-1 fix)"
         )
 
     def test_answer_not_stolen_by_new_task(self) -> None:

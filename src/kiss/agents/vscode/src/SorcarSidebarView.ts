@@ -40,6 +40,13 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _worktreeProgresses: Map<string, vscode.Progress<{ message?: string }>> = new Map();
   private _disposed: boolean = false;
 
+  /** Resolve all pending worktree action promises and clear tracking maps. */
+  private _resolveAllWorktreeActions(): void {
+    for (const resolve of this._worktreeActionResolves.values()) resolve();
+    this._worktreeActionResolves.clear();
+    this._worktreeProgresses.clear();
+  }
+
   constructor(extensionUri: vscode.Uri, mergeManager: MergeManager) {
     this._extensionUri = extensionUri;
     this._mergeManager = mergeManager;
@@ -154,9 +161,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           this._worktreeProgresses.delete(wrTabId);
         } else {
           // Fallback: resolve all pending
-          for (const resolve of this._worktreeActionResolves.values()) resolve();
-          this._worktreeActionResolves.clear();
-          this._worktreeProgresses.clear();
+          this._resolveAllWorktreeActions();
         }
         const result = msg as any;
         if (result.success) {
@@ -225,9 +230,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
     webviewView.onDidDispose(() => {
       this._disposed = true;
-      for (const resolve of this._worktreeActionResolves.values()) resolve();
-      this._worktreeActionResolves.clear();
-      this._worktreeProgresses.clear();
+      this._resolveAllWorktreeActions();
     });
   }
 
@@ -509,10 +512,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         const handler = mergeDispatch[mAction];
         if (handler) handler();
         else if (mAction === 'all-done') {
-          // Route to the merge owner tab's task process
-          const mergeOwnerTabId = this._mergeOwnerTabIdQueue[0];
-          const mergeProc = mergeOwnerTabId ? this._taskProcesses.get(mergeOwnerTabId) : undefined;
-          (mergeProc || this._getServiceProcess()).sendCommand({ type: 'mergeAction', action: 'all-done', tabId: mergeOwnerTabId });
+          this.sendMergeAllDone(this._mergeOwnerTabIdQueue[0]);
         }
         break;
       }
@@ -675,9 +675,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   /** Cleanup: kill all agent processes and dispose listeners. */
   public dispose(): void {
     this._disposed = true;
-    for (const resolve of this._worktreeActionResolves.values()) resolve();
-    this._worktreeActionResolves.clear();
-    this._worktreeProgresses.clear();
+    this._resolveAllWorktreeActions();
     for (const proc of this._taskProcesses.values()) proc.dispose();
     this._taskProcesses.clear();
     if (this._serviceProcess) {

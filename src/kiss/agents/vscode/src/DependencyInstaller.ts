@@ -301,10 +301,9 @@ export async function ensureDependencies(): Promise<void> {
  * The wrapper calls `uv run sorcar` from the bundled kiss_project directory.
  */
 function installCliScript(kissProjectPath: string, uvPath: string): void {
-  const homeDir = process.env.HOME || process.env.USERPROFILE || '';
-  if (!homeDir) return;
+  if (!HOME_DIR) return;
 
-  const binDir = path.join(homeDir, '.local', 'bin');
+  const binDir = path.join(HOME_DIR, '.local', 'bin');
 
   // Resolve uv to an absolute path for the wrapper script
   let absUvPath = uvPath;
@@ -314,7 +313,7 @@ function installCliScript(kissProjectPath: string, uvPath: string): void {
       absUvPath = execSync(whichCmd, { encoding: 'utf-8' }).trim().split('\n')[0];
     } catch {
       const suffix = process.platform === 'win32' ? '.exe' : '';
-      absUvPath = path.join(homeDir, '.local', 'bin', `uv${suffix}`);
+      absUvPath = path.join(HOME_DIR, '.local', 'bin', `uv${suffix}`);
     }
   }
 
@@ -374,8 +373,7 @@ async function installUv(): Promise<string | null> {
     return null;
   }
 
-  const homeDir = process.env.HOME || process.env.USERPROFILE || '';
-  const installDir = path.join(homeDir, '.local', 'bin');
+  const installDir = path.join(HOME_DIR, '.local', 'bin');
   const assetName = `uv-${asset.triplet}`;
   const url = `https://releases.astral.sh/github/uv/releases/download/${UV_VERSION}/${assetName}.${asset.ext}`;
   log(`Downloading uv ${UV_VERSION} from ${url}`);
@@ -899,9 +897,7 @@ function ensurePathInShellRc(rcPath: string, dirPath: string): void {
   const homeDir = process.env.HOME || process.env.USERPROFILE || '';
   let dirRef = dirPath;
   if (homeDir && dirPath.startsWith(homeDir)) {
-    dirRef = isPs1
-      ? dirPath.replace(homeDir, '$HOME')
-      : dirPath.replace(homeDir, '$HOME');
+    dirRef = dirPath.replace(homeDir, '$HOME');
   }
 
   let content = readShellRc(rcPath);

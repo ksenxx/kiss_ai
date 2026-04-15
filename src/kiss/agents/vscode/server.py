@@ -204,17 +204,21 @@ class VSCodeServer:
         The tab_id is a frontend string identifier; the agent's chat_id
         is an integer assigned by the database on first task insertion.
 
+        Thread-safe: acquires ``_state_lock`` to protect the
+        get-or-create pattern against concurrent callers.
+
         Args:
             tab_id: The frontend tab identifier string.
 
         Returns:
             The per-tab state object.
         """
-        tab = self._tab_states.get(tab_id)
-        if tab is None:
-            tab = _TabState(tab_id, self._default_model)
-            self._tab_states[tab_id] = tab
-        return tab
+        with self._state_lock:
+            tab = self._tab_states.get(tab_id)
+            if tab is None:
+                tab = _TabState(tab_id, self._default_model)
+                self._tab_states[tab_id] = tab
+            return tab
 
     def run(self) -> None:
         """Main loop: read commands from stdin, execute them."""
@@ -246,6 +250,10 @@ class VSCodeServer:
                     })
                     self.printer.broadcast({"type": "status", "running": False, "tabId": tab_id})
                     return
+                # RC-NEW-1: create stop_event and queue before starting
+                # the thread so _stop_task always finds a valid event.
+                tab.stop_event = threading.Event()
+                tab.user_answer_queue = queue.Queue(maxsize=1)
                 thread = threading.Thread(
                     target=self._run_task, args=(cmd,), daemon=True
                 )
@@ -402,6 +410,9 @@ class VSCodeServer:
         tab_id = cmd.get("tabId", "")
         tab = self._get_tab(tab_id)
         model = cmd.get("model") or tab.selected_model
+        # RC-NEW-3: single lock block for is_merging check + state setup
+        # (no TOCTOU gap). stop_event and user_answer_queue are pre-created
+        # in _handle_command (RC-NEW-1 fix).
         with self._state_lock:
             if tab.is_merging:
                 self.printer.broadcast(
@@ -413,14 +424,9 @@ class VSCodeServer:
                     }
                 )
                 return
-        # RC1+RC3+RC9: all state mutations under _state_lock
-        with self._state_lock:
             tab.use_worktree = bool(cmd.get("useWorktree", False))
             tab.use_parallel = bool(cmd.get("useParallel", False))
-            stop_event = threading.Event()
-            tab.stop_event = stop_event
-            # RC8: fresh queue per task (avoids drain race with userAnswer handler)
-            tab.user_answer_queue = queue.Queue(maxsize=1)
+            stop_event = tab.stop_event
         self.printer._thread_local.stop_event = stop_event
 
         self.printer.broadcast({"type": "clear", "chat_id": tab.agent.chat_id})
@@ -532,9 +538,7 @@ class VSCodeServer:
                     self._generate_followup_async(
                         prompt,
                         result_summary,
-                        model,
                         tab.task_history_id,
-                        tab_id,
                     )
                 tab.task_history_id = None
             except BaseException:  # pragma: no cover — cleanup interrupted
@@ -909,9 +913,7 @@ class VSCodeServer:
         self,
         task: str,
         result: str,
-        model: str,
         task_id: int | None,
-        tab_id: str = "",
     ) -> None:
         """Generate and broadcast a follow-up suggestion in a background thread.
 
@@ -921,9 +923,7 @@ class VSCodeServer:
         Args:
             task: The completed task description.
             result: The task result summary.
-            model: The model used for the task.
             task_id: Stable history row id for the completed task.
-            tab_id: The tab that owns this followup.
         """
         owner_tab = getattr(self.printer._thread_local, "tab_id", None)
 

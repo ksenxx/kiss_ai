@@ -2680,7 +2680,7 @@ class TestSorcarSidebarViewMergeActions(unittest.TestCase):
         """all-done action is sent to the agent process, not MergeManager."""
         block = self._get_merge_action_block()
         assert "'all-done'" in block
-        assert "sendCommand" in block
+        assert "sendMergeAllDone" in block
 
     def test_merge_data_opens_merge(self) -> None:
         """merge_data from agent opens merge via MergeManager."""
@@ -3010,7 +3010,7 @@ class TestSorcarSidebarViewDisposeHandler(unittest.TestCase):
         """Dispose resolves any pending worktree actions to prevent hangs."""
         idx = self._ts.index("onDidDispose")
         block = self._ts[idx : idx + 300]
-        assert "_worktreeActionResolves" in block
+        assert "_resolveAllWorktreeActions" in block
 
     def test_public_dispose_kills_agent(self) -> None:
         idx = self._ts.index("public dispose()")
@@ -3693,7 +3693,7 @@ class TestSidebarViewBehavior(unittest.TestCase):
         idx = self._sidebar_ts.index("public dispose()")
         end = self._sidebar_ts.index("\n  }", idx) + 4
         body = self._sidebar_ts[idx:end]
-        assert "_worktreeActionResolve" in body
+        assert "_resolveAllWorktreeActions" in body
 
     def test_filters_dropped_paths_outside_workdir(self) -> None:
         import re

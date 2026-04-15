@@ -143,10 +143,8 @@ body {
   line-height: 1;
   color: var(--dim);
   flex-shrink: 0;
-  opacity: 0;
-  transition: opacity 0.1s;
+  opacity: 1;
 }
-.chat-tab:hover .chat-tab-close { opacity: 1; }
 .chat-tab-close:hover { background: color-mix(in srgb, var(--fg) 15%, transparent); color: var(--fg); }
 .chat-tab-add {
   justify-content: center;
