@@ -236,6 +236,7 @@ class VSCodeServer:
 
     def _handle_command(self, cmd: dict[str, Any]) -> None:
         """Handle a command from VS Code."""
+
         cmd_type = cmd.get("type")
 
         if cmd_type == "run":
@@ -327,8 +328,16 @@ class VSCodeServer:
             self._get_input_history()
         elif cmd_type == "getAdjacentTask":
             adj_tab = self._get_tab(cmd.get("tabId", ""))
+            # Get the current chat_id for this tab - if the agent doesn't have one,
+            # look up the most recent chat_id from history for adjacent task navigation
+            chat_id = adj_tab.agent.chat_id
+            if chat_id == 0:
+                # No active chat_id in this tab, look up the most recent one from history
+                entries = _load_history(limit=1)
+                if entries:
+                    chat_id = int(str(entries[0].get("chat_id", 0) or 0))
             self._get_adjacent_task(
-                adj_tab.agent.chat_id,
+                chat_id,
                 cmd.get("task", ""),
                 cmd.get("direction", "prev"),
             )
@@ -825,13 +834,12 @@ class VSCodeServer:
         Args:
             tab_id: The tab requesting the session.
         """
-        # RC12 fix: guard against concurrent running task
+        # RC12 fix: guard against concurrent running task in the specific tab
         with self._state_lock:
-            if any(
-                t.task_thread is not None and t.task_thread.is_alive()
-                for t in self._tab_states.values()
-            ):
-                return
+            if tab_id:
+                tab = self._tab_states.get(tab_id)
+                if tab and tab.task_thread is not None and tab.task_thread.is_alive():
+                    return
         entries = _load_history(limit=1)
         if entries:
             chat_id = int(str(entries[0].get("chat_id", 0) or 0))
