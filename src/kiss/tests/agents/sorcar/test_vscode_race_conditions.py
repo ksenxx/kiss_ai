@@ -91,22 +91,15 @@ class TestRace2FollowupUsesFastModel(unittest.TestCase):
 class TestRace14StatusBroadcastOrder(unittest.TestCase):
     """Race 14 fix: status "running: False" broadcast at end of finally block."""
 
-    def test_status_broadcast_after_cache(self) -> None:
+    def test_status_broadcast_in_outer_finally(self) -> None:
         """Verify _run_task wraps _run_task_inner with try/finally status broadcast.
 
         The outer _run_task guarantees status:running:false is always sent.
-        The inner method does cache cleanup before returning, so the
-        outer finally's status broadcast comes after all cleanup.
         """
         # Outer wrapper has the guaranteed status broadcast
         outer_source = inspect.getsource(VSCodeServer._run_task)
         assert '"running": False' in outer_source
         assert "_run_task_inner" in outer_source
-
-        # Inner method has cache cleanup
-        inner_source = inspect.getsource(VSCodeServer._run_task_inner)
-        cache_pos = inner_source.find("_refresh_file_cache")
-        assert cache_pos > 0, "_refresh_file_cache not found"
 
 
 class TestRace16GuardedNewChatResumeSession(unittest.TestCase):

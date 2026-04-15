@@ -18,7 +18,6 @@ No mocks, patches, fakes, or test doubles.
 from __future__ import annotations
 
 import argparse
-import queue
 import shutil
 import sqlite3
 import subprocess
@@ -204,11 +203,10 @@ class TestWorktreeCommitMessageBranches:
 class TestBrowserPrinterPrintBranches:
     """Cover all print() type branches in browser_ui.py."""
 
-    def _make_printer(self) -> tuple[BaseBrowserPrinter, queue.Queue[dict]]:
+    def _make_printer(self) -> BaseBrowserPrinter:
         p = BaseBrowserPrinter()
-        cq: queue.Queue[dict] = queue.Queue()
-        p._client_queue = cq
-        return p, cq
+        p.start_recording()
+        return p
 
 
 class TestFormatToolCallBranches:
@@ -217,8 +215,7 @@ class TestFormatToolCallBranches:
     def test_format_tool_call_with_all_fields(self) -> None:
         """All optional fields present in tool_input."""
         p = BaseBrowserPrinter()
-        cq: queue.Queue[dict] = queue.Queue()
-        p._client_queue = cq
+        p.start_recording()
         p._format_tool_call("Edit", {
             "file_path": "/path/to/file.py",
             "description": "edit desc",
@@ -228,7 +225,8 @@ class TestFormatToolCallBranches:
             "new_string": "new",
             "extra_param": "extra_val",
         })
-        ev = cq.get_nowait()
+        events = p.stop_recording()
+        ev = events[0]
         assert ev["type"] == "tool_call"
         assert ev["name"] == "Edit"
         assert ev["path"] == "/path/to/file.py"
@@ -320,15 +318,14 @@ class TestVSCodeServerExtractResultSummary:
     def test_extract_result_summary_with_result_event(self) -> None:
         """_extract_result_summary finds the result event."""
         server = VSCodeServer()
-        rec_id = 1
-        server.printer.start_recording(rec_id)
+        server.printer.start_recording()
         server.printer.broadcast({"type": "text_delta", "text": "hello"})
         import yaml
         text = yaml.dump({"success": True, "summary": "All done"})
         server.printer.broadcast({"type": "result", "text": text, "summary": "All done"})
-        summary = server._extract_result_summary(rec_id)
+        summary = server._extract_result_summary()
         assert summary == "All done"
-        server.printer.stop_recording(rec_id)
+        server.printer.stop_recording()
 
 
 class TestBrowserPrinterPeekRecording:
@@ -337,13 +334,13 @@ class TestBrowserPrinterPeekRecording:
     def test_peek_active_recording(self) -> None:
         """peek_recording returns current events without stopping."""
         p = BaseBrowserPrinter()
-        p.start_recording(42)
+        p.start_recording()
         p.broadcast({"type": "text_delta", "text": "hello"})
-        events = p.peek_recording(42)
+        events = p.peek_recording()
         assert len(events) == 1
         # Recording still active
         p.broadcast({"type": "text_delta", "text": " world"})
-        events2 = p.peek_recording(42)
+        events2 = p.peek_recording()
         assert len(events2) == 1  # coalesced
         assert events2[0]["text"] == "hello world"
-        p.stop_recording(42)
+        p.stop_recording()

@@ -4,7 +4,7 @@ Tests verify fixes for:
 - P3:  _complete_seq_latest stale-request guard (lockless — single writer/reader)
 - P8:  _bash_flush_timer duplicate flush (fixed by draining in lock)
 - P11: _last_active_file written under _state_lock in _run_task_inner
-- P12: Stale followup suppressed by _task_generation counter
+- P12: Stale followup: task_generation removed (per-task processes)
 - P13: Entire finally block wrapped in try/except BaseException
 - P14: start_recording inside try block (stop_recording always runs)
 - T6:  AgentProcess.dispose() event race (fixed by reordering)
@@ -42,32 +42,24 @@ class TestP11LastActiveFileWithLock(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# P12 — Stale followup suppressed by _task_generation counter
+# P12 — Stale followup: no longer needed with per-task processes
 # ---------------------------------------------------------------------------
 
-class TestP12StaleFollowupSuppressed(unittest.TestCase):
-    """P12 fix: _generate_followup_async checks _task_generation counter."""
+class TestP12StaleFollowupNotNeeded(unittest.TestCase):
+    """P12: task_generation removed — per-task processes prevent stale followups."""
 
-    def test_generation_counter_in_followup(self) -> None:
-        """Verify _generate_followup_async checks task_generation."""
+    def test_task_generation_removed_from_followup(self) -> None:
+        """Verify task_generation is no longer in _generate_followup_async."""
         source = inspect.getsource(VSCodeServer._generate_followup_async)
-        assert "task_generation" in source, (
-            "P12 fix: _generate_followup_async should check task_generation"
+        assert "task_generation" not in source, (
+            "task_generation should be removed (per-task processes prevent stale followups)"
         )
-        assert "gen" in source, "P12 fix: should accept gen parameter"
 
-    def test_generation_counter_incremented_in_run_task_inner(self) -> None:
-        """Verify _run_task_inner increments task_generation."""
+    def test_task_generation_removed_from_run_task_inner(self) -> None:
+        """Verify task_generation is no longer in _run_task_inner."""
         source = inspect.getsource(VSCodeServer._run_task_inner)
-        assert "task_generation" in source, (
-            "P12 fix: _run_task_inner should increment task_generation"
-        )
-
-    def test_followup_receives_gen_parameter(self) -> None:
-        """Verify _generate_followup_async accepts gen parameter."""
-        sig = inspect.signature(VSCodeServer._generate_followup_async)
-        assert "gen" in sig.parameters, (
-            "P12 fix: _generate_followup_async should accept gen parameter"
+        assert "task_generation" not in source, (
+            "task_generation should be removed from _run_task_inner"
         )
 
 

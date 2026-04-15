@@ -5,7 +5,6 @@ Uses real objects with duck-typed attributes (SimpleNamespace) as
 message inputs and real queue subscribers.
 """
 
-import queue
 import unittest
 from types import SimpleNamespace
 
@@ -16,20 +15,12 @@ from kiss.agents.vscode.browser_ui import (
 )
 
 
-def _subscribe(printer: BaseBrowserPrinter) -> queue.Queue:
-    q: queue.Queue = queue.Queue()
-    printer._client_queue = q
-    return q
+def _start(printer: BaseBrowserPrinter) -> None:
+    printer.start_recording()
 
 
-def _drain(q: queue.Queue) -> list[dict]:
-    events = []
-    while True:
-        try:
-            events.append(q.get_nowait())
-        except queue.Empty:
-            break
-    return events
+def _drain(printer: BaseBrowserPrinter) -> list[dict]:
+    return printer.stop_recording()
 
 
 class TestCoalesceEvents(unittest.TestCase):
@@ -45,17 +36,17 @@ class TestCoalesceEvents(unittest.TestCase):
 class TestHandleMessage(unittest.TestCase):
     def test_subtype_not_tool_output(self):
         p = BaseBrowserPrinter()
-        q = _subscribe(p)
+        _start(p)
         msg = SimpleNamespace(subtype="other", data={"content": "x"})
         p.print(msg, type="message")
-        assert _drain(q) == []
+        assert _drain(p) == []
 
     def test_unknown_message_type_no_crash(self):
         p = BaseBrowserPrinter()
-        q = _subscribe(p)
+        _start(p)
         msg = SimpleNamespace(unknown_attr="value")
         p.print(msg, type="message")
-        assert _drain(q) == []
+        assert _drain(p) == []
 
 
 class TestDisplayEventTypes(unittest.TestCase):

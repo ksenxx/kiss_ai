@@ -15,7 +15,6 @@ import inspect
 import threading
 import unittest
 
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 from kiss.agents.vscode.server import VSCodeServer
 
 # ---------------------------------------------------------------------------
@@ -74,24 +73,6 @@ class TestP15TaskThreadCleared(unittest.TestCase):
         assert "tab.task_thread = None" in source, (
             "P15 fix: _run_task should clear tab.task_thread in finally"
         )
-
-# ---------------------------------------------------------------------------
-# P16 — Recordings use explicit IDs instead of thread ident
-# ---------------------------------------------------------------------------
-
-
-class TestP16ExplicitRecordingIds(unittest.TestCase):
-    """P16 fix: start_recording/stop_recording accept recording_id parameter."""
-
-    def test_start_recording_accepts_id(self) -> None:
-        """Verify start_recording accepts a recording_id parameter."""
-        sig = inspect.signature(BaseBrowserPrinter.start_recording)
-        assert "recording_id" in sig.parameters
-
-    def test_stop_recording_accepts_id(self) -> None:
-        """Verify stop_recording accepts a recording_id parameter."""
-        sig = inspect.signature(BaseBrowserPrinter.stop_recording)
-        assert "recording_id" in sig.parameters
 
 # ---------------------------------------------------------------------------
 # D3 — _await_user_response checks stop_event with timeout

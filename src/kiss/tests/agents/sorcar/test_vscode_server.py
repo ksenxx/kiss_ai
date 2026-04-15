@@ -2813,8 +2813,8 @@ class TestSorcarSidebarViewPublicAPI(unittest.TestCase):
         end = self._ts.index("\n  }", idx) + 4
         body = self._ts[idx:end]
         assert "type: 'clearChat'" in body
-        # Should NOT stop the agent process (no interference with other tabs)
-        assert "this._agentProcess.stop()" not in body
+        # Should NOT stop any agent process (no interference with other tabs)
+        assert ".stop()" not in body
 
     def test_has_generate_commit_message(self) -> None:
         assert "public generateCommitMessage(" in self._ts
@@ -2838,11 +2838,13 @@ class TestSorcarSidebarViewPublicAPI(unittest.TestCase):
     def test_has_dispose(self) -> None:
         assert "public dispose()" in self._ts
 
-    def test_dispose_kills_agent_process(self) -> None:
+    def test_dispose_kills_agent_processes(self) -> None:
         idx = self._ts.index("public dispose()")
         end = self._ts.index("\n  }", idx) + 4
         body = self._ts[idx:end]
-        assert "this._agentProcess.dispose()" in body
+        assert "proc.dispose()" in body
+        assert "_taskProcesses.clear()" in body
+        assert "_serviceProcess" in body
 
     def test_has_visible_getter(self) -> None:
         assert "get visible()" in self._ts
@@ -2858,10 +2860,9 @@ class TestSorcarSidebarViewAgentEventHandling(unittest.TestCase):
         cls._ts = (base / "src" / "SorcarSidebarView.ts").read_text()
 
     def _get_message_handler_body(self) -> str:
-        """Get the on('message') handler body from resolveWebviewView."""
-        idx = self._ts.index("this._agentProcess.on('message'")
-        # Find the closing of this callback - look for the end
-        end = self._ts.index("const workDir = this._getWorkDir()", idx)
+        """Get the _setupProcessListeners message handler body."""
+        idx = self._ts.index("private _setupProcessListeners(")
+        end = self._ts.index("\n  }", idx) + 4
         return self._ts[idx:end]
 
     def test_forwards_commit_messages(self) -> None:
@@ -3015,7 +3016,9 @@ class TestSorcarSidebarViewDisposeHandler(unittest.TestCase):
         idx = self._ts.index("public dispose()")
         end = self._ts.index("\n  }", idx) + 4
         body = self._ts[idx:end]
-        assert "this._agentProcess.dispose()" in body
+        assert "proc.dispose()" in body
+        assert "_taskProcesses.clear()" in body
+        assert "_serviceProcess" in body
         assert "this._onCommitMessage.dispose()" in body
 
     def test_send_to_webview_guards_disposed(self) -> None:

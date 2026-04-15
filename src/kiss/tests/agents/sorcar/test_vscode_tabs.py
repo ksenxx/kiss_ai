@@ -528,9 +528,7 @@ class TestFollowupAsyncTabId(unittest.TestCase):
         old_stdout = sys.stdout
         sys.stdout = buf
         try:
-            # gen matches tab's task_generation so the followup isn't suppressed
-            server._get_tab("0").task_generation = 1
-            server._generate_followup_async("task", "result", "model", 1, None, tab_id="0")
+            server._generate_followup_async("task", "result", "model", None, "0")
             # Wait for the background thread to finish
             time.sleep(2)
         finally:
@@ -570,7 +568,7 @@ class TestBashFlushTimerTabId(unittest.TestCase):
         sys.stdout = buf
         try:
             with printer._bash_lock:
-                printer._get_bash().last_flush = time.monotonic()  # prevent inline flush
+                printer._bash_state.last_flush = time.monotonic()  # prevent inline flush
             # Call print with bash_stream — first call sets _bash_last_flush
             # recent, so the second call (within 0.1s) should trigger the timer
             printer.print("line1\n", type="bash_stream")
@@ -594,10 +592,11 @@ class TestBashFlushTimerTabId(unittest.TestCase):
 
 
 class TestRecordingIsolation(unittest.TestCase):
-    """Events are only recorded to the owning tab's recording."""
+    """Recording captures all broadcast events (no owner filtering needed
+    with per-task processes — each process has its own printer)."""
 
-    def test_events_only_go_to_matching_recording(self) -> None:
-        """Events with tabId=1 are not recorded in tab 2's recording."""
+    def test_recording_captures_all_events(self) -> None:
+        """All broadcast events are recorded regardless of tabId."""
         import io
         import sys
 
@@ -605,111 +604,32 @@ class TestRecordingIsolation(unittest.TestCase):
 
         printer = VSCodePrinter()
 
-        # Start two recordings with different tab owners
-        printer.start_recording(recording_id=100, tab_id="1")
-        printer.start_recording(recording_id=200, tab_id="2")
+        printer.start_recording()
 
         buf = io.StringIO()
         old_stdout = sys.stdout
         sys.stdout = buf
         try:
-            # Broadcast event for tab 1
-            printer._thread_local.tab_id = "1"
-            printer.broadcast({"type": "text_delta", "text": "hello from tab 1"})
-
-            # Broadcast event for tab 2
-            printer._thread_local.tab_id = "2"
-            printer.broadcast({"type": "text_delta", "text": "hello from tab 2"})
+            printer.broadcast({"type": "tool_call", "name": "Read", "tabId": "1"})
+            printer.broadcast({"type": "tool_result", "content": "ok", "tabId": "2"})
+            printer.broadcast({"type": "prompt", "text": "global event"})
         finally:
             sys.stdout = old_stdout
 
-        events1 = printer.stop_recording(recording_id=100)
-        events2 = printer.stop_recording(recording_id=200)
+        events = printer.stop_recording()
 
-        # Tab 1's recording should only have tab 1's event
-        texts1 = [e["text"] for e in events1 if e.get("type") == "text_delta"]
-        assert texts1 == ["hello from tab 1"], f"Expected only tab 1 event, got {texts1}"
+        types = [e["type"] for e in events]
+        assert types == ["tool_call", "tool_result", "prompt"]
 
-        # Tab 2's recording should only have tab 2's event
-        texts2 = [e["text"] for e in events2 if e.get("type") == "text_delta"]
-        assert texts2 == ["hello from tab 2"], f"Expected only tab 2 event, got {texts2}"
-
-    def test_events_without_tabid_skipped_for_owned_recordings(self) -> None:
-        """Events without tabId are NOT recorded in owned recordings."""
+    def test_stop_recording_clears_state(self) -> None:
+        """stop_recording clears the recording list."""
         from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 
         printer = BaseBrowserPrinter()
-        printer.start_recording(recording_id=100, tab_id="1")
-        printer.start_recording(recording_id=200, tab_id="2")
-
-        # Broadcast a global event (no tabId)
-        printer.broadcast({"type": "text_delta", "text": "global event"})
-
-        events1 = printer.stop_recording(recording_id=100)
-        events2 = printer.stop_recording(recording_id=200)
-
-        # Owned recordings skip events without tabId
-        assert len(events1) == 0
-        assert len(events2) == 0
-
-    def test_events_without_tabid_go_to_unowned_recordings(self) -> None:
-        """Events without tabId are recorded in unowned recordings."""
-        from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
-
-        printer = BaseBrowserPrinter()
-        printer.start_recording(recording_id=300)  # No owner
-
-        # Broadcast a global event (no tabId)
-        printer.broadcast({"type": "text_delta", "text": "global event"})
-
-        events = printer.stop_recording(recording_id=300)
-        assert len(events) == 1
-
-    def test_recording_without_owner_gets_all_events(self) -> None:
-        """A recording started without tab_id receives all events."""
-        import io
-        import sys
-
-        from kiss.agents.vscode.server import VSCodePrinter
-
-        printer = VSCodePrinter()
-
-        # One recording with owner, one without
-        printer.start_recording(recording_id=100, tab_id="1")
-        printer.start_recording(recording_id=200)  # No owner
-
-        buf = io.StringIO()
-        old_stdout = sys.stdout
-        sys.stdout = buf
-        try:
-            # Use thinking_start (non-delta, won't coalesce) to avoid
-            # text_delta coalescing masking the count
-            printer._thread_local.tab_id = "1"
-            printer.broadcast({"type": "thinking_start"})
-            printer._thread_local.tab_id = "2"
-            printer.broadcast({"type": "thinking_end"})
-        finally:
-            sys.stdout = old_stdout
-
-        events_owned = printer.stop_recording(recording_id=100)
-        events_unowned = printer.stop_recording(recording_id=200)
-
-        # Owned recording only gets tab 1's event
-        assert len(events_owned) == 1
-        assert events_owned[0]["type"] == "thinking_start"
-
-        # Unowned recording gets both
-        assert len(events_unowned) == 2
-
-    def test_stop_recording_cleans_up_owner(self) -> None:
-        """stop_recording removes the owner entry."""
-        from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
-
-        printer = BaseBrowserPrinter()
-        printer.start_recording(recording_id=100, tab_id="1")
-        assert 100 in printer._recording_owners
-        printer.stop_recording(recording_id=100)
-        assert 100 not in printer._recording_owners
+        printer.start_recording()
+        assert printer._recording is not None
+        printer.stop_recording()
+        assert printer._recording is None
 
 
 if __name__ == "__main__":
@@ -764,14 +684,6 @@ class TestPerTabAgentIsolation(unittest.TestCase):
         tab2 = server._get_tab("2")
         tab1.use_parallel = True
         assert tab2.use_parallel is False
-
-    def test_task_generation_is_per_tab(self) -> None:
-        """task_generation counter is independent per tab."""
-        server, _ = _make_server()
-        tab1 = server._get_tab("1")
-        tab2 = server._get_tab("2")
-        tab1.task_generation = 5
-        assert tab2.task_generation == 0
 
     def test_task_history_id_is_per_tab(self) -> None:
         """task_history_id is independent per tab."""
@@ -852,229 +764,19 @@ class TestSelectedModelIsolation(unittest.TestCase):
 class TestBashBufferIsolation(unittest.TestCase):
     """S11 fix: bash buffer is per-tab, not shared."""
 
-    def test_bash_states_are_per_tab(self) -> None:
-        """Each tab's bash stream goes into its own buffer."""
-        server, events = _make_server()
-        printer = server.printer
-
-        # Simulate tab 1 writing bash output
-        printer._thread_local.tab_id = "1"
-        with printer._bash_lock:
-            bs1 = printer._get_bash()
-            bs1.buffer.append("tab1 output")
-
-        # Simulate tab 2 writing bash output
-        printer._thread_local.tab_id = "2"
-        with printer._bash_lock:
-            bs2 = printer._get_bash()
-            bs2.buffer.append("tab2 output")
-
-        # Verify isolation
-        assert bs1.buffer == ["tab1 output"]
-        assert bs2.buffer == ["tab2 output"]
-        assert bs1 is not bs2
-
-    def test_bash_state_created_on_demand(self) -> None:
-        """_get_bash creates a new _BashState for unknown tab IDs."""
+    def test_bash_state_exists(self) -> None:
+        """Printer has a single _bash_state instance."""
         server, _ = _make_server()
         printer = server.printer
-        printer._thread_local.tab_id = "42"
-        with printer._bash_lock:
-            bs = printer._get_bash()
+        bs = printer._bash_state
         assert bs.buffer == []
         assert bs.timer is None
         assert bs.generation == 0
 
-
-# ── S12: per-thread StreamEventParser state ──────────────────────────
-
-
-class TestStreamParserIsolation(unittest.TestCase):
-    """S12 fix: StreamEventParser state is per-thread (thread-local)."""
-
-    def test_block_type_is_per_thread(self) -> None:
-        """_current_block_type set in one thread is invisible to another."""
+    def test_offsets_default_to_zero(self) -> None:
+        """tokens_offset, budget_offset, steps_offset default to 0."""
         server, _ = _make_server()
         printer = server.printer
-        barrier = threading.Barrier(2)
-        results: dict[str, str] = {}
-
-        def thread_a() -> None:
-            printer._current_block_type = "thinking"
-            barrier.wait()
-            results["a"] = printer._current_block_type
-
-        def thread_b() -> None:
-            printer._current_block_type = "text"
-            barrier.wait()
-            results["b"] = printer._current_block_type
-
-        ta = threading.Thread(target=thread_a)
-        tb = threading.Thread(target=thread_b)
-        ta.start()
-        tb.start()
-        ta.join()
-        tb.join()
-
-        assert results["a"] == "thinking"
-        assert results["b"] == "text"
-
-    def test_tool_name_is_per_thread(self) -> None:
-        """_tool_name set in one thread is invisible to another."""
-        server, _ = _make_server()
-        printer = server.printer
-        barrier = threading.Barrier(2)
-        results: dict[str, str] = {}
-
-        def thread_a() -> None:
-            printer._tool_name = "bash"
-            barrier.wait()
-            results["a"] = printer._tool_name
-
-        def thread_b() -> None:
-            printer._tool_name = "edit"
-            barrier.wait()
-            results["b"] = printer._tool_name
-
-        ta = threading.Thread(target=thread_a)
-        tb = threading.Thread(target=thread_b)
-        ta.start()
-        tb.start()
-        ta.join()
-        tb.join()
-
-        assert results["a"] == "bash"
-        assert results["b"] == "edit"
-
-    def test_tool_json_buffer_is_per_thread(self) -> None:
-        """_tool_json_buffer set in one thread is invisible to another."""
-        server, _ = _make_server()
-        printer = server.printer
-        barrier = threading.Barrier(2)
-        results: dict[str, str] = {}
-
-        def thread_a() -> None:
-            printer._tool_json_buffer = '{"cmd":"ls"}'
-            barrier.wait()
-            results["a"] = printer._tool_json_buffer
-
-        def thread_b() -> None:
-            printer._tool_json_buffer = '{"file":"x.py"}'
-            barrier.wait()
-            results["b"] = printer._tool_json_buffer
-
-        ta = threading.Thread(target=thread_a)
-        tb = threading.Thread(target=thread_b)
-        ta.start()
-        tb.start()
-        ta.join()
-        tb.join()
-
-        assert results["a"] == '{"cmd":"ls"}'
-        assert results["b"] == '{"file":"x.py"}'
-
-
-# ── S13: per-thread token/budget/steps offsets ───────────────────────
-
-
-class TestTokenOffsetIsolation(unittest.TestCase):
-    """S13 fix: tokens_offset, budget_offset, steps_offset are per-thread."""
-
-    def test_tokens_offset_is_per_thread(self) -> None:
-        """tokens_offset set in one thread is invisible to another."""
-        server, _ = _make_server()
-        printer = server.printer
-        barrier = threading.Barrier(2)
-        results: dict[str, int] = {}
-
-        def thread_a() -> None:
-            printer.tokens_offset = 100
-            barrier.wait()
-            results["a"] = printer.tokens_offset
-
-        def thread_b() -> None:
-            printer.tokens_offset = 200
-            barrier.wait()
-            results["b"] = printer.tokens_offset
-
-        ta = threading.Thread(target=thread_a)
-        tb = threading.Thread(target=thread_b)
-        ta.start()
-        tb.start()
-        ta.join()
-        tb.join()
-
-        assert results["a"] == 100
-        assert results["b"] == 200
-
-    def test_budget_offset_is_per_thread(self) -> None:
-        """budget_offset set in one thread is invisible to another."""
-        server, _ = _make_server()
-        printer = server.printer
-        barrier = threading.Barrier(2)
-        results: dict[str, float] = {}
-
-        def thread_a() -> None:
-            printer.budget_offset = 1.5
-            barrier.wait()
-            results["a"] = printer.budget_offset
-
-        def thread_b() -> None:
-            printer.budget_offset = 3.0
-            barrier.wait()
-            results["b"] = printer.budget_offset
-
-        ta = threading.Thread(target=thread_a)
-        tb = threading.Thread(target=thread_b)
-        ta.start()
-        tb.start()
-        ta.join()
-        tb.join()
-
-        assert results["a"] == 1.5
-        assert results["b"] == 3.0
-
-    def test_steps_offset_is_per_thread(self) -> None:
-        """steps_offset set in one thread is invisible to another."""
-        server, _ = _make_server()
-        printer = server.printer
-        barrier = threading.Barrier(2)
-        results: dict[str, int] = {}
-
-        def thread_a() -> None:
-            printer.steps_offset = 10
-            barrier.wait()
-            results["a"] = printer.steps_offset
-
-        def thread_b() -> None:
-            printer.steps_offset = 20
-            barrier.wait()
-            results["b"] = printer.steps_offset
-
-        ta = threading.Thread(target=thread_a)
-        tb = threading.Thread(target=thread_b)
-        ta.start()
-        tb.start()
-        ta.join()
-        tb.join()
-
-        assert results["a"] == 10
-        assert results["b"] == 20
-
-    def test_defaults_are_zero(self) -> None:
-        """Offsets default to 0 on a fresh thread."""
-        server, _ = _make_server()
-        printer = server.printer
-        results: dict[str, tuple[int, float, int]] = {}
-
-        def fresh_thread() -> None:
-            results["fresh"] = (
-                printer.tokens_offset,
-                printer.budget_offset,
-                printer.steps_offset,
-            )
-
-        t = threading.Thread(target=fresh_thread)
-        t.start()
-        t.join()
-        assert results["fresh"] == (0, 0.0, 0)
+        assert printer.tokens_offset == 0
+        assert printer.budget_offset == 0.0
+        assert printer.steps_offset == 0

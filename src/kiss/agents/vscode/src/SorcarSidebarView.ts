@@ -20,7 +20,12 @@ import { FromWebviewMessage, ToWebviewMessage, Attachment, AgentCommand } from '
  */
 export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _view?: vscode.WebviewView;
-  private _agentProcess: AgentProcess;
+  /** Per-tab task processes. Created on submit, disposed on next submit. */
+  private _taskProcesses: Map<string, AgentProcess> = new Map();
+  /** Shared service process for non-task commands (getModels, etc.). */
+  private _serviceProcess: AgentProcess | null = null;
+  /** The currently active tab ID (updated on every message with tabId). */
+  private _activeTabId: string = '';
   private _extensionUri: vscode.Uri;
   private _selectedModel: string;
   private _runningTabs: Set<string> = new Set();
@@ -38,7 +43,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   constructor(extensionUri: vscode.Uri, mergeManager: MergeManager) {
     this._extensionUri = extensionUri;
     this._mergeManager = mergeManager;
-    this._agentProcess = new AgentProcess();
     this._selectedModel = vscode.workspace.getConfiguration('kissSorcar').get<string>('defaultModel') || getDefaultModel();
     this._mergeManager.on('allDone', () => {
       const tabId = this._mergeOwnerTabIdQueue.shift();
@@ -49,46 +53,64 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   }
 
   /**
-   * Called by VS Code when the sidebar view needs to be rendered.
+   * Get or create the shared service process for non-task commands.
+   *
+   * The service process handles global commands (getModels, getHistory,
+   * getFiles, complete, etc.) and per-tab state commands (resumeSession,
+   * getAdjacentTask) when no task process exists for that tab.
    */
-  resolveWebviewView(
-    webviewView: vscode.WebviewView,
-    _context: vscode.WebviewViewResolveContext,
-    _token: vscode.CancellationToken,
-  ): void {
-    this._view = webviewView;
+  private _getServiceProcess(): AgentProcess {
+    if (this._serviceProcess) return this._serviceProcess;
+    this._serviceProcess = new AgentProcess('__service__');
+    this._setupProcessListeners(this._serviceProcess, '');
+    this._serviceProcess.start(this._getWorkDir());
+    return this._serviceProcess;
+  }
 
-    webviewView.webview.options = {
-      enableScripts: true,
-      localResourceRoots: [
-        vscode.Uri.joinPath(this._extensionUri, 'media'),
-        vscode.Uri.joinPath(this._extensionUri, 'out'),
-      ],
-    };
+  /**
+   * Get the best process for a specific tab.
+   *
+   * Returns the tab's task process if one exists (it has the tab's
+   * per-tab agent state from the most recent task), otherwise falls
+   * back to the shared service process.
+   */
+  private _getTabProcess(tabId: string): AgentProcess {
+    return this._taskProcesses.get(tabId) || this._getServiceProcess();
+  }
 
-    webviewView.webview.html = buildChatHtml(
-      webviewView.webview, this._extensionUri, this._selectedModel,
-    );
+  /**
+   * Create a fresh task process for a new task in the given tab.
+   *
+   * Disposes any existing task process for that tab first, ensuring
+   * each task runs in a clean, isolated Python subprocess.
+   */
+  private _createTaskProcess(tabId: string): AgentProcess {
+    const old = this._taskProcesses.get(tabId);
+    if (old) {
+      old.dispose();
+      this._taskProcesses.delete(tabId);
+    }
+    const proc = new AgentProcess(tabId);
+    this._taskProcesses.set(tabId, proc);
+    this._setupProcessListeners(proc, tabId);
+    return proc;
+  }
 
-    webviewView.webview.onDidReceiveMessage(
-      (message: FromWebviewMessage) => this._handleMessage(message),
-    );
-
-    webviewView.onDidChangeVisibility(() => {
-      if (webviewView.visible) {
-        this._agentProcess.sendCommand({ type: 'getInputHistory' });
-        this._sendActiveFileInfo();
+  /**
+   * Set up event listeners on a per-tab AgentProcess.
+   *
+   * Handles all message types (merge, worktree, status, etc.) and
+   * forwards them to the webview. Injects tabId into messages that
+   * don't already have one.
+   */
+  private _setupProcessListeners(proc: AgentProcess, tabId: string): void {
+    proc.on('message', (msg: ToWebviewMessage) => {
+      // Inject tabId if the Python side didn't set it
+      const msgAny = msg as any;
+      if (msgAny.tabId === undefined && tabId) {
+        msgAny.tabId = tabId;
       }
-    });
 
-    webviewView.onDidDispose(() => {
-      this._disposed = true;
-      for (const resolve of this._worktreeActionResolves.values()) resolve();
-      this._worktreeActionResolves.clear();
-      this._worktreeProgresses.clear();
-    });
-
-    this._agentProcess.on('message', (msg: ToWebviewMessage) => {
       if (msg.type === 'commitMessage') {
         this._onCommitMessage.fire(msg as any);
       }
@@ -153,12 +175,11 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
       this._sendToWebview(msg);
       if (msg.type === 'status') {
-        const tabId = (msg as any).tabId as string | undefined;
+        const statusTabId = (msg as any).tabId as string | undefined;
         if (msg.running) {
-          if (tabId !== undefined) this._runningTabs.add(tabId);
+          if (statusTabId !== undefined) this._runningTabs.add(statusTabId);
         } else {
-          if (tabId !== undefined) this._runningTabs.delete(tabId);
-          else this._runningTabs.clear();
+          if (statusTabId !== undefined) this._runningTabs.delete(statusTabId);
           this._sendActiveFileInfo();
           if (this._commitPendingTabs.size > 0) {
             this._onCommitMessage.fire({ message: '', error: 'Process stopped' });
@@ -166,9 +187,48 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         }
       }
     });
+  }
 
-    const workDir = this._getWorkDir();
-    this._agentProcess.start(workDir);
+  /**
+   * Called by VS Code when the sidebar view needs to be rendered.
+   */
+  resolveWebviewView(
+    webviewView: vscode.WebviewView,
+    _context: vscode.WebviewViewResolveContext,
+    _token: vscode.CancellationToken,
+  ): void {
+    this._view = webviewView;
+
+    webviewView.webview.options = {
+      enableScripts: true,
+      localResourceRoots: [
+        vscode.Uri.joinPath(this._extensionUri, 'media'),
+        vscode.Uri.joinPath(this._extensionUri, 'out'),
+      ],
+    };
+
+    webviewView.webview.html = buildChatHtml(
+      webviewView.webview, this._extensionUri, this._selectedModel,
+    );
+
+    webviewView.webview.onDidReceiveMessage(
+      (message: FromWebviewMessage) => this._handleMessage(message),
+    );
+
+    webviewView.onDidChangeVisibility(() => {
+      if (webviewView.visible) {
+        const proc = this._getServiceProcess();
+        proc.sendCommand({ type: 'getInputHistory' });
+        this._sendActiveFileInfo();
+      }
+    });
+
+    webviewView.onDidDispose(() => {
+      this._disposed = true;
+      for (const resolve of this._worktreeActionResolves.values()) resolve();
+      this._worktreeActionResolves.clear();
+      this._worktreeProgresses.clear();
+    });
   }
 
   /** Whether the underlying webview is currently visible. */
@@ -247,7 +307,8 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
   private _startTask(prompt: string, model: string, activeFile?: string, attachments?: Attachment[], useWorktree?: boolean, useParallel?: boolean, tabId?: string, workDir?: string): void {
     const effectiveWorkDir = workDir || this._getWorkDir();
-    const started = this._agentProcess.start(effectiveWorkDir);
+    const proc = tabId ? this._createTaskProcess(tabId) : this._createTaskProcess(this._activeTabId || '__default__');
+    const started = proc.start(effectiveWorkDir);
     if (!started) {
       if (tabId !== undefined) this._runningTabs.delete(tabId);
       this._sendToWebview({ type: 'status', running: false, tabId } as any);
@@ -255,7 +316,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     }
     this._sendToWebview({ type: 'setTaskText', text: prompt, tabId } as any);
     this._sendToWebview({ type: 'status', running: true, tabId } as any);
-    this._agentProcess.sendCommand({
+    proc.sendCommand({
       type: 'run',
       prompt,
       model,
@@ -270,21 +331,27 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
   private async _handleMessage(message: FromWebviewMessage): Promise<void> {
     switch (message.type) {
-      case 'ready':
+      case 'ready': {
+        const readyTabId = (message as any).tabId as string | undefined;
+        if (readyTabId) this._activeTabId = readyTabId;
+        // Use the tab's task process if it exists, otherwise the service process
+        const readyProc = readyTabId ? this._getTabProcess(readyTabId) : this._getServiceProcess();
         // Send running state for each tab that has a running task
-        for (const tabId of this._runningTabs) {
-          this._sendToWebview({ type: 'status', running: true, tabId } as any);
+        for (const runTabId of this._runningTabs) {
+          this._sendToWebview({ type: 'status', running: true, tabId: runTabId } as any);
         }
-        this._agentProcess.sendCommand({ type: 'getModels' });
+        readyProc.sendCommand({ type: 'getModels' });
         this._sendWelcomeSuggestions();
-        this._agentProcess.sendCommand({ type: 'getInputHistory' });
-        this._agentProcess.sendCommand({ type: 'getLastSession', tabId: (message as any).tabId });
+        readyProc.sendCommand({ type: 'getInputHistory' });
+        readyProc.sendCommand({ type: 'getLastSession', tabId: readyTabId });
         this._sendActiveFileInfo();
         this._sendToWebview({ type: 'focusInput' } as ToWebviewMessage);
         break;
+      }
 
       case 'submit': {
         const tabId = (message as any).tabId as string | undefined;
+        if (tabId) this._activeTabId = tabId;
         if (tabId !== undefined && this._runningTabs.has(tabId)) return;
 
         const tabWorkDir = (message as any).workDir as string | undefined;
@@ -322,46 +389,57 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       case 'stop': {
         const stopTabId = (message as any).tabId as string | undefined;
         if (stopTabId !== undefined) {
-          this._agentProcess.sendCommand({ type: 'stop', tabId: stopTabId });
+          const stopProc = this._taskProcesses.get(stopTabId);
+          if (stopProc) stopProc.sendCommand({ type: 'stop', tabId: stopTabId });
         } else {
-          this._agentProcess.stop();
+          // Stop all running task processes
+          for (const proc of this._taskProcesses.values()) proc.stop();
         }
         break;
       }
 
-      case 'selectModel':
+      case 'selectModel': {
         this._selectedModel = message.model;
-        this._agentProcess.sendCommand({ type: 'selectModel', model: message.model, tabId: (message as any).tabId });
+        const selTabId = (message as any).tabId as string | undefined;
+        // Persist model selection via service process
+        this._getServiceProcess().sendCommand({ type: 'selectModel', model: message.model, tabId: selTabId });
         break;
+      }
 
       case 'getModels':
       case 'getInputHistory':
-        this._agentProcess.sendCommand({ type: message.type } as AgentCommand);
+        this._getServiceProcess().sendCommand({ type: message.type } as AgentCommand);
         break;
 
-      case 'newChat':
-        this._agentProcess.sendCommand({ type: 'newChat', tabId: (message as any).tabId });
+      case 'newChat': {
+        const newChatTabId = (message as any).tabId as string | undefined;
+        const newChatProc = newChatTabId ? this._getTabProcess(newChatTabId) : this._getServiceProcess();
+        newChatProc.sendCommand({ type: 'newChat', tabId: newChatTabId });
         break;
+      }
 
       case 'getHistory':
-        this._agentProcess.sendCommand({ type: 'getHistory', query: message.query, offset: message.offset, generation: message.generation });
+        this._getServiceProcess().sendCommand({ type: 'getHistory', query: message.query, offset: message.offset, generation: message.generation });
         break;
 
       case 'getFiles':
-        this._agentProcess.sendCommand({ type: 'getFiles', prefix: message.prefix });
+        this._getServiceProcess().sendCommand({ type: 'getFiles', prefix: message.prefix });
         break;
 
-      case 'userAnswer':
-        this._agentProcess.sendCommand({ type: 'userAnswer', answer: message.answer, tabId: message.tabId });
+      case 'userAnswer': {
+        const ansTabId = message.tabId;
+        const ansProc = ansTabId ? this._taskProcesses.get(ansTabId) : undefined;
+        if (ansProc) ansProc.sendCommand({ type: 'userAnswer', answer: message.answer, tabId: ansTabId });
         break;
+      }
 
       case 'userActionDone':
-        this._agentProcess.sendCommand({ type: 'userAnswer', answer: 'done' });
+        this._getServiceProcess().sendCommand({ type: 'userAnswer', answer: 'done' });
         break;
 
       case 'recordFileUsage':
         if (message.path) {
-          this._agentProcess.sendCommand({ type: 'recordFileUsage', path: message.path });
+          this._getServiceProcess().sendCommand({ type: 'recordFileUsage', path: message.path });
         }
         break;
 
@@ -384,13 +462,19 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         }
         break;
 
-      case 'resumeSession':
-        this._agentProcess.sendCommand({ type: 'resumeSession', sessionId: message.id, tabId: (message as any).tabId });
+      case 'resumeSession': {
+        const resumeTabId = (message as any).tabId as string | undefined;
+        const resumeProc = resumeTabId ? this._getTabProcess(resumeTabId) : this._getServiceProcess();
+        resumeProc.sendCommand({ type: 'resumeSession', sessionId: message.id, tabId: resumeTabId });
         break;
+      }
 
-      case 'getAdjacentTask':
-        this._agentProcess.sendCommand({ type: 'getAdjacentTask', tabId: (message as any).tabId, task: (message as any).task, direction: (message as any).direction });
+      case 'getAdjacentTask': {
+        const adjTabId = (message as any).tabId as string | undefined;
+        const adjProc = adjTabId ? this._getTabProcess(adjTabId) : this._getServiceProcess();
+        adjProc.sendCommand({ type: 'getAdjacentTask', tabId: adjTabId, task: (message as any).task, direction: (message as any).direction });
         break;
+      }
 
       case 'getWelcomeSuggestions':
         this._sendWelcomeSuggestions();
@@ -401,7 +485,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         const completeDoc = editorFile
           ? vscode.workspace.textDocuments.find(d => d.uri.fsPath === editorFile)
           : undefined;
-        this._agentProcess.sendCommand({
+        this._getServiceProcess().sendCommand({
           type: 'complete',
           query: message.query,
           activeFile: editorFile || undefined,
@@ -425,7 +509,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         const handler = mergeDispatch[mAction];
         if (handler) handler();
         else if (mAction === 'all-done') {
-          this._agentProcess.sendCommand({ type: 'mergeAction', action: 'all-done' });
+          // Route to the merge owner tab's task process
+          const mergeOwnerTabId = this._mergeOwnerTabIdQueue[0];
+          const mergeProc = mergeOwnerTabId ? this._taskProcesses.get(mergeOwnerTabId) : undefined;
+          (mergeProc || this._getServiceProcess()).sendCommand({ type: 'mergeAction', action: 'all-done', tabId: mergeOwnerTabId });
         }
         break;
       }
@@ -443,7 +530,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         if (!promptDoc) return;
         const content = promptDoc.getText();
         if (!content.trim()) return;
-        this._startTask(content, this._selectedModel, promptPath);
+        this._startTask(content, this._selectedModel, promptPath, undefined, undefined, undefined, this._activeTabId || undefined);
         break;
       }
 
@@ -477,7 +564,8 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
             });
           },
         );
-        this._agentProcess.sendCommand({
+        const wtProc = wtTabId ? this._getTabProcess(wtTabId) : this._getServiceProcess();
+        wtProc.sendCommand({
           type: 'worktreeAction',
           action: wtAction,
           tabId: wtTabId,
@@ -507,7 +595,8 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
   /** Notify the agent that all merge changes have been reviewed. */
   public sendMergeAllDone(tabId?: string): void {
-    this._agentProcess.sendCommand({ type: 'mergeAction', action: 'all-done', tabId });
+    const proc = tabId ? this._taskProcesses.get(tabId) : undefined;
+    (proc || this._getServiceProcess()).sendCommand({ type: 'mergeAction', action: 'all-done', tabId });
   }
 
   /** Submit a task programmatically (e.g. from runSelection command). */
@@ -563,8 +652,9 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   public generateCommitMessage(token?: vscode.CancellationToken, tabId: string = ''): Promise<void> {
     if (this._commitPendingTabs.has(tabId)) return Promise.resolve();
     this._commitPendingTabs.add(tabId);
-    this._agentProcess.start(this._getWorkDir());
-    this._agentProcess.sendCommand({ type: 'generateCommitMessage', model: this._selectedModel });
+    const proc = this._getServiceProcess();
+    proc.start(this._getWorkDir());
+    proc.sendCommand({ type: 'generateCommitMessage', model: this._selectedModel });
 
     return new Promise<void>((resolve) => {
       let resolved = false;
@@ -582,13 +672,18 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     });
   }
 
-  /** Cleanup: kill agent process and dispose listeners. */
+  /** Cleanup: kill all agent processes and dispose listeners. */
   public dispose(): void {
     this._disposed = true;
     for (const resolve of this._worktreeActionResolves.values()) resolve();
     this._worktreeActionResolves.clear();
     this._worktreeProgresses.clear();
-    this._agentProcess.dispose();
+    for (const proc of this._taskProcesses.values()) proc.dispose();
+    this._taskProcesses.clear();
+    if (this._serviceProcess) {
+      this._serviceProcess.dispose();
+      this._serviceProcess = null;
+    }
     this._onCommitMessage.dispose();
   }
 }

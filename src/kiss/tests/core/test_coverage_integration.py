@@ -137,23 +137,24 @@ class TestMultiPrinter(TestCase):
         p1 = BaseBrowserPrinter()
         p2 = BaseBrowserPrinter()
         mp = MultiPrinter([p1, p2])
-        cq1 = p1.add_client()
-        cq2 = p2.add_client()
+        p1.start_recording()
+        p2.start_recording()
         mp.token_callback("tok")
-        assert not cq1.empty()
-        assert not cq2.empty()
+        events1 = p1.stop_recording()
+        events2 = p2.stop_recording()
+        assert len(events1) > 0
+        assert len(events2) > 0
 
     def test_multi_printer_reset(self) -> None:
         from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
         from kiss.core.printer import MultiPrinter
         p1 = BaseBrowserPrinter()
-        p1._thread_local.tab_id = "0"
         mp = MultiPrinter([p1])
         with p1._bash_lock:
-            p1._get_bash().buffer.append("x")
+            p1._bash_state.buffer.append("x")
         mp.reset()
         with p1._bash_lock:
-            assert len(p1._get_bash().buffer) == 0
+            assert len(p1._bash_state.buffer) == 0
 
 
 def _noop_callback(token: str) -> None:
