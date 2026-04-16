@@ -783,7 +783,7 @@ body {
   padding: 7px 10px; background: color-mix(in srgb, var(--fg) 3%, transparent);
   border: 1px solid color-mix(in srgb, var(--fg) 5%, transparent); border-radius: 8px;
   margin-bottom: 4px; cursor: pointer; font-size: var(--fs-base);
-  color: #000 !important; overflow: hidden; text-overflow: ellipsis;
+  color: var(--fg); overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; transition: all 0.15s;
 }
 .sidebar-item:hover {

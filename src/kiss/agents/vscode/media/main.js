@@ -2054,14 +2054,14 @@
   }
 
   function chatIdBgColor(chatId) {
-    if (!chatId) return 'hsl(0, 0%, 92%)';
-    var hash = 5381;
-    for (var i = 0; i < chatId.length; i++) {
+    if (!chatId) return 'hsl(0, 0%, 18%)';
+    let hash = 5381;
+    for (let i = 0; i < chatId.length; i++) {
       hash = ((hash << 5) + hash) + chatId.charCodeAt(i);
       hash |= 0;
     }
-    var hue = Math.abs(hash) % 360;
-    return 'hsl(' + hue + ', 40%, 92%)';
+    const hue = Math.abs(hash) % 360;
+    return 'hsl(' + hue + ', 45%, 20%)';
   }
 
   function renderHistory(sessions, offset, generation) {

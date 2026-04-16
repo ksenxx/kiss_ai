@@ -348,14 +348,14 @@ class TestMainJsInfiniteScroll(unittest.TestCase):
 
     def test_chat_id_bg_uses_hsl(self) -> None:
         assert "hsl(" in self.js
-        assert "40%" in self.js
-        assert "92%" in self.js
+        assert "45%" in self.js
+        assert "20%" in self.js
 
-    def test_chat_id_bg_colors_are_light(self) -> None:
-        """Verify the chatIdBgColor function produces light colors for all chat_ids.
+    def test_chat_id_bg_colors_are_dark(self) -> None:
+        """Verify the chatIdBgColor function produces dark colors for all chat_ids.
 
         Reimplements the JS djb2 hash + HSL logic in Python and checks that
-        the minimum RGB channel is >= 220 (i.e., clearly light/pastel) for
+        the maximum RGB channel is <= 80 (i.e., clearly dark) for
         a wide range of chat_id strings.
         """
         import colorsys
@@ -367,8 +367,8 @@ class TestMainJsInfiniteScroll(unittest.TestCase):
                 h = ((h << 5) + h) + ord(ch)
                 h = ctypes.c_int32(h).value  # JS |= 0
             hue = abs(h) % 360
-            # HSL(hue, 40%, 92%) -> RGB
-            r, g, b = colorsys.hls_to_rgb(hue / 360.0, 0.92, 0.40)
+            # HSL(hue, 45%, 20%) -> RGB
+            r, g, b = colorsys.hls_to_rgb(hue / 360.0, 0.20, 0.45)
             return (round(r * 255), round(g * 255), round(b * 255))
 
         test_ids = [
@@ -378,8 +378,8 @@ class TestMainJsInfiniteScroll(unittest.TestCase):
         ]
         for cid in test_ids:
             r, g, b = chat_id_bg_rgb(cid)
-            assert min(r, g, b) >= 220, (
-                f"chat_id={cid!r} produced dark color rgb({r},{g},{b})"
+            assert max(r, g, b) <= 80, (
+                f"chat_id={cid!r} produced light color rgb({r},{g},{b})"
             )
 
     def test_sidebar_escape_closes(self) -> None:
@@ -508,10 +508,11 @@ class TestMainCssInfiniteScroll(unittest.TestCase):
     def test_sidebar_loading_style(self) -> None:
         assert ".sidebar-loading" in self.css
 
-    def test_sidebar_item_black_text(self) -> None:
+    def test_sidebar_item_uses_theme_foreground(self) -> None:
         idx = self.css.index(".sidebar-item")
         block = self.css[idx : idx + 300]
-        assert "#000" in block
+        assert "var(--fg)" in block
+        assert "#000" not in block
 
 
 class TestMainCssModelPicker(unittest.TestCase):
