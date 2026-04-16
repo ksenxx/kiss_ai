@@ -656,18 +656,18 @@ class TestPerTabAgentIsolation(unittest.TestCase):
         tab1 = server._get_tab("1")
         tab2 = server._get_tab("2")
         assert tab1.agent is not tab2.agent
-        # Both start at 0 (unassigned), but they are separate agent instances
-        assert tab1.agent.chat_id == 0
-        assert tab2.agent.chat_id == 0
+        # Both start at "" (unassigned), but they are separate agent instances
+        assert tab1.agent.chat_id == ""
+        assert tab2.agent.chat_id == ""
 
     def test_new_chat_on_one_tab_does_not_affect_other(self) -> None:
         """Calling new_chat on tab 1 does not change tab 2's chat_id."""
         server, _ = _make_server()
         tab1 = server._get_tab("1")
         tab2 = server._get_tab("2")
-        tab2.agent._chat_id = 42
+        tab2.agent._chat_id = "42"
         tab1.agent.new_chat()
-        assert tab2.agent.chat_id == 42
+        assert tab2.agent.chat_id == "42"
 
     def test_use_worktree_is_per_tab(self) -> None:
         """Setting use_worktree on one tab does not affect others."""

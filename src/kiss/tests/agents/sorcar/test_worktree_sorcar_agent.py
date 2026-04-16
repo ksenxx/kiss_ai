@@ -94,7 +94,7 @@ class TestWorktreeSorcarAgent:
         _restore_db(self.db_saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def _agent(self, chat_id: int | None = None) -> WorktreeSorcarAgent:
+    def _agent(self, chat_id: str | None = None) -> WorktreeSorcarAgent:
         agent = WorktreeSorcarAgent("test")
         if chat_id:
             agent.resume_chat_by_id(chat_id)
@@ -197,7 +197,7 @@ class TestWorktreeSorcarAgent:
 
     # 23. Missing kiss-original config + detached HEAD
     def test_missing_config_detached_head(self) -> None:
-        agent = self._agent(chat_id=1000)
+        agent = self._agent(chat_id="1000")
         agent.run(prompt_template="task1", work_dir=str(self.repo))
         branch = agent._wt_branch
         assert branch is not None
@@ -213,7 +213,7 @@ class TestWorktreeSorcarAgent:
             capture_output=True, check=True,
         )
 
-        agent2 = self._agent(chat_id=1000)
+        agent2 = self._agent(chat_id="1000")
         agent2._restore_from_git(self.repo)
         assert agent2._wt_branch == branch
         assert agent2._original_branch is None

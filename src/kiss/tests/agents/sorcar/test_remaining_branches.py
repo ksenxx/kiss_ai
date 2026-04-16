@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import os
-import socket
 import subprocess
 import sys
 import tempfile
@@ -61,7 +60,7 @@ class TestPersistenceBranches:
         """_load_latest_chat_events_by_chat_id handles corrupt event_json gracefully."""
         db = th._get_db()
         # Insert a task with chat_id and then corrupt event data
-        task_id, _ = th._add_task("corrupt-event-test", chat_id=1000)
+        task_id, _ = th._add_task("corrupt-event-test", chat_id="corrupt_test")
         db.execute(
             "INSERT INTO events (task_id, seq, event_json) VALUES (?, ?, ?)",
             (task_id, 0, "NOT VALID JSON {{{"),
@@ -71,7 +70,7 @@ class TestPersistenceBranches:
             (task_id, 1, json.dumps({"type": "ok"})),
         )
         db.commit()
-        result = th._load_latest_chat_events_by_chat_id(1000)
+        result = th._load_latest_chat_events_by_chat_id("corrupt_test")
         assert result is not None
         events = result["events"]
         assert isinstance(events, list)
@@ -79,92 +78,7 @@ class TestPersistenceBranches:
         assert len(events) == 1
         assert events[0]["type"] == "ok"
 
-    def test_cleanup_stale_cs_dirs_with_active_port(self) -> None:
-        """_cleanup_stale_cs_dirs skips dirs with active port (lines 560-561)."""
-        import shutil as _shutil
-        kiss_dir = th._KISS_DIR
-        sd = kiss_dir / "sorcar-data"
-        sd.mkdir(parents=True, exist_ok=True)
-        # Create a port file pointing to a port we're listening on
-        server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server_sock.bind(("127.0.0.1", 0))
-        server_sock.listen(1)
-        port = server_sock.getsockname()[1]
-        pf = sd / "cs-port"
-        pf.write_text(str(port))
-        # Set mtime AFTER writing files so directory mtime is old
-        old_time = time.time() - 25 * 3600
-        os.utime(sd, (old_time, old_time))
-        try:
-            th._cleanup_stale_cs_dirs(max_age_hours=24)
-            # Should NOT remove because port is active
-            assert sd.exists()
-        finally:
-            server_sock.close()
-            if sd.exists():
-                _shutil.rmtree(sd, ignore_errors=True)
 
-    def test_cleanup_stale_cs_dirs_with_invalid_port(self) -> None:
-        """_cleanup_stale_cs_dirs removes dir when port file has bad value."""
-        kiss_dir = th._KISS_DIR
-        sd = kiss_dir / "sorcar-data"
-        sd.mkdir(parents=True, exist_ok=True)
-        pf = sd / "cs-port"
-        pf.write_text("not-a-number")
-        # Set mtime AFTER writing files so directory mtime is old
-        old_time = time.time() - 25 * 3600
-        os.utime(sd, (old_time, old_time))
-        removed = th._cleanup_stale_cs_dirs(max_age_hours=24)
-        assert not sd.exists()
-        assert removed >= 1
-
-    def test_cleanup_stale_cs_dirs_with_dead_port(self) -> None:
-        """_cleanup_stale_cs_dirs removes dir when port is not listening."""
-        kiss_dir = th._KISS_DIR
-        sd = kiss_dir / "sorcar-data"
-        sd.mkdir(parents=True, exist_ok=True)
-        pf = sd / "cs-port"
-        # Use a port that's almost certainly not listening
-        pf.write_text("19999")
-        old_time = time.time() - 25 * 3600
-        os.utime(sd, (old_time, old_time))
-        removed = th._cleanup_stale_cs_dirs(max_age_hours=24)
-        assert not sd.exists()
-        assert removed >= 1
-
-    def test_cleanup_stale_cs_legacy_dirs(self) -> None:
-        """_cleanup_stale_cs_dirs removes legacy cs-* dirs and cs-port-* files."""
-        kiss_dir = th._KISS_DIR
-        # Create legacy dir
-        legacy = kiss_dir / "cs-test123"
-        legacy.mkdir(parents=True, exist_ok=True)
-        # Create port file (covers line 557 for-loop iteration and 558 is_file True branch)
-        pf = kiss_dir / "cs-port-test"
-        pf.write_text("12345")
-        # cs-extensions should NOT be removed
-        ext = kiss_dir / "cs-extensions"
-        ext.mkdir(parents=True, exist_ok=True)
-        try:
-            th._cleanup_stale_cs_dirs(max_age_hours=24)
-            assert not legacy.exists()
-            assert not pf.exists()
-            assert ext.exists()
-        finally:
-            if ext.exists():
-                ext.rmdir()
-
-    def test_cleanup_stale_cs_port_dir_not_file(self) -> None:
-        """_cleanup_stale_cs_dirs handles cs-port-* that is a directory (line 557->556)."""
-        kiss_dir = th._KISS_DIR
-        # Create a directory matching cs-port-* pattern
-        port_dir = kiss_dir / "cs-port-dirtest"
-        port_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            th._cleanup_stale_cs_dirs(max_age_hours=24)
-        finally:
-            if port_dir.exists():
-                import shutil as _s
-                _s.rmtree(port_dir, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
@@ -443,7 +357,7 @@ class TestStatefulSorcarAgentBranches:
         from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
         agent = StatefulSorcarAgent("test")
         # Add a task with empty result to the agent's chat
-        task_id, chat_id = th._add_task("task with no result", chat_id=0)
+        task_id, chat_id = th._add_task("task with no result", chat_id="test_no_result")
         agent._chat_id = chat_id
         th._save_task_result("", task_id)
         prompt = agent.build_chat_prompt("new task")

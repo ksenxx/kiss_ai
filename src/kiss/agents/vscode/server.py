@@ -202,7 +202,7 @@ class VSCodeServer:
         Each tab gets its own agent instances so concurrent tabs never
         share mutable agent state (chat_id, task_id, worktree, etc.).
         The tab_id is a frontend string identifier; the agent's chat_id
-        is an integer assigned by the database on first task insertion.
+        is a string assigned by the database on first task insertion.
 
         Thread-safe: acquires ``_state_lock`` to protect the
         get-or-create pattern against concurrent callers.
@@ -298,7 +298,7 @@ class VSCodeServer:
             q.put(cmd.get("answer", ""))
         elif cmd_type == "resumeSession":
             raw_id = cmd.get("sessionId")
-            chat_id = int(raw_id) if raw_id else 0
+            chat_id = str(raw_id) if raw_id else ""
             if chat_id:
                 self._replay_session(chat_id, cmd.get("tabId", ""))
         elif cmd_type == "mergeAction":
@@ -331,11 +331,11 @@ class VSCodeServer:
             # Get the current chat_id for this tab - if the agent doesn't have one,
             # look up the most recent chat_id from history for adjacent task navigation
             chat_id = adj_tab.agent.chat_id
-            if chat_id == 0:
+            if chat_id == "":
                 # No active chat_id in this tab, look up the most recent one from history
                 entries = _load_history(limit=1)
                 if entries:
-                    chat_id = int(str(entries[0].get("chat_id", 0) or 0))
+                    chat_id = str(entries[0].get("chat_id", "") or "")
             self._get_adjacent_task(
                 chat_id,
                 cmd.get("task", ""),
@@ -756,7 +756,7 @@ class VSCodeServer:
         for entry in entries:
             task = str(entry.get("task", ""))
             has_events = bool(entry.get("has_events", False))
-            chat_id = int(str(entry.get("chat_id", 0) or 0))
+            chat_id = str(entry.get("chat_id", "") or "")
             sessions.append({
                 "id": chat_id,
                 "title": task[:50] + "..." if len(task) > 50 else task,
@@ -797,9 +797,9 @@ class VSCodeServer:
         """
         tab = self._get_tab(tab_id)
         tab.stateful_agent.new_chat()
-        tab.worktree_agent._chat_id = 0
+        tab.worktree_agent._chat_id = ""
 
-    def _replay_session(self, chat_id: int, tab_id: str = "") -> None:
+    def _replay_session(self, chat_id: str, tab_id: str = "") -> None:
         """Replay recorded chat events for a previous chat session.
 
         Sets the tab's agent chat_id to match the resumed session.
@@ -842,7 +842,7 @@ class VSCodeServer:
                     return
         entries = _load_history(limit=1)
         if entries:
-            chat_id = int(str(entries[0].get("chat_id", 0) or 0))
+            chat_id = str(entries[0].get("chat_id", "") or "")
             if chat_id:
                 self._replay_session(chat_id, tab_id)
         self._restore_pending_merge()
@@ -1226,7 +1226,7 @@ class VSCodeServer:
             return {"success": True, "message": msg}
         return {"success": False, "message": f"Unknown action: {action}"}
 
-    def _get_adjacent_task(self, chat_id: int, task: str, direction: str) -> None:
+    def _get_adjacent_task(self, chat_id: str, task: str, direction: str) -> None:
         """Send events for the adjacent task in the same chat session.
 
         Args:

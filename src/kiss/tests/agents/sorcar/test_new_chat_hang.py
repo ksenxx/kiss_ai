@@ -160,7 +160,7 @@ class TestTaskEndEventPersistence(unittest.TestCase):
         entries = th._load_history(limit=1)
         assert entries
         chat_id = entries[0]["chat_id"]
-        assert isinstance(chat_id, int) and chat_id
+        assert isinstance(chat_id, str) and chat_id
         result = th._load_latest_chat_events_by_chat_id(chat_id)
         assert result is not None
         events = result["events"]
@@ -222,7 +222,7 @@ class TestPeriodicEventFlush(unittest.TestCase):
             )
             assert flush_entry is not None
             flush_chat_id = flush_entry["chat_id"]
-            assert isinstance(flush_chat_id, int) and flush_chat_id
+            assert isinstance(flush_chat_id, str) and flush_chat_id
             result = th._load_latest_chat_events_by_chat_id(flush_chat_id)
             assert result is not None
             flush_events = result["events"]

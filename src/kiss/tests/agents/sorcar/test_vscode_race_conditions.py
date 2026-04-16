@@ -111,7 +111,7 @@ class TestRace16GuardedNewChatResumeSession(unittest.TestCase):
         server = VSCodeServer()
         tab0 = server._get_tab("0")
         # Set a non-zero chat_id to verify newChat resets it
-        tab0.agent._chat_id = 42
+        tab0.agent._chat_id = "42"
 
         # Simulate running task on tab 1
         stop = threading.Event()

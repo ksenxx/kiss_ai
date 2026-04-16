@@ -32,17 +32,17 @@ class StatefulSorcarAgent(SorcarAgent):
 
     def __init__(self, name: str) -> None:
         super().__init__(name)
-        self._chat_id: int = 0
+        self._chat_id: str = ""
         self._last_task_id: int | None = None
 
     @property
-    def chat_id(self) -> int:
-        """Return the current chat session ID (0 means new session)."""
+    def chat_id(self) -> str:
+        """Return the current chat session ID ("" means new session)."""
         return self._chat_id
 
     def new_chat(self) -> None:
         """Reset to a new chat session (equivalent to VS Code 'Clear')."""
-        self._chat_id = 0
+        self._chat_id = ""
 
     def resume_chat(self, task: str) -> None:
         """Resume a previous chat session by looking up the task's chat_id.
@@ -57,11 +57,11 @@ class StatefulSorcarAgent(SorcarAgent):
         if chat_id:
             self.resume_chat_by_id(chat_id)
 
-    def resume_chat_by_id(self, chat_id: int) -> None:
+    def resume_chat_by_id(self, chat_id: str) -> None:
         """Resume a chat session using a stable chat identifier.
 
         Args:
-            chat_id: Integer chat session identifier to resume.
+            chat_id: String chat session identifier to resume.
         """
         if chat_id:
             self._chat_id = chat_id

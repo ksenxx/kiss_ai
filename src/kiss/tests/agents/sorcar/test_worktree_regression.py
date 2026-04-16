@@ -105,7 +105,7 @@ class TestWorktreeRegression:
         _restore_db(self.db_saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def _agent(self, chat_id: int | None = None) -> WorktreeSorcarAgent:
+    def _agent(self, chat_id: str | None = None) -> WorktreeSorcarAgent:
         agent = WorktreeSorcarAgent("test")
         if chat_id:
             agent.resume_chat_by_id(chat_id)

@@ -57,10 +57,10 @@ class TestResumeChatNoMatch:
     """Cover resume_chat branches."""
 
     def test_resume_chat_by_id_empty(self) -> None:
-        """resume_chat_by_id(0) should be a no-op (branch 73->exit)."""
+        """resume_chat_by_id("") should be a no-op."""
         agent = StatefulSorcarAgent("test")
         original_chat_id = agent.chat_id
-        agent.resume_chat_by_id(0)
+        agent.resume_chat_by_id("")
         assert agent.chat_id == original_chat_id
 
 
@@ -135,7 +135,7 @@ class TestReplaySessionWithEvents:
 
             # Create a task with events (using a chat_id)
             task_text = "test-replay-session-task"
-            task_id, chat_id = th._add_task(task_text, chat_id=0)
+            task_id, chat_id = th._add_task(task_text, chat_id="0")
             test_events: list[dict[str, object]] = [
                 {"type": "text_delta", "text": "hello"},
                 {"type": "result", "summary": "done"},

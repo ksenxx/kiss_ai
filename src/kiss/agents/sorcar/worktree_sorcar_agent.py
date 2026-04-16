@@ -304,7 +304,7 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         # Without this, _chat_id would still be 0 here and the branch
         # would be named kiss/wt-0-<ts>, but _add_task in super().run()
         # would then assign a different id, breaking _restore_from_git.
-        if self._chat_id == 0:
+        if self._chat_id == "":
             self._chat_id = _allocate_chat_id()
 
         wt_work_dir = self._try_setup_worktree(repo, work_dir_str)

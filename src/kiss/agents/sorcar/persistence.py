@@ -10,8 +10,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import shutil
-import socket
 import sqlite3
 import threading
 import time
@@ -65,69 +63,9 @@ _HISTORY_SELECT = (
 _CLEAR_LAST_MODEL = "UPDATE model_usage SET is_last = 0 WHERE is_last = 1"
 
 
-_EXPECTED_COLUMNS: dict[str, list[tuple[str, str]]] = {
-    "task_history": [
-        ("has_events", "INTEGER DEFAULT 0"),
-        ("result", "TEXT DEFAULT ''"),
-        ("chat_id", "INTEGER DEFAULT 0"),
-        ("extra", "TEXT DEFAULT ''"),
-    ],
-    "model_usage": [
-        ("is_last", "INTEGER DEFAULT 0"),
-    ],
-    "file_usage": [
-        ("last_used", "REAL DEFAULT 0"),
-    ],
-}
-
-
-def _migrate_tables(conn: sqlite3.Connection) -> None:
-    """Add any columns missing from existing tables.
-
-    Compares each table's actual columns (via ``PRAGMA table_info``)
-    against ``_EXPECTED_COLUMNS`` and issues ``ALTER TABLE ADD COLUMN``
-    for any that are absent.  This handles schema upgrades when the
-    database was created by an older version of the code.
-
-    Also migrates old TEXT chat_ids (UUID hex strings) to INTEGER
-    (first task's row id) for existing databases.
-    """
-    for table, columns in _EXPECTED_COLUMNS.items():
-        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
-        existing = {r[1] for r in rows}
-        for col_name, col_def in columns:
-            if col_name not in existing:
-                conn.execute(
-                    f"ALTER TABLE {table} ADD COLUMN {col_name} {col_def}"
-                )
-    # Migrate old TEXT chat_ids to INTEGER (first task's row id).
-    # This handles databases created before the chat_id type change.
-    old_ids = conn.execute(
-        "SELECT DISTINCT chat_id FROM task_history "
-        "WHERE typeof(chat_id) = 'text' AND chat_id != ''"
-    ).fetchall()
-    for r in old_ids:
-        old_cid = r[0]
-        first = conn.execute(
-            "SELECT MIN(id) AS first_id FROM task_history WHERE chat_id = ?",
-            (old_cid,),
-        ).fetchone()
-        if first and first["first_id"]:
-            conn.execute(
-                "UPDATE task_history SET chat_id = ? WHERE chat_id = ?",
-                (first["first_id"], old_cid),
-            )
-    # Convert empty strings and NULLs to 0
-    conn.execute(
-        "UPDATE task_history SET chat_id = 0 "
-        "WHERE chat_id = '' OR chat_id IS NULL"
-    )
-    conn.commit()
-
-
 def _init_tables(conn: sqlite3.Connection) -> None:
-    """Create all tables, migrate missing columns, and create indexes."""
-    # 1. Create tables (IF NOT EXISTS keeps old tables untouched).
+    """Create all tables and indexes."""
+    # Create tables
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS task_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -135,7 +73,7 @@ def _init_tables(conn: sqlite3.Connection) -> None:
             task TEXT NOT NULL,
             has_events INTEGER DEFAULT 0,
             result TEXT DEFAULT '',
-            chat_id INTEGER DEFAULT 0,
+            chat_id CHAR(32) DEFAULT '',
             extra TEXT DEFAULT ''
         );
         CREATE TABLE IF NOT EXISTS events (
@@ -157,9 +95,7 @@ def _init_tables(conn: sqlite3.Connection) -> None:
             last_used REAL DEFAULT 0
         );
     """)
-    # 2. Add any columns missing from older schemas.
-    _migrate_tables(conn)
-    # 3. Create indexes (safe now that all columns exist).
+    # Create indexes
     conn.executescript("""
         CREATE INDEX IF NOT EXISTS idx_th_timestamp
             ON task_history(timestamp);
@@ -220,25 +156,28 @@ def _most_recent_task_id(db: sqlite3.Connection, task: str | None) -> int | None
     return row["id"] if row else None
 
 
-def _add_task(task: str, chat_id: int = 0) -> tuple[int, int]:
+def _add_task(task: str, chat_id: str = "") -> tuple[int, str]:
     """Append a task to the history and return ``(task_id, chat_id)``.
 
-    When *chat_id* is ``0`` (new session), the inserted row's own ``id``
-    is used as the chat session identifier (self-referencing first task).
+    When *chat_id* is ``""`` (new session), a new UUID-style string
+    is generated as the chat session identifier.
     Otherwise the given *chat_id* is stored directly (continuation task).
 
     Thread-safe: all writes are protected by ``_db_lock``.
 
     Args:
         task: The task description string.
-        chat_id: Chat session identifier.  ``0`` starts a new session.
+        chat_id: Chat session identifier.  ``""`` starts a new session.
 
     Returns:
         ``(task_id, chat_id)`` — the inserted row id and the
-        (possibly newly-assigned) chat session identifier.
+        chat session identifier.
     """
+    import uuid
     db = _get_db()
     with _db_lock:
+        if chat_id == "":
+            chat_id = uuid.uuid4().hex  # Generate 32-character UUID string
         cursor = db.execute(
             "INSERT INTO task_history (timestamp, task, chat_id, result) VALUES (?, ?, ?, ?)",
             (time.time(), task, chat_id, "Agent Failed Abruptly"),
@@ -246,41 +185,24 @@ def _add_task(task: str, chat_id: int = 0) -> tuple[int, int]:
         row_id = cursor.lastrowid
         if row_id is None:  # pragma: no cover
             raise RuntimeError("sqlite did not return lastrowid")
-        if chat_id == 0:
-            chat_id = row_id
-            db.execute(
-                "UPDATE task_history SET chat_id = ? WHERE id = ?",
-                (chat_id, row_id),
-            )
         db.commit()
         return row_id, chat_id
 
 
-def _allocate_chat_id() -> int:
+def _allocate_chat_id() -> str:
     """Pre-allocate a chat session id without keeping a task row.
 
-    Inserts a temporary row to advance the ``AUTOINCREMENT`` counter,
-    records its ``id``, then deletes it.  SQLite's ``AUTOINCREMENT``
-    guarantees the returned id will never be reused by a future insert.
+    Generates a new UUID-style string that can be used as a unique
+    chat session identifier.
 
     This is used by ``WorktreeSorcarAgent`` to name worktree branches
     *before* the first task in a session is persisted.
 
     Returns:
-        A unique integer suitable for use as a ``chat_id``.
+        A unique 32-character string suitable for use as a ``chat_id``.
     """
-    db = _get_db()
-    with _db_lock:
-        cursor = db.execute(
-            "INSERT INTO task_history (timestamp, task, chat_id, result) "
-            "VALUES (0, '', 0, '')",
-        )
-        row_id = cursor.lastrowid
-        if row_id is None:  # pragma: no cover
-            raise RuntimeError("sqlite did not return lastrowid")
-        db.execute("DELETE FROM task_history WHERE id = ?", (row_id,))
-        db.commit()
-        return row_id
+    import uuid
+    return uuid.uuid4().hex
 
 
 def _load_history(limit: int = 0, offset: int = 0) -> list[_HistoryEntry]:
@@ -492,27 +414,27 @@ def _append_chat_event(
         db.commit()
 
 
-def _load_task_chat_id(task: str) -> int:
-    """Return the chat_id for the most recent run of *task*, or ``0``.
+def _load_task_chat_id(task: str) -> str:
+    """Return the chat_id for the most recent run of *task*, or ``""``.
 
     Args:
         task: The task description string.
 
     Returns:
-        The integer chat_id, or ``0`` if not found.
+        The string chat_id, or ``""`` if not found.
     """
     db = _get_db()
     task_id = _most_recent_task_id(db, task)
     if task_id is None:
-        return 0
+        return ""
     row = db.execute(
         "SELECT chat_id FROM task_history WHERE id = ?", (task_id,)
     ).fetchone()
-    return int(row["chat_id"]) if row and row["chat_id"] else 0
+    return str(row["chat_id"]) if row and row["chat_id"] else ""
 
 
-def _load_last_chat_id() -> int:
-    """Return the chat_id of the most recently added task, or ``0``.
+def _load_last_chat_id() -> str:
+    """Return the chat_id of the most recently added task, or ``""``.
 
     Useful for resuming the last CLI session without manually tracking
     the chat_id.
@@ -521,7 +443,7 @@ def _load_last_chat_id() -> int:
     row = db.execute(
         "SELECT chat_id FROM task_history ORDER BY timestamp DESC LIMIT 1"
     ).fetchone()
-    return int(row["chat_id"]) if row and row["chat_id"] else 0
+    return str(row["chat_id"]) if row and row["chat_id"] else ""
 
 
 def _list_recent_chats(limit: int = 10) -> list[dict[str, object]]:
@@ -536,14 +458,14 @@ def _list_recent_chats(limit: int = 10) -> list[dict[str, object]]:
         limit: Maximum number of chat sessions to return.
 
     Returns:
-        List of dicts, each with ``chat_id`` (int) and ``tasks``
+        List of dicts, each with ``chat_id`` (str) and ``tasks``
         (list of dicts with ``task``, ``result``, ``timestamp``).
     """
     db = _get_db()
     # Get the most recent chat_ids by their latest task timestamp
     chat_rows = db.execute(
         "SELECT chat_id, MAX(timestamp) AS latest "
-        "FROM task_history WHERE chat_id != 0 "
+        "FROM task_history WHERE chat_id != '' "
         "GROUP BY chat_id ORDER BY latest DESC LIMIT ?",
         (limit,),
     ).fetchall()
@@ -568,7 +490,7 @@ def _list_recent_chats(limit: int = 10) -> list[dict[str, object]]:
 
 
 def _load_latest_chat_events_by_chat_id(
-    chat_id: int,
+    chat_id: str,
 ) -> dict[str, object] | None:
     """Load the latest task and its events for a chat session.
 
@@ -576,12 +498,12 @@ def _load_latest_chat_events_by_chat_id(
     its task description string and recorded events.
 
     Args:
-        chat_id: The integer chat session identifier.
+        chat_id: The string chat session identifier.
 
     Returns:
         A dict with ``task`` (str), ``events`` (list of event dicts),
-        ``chat_id`` (int), and ``extra`` (str, JSON metadata),
-        or ``None`` if chat_id is ``0`` or has no tasks.
+        ``chat_id`` (str), and ``extra`` (str, JSON metadata),
+        or ``None`` if chat_id is ``""`` or has no tasks.
     """
     if not chat_id:
         return None
@@ -610,12 +532,12 @@ def _load_latest_chat_events_by_chat_id(
 
 
 def _get_adjacent_task_by_chat_id(
-    chat_id: int, current_task: str, direction: str
+    chat_id: str, current_task: str, direction: str
 ) -> dict[str, object] | None:
     """Return the adjacent task within a chat session, relative to *current_task*.
 
     Args:
-        chat_id: The integer chat session identifier.
+        chat_id: The string chat session identifier.
         current_task: The current task description string used to find
             the reference timestamp within the chat.
         direction: ``"prev"`` for the earlier task, ``"next"`` for the
@@ -672,11 +594,11 @@ def _get_adjacent_task_by_chat_id(
     return {"task": adj_task, "events": events}
 
 
-def _load_chat_context(chat_id: int) -> list[_HistoryEntry]:
+def _load_chat_context(chat_id: str) -> list[_HistoryEntry]:
     """Load all tasks and results for a chat session in chronological order.
 
     Args:
-        chat_id: The integer chat session identifier.
+        chat_id: The string chat session identifier.
 
     Returns:
         List of dicts with ``task`` and ``result`` keys, ordered by
@@ -782,54 +704,4 @@ def _record_file_usage(path: str) -> None:
         db.commit()
 
 
-# ---------------------------------------------------------------------------
-# Stale directory cleanup (unchanged)
-# ---------------------------------------------------------------------------
 
-def _cleanup_stale_cs_dirs(max_age_hours: int = 24) -> int:
-    """Remove the sorcar data directory if stale.
-
-    Checks ``~/.kiss/sorcar-data`` and removes it if older than
-    ``max_age_hours`` and no process is listening on its port.
-    Also removes any legacy ``~/.kiss/cs-*`` per-workdir directories,
-    ``cs-port-*`` files, and the old ``cs-data`` directory.
-
-    Args:
-        max_age_hours: Maximum age in hours before the directory is
-            eligible for cleanup.
-
-    Returns:
-        Number of directories removed.
-    """
-    threshold = time.time() - max_age_hours * 3600
-    removed = 0
-    for p in sorted(_KISS_DIR.glob("cs-port-*")):
-        if p.is_file():
-            try:
-                p.unlink()
-            except OSError:  # pragma: no cover — OS-level unlink failure
-                logger.debug("Exception caught", exc_info=True)
-    for d in sorted(_KISS_DIR.glob("cs-*")):
-        if not d.is_dir() or d.name == "cs-extensions":
-            continue
-        shutil.rmtree(d, ignore_errors=True)
-        removed += 1
-    d = _KISS_DIR / "sorcar-data"
-    if not d.is_dir():
-        return removed
-    try:
-        if d.stat().st_mtime > threshold:
-            return removed
-        _pf = d / "cs-port"
-        if _pf.exists():
-            try:
-                port = int(_pf.read_text().strip())
-                with socket.create_connection(("127.0.0.1", port), timeout=0.3):
-                    return removed
-            except (ConnectionRefusedError, OSError, ValueError):
-                pass
-        shutil.rmtree(d, ignore_errors=True)
-        removed += 1
-    except OSError:  # pragma: no cover
-        logger.debug("Exception caught", exc_info=True)
-    return removed

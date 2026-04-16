@@ -68,20 +68,20 @@ class TestChatEvents:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_set_events_no_task(self):
-        task_id, _ = th._add_task("latest", chat_id=1004)
+        task_id, _ = th._add_task("latest", chat_id="1004")
         th._set_latest_chat_events([{"a": 1}], task_id=task_id)
-        result = th._load_latest_chat_events_by_chat_id(1004)
+        result = th._load_latest_chat_events_by_chat_id("1004")
         assert result is not None
         events = result["events"]
         assert isinstance(events, list)
         assert events == [{"a": 1}]
 
     def test_load_chat_events_includes_extra(self):
-        task_id, _ = th._add_task("extra-task", chat_id=1005)
+        task_id, _ = th._add_task("extra-task", chat_id="1005")
         th._set_latest_chat_events([{"b": 2}], task_id=task_id)
         extra = {"model": "gpt-4o", "is_worktree": True, "is_parallel": False}
         th._save_task_extra(extra, task_id=task_id)
-        result = th._load_latest_chat_events_by_chat_id(1005)
+        result = th._load_latest_chat_events_by_chat_id("1005")
         assert result is not None
         loaded = json.loads(str(result["extra"]))
         assert loaded["model"] == "gpt-4o"
@@ -106,7 +106,7 @@ class TestSaveTaskExtra:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_save_and_load_extra(self):
-        task_id, _ = th._add_task("extra test task", chat_id=1002)
+        task_id, _ = th._add_task("extra test task", chat_id="1002")
         extra = {
             "model": "claude-opus-4-6",
             "work_dir": "/tmp/test",
@@ -145,7 +145,7 @@ class TestSaveTaskExtra:
         assert entries[0]["extra"] == ""
 
     def test_extra_in_search_results(self):
-        task_id, _ = th._add_task("searchable extra", chat_id=1003)
+        task_id, _ = th._add_task("searchable extra", chat_id="1003")
         th._save_task_extra({"model": "test-model"}, task_id=task_id)
         results = th._search_history("searchable")
         assert len(results) == 1
@@ -153,7 +153,7 @@ class TestSaveTaskExtra:
         assert stored["model"] == "test-model"
 
     def test_extra_in_get_history_entry(self):
-        task_id, _ = th._add_task("entry extra", chat_id=1001)
+        task_id, _ = th._add_task("entry extra", chat_id="1001")
         th._save_task_extra({"tokens": 999}, task_id=task_id)
         entry = th._get_history_entry(0)
         assert entry is not None
@@ -221,120 +221,6 @@ class TestPrintRecentChats:
 
 
 
-class TestMigrateMissingColumns:
-    """Verify ALTER TABLE migration adds columns missing from old schemas."""
-
-    def setup_method(self):
-        self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect(self.tmpdir)
-
-    def teardown_method(self):
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
-        _restore(self.saved)
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def _create_old_schema(self) -> None:
-        """Create a DB with the minimal old schema (missing newer columns)."""
-        import sqlite3
-
-        th._ensure_kiss_dir()
-        conn = sqlite3.connect(str(th._DB_PATH))
-        conn.executescript("""
-            CREATE TABLE task_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp REAL NOT NULL,
-                task TEXT NOT NULL
-            );
-            CREATE TABLE events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                task_id INTEGER NOT NULL REFERENCES task_history(id),
-                seq INTEGER NOT NULL,
-                event_json TEXT NOT NULL
-            );
-            CREATE TABLE model_usage (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                model TEXT NOT NULL UNIQUE,
-                count INTEGER DEFAULT 0
-            );
-            CREATE TABLE file_usage (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                path TEXT NOT NULL UNIQUE,
-                count INTEGER DEFAULT 0
-            );
-        """)
-        # Insert a row using only the old columns
-        conn.execute(
-            "INSERT INTO task_history (timestamp, task) VALUES (?, ?)",
-            (time.time(), "old task"),
-        )
-        conn.commit()
-        conn.close()
-
-    def test_migration_adds_missing_columns(self):
-        self._create_old_schema()
-        # Opening the DB triggers _init_tables → _migrate_tables
-        task_id, _ = th._add_task("new task", chat_id=1000)
-        th._save_task_result("done", task_id=task_id)
-        th._save_task_extra({"model": "gpt-4o"}, task_id=task_id)
-        entries = th._load_history(limit=10)
-        assert len(entries) == 2
-        new_entry = entries[0]
-        assert new_entry["chat_id"] == 1000
-        assert new_entry["result"] == "done"
-        stored = json.loads(str(new_entry["extra"]))
-        assert stored["model"] == "gpt-4o"
-        # Old row should have defaults for the new columns
-        old_entry = entries[1]
-        assert old_entry["chat_id"] == 0
-        assert old_entry["extra"] == ""
-        assert old_entry["has_events"] == 0
-        assert old_entry["result"] == ""
-
-    def test_migration_model_usage_is_last(self):
-        self._create_old_schema()
-        th._save_last_model("claude-opus-4-6")
-        assert th._load_last_model() == "claude-opus-4-6"
-
-    def test_migration_file_usage_last_used(self):
-        self._create_old_schema()
-        th._record_file_usage("test.py")
-        usage = th._load_file_usage()
-        assert "test.py" in usage
-
-    def test_migration_idempotent(self):
-        """Running migration twice does not fail or duplicate columns."""
-        self._create_old_schema()
-        # First open triggers migration
-        th._add_task("first")
-        # Close and reopen to trigger migration again
-        th._close_db()
-        th._add_task("second")
-        entries = th._load_history(limit=10)
-        assert any(e["task"] == "first" for e in entries)
-        assert any(e["task"] == "second" for e in entries)
-
-
-class TestCleanupStaleCsDirs:
-    def setup_method(self):
-        self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect(self.tmpdir)
-
-    def teardown_method(self):
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
-        _restore(self.saved)
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_keeps_sorcar_data_when_recent(self):
-        kiss_dir = th._KISS_DIR
-        sorcar_data = kiss_dir / "sorcar-data"
-        sorcar_data.mkdir()
-        (sorcar_data / "cs-port").write_text("99999")
-        th._cleanup_stale_cs_dirs(max_age_hours=24)
-        assert sorcar_data.exists()
 
 
 if __name__ == "__main__":

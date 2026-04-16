@@ -207,20 +207,9 @@ class TestTaskHistoryBranches:
             self._restore_db(saved)
 
     def test_load_chat_context_empty_id(self):
-        assert th._load_chat_context(0) == []
+        assert th._load_chat_context("") == []
 
-    def test_cleanup_stale_cs_dirs_no_port_file(self, tmp_path):
-        """When sorcar-data exists but no cs-port file, clean up."""
-        saved = self._fresh_db(tmp_path)
-        try:
-            sorcar_data = th._KISS_DIR / "sorcar-data"
-            sorcar_data.mkdir()
-            old_time = time.time() - 48 * 3600
-            os.utime(sorcar_data, (old_time, old_time))
-            removed = th._cleanup_stale_cs_dirs(max_age_hours=24)
-            assert removed >= 1
-        finally:
-            self._restore_db(saved)
+
 
 
 # ---------------------------------------------------------------------------

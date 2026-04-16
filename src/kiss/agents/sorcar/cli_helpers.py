@@ -82,7 +82,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "-n", "--new", action="store_true", help="Start a new chat session",
     )
     parser.add_argument(
-        "-c", "--chat-id", type=int, default=None, help="Resume a chat session by ID",
+        "-c", "--chat-id", type=str, default=None, help="Resume a chat session by ID",
     )
     parser.add_argument(
         "-l", "--list-chat-id", action="store_true",
