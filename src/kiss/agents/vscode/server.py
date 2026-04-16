@@ -438,6 +438,10 @@ class VSCodeServer:
             stop_event = tab.stop_event
         self.printer._thread_local.stop_event = stop_event
 
+        # Use tab_id as chat_id for new sessions
+        if tab_id and tab.agent.chat_id == "":
+            tab.agent._chat_id = tab_id
+
         self.printer.broadcast({"type": "clear", "chat_id": tab.agent.chat_id})
 
         # Git snapshot captures pre-task state (may be slow for large repos)
@@ -789,7 +793,7 @@ class VSCodeServer:
     def _new_chat(self, tab_id: str) -> None:
         """Start a new chat session for the given tab.
 
-        Resets the agent's ``chat_id`` to ``0`` so the next task starts
+        Resets the agent's ``chat_id`` to ``""`` so the next task starts
         a fresh session.  The tab_id (frontend key) does not change.
 
         Args:
@@ -806,7 +810,7 @@ class VSCodeServer:
         The tab_id (frontend key in ``_tab_states``) does not change.
 
         Args:
-            chat_id: The integer chat session identifier to replay.
+            chat_id: The string chat session identifier to replay.
             tab_id: The frontend tab identifier.
         """
         result = _load_latest_chat_events_by_chat_id(chat_id)
@@ -1230,7 +1234,7 @@ class VSCodeServer:
         """Send events for the adjacent task in the same chat session.
 
         Args:
-            chat_id: The integer chat session identifier.
+            chat_id: The string chat session identifier.
             task: Current task description string (used as timestamp reference).
             direction: ``"prev"`` or ``"next"``.
         """
