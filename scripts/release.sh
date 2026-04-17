@@ -189,6 +189,8 @@ build_vscode_extension() {
     fi
 
     print_info "Built kiss-sorcar.vsix"
+    rm -rf out kiss_project
+    print_info "Cleaned up build artifacts (out/, kiss_project/)"
     cd - > /dev/null
 }
 

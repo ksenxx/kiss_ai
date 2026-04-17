@@ -292,6 +292,11 @@ export PATH="$HOME/.local/bin:$PATH"
     "$CODE" --install-extension "$VSIX" --force 2>&1
     echo ""
 
+    echo "--- Clean up build artifacts ---"
+    rm -rf "$SCRIPT_DIR/out" "$SCRIPT_DIR/kiss_project"
+    echo "  Removed out/ and kiss_project/"
+    echo ""
+
     echo "=== Install complete ==="
     echo "Date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 } 2>&1 | tee "$LOG_FILE"

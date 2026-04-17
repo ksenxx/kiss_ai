@@ -590,6 +590,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       case 'focusEditor':
         vscode.commands.executeCommand('workbench.action.focusFirstEditorGroup');
         break;
+
+      case 'closeSecondaryBar':
+        vscode.commands.executeCommand('workbench.action.closeAuxiliaryBar');
+        break;
     }
   }
 

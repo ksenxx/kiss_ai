@@ -315,7 +315,8 @@
     tabs.splice(idx, 1);
     if (activeTabId === tabId) {
       if (tabs.length === 0) {
-        // Last tab closed — open a fresh new chat
+        // Last tab closed — close the secondary bar and open a fresh new chat
+        vscode.postMessage({ type: 'closeSecondaryBar' });
         createNewTab();
         return;
       }
@@ -2054,14 +2055,14 @@
   }
 
   function chatIdBgColor(chatId) {
-    if (!chatId) return 'hsl(0, 0%, 18%)';
+    if (!chatId) return 'hsl(0, 0%, 75%)';
     let hash = 5381;
     for (let i = 0; i < chatId.length; i++) {
       hash = ((hash << 5) + hash) + chatId.charCodeAt(i);
       hash |= 0;
     }
     const hue = Math.abs(hash) % 360;
-    return 'hsl(' + hue + ', 45%, 20%)';
+    return 'hsl(' + hue + ', 55%, 75%)';
   }
 
   function renderHistory(sessions, offset, generation) {
@@ -2087,7 +2088,7 @@
       div.textContent = itemText;
       div.dataset.tooltip = s.preview || itemText;
       div.style.backgroundColor = chatIdBgColor(String(s.id));
-      div.style.color = '#000';
+      div.style.color = '#1a1a1a';
       div.addEventListener('click', function() {
         if (s.has_events && s.id) {
           setTaskText(s.preview || s.title || '');

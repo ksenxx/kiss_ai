@@ -39,6 +39,7 @@ export type FromWebviewMessage =
   | { type: 'generateCommitMessage' }
   | { type: 'runPrompt' }
   | { type: 'focusEditor' }
+  | { type: 'closeSecondaryBar' }
   | { type: 'getInputHistory' }
   | { type: 'worktreeAction'; action: 'merge' | 'discard' | 'do_nothing' }
   | { type: 'resolveDroppedPaths'; uris: string[] }

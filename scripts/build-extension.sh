@@ -22,4 +22,7 @@ npm run package
 echo "==> Installing extension..."
 "$CODE" --install-extension kiss-sorcar.vsix --force
 
+echo "==> Cleaning up build artifacts..."
+rm -rf "$EXT_DIR/out" "$EXT_DIR/kiss_project"
+
 echo "==> Done. KISS Sorcar extension installed successfully."
