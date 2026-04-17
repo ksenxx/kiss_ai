@@ -89,6 +89,7 @@ export function buildChatHtml(webview: vscode.Webview, extensionUri: vscode.Uri,
       <div id="welcome">
         <h2>Welcome to KISS Sorcar</h2>
         <p>Your AI assistant. Ask me anything!</p>
+        <div id="suggestions"></div>
       </div>
     </div>
 

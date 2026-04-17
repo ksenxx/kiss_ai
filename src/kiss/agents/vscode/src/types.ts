@@ -32,6 +32,7 @@ export type FromWebviewMessage =
   | { type: 'recordFileUsage'; path: string }
   | { type: 'ready'; tabId?: string }
   | { type: 'resumeSession'; id: number; tabId?: string }
+  | { type: 'getWelcomeSuggestions' }
   | { type: 'complete'; query: string }
   | { type: 'mergeAction'; action: string }
   | { type: 'newChat'; tabId?: string }
@@ -74,6 +75,7 @@ export type ToWebviewMessage =
   | { type: 'error'; text: string }
   | { type: 'followup_suggestion'; text: string }
   | { type: 'tasks_updated' }
+  | { type: 'welcome_suggestions'; suggestions: Array<{text: string}> }
   | { type: 'task_events'; events: any[]; task?: string; chat_id?: number }
   | { type: 'ghost'; suggestion: string; query: string }
   | { type: 'merge_data'; data: any; hunk_count: number }
