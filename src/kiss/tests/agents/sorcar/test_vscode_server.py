@@ -96,6 +96,30 @@ class TestGetFiles(unittest.TestCase):
             assert "main" in f["text"].lower()
 
 
+class TestNewChatBroadcastsShowWelcome(unittest.TestCase):
+    """_new_chat must broadcast a showWelcome event to the tab."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.server = VSCodeServer()
+        self.server.work_dir = self.tmpdir
+        self.events: list[dict] = []
+
+        def capture_broadcast(event: dict) -> None:
+            self.events.append(event)
+
+        self.server.printer.broadcast = capture_broadcast  # type: ignore[assignment]
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_new_chat_broadcasts_show_welcome(self) -> None:
+        self.server._new_chat("tab-1")
+        welcome_events = [e for e in self.events if e["type"] == "showWelcome"]
+        assert len(welcome_events) == 1
+        assert welcome_events[0]["tabId"] == "tab-1"
+
+
 class TestMainJsFilePicker(unittest.TestCase):
     """Test the main.js file picker JavaScript code for web Sorcar parity."""
 
@@ -648,15 +672,6 @@ class TestMainJsInputHistory(unittest.TestCase):
     def test_sets_hist_cache_from_tasks(self) -> None:
         """inputHistory handler should set histCache from ev.tasks."""
         assert "histCache = ev.tasks" in self._js
-
-    def test_does_not_set_hist_cache_from_welcome(self) -> None:
-        """renderWelcomeSuggestions should NOT set histCache anymore."""
-        # Find the renderWelcomeSuggestions function body
-        idx = self._js.index("function renderWelcomeSuggestions")
-        # Find the next function definition to bound the search
-        end = self._js.index("\n  function ", idx + 1)
-        body = self._js[idx:end]
-        assert "histCache" not in body
 
     def test_requests_input_history_on_tasks_updated(self) -> None:
         """tasks_updated handler should request getInputHistory."""
@@ -2419,9 +2434,6 @@ class TestSorcarSidebarViewTS(unittest.TestCase):
     def test_sends_active_file_info(self) -> None:
         assert "_sendActiveFileInfo" in self._ts
 
-    def test_sends_welcome_suggestions(self) -> None:
-        assert "_sendWelcomeSuggestions" in self._ts
-
 
 class TestExtensionRegistersSecondaryView(unittest.TestCase):
     """Verify extension.ts registers the SorcarSidebarView provider."""
@@ -2513,7 +2525,7 @@ class TestSorcarSidebarViewMessageHandling(unittest.TestCase):
             "ready", "submit", "stop", "selectModel", "getModels",
             "newChat", "getInputHistory", "getHistory", "getFiles",
             "userAnswer", "userActionDone", "recordFileUsage", "openFile",
-            "resumeSession", "getAdjacentTask", "getWelcomeSuggestions",
+            "resumeSession", "getAdjacentTask",
             "complete", "mergeAction", "generateCommitMessage", "runPrompt",
             "worktreeAction", "resolveDroppedPaths", "focusEditor",
         }
@@ -2527,7 +2539,7 @@ class TestSorcarSidebarViewMessageHandling(unittest.TestCase):
             "ready", "submit", "stop", "selectModel", "getModels",
             "newChat", "getInputHistory", "getHistory", "getFiles",
             "userAnswer", "userActionDone", "recordFileUsage", "openFile",
-            "resumeSession", "getAdjacentTask", "getWelcomeSuggestions",
+            "resumeSession", "getAdjacentTask",
             "complete", "mergeAction", "generateCommitMessage", "runPrompt",
             "worktreeAction", "resolveDroppedPaths", "focusEditor",
             "closeSecondaryBar",
@@ -2944,18 +2956,9 @@ class TestSorcarSidebarViewReadyHandler(unittest.TestCase):
         end = self._ts.index("break;", m.end()) + len("break;")
         return self._ts[m.start() : end]
 
-    def test_sends_status(self) -> None:
-        block = self._get_ready_block()
-        assert "this._runningTabs" in block
-        assert "running: true" in block
-
     def test_requests_models(self) -> None:
         block = self._get_ready_block()
         assert "'getModels'" in block
-
-    def test_sends_welcome_suggestions(self) -> None:
-        block = self._get_ready_block()
-        assert "_sendWelcomeSuggestions()" in block
 
     def test_requests_input_history(self) -> None:
         block = self._get_ready_block()
@@ -3288,7 +3291,22 @@ class TestWebviewTabBarJS(unittest.TestCase):
         end = self._js.index("\n  function ", idx + 1)
         body = self._js[idx:end]
         assert "welcome" in body
-        assert "getWelcomeSuggestions" in body
+
+    def test_show_welcome_event_handler_exists(self) -> None:
+        assert "case 'showWelcome':" in self._js
+
+    def test_show_welcome_event_shows_welcome_for_active_tab(self) -> None:
+        idx = self._js.index("case 'showWelcome':")
+        end = self._js.index("break;", idx) + len("break;")
+        body = self._js[idx:end]
+        assert "welcome.style.display = ''" in body
+        assert "clearOutput()" in body
+
+    def test_show_welcome_sets_visibility_for_background_tab(self) -> None:
+        idx = self._js.index("case 'showWelcome':")
+        end = self._js.index("break;", idx) + len("break;")
+        body = self._js[idx:end]
+        assert "welcomeVisible = true" in body
 
     # -- Switching tabs --
 
@@ -3658,12 +3676,6 @@ class TestSidebarViewBehavior(unittest.TestCase):
         end = self._sidebar_ts.index("break;", idx) + len("break;")
         block = self._sidebar_ts[idx:end]
         assert "'getModels'" in block
-
-    def test_sends_welcome_suggestions_on_ready(self) -> None:
-        idx = self._sidebar_ts.index("case 'ready':")
-        end = self._sidebar_ts.index("break;", idx) + len("break;")
-        block = self._sidebar_ts[idx:end]
-        assert "_sendWelcomeSuggestions()" in block
 
     def test_requests_input_history_on_ready(self) -> None:
         idx = self._sidebar_ts.index("case 'ready':")

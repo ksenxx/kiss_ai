@@ -430,7 +430,6 @@
     stopTimer();
     statusText.textContent = 'Ready';
     vscode.postMessage({ type: 'newChat', tabId: activeTabId });
-    vscode.postMessage({ type: 'getWelcomeSuggestions' });
   }
 
   function updateActiveTabTitle(title) {
@@ -1217,6 +1216,24 @@
     case 'clearChat':
       createNewTab();
       break;
+    case 'showWelcome': {
+      var swTabId = ev.tabId || activeTabId;
+      var swTab = tabs.find(function(t) { return t.id === swTabId; });
+      if (swTab) {
+        if (swTabId === activeTabId) {
+          clearOutput();
+          resetOutputState();
+          if (welcome) {
+            welcome.style.display = '';
+            O.appendChild(welcome);
+          }
+        } else {
+          swTab.outputFragment = null;
+          swTab.welcomeVisible = true;
+        }
+      }
+      break;
+    }
     case 'followup_suggestion': {
       if (ev.tabId !== undefined && ev.tabId !== activeTabId) break;
       var fu = mkEl('div', 'followup-bar');
@@ -1232,12 +1249,9 @@
     }
     case 'tasks_updated':
       refreshHistory();
-      vscode.postMessage({ type: 'getWelcomeSuggestions' });
       vscode.postMessage({ type: 'getInputHistory' });
       break;
-    case 'welcome_suggestions':
-      renderWelcomeSuggestions(ev.suggestions || []);
-      break;
+
     case 'task_events': {
       var teTabId = ev.tabId || activeTabId;
       var teTab = tabs.find(function(t) { return t.id === teTabId; });
@@ -1512,25 +1526,6 @@
     div.innerHTML = '<strong>Error:</strong> ' + esc(text);
     O.appendChild(div);
     sb();
-  }
-
-  // --- Welcome suggestions (dynamic) ---
-  function renderWelcomeSuggestions(suggestions) {
-    var container = document.getElementById('suggestions');
-    if (!container) return;
-    container.innerHTML = '';
-    if (!suggestions || suggestions.length === 0) return;
-    suggestions.forEach(function(s) {
-      var chip = document.createElement('div');
-      chip.className = 'suggestion-chip';
-      chip.dataset.prompt = s.text;
-      chip.innerHTML = '<span class="chip-label">Suggested</span>' + esc(s.text);
-      chip.addEventListener('click', function() {
-        inp.value = s.text; syncClearBtn();
-        inp.focus();
-      });
-      container.appendChild(chip);
-    });
   }
 
   // --- Task replay ---
