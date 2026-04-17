@@ -8,7 +8,7 @@
 
 import * as vscode from 'vscode';
 import * as fs from 'fs';
-import { EventEmitter } from 'events';
+import {EventEmitter} from 'events';
 
 interface ProcessedHunk {
   /** Old-lines start (0-based, in the merged document) */
@@ -32,7 +32,7 @@ interface MergeFileData {
   name: string;
   base: string;
   current: string;
-  hunks: Array<{ bs: number; bc: number; cs: number; cc: number }>;
+  hunks: Array<{bs: number; bc: number; cs: number; cc: number}>;
 }
 
 interface MergeData {
@@ -42,7 +42,7 @@ interface MergeData {
 
 export class MergeManager extends EventEmitter {
   private _ms: Record<string, MergeFileState> = {};
-  private _curHunk: { fp: string; idx: number } | null = null;
+  private _curHunk: {fp: string; idx: number} | null = null;
   private _redDeco: vscode.TextEditorDecorationType;
   private _blueDeco: vscode.TextEditorDecorationType;
   private _disposables: vscode.Disposable[] = [];
@@ -70,13 +70,13 @@ export class MergeManager extends EventEmitter {
     });
     this._disposables.push(visibleSub);
 
-    const willSaveSub = vscode.workspace.onWillSaveTextDocument((e) => {
+    const willSaveSub = vscode.workspace.onWillSaveTextDocument(e => {
       this._onWillSave(e);
     });
     this._disposables.push(willSaveSub);
 
-    const didSaveSub = vscode.workspace.onDidSaveTextDocument((doc) => {
-      this._onDidSave(doc);
+    const didSaveSub = vscode.workspace.onDidSaveTextDocument(doc => {
+      void this._onDidSave(doc);
     });
     this._disposables.push(didSaveSub);
   }
@@ -122,7 +122,7 @@ export class MergeManager extends EventEmitter {
             h.oc = 0;
           }
         }
-      })()
+      })(),
     );
   }
 
@@ -141,7 +141,7 @@ export class MergeManager extends EventEmitter {
       if (old.length > 0) {
         const insertLine = h.os + offset;
         const txt = old.join('\n') + '\n';
-        await ed.edit((eb) => {
+        await ed.edit(eb => {
           eb.insert(new vscode.Position(insertLine, 0), txt);
         });
         h.os = insertLine;
@@ -177,49 +177,49 @@ export class MergeManager extends EventEmitter {
   private async _delLines(
     ed: vscode.TextEditor,
     start: number,
-    count: number
+    count: number,
   ): Promise<boolean> {
     if (count <= 0) return true;
     const end = start + count;
     const doc = ed.document;
     let ok: boolean;
     if (end < doc.lineCount) {
-      ok = await ed.edit((eb) => {
+      ok = await ed.edit(eb => {
         eb.delete(new vscode.Range(start, 0, end, 0));
       });
     } else if (start > 0) {
       const prevLine = doc.lineAt(start - 1);
       const lastLine = doc.lineAt(doc.lineCount - 1);
-      ok = await ed.edit((eb) => {
+      ok = await ed.edit(eb => {
         eb.delete(
           new vscode.Range(
             start - 1,
             prevLine.text.length,
             lastLine.range.end.line,
-            lastLine.text.length
-          )
+            lastLine.text.length,
+          ),
         );
       });
     } else {
       const lastLine = doc.lineAt(doc.lineCount - 1);
-      ok = await ed.edit((eb) => {
+      ok = await ed.edit(eb => {
         eb.replace(
           new vscode.Range(0, 0, lastLine.range.end.line, lastLine.text.length),
-          ''
+          '',
         );
       });
     }
     if (!ok) {
-      console.error(`[MergeManager] ed.edit failed in _delLines (start=${start}, count=${count})`);
+      console.error(
+        `[MergeManager] ed.edit failed in _delLines (start=${start}, count=${count})`,
+      );
     }
     return ok;
   }
 
-  private async _getOrOpenEditor(
-    fp: string
-  ): Promise<vscode.TextEditor> {
+  private async _getOrOpenEditor(fp: string): Promise<vscode.TextEditor> {
     const existing = vscode.window.visibleTextEditors.find(
-      (e) => e.document.uri.fsPath === fp
+      e => e.document.uri.fsPath === fp,
     );
     if (existing) return existing;
     const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(fp));
@@ -241,7 +241,7 @@ export class MergeManager extends EventEmitter {
   private async _delLinesWithRetry(
     ed: vscode.TextEditor,
     start: number,
-    count: number
+    count: number,
   ): Promise<boolean> {
     let ok = await this._delLines(ed, start, count);
     if (!ok) {
@@ -254,7 +254,7 @@ export class MergeManager extends EventEmitter {
     fp: string,
     idx: number,
     countProp: 'oc' | 'nc',
-    startProp: 'os' | 'ns'
+    startProp: 'os' | 'ns',
   ): Promise<void> {
     const s = this._ms[fp];
     if (!s) return;
@@ -263,7 +263,9 @@ export class MergeManager extends EventEmitter {
       const ed = await this._getOrOpenEditor(fp);
       const ok = await this._delLinesWithRetry(ed, h[startProp], h[countProp]);
       if (!ok) {
-        vscode.window.showWarningMessage('Failed to apply change. Please try again.');
+        vscode.window.showWarningMessage(
+          'Failed to apply change. Please try again.',
+        );
         return;
       }
       const rm = h[countProp];
@@ -302,12 +304,10 @@ export class MergeManager extends EventEmitter {
     fp: string | undefined,
     idx: number | undefined,
     countProp: 'oc' | 'nc',
-    startProp: 'os' | 'ns'
+    startProp: 'os' | 'ns',
   ): Promise<void> {
     return this._withHunkGuard(async () => {
-      const target = fp && idx !== undefined
-        ? { fp, idx }
-        : this._curHunk;
+      const target = fp && idx !== undefined ? {fp, idx} : this._curHunk;
       if (!target || !this._ms[target.fp]) return;
       await this._applyHunkAction(target.fp, target.idx, countProp, startProp);
     });
@@ -318,19 +318,19 @@ export class MergeManager extends EventEmitter {
   }
 
   prevChange(): void {
-    this._navigateHunk(-1);
+    void this._navigateHunk(-1);
   }
 
   nextChange(): void {
-    this._navigateHunk(1);
+    void this._navigateHunk(1);
   }
 
   private async _navigateHunk(dir: number): Promise<void> {
     const seq = ++this._navSeq;
-    const allH: Array<{ fp: string; h: ProcessedHunk }> = [];
+    const allH: Array<{fp: string; h: ProcessedHunk}> = [];
     for (const fp of Object.keys(this._ms)) {
       for (const h of this._ms[fp].hunks) {
-        allH.push({ fp, h });
+        allH.push({fp, h});
       }
     }
     if (!allH.length) {
@@ -341,9 +341,10 @@ export class MergeManager extends EventEmitter {
     const ae = vscode.window.activeTextEditor;
     const cf = ae ? ae.document.uri.fsPath : '';
     const cl = ae ? ae.selection.active.line : dir < 0 ? 999999 : -1;
-    const cmp = dir < 0
-      ? (a: number, b: number) => a < b
-      : (a: number, b: number) => a > b;
+    const cmp =
+      dir < 0
+        ? (a: number, b: number) => a < b
+        : (a: number, b: number) => a > b;
     const start = dir < 0 ? allH.length - 1 : 0;
     const end = dir < 0 ? -1 : allH.length;
     const step = dir < 0 ? -1 : 1;
@@ -371,17 +372,19 @@ export class MergeManager extends EventEmitter {
       idx: this._ms[found.fp].hunks.indexOf(found.h),
     };
 
-    const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(found.fp));
-    if (this._navSeq !== seq) return;  // Superseded by newer navigation
+    const doc = await vscode.workspace.openTextDocument(
+      vscode.Uri.file(found.fp),
+    );
+    if (this._navSeq !== seq) return; // Superseded by newer navigation
     const ed = await vscode.window.showTextDocument(doc, {
       preview: false,
       viewColumn: vscode.ViewColumn.One,
     });
-    if (this._navSeq !== seq) return;  // Superseded by newer navigation
+    if (this._navSeq !== seq) return; // Superseded by newer navigation
     const ln = this._hunkLine(found.h);
     ed.revealRange(
       new vscode.Range(ln, 0, ln, 0),
-      vscode.TextEditorRevealType.InCenter
+      vscode.TextEditorRevealType.InCenter,
     );
     ed.selection = new vscode.Selection(ln, 0, ln, 0);
   }
@@ -389,16 +392,22 @@ export class MergeManager extends EventEmitter {
   private async _deleteFileHunks(
     fp: string,
     countProp: 'oc' | 'nc',
-    startProp: 'os' | 'ns'
+    startProp: 'os' | 'ns',
   ): Promise<void> {
     const s = this._ms[fp];
     if (!s) return;
     const ed = await this._getOrOpenEditor(fp);
     for (let i = s.hunks.length - 1; i >= 0; i--) {
       if (s.hunks[i][countProp] > 0) {
-        const ok = await this._delLinesWithRetry(ed, s.hunks[i][startProp], s.hunks[i][countProp]);
+        const ok = await this._delLinesWithRetry(
+          ed,
+          s.hunks[i][startProp],
+          s.hunks[i][countProp],
+        );
         if (!ok) {
-          console.error(`[MergeManager] Failed to delete hunk ${i} lines in ${fp}`);
+          console.error(
+            `[MergeManager] Failed to delete hunk ${i} lines in ${fp}`,
+          );
         }
       }
     }
@@ -407,7 +416,7 @@ export class MergeManager extends EventEmitter {
   private async _resolveAll(
     countProp: 'oc' | 'nc',
     startProp: 'os' | 'ns',
-    label: string
+    label: string,
   ): Promise<void> {
     const fps = Object.keys(this._ms);
     try {
@@ -429,7 +438,7 @@ export class MergeManager extends EventEmitter {
   private async _resolveFile(
     fp: string,
     countProp: 'oc' | 'nc',
-    startProp: 'os' | 'ns'
+    startProp: 'os' | 'ns',
   ): Promise<void> {
     await this._deleteFileHunks(fp, countProp, startProp);
     delete this._ms[fp];
@@ -452,11 +461,15 @@ export class MergeManager extends EventEmitter {
   }
 
   async acceptAll(): Promise<void> {
-    return this._withHunkGuard(() => this._resolveAll('oc', 'os', 'All changes accepted.'));
+    return this._withHunkGuard(() =>
+      this._resolveAll('oc', 'os', 'All changes accepted.'),
+    );
   }
 
   async rejectAll(): Promise<void> {
-    return this._withHunkGuard(() => this._resolveAll('nc', 'ns', 'All changes rejected.'));
+    return this._withHunkGuard(() =>
+      this._resolveAll('nc', 'ns', 'All changes rejected.'),
+    );
   }
 
   private _checkAllDone(): void {
@@ -470,7 +483,7 @@ export class MergeManager extends EventEmitter {
       () => {
         vscode.window.showInformationMessage('All changes reviewed.');
         this.emit('allDone');
-      }
+      },
     );
   }
 
@@ -498,7 +511,9 @@ export class MergeManager extends EventEmitter {
   private async _doOpenMerge(data: MergeData): Promise<void> {
     try {
       await vscode.workspace.saveAll(false);
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
 
     // Clear previous decorations
     for (const fp of Object.keys(this._ms)) {
@@ -526,11 +541,18 @@ export class MergeManager extends EventEmitter {
           const revertEdit = new vscode.WorkspaceEdit();
           revertEdit.replace(
             doc.uri,
-            new vscode.Range(0, 0, lastLine.range.end.line, lastLine.range.end.character),
+            new vscode.Range(
+              0,
+              0,
+              lastLine.range.end.line,
+              lastLine.range.end.character,
+            ),
             diskContent,
           );
           await vscode.workspace.applyEdit(revertEdit);
-        } catch { /* ignore */ }
+        } catch {
+          /* ignore */
+        }
       }
 
       if (!firstFileFp) {
@@ -540,10 +562,12 @@ export class MergeManager extends EventEmitter {
       let baseLines: string[] = [];
       try {
         baseLines = fs.readFileSync(f.base, 'utf8').split('\n');
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
 
       const hunks = (f.hunks || [])
-        .map((h) => ({ cs: h.cs, cc: h.cc, bs: h.bs, bc: h.bc }))
+        .map(h => ({cs: h.cs, cc: h.cc, bs: h.bs, bc: h.bc}))
         .sort((a, b) => a.cs - b.cs);
 
       // Batch all base-line insertions into a single WorkspaceEdit.
@@ -576,14 +600,14 @@ export class MergeManager extends EventEmitter {
         }
       }
 
-      this._ms[f.current] = { basePath: f.base, hunks: processed };
+      this._ms[f.current] = {basePath: f.base, hunks: processed};
     }
 
     // Show only the first changed file in the editor (viewColumn: One
     // avoids replacing the chat webview panel which lives in a later column)
     // and navigate to its first hunk.
     if (firstFileFp && this._ms[firstFileFp]?.hunks.length) {
-      this._curHunk = { fp: firstFileFp, idx: 0 };
+      this._curHunk = {fp: firstFileFp, idx: 0};
       const firstDoc = await vscode.workspace.openTextDocument(
         vscode.Uri.file(firstFileFp),
       );

@@ -7,11 +7,16 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
-import { AgentProcess } from './AgentProcess';
-import { MergeManager } from './MergeManager';
-import { getDefaultModel } from './DependencyInstaller';
-import { buildChatHtml } from './SorcarTab';
-import { FromWebviewMessage, ToWebviewMessage, Attachment, AgentCommand } from './types';
+import {AgentProcess} from './AgentProcess';
+import {MergeManager} from './MergeManager';
+import {getDefaultModel} from './DependencyInstaller';
+import {buildChatHtml} from './SorcarTab';
+import {
+  FromWebviewMessage,
+  ToWebviewMessage,
+  Attachment,
+  AgentCommand,
+} from './types';
 
 /**
  * WebviewViewProvider for the KISS Sorcar chat in the secondary sidebar.
@@ -32,12 +37,18 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
   private _mergeManager: MergeManager;
   private _mergeOwnerTabIdQueue: string[] = [];
-  private _onCommitMessage = new vscode.EventEmitter<{ message: string; error?: string }>();
+  private _onCommitMessage = new vscode.EventEmitter<{
+    message: string;
+    error?: string;
+  }>();
   public readonly onCommitMessage = this._onCommitMessage.event;
   private _commitPendingTabs: Set<string> = new Set();
   private _worktreeDirs: Map<string, string> = new Map();
   private _worktreeActionResolves: Map<string, () => void> = new Map();
-  private _worktreeProgresses: Map<string, vscode.Progress<{ message?: string }>> = new Map();
+  private _worktreeProgresses: Map<
+    string,
+    vscode.Progress<{message?: string}>
+  > = new Map();
   private _disposed: boolean = false;
 
   /** Resolve all pending worktree action promises and clear tracking maps. */
@@ -50,7 +61,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   constructor(extensionUri: vscode.Uri, mergeManager: MergeManager) {
     this._extensionUri = extensionUri;
     this._mergeManager = mergeManager;
-    this._selectedModel = vscode.workspace.getConfiguration('kissSorcar').get<string>('defaultModel') || getDefaultModel();
+    this._selectedModel =
+      vscode.workspace
+        .getConfiguration('kissSorcar')
+        .get<string>('defaultModel') || getDefaultModel();
     this._mergeManager.on('allDone', () => {
       const tabId = this._mergeOwnerTabIdQueue.shift();
       if (tabId !== undefined) {
@@ -129,7 +143,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         if (mergeTabId !== undefined) {
           this._mergeOwnerTabIdQueue.push(mergeTabId);
         }
-        this._mergeManager.openMerge((msg as any).data);
+        void this._mergeManager.openMerge((msg as any).data);
       }
       if (msg.type === 'worktree_created' || msg.type === 'worktree_done') {
         const dir = (msg as any).worktreeDir;
@@ -138,16 +152,17 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           if (wtTabId !== undefined) {
             this._worktreeDirs.set(wtTabId, dir);
           }
-          this._openWorktreeInScm(dir);
+          void this._openWorktreeInScm(dir);
         }
       }
       if (msg.type === 'worktree_progress') {
         const wpTabId = (msg as any).tabId as string | undefined;
-        const progress = wpTabId !== undefined
-          ? this._worktreeProgresses.get(wpTabId)
-          : this._worktreeProgresses.values().next().value;
+        const progress =
+          wpTabId !== undefined
+            ? this._worktreeProgresses.get(wpTabId)
+            : this._worktreeProgresses.values().next().value;
         if (progress) {
-          progress.report({ message: (msg as any).message });
+          progress.report({message: (msg as any).message});
         }
       }
       if (msg.type === 'worktree_result') {
@@ -165,14 +180,18 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         }
         const result = msg as any;
         if (result.success) {
-          vscode.window.showInformationMessage(result.message || 'Worktree action completed.');
+          vscode.window.showInformationMessage(
+            result.message || 'Worktree action completed.',
+          );
         } else {
-          vscode.window.showErrorMessage(result.message || 'Worktree action failed.');
+          vscode.window.showErrorMessage(
+            result.message || 'Worktree action failed.',
+          );
         }
         if (result.success && wrTabId !== undefined) {
           const wtDir = this._worktreeDirs.get(wrTabId);
           if (wtDir) {
-            this._closeWorktreeInScm(wtDir);
+            void this._closeWorktreeInScm(wtDir);
             this._worktreeDirs.delete(wrTabId);
           }
         }
@@ -187,7 +206,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           if (statusTabId !== undefined) this._runningTabs.delete(statusTabId);
           this._sendActiveFileInfo();
           if (this._commitPendingTabs.size > 0) {
-            this._onCommitMessage.fire({ message: '', error: 'Process stopped' });
+            this._onCommitMessage.fire({message: '', error: 'Process stopped'});
           }
         }
       }
@@ -213,17 +232,19 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     };
 
     webviewView.webview.html = buildChatHtml(
-      webviewView.webview, this._extensionUri, this._selectedModel,
+      webviewView.webview,
+      this._extensionUri,
+      this._selectedModel,
     );
 
-    webviewView.webview.onDidReceiveMessage(
-      (message: FromWebviewMessage) => this._handleMessage(message),
+    webviewView.webview.onDidReceiveMessage((message: FromWebviewMessage) =>
+      this._handleMessage(message),
     );
 
     webviewView.onDidChangeVisibility(() => {
       if (webviewView.visible) {
         const proc = this._getServiceProcess();
-        proc.sendCommand({ type: 'getInputHistory' });
+        proc.sendCommand({type: 'getInputHistory'});
         this._sendActiveFileInfo();
       }
     });
@@ -257,9 +278,15 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     const jsonPath = path.join(this._extensionUri.fsPath, 'SAMPLE_TASKS.json');
     try {
       const data = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
-      this._sendToWebview({ type: 'welcome_suggestions', suggestions: data } as ToWebviewMessage);
+      this._sendToWebview({
+        type: 'welcome_suggestions',
+        suggestions: data,
+      } as ToWebviewMessage);
     } catch {
-      this._sendToWebview({ type: 'welcome_suggestions', suggestions: [] } as ToWebviewMessage);
+      this._sendToWebview({
+        type: 'welcome_suggestions',
+        suggestions: [],
+      } as ToWebviewMessage);
     }
   }
 
@@ -304,21 +331,37 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
   private async _closeWorktreeInScm(worktreeDir: string): Promise<void> {
     try {
-      await vscode.commands.executeCommand('git.close', vscode.Uri.file(worktreeDir));
-    } catch { /* ignored */ }
+      await vscode.commands.executeCommand(
+        'git.close',
+        vscode.Uri.file(worktreeDir),
+      );
+    } catch {
+      /* ignored */
+    }
   }
 
-  private _startTask(prompt: string, model: string, activeFile?: string, attachments?: Attachment[], useWorktree?: boolean, useParallel?: boolean, tabId?: string, workDir?: string): void {
+  private _startTask(
+    prompt: string,
+    model: string,
+    activeFile?: string,
+    attachments?: Attachment[],
+    useWorktree?: boolean,
+    useParallel?: boolean,
+    tabId?: string,
+    workDir?: string,
+  ): void {
     const effectiveWorkDir = workDir || this._getWorkDir();
-    const proc = tabId ? this._createTaskProcess(tabId) : this._createTaskProcess(this._activeTabId || '__default__');
+    const proc = tabId
+      ? this._createTaskProcess(tabId)
+      : this._createTaskProcess(this._activeTabId || '__default__');
     const started = proc.start(effectiveWorkDir);
     if (!started) {
       if (tabId !== undefined) this._runningTabs.delete(tabId);
-      this._sendToWebview({ type: 'status', running: false, tabId } as any);
+      this._sendToWebview({type: 'status', running: false, tabId} as any);
       return;
     }
-    this._sendToWebview({ type: 'setTaskText', text: prompt, tabId } as any);
-    this._sendToWebview({ type: 'status', running: true, tabId } as any);
+    this._sendToWebview({type: 'setTaskText', text: prompt, tabId} as any);
+    this._sendToWebview({type: 'status', running: true, tabId} as any);
     proc.sendCommand({
       type: 'run',
       prompt,
@@ -338,18 +381,26 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         const readyTabId = (message as any).tabId as string | undefined;
         if (readyTabId) this._activeTabId = readyTabId;
         // Use the tab's task process if it exists, otherwise the service process
-        const readyProc = readyTabId ? this._getTabProcess(readyTabId) : this._getServiceProcess();
-        readyProc.sendCommand({ type: 'getModels' });
+        const readyProc = readyTabId
+          ? this._getTabProcess(readyTabId)
+          : this._getServiceProcess();
+        readyProc.sendCommand({type: 'getModels'});
         this._sendWelcomeSuggestions();
-        readyProc.sendCommand({ type: 'getInputHistory' });
+        readyProc.sendCommand({type: 'getInputHistory'});
         this._sendActiveFileInfo();
-        this._sendToWebview({ type: 'focusInput' } as ToWebviewMessage);
+        this._sendToWebview({type: 'focusInput'} as ToWebviewMessage);
         // Auto-reload events for restored tabs that had active sessions
-        const restoredTabs = (message as any).restoredTabs as Array<{ tabId: string; chatId: string }> | undefined;
+        const restoredTabs = (message as any).restoredTabs as
+          | Array<{tabId: string; chatId: string}>
+          | undefined;
         if (restoredTabs && restoredTabs.length > 0) {
           const svc = this._getServiceProcess();
           for (const rt of restoredTabs) {
-            svc.sendCommand({ type: 'resumeSession', chatId: rt.chatId, tabId: rt.tabId });
+            svc.sendCommand({
+              type: 'resumeSession',
+              chatId: rt.chatId,
+              tabId: rt.tabId,
+            });
           }
         }
         break;
@@ -396,7 +447,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         const stopTabId = (message as any).tabId as string | undefined;
         if (stopTabId !== undefined) {
           const stopProc = this._taskProcesses.get(stopTabId);
-          if (stopProc) stopProc.sendCommand({ type: 'stop', tabId: stopTabId });
+          if (stopProc) stopProc.sendCommand({type: 'stop', tabId: stopTabId});
         } else {
           // Stop all running task processes
           for (const proc of this._taskProcesses.values()) proc.stop();
@@ -408,44 +459,73 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         this._selectedModel = message.model;
         const selTabId = (message as any).tabId as string | undefined;
         // Persist model selection via service process
-        this._getServiceProcess().sendCommand({ type: 'selectModel', model: message.model, tabId: selTabId });
+        this._getServiceProcess().sendCommand({
+          type: 'selectModel',
+          model: message.model,
+          tabId: selTabId,
+        });
         break;
       }
 
       case 'getModels':
       case 'getInputHistory':
-        this._getServiceProcess().sendCommand({ type: message.type } as AgentCommand);
+        this._getServiceProcess().sendCommand({
+          type: message.type,
+        } as AgentCommand);
         break;
 
       case 'newChat': {
         const newChatTabId = (message as any).tabId as string | undefined;
-        const newChatProc = newChatTabId ? this._getTabProcess(newChatTabId) : this._getServiceProcess();
-        newChatProc.sendCommand({ type: 'newChat', tabId: newChatTabId });
+        const newChatProc = newChatTabId
+          ? this._getTabProcess(newChatTabId)
+          : this._getServiceProcess();
+        newChatProc.sendCommand({type: 'newChat', tabId: newChatTabId});
         break;
       }
 
       case 'getHistory':
-        this._getServiceProcess().sendCommand({ type: 'getHistory', query: message.query, offset: message.offset, generation: message.generation });
+        this._getServiceProcess().sendCommand({
+          type: 'getHistory',
+          query: message.query,
+          offset: message.offset,
+          generation: message.generation,
+        });
         break;
 
       case 'getFiles':
-        this._getServiceProcess().sendCommand({ type: 'getFiles', prefix: message.prefix });
+        this._getServiceProcess().sendCommand({
+          type: 'getFiles',
+          prefix: message.prefix,
+        });
         break;
 
       case 'userAnswer': {
         const ansTabId = message.tabId;
-        const ansProc = ansTabId ? this._taskProcesses.get(ansTabId) : undefined;
-        if (ansProc) ansProc.sendCommand({ type: 'userAnswer', answer: message.answer, tabId: ansTabId });
+        const ansProc = ansTabId
+          ? this._taskProcesses.get(ansTabId)
+          : undefined;
+        if (ansProc)
+          ansProc.sendCommand({
+            type: 'userAnswer',
+            answer: message.answer,
+            tabId: ansTabId,
+          });
         break;
       }
 
       case 'userActionDone':
-        this._getServiceProcess().sendCommand({ type: 'userAnswer', answer: 'done' });
+        this._getServiceProcess().sendCommand({
+          type: 'userAnswer',
+          answer: 'done',
+        });
         break;
 
       case 'recordFileUsage':
         if (message.path) {
-          this._getServiceProcess().sendCommand({ type: 'recordFileUsage', path: message.path });
+          this._getServiceProcess().sendCommand({
+            type: 'recordFileUsage',
+            path: message.path,
+          });
         }
         break;
 
@@ -462,7 +542,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
             if (message.line !== undefined && message.line > 0) {
               const pos = new vscode.Position(message.line - 1, 0);
               editor.selection = new vscode.Selection(pos, pos);
-              editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+              editor.revealRange(
+                new vscode.Range(pos, pos),
+                vscode.TextEditorRevealType.InCenter,
+              );
             }
           }
         }
@@ -470,15 +553,28 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
       case 'resumeSession': {
         const resumeTabId = (message as any).tabId as string | undefined;
-        const resumeProc = resumeTabId ? this._getTabProcess(resumeTabId) : this._getServiceProcess();
-        resumeProc.sendCommand({ type: 'resumeSession', chatId: message.id, tabId: resumeTabId });
+        const resumeProc = resumeTabId
+          ? this._getTabProcess(resumeTabId)
+          : this._getServiceProcess();
+        resumeProc.sendCommand({
+          type: 'resumeSession',
+          chatId: message.id,
+          tabId: resumeTabId,
+        });
         break;
       }
 
       case 'getAdjacentTask': {
         const adjTabId = (message as any).tabId as string | undefined;
-        const adjProc = adjTabId ? this._getTabProcess(adjTabId) : this._getServiceProcess();
-        adjProc.sendCommand({ type: 'getAdjacentTask', tabId: adjTabId, task: (message as any).task, direction: (message as any).direction });
+        const adjProc = adjTabId
+          ? this._getTabProcess(adjTabId)
+          : this._getServiceProcess();
+        adjProc.sendCommand({
+          type: 'getAdjacentTask',
+          tabId: adjTabId,
+          task: (message as any).task,
+          direction: (message as any).direction,
+        });
         break;
       }
 
@@ -489,7 +585,9 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       case 'complete': {
         const editorFile = this._getVisibleEditorFile();
         const completeDoc = editorFile
-          ? vscode.workspace.textDocuments.find(d => d.uri.fsPath === editorFile)
+          ? vscode.workspace.textDocuments.find(
+              d => d.uri.fsPath === editorFile,
+            )
           : undefined;
         this._getServiceProcess().sendCommand({
           type: 'complete',
@@ -502,10 +600,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
       case 'mergeAction': {
         const mergeDispatch: Record<string, () => void> = {
-          'accept': () => this._mergeManager.acceptChange(),
-          'reject': () => this._mergeManager.rejectChange(),
-          'prev': () => this._mergeManager.prevChange(),
-          'next': () => this._mergeManager.nextChange(),
+          accept: () => this._mergeManager.acceptChange(),
+          reject: () => this._mergeManager.rejectChange(),
+          prev: () => this._mergeManager.prevChange(),
+          next: () => this._mergeManager.nextChange(),
           'accept-all': () => this._mergeManager.acceptAll(),
           'reject-all': () => this._mergeManager.rejectAll(),
           'accept-file': () => this._mergeManager.acceptFile(),
@@ -521,7 +619,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       }
 
       case 'generateCommitMessage':
-        this.generateCommitMessage();
+        void this.generateCommitMessage();
         break;
 
       case 'runPrompt': {
@@ -529,37 +627,54 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         if (this._runningTabs.size > 0) return;
         const promptPath = this._getVisibleEditorFile();
         if (!promptPath || !promptPath.toLowerCase().endsWith('.md')) return;
-        const promptDoc = vscode.workspace.textDocuments.find(d => d.uri.fsPath === promptPath);
+        const promptDoc = vscode.workspace.textDocuments.find(
+          d => d.uri.fsPath === promptPath,
+        );
         if (!promptDoc) return;
         const content = promptDoc.getText();
         if (!content.trim()) return;
-        this._startTask(content, this._selectedModel, promptPath, undefined, undefined, undefined, this._activeTabId || undefined);
+        this._startTask(
+          content,
+          this._selectedModel,
+          promptPath,
+          undefined,
+          undefined,
+          undefined,
+          this._activeTabId || undefined,
+        );
         break;
       }
 
       case 'worktreeAction': {
         const wtAction = (message as any).action;
         const wtTabId = (message as any).tabId as string | undefined;
-        const progressTitle = wtAction === 'merge'
-          ? 'Committing and merging worktree…'
-          : wtAction === 'discard'
-            ? 'Discarding worktree…'
-            : wtAction === 'do_nothing'
-              ? 'Finishing up…'
-              : 'Processing worktree action…';
+        const progressTitle =
+          wtAction === 'merge'
+            ? 'Committing and merging worktree…'
+            : wtAction === 'discard'
+              ? 'Discarding worktree…'
+              : wtAction === 'do_nothing'
+                ? 'Finishing up…'
+                : 'Processing worktree action…';
         const worktreeTimeout = 120_000;
         vscode.window.withProgress(
-          { location: vscode.ProgressLocation.Notification, title: progressTitle },
-          (progress) => {
+          {
+            location: vscode.ProgressLocation.Notification,
+            title: progressTitle,
+          },
+          progress => {
             if (wtTabId !== undefined) {
               this._worktreeProgresses.set(wtTabId, progress);
             }
-            return new Promise<void>((resolve) => {
+            return new Promise<void>(resolve => {
               if (wtTabId !== undefined) {
                 this._worktreeActionResolves.set(wtTabId, resolve);
               }
               setTimeout(() => {
-                if (wtTabId !== undefined && this._worktreeActionResolves.get(wtTabId) === resolve) {
+                if (
+                  wtTabId !== undefined &&
+                  this._worktreeActionResolves.get(wtTabId) === resolve
+                ) {
                   this._worktreeActionResolves.delete(wtTabId);
                   resolve();
                 }
@@ -567,7 +682,9 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
             });
           },
         );
-        const wtProc = wtTabId ? this._getTabProcess(wtTabId) : this._getServiceProcess();
+        const wtProc = wtTabId
+          ? this._getTabProcess(wtTabId)
+          : this._getServiceProcess();
         wtProc.sendCommand({
           type: 'worktreeAction',
           action: wtAction,
@@ -578,20 +695,24 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
       case 'resolveDroppedPaths': {
         const workDir = this._getWorkDir();
-        const paths = (message.uris || []).map((uri: string) => {
-          try {
-            const absPath = vscode.Uri.parse(uri).fsPath;
-            return path.relative(workDir, absPath);
-          } catch {
-            return '';
-          }
-        }).filter((p: string) => p && !p.startsWith('..'));
-        this._sendToWebview({ type: 'droppedPaths', paths } as ToWebviewMessage);
+        const paths = (message.uris || [])
+          .map((uri: string) => {
+            try {
+              const absPath = vscode.Uri.parse(uri).fsPath;
+              return path.relative(workDir, absPath);
+            } catch {
+              return '';
+            }
+          })
+          .filter((p: string) => p && !p.startsWith('..'));
+        this._sendToWebview({type: 'droppedPaths', paths} as ToWebviewMessage);
         break;
       }
 
       case 'focusEditor':
-        vscode.commands.executeCommand('workbench.action.focusFirstEditorGroup');
+        vscode.commands.executeCommand(
+          'workbench.action.focusFirstEditorGroup',
+        );
         break;
 
       case 'closeSecondaryBar':
@@ -603,7 +724,11 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   /** Notify the agent that all merge changes have been reviewed. */
   public sendMergeAllDone(tabId?: string): void {
     const proc = tabId ? this._taskProcesses.get(tabId) : undefined;
-    (proc || this._getServiceProcess()).sendCommand({ type: 'mergeAction', action: 'all-done', tabId });
+    (proc || this._getServiceProcess()).sendCommand({
+      type: 'mergeAction',
+      action: 'all-done',
+      tabId,
+    });
   }
 
   /** Submit a task programmatically (e.g. from runSelection command). */
@@ -618,20 +743,22 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
   /** Stop the currently running task in the active tab. */
   public stopTask(): void {
-    this._sendToWebview({ type: 'triggerStop' } as ToWebviewMessage);
+    this._sendToWebview({type: 'triggerStop'} as ToWebviewMessage);
   }
 
   /** Focus the chat input in the sidebar. */
   public async focusChatInput(): Promise<void> {
     if (!this._view) {
       // Webview not yet resolved — trigger resolution by focusing the view
-      await vscode.commands.executeCommand('kissSorcar.chatViewSecondary.focus');
+      await vscode.commands.executeCommand(
+        'kissSorcar.chatViewSecondary.focus',
+      );
       await new Promise(r => setTimeout(r, 200));
     }
     if (this._view) {
       this._view.show(true);
       await new Promise(r => setTimeout(r, 150));
-      this._sendToWebview({ type: 'focusInput' });
+      this._sendToWebview({type: 'focusInput'});
     }
   }
 
@@ -640,18 +767,18 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     if (this._view) {
       this._view.show(true);
       await new Promise(r => setTimeout(r, 150));
-      this._sendToWebview({ type: 'appendToInput', text });
+      this._sendToWebview({type: 'appendToInput', text});
     }
   }
 
   /** Start a new conversation in a new tab (without affecting running tabs). */
   public newConversation(): void {
-    this._sendToWebview({ type: 'clearChat' });
+    this._sendToWebview({type: 'clearChat'});
   }
 
   /** Ensure at least one chat tab exists; creates one only if there are none. */
   public ensureChat(): void {
-    this._sendToWebview({ type: 'ensureChat' });
+    this._sendToWebview({type: 'ensureChat'});
   }
 
   /**
@@ -661,14 +788,20 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
    * @param tabId Optional tab ID — each tab can independently request a
    *              commit message without blocking other tabs.
    */
-  public generateCommitMessage(token?: vscode.CancellationToken, tabId: string = ''): Promise<void> {
+  public generateCommitMessage(
+    token?: vscode.CancellationToken,
+    tabId: string = '',
+  ): Promise<void> {
     if (this._commitPendingTabs.has(tabId)) return Promise.resolve();
     this._commitPendingTabs.add(tabId);
     const proc = this._getServiceProcess();
     proc.start(this._getWorkDir());
-    proc.sendCommand({ type: 'generateCommitMessage', model: this._selectedModel });
+    proc.sendCommand({
+      type: 'generateCommitMessage',
+      model: this._selectedModel,
+    });
 
-    return new Promise<void>((resolve) => {
+    return new Promise<void>(resolve => {
       let resolved = false;
       const done = () => {
         if (resolved) return;

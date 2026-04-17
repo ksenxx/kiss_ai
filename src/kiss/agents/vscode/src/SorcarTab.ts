@@ -6,7 +6,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
-import { findKissProject } from './AgentProcess';
+import {findKissProject} from './AgentProcess';
 
 /** Read the KISS project version from ``_version.py`` on disk. */
 export function getVersion(): string {
@@ -18,14 +18,17 @@ export function getVersion(): string {
       const match = content.match(/__version__\s*=\s*["']([^"']+)["']/);
       if (match) return match[1];
     }
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
   return '';
 }
 
 /** Generate a random nonce string for Content Security Policy. */
 export function getNonce(): string {
   let text = '';
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  const chars =
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
   for (let i = 0; i < 32; i++) {
     text += chars.charAt(Math.floor(Math.random() * chars.length));
   }
@@ -36,23 +39,27 @@ export function getNonce(): string {
  * Build the full chat HTML for a Sorcar webview.
  * Used by the sidebar view (SorcarSidebarView).
  */
-export function buildChatHtml(webview: vscode.Webview, extensionUri: vscode.Uri, selectedModel: string): string {
+export function buildChatHtml(
+  webview: vscode.Webview,
+  extensionUri: vscode.Uri,
+  selectedModel: string,
+): string {
   const nonce = getNonce();
 
   const styleUri = webview.asWebviewUri(
-    vscode.Uri.joinPath(extensionUri, 'media', 'main.css')
+    vscode.Uri.joinPath(extensionUri, 'media', 'main.css'),
   );
   const hljsCssUri = webview.asWebviewUri(
-    vscode.Uri.joinPath(extensionUri, 'media', 'highlight-github-dark.min.css')
+    vscode.Uri.joinPath(extensionUri, 'media', 'highlight-github-dark.min.css'),
   );
   const hljsUri = webview.asWebviewUri(
-    vscode.Uri.joinPath(extensionUri, 'media', 'highlight.min.js')
+    vscode.Uri.joinPath(extensionUri, 'media', 'highlight.min.js'),
   );
   const markedUri = webview.asWebviewUri(
-    vscode.Uri.joinPath(extensionUri, 'media', 'marked.min.js')
+    vscode.Uri.joinPath(extensionUri, 'media', 'marked.min.js'),
   );
   const scriptUri = webview.asWebviewUri(
-    vscode.Uri.joinPath(extensionUri, 'media', 'main.js')
+    vscode.Uri.joinPath(extensionUri, 'media', 'main.js'),
   );
 
   return `<!DOCTYPE html>

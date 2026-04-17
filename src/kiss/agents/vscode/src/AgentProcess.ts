@@ -6,9 +6,9 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import { ChildProcess, spawn, execSync } from 'child_process';
-import { EventEmitter } from 'events';
-import { AgentCommand, ToWebviewMessage } from './types';
+import {ChildProcess, spawn, execSync} from 'child_process';
+import {EventEmitter} from 'events';
+import {AgentCommand, ToWebviewMessage} from './types';
 
 // ---------------------------------------------------------------------------
 // Module-level utility functions (shared with DependencyInstaller)
@@ -52,7 +52,9 @@ export function findKissProject(): string | null {
   if (isValidKissProject(embeddedPath)) return embeddedPath;
 
   // 1. Check configuration setting
-  const configPath = vscode.workspace.getConfiguration('kissSorcar').get<string>('kissProjectPath');
+  const configPath = vscode.workspace
+    .getConfiguration('kissSorcar')
+    .get<string>('kissProjectPath');
   if (configPath && isValidKissProject(configPath)) return configPath;
 
   // 2. Search up from workspace folders
@@ -108,7 +110,9 @@ export function findUvPath(): string | null {
   }
   // Check if uv is on PATH
   try {
-    execSync(process.platform === 'win32' ? 'where uv' : 'which uv', { stdio: 'ignore' });
+    execSync(process.platform === 'win32' ? 'where uv' : 'which uv', {
+      stdio: 'ignore',
+    });
     return 'uv';
   } catch {
     return null;
@@ -150,7 +154,7 @@ export class AgentProcess extends EventEmitter {
     if (!this.kissProjectPath) {
       this.emit('message', {
         type: 'error',
-        text: 'Could not find KISS project. Please set kissSorcar.kissProjectPath in settings.'
+        text: 'Could not find KISS project. Please set kissSorcar.kissProjectPath in settings.',
       } as ToWebviewMessage);
       return false;
     }
@@ -180,25 +184,30 @@ export class AgentProcess extends EventEmitter {
         console.error('[AgentProcess stderr]', text);
       });
 
-      this.process.on('close', (code) => {
+      this.process.on('close', code => {
         console.log(`[AgentProcess] Process exited with code ${code}`);
         // RC11 fix: flush any remaining buffer content
         if (this.buffer.trim()) {
           try {
             const event = JSON.parse(this.buffer) as ToWebviewMessage;
             this.emit('message', event);
-          } catch { /* not valid JSON — discard */ }
+          } catch {
+            /* not valid JSON — discard */
+          }
         }
         this.buffer = '';
         this.process = null;
-        this.emit('message', { type: 'status', running: false } as ToWebviewMessage);
+        this.emit('message', {
+          type: 'status',
+          running: false,
+        } as ToWebviewMessage);
       });
 
-      this.process.on('error', (err) => {
+      this.process.on('error', err => {
         console.error('[AgentProcess error]', err);
         this.emit('message', {
           type: 'error',
-          text: `Failed to start agent: ${err.message}`
+          text: `Failed to start agent: ${err.message}`,
         } as ToWebviewMessage);
         this.process = null;
       });
@@ -238,7 +247,7 @@ export class AgentProcess extends EventEmitter {
     if (!this.process?.stdin?.writable) {
       this.emit('message', {
         type: 'error',
-        text: 'Agent process not running'
+        text: 'Agent process not running',
       } as ToWebviewMessage);
       return;
     }
@@ -249,7 +258,7 @@ export class AgentProcess extends EventEmitter {
     } catch {
       this.emit('message', {
         type: 'error',
-        text: 'Failed to send command to agent'
+        text: 'Failed to send command to agent',
       } as ToWebviewMessage);
     }
   }
@@ -258,7 +267,7 @@ export class AgentProcess extends EventEmitter {
    * Stop the current task.
    */
   stop(): void {
-    this.sendCommand({ type: 'stop' });
+    this.sendCommand({type: 'stop'});
   }
 
   /**
@@ -275,16 +284,32 @@ export class AgentProcess extends EventEmitter {
       this.process = null;
       this.removeAllListeners();
       // Close stdin to unblock the Python server's main loop
-      try { proc.stdin?.end(); } catch { /* ignored */ }
+      try {
+        proc.stdin?.end();
+      } catch {
+        /* ignored */
+      }
       if (process.platform === 'win32') {
         // On Windows, SIGTERM/SIGKILL both map to TerminateProcess — one call suffices
-        try { proc.kill(); } catch { /* ignored */ }
+        try {
+          proc.kill();
+        } catch {
+          /* ignored */
+        }
       } else {
         // SIGTERM as backup
-        try { proc.kill('SIGTERM'); } catch { /* ignored */ }
+        try {
+          proc.kill('SIGTERM');
+        } catch {
+          /* ignored */
+        }
         // SIGKILL after 2s if the process is still alive
         setTimeout(() => {
-          try { proc.kill('SIGKILL'); } catch { /* ignored */ }
+          try {
+            proc.kill('SIGKILL');
+          } catch {
+            /* ignored */
+          }
         }, 2000);
       }
     } else {
