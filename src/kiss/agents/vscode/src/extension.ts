@@ -39,9 +39,9 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('kissSorcar.newConversation', () => {
-      sidebarView!.newConversation();
-      sidebarView!.focusChatInput();
+    vscode.commands.registerCommand('kissSorcar.newConversation', async () => {
+      await sidebarView!.focusChatInput();
+      sidebarView!.ensureChat();
     })
   );
 

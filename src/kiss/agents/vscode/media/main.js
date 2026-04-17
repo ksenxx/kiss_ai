@@ -1216,6 +1216,11 @@
     case 'clearChat':
       createNewTab();
       break;
+    case 'ensureChat':
+      if (tabs.length === 0) {
+        createNewTab();
+      }
+      break;
     case 'showWelcome': {
       var swTabId = ev.tabId || activeTabId;
       var swTab = tabs.find(function(t) { return t.id === swTabId; });

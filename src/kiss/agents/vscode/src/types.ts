@@ -61,6 +61,7 @@ export type ToWebviewMessage =
   // Lifecycle events
   | { type: 'clear'; chat_id?: number }
   | { type: 'clearChat' }
+  | { type: 'ensureChat' }
   | { type: 'task_done' }
   | { type: 'task_error'; text: string }
   | { type: 'task_stopped' }

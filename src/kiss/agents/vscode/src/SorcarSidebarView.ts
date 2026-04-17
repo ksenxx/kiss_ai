@@ -634,6 +634,11 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     this._sendToWebview({ type: 'clearChat' });
   }
 
+  /** Ensure at least one chat tab exists; creates one only if there are none. */
+  public ensureChat(): void {
+    this._sendToWebview({ type: 'ensureChat' });
+  }
+
   /**
    * Generate a commit message using this view's agent process.
    *
