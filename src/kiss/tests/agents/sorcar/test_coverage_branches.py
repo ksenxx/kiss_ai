@@ -258,8 +258,8 @@ class TestVSCodeServerBranches:
 
     def test_handle_command_resume_session(self):
         server, events = self._make_server()
-        server._handle_command({"type": "resumeSession", "sessionId": ""})
-        # Empty sessionId - no action
+        server._handle_command({"type": "resumeSession", "chatId": ""})
+        # Empty chatId - no action
 
     def test_ask_user_question(self):
         server, events = self._make_server()
@@ -306,51 +306,6 @@ class TestVSCodeServerBranches:
 
         model_events = [e for e in events if e["type"] == "models"]
         assert len(model_events) == 1
-
-    def test_get_last_session_empty_task(self, tmp_path):
-        """When last task has empty task text, no event emitted."""
-        saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-        kiss_dir = tmp_path / ".kiss"
-        kiss_dir.mkdir(parents=True, exist_ok=True)
-        th._KISS_DIR = kiss_dir
-        th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
-        try:
-            # Add empty task
-            th._add_task("")
-            server, events = self._make_server()
-            server._get_last_session()
-            task_events = [e for e in events if e.get("type") == "task_events"]
-            # Empty task should cause early return
-            assert len(task_events) == 0
-        finally:
-            if th._db_conn is not None:
-                th._db_conn.close()
-                th._db_conn = None
-            th._DB_PATH, th._db_conn, th._KISS_DIR = saved
-
-    def test_get_last_session_no_entries(self, tmp_path):
-        """When history is empty, no event emitted."""
-        saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-        kiss_dir = tmp_path / ".kiss"
-        kiss_dir.mkdir(parents=True, exist_ok=True)
-        th._KISS_DIR = kiss_dir
-        th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
-        try:
-            db = th._get_db()
-            # Delete all tasks including samples
-            db.execute("DELETE FROM task_history")
-            db.commit()
-            server, events = self._make_server()
-            server._get_last_session()
-            task_events = [e for e in events if e.get("type") == "task_events"]
-            assert len(task_events) == 0
-        finally:
-            if th._db_conn is not None:
-                th._db_conn.close()
-                th._db_conn = None
-            th._DB_PATH, th._db_conn, th._KISS_DIR = saved
 
     def test_emit_pending_worktree_with_branch(self, tmp_path):
         """_emit_pending_worktree emits worktree_done when branch exists."""

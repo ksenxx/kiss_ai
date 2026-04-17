@@ -12,7 +12,6 @@ Fixed Python races:
   RC6 — _generate_followup_async holds _state_lock across check + broadcast
   RC7 — worktree action Promise has timeout (TS-side, verified by inspection)
   RC8 — _user_answer_queue replaced with fresh Queue per task (no drain race)
-  RC12 — _get_last_session guarded against concurrent running task
   RC13 — status running:false broadcast inside _state_lock
   RC14 — _periodic_event_flush reads _last_task_id (lock removed — redundant)
 """
@@ -115,7 +114,7 @@ class TestRC2TaskThreadProtected(unittest.TestCase):
 
         try:
             # resumeSession should still proceed (per-tab isolation)
-            server._handle_command({"type": "resumeSession", "sessionId": "999999"})
+            server._handle_command({"type": "resumeSession", "chatId": "999999"})
         finally:
             stop.set()
             thread.join()
@@ -362,43 +361,6 @@ class TestRC11StdoutBufferFlushOnClose(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# RC12 — _get_last_session guarded against concurrent running task
-# ---------------------------------------------------------------------------
-
-
-class TestRC12GetLastSessionGuarded(unittest.TestCase):
-    """RC12 fix: _get_last_session guards against concurrent running task."""
-
-    def test_has_task_thread_check(self) -> None:
-        """Verify _get_last_session checks tab.task_thread."""
-        source = inspect.getsource(VSCodeServer._get_last_session)
-        assert "task_thread" in source
-        assert "_state_lock" in source
-
-    def test_blocked_when_running(self) -> None:
-        """Verify _get_last_session returns early when a task is running."""
-        server = VSCodeServer()
-        events: list[dict] = []
-        server.printer.broadcast = lambda e: events.append(e)  # type: ignore[assignment]
-
-        stop = threading.Event()
-        thread = threading.Thread(target=lambda: stop.wait(), daemon=True)
-        thread.start()
-        server._get_tab("0").task_thread = thread
-
-        try:
-            server._get_last_session()
-            # Should return early without broadcasting anything
-            task_events = [e for e in events if e.get("type") == "task_events"]
-            assert len(task_events) == 0, (
-                "_get_last_session should not replay when task is running"
-            )
-        finally:
-            stop.set()
-            thread.join()
-            server._get_tab("0").task_thread = None
-
-
 # ---------------------------------------------------------------------------
 # RC13 — status broadcast inside _state_lock
 # ---------------------------------------------------------------------------
@@ -477,7 +439,7 @@ class TestRaceConditionCatalog(unittest.TestCase):
             if m:
                 rc_numbers.add(int(m.group(1)))
 
-        expected = {1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14}
+        expected = {1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 13, 14}
         assert expected.issubset(rc_numbers), (
             f"Missing test classes for RCs: {expected - rc_numbers}"
         )

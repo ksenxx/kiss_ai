@@ -297,14 +297,12 @@ class VSCodeServer:
                     break
             q.put(cmd.get("answer", ""))
         elif cmd_type == "resumeSession":
-            raw_id = cmd.get("sessionId")
+            raw_id = cmd.get("chatId")
             chat_id = str(raw_id) if raw_id else ""
             if chat_id:
                 self._replay_session(chat_id, cmd.get("tabId", ""))
         elif cmd_type == "mergeAction":
             self._handle_merge_action(cmd.get("action", ""), cmd.get("tabId"))
-        elif cmd_type == "getLastSession":
-            self._get_last_session(cmd.get("tabId", ""))
         elif cmd_type == "newChat":
             self._new_chat(cmd.get("tabId", ""))
         elif cmd_type == "complete":
@@ -828,28 +826,6 @@ class VSCodeServer:
             "tabId": tab_id,
         })
         self._emit_pending_worktree(tab_id)
-
-    def _get_last_session(self, tab_id: str = "") -> None:
-        """Load the most recent task from history and replay its events.
-
-        Also restores any pending merge session from disk so that
-        merge-diff buttons reappear after a VS Code restart.
-
-        Args:
-            tab_id: The tab requesting the session.
-        """
-        # RC12 fix: guard against concurrent running task in the specific tab
-        with self._state_lock:
-            if tab_id:
-                tab = self._tab_states.get(tab_id)
-                if tab and tab.task_thread is not None and tab.task_thread.is_alive():
-                    return
-        entries = _load_history(limit=1)
-        if entries:
-            chat_id = str(entries[0].get("chat_id", "") or "")
-            if chat_id:
-                self._replay_session(chat_id, tab_id)
-        self._restore_pending_merge()
 
     def _restore_pending_merge(self) -> None:
         """Restore a pending merge session from disk if one exists.

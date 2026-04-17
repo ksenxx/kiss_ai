@@ -69,8 +69,8 @@
     var _id = genTabId();
     return {
       id: _id,
-      sessionId: _id,
       title: title || 'new chat',
+      backendChatId: '',
       isRunning: false,
       outputFragment: null,
       taskPanelHTML: '',
@@ -307,8 +307,6 @@
       stopTimer();
       removeSpinner();
     }
-    // No backend message needed: the DOM is restored from the saved fragment
-    // and each tab already has its own agent state keyed by tabId.
   }
 
   function closeTab(tabId) {
@@ -333,7 +331,6 @@
         stopTimer();
         removeSpinner();
       }
-      // No backend message needed: DOM restored from fragment, backend tab state persists.
     }
     renderTabBar();
     persistTabState();
@@ -450,14 +447,13 @@
     var serialized = tabs.map(function(t) {
       // Always use activeTabId for the active tab so the persisted
       // chatId stays in sync even when saveCurrentTab() hasn't run.
-      return { title: t.title, chatId: t.id, sessionId: t.sessionId };
+      return { title: t.title, chatId: t.id, backendChatId: t.backendChatId || '' };
     });
     var activeIdx = tabs.findIndex(function(t) { return t.id === activeTabId; });
     vscode.setState({ tabs: serialized, activeTabIndex: activeIdx, chatId: activeTabId });
   }
 
   // Initialize tabs — restore from saved state if available, else create one default tab
-  // (no _restoredActiveChatId needed; backend always uses getLastSession)
   (function() {
     var saved = vscode.getState();
     if (saved && saved.tabs && saved.tabs.length > 0) {
@@ -466,8 +462,7 @@
         var tab = makeTab(st.title);
         // Restore tab.id from persisted chatId (frontend tab identifier)
         if (st.chatId) tab.id = st.chatId;
-        if (st.sessionId) tab.sessionId = st.sessionId;
-        else tab.sessionId = tab.id;
+        if (st.backendChatId) tab.backendChatId = st.backendChatId;
         tabs.push(tab);
       });
       var idx = saved.activeTabIndex || 0;
@@ -1204,6 +1199,13 @@
       addError(ev.text);
       break;
     case 'clear': {
+      var clearTab = ev.tabId !== undefined
+        ? tabs.find(function(t) { return t.id === ev.tabId; })
+        : tabs.find(function(t) { return t.id === activeTabId; });
+      if (ev.chat_id && clearTab) {
+        clearTab.backendChatId = ev.chat_id;
+        persistTabState();
+      }
       var evTabId = ev.tabId;
       if (evTabId === undefined || evTabId === activeTabId) {
         clearOutput();
@@ -1238,11 +1240,47 @@
       break;
     case 'task_events': {
       var teTabId = ev.tabId || activeTabId;
-      if (ev.chat_id) {
-        var teTab = tabs.find(function(t) { return t.id === teTabId; });
-        if (teTab) teTab.sessionId = ev.chat_id;
+      var teTab = tabs.find(function(t) { return t.id === teTabId; });
+      if (ev.chat_id && teTab) {
+        teTab.backendChatId = ev.chat_id;
         persistTabState();
       }
+      // Non-active tab: render into a document fragment without touching the DOM
+      if (teTabId !== activeTabId && teTab) {
+        var taskTitle = (ev.task || '').trim();
+        if (taskTitle) {
+          teTab.title = taskTitle.length > 30 ? taskTitle.substring(0, 30) + '\u2026' : taskTitle;
+          teTab.taskPanelHTML = taskTitle;
+          teTab.taskPanelVisible = true;
+          renderTabBar();
+        }
+        if (ev.extra) {
+          try {
+            var bgExtra = JSON.parse(ev.extra);
+            if (bgExtra.model) teTab.selectedModel = bgExtra.model;
+            if (bgExtra.work_dir) teTab.workDir = bgExtra.work_dir;
+          } catch (e) { /* ignore */ }
+        }
+        var frag = document.createDocumentFragment();
+        replayEventsInto(frag, ev.events || [], {
+          onFollowupClick: function(text) { inp.value = text; syncClearBtn(); inp.focus(); }
+        });
+        teTab.outputFragment = frag;
+        teTab.welcomeVisible = false;
+        // Count steps from replayed events
+        var bgSteps = 0, bgPending = false, bgLastTool = '';
+        (ev.events || []).forEach(function(e) {
+          var t = e.type;
+          if (t === 'tool_call') { bgLastTool = e.name || ''; bgPending = false; }
+          if (t === 'tool_result' && bgLastTool !== 'finish') bgPending = true;
+          if (bgSteps === 0 && (t === 'thinking_start' || t === 'text_delta')) bgSteps = 1;
+          if (bgPending && (t === 'thinking_start' || t === 'text_delta')) { bgSteps++; bgPending = false; }
+          if (t === 'result' && e.step_count) bgSteps = e.step_count;
+        });
+        if (bgSteps > 0) teTab.statusStepsText = 'Steps: ' + bgSteps;
+        break;
+      }
+      // Active tab: render directly into the DOM
       if (ev.task) {
         currentTaskName = ev.task;
         resetAdjacentState();  // sets oldest/newest to currentTaskName
@@ -1693,7 +1731,11 @@
   function init() {
     setupEventListeners();
     renderTabBar();
-    vscode.postMessage({ type: 'ready', tabId: activeTabId });
+    // Include restored tabs with backend chat IDs so the extension can auto-reload their events
+    var restoredTabs = tabs
+      .filter(function(t) { return t.backendChatId; })
+      .map(function(t) { return { tabId: t.id, chatId: t.backendChatId }; });
+    vscode.postMessage({ type: 'ready', tabId: activeTabId, restoredTabs: restoredTabs });
   }
 
   function setupEventListeners() {
@@ -2101,18 +2143,11 @@
       div.style.backgroundColor = chatIdBgColor(String(s.id));
       div.style.color = '#1a1a1a';
       div.addEventListener('click', function() {
+        createNewTab();
         if (s.has_events && s.id) {
-          var sid = String(s.id);
-          var existingTab = tabs.find(function(t) { return t.sessionId === sid; });
-          if (existingTab) {
-            switchToTab(existingTab.id);
-          } else {
-            createNewTab();
-            setTaskText(s.preview || s.title || '');
-            vscode.postMessage({ type: 'resumeSession', id: s.id, tabId: activeTabId });
-          }
+          setTaskText(s.preview || s.title || '');
+          vscode.postMessage({ type: 'resumeSession', id: s.id, tabId: activeTabId });
         } else {
-          createNewTab();
           inp.value = s.preview || s.title || ''; syncClearBtn();
           inp.focus();
         }

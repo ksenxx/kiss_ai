@@ -482,37 +482,16 @@ class TestHistoryClickTabFocus(unittest.TestCase):
         end = self._js.index("\n  function ", idx + 1)
         return self._js[idx:end]
 
-    def test_tab_has_session_id_field(self) -> None:
-        """makeTab creates tabs with a sessionId field."""
-        assert "sessionId:" in self._js
-
-    def test_session_id_persisted(self) -> None:
-        """sessionId is included in persistTabState serialization."""
-        idx = self._js.index("function persistTabState()")
-        end = self._js.index("\n  }", idx) + 4
-        body = self._js[idx:end]
-        assert "sessionId" in body
-
-    def test_session_id_restored(self) -> None:
-        """sessionId is restored from saved state on init."""
-        assert "st.sessionId" in self._js
-
     def test_task_events_captures_chat_id(self) -> None:
-        """task_events handler stores ev.chat_id as tab sessionId."""
+        """task_events handler persists state when ev.chat_id is present."""
         idx = self._js.index("case 'task_events'")
         end = self._js.index("case 'adjacent_task_events'", idx)
         body = self._js[idx:end]
         assert "ev.chat_id" in body
-        assert "sessionId" in body
+        assert "persistTabState" in body
 
-    def test_history_click_checks_existing_tab(self) -> None:
-        """History item click checks for existing tab with matching sessionId."""
-        body = self._get_render_history_body()
-        assert "t.sessionId" in body
-        assert "switchToTab" in body
-
-    def test_history_click_creates_new_tab_if_no_match(self) -> None:
-        """History item click creates a new tab when no tab has the session."""
+    def test_history_click_creates_new_tab(self) -> None:
+        """History item click creates a new tab and loads the session."""
         body = self._get_render_history_body()
         assert "createNewTab()" in body
         assert "resumeSession" in body
@@ -637,27 +616,6 @@ class TestGhostOverlayPaddingAlignment(unittest.TestCase):
         assert len(parts) >= 2, (
             f"#task-input padding should be explicit for all sides, got: '{padding}'"
         )
-
-
-class TestGetLastSession(unittest.TestCase):
-    """Test _get_last_session loads the most recent task."""
-
-    def setUp(self) -> None:
-        self.server = VSCodeServer()
-        self.events: list[dict] = []
-
-        def capture_broadcast(event: dict) -> None:
-            self.events.append(event)
-
-        self.server.printer.broadcast = capture_broadcast  # type: ignore[assignment]
-        # Just verify no crash; may or may not emit depending on DB state
-
-    def test_command_routing(self) -> None:
-        """getLastSession command should be routed to _get_last_session."""
-        self.server._handle_command({"type": "getLastSession"})
-        # Should not produce an error event
-        errors = [e for e in self.events if e["type"] == "error"]
-        assert len(errors) == 0
 
 
 class TestCompleteFromActiveFile(unittest.TestCase):
@@ -3002,10 +2960,6 @@ class TestSorcarSidebarViewReadyHandler(unittest.TestCase):
     def test_requests_input_history(self) -> None:
         block = self._get_ready_block()
         assert "'getInputHistory'" in block
-
-    def test_requests_last_session(self) -> None:
-        block = self._get_ready_block()
-        assert "'getLastSession'" in block
 
     def test_sends_active_file_info(self) -> None:
         block = self._get_ready_block()

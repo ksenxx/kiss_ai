@@ -96,7 +96,7 @@ export type ToWebviewMessage =
 
 /** Command sent to Python backend */
 export interface AgentCommand {
-  type: 'run' | 'stop' | 'getModels' | 'selectModel' | 'getHistory' | 'getFiles' | 'userAnswer' | 'recordFileUsage' | 'resumeSession' | 'getLastSession' | 'complete' | 'mergeAction' | 'refreshFiles' | 'newChat' | 'generateCommitMessage' | 'getInputHistory' | 'worktreeAction' | 'getAdjacentTask';
+  type: 'run' | 'stop' | 'getModels' | 'selectModel' | 'getHistory' | 'getFiles' | 'userAnswer' | 'recordFileUsage' | 'resumeSession' | 'complete' | 'mergeAction' | 'refreshFiles' | 'newChat' | 'generateCommitMessage' | 'getInputHistory' | 'worktreeAction' | 'getAdjacentTask';
   prompt?: string;
   model?: string;
   workDir?: string;
@@ -108,7 +108,7 @@ export interface AgentCommand {
   prefix?: string;
   answer?: string;
   path?: string;
-  sessionId?: number;
+  chatId?: number | string;
   activeFileContent?: string;
   action?: 'merge' | 'discard' | 'do_nothing' | 'all-done';
   useWorktree?: boolean;

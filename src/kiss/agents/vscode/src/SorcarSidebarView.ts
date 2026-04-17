@@ -346,9 +346,16 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         readyProc.sendCommand({ type: 'getModels' });
         this._sendWelcomeSuggestions();
         readyProc.sendCommand({ type: 'getInputHistory' });
-        readyProc.sendCommand({ type: 'getLastSession', tabId: readyTabId });
         this._sendActiveFileInfo();
         this._sendToWebview({ type: 'focusInput' } as ToWebviewMessage);
+        // Auto-reload events for restored tabs that had active sessions
+        const restoredTabs = (message as any).restoredTabs as Array<{ tabId: string; chatId: string }> | undefined;
+        if (restoredTabs && restoredTabs.length > 0) {
+          const svc = this._getServiceProcess();
+          for (const rt of restoredTabs) {
+            svc.sendCommand({ type: 'resumeSession', chatId: rt.chatId, tabId: rt.tabId });
+          }
+        }
         break;
       }
 
@@ -468,7 +475,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       case 'resumeSession': {
         const resumeTabId = (message as any).tabId as string | undefined;
         const resumeProc = resumeTabId ? this._getTabProcess(resumeTabId) : this._getServiceProcess();
-        resumeProc.sendCommand({ type: 'resumeSession', sessionId: message.id, tabId: resumeTabId });
+        resumeProc.sendCommand({ type: 'resumeSession', chatId: message.id, tabId: resumeTabId });
         break;
       }
 

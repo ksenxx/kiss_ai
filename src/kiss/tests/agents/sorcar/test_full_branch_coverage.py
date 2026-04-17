@@ -96,7 +96,7 @@ class TestResumeSessionWithTask:
     """Cover resumeSession handler calling _replay_session (line 179)."""
 
     def test_resume_session_with_task(self) -> None:
-        """resumeSession with a non-empty sessionId calls _replay_session."""
+        """resumeSession with a non-empty chatId calls _replay_session."""
         server = VSCodeServer()
         events: list[dict[str, object]] = []
         orig = server.printer.broadcast
@@ -108,7 +108,7 @@ class TestResumeSessionWithTask:
         server.printer.broadcast = capture  # type: ignore[assignment]
         # Use a task that doesn't exist — silently returns (no error broadcast)
         server._handle_command(
-            {"type": "resumeSession", "sessionId": "999999"}
+            {"type": "resumeSession", "chatId": "999999"}
         )
         err = [e for e in events if e.get("type") == "error"]
         assert len(err) == 0
