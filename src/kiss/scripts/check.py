@@ -219,6 +219,8 @@ def main() -> int:
         if args.clean_only:
             return 0
 
+    project_root = Path(__file__).parent.parent.parent.parent
+
     # Find all markdown files for linting
     md_files = find_markdown_files()
 
@@ -235,6 +237,11 @@ def main() -> int:
 
     if args.full:
         checks.append((["uv", "run", "pyright", "src/"], "Type check (pyright)"))
+        # VS Code extension checks (npm must be available, node_modules installed)
+        vscode_dir = project_root / "src" / "kiss" / "agents" / "vscode"
+        if (vscode_dir / "node_modules").is_dir() and shutil.which("npm"):
+            cmd = ["npm", "--prefix", str(vscode_dir), "run", "check"]
+            checks.append((cmd, "VS Code extension check (typecheck + lint)"))
 
     # Add markdown lint check if there are markdown files
     if md_files:
