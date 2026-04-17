@@ -66,8 +66,10 @@
   var activeTabId = '';
 
   function makeTab(title) {
+    var _id = genTabId();
     return {
-      id: genTabId(),
+      id: _id,
+      sessionId: _id,
       title: title || 'new chat',
       isRunning: false,
       outputFragment: null,
@@ -448,7 +450,7 @@
     var serialized = tabs.map(function(t) {
       // Always use activeTabId for the active tab so the persisted
       // chatId stays in sync even when saveCurrentTab() hasn't run.
-      return { title: t.title, chatId: t.id };
+      return { title: t.title, chatId: t.id, sessionId: t.sessionId };
     });
     var activeIdx = tabs.findIndex(function(t) { return t.id === activeTabId; });
     vscode.setState({ tabs: serialized, activeTabIndex: activeIdx, chatId: activeTabId });
@@ -464,6 +466,8 @@
         var tab = makeTab(st.title);
         // Restore tab.id from persisted chatId (frontend tab identifier)
         if (st.chatId) tab.id = st.chatId;
+        if (st.sessionId) tab.sessionId = st.sessionId;
+        else tab.sessionId = tab.id;
         tabs.push(tab);
       });
       var idx = saved.activeTabIndex || 0;
@@ -1232,7 +1236,13 @@
     case 'welcome_suggestions':
       renderWelcomeSuggestions(ev.suggestions || []);
       break;
-    case 'task_events':
+    case 'task_events': {
+      var teTabId = ev.tabId || activeTabId;
+      if (ev.chat_id) {
+        var teTab = tabs.find(function(t) { return t.id === teTabId; });
+        if (teTab) teTab.sessionId = ev.chat_id;
+        persistTabState();
+      }
       if (ev.task) {
         currentTaskName = ev.task;
         resetAdjacentState();  // sets oldest/newest to currentTaskName
@@ -1265,6 +1275,7 @@
       }
       replayTaskEvents(ev.events || []);
       break;
+    }
     case 'adjacent_task_events':
       renderAdjacentTask(ev.direction, ev.task, ev.events || []);
       break;
@@ -2091,9 +2102,17 @@
       div.style.color = '#1a1a1a';
       div.addEventListener('click', function() {
         if (s.has_events && s.id) {
-          setTaskText(s.preview || s.title || '');
-          vscode.postMessage({ type: 'resumeSession', id: s.id, tabId: activeTabId });
+          var sid = String(s.id);
+          var existingTab = tabs.find(function(t) { return t.sessionId === sid; });
+          if (existingTab) {
+            switchToTab(existingTab.id);
+          } else {
+            createNewTab();
+            setTaskText(s.preview || s.title || '');
+            vscode.postMessage({ type: 'resumeSession', id: s.id, tabId: activeTabId });
+          }
         } else {
+          createNewTab();
           inp.value = s.preview || s.title || ''; syncClearBtn();
           inp.focus();
         }

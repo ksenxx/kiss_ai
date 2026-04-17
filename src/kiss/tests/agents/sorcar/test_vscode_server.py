@@ -348,14 +348,14 @@ class TestMainJsInfiniteScroll(unittest.TestCase):
 
     def test_chat_id_bg_uses_hsl(self) -> None:
         assert "hsl(" in self.js
-        assert "45%" in self.js
-        assert "20%" in self.js
+        assert "55%" in self.js
+        assert "75%" in self.js
 
-    def test_chat_id_bg_colors_are_dark(self) -> None:
-        """Verify the chatIdBgColor function produces dark colors for all chat_ids.
+    def test_chat_id_bg_colors_are_light(self) -> None:
+        """Verify the chatIdBgColor function produces light pastel colors.
 
         Reimplements the JS djb2 hash + HSL logic in Python and checks that
-        the maximum RGB channel is <= 80 (i.e., clearly dark) for
+        the minimum RGB channel is >= 140 (i.e., clearly light) for
         a wide range of chat_id strings.
         """
         import colorsys
@@ -367,8 +367,8 @@ class TestMainJsInfiniteScroll(unittest.TestCase):
                 h = ((h << 5) + h) + ord(ch)
                 h = ctypes.c_int32(h).value  # JS |= 0
             hue = abs(h) % 360
-            # HSL(hue, 45%, 20%) -> RGB
-            r, g, b = colorsys.hls_to_rgb(hue / 360.0, 0.20, 0.45)
+            # HSL(hue, 55%, 75%) -> RGB
+            r, g, b = colorsys.hls_to_rgb(hue / 360.0, 0.75, 0.55)
             return (round(r * 255), round(g * 255), round(b * 255))
 
         test_ids = [
@@ -378,8 +378,8 @@ class TestMainJsInfiniteScroll(unittest.TestCase):
         ]
         for cid in test_ids:
             r, g, b = chat_id_bg_rgb(cid)
-            assert max(r, g, b) <= 80, (
-                f"chat_id={cid!r} produced light color rgb({r},{g},{b})"
+            assert min(r, g, b) >= 140, (
+                f"chat_id={cid!r} produced dark color rgb({r},{g},{b})"
             )
 
     def test_sidebar_escape_closes(self) -> None:
@@ -465,6 +465,57 @@ class TestHistoryPanelSearchOnOpen(unittest.TestCase):
         assert len(events) == 1
         assert events[0]["type"] == "history"
         assert isinstance(events[0]["sessions"], list)
+
+
+class TestHistoryClickTabFocus(unittest.TestCase):
+    """Test that clicking a history item focuses an existing tab or creates a new one."""
+
+    _js: str = ""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
+        cls._js = (base / "vscode" / "media" / "main.js").read_text()
+
+    def _get_render_history_body(self) -> str:
+        idx = self._js.index("function renderHistory(")
+        end = self._js.index("\n  function ", idx + 1)
+        return self._js[idx:end]
+
+    def test_tab_has_session_id_field(self) -> None:
+        """makeTab creates tabs with a sessionId field."""
+        assert "sessionId:" in self._js
+
+    def test_session_id_persisted(self) -> None:
+        """sessionId is included in persistTabState serialization."""
+        idx = self._js.index("function persistTabState()")
+        end = self._js.index("\n  }", idx) + 4
+        body = self._js[idx:end]
+        assert "sessionId" in body
+
+    def test_session_id_restored(self) -> None:
+        """sessionId is restored from saved state on init."""
+        assert "st.sessionId" in self._js
+
+    def test_task_events_captures_chat_id(self) -> None:
+        """task_events handler stores ev.chat_id as tab sessionId."""
+        idx = self._js.index("case 'task_events'")
+        end = self._js.index("case 'adjacent_task_events'", idx)
+        body = self._js[idx:end]
+        assert "ev.chat_id" in body
+        assert "sessionId" in body
+
+    def test_history_click_checks_existing_tab(self) -> None:
+        """History item click checks for existing tab with matching sessionId."""
+        body = self._get_render_history_body()
+        assert "t.sessionId" in body
+        assert "switchToTab" in body
+
+    def test_history_click_creates_new_tab_if_no_match(self) -> None:
+        """History item click creates a new tab when no tab has the session."""
+        body = self._get_render_history_body()
+        assert "createNewTab()" in body
+        assert "resumeSession" in body
 
 
 class TestMainCssInfiniteScroll(unittest.TestCase):
