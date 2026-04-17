@@ -207,20 +207,6 @@ body {
 }
 #welcome h2 { font-size: var(--fs-2xl); font-weight: 600; color: var(--fg); margin-bottom: 3px; letter-spacing: -0.3px; }
 #welcome p { font-size: var(--fs-base); color: var(--dim); margin-bottom: 14px; }
-#suggestions { display: grid; grid-template-columns: 1fr; gap: 5px; width: 100%; }
-.suggestion-chip {
-  background: color-mix(in srgb, var(--fg) 3%, transparent); border: 1px solid color-mix(in srgb, var(--fg) 8%, transparent);
-  border-radius: 8px; padding: 7px 11px; cursor: pointer; text-align: left;
-  font-size: var(--fs-base); color: color-mix(in srgb, var(--fg) 79%, transparent); line-height: 1.35; transition: all 0.15s;
-}
-.suggestion-chip:hover {
-  background: color-mix(in srgb, var(--fg) 6%, transparent); border-color: color-mix(in srgb, var(--fg) 15%, transparent); color: var(--fg);
-}
-.chip-label {
-  display: block; font-size: var(--fs-sm); font-weight: 600; text-transform: uppercase;
-  letter-spacing: 0.04em; color: var(--accent); margin-bottom: 2px; opacity: 0.8;
-}
-
 /* ── Event items (from OUTPUT_CSS) ──────────────────── */
 .ev { margin-bottom: 6px; animation: fadeIn .15s ease; }
 @keyframes fadeIn { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }

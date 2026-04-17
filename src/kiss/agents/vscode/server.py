@@ -793,6 +793,8 @@ class VSCodeServer:
 
         Resets the agent's ``chat_id`` to ``""`` so the next task starts
         a fresh session.  The tab_id (frontend key) does not change.
+        Broadcasts a ``showWelcome`` event so the frontend displays the
+        welcome messages in the tab.
 
         Args:
             tab_id: The frontend tab identifier.
@@ -800,6 +802,7 @@ class VSCodeServer:
         tab = self._get_tab(tab_id)
         tab.stateful_agent.new_chat()
         tab.worktree_agent._chat_id = ""
+        self.printer.broadcast({"type": "showWelcome", "tabId": tab_id})
 
     def _replay_session(self, chat_id: str, tab_id: str = "") -> None:
         """Replay recorded chat events for a previous chat session.

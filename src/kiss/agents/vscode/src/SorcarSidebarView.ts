@@ -253,16 +253,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     }
   }
 
-  private _sendWelcomeSuggestions(): void {
-    const jsonPath = path.join(this._extensionUri.fsPath, 'SAMPLE_TASKS.json');
-    try {
-      const data = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
-      this._sendToWebview({ type: 'welcome_suggestions', suggestions: data } as ToWebviewMessage);
-    } catch {
-      this._sendToWebview({ type: 'welcome_suggestions', suggestions: [] } as ToWebviewMessage);
-    }
-  }
-
   private _getVisibleEditorFile(): string {
     const activeEditor = vscode.window.activeTextEditor;
     if (activeEditor) {
@@ -339,12 +329,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         if (readyTabId) this._activeTabId = readyTabId;
         // Use the tab's task process if it exists, otherwise the service process
         const readyProc = readyTabId ? this._getTabProcess(readyTabId) : this._getServiceProcess();
-        // Send running state for each tab that has a running task
-        for (const runTabId of this._runningTabs) {
-          this._sendToWebview({ type: 'status', running: true, tabId: runTabId } as any);
-        }
         readyProc.sendCommand({ type: 'getModels' });
-        this._sendWelcomeSuggestions();
         readyProc.sendCommand({ type: 'getInputHistory' });
         this._sendActiveFileInfo();
         this._sendToWebview({ type: 'focusInput' } as ToWebviewMessage);
@@ -485,10 +470,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         adjProc.sendCommand({ type: 'getAdjacentTask', tabId: adjTabId, task: (message as any).task, direction: (message as any).direction });
         break;
       }
-
-      case 'getWelcomeSuggestions':
-        this._sendWelcomeSuggestions();
-        break;
 
       case 'complete': {
         const editorFile = this._getVisibleEditorFile();
