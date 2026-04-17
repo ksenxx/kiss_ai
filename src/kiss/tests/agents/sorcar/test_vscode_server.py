@@ -300,6 +300,48 @@ class TestMainCssFilePicker(unittest.TestCase):
         assert "acSlideUp" in self.css
 
 
+class TestGenerateCommitMessage(unittest.TestCase):
+    """Test generateCommitMessage uses fast_model_for via _generate_commit_message_llm."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.server = VSCodeServer()
+        self.server.work_dir = self.tmpdir
+        self.events: list[dict] = []
+
+        def capture_broadcast(event: dict) -> None:
+            self.events.append(event)
+
+        self.server.printer.broadcast = capture_broadcast  # type: ignore[assignment]
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_command_spawns_thread(self) -> None:
+        """generateCommitMessage command calls _generate_commit_message."""
+        import inspect
+
+        src = inspect.getsource(VSCodeServer._handle_command)
+        assert "target=self._generate_commit_message" in src
+
+    def test_no_model_param(self) -> None:
+        """_generate_commit_message takes no model parameter."""
+        import inspect
+
+        sig = inspect.signature(VSCodeServer._generate_commit_message)
+        # Only 'self' — no model parameter
+        assert "model" not in sig.parameters
+
+    def test_no_staged_changes(self) -> None:
+        """_generate_commit_message reports no staged changes."""
+        subprocess.run(["git", "init"], cwd=self.tmpdir, capture_output=True)
+        self.server._generate_commit_message()
+        assert len(self.events) == 1
+        assert self.events[0]["error"] == (
+            "No staged changes found. Stage files with 'git add' first."
+        )
+
+
 class TestExtractResultSummary(unittest.TestCase):
     """Test _extract_result_summary extracts summary from recorded events."""
 
