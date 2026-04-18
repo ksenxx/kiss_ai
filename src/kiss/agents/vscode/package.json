@@ -205,6 +205,7 @@
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.98.0",
+    "@vscode/vsce": "^3.9.1",
     "gts": "^7.0.0",
     "htmlhint": "^1.9.2",
     "stylelint": "^17.8.0",

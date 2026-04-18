@@ -33,6 +33,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 VSCODE_EXT_DIR="$PROJECT_ROOT/src/kiss/agents/vscode"
 README_FILE="$PROJECT_ROOT/README.md"
+VERSION_FILE="$PROJECT_ROOT/src/kiss/_version.py"
 
 BUGGY_NAME="kiss-sorcar-buggy"
 BUGGY_DISPLAY_NAME="KISS Sorcar Buggy"
@@ -86,18 +87,50 @@ on_exit() {
     exit $exit_code
 }
 
+read_project_version() {
+    # Read __version__ from src/kiss/_version.py (e.g. '0.2.79'), bump its
+    # patch component by 1, write the new value back, and expose it as
+    # BUGGY_VERSION. Persisting the bump mirrors what scripts/release.sh does
+    # for the stable release and guarantees each Buggy publish uses a fresh,
+    # unique version (the Marketplace rejects duplicates).
+    if [[ ! -f "$VERSION_FILE" ]]; then
+        print_error "Version file not found: $VERSION_FILE"
+        exit 1
+    fi
+    local current major minor patch
+    current=$(sed -n 's/^__version__[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$VERSION_FILE" | head -1)
+    if [[ -z "$current" ]]; then
+        print_error "Could not extract __version__ from $VERSION_FILE"
+        exit 1
+    fi
+    IFS='.' read -r major minor patch <<< "$current"
+    if [[ -z "$major" || -z "$minor" || -z "$patch" ]]; then
+        print_error "Unexpected version format in $VERSION_FILE: '$current' (need MAJOR.MINOR.PATCH)"
+        exit 1
+    fi
+    BUGGY_VERSION="${major}.${minor}.$((patch + 1))"
+    sed -i.bak "s/__version__ = \"${current}\"/__version__ = \"${BUGGY_VERSION}\"/" "$VERSION_FILE"
+    rm -f "${VERSION_FILE}.bak"
+    print_info "Bumped $VERSION_FILE: $current -> $BUGGY_VERSION"
+}
+
 rewrite_package_json() {
-    # Rewrite "name" and "displayName" in package.json using Node so we
-    # preserve exact JSON formatting semantics (vsce validates the file).
-    node - "$PKG_JSON" "$BUGGY_NAME" "$BUGGY_DISPLAY_NAME" <<'NODE'
+    # Rewrite "name", "displayName" and "version" in package.json using Node
+    # so we preserve exact JSON formatting semantics (vsce validates the file).
+    #
+    # The version comes from read_project_version(), which bumps the patch
+    # component of __version__ in src/kiss/_version.py so every Buggy publish
+    # uses a fresh, unique version (the Marketplace rejects duplicates).
+    node - "$PKG_JSON" "$BUGGY_NAME" "$BUGGY_DISPLAY_NAME" "$BUGGY_VERSION" <<'NODE'
 const fs = require('fs');
-const [, , path, name, displayName] = process.argv;
+const [, , path, name, displayName, version] = process.argv;
 const pkg = JSON.parse(fs.readFileSync(path, 'utf8'));
 pkg.name = name;
 pkg.displayName = displayName;
+pkg.version = version;
 fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + '\n');
 NODE
-    print_info "Rewrote package.json: name=$BUGGY_NAME, displayName=\"$BUGGY_DISPLAY_NAME\""
+    print_info "Rewrote package.json: name=$BUGGY_NAME, displayName=\"$BUGGY_DISPLAY_NAME\", version=$BUGGY_VERSION"
 }
 
 # =============================================================================
@@ -137,6 +170,7 @@ main() {
     fi
 
     # Back up and rewrite package.json for the Buggy variant.
+    read_project_version
     cp "$PKG_JSON" "$PKG_JSON_BACKUP"
     rewrite_package_json
 
