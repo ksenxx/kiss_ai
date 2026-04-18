@@ -970,13 +970,13 @@
       m = al.length,
       n = bl.length;
     const dp = [];
-    for (var i = 0; i <= m; i++) {
+    for (let i = 0; i <= m; i++) {
       dp[i] = new Array(n + 1);
       dp[i][0] = 0;
     }
-    for (var j = 0; j <= n; j++) dp[0][j] = 0;
-    for (var i = 1; i <= m; i++)
-      for (var j = 1; j <= n; j++)
+    for (let j = 0; j <= n; j++) dp[0][j] = 0;
+    for (let i = 1; i <= m; i++)
+      for (let j = 1; j <= n; j++)
         dp[i][j] =
           al[i - 1] === bl[j - 1]
             ? dp[i - 1][j - 1] + 1
@@ -1039,14 +1039,14 @@
       }
       if (dels.length || adds.length) {
         const pairs = Math.min(dels.length, adds.length);
-        for (var p = 0; p < pairs; p++) {
+        for (let p = 0; p < pairs; p++) {
           const h = hlInline(dels[p].o, adds[p].n);
           html += '<div class="diff-old">- ' + h.o + '</div>';
           html += '<div class="diff-new">+ ' + h.n + '</div>';
         }
-        for (var p = pairs; p < dels.length; p++)
+        for (let p = pairs; p < dels.length; p++)
           html += '<div class="diff-old">- ' + esc(dels[p].o) + '</div>';
-        for (var p = pairs; p < adds.length; p++)
+        for (let p = pairs; p < adds.length; p++)
           html += '<div class="diff-new">+ ' + esc(adds[p].n) + '</div>';
         continue;
       }
@@ -2017,7 +2017,7 @@
       const t = ev.type;
       if (t === 'task_done' || t === 'task_error' || t === 'task_stopped') {
         if (t === 'task_error') {
-          var banner = mkEl('div', 'ev tr err');
+          const banner = mkEl('div', 'ev tr err');
           banner.innerHTML =
             '<div class="rl fail">ERROR</div><div class="tr-content">' +
             esc(ev.text || 'Unknown error') +
@@ -2025,7 +2025,7 @@
           addCollapse(banner, banner.querySelector('.rl'));
           container.appendChild(banner);
         } else if (t === 'task_stopped') {
-          var banner = mkEl('div', 'ev tr err');
+          const banner = mkEl('div', 'ev tr err');
           banner.innerHTML =
             '<div class="rl fail">STOPPED</div><div class="tr-content">Agent execution stopped by user</div>';
           addCollapse(banner, banner.querySelector('.rl'));
@@ -2125,7 +2125,7 @@
 
   // --- Worktree merge/discard UI ---
 
-  var worktreeBar = null;
+  let worktreeBar = null;
 
   function clearWorktreeBar() {
     if (worktreeBar && worktreeBar.parentNode) {
