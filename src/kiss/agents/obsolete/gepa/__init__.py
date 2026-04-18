@@ -5,7 +5,7 @@
 
 """GEPA (Genetic-Pareto) prompt optimization package."""
 
-from kiss.agents.gepa.gepa import (
+from kiss.agents.obsolete.gepa.gepa import (
     GEPA,
     GEPAPhase,
     GEPAProgress,

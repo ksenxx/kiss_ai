@@ -27,7 +27,7 @@
     - [`kiss.agents.sorcar`](#kissagentssorcar)
     - [`kiss.core.relentless_agent`](#kisscorerelentless_agent)
       - [`kiss.agents.sorcar.sorcar_agent`](#kissagentssorcarsorcar_agent)
-    - [`kiss.agents.gepa`](#kissagentsgepa)
+    - [`kiss.agents.obsolete.gepa`](#kissagentsobsoletegepa)
     - [`kiss.agents.kiss_evolve`](#kissagentskiss_evolve)
   - [`kiss.docker`](#kissdocker)
     - [`kiss.docker.docker_manager`](#kissdockerdocker_manager)
@@ -817,10 +817,10 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.agents.gepa` — *GEPA (Genetic-Pareto) prompt optimization package.*
+#### `kiss.agents.obsolete.gepa` — *GEPA (Genetic-Pareto) prompt optimization package.*
 
 ```python
-from kiss.agents.gepa import GEPA, GEPAPhase, GEPAProgress, PromptCandidate, create_progress_callback
+from kiss.agents.obsolete.gepa import GEPA, GEPAPhase, GEPAProgress, PromptCandidate, create_progress_callback
 ```
 
 ##### `class GEPA` — GEPA (Genetic-Pareto) prompt optimizer.

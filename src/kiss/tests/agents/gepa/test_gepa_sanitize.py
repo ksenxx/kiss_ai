@@ -2,7 +2,7 @@
 
 import unittest
 
-from kiss.agents.gepa import GEPA
+from kiss.agents.obsolete.gepa import GEPA
 
 
 def dummy_wrapper(prompt_template: str, arguments: dict[str, str]) -> tuple[str, list]:

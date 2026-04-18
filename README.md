@@ -184,7 +184,7 @@ No special orchestration framework needed. No message buses. No complex state ma
 
 KISS has a fresh implementation of GEPA with some key improvements. GEPA (Genetic-Pareto) is a prompt optimization framework that uses natural language reflection to evolve prompts. It maintains an instance-level Pareto frontier of top-performing prompts and combines complementary lessons through structural merge. It also supports optional batched evaluation via `batched_agent_wrapper`, so you can plug in prompt-merging inference pipelines to process more datapoints per API call. GEPA is based on the paper ["GEPA: Reflective Prompt Evolution Can Outperform Reinforcement Learning"](https://arxiv.org/pdf/2507.19457).
 
-📖 **For detailed GEPA documentation, see [GEPA README](src/kiss/agents/gepa/README.md)**
+📖 **For detailed GEPA documentation, see [GEPA README](src/kiss/agents/obsolete/gepa/README.md)**
 
 ## 🧪 Using KISSEvolve for Algorithm Discovery
 

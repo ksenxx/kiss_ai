@@ -27,10 +27,11 @@
     - [`kiss.agents.sorcar`](#kissagentssorcar)
     - [`kiss.core.relentless_agent`](#kisscorerelentless_agent)
       - [`kiss.agents.sorcar.sorcar_agent`](#kissagentssorcarsorcar_agent)
-    - [`kiss.agents.gepa`](#kissagentsgepa)
+      - [`kiss.agents.obsolete.gepa`](#kissagentsobsoletegepa)
     - [`kiss.agents.kiss_evolve`](#kissagentskiss_evolve)
   - [`kiss.docker`](#kissdocker)
     - [`kiss.docker.docker_manager`](#kissdockerdocker_manager)
+    - [`kiss.agents.obsolete`](#kissagentsobsolete)
       - [`kiss.agents.sorcar.git_worktree`](#kissagentssorcargit_worktree)
       - [`kiss.agents.sorcar.stateful_sorcar_agent`](#kissagentssorcarstateful_sorcar_agent)
       - [`kiss.agents.sorcar.worktree_sorcar_agent`](#kissagentssorcarworktree_sorcar_agent)
@@ -813,10 +814,10 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.agents.gepa` — *GEPA (Genetic-Pareto) prompt optimization package.*
+#### `kiss.agents.obsolete.gepa` — *GEPA (Genetic-Pareto) prompt optimization package.*
 
 ```python
-from kiss.agents.gepa import GEPA, GEPAPhase, GEPAProgress, PromptCandidate, create_progress_callback
+from kiss.agents.obsolete.gepa import GEPA, GEPAPhase, GEPAProgress, PromptCandidate, create_progress_callback
 ```
 
 ##### `class GEPA` — GEPA (Genetic-Pareto) prompt optimizer.
@@ -1015,6 +1016,10 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
+#### `kiss.agents.obsolete`
+
+______________________________________________________________________
+
 #### `kiss.agents.sorcar.git_worktree` — *Git worktree operations and state.*
 
 ##### `class GitWorktree` — Immutable snapshot of a pending worktree task.
@@ -1066,11 +1071,17 @@ ______________________________________________________________________
   - `wt_dir`: Worktree directory (must have staged changes).
   - **Returns:** The diff text, or empty string if no staged changes.
 
-- **checkout** — Checkout a branch in the main worktree.<br/>`checkout(repo: Path, branch: str) -> str`
+- **checkout** — Checkout a branch in the main worktree.<br/>`checkout(repo: Path, branch: str) -> bool`
 
   - `repo`: Git repo root path.
   - `branch`: Branch name to checkout.
-  - **Returns:** Empty string on success, or the stderr error message on failure.
+  - **Returns:** True if checkout succeeded, False otherwise.
+
+- **checkout_error** — Return the stderr from a failed checkout attempt.<br/>`checkout_error(repo: Path, branch: str) -> str`
+
+  - `repo`: Git repo root path.
+  - `branch`: Branch name that failed to checkout.
+  - **Returns:** The stderr text from the failed checkout.
 
 - **merge_branch** — Merge a branch into the current HEAD with `--no-edit`. On conflict, the merge is aborted to leave a clean worktree.<br/>`merge_branch(repo: Path, branch: str) -> MergeResult`
 

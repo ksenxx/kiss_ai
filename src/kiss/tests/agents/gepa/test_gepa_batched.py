@@ -3,7 +3,7 @@
 import unittest
 from typing import Any
 
-from kiss.agents.gepa import GEPA
+from kiss.agents.obsolete.gepa import GEPA
 
 
 def create_deterministic_sequential_wrapper():

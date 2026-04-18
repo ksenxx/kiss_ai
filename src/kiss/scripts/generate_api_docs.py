@@ -411,8 +411,8 @@ def _sort_modules(modules: list[ModuleDoc]) -> list[ModuleDoc]:
         "kiss.agents.sorcar.sorcar_agent",
         "kiss.agents.sorcar.sorcar",
 
-        "kiss.agents.gepa",
-        "kiss.agents.gepa.gepa",
+        "kiss.agents.obsolete.gepa",
+        "kiss.agents.obsolete.gepa.gepa",
         "kiss.agents.kiss_evolve",
         "kiss.agents.kiss_evolve.kiss_evolve",
         "kiss.agents.imo_agent",
