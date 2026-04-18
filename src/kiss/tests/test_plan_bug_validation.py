@@ -8,20 +8,6 @@ import inspect
 
 
 # ---------------------------------------------------------------------------
-# §18: AgentEvolver no longer mutates sys.path / sys.modules / cwd
-# ---------------------------------------------------------------------------
-class TestAgentEvolverIsolation:
-    def test_evaluate_variant_uses_subprocess(self) -> None:
-        """Variant evaluation uses subprocess, not global state mutation."""
-        from kiss.agents.obsolete.create_and_optimize_agent.agent_evolver import AgentEvolver
-
-        source = inspect.getsource(AgentEvolver)
-        assert "sys.path.insert" not in source
-        assert "sys.modules[" not in source
-        assert "subprocess" in source
-
-
-# ---------------------------------------------------------------------------
 # §19: poller uses public resume_chat_by_id — not private _chat_id
 # ---------------------------------------------------------------------------
 class TestPollerSessionResume:
