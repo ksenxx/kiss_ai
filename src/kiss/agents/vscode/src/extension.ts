@@ -160,11 +160,30 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
   );
 
-  const triggerCommitMessageGeneration = (
+  // Returns true iff the first Git repository has at least one staged change.
+  const hasStagedChanges = async (): Promise<boolean> => {
+    try {
+      const gitExt = vscode.extensions.getExtension('vscode.git');
+      if (!gitExt) return true; // Can't check — let generation proceed.
+      const git = gitExt.isActive ? gitExt.exports : await gitExt.activate();
+      const api = git.getAPI(1);
+      if (api.repositories.length === 0) return true;
+      return api.repositories[0].state.indexChanges.length > 0;
+    } catch (err) {
+      console.error('[kissSorcar] Failed to check staged changes:', err);
+      return true;
+    }
+  };
+
+  const triggerCommitMessageGeneration = async (
     _rootUri?: unknown,
     _context?: unknown,
     token?: vscode.CancellationToken,
-  ): Thenable<void> | void => {
+  ): Promise<void> => {
+    if (!(await hasStagedChanges())) {
+      await setScmMessage('Error: nothing staged');
+      return;
+    }
     startCommitCountdown();
     token?.onCancellationRequested(() => stopCommitCountdown?.());
     return sidebarView!.generateCommitMessage(token);
