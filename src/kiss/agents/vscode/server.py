@@ -19,6 +19,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 from kiss.agents.sorcar.persistence import (
     _append_chat_event,
     _get_adjacent_task_by_chat_id,
@@ -1088,11 +1089,19 @@ class VSCodeServer:
     def _check_merge_conflict(self, tab_id: str = "") -> bool:
         """Check if merging the worktree branch into original would conflict.
 
-        Checks two things:
-        1. Tree-level conflicts via ``git merge-tree --write-tree``.
+        Delegates all git operations to :class:`GitWorktreeOps` and
+        reads the pending worktree state from
+        :class:`WorktreeSorcarAgent`.  Checks two things:
+
+        1. Tree-level conflicts via
+           :meth:`GitWorktreeOps.would_merge_conflict`
+           (``git merge-tree --write-tree``).
         2. Uncommitted changes in the main working tree that overlap
            with files modified by the merge (which would cause
-           ``git merge`` to refuse the merge).
+           ``git merge`` to refuse the merge), computed as the
+           intersection of
+           :meth:`GitWorktreeOps.branch_diff_files` and
+           :meth:`GitWorktreeOps.unstaged_files`.
 
         Args:
             tab_id: The tab whose worktree to check.
@@ -1103,30 +1112,22 @@ class VSCodeServer:
         tab = self._get_tab(tab_id)
         if not tab.use_worktree:
             return False
-        wt = tab.worktree_agent
-        if not wt._wt_branch or not wt._original_branch:
+        wt = tab.worktree_agent._wt
+        if wt is None or wt.original_branch is None:
             return False
-        repo_root = str(wt._repo_root) if wt._repo_root else self.work_dir
-        # Check 1: tree-level merge conflicts
-        result = _git(repo_root,
-                      "merge-tree", "--write-tree",
-                      wt._original_branch,
-                      wt._wt_branch)
-        if result.returncode != 0:
+        # Check 1: tree-level merge conflicts (dry-run, no working-tree touch)
+        if GitWorktreeOps.would_merge_conflict(
+            wt.repo_root, wt.original_branch, wt.branch,
+        ):
             return True
-        # Check 2: dirty working tree files that overlap with merge changes
-        merge_files = _git(repo_root,
-                           "diff", "--name-only",
-                           wt._original_branch,
-                           wt._wt_branch)
-        if merge_files.returncode != 0 or not merge_files.stdout.strip():
+        # Check 2: dirty working-tree files that overlap with merge changes
+        merge_files = set(GitWorktreeOps.branch_diff_files(
+            wt.repo_root, wt.original_branch, wt.branch,
+        ))
+        if not merge_files:
             return False
-        dirty = _git(repo_root, "diff", "--name-only")
-        if dirty.returncode != 0 or not dirty.stdout.strip():
-            return False
-        dirty_set = set(dirty.stdout.strip().splitlines())
-        merge_set = set(merge_files.stdout.strip().splitlines())
-        return bool(dirty_set & merge_set)
+        dirty = set(GitWorktreeOps.unstaged_files(wt.repo_root))
+        return bool(dirty & merge_files)
 
     def _get_worktree_changed_files(self, tab_id: str = "") -> list[str]:
         """List files changed in the worktree vs the original branch.

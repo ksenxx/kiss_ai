@@ -312,6 +312,67 @@ class GitWorktreeOps:
         return MergeResult.SUCCESS
 
     @staticmethod
+    def would_merge_conflict(
+        repo: Path, base: str, branch: str,
+    ) -> bool:
+        """Dry-run check for tree-level merge conflicts.
+
+        Runs ``git merge-tree --write-tree`` which performs a merge
+        entirely in memory without touching the working tree or index.
+        A non-zero exit code indicates the three-way merge would
+        produce textual conflicts.
+
+        Args:
+            repo: Git repo root path.
+            base: The branch that would receive the merge.
+            branch: The branch that would be merged in.
+
+        Returns:
+            True if the merge would have tree-level conflicts, False
+            if it would apply cleanly.
+        """
+        result = _git(
+            "merge-tree", "--write-tree", base, branch, cwd=repo,
+        )
+        return result.returncode != 0
+
+    @staticmethod
+    def branch_diff_files(
+        repo: Path, base: str, branch: str,
+    ) -> list[str]:
+        """List files that differ between two branches/revisions.
+
+        Args:
+            repo: Git repo root path.
+            base: First branch or revision.
+            branch: Second branch or revision.
+
+        Returns:
+            List of file paths that differ between *base* and *branch*,
+            or an empty list if the command fails.
+        """
+        result = _git("diff", "--name-only", base, branch, cwd=repo)
+        if result.returncode != 0:
+            return []
+        return [f for f in result.stdout.strip().splitlines() if f]
+
+    @staticmethod
+    def unstaged_files(repo: Path) -> list[str]:
+        """List files with unstaged changes in the working tree.
+
+        Args:
+            repo: Git repo root path.
+
+        Returns:
+            List of files with uncommitted, unstaged modifications,
+            or an empty list if the command fails.
+        """
+        result = _git("diff", "--name-only", cwd=repo)
+        if result.returncode != 0:
+            return []
+        return [f for f in result.stdout.strip().splitlines() if f]
+
+    @staticmethod
     def manual_merge_branch(repo: Path, branch: str) -> ManualMergeResult:
         """Merge with ``--no-commit --no-ff`` for interactive review.
 
