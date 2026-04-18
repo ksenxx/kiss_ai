@@ -275,6 +275,43 @@ class GitWorktreeOps:
         return MergeResult.SUCCESS
 
     @staticmethod
+    def apply_branch_to_working_tree(
+        repo: Path, branch: str,
+    ) -> MergeResult:
+        """Apply a branch's changes to the working tree as unstaged edits.
+
+        Captures the set of files that will change (``git diff
+        --name-only HEAD..branch``), runs ``git merge --squash`` to
+        stage them, then unstages *only* those files with
+        ``git reset HEAD -- <files>`` so any pre-existing staged
+        changes the user had are preserved.
+
+        On merge failure (e.g. dirty index that overlaps the branch),
+        restores the pre-merge state of the affected files with
+        ``git reset HEAD -- <files>`` + ``git checkout -- <files>``
+        so unrelated user changes are untouched.
+
+        Args:
+            repo: Git repo root path.
+            branch: Branch whose changes to apply.
+
+        Returns:
+            :attr:`MergeResult.SUCCESS` or :attr:`MergeResult.CONFLICT`.
+        """
+        diff = _git("diff", "--name-only", f"HEAD..{branch}", cwd=repo)
+        merge_files = [
+            f for f in diff.stdout.strip().splitlines() if f
+        ]
+        result = _git("merge", "--squash", branch, cwd=repo)
+        if result.returncode != 0:
+            # git refused (e.g. dirty index overlaps the merge) —
+            # nothing was written, leave the user's state alone.
+            return MergeResult.CONFLICT
+        if merge_files:  # pragma: no branch — non-empty for real merges
+            _git("reset", "HEAD", "--", *merge_files, cwd=repo)
+        return MergeResult.SUCCESS
+
+    @staticmethod
     def manual_merge_branch(repo: Path, branch: str) -> ManualMergeResult:
         """Merge with ``--no-commit --no-ff`` for interactive review.
 
