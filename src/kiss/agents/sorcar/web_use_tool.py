@@ -6,6 +6,7 @@ Uses non-headless Playwright Chromium for page analysis and automation
 
 from __future__ import annotations
 
+import atexit
 import logging
 import re
 import subprocess
@@ -15,6 +16,10 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# Stale singleton files left behind by a previously crashed/killed Chromium
+# prevent a new persistent-context launch from starting cleanly.
+_SINGLETON_FILES = ("SingletonLock", "SingletonCookie", "SingletonSocket")
 
 
 
@@ -87,6 +92,7 @@ class WebUseTool:
         self._context: Any = None
         self._page: Any = None
         self._elements: list[dict[str, str]] = []
+        atexit.register(self.close)
 
     def _context_args(self) -> dict[str, Any]:
         return {
@@ -99,14 +105,58 @@ class WebUseTool:
             "device_scale_factor": 2,
         }
 
+    def _is_alive(self) -> bool:
+        """Return True iff the current page/context survived (not crashed/closed)."""
+        if self._playwright is None or self._context is None or self._page is None:
+            return False
+        try:
+            return not self._page.is_closed()
+        except Exception:  # pragma: no cover — Playwright internals rarely throw here
+            logger.debug("Exception caught", exc_info=True)
+            return False
+
+    def _on_browser_lost(self, _obj: Any = None) -> None:
+        """Drop page/context/browser references after a crash or disconnect.
+
+        The Playwright driver (`self._playwright`) is kept running so that the
+        next tool call can launch a fresh browser without restarting the driver
+        (sync_playwright cannot be restarted in the same process).
+        """
+        self._page = None
+        self._context = None
+        self._browser = None
+        self._elements = []
+
+    def _close_browser_only(self) -> None:
+        """Close context/browser if present, leaving self._playwright running."""
+        for obj in (self._context, self._browser):
+            if obj is None:
+                continue
+            try:
+                obj.close()
+            except Exception:  # pragma: no cover — already-dead objects raise
+                logger.debug("Exception caught", exc_info=True)
+        self._on_browser_lost()
+
     def _ensure_browser(self) -> None:
-        """Ensure a Playwright browser page is ready, installing Chromium if needed."""
-        if self._playwright is not None and self._page is not None:
+        """Ensure a Playwright browser page is ready, installing Chromium if needed.
+
+        Detects and recovers from a previously-crashed Chromium by tearing down
+        stale references and relaunching. This handles the common case where
+        "Google Chrome for Testing quit unexpectedly" leaves the tool with a
+        dead page that would otherwise fail every subsequent call.
+        """
+        if self._is_alive():
             return
+        # Drop references to any crashed browser/context but keep the Playwright
+        # driver running — restarting sync_playwright inside the same process
+        # fails ("using Sync API inside the asyncio loop").
+        self._close_browser_only()
         from playwright.sync_api import sync_playwright
 
         try:
-            self._playwright = sync_playwright().start()
+            if self._playwright is None:
+                self._playwright = sync_playwright().start()
             launcher = self._playwright.chromium
             kwargs: dict[str, Any] = {
                 "headless": self._headless,
@@ -133,9 +183,28 @@ class WebUseTool:
             self.close()
             raise
 
+    def _clean_singleton_locks(self) -> None:
+        """Remove stale Singleton* files from a previously crashed Chromium.
+
+        Chromium writes Singleton{Lock,Cookie,Socket} when a persistent profile
+        is opened. If the process dies without cleaning up, the next launch
+        may fail or crash. Safe to call unconditionally — live Chromium
+        recreates the files during startup.
+        """
+        if not self.user_data_dir:
+            return
+        for name in _SINGLETON_FILES:
+            path = Path(self.user_data_dir) / name
+            try:
+                if path.is_symlink() or path.exists():
+                    path.unlink()
+            except OSError:  # pragma: no cover — race with another launch
+                logger.debug("Exception caught", exc_info=True)
+
     def _launch_browser(self, launcher: Any, kwargs: dict[str, Any]) -> None:
         if self.user_data_dir:
             Path(self.user_data_dir).mkdir(parents=True, exist_ok=True)
+            self._clean_singleton_locks()
             self._context = launcher.launch_persistent_context(
                 self.user_data_dir, **kwargs, **self._context_args()
             )
@@ -144,6 +213,8 @@ class WebUseTool:
             self._browser = launcher.launch(**kwargs)
             self._context = self._browser.new_context(**self._context_args())
             self._page = self._context.new_page()
+        self._context.on("close", self._on_browser_lost)
+        self._page.on("crash", self._on_browser_lost)
 
     def _get_ax_tree(self, max_chars: int = 50000) -> str:
         self._ensure_browser()
@@ -401,11 +472,8 @@ class WebUseTool:
         except Exception:  # pragma: no cover — Playwright close rarely fails
             logger.debug("Exception caught", exc_info=True)
             pass
-        self._page = None
-        self._context = None
-        self._browser = None
+        self._on_browser_lost()
         self._playwright = None
-        self._elements = []
         return "Browser closed."
 
     def get_tools(self) -> list[Callable[..., str]]:

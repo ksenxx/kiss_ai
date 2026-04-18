@@ -34,6 +34,7 @@
       - [`kiss.agents.sorcar.worktree_sorcar_agent`](#kissagentssorcarworktree_sorcar_agent)
     - [`kiss.agents.vscode`](#kissagentsvscode)
       - [`kiss.agents.vscode.helpers`](#kissagentsvscodehelpers)
+        \- [`kiss.agents.vscode.node_modules.flatted.python.flatted`](#kissagentsvscodenode_modulesflattedpythonflatted)
       - [`kiss.agents.vscode.server`](#kissagentsvscodeserver)
   - [`kiss.benchmarks`](#kissbenchmarks)
     - [`kiss.benchmarks.generate_dashboard`](#kissbenchmarksgenerate_dashboard)
@@ -928,6 +929,12 @@ ______________________________________________________________________
   - `branch`: Branch to squash-merge.
   - **Returns:** :attr:`MergeResult.SUCCESS` or :attr:`MergeResult.CONFLICT`.
 
+- **apply_branch_to_working_tree** — Apply a branch's changes to the working tree as unstaged edits. Captures the set of files that will change (`git diff --name-only HEAD..branch`), runs `git merge --squash` to stage them, then unstages *only* those files with `git reset HEAD -- <files>` so any pre-existing staged changes the user had are preserved. On merge failure (e.g. dirty index that overlaps the branch), restores the pre-merge state of the affected files with `git reset HEAD -- <files>` + `git checkout -- <files>` so unrelated user changes are untouched.<br/>`apply_branch_to_working_tree(repo: Path, branch: str) -> MergeResult`
+
+  - `repo`: Git repo root path.
+  - `branch`: Branch whose changes to apply.
+  - **Returns:** :attr:`MergeResult.SUCCESS` or :attr:`MergeResult.CONFLICT`.
+
 - **manual_merge_branch** — Merge with `--no-commit --no-ff` for interactive review. On success (no conflicts), unstages changes via `git reset HEAD` so the user can selectively stage hunks.<br/>`manual_merge_branch(repo: Path, branch: str) -> ManualMergeResult`
 
   - `repo`: Git repo root path.
@@ -1080,6 +1087,14 @@ ______________________________________________________________________
 - `usage`: File usage counts keyed by path (insertion order encodes recency, last key = most recently used).
 - `limit`: Maximum number of results to return.
 - **Returns:** Sorted list of dicts with `type` (`"frequent"` or `"file"`) and `text` keys.
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.node_modules.flatted.python.flatted`
+
+**`parse`**<br/>`def parse(value, *args, **kwargs)`
+
+**`stringify`**<br/>`def stringify(value, *args, **kwargs)`
 
 ______________________________________________________________________
 

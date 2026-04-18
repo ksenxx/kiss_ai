@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 from kiss.agents.sorcar.web_use_tool import (
+    _SINGLETON_FILES,
     WebUseTool,
 )
 
@@ -121,6 +122,49 @@ class TestNavigation:
     def test_go_to_invalid_url(self, web_tool):
         result = web_tool.go_to_url("http://localhost:99999/nonexistent")
         assert "Error" in result
+
+
+class TestCrashRecovery:
+    """Verify the tool auto-recovers after Chromium/context dies unexpectedly.
+
+    Simulates the "Google Chrome for Testing quit unexpectedly" scenario by
+    closing the browser context out from under the tool.
+    """
+
+    def test_auto_relaunch_after_context_close(self, web_tool, http_server):
+        web_tool.go_to_url(http_server + "/")
+        assert web_tool._is_alive()
+        # Simulate a crash: drop the browser context without notifying the tool.
+        web_tool._context.close()
+        assert not web_tool._is_alive()
+        # Next call should transparently relaunch and succeed.
+        result = web_tool.go_to_url(http_server + "/")
+        assert "Test" in result
+        assert web_tool._is_alive()
+
+
+class TestSingletonLockCleanup:
+    """Stale Singleton{Lock,Cookie,Socket} from a previously crashed Chromium
+    must be removed before launching a persistent context."""
+
+    def test_cleans_stale_singleton_files(self, tmp_path):
+        (tmp_path / _SINGLETON_FILES[0]).symlink_to("stale-host-99999")
+        (tmp_path / _SINGLETON_FILES[1]).write_text("stale")
+        tool = WebUseTool(user_data_dir=str(tmp_path), headless=True)
+        try:
+            tool._clean_singleton_locks()
+            for name in _SINGLETON_FILES:
+                assert not (tmp_path / name).exists()
+                assert not (tmp_path / name).is_symlink()
+        finally:
+            tool.close()
+
+    def test_clean_singleton_locks_no_profile(self):
+        """Called on an in-memory tool — no-op, does not raise."""
+        tool = WebUseTool(user_data_dir=None, headless=True)
+        tool._clean_singleton_locks()  # must not raise
+        tool.close()
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
