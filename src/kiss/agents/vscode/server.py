@@ -19,7 +19,6 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar.git_worktree import GitWorktreeOps, MergeResult
 from kiss.agents.sorcar.persistence import (
     _append_chat_event,
     _get_adjacent_task_by_chat_id,
@@ -482,17 +481,10 @@ class VSCodeServer:
                     task_end_event = {"type": "task_done"}
                     if is_last and tab.use_worktree and tab.worktree_agent._wt_pending:
                         changed = self._get_worktree_changed_files(tab_id)
-                        if not changed:
-                            tab.worktree_agent.discard()
-                        elif not self._apply_worktree_to_main(tab_id):
-                            # Merge conflict with user's local changes:
-                            # keep the worktree and show the 3-button bar
-                            # so the user can merge/discard manually.
+                        if changed:
                             self._broadcast_worktree_done(changed, tab_id)
-                        # Else: changes are now unstaged in the main
-                        # working tree; the standard post-task merge-
-                        # view code in the finally block will detect
-                        # them and start the 8-button merge session.
+                        else:
+                            tab.worktree_agent.discard()
                 except KeyboardInterrupt:
                     result_summary = "Task stopped by user"
                     task_end_event = {"type": "task_stopped"}
@@ -847,46 +839,6 @@ class VSCodeServer:
         webview shows the accept/reject toolbar.
         """
         self._start_merge_session(str(_merge_data_dir() / "pending-merge.json"))
-
-    def _apply_worktree_to_main(self, tab_id: str = "") -> bool:
-        """Apply worktree branch changes to the main working tree.
-
-        Auto-commits the worktree, checks for merge conflicts with the
-        user's uncommitted changes, then squash-merges the worktree
-        branch into the main checkout and unstages the result so the
-        changes appear as plain working-tree edits.  On success, the
-        worktree directory and branch are removed and the agent's
-        pending-worktree state is cleared; the caller can then rely
-        on the standard 8-button merge-review flow.
-
-        Args:
-            tab_id: The tab whose worktree to apply.
-
-        Returns:
-            True if the changes were applied cleanly, False when
-            there is no pending worktree or when a conflict with the
-            user's local changes prevents a clean apply.  In the
-            False case, the worktree state is preserved so the
-            caller can fall back to the 3-button worktree bar.
-        """
-        tab = self._get_tab(tab_id)
-        wt = tab.worktree_agent
-        if wt._wt is None:
-            return False
-        state = wt._wt
-        wt._auto_commit_worktree()
-        if self._check_merge_conflict(tab_id):
-            return False
-        result = GitWorktreeOps.apply_branch_to_working_tree(
-            state.repo_root, state.branch,
-        )
-        if result != MergeResult.SUCCESS:
-            return False
-        GitWorktreeOps.remove(state.repo_root, state.wt_dir)
-        GitWorktreeOps.prune(state.repo_root)
-        GitWorktreeOps.delete_branch(state.repo_root, state.branch)
-        wt._wt = None
-        return True
 
     def _broadcast_worktree_done(self, changed: list[str], tab_id: str = "") -> None:
         """Broadcast a ``worktree_done`` event with the current worktree state.
