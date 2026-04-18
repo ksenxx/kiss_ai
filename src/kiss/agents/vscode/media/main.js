@@ -2657,7 +2657,14 @@
   }
 
   function showAskUserModal(question) {
-    askUserQuestion.textContent = question;
+    const text = question || '';
+    if (typeof marked !== 'undefined') {
+      askUserQuestion.innerHTML = marked.parse(text);
+      askUserQuestion.classList.add('md-body');
+      hlBlock(askUserQuestion);
+    } else {
+      askUserQuestion.textContent = text;
+    }
     askUserModal.style.display = 'flex';
     askUserInput.focus();
   }
