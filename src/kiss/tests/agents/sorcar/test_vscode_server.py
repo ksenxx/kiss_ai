@@ -1669,16 +1669,12 @@ class TestCollapsiblePanelsJS(unittest.TestCase):
         """Tool result calls addCollapse with .rl as the header."""
         assert "addCollapse(r, r.querySelector('.rl'))" in self._js
 
-    # -- Usage info is collapsible --
+    # -- Usage info panels are hidden (not rendered in chat) --
 
-    def test_usage_has_header_and_content(self) -> None:
-        """Usage info has .usage-hdr and .usage-content elements."""
-        assert "usage-hdr" in self._js
-        assert "usage-content" in self._js
-
-    def test_usage_calls_add_collapse(self) -> None:
-        """Usage info calls addCollapse with the header."""
-        assert "addCollapse(u, uHdr)" in self._js
+    def test_usage_panels_not_rendered(self) -> None:
+        """Usage info panels are not rendered in the chat output."""
+        assert "usage-hdr" not in self._js
+        assert "usage-content" not in self._js
 
     # -- Error/stopped banners are collapsible --
 

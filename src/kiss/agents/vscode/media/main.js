@@ -842,7 +842,7 @@
         ch.querySelector('.collapse-chv')
       )
         continue;
-      txt += (ch.textContent || '') + ' ';
+      txt += (ch.innerText || '') + ' ';
     }
     txt = txt.replace(/\s+/g, ' ').trim();
     prev.textContent = txt;
@@ -1221,15 +1221,6 @@
         break;
       }
       case 'usage_info': {
-        const u = mkEl('div', 'ev usage');
-        const uHdr = mkEl('div', 'usage-hdr');
-        uHdr.textContent = 'Usage';
-        const uBody = mkEl('div', 'usage-content');
-        uBody.textContent = ev.text || '';
-        u.appendChild(uHdr);
-        u.appendChild(uBody);
-        addCollapse(u, uHdr);
-        target.appendChild(u);
         if (ev.total_tokens != null && ev.cost != null) {
           if (statusTokens)
             statusTokens.textContent = 'Tokens: ' + fmtN(ev.total_tokens);
