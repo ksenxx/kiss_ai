@@ -188,11 +188,11 @@ KISS has a fresh implementation of GEPA with some key improvements. GEPA (Geneti
 
 ## 🧪 Using KISSEvolve for Algorithm Discovery
 
-This is where I started building an optimizer for agents. Then I switched to [`agent evolver`](src/kiss/agents/create_and_optimize_agent/agent_evolver.py) because `KISSEvolve` was expensive to run. I am still keeping KISSEvolve around. KISSEvolve is an evolutionary algorithm discovery framework that uses LLM-guided mutation and crossover to evolve code variants. It supports advanced features including island-based evolution, novelty rejection sampling, and multiple parent sampling methods.
+This is where I started building an optimizer for agents. Then I switched to [`agent evolver`](src/kiss/agents/obsolete/create_and_optimize_agent/agent_evolver.py) because `KISSEvolve` was expensive to run. I am still keeping KISSEvolve around. KISSEvolve is an evolutionary algorithm discovery framework that uses LLM-guided mutation and crossover to evolve code variants. It supports advanced features including island-based evolution, novelty rejection sampling, and multiple parent sampling methods.
 
-For usage examples, API reference, and configuration options, please see the [KISSEvolve README](src/kiss/agents/kiss_evolve/README.md).
+For usage examples, API reference, and configuration options, please see the [KISSEvolve README](src/kiss/agents/obsolete/kiss_evolve/README.md).
 
-📖 **For detailed KISSEvolve documentation, see [KISSEvolve README](src/kiss/agents/kiss_evolve/README.md)**
+📖 **For detailed KISSEvolve documentation, see [KISSEvolve README](src/kiss/agents/obsolete/kiss_evolve/README.md)**
 
 ## 🤖 Models Supported
 

@@ -28,7 +28,7 @@
     - [`kiss.core.relentless_agent`](#kisscorerelentless_agent)
       - [`kiss.agents.sorcar.sorcar_agent`](#kissagentssorcarsorcar_agent)
     - [`kiss.agents.obsolete.gepa`](#kissagentsobsoletegepa)
-    - [`kiss.agents.kiss_evolve`](#kissagentskiss_evolve)
+    - [`kiss.agents.obsolete.kiss_evolve`](#kissagentsobsoletekiss_evolve)
   - [`kiss.docker`](#kissdocker)
     - [`kiss.docker.docker_manager`](#kissdockerdocker_manager)
       - [`kiss.agents.sorcar.git_worktree`](#kissagentssorcargit_worktree)
@@ -884,10 +884,10 @@ from kiss.agents.obsolete.gepa import GEPA, GEPAPhase, GEPAProgress, PromptCandi
 
 ______________________________________________________________________
 
-#### `kiss.agents.kiss_evolve` — *KISSEvolve: Evolutionary Algorithm Discovery using LLMs.*
+#### `kiss.agents.obsolete.kiss_evolve` — *KISSEvolve: Evolutionary Algorithm Discovery using LLMs.*
 
 ```python
-from kiss.agents.kiss_evolve import CodeVariant, KISSEvolve, SimpleRAG
+from kiss.agents.obsolete.kiss_evolve import CodeVariant, KISSEvolve, SimpleRAG
 ```
 
 ##### `class CodeVariant` — Represents a code variant in the evolutionary population.

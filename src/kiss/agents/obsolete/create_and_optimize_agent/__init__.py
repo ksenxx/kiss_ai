@@ -7,14 +7,17 @@
 
 import warnings
 
-from kiss.agents.create_and_optimize_agent.agent_evolver import (
+from kiss.agents.obsolete.create_and_optimize_agent.agent_evolver import (
     AgentEvolver,
     AgentVariant,
     EvolverPhase,
     EvolverProgress,
     create_progress_callback,
 )
-from kiss.agents.create_and_optimize_agent.improver_agent import ImprovementReport, ImproverAgent
+from kiss.agents.obsolete.create_and_optimize_agent.improver_agent import (
+    ImprovementReport,
+    ImproverAgent,
+)
 
 warnings.warn(
     "kiss.agents.create_and_optimize_agent is deprecated.",

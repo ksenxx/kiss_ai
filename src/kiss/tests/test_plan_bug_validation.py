@@ -13,7 +13,7 @@ import inspect
 class TestAgentEvolverIsolation:
     def test_evaluate_variant_uses_subprocess(self) -> None:
         """Variant evaluation uses subprocess, not global state mutation."""
-        from kiss.agents.create_and_optimize_agent.agent_evolver import AgentEvolver
+        from kiss.agents.obsolete.create_and_optimize_agent.agent_evolver import AgentEvolver
 
         source = inspect.getsource(AgentEvolver)
         assert "sys.path.insert" not in source

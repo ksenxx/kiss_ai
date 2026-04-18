@@ -12,8 +12,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from kiss.agents.kiss_evolve.novelty_prompts import INNOVATION_INSTRUCTIONS
-from kiss.agents.kiss_evolve.simple_rag import SimpleRAG
+from kiss.agents.obsolete.kiss_evolve.novelty_prompts import INNOVATION_INSTRUCTIONS
+from kiss.agents.obsolete.kiss_evolve.simple_rag import SimpleRAG
 from kiss.core.models.model import Model
 
 logger = logging.getLogger(__name__)

@@ -31,7 +31,7 @@ KISSEvolve is part of the KISS Agent Framework. See the main [README.md](../../.
 ```python
 from typing import Any
 
-from kiss.agents.kiss_evolve import KISSEvolve
+from kiss.agents.obsolete.kiss_evolve import KISSEvolve
 from kiss.core.kiss_agent import KISSAgent
 
 def evaluate_code(code: str) -> dict[str, Any]:

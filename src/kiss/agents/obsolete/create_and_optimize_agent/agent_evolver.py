@@ -98,7 +98,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.create_and_optimize_agent.improver_agent import (
+from kiss.agents.obsolete.create_and_optimize_agent.improver_agent import (
     ImprovementReport,
     ImproverAgent,
 )

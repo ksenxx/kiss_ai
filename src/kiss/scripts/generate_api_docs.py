@@ -16,7 +16,7 @@ EXCLUDE_DIRS = {
     "viz_trajectory",
     "demo",
     "__pycache__",
-    "create_and_optimize_agent",
+    "obsolete",
 }
 EXCLUDE_FILES = {"_version.py", "conftest.py", "novelty_prompts.py"}
 
@@ -413,8 +413,8 @@ def _sort_modules(modules: list[ModuleDoc]) -> list[ModuleDoc]:
 
         "kiss.agents.obsolete.gepa",
         "kiss.agents.obsolete.gepa.gepa",
-        "kiss.agents.kiss_evolve",
-        "kiss.agents.kiss_evolve.kiss_evolve",
+        "kiss.agents.obsolete.kiss_evolve",
+        "kiss.agents.obsolete.kiss_evolve.kiss_evolve",
         "kiss.agents.imo_agent",
         "kiss.agents.imo_agent.imo_agent",
         "kiss.agents.imo_agent.config",

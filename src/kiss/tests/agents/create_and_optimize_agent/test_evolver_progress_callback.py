@@ -6,11 +6,11 @@ import warnings
 
 with warnings.catch_warnings():
     warnings.simplefilter("ignore", DeprecationWarning)
-    from kiss.agents.create_and_optimize_agent.agent_evolver import (
+    from kiss.agents.obsolete.create_and_optimize_agent.agent_evolver import (
         AgentEvolver,
         AgentVariant,
     )
-    from kiss.agents.create_and_optimize_agent.improver_agent import (
+    from kiss.agents.obsolete.create_and_optimize_agent.improver_agent import (
         ImprovementReport,
     )
 

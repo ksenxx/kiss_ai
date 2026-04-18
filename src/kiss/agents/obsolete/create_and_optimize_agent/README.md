@@ -30,7 +30,7 @@ The module is part of the `kiss` package. No additional installation required.
 ### Improving an Existing Agent
 
 ```python
-from kiss.agents.create_and_optimize_agent import ImproverAgent
+from kiss.agents.obsolete.create_and_optimize_agent import ImproverAgent
 
 improver = ImproverAgent()
 
@@ -48,7 +48,7 @@ if success and report:
 ### Evolving a New Agent from Scratch
 
 ```python
-from kiss.agents.create_and_optimize_agent import AgentEvolver, create_progress_callback
+from kiss.agents.obsolete.create_and_optimize_agent import AgentEvolver, create_progress_callback
 
 evolver = AgentEvolver()
 
