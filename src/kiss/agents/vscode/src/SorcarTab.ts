@@ -90,7 +90,14 @@ export function buildChatHtml(
       </div>
     </div>
 
-    <div id="task-panel"></div>
+    <div id="task-panel">
+      <button id="task-panel-chevron" type="button" aria-label="Toggle panel visibility">
+        <svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="9 18 15 12 9 6"/>
+        </svg>
+      </button>
+      <div id="task-panel-text"></div>
+    </div>
 
     <div id="output">
       <div id="welcome">

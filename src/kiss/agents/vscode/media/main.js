@@ -77,6 +77,7 @@
       outputFragment: null,
       taskPanelHTML: '',
       taskPanelVisible: false,
+      panelsExpanded: false,
       statusTextContent: 'Ready',
       statusTextColor: 'var(--green)',
       statusTokensText: '',
@@ -130,7 +131,7 @@
     // Save DOM subtree as fragment (preserves element references for streaming state)
     tab.outputFragment = document.createDocumentFragment();
     while (O.firstChild) tab.outputFragment.appendChild(O.firstChild);
-    tab.taskPanelHTML = taskPanel ? taskPanel.textContent : '';
+    tab.taskPanelHTML = taskPanelText ? taskPanelText.textContent : '';
     tab.taskPanelVisible = taskPanel
       ? taskPanel.classList.contains('visible')
       : false;
@@ -182,12 +183,13 @@
       O.appendChild(tab.outputFragment);
       tab.outputFragment = null;
     }
-    if (taskPanel) {
-      taskPanel.textContent = tab.taskPanelHTML;
+    if (taskPanel && taskPanelText) {
+      taskPanelText.textContent = tab.taskPanelHTML;
       if (tab.taskPanelVisible) taskPanel.classList.add('visible');
       else taskPanel.classList.remove('visible');
     }
     currentTaskName = tab.taskPanelHTML || '';
+    updateChevronIcon(!!tab.panelsExpanded);
     if (statusText) {
       statusText.textContent = tab.statusTextContent || 'Ready';
       statusText.style.color = tab.statusTextColor || 'var(--green)';
@@ -326,6 +328,7 @@
       stopTimer();
       removeSpinner();
     }
+    applyChevronState(!!tab.panelsExpanded);
   }
 
   function closeTab(tabId) {
@@ -352,6 +355,7 @@
         stopTimer();
         removeSpinner();
       }
+      applyChevronState(!!newTab.panelsExpanded);
     }
     renderTabBar();
     persistTabState();
@@ -590,20 +594,76 @@
   const worktreeToggleBtn = document.getElementById('worktree-toggle-btn');
   const parallelToggleBtn = document.getElementById('parallel-toggle-btn');
   const taskPanel = document.getElementById('task-panel');
+  const taskPanelText = document.getElementById('task-panel-text');
+  const taskPanelChevron = document.getElementById('task-panel-chevron');
   const statusTokens = document.getElementById('status-tokens');
   const statusBudget = document.getElementById('status-budget');
   const statusSteps = document.getElementById('status-steps');
 
   function setTaskText(text) {
-    if (!taskPanel) return;
+    if (!taskPanel || !taskPanelText) return;
     const t = (text || '').trim();
     if (t) {
-      taskPanel.textContent = t;
+      taskPanelText.textContent = t;
       taskPanel.classList.add('visible');
     } else {
-      taskPanel.textContent = '';
+      taskPanelText.textContent = '';
       taskPanel.classList.remove('visible');
     }
+  }
+
+  /**
+   * Apply the chevron expand/collapse state to panels in the tab.
+   * - expanded=false (chevron right, default): hide every .collapsible
+   *   panel in #output (display:none via .chv-hidden) except result panels
+   *   (.rc) and panels belonging to the currently running task.
+   * - expanded=true (chevron down): reveal every hidden panel and expand
+   *   every .collapsible panel in #output except those belonging to the
+   *   currently running task.
+   * Running task panels are direct children of #output (not inside
+   *   .adjacent-task) while a task is running; adjacent-task containers
+   *   hold previously-completed tasks.
+   */
+  function applyChevronState(expanded) {
+    if (!O) return;
+    const panels = O.querySelectorAll('.collapsible');
+    for (let i = 0; i < panels.length; i++) {
+      const p = panels[i];
+      const inAdjacent = !!p.closest('.adjacent-task');
+      const inRunning = isRunning && !inAdjacent;
+      if (!expanded) {
+        if (inRunning || p.classList.contains('rc')) {
+          p.classList.remove('chv-hidden');
+          continue;
+        }
+        p.classList.add('chv-hidden');
+      } else {
+        p.classList.remove('chv-hidden');
+        if (inRunning) continue;
+        p.classList.remove('collapsed');
+        collapsePreview(p);
+      }
+    }
+  }
+
+  /** Update the chevron icon to reflect the current expanded state. */
+  function updateChevronIcon(expanded) {
+    if (!taskPanelChevron) return;
+    if (expanded) taskPanelChevron.classList.add('expanded');
+    else taskPanelChevron.classList.remove('expanded');
+  }
+
+  if (taskPanelChevron) {
+    taskPanelChevron.addEventListener('click', e => {
+      e.stopPropagation();
+      const tab = tabs.find(t => {
+        return t.id === activeTabId;
+      });
+      const expanded = tab ? !tab.panelsExpanded : true;
+      if (tab) tab.panelsExpanded = expanded;
+      updateChevronIcon(expanded);
+      applyChevronState(expanded);
+    });
   }
 
   function syncClearBtn() {
@@ -711,6 +771,10 @@
       O.appendChild(container);
       newestLoadedTask = task;
     }
+    const tab = tabs.find(x => {
+      return x.id === activeTabId;
+    });
+    if (tab) applyChevronState(!!tab.panelsExpanded);
   }
 
   function clearOutput() {
@@ -1284,6 +1348,11 @@
     handleOutputEvent(ev, target, tState);
     if (target === O) collapseOlderPanels();
     if (target === llmPanel) llmPanel.scrollTop = llmPanel.scrollHeight;
+    // Keep the chevron "right" state consistent across new panels added by streaming
+    const tab = tabs.find(x => {
+      return x.id === activeTabId;
+    });
+    if (tab && !tab.panelsExpanded) applyChevronState(false);
   }
 
   // --- Scrolling ---
@@ -2047,6 +2116,10 @@
       if (t === 'result' && ev.step_count) rSteps = ev.step_count;
     });
     if (rSteps > 0) updateStepCount(rSteps);
+    const tab = tabs.find(x => {
+      return x.id === activeTabId;
+    });
+    if (tab) applyChevronState(!!tab.panelsExpanded);
     sb();
   }
 

@@ -189,22 +189,45 @@ body {
 
 /* ── Task Panel ──────────────────────────────────────── */
 #task-panel {
+  position: relative;
   flex-shrink: 0;
   max-height: calc(var(--vscode-editor-font-size) * 1.6 * 3 + 16px);
   overflow-y: auto;
   margin: 8px 10px 0;
-  padding: 8px 8px;
+  padding: 8px 8px 8px 28px;
   border: 2px solid rgb(255 200 0 / 50%);
   border-radius: 8px;
   background: color-mix(in srgb, var(--accent) 4%, transparent);
   font-size: var(--vscode-editor-font-size);
   color: var(--fg);
-  white-space: pre-wrap;
-  word-break: break-word;
   line-height: 1.6;
   display: none;
 }
 #task-panel.visible { display: block; }
+
+#task-panel-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+#task-panel-chevron {
+  position: absolute;
+  left: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  color: var(--dim);
+  cursor: pointer;
+  padding: 2px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s;
+}
+#task-panel-chevron:hover { color: var(--fg); }
+#task-panel-chevron svg { transition: transform 0.2s ease; }
+#task-panel-chevron.expanded svg { transform: rotate(90deg); }
 
 /* ── Output Area ────────────────────────────────────── */
 #output {
@@ -1123,6 +1146,11 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 .usage.collapsed .usage-content { display: none; }
 
 .merge-info.collapsed .merge-info-body { display: none; }
+
+/* Chevron-driven hide: when the fixed task-panel chevron is collapsed
+   (pointing right), non-result panels of completed tasks are fully
+   hidden (not just body-collapsed). */
+.chv-hidden { display: none !important; }
 
 
 
