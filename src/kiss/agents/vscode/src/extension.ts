@@ -126,12 +126,36 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   };
 
+  // Countdown shown in the SCM input box while a commit message is being
+  // generated. Starts at 15s, decrements every second, stays at 0 if the
+  // agent is still generating. Cleared/replaced when the result arrives.
+  const commitCountdownSeconds = 15;
+  let stopCommitCountdown: (() => void) | undefined;
+  const startCommitCountdown = () => {
+    stopCommitCountdown?.();
+    let seconds = commitCountdownSeconds;
+    void setScmMessage(`Generating in ${seconds}s ...`);
+    const interval = setInterval(() => {
+      seconds = Math.max(seconds - 1, 0);
+      void setScmMessage(`Generating in ${seconds}s ...`);
+    }, 1000);
+    stopCommitCountdown = () => {
+      clearInterval(interval);
+      stopCommitCountdown = undefined;
+    };
+  };
+
   context.subscriptions.push(
     sidebarView!.onCommitMessage(ev => {
+      const countdownWasRunning = stopCommitCountdown !== undefined;
+      stopCommitCountdown?.();
       if (ev.error) {
         vscode.window.showWarningMessage(`Commit message: ${ev.error}`);
+        if (countdownWasRunning) void setScmMessage('');
       } else if (ev.message) {
         void setScmMessage(ev.message);
+      } else if (countdownWasRunning) {
+        void setScmMessage('');
       }
     }),
   );
@@ -141,6 +165,8 @@ export function activate(context: vscode.ExtensionContext): void {
     _context?: unknown,
     token?: vscode.CancellationToken,
   ): Thenable<void> | void => {
+    startCommitCountdown();
+    token?.onCancellationRequested(() => stopCommitCountdown?.());
     return sidebarView!.generateCommitMessage(token);
   };
 
