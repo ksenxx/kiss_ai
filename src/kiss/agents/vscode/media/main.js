@@ -689,6 +689,7 @@
     return {
       thinkEl: null,
       txtEl: null,
+      txtBuf: '',
       bashPanel: null,
       bashBuf: '',
       bashRaf: 0,
@@ -1086,11 +1087,21 @@
         if (!tState.txtEl) {
           tState.txtEl = mkEl('div', 'txt');
           target.appendChild(tState.txtEl);
+          tState.txtBuf = '';
         }
+        tState.txtBuf += ev.text || '';
         tState.txtEl.textContent += (ev.text || '').replace(/\n\n+/g, '\n');
         break;
       case 'text_end':
-        tState.txtEl = null;
+        if (tState.txtEl) {
+          if (typeof marked !== 'undefined') {
+            tState.txtEl.classList.add('md-body');
+            tState.txtEl.innerHTML = marked.parse(tState.txtBuf || '');
+            hlBlock(tState.txtEl);
+          }
+          tState.txtEl = null;
+          tState.txtBuf = '';
+        }
         break;
       case 'tool_call': {
         if (tState.bashPanel && tState.bashBuf) {
@@ -1347,6 +1358,7 @@
     }
     handleOutputEvent(ev, target, tState);
     if (target === O) collapseOlderPanels();
+    if (t === 'result') collapseAllExceptResult(O);
     if (target === llmPanel) llmPanel.scrollTop = llmPanel.scrollHeight;
     // Keep the chevron "right" state consistent across new panels added by streaming
     const tab = tabs.find(x => {
