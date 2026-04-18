@@ -1316,11 +1316,11 @@
     if (t === 'tool_result' && lastToolName !== 'finish') {
       pendingPanel = true;
     }
-    // Count initial thinking as step 1
-    if (stepCount === 0 && (t === 'thinking_start' || t === 'text_delta')) {
-      updateStepCount(1);
-    }
-    if (pendingPanel && (t === 'thinking_start' || t === 'text_delta')) {
+    // First thought (stepCount === 0) also gets a panel, like every other turn.
+    if (
+      (pendingPanel || stepCount === 0) &&
+      (t === 'thinking_start' || t === 'text_delta')
+    ) {
       updateStepCount(stepCount + 1);
       llmPanel = mkEl('div', 'llm-panel');
       const lHdr = mkEl('div', 'llm-panel-hdr');
@@ -2012,7 +2012,8 @@
     let rLlmPanel = null;
     let rLlmPanelState = mkS();
     let rLastToolName = '';
-    let rPendingPanel = false;
+    // Start true so the first thought also gets its own panel.
+    let rPendingPanel = true;
     events.forEach(ev => {
       const t = ev.type;
       if (t === 'task_done' || t === 'task_error' || t === 'task_stopped') {
