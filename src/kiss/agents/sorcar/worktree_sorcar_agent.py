@@ -262,10 +262,12 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
 
         Creates a new worktree and branch, redirects ``work_dir`` into
         the worktree, and delegates to ``StatefulSorcarAgent.run()``.
-        If a branch from this chat session is already pending, returns
-        an error asking the user to merge or discard first.
+        Each call starts a fresh worktree; any previously pending
+        branch from an earlier run is left as-is in git for the user
+        to merge or discard later.
 
         Falls back to direct execution (no worktree) when:
+        - ``use_worktree`` kwarg is explicitly ``False``
         - ``work_dir`` is not inside a git repo
         - The repo has no commits
         - HEAD is detached (no merge target)
@@ -274,11 +276,17 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         Args:
             prompt_template: The task prompt.
             **kwargs: All other arguments forwarded to
-                ``StatefulSorcarAgent.run()``.
+                ``StatefulSorcarAgent.run()``.  The optional
+                ``use_worktree`` kwarg (default ``True``) gates the
+                worktree behavior — when ``False`` the call is
+                equivalent to ``StatefulSorcarAgent.run()``.
 
         Returns:
             YAML string with 'success' and 'summary' keys.
         """
+        if not kwargs.pop("use_worktree", True):
+            return super().run(prompt_template=prompt_template, **kwargs)
+
         work_dir_str = kwargs.get("work_dir")
         discovery_dir = Path(work_dir_str) if work_dir_str else Path.cwd()
 
@@ -288,17 +296,6 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
             return super().run(prompt_template=prompt_template, **kwargs)
 
         self._restore_from_git(repo)
-
-        if self._wt is not None:
-            blocked: str = yaml.dump({
-                "success": False,
-                "summary": (
-                    f"Cannot start a new task in this chat session: branch "
-                    f"'{self._wt.branch}' is pending merge/discard.\n\n"
-                    + self.merge_instructions()
-                ),
-            })
-            return blocked
 
         # Pre-allocate a chat_id so the worktree branch name is stable.
         # Without this, _chat_id would still be 0 here and the branch

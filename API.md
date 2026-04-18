@@ -935,6 +935,25 @@ ______________________________________________________________________
   - `branch`: Branch whose changes to apply.
   - **Returns:** :attr:`MergeResult.SUCCESS` or :attr:`MergeResult.CONFLICT`.
 
+- **would_merge_conflict** — Dry-run check for tree-level merge conflicts. Runs `git merge-tree --write-tree` which performs a merge entirely in memory without touching the working tree or index. A non-zero exit code indicates the three-way merge would produce textual conflicts.<br/>`would_merge_conflict(repo: Path, base: str, branch: str) -> bool`
+
+  - `repo`: Git repo root path.
+  - `base`: The branch that would receive the merge.
+  - `branch`: The branch that would be merged in.
+  - **Returns:** True if the merge would have tree-level conflicts, False if it would apply cleanly.
+
+- **branch_diff_files** — List files that differ between two branches/revisions.<br/>`branch_diff_files(repo: Path, base: str, branch: str) -> list[str]`
+
+  - `repo`: Git repo root path.
+  - `base`: First branch or revision.
+  - `branch`: Second branch or revision.
+  - **Returns:** List of file paths that differ between *base* and *branch*, or an empty list if the command fails.
+
+- **unstaged_files** — List files with unstaged changes in the working tree.<br/>`unstaged_files(repo: Path) -> list[str]`
+
+  - `repo`: Git repo root path.
+  - **Returns:** List of files with uncommitted, unstaged modifications, or an empty list if the command fails.
+
 - **manual_merge_branch** — Merge with `--no-commit --no-ff` for interactive review. On success (no conflicts), unstages changes via `git reset HEAD` so the user can selectively stage hunks.<br/>`manual_merge_branch(repo: Path, branch: str) -> ManualMergeResult`
 
   - `repo`: Git repo root path.
@@ -1025,10 +1044,10 @@ ______________________________________________________________________
 
 **Constructor:** `WorktreeSorcarAgent(name: str) -> None`
 
-- **run** — Run a task on an isolated git worktree branch. Creates a new worktree and branch, redirects `work_dir` into the worktree, and delegates to `StatefulSorcarAgent.run()`. If a branch from this chat session is already pending, returns an error asking the user to merge or discard first. Falls back to direct execution (no worktree) when: - `work_dir` is not inside a git repo - The repo has no commits - HEAD is detached (no merge target) - Any git command fails during setup<br/>`run(prompt_template: str = '', **kwargs: Any) -> str`
+- **run** — Run a task on an isolated git worktree branch. Creates a new worktree and branch, redirects `work_dir` into the worktree, and delegates to `StatefulSorcarAgent.run()`. If a branch from this chat session is already pending, returns an error asking the user to merge or discard first. Falls back to direct execution (no worktree) when: - `use_worktree` kwarg is explicitly `False` - `work_dir` is not inside a git repo - The repo has no commits - HEAD is detached (no merge target) - Any git command fails during setup<br/>`run(prompt_template: str = '', **kwargs: Any) -> str`
 
   - `prompt_template`: The task prompt.
-  - `**kwargs`: All other arguments forwarded to `StatefulSorcarAgent.run()`.
+  - `**kwargs`: All other arguments forwarded to `StatefulSorcarAgent.run()`. The optional `use_worktree` kwarg (default `True`) gates the worktree behavior — when `False` the call is equivalent to `StatefulSorcarAgent.run()`.
   - **Returns:** YAML string with 'success' and 'summary' keys.
 
 - **merge** — Merge the task branch into the original branch. Every step is idempotent — safe to re-run after a crash. Auto-commits any uncommitted changes in the worktree before merging.<br/>`merge() -> str`

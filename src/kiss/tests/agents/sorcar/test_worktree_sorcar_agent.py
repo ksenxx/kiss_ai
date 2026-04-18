@@ -104,17 +104,19 @@ class TestWorktreeSorcarAgent:
 
     # 2. Discard path
 
-    # 3. Blocking (same session)
-    def test_blocking_same_session(self) -> None:
+    # 3. Consecutive tasks in the same session succeed (no blocking)
+    def test_consecutive_tasks_same_session(self) -> None:
         agent = self._agent()
         agent.run(prompt_template="task1", work_dir=str(self.repo))
+        first_branch = agent._wt_branch
+        assert first_branch is not None
 
+        # A second task in the same session starts a new worktree
+        # instead of being blocked by the pending first branch.
         result = agent.run(prompt_template="task2", work_dir=str(self.repo))
-        assert "pending merge/discard" in result
-
-        agent.merge()
-        result = agent.run(prompt_template="task3", work_dir=str(self.repo))
         assert "test done" in result
+        assert agent._wt_branch is not None
+        assert agent._wt_branch != first_branch
 
     # 4. No blocking (different session)
 

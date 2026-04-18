@@ -251,7 +251,7 @@ class TestVSCodeServerUncoveredBranches:
         server = VSCodeServer()
         tab = server._get_tab("0")
         tab.use_worktree = True
-        tab.worktree_agent._wt = None  # type: ignore[attr-defined]
+        tab.agent._wt = None  # type: ignore[attr-defined]
         assert server._check_merge_conflict() is False
 
     def test_get_worktree_changed_files_no_branches(self) -> None:
@@ -259,7 +259,7 @@ class TestVSCodeServerUncoveredBranches:
         server = VSCodeServer()
         tab = server._get_tab("0")
         tab.use_worktree = True
-        tab.worktree_agent._wt = None  # type: ignore[attr-defined]
+        tab.agent._wt = None  # type: ignore[attr-defined]
         assert server._get_worktree_changed_files() == []
 
     def test_check_merge_conflict_dirty_worktree(self, tmp_path: Path) -> None:
@@ -291,7 +291,7 @@ class TestVSCodeServerUncoveredBranches:
             server = VSCodeServer()
             tab = server._get_tab("0")
             tab.use_worktree = True
-            tab.worktree_agent._wt = GitWorktree(
+            tab.agent._wt = GitWorktree(
                 repo_root=repo, branch="test-branch",
                 original_branch="main",
                 wt_dir=repo / ".kiss-worktrees" / "test-branch",
