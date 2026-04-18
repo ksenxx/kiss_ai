@@ -264,6 +264,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "minimax-m2.5": _mi(1000000, 0.15, 1.20),  # Standard: 50 TPS
     "minimax-m2.5-lightning": _mi(1000000, 0.30, 2.40),  # Lightning: 100 TPS
     "MiniMaxAI/MiniMax-M2.5": _mi(196608, 0.30, 1.20),
+    "MiniMaxAI/MiniMax-M2.7": _mi(196608, 0.30, 1.20),  # NEW
     "mistralai/Ministral-3-14B-Instruct-2512": _mi(262144, 0.20, 0.20, fc=False),
     "mistralai/Mistral-7B-Instruct-v0.1": _mi(32768, 0.20, 0.20),  # NEW
     "mistralai/Mistral-7B-Instruct-v0.2": _mi(32768, 0.20, 0.20, fc=False),
@@ -441,7 +442,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/moonshotai/kimi-k2": _mi(131072, 0.57, 2.30, fc=False),  # Unreliable FC
     "openrouter/moonshotai/kimi-k2-0905": _mi(262144, 0.40, 2.00, fc=False),  # Unreliable FC
     "openrouter/moonshotai/kimi-k2-thinking": _mi(262144, 0.60, 2.50, fc=False),  # SLOW
-    "openrouter/moonshotai/kimi-k2.5": _mi(256000, 0.00, 0.00),  # Multimodal + agentic
+    "openrouter/moonshotai/kimi-k2.5": _mi(262144, 0.383, 1.72),  # Multimodal + agentic
     "openrouter/morph/morph-v3-fast": _mi(81920, 0.80, 1.20, fc=False),
     "openrouter/morph/morph-v3-large": _mi(262144, 0.90, 1.90, fc=False),
     "openrouter/nex-agi/deepseek-v3.1-nex-n1": _mi(131072, 0.135, 0.50, fc=False),
@@ -532,7 +533,6 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/qwen/qwen-turbo": _mi(131072, 0.033, 0.13),
     "openrouter/qwen/qwen-vl-max": _mi(131072, 0.52, 2.08),  # Vision model
     "openrouter/qwen/qwen-vl-plus": _mi(131072, 0.137, 0.41, fc=False),  # Vision model
-    "openrouter/qwen/qwen2.5-vl-32b-instruct": _mi(128000, 0.20, 0.60, fc=False),  # Vision model
     "openrouter/qwen/qwen2.5-vl-72b-instruct": _mi(32000, 0.25, 0.75, fc=False),  # Vision model
     "openrouter/qwen/qwen3-14b": _mi(40960, 0.06, 0.24, fc=False),
     "openrouter/qwen/qwen3-235b-a22b": _mi(131072, 0.455, 1.82, fc=False, gen=False),
