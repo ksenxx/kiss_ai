@@ -467,13 +467,14 @@ class TestWorktreeWorkflow:
         assert agent._wt_branch in instructions
         agent.discard()
 
-    def test_run_result_includes_merge_instructions(self) -> None:
-        """run() result has task output + separator + merge instructions."""
+    def test_run_result_is_plain_task_output(self) -> None:
+        """run() returns only the task result — no merge-instructions suffix."""
         agent = self._agent()
         result = agent.run(prompt_template="task1", work_dir=str(self.repo))
-        assert "---" in result
-        assert "agent.merge()" in result
-        assert "agent.discard()" in result
+        assert "agent.merge()" not in result
+        assert "agent.discard()" not in result
+        assert "agent.do_nothing()" not in result
+        assert agent._wt_pending
         agent.discard()
 
 

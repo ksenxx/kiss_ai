@@ -1044,7 +1044,7 @@ ______________________________________________________________________
 
 **Constructor:** `WorktreeSorcarAgent(name: str) -> None`
 
-- **run** — Run a task on an isolated git worktree branch. Creates a new worktree and branch, redirects `work_dir` into the worktree, and delegates to `StatefulSorcarAgent.run()`. If a branch from this chat session is already pending, returns an error asking the user to merge or discard first. Falls back to direct execution (no worktree) when: - `use_worktree` kwarg is explicitly `False` - `work_dir` is not inside a git repo - The repo has no commits - HEAD is detached (no merge target) - Any git command fails during setup<br/>`run(prompt_template: str = '', **kwargs: Any) -> str`
+- **run** — Run a task on an isolated git worktree branch. Creates a new worktree and branch, redirects `work_dir` into the worktree, and delegates to `StatefulSorcarAgent.run()`. Each call starts a fresh worktree; any previously pending branch from an earlier run is left as-is in git for the user to merge or discard later. Falls back to direct execution (no worktree) when: - `use_worktree` kwarg is explicitly `False` - `work_dir` is not inside a git repo - The repo has no commits - HEAD is detached (no merge target) - Any git command fails during setup<br/>`run(prompt_template: str = '', **kwargs: Any) -> str`
 
   - `prompt_template`: The task prompt.
   - `**kwargs`: All other arguments forwarded to `StatefulSorcarAgent.run()`. The optional `use_worktree` kwarg (default `True`) gates the worktree behavior — when `False` the call is equivalent to `StatefulSorcarAgent.run()`.

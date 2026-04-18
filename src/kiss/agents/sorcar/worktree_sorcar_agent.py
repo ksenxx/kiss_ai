@@ -320,17 +320,14 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         kwargs["work_dir"] = str(wt_work_dir)
 
         try:
-            task_result = super().run(
-                prompt_template=prompt_template, **kwargs)
+            return super().run(prompt_template=prompt_template, **kwargs)
         except KISSError:
             raise
         except Exception as exc:
-            task_result = yaml.dump({
+            return yaml.dump({
                 "success": False,
                 "summary": f"Task failed with error: {exc}",
             })
-
-        return task_result + "\n\n---\n" + self.merge_instructions()
 
     # -- Merge / discard / do nothing --------------------------------------
 
