@@ -6,7 +6,7 @@ import unittest
 import pytest
 
 import kiss.core.utils as utils
-from kiss.agents.gepa import GEPA, GEPAPhase, GEPAProgress
+from kiss.agents.obsolete.gepa import GEPA, GEPAPhase, GEPAProgress
 from kiss.core.kiss_agent import KISSAgent
 from kiss.tests.conftest import requires_openai_api_key
 

@@ -24,7 +24,7 @@ Repeatedly:
 ## Quick Start
 
 ```python
-from kiss.agents.gepa import GEPA, GEPAProgress
+from kiss.agents.obsolete.gepa import GEPA, GEPAProgress
 from kiss.core.kiss_agent import KISSAgent
 import json
 
@@ -220,7 +220,7 @@ gepa = GEPA(
 Use the built-in `create_progress_callback()` for simple console output:
 
 ```python
-from kiss.agents.gepa import GEPA, create_progress_callback
+from kiss.agents.obsolete.gepa import GEPA, create_progress_callback
 
 # Simple usage - prints only val evaluation completions
 gepa = GEPA(
@@ -258,7 +258,7 @@ For more advanced UI integration:
 
 ```python
 from rich.progress import Progress, SpinnerColumn, TextColumn
-from kiss.agents.gepa import GEPA, GEPAProgress
+from kiss.agents.obsolete.gepa import GEPA, GEPAProgress
 
 with Progress(
     SpinnerColumn(),
