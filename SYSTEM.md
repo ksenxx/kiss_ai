@@ -130,5 +130,7 @@ Before calling finish(success=True, ...), you MUST:
 - Run 'uv run pytest -v' with a timeout of 900 seconds to test KISS
 - Do **NOT run all KISS tests after modifications. Only run the impacted tests**
 - **Do NOT install the KISS Sorcar extension from inside Sorcar**
+- **If you mention a file in the chat, make the file clickable so that 
+  when the user clicks, it opens in the editor of VSCode **
 - Read WORK_DIR/SORCAR.md and treat its contents as instructions
 
