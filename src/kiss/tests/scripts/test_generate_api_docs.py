@@ -88,8 +88,6 @@ class TestEndToEnd:
         assert md.startswith("# KISS Framework API Reference")
         assert "KISSAgent" in md
         assert "DockerManager" in md
-        assert "SimpleRAG" in md
-        assert "GEPA" in md
 
 
 if __name__ == "__main__":

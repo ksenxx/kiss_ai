@@ -34,7 +34,6 @@
       - [`kiss.agents.sorcar.worktree_sorcar_agent`](#kissagentssorcarworktree_sorcar_agent)
     - [`kiss.agents.vscode`](#kissagentsvscode)
       - [`kiss.agents.vscode.helpers`](#kissagentsvscodehelpers)
-        \- [`kiss.agents.vscode.node_modules.flatted.python.flatted`](#kissagentsvscodenode_modulesflattedpythonflatted)
       - [`kiss.agents.vscode.server`](#kissagentsvscodeserver)
   - [`kiss.benchmarks`](#kissbenchmarks)
     - [`kiss.benchmarks.generate_dashboard`](#kissbenchmarksgenerate_dashboard)
@@ -78,6 +77,7 @@
     - [`kiss.channels.zalo_agent`](#kisschannelszalo_agent)
       - [`kiss.core.models.claude_code_model`](#kisscoremodelsclaude_code_model)
     - [`kiss.docker.docker_tools`](#kissdockerdocker_tools)
+      \- [`kiss.vscode.node_modules.flatted.python.flatted`](#kissvscodenode_modulesflattedpythonflatted)
 
 </details>
 
@@ -1080,14 +1080,6 @@ ______________________________________________________________________
 - `usage`: File usage counts keyed by path (insertion order encodes recency, last key = most recently used).
 - `limit`: Maximum number of results to return.
 - **Returns:** Sorted list of dicts with `type` (`"frequent"` or `"file"`) and `text` keys.
-
-______________________________________________________________________
-
-#### `kiss.agents.vscode.node_modules.flatted.python.flatted`
-
-**`parse`**<br/>`def parse(value, *args, **kwargs)`
-
-**`stringify`**<br/>`def stringify(value, *args, **kwargs)`
 
 ______________________________________________________________________
 
@@ -3393,5 +3385,13 @@ ______________________________________________________________________
   - `old_string`: Exact text to find and replace.
   - `new_string`: Replacement text, must differ from old_string.
   - `replace_all`: If True, replace all occurrences.
+
+______________________________________________________________________
+
+#### `kiss.vscode.node_modules.flatted.python.flatted`
+
+**`parse`**<br/>`def parse(value, *args, **kwargs)`
+
+**`stringify`**<br/>`def stringify(value, *args, **kwargs)`
 
 ______________________________________________________________________

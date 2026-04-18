@@ -982,19 +982,14 @@ class TestAgentToggle(unittest.TestCase):
         assert "useWorktree" in self._ts
 
     def test_ts_start_task_includes_use_worktree(self) -> None:
-        """_startTask sends useWorktree in agent command."""
-        # Check that _startTask accepts useWorktree and passes it through
+        """_startTask accepts useWorktree and forwards it in sendCommand."""
         assert "useWorktree?: boolean" in self._ts
-        # Check it's included in the command object
-        lines = self._ts.split("\n")
-        in_start_task = False
-        found_use_worktree_in_command = False
-        for line in lines:
-            if "_startTask" in line and "useWorktree" in line:
-                in_start_task = True
-            if in_start_task and "useWorktree" in line and "sendCommand" not in line:
-                found_use_worktree_in_command = True
-        assert found_use_worktree_in_command
+        # Locate the _startTask method body and its sendCommand({...}) call.
+        idx = self._ts.index("_startTask(")
+        body = self._ts[idx : idx + 2000]
+        send_idx = body.index("sendCommand({")
+        cmd_block = body[send_idx : body.index("});", send_idx)]
+        assert "useWorktree" in cmd_block
 
     def test_worktree_action_rejected_when_not_enabled(self) -> None:
         """Worktree action fails gracefully when worktree mode is off."""
@@ -1153,19 +1148,15 @@ class TestSorcarTabParallelToggle(unittest.TestCase):
         assert "useParallel" in ts
 
     def test_ts_start_task_includes_use_parallel(self) -> None:
-        """_startTask sends useParallel in agent command."""
+        """_startTask accepts useParallel and forwards it in sendCommand."""
         base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
         ts = (base / "vscode" / "src" / "SorcarSidebarView.ts").read_text()
         assert "useParallel?: boolean" in ts
-        lines = ts.split("\n")
-        in_start_task = False
-        found = False
-        for line in lines:
-            if "_startTask" in line and "useParallel" in line:
-                in_start_task = True
-            if in_start_task and "useParallel" in line and "sendCommand" not in line:
-                found = True
-        assert found
+        idx = ts.index("_startTask(")
+        body = ts[idx : idx + 2000]
+        send_idx = body.index("sendCommand({")
+        cmd_block = body[send_idx : body.index("});", send_idx)]
+        assert "useParallel" in cmd_block
 
 
 class TestServerParallelToggle(unittest.TestCase):
@@ -1636,7 +1627,7 @@ class TestCollapsiblePanelsJS(unittest.TestCase):
 
     def test_llm_panel_calls_add_collapse(self) -> None:
         """processOutputEvent calls addCollapse on the LLM panel."""
-        idx = self._js.index("var lHdr = mkEl('div', 'llm-panel-hdr')")
+        idx = self._js.index("const lHdr = mkEl('div', 'llm-panel-hdr')")
         block = self._js[idx : idx + 200]
         assert "addCollapse(llmPanel, lHdr)" in block
 
@@ -1688,7 +1679,7 @@ class TestCollapsiblePanelsJS(unittest.TestCase):
     def test_error_banner_calls_add_collapse(self) -> None:
         """Error/stopped banners call addCollapse."""
         idx = self._js.index("case 'task_error':")
-        block = self._js[idx : idx + 500]
+        block = self._js[idx : idx + 800]
         assert "addCollapse(banner, banner.querySelector('.rl'))" in block
 
     def test_adjacent_error_banners_collapsible(self) -> None:
@@ -2699,22 +2690,22 @@ class TestSorcarSidebarViewMergeActions(unittest.TestCase):
 
     def test_dispatches_accept(self) -> None:
         block = self._get_merge_action_block()
-        assert "'accept'" in block
+        assert "accept:" in block
         assert "acceptChange()" in block
 
     def test_dispatches_reject(self) -> None:
         block = self._get_merge_action_block()
-        assert "'reject'" in block
+        assert "reject:" in block
         assert "rejectChange()" in block
 
     def test_dispatches_prev(self) -> None:
         block = self._get_merge_action_block()
-        assert "'prev'" in block
+        assert "prev:" in block
         assert "prevChange()" in block
 
     def test_dispatches_next(self) -> None:
         block = self._get_merge_action_block()
-        assert "'next'" in block
+        assert "next:" in block
         assert "nextChange()" in block
 
     def test_dispatches_accept_all(self) -> None:
@@ -3231,10 +3222,10 @@ class TestWebviewTabBarJS(unittest.TestCase):
             assert field in body, f"makeTab missing field {field}"
 
     def test_tabs_array_exists(self) -> None:
-        assert "var tabs = [];" in self._js
+        assert "let tabs = [];" in self._js
 
     def test_active_tab_id_exists(self) -> None:
-        assert "var activeTabId = '';" in self._js
+        assert "let activeTabId = '';" in self._js
 
     # -- Tab bar rendering --
 
@@ -3552,15 +3543,17 @@ class TestWebviewTabBarCSS(unittest.TestCase):
         block = self._css[idx : idx + 200]
         assert "text-overflow: ellipsis" in block
 
-    def test_chat_tab_close_is_hidden_by_default(self) -> None:
+    def test_chat_tab_close_always_visible(self) -> None:
+        """Tab close button is always visible (no hover-reveal behavior)."""
         assert ".chat-tab-close" in self._css
         idx = self._css.index(".chat-tab-close {")
         end = self._css.index("}", idx)
         block = self._css[idx:end]
-        assert "opacity: 0" in block
+        assert "opacity: 1" in block
 
-    def test_chat_tab_close_visible_on_hover(self) -> None:
-        assert ".chat-tab:hover .chat-tab-close" in self._css
+    def test_chat_tab_close_hover_highlights(self) -> None:
+        """Hovering the close button changes its background for affordance."""
+        assert ".chat-tab-close:hover" in self._css
 
     def test_chat_tab_add_button_style(self) -> None:
         assert ".chat-tab-add" in self._css

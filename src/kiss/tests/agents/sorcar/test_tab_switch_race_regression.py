@@ -1059,7 +1059,7 @@ class TestPerTabInputValue(unittest.TestCase):
         idx = self.js.index("function createNewTab()")
         end = self.js.index("\n  function ", idx + 1)
         body = self.js[idx:end]
-        assert "var pendingText = inp.value" in body
+        assert "const pendingText = inp.value" in body
         assert "inp.value = pendingText" in body
 
 
