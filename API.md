@@ -55,6 +55,7 @@
     - [`kiss.channels._backend_utils`](#kisschannels_backend_utils)
     - [`kiss.channels._channel_agent_utils`](#kisschannels_channel_agent_utils)
     - [`kiss.channels.bluebubbles_agent`](#kisschannelsbluebubbles_agent)
+    - [`kiss.channels.cron_manager_daemon`](#kisschannelscron_manager_daemon)
     - [`kiss.channels.discord_agent`](#kisschannelsdiscord_agent)
     - [`kiss.channels.feishu_agent`](#kisschannelsfeishu_agent)
     - [`kiss.channels.gmail_agent`](#kisschannelsgmail_agent)
@@ -1065,17 +1066,11 @@ ______________________________________________________________________
   - `wt_dir`: Worktree directory (must have staged changes).
   - **Returns:** The diff text, or empty string if no staged changes.
 
-- **checkout** — Checkout a branch in the main worktree.<br/>`checkout(repo: Path, branch: str) -> bool`
+- **checkout** — Checkout a branch in the main worktree.<br/>`checkout(repo: Path, branch: str) -> str`
 
   - `repo`: Git repo root path.
   - `branch`: Branch name to checkout.
-  - **Returns:** True if checkout succeeded, False otherwise.
-
-- **checkout_error** — Return the stderr from a failed checkout attempt.<br/>`checkout_error(repo: Path, branch: str) -> str`
-
-  - `repo`: Git repo root path.
-  - `branch`: Branch name that failed to checkout.
-  - **Returns:** The stderr text from the failed checkout.
+  - **Returns:** Empty string on success, or the stderr error message on failure.
 
 - **merge_branch** — Merge a branch into the current HEAD with `--no-edit`. On conflict, the merge is aborted to leave a clean worktree.<br/>`merge_branch(repo: Path, branch: str) -> MergeResult`
 
@@ -1621,6 +1616,71 @@ ______________________________________________________________________
 ##### `class BlueBubblesAgent(BaseChannelAgent, StatefulSorcarAgent)` — StatefulSorcarAgent extended with BlueBubbles REST API tools (macOS only).
 
 **Constructor:** `BlueBubblesAgent() -> None`
+
+______________________________________________________________________
+
+#### `kiss.channels.cron_manager_daemon` — *Cron Manager Daemon — scheduled task manager with Unix domain socket interface.*
+
+##### `class CronDaemon` — Daemon process that manages cron jobs via a Unix domain socket.
+
+**Constructor:** `CronDaemon(sock_path: Path = SOCK_PATH, pid_path: Path = PID_PATH, jobs_path: Path = JOBS_PATH) -> None`
+
+- **run** — Start the daemon (foreground mode). Loads persisted jobs, writes the PID file, starts the scheduler thread, and enters the socket server loop. On shutdown (via `stop` command or signal), cleans up all resources.<br/>`run() -> None`
+
+##### `class CronClient` — Client for communicating with the Cron Manager Daemon.
+
+**Constructor:** `CronClient(sock_path: Path = SOCK_PATH) -> None`
+
+- **add_job** — Add a cron job.<br/>`add_job(schedule: str, command: str) -> str`
+
+  - `schedule`: Cron expression (5 fields), e.g. `"*/5 * * * *"`.
+  - `command`: Shell command to run on schedule.
+  - **Returns:** The job ID string.
+
+- **remove_job** — Remove a cron job.<br/>`remove_job(job_id: str) -> None`
+
+  - `job_id`: The job identifier to remove.
+
+- **list_jobs** — List all cron jobs.<br/>`list_jobs() -> list[dict[str, Any]]`
+
+  - **Returns:** List of job dictionaries.
+
+- **status** — Get daemon status.<br/>`status() -> dict[str, Any]`
+
+  - **Returns:** Status dictionary with `pid`, `job_count`, etc.
+
+- **stop_daemon** — Send stop command to the daemon.<br/>`stop_daemon() -> None`
+  **`parse_cron_expression`** — Parse a 5-field cron expression into matched value sets. Fields: minute hour day-of-month month day-of-week<br/>`def parse_cron_expression(expr: str) -> dict[str, set[int]]`
+
+- `expr`: Cron expression string, e.g. `"*/5 * * * *"`.
+
+- **Returns:** Dictionary with keys `minute`, `hour`, `dom`, `month`, `dow` each mapping to a set of matching integer values.
+
+**`cron_matches_time`** — Check whether a parsed cron schedule matches a specific datetime.<br/>`def cron_matches_time(parsed: dict[str, set[int]], dt: datetime) -> bool`
+
+- `parsed`: Output of :func:`parse_cron_expression`.
+- `dt`: The datetime to check against.
+- **Returns:** True if all five fields match the datetime.
+
+**`start_daemon`** — Start the cron manager daemon.<br/>`def start_daemon(sock_path: Path = SOCK_PATH, pid_path: Path = PID_PATH, jobs_path: Path = JOBS_PATH, foreground: bool = False) -> str`
+
+- `sock_path`: Path for the Unix domain socket.
+- `pid_path`: Path for the PID file.
+- `jobs_path`: Path for the jobs persistence file.
+- `foreground`: If True, run in the foreground (don't daemonize).
+- **Returns:** Status message string.
+
+**`stop_daemon`** — Stop the cron manager daemon. Tries a graceful stop via the socket first, then falls back to SIGTERM.<br/>`def stop_daemon(sock_path: Path = SOCK_PATH, pid_path: Path = PID_PATH) -> str`
+
+- `sock_path`: Path to the daemon socket.
+- `pid_path`: Path to the PID file.
+- **Returns:** Status message string.
+
+**`daemon_status`** — Check the daemon status.<br/>`def daemon_status(pid_path: Path = PID_PATH, sock_path: Path = SOCK_PATH) -> str`
+
+- `pid_path`: Path to the PID file.
+- `sock_path`: Path to the daemon socket.
+- **Returns:** Human-readable status string.
 
 ______________________________________________________________________
 
