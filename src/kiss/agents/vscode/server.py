@@ -36,7 +36,6 @@ from kiss.agents.sorcar.persistence import (
     _search_history,
     _set_latest_chat_events,
 )
-from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 from kiss.agents.vscode.diff_merge import (
@@ -122,18 +121,20 @@ class VSCodePrinter(BaseBrowserPrinter):
 
 
 class _TabState:
-    """Per-tab state holding agent instances, runtime state, and settings.
+    """Per-tab state holding the agent, runtime state, and settings.
 
-    Each chat tab gets its own ``StatefulSorcarAgent`` and
-    ``WorktreeSorcarAgent`` so concurrent tabs never share mutable agent
-    state (chat_id, last_task_id, worktree branch, etc.).  Runtime
-    state (stop event, task thread, answer queue, merge flag) also lives
-    here so the server needs only a single ``_tab_states`` dict.
+    Each chat tab owns a single ``WorktreeSorcarAgent`` so concurrent
+    tabs never share mutable agent state (chat_id, last_task_id,
+    worktree branch, etc.).  The ``use_worktree`` flag is passed to
+    ``agent.run()`` per task — when ``False`` the agent short-circuits
+    to the plain stateful code path, so no separate non-worktree agent
+    instance is needed.  Runtime state (stop event, task thread,
+    answer queue, merge flag) also lives here so the server needs
+    only a single ``_tab_states`` dict.
     """
 
     __slots__ = (
-        "stateful_agent",
-        "worktree_agent",
+        "agent",
         "use_worktree",
         "use_parallel",
         "task_history_id",
@@ -145,8 +146,7 @@ class _TabState:
     )
 
     def __init__(self, tab_id: str, default_model: str) -> None:
-        self.stateful_agent = StatefulSorcarAgent("Sorcar VS Code")
-        self.worktree_agent = WorktreeSorcarAgent("Sorcar VS Code")
+        self.agent = WorktreeSorcarAgent("Sorcar VS Code")
         self.use_worktree: bool = False
         self.use_parallel: bool = False
         self.task_history_id: int | None = None
@@ -155,18 +155,6 @@ class _TabState:
         self.task_thread: threading.Thread | None = None
         self.user_answer_queue: queue.Queue[str] | None = None
         self.is_merging: bool = False
-
-    @property
-    def agent(self) -> StatefulSorcarAgent:
-        """Return the active agent based on the worktree toggle.
-
-        Returns:
-            WorktreeSorcarAgent when worktree mode is enabled,
-            StatefulSorcarAgent otherwise.
-        """
-        if self.use_worktree:
-            return self.worktree_agent
-        return self.stateful_agent
 
 
 class VSCodeServer:
@@ -378,7 +366,7 @@ class VSCodeServer:
                 self.printer.broadcast({"type": "status", "running": False})
 
     def _periodic_event_flush(
-        self, stop: threading.Event, agent: StatefulSorcarAgent
+        self, stop: threading.Event, agent: WorktreeSorcarAgent
     ) -> None:
         """Periodically flush recorded events to DB for crash recovery.
 
@@ -477,15 +465,16 @@ class VSCodeServer:
                         attachments=attachments,
                         ask_user_question_callback=self._ask_user_question,
                         is_parallel=tab.use_parallel,
+                        use_worktree=tab.use_worktree,
                     )
                     result_summary = self._extract_result_summary() or "No summary available"
                     task_end_event = {"type": "task_done"}
-                    if is_last and tab.use_worktree and tab.worktree_agent._wt_pending:
+                    if is_last and tab.use_worktree and tab.agent._wt_pending:
                         changed = self._get_worktree_changed_files(tab_id)
                         if changed:
                             self._broadcast_worktree_done(changed, tab_id)
                         else:
-                            tab.worktree_agent.discard()
+                            tab.agent.discard()
                 except KeyboardInterrupt:
                     result_summary = "Task stopped by user"
                     task_end_event = {"type": "task_stopped"}
@@ -801,8 +790,7 @@ class VSCodeServer:
             tab_id: The frontend tab identifier.
         """
         tab = self._get_tab(tab_id)
-        tab.stateful_agent.new_chat()
-        tab.worktree_agent._chat_id = ""
+        tab.agent.new_chat()
         self.printer.broadcast({"type": "showWelcome", "tabId": tab_id})
 
     def _replay_session(self, chat_id: str, tab_id: str = "") -> None:
@@ -820,7 +808,6 @@ class VSCodeServer:
             return
         tab = self._get_tab(tab_id) if tab_id else self._get_tab(str(chat_id))
         tab.agent.resume_chat_by_id(chat_id)
-        tab.worktree_agent._chat_id = chat_id
         self.printer.broadcast({
             "type": "task_events",
             "events": result["events"],
@@ -848,7 +835,7 @@ class VSCodeServer:
             changed: List of file paths changed in the worktree.
             tab_id: The tab that owns the worktree.
         """
-        wt = self._get_tab(tab_id).worktree_agent
+        wt = self._get_tab(tab_id).agent
         self.printer.broadcast({
             "type": "worktree_done",
             "branch": wt._wt_branch,
@@ -871,7 +858,7 @@ class VSCodeServer:
         tab = self._get_tab(tab_id)
         if not tab.use_worktree:
             return
-        wt = tab.worktree_agent
+        wt = tab.agent
         self._ensure_worktree_state(tab_id)
         if not wt._wt_pending:
             return
@@ -892,7 +879,7 @@ class VSCodeServer:
         tab = self._get_tab(tab_id)
         if not tab.use_worktree:
             return
-        wt = tab.worktree_agent
+        wt = tab.agent
         repo_root = wt._repo_root
         if repo_root is None:
             toplevel = _git(self.work_dir, "rev-parse", "--show-toplevel")
@@ -1112,7 +1099,7 @@ class VSCodeServer:
         tab = self._get_tab(tab_id)
         if not tab.use_worktree:
             return False
-        wt = tab.worktree_agent._wt
+        wt = tab.agent._wt
         if wt is None or wt.original_branch is None:
             return False
         # Check 1: tree-level merge conflicts (dry-run, no working-tree touch)
@@ -1148,7 +1135,7 @@ class VSCodeServer:
         tab = self._get_tab(tab_id)
         if not tab.use_worktree:
             return []
-        wt = tab.worktree_agent
+        wt = tab.agent
         if not wt._original_branch:
             return []
         wt_dir = wt._wt_dir
@@ -1191,7 +1178,7 @@ class VSCodeServer:
         tab = self._get_tab(tab_id)
         if not tab.use_worktree:
             return {"success": False, "message": "Worktree mode is not enabled"}
-        wt = tab.worktree_agent
+        wt = tab.agent
         if not wt._wt_pending:
             self._ensure_worktree_state(tab_id)
         if action == "merge":

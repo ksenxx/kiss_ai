@@ -324,7 +324,7 @@ class TestVSCodeServerBranches:
         subprocess.run(["git", "commit", "-m", "init"],
                        cwd=str(repo), capture_output=True)
         # Create a branch matching the worktree agent's chat_id
-        chat_id = tab.worktree_agent._chat_id
+        chat_id = tab.agent._chat_id
         branch = f"kiss/wt-{chat_id}-1234567890"
         subprocess.run(["git", "branch", branch],
                        cwd=str(repo), capture_output=True)

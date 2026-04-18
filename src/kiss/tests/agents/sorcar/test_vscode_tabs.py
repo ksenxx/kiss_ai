@@ -642,14 +642,6 @@ if __name__ == "__main__":
 class TestPerTabAgentIsolation(unittest.TestCase):
     """Each tab gets its own agent instances — no cross-tab state leakage."""
 
-    def test_different_tabs_have_different_agents(self) -> None:
-        """Tab 1 and tab 2 get distinct StatefulSorcarAgent instances."""
-        server, _ = _make_server()
-        tab1 = server._get_tab("1")
-        tab2 = server._get_tab("2")
-        assert tab1.stateful_agent is not tab2.stateful_agent
-        assert tab1.worktree_agent is not tab2.worktree_agent
-
     def test_different_tabs_have_independent_agents(self) -> None:
         """Tab agents are distinct objects (chat_id assigned on first task)."""
         server, _ = _make_server()
@@ -701,16 +693,16 @@ class TestPerTabAgentIsolation(unittest.TestCase):
         assert "99" in server._tab_states
         assert tab is server._get_tab("99")  # same instance returned
 
-    def test_agent_property_respects_per_tab_worktree(self) -> None:
-        """_TabState.agent returns worktree_agent when use_worktree is True."""
+    def test_agent_is_always_worktree_sorcar_agent(self) -> None:
+        """_TabState.agent is a single WorktreeSorcarAgent regardless of toggle."""
         from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
         server, _ = _make_server()
         tab = server._get_tab("1")
-        assert tab.agent is tab.stateful_agent
+        original = tab.agent
+        assert isinstance(original, WorktreeSorcarAgent)
         tab.use_worktree = True
-        assert tab.agent is tab.worktree_agent
-        assert isinstance(tab.agent, WorktreeSorcarAgent)
+        assert tab.agent is original
 
 
 # ── S7: selected_model per-tab isolation ─────────────────────────────
