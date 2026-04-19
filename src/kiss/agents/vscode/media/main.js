@@ -495,6 +495,7 @@
     statusText.textContent = 'Ready';
     vscode.postMessage({type: 'newChat', tabId: activeTabId});
     vscode.postMessage({type: 'getWelcomeSuggestions'});
+    focusInputWithRetry();
   }
 
   function updateActiveTabTitle(title) {
