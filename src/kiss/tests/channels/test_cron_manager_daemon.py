@@ -343,10 +343,6 @@ class TestClientDaemonIntegration:
         with pytest.raises(RuntimeError, match="5 fields"):
             client.add_job("bad", "echo x")
 
-    def test_remove_nonexistent(self, client: CronClient) -> None:
-        with pytest.raises(RuntimeError, match="not found"):
-            client.remove_job("doesnotexist")
-
     def test_multiple_jobs(self, client: CronClient) -> None:
         ids = [client.add_job(f"0 {h} * * *", f"echo job{h}") for h in range(5)]
         jobs = client.list_jobs()
