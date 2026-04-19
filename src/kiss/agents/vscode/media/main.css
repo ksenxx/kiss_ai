@@ -145,6 +145,12 @@ body {
   border-radius: 50%; flex-shrink: 0; animation: spin 0.8s linear infinite;
 }
 
+.chat-tab-status {
+  font-size: 10px; font-weight: 700; flex-shrink: 0; line-height: 1;
+}
+.chat-tab-ok { color: var(--green); }
+.chat-tab-fail { color: var(--red); }
+
 .chat-tab-close {
   display: inline-flex;
   align-items: center;

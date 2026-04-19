@@ -97,6 +97,8 @@
       streamLlmPanelState: null,
       streamLastToolName: '',
       streamPendingPanel: false,
+      lastTaskFailed: false,
+      hasRunTask: false,
     };
   }
 
@@ -271,6 +273,13 @@
         const spinner = document.createElement('span');
         spinner.className = 'chat-tab-spinner';
         el.appendChild(spinner);
+      } else if (tab.hasRunTask) {
+        const icon = document.createElement('span');
+        icon.className = tab.lastTaskFailed
+          ? 'chat-tab-status chat-tab-fail'
+          : 'chat-tab-status chat-tab-ok';
+        icon.textContent = tab.lastTaskFailed ? '\u2717' : '\u2713';
+        el.appendChild(icon);
       }
 
       const label = document.createElement('span');
@@ -1367,7 +1376,15 @@
     }
     handleOutputEvent(ev, target, tState);
     if (target === O) collapseOlderPanels();
-    if (t === 'result') collapseAllExceptResult(O);
+    if (t === 'result') {
+      collapseAllExceptResult(O);
+      if (ev.success === false) {
+        const rTab = tabs.find(x => {
+          return x.id === activeTabId;
+        });
+        if (rTab) rTab.lastTaskFailed = true;
+      }
+    }
     if (target === llmPanel) llmPanel.scrollTop = llmPanel.scrollHeight;
     // Keep the chevron "right" state consistent across new panels added by streaming
     const tab = tabs.find(x => {
@@ -1595,6 +1612,10 @@
             : tabs.find(t => {
                 return t.id === activeTabId;
               });
+        if (clearTab) {
+          clearTab.lastTaskFailed = false;
+          clearTab.hasRunTask = true;
+        }
         if (ev.chat_id && clearTab) {
           clearTab.backendChatId = ev.chat_id;
           persistTabState();
@@ -1605,6 +1626,7 @@
           resetOutputState();
           showSpinner();
         }
+        renderTabBar();
         break;
       }
       case 'clearChat': {
@@ -1919,6 +1941,7 @@
         }
         const el = doneT0 ? Math.floor((Date.now() - doneT0) / 1000) : 0;
         const em = Math.floor(el / 60);
+        markTabDone(ev.tabId, ev.success === false);
         setReady(
           'Done (' + (em > 0 ? em + 'm ' : '') + (el % 60) + 's)',
           ev.tabId,
@@ -1945,6 +1968,7 @@
           O.appendChild(banner);
           collapseOlderPanels();
         }
+        markTabDone(ev.tabId, true);
         setReady(isErr ? 'Error' : 'Stopped', ev.tabId);
         break;
       }
@@ -1983,6 +2007,17 @@
     updateInputDisabled();
     if (running) {
       startTimer();
+    }
+  }
+
+  function markTabDone(tabId, failed) {
+    const tid = tabId !== undefined ? tabId : activeTabId;
+    const tab = tabs.find(t => {
+      return t.id === tid;
+    });
+    if (tab) {
+      tab.hasRunTask = true;
+      tab.lastTaskFailed = !!failed;
     }
   }
 
