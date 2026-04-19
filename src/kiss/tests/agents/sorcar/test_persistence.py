@@ -74,7 +74,10 @@ class TestChatEvents:
         assert result is not None
         events = result["events"]
         assert isinstance(events, list)
-        assert events == [{"a": 1}]
+        assert len(events) == 1
+        assert events[0]["a"] == 1
+        assert "_timestamp" in events[0]
+        assert isinstance(events[0]["_timestamp"], float)
 
     def test_load_chat_events_includes_extra(self):
         task_id, _ = th._add_task("extra-task", chat_id="1005")
@@ -87,6 +90,60 @@ class TestChatEvents:
         assert loaded["model"] == "gpt-4o"
         assert loaded["is_worktree"] is True
         assert loaded["is_parallel"] is False
+
+    def test_set_events_stores_timestamps(self):
+        task_id, _ = th._add_task("ts-task", chat_id="ts1")
+        before = time.time()
+        th._set_latest_chat_events([{"x": 1}, {"x": 2}], task_id=task_id)
+        after = time.time()
+        result = th._load_latest_chat_events_by_chat_id("ts1")
+        assert result is not None
+        events = result["events"]
+        assert len(events) == 2
+        for ev in events:
+            assert before <= ev["_timestamp"] <= after
+
+    def test_append_event_stores_timestamp(self):
+        task_id, _ = th._add_task("append-ts", chat_id="ts2")
+        before = time.time()
+        th._append_chat_event({"step": 1}, task_id=task_id)
+        after_first = time.time()
+        time.sleep(0.01)
+        before_second = time.time()
+        th._append_chat_event({"step": 2}, task_id=task_id)
+        after_second = time.time()
+        result = th._load_latest_chat_events_by_chat_id("ts2")
+        assert result is not None
+        events = result["events"]
+        assert len(events) == 2
+        assert before <= events[0]["_timestamp"] <= after_first
+        assert before_second <= events[1]["_timestamp"] <= after_second
+        # Second event timestamp is strictly after the first
+        assert events[1]["_timestamp"] >= events[0]["_timestamp"]
+
+    def test_adjacent_task_events_have_timestamps(self):
+        task_id1, _ = th._add_task("adj-first", chat_id="adj1")
+        th._set_latest_chat_events([{"ev": "a"}], task_id=task_id1)
+        time.sleep(0.01)
+        task_id2, _ = th._add_task("adj-second", chat_id="adj1")
+        th._set_latest_chat_events([{"ev": "b"}], task_id=task_id2)
+        prev = th._get_adjacent_task_by_chat_id("adj1", "adj-second", "prev")
+        assert prev is not None
+        assert len(prev["events"]) == 1
+        assert "_timestamp" in prev["events"][0]
+        assert isinstance(prev["events"][0]["_timestamp"], float)
+
+    def test_event_timestamp_in_raw_db(self):
+        """Verify the timestamp column exists in the events table at the DB level."""
+        task_id, _ = th._add_task("raw-ts", chat_id="raw1")
+        th._append_chat_event({"k": "v"}, task_id=task_id)
+        db = th._get_db()
+        row = db.execute(
+            "SELECT timestamp FROM events WHERE task_id = ?", (task_id,)
+        ).fetchone()
+        assert row is not None
+        assert isinstance(row["timestamp"], float)
+        assert row["timestamp"] > 0
 
     def test_save_task_result_no_matching_task(self):
         th._save_task_result(result="result", task="nonexistent")

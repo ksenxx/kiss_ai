@@ -80,7 +80,8 @@ def _init_tables(conn: sqlite3.Connection) -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             task_id INTEGER NOT NULL REFERENCES task_history(id),
             seq INTEGER NOT NULL,
-            event_json TEXT NOT NULL
+            event_json TEXT NOT NULL,
+            timestamp REAL NOT NULL
         );
         CREATE TABLE IF NOT EXISTS model_usage (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -378,9 +379,10 @@ def _set_latest_chat_events(
             )
         db.execute("DELETE FROM events WHERE task_id = ?", (resolved_task_id,))
         if has_ev:
+            now = time.time()
             db.executemany(
-                "INSERT INTO events (task_id, seq, event_json) VALUES (?, ?, ?)",
-                [(resolved_task_id, i, json.dumps(ev)) for i, ev in enumerate(events)],
+                "INSERT INTO events (task_id, seq, event_json, timestamp) VALUES (?, ?, ?, ?)",
+                [(resolved_task_id, i, json.dumps(ev), now) for i, ev in enumerate(events)],
             )
         db.commit()
 
@@ -408,8 +410,8 @@ def _append_chat_event(
         ).fetchone()
         next_seq = row["next_seq"] if row else 0
         db.execute(
-            "INSERT INTO events (task_id, seq, event_json) VALUES (?, ?, ?)",
-            (resolved_task_id, next_seq, json.dumps(event)),
+            "INSERT INTO events (task_id, seq, event_json, timestamp) VALUES (?, ?, ?, ?)",
+            (resolved_task_id, next_seq, json.dumps(event), time.time()),
         )
         db.commit()
 
@@ -519,13 +521,15 @@ def _load_latest_chat_events_by_chat_id(
     task = row["task"]
     extra_str = row["extra"] or ""
     event_rows = db.execute(
-        "SELECT event_json FROM events WHERE task_id = ? ORDER BY seq",
+        "SELECT event_json, timestamp FROM events WHERE task_id = ? ORDER BY seq",
         (task_id,),
     ).fetchall()
     events: list[dict[str, object]] = []
     for r in event_rows:
         try:
-            events.append(json.loads(r["event_json"]))
+            ev = json.loads(r["event_json"])
+            ev["_timestamp"] = r["timestamp"]
+            events.append(ev)
         except (json.JSONDecodeError, TypeError):
             logger.debug("Exception caught", exc_info=True)
     return {"task": task, "events": events, "chat_id": chat_id, "extra": extra_str}
@@ -582,13 +586,15 @@ def _get_adjacent_task_by_chat_id(
     adj_id = adj["id"]
     adj_task = adj["task"]
     event_rows = db.execute(
-        "SELECT event_json FROM events WHERE task_id = ? ORDER BY seq",
+        "SELECT event_json, timestamp FROM events WHERE task_id = ? ORDER BY seq",
         (adj_id,),
     ).fetchall()
     events: list[dict[str, object]] = []
     for r in event_rows:
         try:
-            events.append(json.loads(r["event_json"]))
+            ev = json.loads(r["event_json"])
+            ev["_timestamp"] = r["timestamp"]
+            events.append(ev)
         except (json.JSONDecodeError, TypeError):
             logger.debug("Exception caught", exc_info=True)
     return {"task": adj_task, "events": events}
