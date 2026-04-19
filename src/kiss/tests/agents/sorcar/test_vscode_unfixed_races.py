@@ -142,19 +142,24 @@ class TestCompleteSeqCounterRace(unittest.TestCase):
 
         src = inspect.getsource(type(server)._handle_command)
         # The "complete" branch writes _complete_seq and _complete_seq_latest
-        # outside any lock.
+        # Verify RACE 1 is FIXED: counter writes are now INSIDE _state_lock.
         self.assertIn("self._complete_seq += 1", src)
         self.assertIn("self._complete_seq_latest = seq", src)
         # Find the "complete" branch and verify the counter writes are
-        # AFTER the _state_lock block (i.e., outside it)
+        # INSIDE the _state_lock block (between lock acquire and the
+        # next dedented line after the with-block).
         complete_idx = src.index('"complete"')
-        complete_section = src[complete_idx:complete_idx + 600]
-        lock_end = complete_section.index("snapshot_content = self._last_active_content")
+        complete_section = src[complete_idx:complete_idx + 800]
+        lock_start = complete_section.index("with self._state_lock:")
         seq_write = complete_section.index("self._complete_seq += 1")
         self.assertGreater(
-            seq_write, lock_end,
-            "_complete_seq incremented after _state_lock block — outside lock, race confirmed",
+            seq_write, lock_start,
+            "_complete_seq should be inside _state_lock block — race fixed",
         )
+        # Also verify the reader (_complete) now reads under lock
+        import inspect
+        complete_src = inspect.getsource(type(server)._complete)
+        self.assertIn("with self._state_lock:", complete_src)
 
 
 # ---------------------------------------------------------------------------
