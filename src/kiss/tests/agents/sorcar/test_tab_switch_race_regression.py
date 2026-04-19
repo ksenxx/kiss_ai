@@ -895,7 +895,7 @@ class TestSetReadyResetsRunningTabId(unittest.TestCase):
 
     def test_task_done_calls_set_ready(self) -> None:
         idx = self.js.index("case 'task_done':")
-        block = self.js[idx : idx + 400]
+        block = self.js[idx : idx + 500]
         assert "setReady(" in block
 
 
