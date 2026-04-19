@@ -14,25 +14,23 @@
   timeout. Only for commands expected to exceed 10 minutes, run in the
   background with output redirected to a file and poll periodically.
 - Use go_to_url() for browser tool.
-- Call finish(success=True, summary="detailed summary of what was accomplished
+- Call finish(success=True, is_continue=False, summary="detailed summary of what was accomplished
   and if the user asks the agent for information, show it in the summary
-  as nicely formatted markdown text. Don't tell the user to see the answer in the
-  chat window because the user won't see the chat conversations.
-  If the answer to the user question is long, then
-  create a nicely formatted html page, use PageDrop to upload the
-  html file, get an instant link, and give the link to the user in the result.") 
+  as nicely formatted markdown text.") 
   immediately when task is complete.
+- **The user cannot see intermediate chat.  Show whatever user asks in the summary of the finish tool call.**
 - You can call the public API of PageDrop with curl to upload an HTML file:
 
 ```
 curl -s -X POST https://pagedrop.io/api/upload \
   -H "Content-Type: application/json" \
-  -d "$(jq -n --rawfile html /path/to/html/file '{html: $html, ttl: "7d"}')"
+  -d "$(jq -n --rawfile html /path/to/html/file '{html: $html, ttl: "3d"}')"
 ```
 
 - READ large files in chunks.
 - Create temporary files in WORK_DIR/tmp
 - Use ultra thinking
+- Do not push or modify git remotes.  Ask user permission if you have to.
 
 ## Pre-flight Checks
 
@@ -41,8 +39,7 @@ curl -s -X POST https://pagedrop.io/api/upload \
   source files first.
 - If the task references files, commands, or config that do not exist, stop and
   ask or report instead of guessing.
-- When changing behavior, establish the current baseline (run the test, check
-  the output) before making changes.
+- **When fixing a bug, an issue, or a race, write tests to confirm them. Then fix them.** 
 
 ## Code Style Guidelines
 
@@ -83,15 +80,9 @@ For simple single-file tasks, skip formal planning and execute directly.
 ## Testing Instructions
 
 - Run lint and typecheckers and fix any lint and typecheck errors.
-- Carefully read the code, find and fix redundancies, duplications,
-  inconsistencies, errors, and AI slop in the code
 - You MUST achieve 100% branch coverage
 - Tests MUST NOT use mocks, patches, fakes, or any form of test doubles
 - Integration tests are HIGHLY encouraged
-- You MUST not add tests that are redundant or duplicate of existing
-  tests or does not add new branch coverage over existing tests
-- Generate meaningful stress tests for the code if you are
-  optimizing the code for performance
 - Each test should be independent and verify actual behavior
 
 ## Use web tools when you need to:
@@ -132,5 +123,5 @@ Before calling finish(success=True, ...), you MUST:
 - **Do NOT install the KISS Sorcar extension from inside Sorcar**
 - **If you mention a file in the chat, make the file clickable so that 
   when the user clicks, it opens in the editor of VSCode **
-- Read WORK_DIR/SORCAR.md and treat its contents as instructions
+- Read WORK_DIR/SORCAR.md and treat its contents as instructions and allow those instructions to override the instructions above
 
