@@ -23,6 +23,6 @@ echo "==> Installing extension..."
 "$CODE" --install-extension kiss-sorcar.vsix --force
 
 echo "==> Cleaning up build artifacts..."
-rm -rf "$EXT_DIR/out" "$EXT_DIR/kiss_project"
+rm -rf "$EXT_DIR/out" "$EXT_DIR/kiss_project" "$EXT_DIR/kiss-sorcar.vsix"
 
 echo "==> Done. KISS Sorcar extension installed successfully."
