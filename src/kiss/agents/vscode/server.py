@@ -529,17 +529,9 @@ class VSCodeServer:
                 self.printer.reset()
                 if not tab.use_worktree:
                     try:
-                        merge_dir = str(_merge_data_dir())
-                        merge_result = _prepare_merge_view(
-                            work_dir,
-                            merge_dir,
-                            pre_hunks,
-                            pre_untracked,
-                            pre_file_hashes,
+                        self._prepare_and_start_merge(
+                            work_dir, pre_hunks, pre_untracked, pre_file_hashes,
                         )
-                        if merge_result.get("status") == "opened":  # pragma: no cover
-                            merge_json = os.path.join(merge_dir, "pending-merge.json")
-                            self._start_merge_session(merge_json)
                     except BaseException:  # pragma: no cover — merge view error handler
                         logger.debug("Merge view error", exc_info=True)
                 if task_end_event:  # pragma: no branch — always set
@@ -591,6 +583,41 @@ class VSCodeServer:
             logger.debug("Failed to load merge data", exc_info=True)
             return False
 
+    def _prepare_and_start_merge(
+        self,
+        work_dir: str,
+        pre_hunks: dict[str, list[tuple[int, int, int, int]]] | None = None,
+        pre_untracked: set[str] | None = None,
+        pre_file_hashes: dict[str, str] | None = None,
+    ) -> bool:
+        """Prepare a merge view and start the merge session if changes exist.
+
+        Combines ``_prepare_merge_view`` and ``_start_merge_session``
+        into a single call to eliminate the repeated prepare→check→start
+        sequence.
+
+        Args:
+            work_dir: Repository root (or worktree) directory.
+            pre_hunks: Pre-task diff hunks (empty dict when not applicable).
+            pre_untracked: Pre-task untracked file set (empty when not applicable).
+            pre_file_hashes: Pre-task MD5 hashes for change detection.
+
+        Returns:
+            True if a merge session was started, False otherwise.
+        """
+        merge_dir = str(_merge_data_dir())
+        merge_result = _prepare_merge_view(
+            work_dir,
+            merge_dir,
+            pre_hunks or {},
+            pre_untracked or set(),
+            pre_file_hashes,
+        )
+        if merge_result.get("status") != "opened":
+            return False
+        merge_json = os.path.join(merge_dir, "pending-merge.json")
+        return self._start_merge_session(merge_json)
+
     def _start_worktree_merge_review(self, tab_id: str) -> bool:
         """Prepare and start a merge review for worktree changes.
 
@@ -610,14 +637,7 @@ class VSCodeServer:
         if wt_dir is None or not wt_dir.exists():
             return False
         try:
-            merge_dir = str(_merge_data_dir())
-            merge_result = _prepare_merge_view(
-                str(wt_dir), merge_dir, {}, set(),
-            )
-            if merge_result.get("status") != "opened":
-                return False
-            merge_json = os.path.join(merge_dir, "pending-merge.json")
-            return self._start_merge_session(merge_json)
+            return self._prepare_and_start_merge(str(wt_dir))
         except BaseException:
             logger.debug("Worktree merge review error", exc_info=True)
             return False
@@ -1209,11 +1229,7 @@ class VSCodeServer:
                            wt._original_branch)
             files = (tracked.stdout.strip().splitlines()
                      if tracked.returncode == 0 else [])
-            # Also include untracked new files
-            untracked = _git(str(wt_dir), "ls-files",
-                             "--others", "--exclude-standard")
-            if untracked.returncode == 0 and untracked.stdout.strip():
-                files.extend(untracked.stdout.strip().splitlines())
+            files.extend(_capture_untracked(str(wt_dir)))
             return sorted(set(files))
         # Worktree already removed — fall back to branch diff
         if not wt._wt_branch:
