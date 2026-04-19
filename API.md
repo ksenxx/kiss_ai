@@ -1123,7 +1123,7 @@ ______________________________________________________________________
 
 **Constructor:** `VSCodePrinter() -> None`
 
-- **broadcast** — Write event as a JSON line to stdout and record it. Injects `tabId` from thread-local storage when available so the frontend can route events to the correct chat tab.<br/>`broadcast(event: dict[str, Any]) -> None`
+- **broadcast** — Write event as a JSON line to stdout and record it. Injects `tabId` from thread-local storage when available so the frontend can route events to the correct chat tab. The `_record_event` call and the stdout write are performed inside a single `_lock` critical section so recording order is guaranteed to match stdout-write order even under concurrent broadcasts. `_stdout_lock` is nested inside `_lock` for defence-in-depth against any future caller that writes to stdout directly.<br/>`broadcast(event: dict[str, Any]) -> None`
   - `event`: The event dictionary to emit.
 
 ##### `class VSCodeServer` — Backend server for VS Code extension.

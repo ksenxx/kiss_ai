@@ -107,6 +107,13 @@ class VSCodePrinter(BaseBrowserPrinter):
         Injects ``tabId`` from thread-local storage when available so the
         frontend can route events to the correct chat tab.
 
+        The ``_record_event`` call and the stdout write are performed
+        inside a single ``_lock`` critical section so recording order
+        is guaranteed to match stdout-write order even under
+        concurrent broadcasts.  ``_stdout_lock`` is nested inside
+        ``_lock`` for defence-in-depth against any future caller that
+        writes to stdout directly.
+
         Args:
             event: The event dictionary to emit.
         """
@@ -115,9 +122,9 @@ class VSCodePrinter(BaseBrowserPrinter):
             event = {**event, "tabId": tab_id}
         with self._lock:
             self._record_event(event)
-        with self._stdout_lock:
-            sys.stdout.write(json.dumps(event) + "\n")
-            sys.stdout.flush()
+            with self._stdout_lock:
+                sys.stdout.write(json.dumps(event) + "\n")
+                sys.stdout.flush()
 
 
 class _TabState:
@@ -1067,8 +1074,14 @@ class VSCodeServer:
         if not cache:
             from kiss.agents.vscode.diff_merge import _scan_files
             cache = _scan_files(self.work_dir)
+            # Double-check under lock: a concurrent _refresh_file_cache
+            # thread may have published a fresher cache while we were
+            # scanning — do not overwrite it with our (older) scan.
             with self._state_lock:
-                self._file_cache = cache
+                if self._file_cache is None:
+                    self._file_cache = cache
+                else:
+                    cache = self._file_cache
         usage = _load_file_usage()
         ranked = rank_file_suggestions(cache, prefix, usage)
         self.printer.broadcast({"type": "files", "files": ranked})
