@@ -69,7 +69,7 @@ class TestChatEvents:
 
     def test_set_events_no_task(self):
         task_id, _ = th._add_task("latest", chat_id="1004")
-        th._set_latest_chat_events([{"a": 1}], task_id=task_id)
+        th._append_chat_event({"a": 1}, task_id=task_id)
         result = th._load_latest_chat_events_by_chat_id("1004")
         assert result is not None
         events = result["events"]
@@ -81,7 +81,7 @@ class TestChatEvents:
 
     def test_load_chat_events_includes_extra(self):
         task_id, _ = th._add_task("extra-task", chat_id="1005")
-        th._set_latest_chat_events([{"b": 2}], task_id=task_id)
+        th._append_chat_event({"b": 2}, task_id=task_id)
         extra = {"model": "gpt-4o", "is_worktree": True, "is_parallel": False}
         th._save_task_extra(extra, task_id=task_id)
         result = th._load_latest_chat_events_by_chat_id("1005")
@@ -94,7 +94,8 @@ class TestChatEvents:
     def test_set_events_stores_timestamps(self):
         task_id, _ = th._add_task("ts-task", chat_id="ts1")
         before = time.time()
-        th._set_latest_chat_events([{"x": 1}, {"x": 2}], task_id=task_id)
+        th._append_chat_event({"x": 1}, task_id=task_id)
+        th._append_chat_event({"x": 2}, task_id=task_id)
         after = time.time()
         result = th._load_latest_chat_events_by_chat_id("ts1")
         assert result is not None
@@ -123,10 +124,10 @@ class TestChatEvents:
 
     def test_adjacent_task_events_have_timestamps(self):
         task_id1, _ = th._add_task("adj-first", chat_id="adj1")
-        th._set_latest_chat_events([{"ev": "a"}], task_id=task_id1)
+        th._append_chat_event({"ev": "a"}, task_id=task_id1)
         time.sleep(0.01)
         task_id2, _ = th._add_task("adj-second", chat_id="adj1")
-        th._set_latest_chat_events([{"ev": "b"}], task_id=task_id2)
+        th._append_chat_event({"ev": "b"}, task_id=task_id2)
         prev = th._get_adjacent_task_by_chat_id("adj1", "adj-second", "prev")
         assert prev is not None
         assert len(prev["events"]) == 1

@@ -1029,7 +1029,7 @@ ______________________________________________________________________
   - `prompt`: The original task prompt.
   - **Returns:** The augmented prompt with chat history prepended, or the original prompt if no prior context exists.
 
-- **run** — Run the agent with chat-session context management. Loads prior chat context, persists the new task, augments the prompt with previous tasks/results, runs the underlying agent, and saves the result back to history. Only the result summary is persisted here. Callers that record chat events (e.g. the VS Code server) should additionally call :func:`~kiss.agents.sorcar.persistence._set_latest_chat_events` to persist the full event stream.<br/>`run(prompt_template: str = '', **kwargs: Any) -> str`
+- **run** — Run the agent with chat-session context management. Loads prior chat context, persists the new task, augments the prompt with previous tasks/results, runs the underlying agent, and saves the result back to history. Only the result summary is persisted here. Callers that record chat events (e.g. the VS Code server) persist events incrementally via :func:`~kiss.agents.sorcar.persistence._append_chat_event`.<br/>`run(prompt_template: str = '', **kwargs: Any) -> str`
 
   - `prompt_template`: The task prompt.
   - `**kwargs`: All other arguments forwarded to `SorcarAgent.run()`.
@@ -1122,7 +1122,7 @@ ______________________________________________________________________
 
 **Constructor:** `VSCodePrinter() -> None`
 
-- **broadcast** — Write event as a JSON line to stdout and record it. Injects `tabId` from thread-local storage when available so the frontend can route events to the correct chat tab. The `_record_event` call and the stdout write are performed inside a single `_lock` critical section so recording order is guaranteed to match stdout-write order even under concurrent broadcasts. `_stdout_lock` is nested inside `_lock` for defence-in-depth against any future caller that writes to stdout directly.<br/>`broadcast(event: dict[str, Any]) -> None`
+- **broadcast** — Write event as a JSON line to stdout, record it, and persist to DB. Injects `tabId` from thread-local storage when available so the frontend can route events to the correct chat tab. Display events are persisted to the database via `_append_chat_event` as they are created, provided a per-tab agent with a valid `_last_task_id` is registered in `_persist_agents`. The `_record_event` call and the stdout write are performed inside a single `_lock` critical section so recording order is guaranteed to match stdout-write order even under concurrent broadcasts. `_stdout_lock` is nested inside `_lock` for defence-in-depth against any future caller that writes to stdout directly.<br/>`broadcast(event: dict[str, Any]) -> None`
   - `event`: The event dictionary to emit.
 
 ##### `class VSCodeServer` — Backend server for VS Code extension.

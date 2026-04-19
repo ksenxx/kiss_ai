@@ -394,28 +394,6 @@ class TestUserAnswerQueueStaleReference(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# RACE 5: _periodic_event_flush reads agent._last_task_id without lock
-# ---------------------------------------------------------------------------
-# The flush thread reads agent._last_task_id every _flush_interval seconds.
-# The task thread writes it (via agent.run()).  No lock coordinates these.
-# Under CPython-GIL this is "safe" but there is no happens-before edge.
-# ---------------------------------------------------------------------------
-
-class TestPeriodicFlushReadsTaskIdWithoutLock(unittest.TestCase):
-    """_periodic_event_flush reads agent state without synchronisation."""
-
-    def test_structural_no_lock_on_task_id_read(self) -> None:
-        """The flush thread reads agent._last_task_id with no lock."""
-        import inspect
-
-        src = inspect.getsource(VSCodeServer._periodic_event_flush)
-        self.assertIn("task_id = agent._last_task_id", src)
-        # Verify no lock wraps this read
-        self.assertNotIn("_state_lock", src)
-        self.assertNotIn("_lock", src.replace("_state_lock", ""))
-
-
-# ---------------------------------------------------------------------------
 # RACE 6: _ensure_complete_worker double-init
 # ---------------------------------------------------------------------------
 # _ensure_complete_worker checks _complete_worker is not None then creates

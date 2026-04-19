@@ -33,11 +33,11 @@ from kiss.agents.sorcar.persistence import (
     _record_model_usage,
     _save_last_model,
     _save_task_extra,
+    _save_task_result,
     _search_history,
-    _set_latest_chat_events,
 )
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.browser_ui import _DISPLAY_EVENT_TYPES, BaseBrowserPrinter
 from kiss.agents.vscode.diff_merge import (
     _capture_untracked,
     _cleanup_merge_data,
@@ -100,12 +100,18 @@ class VSCodePrinter(BaseBrowserPrinter):
     def __init__(self) -> None:
         super().__init__()
         self._stdout_lock = threading.Lock()
+        self._persist_agents: dict[str, Any] = {}
 
     def broadcast(self, event: dict[str, Any]) -> None:
-        """Write event as a JSON line to stdout and record it.
+        """Write event as a JSON line to stdout, record it, and persist to DB.
 
         Injects ``tabId`` from thread-local storage when available so the
         frontend can route events to the correct chat tab.
+
+        Display events are persisted to the database via
+        ``_append_chat_event`` as they are created, provided a
+        per-tab agent with a valid ``_last_task_id`` is registered
+        in ``_persist_agents``.
 
         The ``_record_event`` call and the stdout write are performed
         inside a single ``_lock`` critical section so recording order
@@ -125,6 +131,15 @@ class VSCodePrinter(BaseBrowserPrinter):
             with self._stdout_lock:
                 sys.stdout.write(json.dumps(event) + "\n")
                 sys.stdout.flush()
+        # Persist display events to the database as they are created
+        if event.get("type") in _DISPLAY_EVENT_TYPES:
+            evt_tab = event.get("tabId")
+            if evt_tab is not None:
+                agent = self._persist_agents.get(evt_tab)
+                if agent is not None:
+                    task_id = agent._last_task_id
+                    if task_id is not None:
+                        _append_chat_event(event, task_id=task_id)
 
 
 class _TabState:
@@ -190,7 +205,6 @@ class VSCodeServer:
         self._file_cache: list[str] | None = None
         self._last_active_file: str = ""
         self._last_active_content: str = ""
-        self._flush_interval: float = 5  # seconds between crash-recovery flushes
 
     def _get_tab(self, tab_id: str) -> _TabState:
         """Get or create per-tab state for the given tab.
@@ -374,28 +388,6 @@ class VSCodeServer:
                     tab.user_answer_queue = None
                 self.printer.broadcast({"type": "status", "running": False})
 
-    def _periodic_event_flush(
-        self, stop: threading.Event, agent: WorktreeSorcarAgent
-    ) -> None:
-        """Periodically flush recorded events to DB for crash recovery.
-
-        Runs in a background daemon thread.  Every ``_flush_interval``
-        seconds it snapshots the in-memory recording and writes it to the
-        database.  If the agent process is killed before the task's
-        ``finally`` block runs, the most recent flush ensures partial
-        events survive in the DB and can be replayed later.
-
-        Args:
-            stop: Event signaled when the task completes normally.
-            agent: The per-tab agent whose ``_last_task_id`` to read.
-        """
-        while not stop.wait(self._flush_interval):
-            task_id = agent._last_task_id
-            if task_id is not None:
-                events = self.printer.peek_recording()
-                if events:
-                    _set_latest_chat_events(events, task_id=task_id, result=None)
-
     def _run_task_inner(self, cmd: dict[str, Any]) -> None:
         """Inner implementation of _run_task (without the status guarantee)."""
         prompt = cmd.get("prompt", "")
@@ -451,15 +443,9 @@ class VSCodeServer:
         # start_recording inside try so stop_recording always runs (P14 fix)
         result_summary = "Agent Failed Abruptly"
         task_end_event: dict[str, Any] | None = None
-        flush_stop = threading.Event()
-        flush_thread = threading.Thread(
-            target=self._periodic_event_flush,
-            args=(flush_stop, tab.agent),
-            daemon=True,
-        )
-        flush_thread.start()
         try:
             self.printer.start_recording()
+            self.printer._persist_agents[tab_id] = tab.agent
             tab.task_history_id = None
             subtasks = parse_task_tags(prompt)
             for task_idx, task_prompt in enumerate(subtasks):
@@ -499,19 +485,21 @@ class VSCodeServer:
             # P14: interrupt before inner try — ensure stop_recording runs
             task_end_event = task_end_event or {"type": "task_stopped"}
         finally:
-            flush_stop.set()
-            flush_thread.join(timeout=2)
             _record_model_usage(model)
             # Entire cleanup wrapped in try/except BaseException (P13 fix)
             try:
-                chat_events = self.printer.stop_recording()
+                self.printer._persist_agents.pop(tab_id, None)
+                self.printer.stop_recording()
                 if task_end_event:  # pragma: no branch — always set
-                    chat_events.append(task_end_event)
-                _set_latest_chat_events(
-                    chat_events,
+                    _append_chat_event(
+                        task_end_event,
+                        task_id=tab.task_history_id,
+                        task=prompt,
+                    )
+                _save_task_result(
+                    result=result_summary,
                     task_id=tab.task_history_id,
                     task=prompt,
-                    result=result_summary,
                 )
                 from kiss._version import __version__
 

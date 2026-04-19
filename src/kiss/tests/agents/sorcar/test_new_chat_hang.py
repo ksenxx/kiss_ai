@@ -177,7 +177,6 @@ class TestPeriodicEventFlush(unittest.TestCase):
         self.saved = _redirect_db(self.tmpdir)
         _init_git_repo(self.tmpdir)
         self.server = VSCodeServer()
-        self.server._flush_interval = 1  # speed up for testing
         # Redirect stdout so VSCodePrinter.broadcast doesn't pollute test output
         import io
         import sys

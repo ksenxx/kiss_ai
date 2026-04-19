@@ -374,15 +374,6 @@ class TestPersistenceTOCTOUFixed:
         sig = inspect.signature(persistence._save_task_result)
         assert "task_id" in sig.parameters
 
-    def test_set_latest_chat_events_uses_task_id_under_lock(self) -> None:
-        """_set_latest_chat_events() resolves task_id inside _db_lock."""
-        from kiss.agents.sorcar import persistence
-
-        source = inspect.getsource(persistence._set_latest_chat_events)
-        assert "with _db_lock:" in source
-        sig = inspect.signature(persistence._set_latest_chat_events)
-        assert "task_id" in sig.parameters
-
 
 # ---------------------------------------------------------------------------
 # §41: _add_task returns row ID

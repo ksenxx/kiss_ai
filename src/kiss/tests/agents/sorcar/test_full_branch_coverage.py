@@ -140,7 +140,8 @@ class TestReplaySessionWithEvents:
                 {"type": "text_delta", "text": "hello"},
                 {"type": "result", "summary": "done"},
             ]
-            th._set_latest_chat_events(test_events, task_id=task_id)
+            for ev in test_events:
+                th._append_chat_event(ev, task_id=task_id)
 
             server = VSCodeServer()
             captured: list[dict[str, object]] = []

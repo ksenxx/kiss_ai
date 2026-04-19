@@ -199,13 +199,6 @@ class TestTaskHistoryBranches:
             th._db_conn = None
         th._DB_PATH, th._db_conn, th._KISS_DIR = saved
 
-    def test_set_latest_chat_events_no_match(self, tmp_path):
-        saved = self._fresh_db(tmp_path)
-        try:
-            th._set_latest_chat_events([], task="nonexistent_task_xyz")
-        finally:
-            self._restore_db(saved)
-
     def test_load_chat_context_empty_id(self):
         assert th._load_chat_context("") == []
 

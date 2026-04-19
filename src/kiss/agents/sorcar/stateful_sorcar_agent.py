@@ -99,9 +99,8 @@ class StatefulSorcarAgent(SorcarAgent):
         and saves the result back to history.
 
         Only the result summary is persisted here.  Callers that record
-        chat events (e.g. the VS Code server) should additionally call
-        :func:`~kiss.agents.sorcar.persistence._set_latest_chat_events`
-        to persist the full event stream.
+        chat events (e.g. the VS Code server) persist events incrementally
+        via :func:`~kiss.agents.sorcar.persistence._append_chat_event`.
 
         Args:
             prompt_template: The task prompt.

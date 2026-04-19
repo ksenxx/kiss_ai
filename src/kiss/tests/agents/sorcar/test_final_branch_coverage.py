@@ -13,8 +13,6 @@ from __future__ import annotations
 import shutil
 import sqlite3
 import tempfile
-import threading
-import time
 from pathlib import Path
 
 from kiss.agents.sorcar import persistence as th
@@ -72,47 +70,7 @@ class TestGetDbWithExistingFile:
 
 
 # ---------------------------------------------------------------------------
-# persistence.py — line 380→385: _set_latest_chat_events with empty events
-# ---------------------------------------------------------------------------
-
-
-class TestSetLatestChatEventsEmpty:
-    """Cover 'if has_ev:' False branch (line 380→385)."""
-
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect(self.tmpdir)
-
-    def teardown_method(self) -> None:
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
-        _restore(self.saved)
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_set_empty_events(self) -> None:
-        """Passing empty events list sets has_events=0 and skips insert."""
-        task_id, chat_id = th._add_task("empty-events-task", chat_id="test_empty_events")
-        # First set some events, then clear them
-        th._set_latest_chat_events(
-            [{"type": "text_delta", "text": "hello"}], task_id=task_id
-        )
-        result = th._load_latest_chat_events_by_chat_id(chat_id)
-        assert result is not None
-        events = result["events"]
-        assert isinstance(events, list)
-        assert len(events) == 1
-        # Now set empty events (line 380→385)
-        th._set_latest_chat_events([], task_id=task_id)
-        result = th._load_latest_chat_events_by_chat_id(chat_id)
-        assert result is not None
-        events = result["events"]
-        assert isinstance(events, list)
-        assert len(events) == 0
-
-
-# ---------------------------------------------------------------------------
-# persistence.py — line 403→404: _append_chat_event with nonexistent task
+# persistence.py — _append_chat_event with nonexistent task
 # ---------------------------------------------------------------------------
 
 
@@ -153,61 +111,6 @@ class TestRankFileSuggestionsWithUsage:
         frequent = [r for r in result if r["type"] == "frequent"]
         # Both src/main.py and lib/main.py match "main" and have usage
         assert len(frequent) == 2
-
-
-# ---------------------------------------------------------------------------
-# server.py — lines 239→237 and 241→237: _periodic_event_flush early exits
-# ---------------------------------------------------------------------------
-
-
-class TestPeriodicEventFlushEarlyExits:
-    """Cover flush loop branches when task_id is None and events are empty."""
-
-    def test_flush_with_no_task_id(self) -> None:
-        """Flush loop exits early when agent._last_task_id is None."""
-        server = VSCodeServer()
-        agent = server._get_tab("0").agent
-        agent._last_task_id = None
-        stop = threading.Event()
-        server._flush_interval = 0.05  # very fast flush
-        server.printer.start_recording()
-        # Run flush loop briefly — should skip because task_id is None
-        t = threading.Thread(
-            target=server._periodic_event_flush, args=(stop, agent), daemon=True
-        )
-        t.start()
-        time.sleep(0.15)  # allow 2-3 flush cycles
-        stop.set()
-        t.join(timeout=2)
-        server.printer.stop_recording()
-
-    def test_flush_with_empty_events(self) -> None:
-        """Flush loop skips DB write when events list is empty."""
-        tmpdir = tempfile.mkdtemp()
-        saved = _redirect(tmpdir)
-        try:
-            server = VSCodeServer()
-            agent = server._get_tab("0").agent
-            task_id, _ = th._add_task("flush-test")
-            agent._last_task_id = task_id
-            stop = threading.Event()
-            server._flush_interval = 0.05
-            server.printer.start_recording()
-            # Don't broadcast anything → events empty → line 241→237
-            t = threading.Thread(
-                target=server._periodic_event_flush, args=(stop, agent), daemon=True
-            )
-            t.start()
-            time.sleep(0.15)
-            stop.set()
-            t.join(timeout=2)
-            server.printer.stop_recording()
-        finally:
-            if th._db_conn is not None:
-                th._db_conn.close()
-                th._db_conn = None
-            _restore(saved)
-            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------

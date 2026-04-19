@@ -345,48 +345,6 @@ def _save_task_extra(
         db.commit()
 
 
-def _set_latest_chat_events(
-    events: list[dict[str, object]],
-    task_id: int | None = None,
-    task: str | None = None,
-    result: str | None = "",
-) -> None:
-    """Save chat events for a task.
-
-    Args:
-        events: The chat events to store.
-        task_id: Stable row id to update when available.
-        task: Fallback task description string for legacy callers.
-        result: The task result text to store in the history entry.
-            Pass ``None`` to update only events without touching the
-            result column (used for incremental crash-recovery flushes).
-    """
-    db = _get_db()
-    has_ev = 1 if events else 0
-    with _db_lock:
-        resolved_task_id = task_id if task_id is not None else _most_recent_task_id(db, task)
-        if resolved_task_id is None:
-            return
-        if result is not None:
-            db.execute(
-                "UPDATE task_history SET has_events = ?, result = ? WHERE id = ?",
-                (has_ev, result, resolved_task_id),
-            )
-        else:
-            db.execute(
-                "UPDATE task_history SET has_events = ? WHERE id = ?",
-                (has_ev, resolved_task_id),
-            )
-        db.execute("DELETE FROM events WHERE task_id = ?", (resolved_task_id,))
-        if has_ev:
-            now = time.time()
-            db.executemany(
-                "INSERT INTO events (task_id, seq, event_json, timestamp) VALUES (?, ?, ?, ?)",
-                [(resolved_task_id, i, json.dumps(ev), now) for i, ev in enumerate(events)],
-            )
-        db.commit()
-
-
 def _append_chat_event(
     event: dict[str, object],
     task_id: int | None = None,
@@ -412,6 +370,10 @@ def _append_chat_event(
         db.execute(
             "INSERT INTO events (task_id, seq, event_json, timestamp) VALUES (?, ?, ?, ?)",
             (resolved_task_id, next_seq, json.dumps(event), time.time()),
+        )
+        db.execute(
+            "UPDATE task_history SET has_events = 1 WHERE id = ?",
+            (resolved_task_id,),
         )
         db.commit()
 
