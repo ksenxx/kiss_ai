@@ -267,6 +267,12 @@
       el.className = 'chat-tab' + (tab.id === activeTabId ? ' active' : '');
       el.dataset.tabId = tab.id;
 
+      if (tab.isRunning) {
+        const spinner = document.createElement('span');
+        spinner.className = 'chat-tab-spinner';
+        el.appendChild(spinner);
+      }
+
       const label = document.createElement('span');
       label.className = 'chat-tab-label';
       label.textContent = tab.title;
@@ -1555,6 +1561,7 @@
         if (!evTab || evTab.id === activeTabId) {
           setRunningState(ev.running);
         }
+        renderTabBar();
         break;
       }
       case 'models':
@@ -1998,6 +2005,7 @@
       statusText.textContent = label || 'Ready';
       inp.focus();
     }
+    renderTabBar();
   }
 
   function addError(text) {
