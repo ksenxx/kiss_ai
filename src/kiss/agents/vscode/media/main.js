@@ -1597,9 +1597,16 @@
         }
         break;
       }
-      case 'clearChat':
-        createNewTab();
+      case 'clearChat': {
+        const ccTab = tabs.find(t => t.id === activeTabId);
+        const ccWelcome = welcome && welcome.style.display !== 'none' && O.contains(welcome);
+        if (ccTab && !ccTab.backendChatId && ccWelcome) {
+          focusInputWithRetry();
+        } else {
+          createNewTab();
+        }
         break;
+      }
       case 'ensureChat':
         if (tabs.length === 0) {
           createNewTab();
