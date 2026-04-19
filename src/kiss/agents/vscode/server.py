@@ -280,8 +280,9 @@ class VSCodeServer:
         elif cmd_type == "userAnswer":
             # Route answer to the correct tab's queue — require tabId
             ans_tab = cmd.get("tabId")
-            ans_state = self._tab_states.get(ans_tab) if ans_tab is not None else None
-            q = ans_state.user_answer_queue if ans_state is not None else None
+            with self._state_lock:
+                ans_state = self._tab_states.get(ans_tab) if ans_tab is not None else None
+                q = ans_state.user_answer_queue if ans_state is not None else None
             if q is None:
                 logger.debug("userAnswer dropped: no queue for tabId=%s", ans_tab)
                 return
