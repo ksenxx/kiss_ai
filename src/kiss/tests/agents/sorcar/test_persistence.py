@@ -100,8 +100,10 @@ class TestChatEvents:
         result = th._load_latest_chat_events_by_chat_id("ts1")
         assert result is not None
         events = result["events"]
+        assert isinstance(events, list)
         assert len(events) == 2
         for ev in events:
+            assert isinstance(ev, dict)
             assert before <= ev["_timestamp"] <= after
 
     def test_append_event_stores_timestamp(self):
@@ -116,6 +118,7 @@ class TestChatEvents:
         result = th._load_latest_chat_events_by_chat_id("ts2")
         assert result is not None
         events = result["events"]
+        assert isinstance(events, list)
         assert len(events) == 2
         assert before <= events[0]["_timestamp"] <= after_first
         assert before_second <= events[1]["_timestamp"] <= after_second
@@ -130,9 +133,12 @@ class TestChatEvents:
         th._append_chat_event({"ev": "b"}, task_id=task_id2)
         prev = th._get_adjacent_task_by_chat_id("adj1", "adj-second", "prev")
         assert prev is not None
-        assert len(prev["events"]) == 1
-        assert "_timestamp" in prev["events"][0]
-        assert isinstance(prev["events"][0]["_timestamp"], float)
+        prev_events = prev["events"]
+        assert isinstance(prev_events, list)
+        assert len(prev_events) == 1
+        assert isinstance(prev_events[0], dict)
+        assert "_timestamp" in prev_events[0]
+        assert isinstance(prev_events[0]["_timestamp"], float)
 
     def test_event_timestamp_in_raw_db(self):
         """Verify the timestamp column exists in the events table at the DB level."""

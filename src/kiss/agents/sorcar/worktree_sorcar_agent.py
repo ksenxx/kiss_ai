@@ -324,10 +324,10 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         except KISSError:
             raise
         except Exception as exc:
-            return yaml.dump({
+            return str(yaml.dump({
                 "success": False,
                 "summary": f"Task failed with error: {exc}",
-            })
+            }))
 
     # -- Merge / discard / do nothing --------------------------------------
 

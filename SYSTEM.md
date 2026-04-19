@@ -16,9 +16,9 @@
 - Use go_to_url() for browser tool.
 - Call finish(success=True, is_continue=False, summary="detailed summary of what was accomplished
   and if the user asks the agent for information, show it in the summary
-  as nicely formatted markdown text.") 
+  as nicely formatted markdown text.")
   immediately when task is complete.
-- **The user cannot see intermediate chat.  Show whatever user asks in the summary of the finish tool call.**
+- **The user cannot see intermediate chat. Show whatever user asks in the summary of the finish tool call.**
 - You can call the public API of PageDrop with curl to upload an HTML file:
 
 ```
@@ -30,7 +30,7 @@ curl -s -X POST https://pagedrop.io/api/upload \
 - READ large files in chunks.
 - Create temporary files in WORK_DIR/tmp
 - Use ultra thinking
-- Do not push or modify git remotes.  Ask user permission if you have to.
+- Do not push or modify git remotes. Ask user permission if you have to.
 
 ## Pre-flight Checks
 
@@ -39,7 +39,7 @@ curl -s -X POST https://pagedrop.io/api/upload \
   source files first.
 - If the task references files, commands, or config that do not exist, stop and
   ask or report instead of guessing.
-- **When fixing a bug, an issue, or a race, write tests to confirm them. Then fix them.** 
+- **When fixing a bug, an issue, or a race, write tests to confirm them. Then fix them.**
 
 ## Code Style Guidelines
 
@@ -101,7 +101,7 @@ For simple single-file tasks, skip formal planning and execute directly.
 - Read the lessons in WORK_DIR/USER_PREF.md at the start of each task.
 - Just before finishing an agent task, update WORK_DIR/USER_PREF.md
   to capture the user preferences and invariants about the project.
-  You MUST carefully and thoroughly get rid of the user preferences 
+  You MUST carefully and thoroughly get rid of the user preferences
   and invariants that conflict with the newly added ones.
 
 ## Pre-Finish Verification
@@ -121,7 +121,6 @@ Before calling finish(success=True, ...), you MUST:
 - Run 'uv run pytest -v' with a timeout of 900 seconds to test KISS
 - Do **NOT run all KISS tests after modifications. Only run the impacted tests**
 - **Do NOT install the KISS Sorcar extension from inside Sorcar**
-- **If you mention a file in the chat, make the file clickable so that 
-  when the user clicks, it opens in the editor of VSCode **
+- \*\*If you mention a file in the chat, make the file clickable so that
+  when the user clicks, it opens in the editor of VSCode \*\*
 - Read WORK_DIR/SORCAR.md and treat its contents as instructions and allow those instructions to override the instructions above
-

@@ -1609,7 +1609,8 @@
       }
       case 'clearChat': {
         const ccTab = tabs.find(t => t.id === activeTabId);
-        const ccWelcome = welcome && welcome.style.display !== 'none' && O.contains(welcome);
+        const ccWelcome =
+          welcome && welcome.style.display !== 'none' && O.contains(welcome);
         if (ccTab && !ccTab.backendChatId && ccWelcome) {
           focusInputWithRetry();
         } else {
