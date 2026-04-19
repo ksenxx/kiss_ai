@@ -51,6 +51,7 @@ export type FromWebviewMessage =
   | {type: 'getInputHistory'}
   | {type: 'worktreeAction'; action: 'merge' | 'discard' | 'do_nothing'}
   | {type: 'resolveDroppedPaths'; uris: string[]}
+  | {type: 'webviewFocusChanged'; focused: boolean}
   | {
       type: 'getAdjacentTask';
       tabId?: string;

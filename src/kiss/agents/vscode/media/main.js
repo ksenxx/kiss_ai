@@ -2305,6 +2305,12 @@
 
   function setupEventListeners() {
     sendBtn.addEventListener('click', sendMessage);
+    window.addEventListener('focus', () => {
+      vscode.postMessage({type: 'webviewFocusChanged', focused: true});
+    });
+    window.addEventListener('blur', () => {
+      vscode.postMessage({type: 'webviewFocusChanged', focused: false});
+    });
     document.addEventListener('keydown', e => {
       if (
         (e.metaKey || e.ctrlKey) &&

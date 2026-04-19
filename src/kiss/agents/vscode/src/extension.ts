@@ -88,13 +88,13 @@ export function activate(context: vscode.ExtensionContext): void {
       if (_focusToggling) return;
       _focusToggling = true;
       try {
-        if (sidebarView!.visible) {
-          // Sidebar is visible → focus the text editor
+        if (sidebarView!.hasFocus) {
+          // Webview chat has focus → switch to the text editor
           await vscode.commands.executeCommand(
             'workbench.action.focusFirstEditorGroup',
           );
         } else {
-          // Text editor is focused → show and focus the sidebar chat
+          // Editor (or anything else) has focus → focus the sidebar chat
           await sidebarView!.focusChatInput();
         }
       } finally {
