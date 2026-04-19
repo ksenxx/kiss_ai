@@ -102,10 +102,17 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
                 self._bash_state.timer = None
 
     def _flush_bash(self) -> None:
-        """Flush the bash buffer."""
-        # RC5 fix: drain entirely inside lock, no generation TOCTOU
+        """Flush the bash buffer.
+
+        Captures the generation counter inside ``_bash_lock`` along with
+        the buffered text.  After releasing the lock, re-checks the
+        generation: if ``reset()`` ran in between (incrementing the
+        generation), the captured text is stale and is discarded instead
+        of being broadcast into the new turn's recording.
+        """
         with self._bash_lock:
             bs = self._bash_state
+            gen = bs.generation
             if bs.timer is not None:
                 bs.timer.cancel()
                 bs.timer = None
@@ -113,6 +120,9 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
             bs.buffer.clear()
             bs.last_flush = time.monotonic()
         if text:
+            with self._bash_lock:
+                if self._bash_state.generation != gen:
+                    return  # stale — discard
             self.broadcast({"type": "system_output", "text": text})
 
     def start_recording(self) -> None:

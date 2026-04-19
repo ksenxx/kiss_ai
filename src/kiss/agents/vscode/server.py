@@ -265,7 +265,8 @@ class VSCodeServer:
             tab = self._get_tab(tab_id)
             model = cmd.get("model", tab.selected_model)
             tab.selected_model = model
-            self._default_model = model  # new tabs inherit latest selection
+            with self._state_lock:
+                self._default_model = model  # new tabs inherit latest selection
             _save_last_model(model)
         elif cmd_type == "getHistory":
             self._get_history(cmd.get("query"), cmd.get("offset", 0), cmd.get("generation", 0))
