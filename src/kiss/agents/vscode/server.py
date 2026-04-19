@@ -313,9 +313,9 @@ class VSCodeServer:
                     self._last_active_content = active_content
                 snapshot_file = self._last_active_file
                 snapshot_content = self._last_active_content
-            self._complete_seq += 1
-            seq = self._complete_seq
-            self._complete_seq_latest = seq
+                self._complete_seq += 1
+                seq = self._complete_seq
+                self._complete_seq_latest = seq
             if query:
                 self._ensure_complete_worker()
                 self._complete_queue.put((query, seq, snapshot_file, snapshot_content))  # type: ignore[union-attr]
@@ -1098,8 +1098,10 @@ class VSCodeServer:
             snapshot_file: Atomically-captured active file path.
             snapshot_content: Atomically-captured active file content.
         """
-        if seq >= 0 and seq != self._complete_seq_latest:
-            return
+        if seq >= 0:
+            with self._state_lock:
+                if seq != self._complete_seq_latest:
+                    return
         if not query or len(query) < 2:
             self.printer.broadcast({"type": "ghost", "suggestion": "", "query": query})
             return
