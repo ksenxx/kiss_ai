@@ -78,7 +78,6 @@
     - [`kiss.channels.zalo_agent`](#kisschannelszalo_agent)
       - [`kiss.core.models.claude_code_model`](#kisscoremodelsclaude_code_model)
     - [`kiss.docker.docker_tools`](#kissdockerdocker_tools)
-      \- [`kiss.vscode.node_modules.flatted.python.flatted`](#kissvscodenode_modulesflattedpythonflatted)
 
 </details>
 

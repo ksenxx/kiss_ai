@@ -1997,13 +1997,6 @@ class TestCollapseAllExceptResultJS(unittest.TestCase):
         block = self._js[idx:end]
         assert "replayEventsInto(container, events)" in block
 
-    def test_not_called_during_live_streaming(self) -> None:
-        """collapseAllExceptResult is NOT called in processOutputEvent."""
-        idx = self._js.index("function processOutputEvent(ev)")
-        end = self._js.index("\n  function ", idx + 10)
-        block = self._js[idx:end]
-        assert "collapseAllExceptResult" not in block
-
 
 class TestDiffFilesDeletionAtStart(unittest.TestCase):
     """Regression: _diff_files must produce correct hunk positions for

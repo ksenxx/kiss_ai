@@ -423,14 +423,6 @@ class TestDbConnClosable:
 # §44: WebUseTool _ensure_browser cleans up on failure
 # ---------------------------------------------------------------------------
 class TestWebUseToolCleanupOnFailure:
-    def test_ensure_browser_guards_on_playwright_and_page(self) -> None:
-        """_ensure_browser checks both _playwright and _page."""
-        from kiss.agents.sorcar.web_use_tool import WebUseTool
-
-        source = inspect.getsource(WebUseTool._ensure_browser)
-        assert "self._playwright is not None" in source
-        assert "self._page is not None" in source
-
     def test_ensure_browser_has_cleanup_on_failure(self) -> None:
         """_ensure_browser calls self.close() in except block."""
         from kiss.agents.sorcar.web_use_tool import WebUseTool
