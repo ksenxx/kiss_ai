@@ -479,7 +479,8 @@ class VSCodeServer:
                     if is_last and tab.use_worktree and tab.agent._wt_pending:
                         changed = self._get_worktree_changed_files(tab_id)
                         if changed:
-                            self._broadcast_worktree_done(changed, tab_id)
+                            if not self._start_worktree_merge_review(tab_id):
+                                self._broadcast_worktree_done(changed, tab_id)
                         else:
                             tab.agent.discard()
                 except KeyboardInterrupt:
@@ -526,20 +527,21 @@ class VSCodeServer:
                 )
                 self.printer.broadcast({"type": "tasks_updated"})
                 self.printer.reset()
-                try:
-                    merge_dir = str(_merge_data_dir())
-                    merge_result = _prepare_merge_view(
-                        work_dir,
-                        merge_dir,
-                        pre_hunks,
-                        pre_untracked,
-                        pre_file_hashes,
-                    )
-                    if merge_result.get("status") == "opened":  # pragma: no cover
-                        merge_json = os.path.join(merge_dir, "pending-merge.json")
-                        self._start_merge_session(merge_json)
-                except BaseException:  # pragma: no cover — merge view error handler
-                    logger.debug("Merge view error", exc_info=True)
+                if not tab.use_worktree:
+                    try:
+                        merge_dir = str(_merge_data_dir())
+                        merge_result = _prepare_merge_view(
+                            work_dir,
+                            merge_dir,
+                            pre_hunks,
+                            pre_untracked,
+                            pre_file_hashes,
+                        )
+                        if merge_result.get("status") == "opened":  # pragma: no cover
+                            merge_json = os.path.join(merge_dir, "pending-merge.json")
+                            self._start_merge_session(merge_json)
+                    except BaseException:  # pragma: no cover — merge view error handler
+                        logger.debug("Merge view error", exc_info=True)
                 if task_end_event:  # pragma: no branch — always set
                     self.printer.broadcast(task_end_event)
                 if tab.task_history_id is not None:
@@ -589,6 +591,37 @@ class VSCodeServer:
             logger.debug("Failed to load merge data", exc_info=True)
             return False
 
+    def _start_worktree_merge_review(self, tab_id: str) -> bool:
+        """Prepare and start a merge review for worktree changes.
+
+        Builds a merge view from the worktree directory so the user can
+        accept/reject individual hunks before the worktree is committed
+        and merged.  The worktree starts clean from HEAD, so all
+        uncommitted changes are the agent's work.
+
+        Args:
+            tab_id: The tab whose worktree to review.
+
+        Returns:
+            True if a merge session was started, False otherwise.
+        """
+        tab = self._get_tab(tab_id)
+        wt_dir = tab.agent._wt_dir
+        if wt_dir is None or not wt_dir.exists():
+            return False
+        try:
+            merge_dir = str(_merge_data_dir())
+            merge_result = _prepare_merge_view(
+                str(wt_dir), merge_dir, {}, set(),
+            )
+            if merge_result.get("status") != "opened":
+                return False
+            merge_json = os.path.join(merge_dir, "pending-merge.json")
+            return self._start_merge_session(merge_json)
+        except BaseException:
+            logger.debug("Worktree merge review error", exc_info=True)
+            return False
+
     def _handle_merge_action(self, action: str, tab_id: str | None = None) -> None:
         """Handle merge accept/reject actions from the extension.
 
@@ -605,6 +638,10 @@ class VSCodeServer:
 
     def _finish_merge(self, tab_id: str | None = None) -> None:
         """End the merge session for a specific tab.
+
+        When a worktree task is pending, emits ``worktree_done`` so the
+        user sees merge/discard buttons only after the hunk review is
+        complete.
 
         Args:
             tab_id: The tab whose merge session is finished. When *None*,
@@ -623,6 +660,16 @@ class VSCodeServer:
             event["tabId"] = tab_id
         self.printer.broadcast(event)
         _cleanup_merge_data(str(_merge_data_dir()))
+
+        # Emit deferred worktree_done after merge review completes
+        if tab_id is not None:
+            tab = self._get_tab(tab_id)
+            if tab.use_worktree and tab.agent._wt_pending:
+                changed = self._get_worktree_changed_files(tab_id)
+                if changed:
+                    self._broadcast_worktree_done(changed, tab_id)
+                else:
+                    tab.agent.discard()
 
     def _stop_task(self, tab_id: str | None = None) -> None:
         """Signal the agent to stop.
@@ -853,11 +900,12 @@ class VSCodeServer:
         })
 
     def _emit_pending_worktree(self, tab_id: str = "") -> None:
-        """Emit ``worktree_done`` if the agent has a pending worktree branch.
+        """Emit merge review or ``worktree_done`` for a pending worktree branch.
 
-        Called after replaying a session so that merge/discard buttons
-        are shown whenever the worktree branch still exists — even if
-        the agent was killed before it could emit the event originally.
+        Called after replaying a session.  Tries to start a merge/diff
+        review first so the user can accept/reject hunks before the
+        branch is committed.  Falls back to ``worktree_done`` if the
+        review cannot be started (e.g. no uncommitted changes).
 
         Args:
             tab_id: The tab to check for pending worktree.
@@ -870,6 +918,8 @@ class VSCodeServer:
         if not wt._wt_pending:
             return
         changed = self._get_worktree_changed_files(tab_id)
+        if changed and self._start_worktree_merge_review(tab_id):
+            return
         self._broadcast_worktree_done(changed, tab_id)
 
     def _ensure_worktree_state(self, tab_id: str = "") -> None:
