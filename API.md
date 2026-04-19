@@ -3421,11 +3421,3 @@ ______________________________________________________________________
   - `replace_all`: If True, replace all occurrences.
 
 ______________________________________________________________________
-
-#### `kiss.vscode.node_modules.flatted.python.flatted`
-
-**`parse`**<br/>`def parse(value, *args, **kwargs)`
-
-**`stringify`**<br/>`def stringify(value, *args, **kwargs)`
-
-______________________________________________________________________
