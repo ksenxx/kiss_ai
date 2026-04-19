@@ -61,13 +61,15 @@ class TestPersistenceBranches:
         db = th._get_db()
         # Insert a task with chat_id and then corrupt event data
         task_id, _ = th._add_task("corrupt-event-test", chat_id="corrupt_test")
+        import time as _time
+        now = _time.time()
         db.execute(
-            "INSERT INTO events (task_id, seq, event_json) VALUES (?, ?, ?)",
-            (task_id, 0, "NOT VALID JSON {{{"),
+            "INSERT INTO events (task_id, seq, event_json, timestamp) VALUES (?, ?, ?, ?)",
+            (task_id, 0, "NOT VALID JSON {{{", now),
         )
         db.execute(
-            "INSERT INTO events (task_id, seq, event_json) VALUES (?, ?, ?)",
-            (task_id, 1, json.dumps({"type": "ok"})),
+            "INSERT INTO events (task_id, seq, event_json, timestamp) VALUES (?, ?, ?, ?)",
+            (task_id, 1, json.dumps({"type": "ok"}), now),
         )
         db.commit()
         result = th._load_latest_chat_events_by_chat_id("corrupt_test")
