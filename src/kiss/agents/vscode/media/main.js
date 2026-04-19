@@ -329,6 +329,7 @@
       removeSpinner();
     }
     applyChevronState(!!tab.panelsExpanded);
+    focusInputWithRetry();
   }
 
   function closeTab(tabId) {
@@ -356,6 +357,7 @@
         removeSpinner();
       }
       applyChevronState(!!newTab.panelsExpanded);
+      focusInputWithRetry();
     }
     renderTabBar();
     persistTabState();
