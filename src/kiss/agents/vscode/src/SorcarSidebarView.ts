@@ -34,6 +34,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _extensionUri: vscode.Uri;
   private _selectedModel: string;
   private _runningTabs: Set<string> = new Set();
+  private _webviewHasFocus: boolean = false;
 
   private _mergeManager: MergeManager;
   private _mergeOwnerTabIdQueue: string[] = [];
@@ -258,6 +259,11 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   /** Whether the underlying webview is currently visible. */
   get visible(): boolean {
     return this._view?.visible ?? false;
+  }
+
+  /** Whether the webview currently has input focus. */
+  get hasFocus(): boolean {
+    return this._webviewHasFocus;
   }
 
   private _getWorkDir(): string {
@@ -708,6 +714,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         this._sendToWebview({type: 'droppedPaths', paths} as ToWebviewMessage);
         break;
       }
+
+      case 'webviewFocusChanged':
+        this._webviewHasFocus = (message as any).focused;
+        break;
 
       case 'focusEditor':
         vscode.commands.executeCommand(
