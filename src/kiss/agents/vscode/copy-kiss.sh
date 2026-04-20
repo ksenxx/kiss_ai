@@ -7,8 +7,12 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 DEST="$SCRIPT_DIR/kiss_project"
 
-# Sync version from _version.py into package.json
-VERSION=$(python3 -c "exec(open('$PROJECT_ROOT/src/kiss/_version.py').read()); print(__version__)")
+# Sync version into package.json (use KISS_EXP_VERSION override if set)
+if [ -n "${KISS_EXP_VERSION:-}" ]; then
+    VERSION="$KISS_EXP_VERSION"
+else
+    VERSION=$(python3 -c "exec(open('$PROJECT_ROOT/src/kiss/_version.py').read()); print(__version__)")
+fi
 if [ -n "$VERSION" ]; then
     # Use python for portable JSON editing
     python3 -c "

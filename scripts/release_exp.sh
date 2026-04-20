@@ -59,12 +59,18 @@ build_vscode_extension() {
     cp "$README_FILE" "$VSCODE_EXT_DIR/README.md"
     print_info "Copied $README_FILE to $VSCODE_EXT_DIR/README.md"
 
+    # Generate a unique version for experimental builds using a timestamp
+    EXP_VERSION="$(echo "$VERSION" | cut -d. -f1).$(echo "$VERSION" | cut -d. -f2).$(date +%s)"
+
     # Rename extension to "KISS Sorcar Buggy" for experimental builds
     sed -i.bak \
         -e 's/"name": "kiss-sorcar"/"name": "kiss-sorcar-buggy"/' \
         -e 's/"displayName": "KISS Sorcar"/"displayName": "KISS Sorcar Buggy"/' \
         "$VSCODE_EXT_DIR/package.json"
-    print_info "Set extension name to 'kiss-sorcar-buggy' and displayName to 'KISS Sorcar Buggy'"
+    # Export KISS_EXP_VERSION so copy-kiss.sh (run during vsce package) uses it
+    # instead of reading _version.py, which would overwrite our timestamp version.
+    export KISS_EXP_VERSION="$EXP_VERSION"
+    print_info "Set extension name to 'kiss-sorcar-buggy', displayName to 'KISS Sorcar Buggy', version to '$EXP_VERSION'"
 
     cd "$VSCODE_EXT_DIR"
     npm ci
@@ -123,7 +129,7 @@ main() {
     build_vscode_extension
 
     # Step 2: Publish to VS Code marketplace
-    publish_vscode_extension "$VERSION"
+    publish_vscode_extension "$EXP_VERSION"
 
     # Step 3: Remove local VSIX artifact
     rm -f "${VSCODE_EXT_DIR}/kiss-sorcar-buggy.vsix"
@@ -133,7 +139,7 @@ main() {
     print_info "========================================"
     print_info "Extension release completed!"
     print_info "========================================"
-    print_info "Version: $VERSION"
+    print_info "Version: $EXP_VERSION"
     print_info "VSCode:  https://marketplace.visualstudio.com/items?itemName=ksenxx.kiss-sorcar-buggy"
     echo
 }
