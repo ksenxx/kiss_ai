@@ -20,3 +20,11 @@
 - `_release_worktree` returns `None` (not `wt.original_branch`) on checkout failure so caller falls through to `current_branch()`
 - `merge()` and `_release_worktree()` surface stash_pop failure warnings to the user instead of silently logging
 - Pre-existing test failures: `test_check_merge_conflict_dirty_worktree` (wt_dir doesn't exist) and `test_sidebar_has_no_unknown_message_types` — NOT caused by worktree changes
+- BUG-12 through BUG-18 (found in audit4) are in test_worktree_audit4.py — these are UNFIXED bugs confirmed by passing tests
+- BUG-12: `squash_merge_from_baseline` doesn't check commit return code (same pattern as BUG-7 but on baseline path)
+- BUG-13: `_release_worktree` returns `original_branch` on merge conflict (not `None`), silently orphaning the branch with no user notification
+- BUG-14: `_new_chat` in server.py doesn't check/broadcast `_stash_pop_warning` — warning only appears on next task run
+- BUG-15: No git-level locking for concurrent tab releases — `GitWorktreeOps` and `_release_worktree` have no mutex
+- BUG-16: `_finalize_worktree` removes worktree even if auto-commit was REJECTED by pre-commit hook (still-unfixed BUG-6)
+- BUG-17: `_save_untracked_base` unconditionally deletes existing base dir — concurrent tab merge reviews can lose data
+- BUG-18: `_release_worktree` returns misleading "main" on merge conflict (semantically wrong return value, same root cause as BUG-13)
