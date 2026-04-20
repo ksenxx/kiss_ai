@@ -46,12 +46,17 @@ class GitWorktree:
         original_branch: The branch the user was on when the task started,
             or ``None`` if unknown (crash between creation and config write).
         wt_dir: Worktree directory path.
+        baseline_commit: SHA of the initial commit that captured the user's
+            dirty state (staged, unstaged, untracked files) at worktree
+            creation time.  ``None`` when the main worktree was clean or
+            for legacy worktrees created before baseline support.
     """
 
     repo_root: Path
     branch: str
     original_branch: str | None
     wt_dir: Path
+    baseline_commit: str | None = None
 
 
 class MergeResult(enum.Enum):
@@ -593,6 +598,174 @@ class GitWorktreeOps:
             )
             return False
         return True
+
+    @staticmethod
+    def save_baseline_commit(
+        repo: Path, branch: str, sha: str,
+    ) -> bool:
+        """Store the baseline commit SHA in git config.
+
+        The baseline commit captures the user's dirty state (staged,
+        unstaged, untracked files) at worktree creation time.  Downstream
+        operations diff against this SHA to isolate agent-only changes.
+
+        Args:
+            repo: Git repo root path.
+            branch: The worktree branch name.
+            sha: The baseline commit SHA to store.
+
+        Returns:
+            True if config was saved successfully, False otherwise.
+        """
+        result = _git(
+            "config", f"branch.{branch}.kiss-baseline", sha, cwd=repo,
+        )
+        if result.returncode != 0:  # pragma: no cover — git config failure
+            logger.warning(
+                "Failed to store baseline commit in git config: %s",
+                result.stderr.strip(),
+            )
+            return False
+        return True
+
+    @staticmethod
+    def load_baseline_commit(repo: Path, branch: str) -> str | None:
+        """Load the baseline commit SHA from git config.
+
+        Args:
+            repo: Git repo root path.
+            branch: The worktree branch name.
+
+        Returns:
+            The baseline commit SHA, or ``None`` if not stored (clean
+            worktree or legacy worktree without baseline support).
+        """
+        result = _git(
+            "config", f"branch.{branch}.kiss-baseline", cwd=repo,
+        )
+        return result.stdout.strip() or None
+
+    @staticmethod
+    def copy_dirty_state(repo: Path, wt_dir: Path) -> bool:
+        """Copy uncommitted/staged/untracked files from main worktree.
+
+        Reads ``git status --porcelain`` in *repo* and mirrors every
+        dirty file into *wt_dir*.  Files that exist in the main
+        worktree are copied; files that were deleted are removed from
+        *wt_dir*.  The caller is expected to stage and commit the
+        result as a baseline commit.
+
+        Args:
+            repo: Git repo root (main worktree).
+            wt_dir: Target worktree directory.
+
+        Returns:
+            True if any dirty state was copied, False if the main
+            worktree was clean.
+        """
+        import shutil as _shutil
+
+        status = _git("status", "--porcelain", "-uall", cwd=repo)
+        if not status.stdout.strip():
+            return False
+
+        copied = False
+        for line in status.stdout.splitlines():
+            if len(line) < 4:
+                continue
+            xy = line[:2]
+            fname = line[3:]
+            # Handle renames: "R  old -> new"
+            if " -> " in fname:
+                fname = fname.split(" -> ", 1)[1]
+
+            src = repo / fname
+            dst = wt_dir / fname
+
+            if "D" in xy:
+                # File deleted (staged or unstaged)
+                if dst.exists():
+                    dst.unlink()
+                    copied = True
+            elif src.is_file():
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                _shutil.copy2(str(src), str(dst))
+                copied = True
+            elif src.is_dir():
+                # Submodule or directory entry — skip
+                continue
+
+        return copied
+
+    @staticmethod
+    def head_sha(wt_dir: Path) -> str | None:
+        """Return the SHA of HEAD in the given directory.
+
+        Args:
+            wt_dir: Git working directory (repo root or worktree).
+
+        Returns:
+            The full SHA string, or ``None`` on failure.
+        """
+        result = _git("rev-parse", "HEAD", cwd=wt_dir)
+        sha = result.stdout.strip()
+        return sha if result.returncode == 0 and sha else None
+
+    @staticmethod
+    def squash_merge_from_baseline(
+        repo: Path, branch: str, baseline: str,
+    ) -> MergeResult:
+        """Squash-merge only the agent's changes (after baseline) into HEAD.
+
+        Uses ``git cherry-pick --no-commit`` to replay each commit
+        after *baseline* onto the current HEAD.  Cherry-pick performs
+        a proper three-way merge per commit (using the commit's parent
+        as the merge base), so it handles cases where the user's dirty
+        state (captured in the baseline) diverges from the committed
+        HEAD content.
+
+        Falls back to :meth:`squash_merge_branch` when *baseline* is
+        ``None`` (legacy worktrees).
+
+        Args:
+            repo: Git repo root path.
+            branch: The worktree branch to merge from.
+            baseline: SHA of the baseline commit to diff against.
+
+        Returns:
+            :attr:`MergeResult.SUCCESS` or :attr:`MergeResult.CONFLICT`.
+        """
+        # Check if there are any commits after baseline
+        log_result = _git(
+            "rev-list", "--count", f"{baseline}..{branch}", cwd=repo,
+        )
+        count = log_result.stdout.strip()
+        if count == "0":
+            return MergeResult.SUCCESS  # no agent changes
+
+        result = _git(
+            "cherry-pick", "--no-commit", f"{baseline}..{branch}", cwd=repo,
+        )
+        if result.returncode != 0:
+            logger.warning(
+                "squash merge from baseline failed: %s",
+                result.stderr.strip(),
+            )
+            _git("cherry-pick", "--abort", cwd=repo)
+            return MergeResult.CONFLICT
+
+        # Commit the squashed cherry-pick result
+        diff_check = _git("diff", "--cached", "--quiet", cwd=repo)
+        if diff_check.returncode != 0:
+            log_msgs = _git(
+                "log", "--oneline", f"{baseline}..{branch}", cwd=repo,
+            )
+            body = log_msgs.stdout.strip()
+            msg = f"kiss: merged from {branch}"
+            if body:
+                msg += f"\n\n{body}"
+            _git("commit", "-m", msg, cwd=repo)
+        return MergeResult.SUCCESS
 
     @staticmethod
     def cleanup_partial(repo: Path, branch: str, wt_dir: Path) -> None:

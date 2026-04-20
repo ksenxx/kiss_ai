@@ -120,6 +120,11 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         """Worktree directory path."""
         return self._wt.wt_dir if self._wt else None
 
+    @property
+    def _baseline_commit(self) -> str | None:
+        """SHA of the baseline commit (user's dirty state), or ``None``."""
+        return self._wt.baseline_commit if self._wt else None
+
     # -- State management --------------------------------------------------
 
     def _restore_from_git(self, repo: Path) -> None:
@@ -144,6 +149,8 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         if original is None:
             original = GitWorktreeOps.current_branch(repo)
 
+        baseline = GitWorktreeOps.load_baseline_commit(repo, branch)
+
         slug = branch.replace("/", "_")
         wt_dir = repo / ".kiss-worktrees" / slug
         self._wt = GitWorktree(
@@ -151,6 +158,7 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
             branch=branch,
             original_branch=original,
             wt_dir=wt_dir,
+            baseline_commit=baseline,
         )
 
     # -- Auto-commit -------------------------------------------------------
@@ -224,9 +232,14 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
                     return wt.original_branch
 
             did_stash = GitWorktreeOps.stash_if_dirty(wt.repo_root)
-            result = GitWorktreeOps.squash_merge_branch(
-                wt.repo_root, wt.branch,
-            )
+            if wt.baseline_commit:
+                result = GitWorktreeOps.squash_merge_from_baseline(
+                    wt.repo_root, wt.branch, wt.baseline_commit,
+                )
+            else:
+                result = GitWorktreeOps.squash_merge_branch(
+                    wt.repo_root, wt.branch,
+                )
             if did_stash:
                 if not GitWorktreeOps.stash_pop(wt.repo_root):
                     logger.warning(
@@ -322,11 +335,28 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
             GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
             return None
 
+        # Copy the user's dirty state (staged, unstaged, untracked)
+        # into the worktree and create a baseline commit so that
+        # downstream operations (merge review, changed-file detection,
+        # squash-merge) can diff against it and see only agent changes.
+        baseline_commit: str | None = None
+        if GitWorktreeOps.copy_dirty_state(repo, wt_dir):
+            GitWorktreeOps.stage_all(wt_dir)
+            GitWorktreeOps.commit_staged(
+                wt_dir, "kiss: baseline from dirty state",
+            )
+            baseline_commit = GitWorktreeOps.head_sha(wt_dir)
+            if baseline_commit:
+                GitWorktreeOps.save_baseline_commit(
+                    repo, branch, baseline_commit,
+                )
+
         self._wt = GitWorktree(
             repo_root=repo,
             branch=branch,
             original_branch=original_branch,
             wt_dir=wt_dir,
+            baseline_commit=baseline_commit,
         )
 
         wt_work_dir = wt_dir / offset
@@ -459,7 +489,14 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         # Stash any user edits so they don't block the squash merge
         did_stash = GitWorktreeOps.stash_if_dirty(wt.repo_root)
 
-        result = GitWorktreeOps.squash_merge_branch(wt.repo_root, wt.branch)
+        if wt.baseline_commit:
+            result = GitWorktreeOps.squash_merge_from_baseline(
+                wt.repo_root, wt.branch, wt.baseline_commit,
+            )
+        else:
+            result = GitWorktreeOps.squash_merge_branch(
+                wt.repo_root, wt.branch,
+            )
 
         # Restore stashed user edits (best-effort)
         if did_stash:

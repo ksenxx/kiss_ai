@@ -1027,6 +1027,37 @@ ______________________________________________________________________
   - `original`: The original branch to store.
   - **Returns:** True if config was saved successfully, False otherwise.
 
+- **save_baseline_commit** — Store the baseline commit SHA in git config. The baseline commit captures the user's dirty state (staged, unstaged, untracked files) at worktree creation time. Downstream operations diff against this SHA to isolate agent-only changes.<br/>`save_baseline_commit(repo: Path, branch: str, sha: str) -> bool`
+
+  - `repo`: Git repo root path.
+  - `branch`: The worktree branch name.
+  - `sha`: The baseline commit SHA to store.
+  - **Returns:** True if config was saved successfully, False otherwise.
+
+- **load_baseline_commit** — Load the baseline commit SHA from git config.<br/>`load_baseline_commit(repo: Path, branch: str) -> str | None`
+
+  - `repo`: Git repo root path.
+  - `branch`: The worktree branch name.
+  - **Returns:** The baseline commit SHA, or `None` if not stored (clean worktree or legacy worktree without baseline support).
+
+- **copy_dirty_state** — Copy uncommitted/staged/untracked files from main worktree. Reads `git status --porcelain` in *repo* and mirrors every dirty file into *wt_dir*. Files that exist in the main worktree are copied; files that were deleted are removed from *wt_dir*. The caller is expected to stage and commit the result as a baseline commit.<br/>`copy_dirty_state(repo: Path, wt_dir: Path) -> bool`
+
+  - `repo`: Git repo root (main worktree).
+  - `wt_dir`: Target worktree directory.
+  - **Returns:** True if any dirty state was copied, False if the main worktree was clean.
+
+- **head_sha** — Return the SHA of HEAD in the given directory.<br/>`head_sha(wt_dir: Path) -> str | None`
+
+  - `wt_dir`: Git working directory (repo root or worktree).
+  - **Returns:** The full SHA string, or `None` on failure.
+
+- **squash_merge_from_baseline** — Squash-merge only the agent's changes (after baseline) into HEAD. Uses `git cherry-pick --no-commit` to replay each commit after *baseline* onto the current HEAD. Cherry-pick performs a proper three-way merge per commit (using the commit's parent as the merge base), so it handles cases where the user's dirty state (captured in the baseline) diverges from the committed HEAD content. Falls back to :meth:`squash_merge_branch` when *baseline* is `None` (legacy worktrees).<br/>`squash_merge_from_baseline(repo: Path, branch: str, baseline: str) -> MergeResult`
+
+  - `repo`: Git repo root path.
+  - `branch`: The worktree branch to merge from.
+  - `baseline`: SHA of the baseline commit to diff against.
+  - **Returns:** :attr:`MergeResult.SUCCESS` or :attr:`MergeResult.CONFLICT`.
+
 - **cleanup_partial** — Remove a partially-created worktree and branch (best-effort).<br/>`cleanup_partial(repo: Path, branch: str, wt_dir: Path) -> None`
 
   - `repo`: Git repo root path.

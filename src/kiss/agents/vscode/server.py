@@ -1195,11 +1195,16 @@ class VSCodeServer:
         if not wt_dir.exists():
             return False
 
-        # Find the fork point between worktree branch and original
-        mb = _git(str(wt_dir), "merge-base", "HEAD", wt.original_branch)
-        if mb.returncode != 0 or not mb.stdout.strip():
-            return False
-        fork_point = mb.stdout.strip()
+        # Use baseline commit (user's dirty state snapshot) when
+        # available so only agent changes are considered.  Fall back
+        # to the git merge-base for legacy worktrees without baseline.
+        if wt.baseline_commit:
+            fork_point = wt.baseline_commit
+        else:
+            mb = _git(str(wt_dir), "merge-base", "HEAD", wt.original_branch)
+            if mb.returncode != 0 or not mb.stdout.strip():
+                return False
+            fork_point = mb.stdout.strip()
 
         # Files changed on original branch since the fork
         orig_diff = _git(
@@ -1252,14 +1257,17 @@ class VSCodeServer:
             return []
         wt_dir = wt._wt_dir
         if wt_dir and wt_dir.exists():
-            # Compare worktree working tree against the fork point
-            # (merge-base), not the current tip of the original branch.
-            # This avoids false positives when the original branch
-            # advances after the worktree was created (BUG-8 fix).
-            base_ref = wt._original_branch
-            mb = _git(str(wt_dir), "merge-base", "HEAD", wt._original_branch)
-            if mb.returncode == 0 and mb.stdout.strip():
-                base_ref = mb.stdout.strip()
+            # Use baseline commit (user's dirty state snapshot) when
+            # available so only agent changes are listed.  Fall back
+            # to the merge-base for legacy worktrees (BUG-8 fix).
+            baseline = wt._baseline_commit
+            if baseline:
+                base_ref = baseline
+            else:
+                base_ref = wt._original_branch
+                mb = _git(str(wt_dir), "merge-base", "HEAD", wt._original_branch)
+                if mb.returncode == 0 and mb.stdout.strip():
+                    base_ref = mb.stdout.strip()
             tracked = _git(str(wt_dir), "diff", "--name-only", base_ref)
             files = (tracked.stdout.strip().splitlines()
                      if tracked.returncode == 0 else [])
@@ -1269,11 +1277,15 @@ class VSCodeServer:
         if not wt._wt_branch:
             return []
         repo_root = str(wt._repo_root) if wt._repo_root else self.work_dir
-        # Use fork point for branch-to-branch diff too (BUG-8 fix)
-        base_ref = wt._original_branch
-        mb = _git(repo_root, "merge-base", wt._original_branch, wt._wt_branch)
-        if mb.returncode == 0 and mb.stdout.strip():
-            base_ref = mb.stdout.strip()
+        # Use baseline for branch-to-branch diff when available (BUG-8 fix)
+        baseline = wt._baseline_commit
+        if baseline:
+            base_ref = baseline
+        else:
+            base_ref = wt._original_branch
+            mb = _git(repo_root, "merge-base", wt._original_branch, wt._wt_branch)
+            if mb.returncode == 0 and mb.stdout.strip():
+                base_ref = mb.stdout.strip()
         result = _git(repo_root, "diff", "--name-only",
                       base_ref,
                       wt._wt_branch)
