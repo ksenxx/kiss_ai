@@ -60,20 +60,23 @@ build_vscode_extension() {
     print_info "Copied $README_FILE to $VSCODE_EXT_DIR/README.md"
 
     # Rename extension to "KISS Sorcar Buggy" for experimental builds
-    sed -i.bak 's/"displayName": "KISS Sorcar"/"displayName": "KISS Sorcar Buggy"/' "$VSCODE_EXT_DIR/package.json"
-    print_info "Set extension displayName to 'KISS Sorcar Buggy'"
+    sed -i.bak \
+        -e 's/"name": "kiss-sorcar"/"name": "kiss-sorcar-buggy"/' \
+        -e 's/"displayName": "KISS Sorcar"/"displayName": "KISS Sorcar Buggy"/' \
+        "$VSCODE_EXT_DIR/package.json"
+    print_info "Set extension name to 'kiss-sorcar-buggy' and displayName to 'KISS Sorcar Buggy'"
 
     cd "$VSCODE_EXT_DIR"
     npm ci
     npm run package
 
-    if [[ ! -f "kiss-sorcar.vsix" ]]; then
-        print_error "VSIX file not found: kiss-sorcar.vsix"
+    if [[ ! -f "kiss-sorcar-buggy.vsix" ]]; then
+        print_error "VSIX file not found: kiss-sorcar-buggy.vsix"
         cd - > /dev/null
         return 1
     fi
 
-    print_info "Built kiss-sorcar.vsix"
+    print_info "Built kiss-sorcar-buggy.vsix"
     rm -rf out kiss_project
     print_info "Cleaned up build artifacts (out/, kiss_project/)"
     cd - > /dev/null
@@ -94,17 +97,17 @@ publish_vscode_extension() {
 
     print_step "Publishing VS Code extension..."
     cd "$VSCODE_EXT_DIR"
-    npx @vscode/vsce publish --packagePath "kiss-sorcar.vsix" --pat "$VSCE_PAT"
+    npx @vscode/vsce publish --packagePath "kiss-sorcar-buggy.vsix" --pat "$VSCE_PAT"
     cd - > /dev/null
 
     print_info "Successfully published VS Code extension v$version"
-    print_info "View at: https://marketplace.visualstudio.com/items?itemName=ksenxx.kiss-sorcar"
+    print_info "View at: https://marketplace.visualstudio.com/items?itemName=ksenxx.kiss-sorcar-buggy"
 }
 
 upload_to_github_release() {
     local version="$1"
     local tag_name="v$version"
-    local vsix_asset="${VSCODE_EXT_DIR}/kiss-sorcar.vsix"
+    local vsix_asset="${VSCODE_EXT_DIR}/kiss-sorcar-buggy.vsix"
 
     if ! command -v gh &>/dev/null; then
         print_warn "gh CLI not found — skipping GitHub release upload"
@@ -122,7 +125,7 @@ upload_to_github_release() {
 }
 
 install_local_extension() {
-    local vsix_path="${VSCODE_EXT_DIR}/kiss-sorcar.vsix"
+    local vsix_path="${VSCODE_EXT_DIR}/kiss-sorcar-buggy.vsix"
 
     # Install into VS Code
     local code_cli=""
@@ -192,7 +195,7 @@ main() {
     print_info "Extension release completed!"
     print_info "========================================"
     print_info "Version: $VERSION"
-    print_info "VSCode:  https://marketplace.visualstudio.com/items?itemName=ksenxx.kiss-sorcar"
+    print_info "VSCode:  https://marketplace.visualstudio.com/items?itemName=ksenxx.kiss-sorcar-buggy"
     echo
 }
 
