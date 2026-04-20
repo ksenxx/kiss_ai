@@ -307,40 +307,20 @@ class TestBug35WorktreeMergeStashesAgentWork:
                 "BUG-35 confirmed: agent's work was disrupted by stash cycle"
             )
 
-    def test_release_worktree_stashes_main_repo_dirty_state(self) -> None:
-        """BUG-35: _release_worktree's merge path calls stash_if_dirty on
-        the main repo.  Source inspection confirms there's no guard against
-        concurrent non-worktree agent edits."""
+    def test_release_worktree_stashes_via_do_merge(self) -> None:
+        """BUG-35: _release_worktree delegates stashing to _do_merge."""
         source = inspect.getsource(WorktreeSorcarAgent._release_worktree)
+        # stash_if_dirty is now in _do_merge, called from _release_worktree
+        assert "_do_merge" in source, "_release_worktree must use _do_merge"
+        do_merge_source = inspect.getsource(WorktreeSorcarAgent._do_merge)
+        assert "stash_if_dirty" in do_merge_source, (
+            "_do_merge must call stash_if_dirty"
+        )
 
-        # Confirm stash_if_dirty is called on the main repo (wt.repo_root)
-        assert "stash_if_dirty" in source, "sanity: stash_if_dirty used"
-
-        # Check that there's no mechanism to distinguish "user dirty state"
-        # from "non-worktree agent dirty state" — it stashes everything
-        lines = source.splitlines()
-        for i, line in enumerate(lines):
-            if "stash_if_dirty" in line:
-                # The call is just: did_stash = GitWorktreeOps.stash_if_dirty(wt.repo_root)
-                # No filter, no check for concurrent agents
-                assert "agent" not in line.lower(), (
-                    "Bug no longer present: stash_if_dirty has agent awareness"
-                )
-                break
-
-    def test_merge_also_stashes_indiscriminately(self) -> None:
-        """BUG-35: merge() also calls stash_if_dirty with no agent filter."""
+    def test_merge_also_stashes_via_do_merge(self) -> None:
+        """BUG-35: merge() delegates stashing to _do_merge."""
         source = inspect.getsource(WorktreeSorcarAgent.merge)
-        assert "stash_if_dirty" in source, "sanity: stash_if_dirty used in merge()"
-
-        # No guard against stashing another agent's work
-        lines = [ln for ln in source.splitlines() if "stash_if_dirty" in ln]
-        assert len(lines) >= 1
-        for line in lines:
-            # It's a simple call with no filtering
-            assert "concurrent" not in line.lower(), (
-                "Bug no longer present: merge has concurrent agent awareness"
-            )
+        assert "_do_merge" in source, "merge() must use _do_merge"
 
     def test_functional_stash_during_worktree_merge(self) -> None:
         """BUG-35 functional: worktree merge stashes non-worktree agent's file."""
@@ -378,11 +358,10 @@ class TestBug35WorktreeMergeStashesAgentWork:
         assert non_wt_file.exists(), "File should be back after stash pop"
 
         # The real danger: during the stash window, the file was gone.
-        # We confirm the design by checking stash_if_dirty is called
-        # unconditionally in merge()
-        source = inspect.getsource(WorktreeSorcarAgent.merge)
-        assert "stash_if_dirty" in source, (
-            "BUG-35 confirmed: merge stashes indiscriminately"
+        # stash_if_dirty is called inside _do_merge (delegated from merge)
+        do_merge_source = inspect.getsource(WorktreeSorcarAgent._do_merge)
+        assert "stash_if_dirty" in do_merge_source, (
+            "_do_merge must call stash_if_dirty"
         )
 
 

@@ -5,10 +5,9 @@ import sys
 
 import pytest
 
-from test_data.calculator.evaluator import _get_operator, evaluate, tokenize
 from test_data.calculator.cli import main
+from test_data.calculator.evaluator import _get_operator, evaluate, tokenize
 from test_data.calculator.operators import OPERATORS
-
 
 # --- Operator registry tests ---
 
@@ -23,7 +22,7 @@ class TestOperatorRegistry:
             assert hasattr(mod, "symbol"), f"{sym} missing symbol"
 
     def test_mul_div_higher_precedence_than_add_sub(self):
-        from test_data.calculator.operators import add, subtract, multiply, divide
+        from test_data.calculator.operators import add, divide, multiply, subtract
         assert multiply.precedence > add.precedence
         assert divide.precedence > subtract.precedence
 

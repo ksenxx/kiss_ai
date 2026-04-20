@@ -186,27 +186,22 @@ class TestFix2PinHeadSHA:
     """Verify pre-task snapshot is atomic and HEAD SHA is pinned."""
 
     def test_run_task_inner_acquires_repo_lock_for_snapshot(self) -> None:
-        """The non-worktree snapshot block should acquire repo_lock."""
-        source = inspect.getsource(VSCodeServer._run_task_inner)
-        lines = source.splitlines()
+        """The non-worktree snapshot helper should acquire repo_lock."""
+        # The snapshot logic lives in _capture_pre_snapshot (extracted
+        # from _run_task_inner for RED-4 deduplication).
+        source = inspect.getsource(VSCodeServer._capture_pre_snapshot)
 
-        # Find the non-worktree snapshot block
-        found_repo_lock = False
-        found_head_sha = False
-        for line in lines:
-            if "if not tab.use_worktree:" in line and "snapshot" not in line:
-                # Skip the Fix 4 block, find the snapshot block
-                continue
-            if "repo_lock(repo)" in line:
-                found_repo_lock = True
-            if "pre_head_sha" in line and "head_sha" in line:
-                found_head_sha = True
-
-        assert found_repo_lock, (
-            "Fix 2: snapshot block must acquire repo_lock"
+        assert "repo_lock(repo)" in source, (
+            "Fix 2: _capture_pre_snapshot must acquire repo_lock"
         )
-        assert found_head_sha, (
-            "Fix 2: must capture pre_head_sha before snapshot"
+        assert "head_sha" in source, (
+            "Fix 2: must capture head_sha inside the snapshot"
+        )
+
+        # _run_task_inner delegates to _capture_pre_snapshot
+        inner_source = inspect.getsource(VSCodeServer._run_task_inner)
+        assert "_capture_pre_snapshot" in inner_source, (
+            "Fix 2: _run_task_inner must call _capture_pre_snapshot"
         )
 
     def test_prepare_and_start_merge_receives_pinned_base_ref(self) -> None:

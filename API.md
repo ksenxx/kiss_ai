@@ -918,10 +918,11 @@ ______________________________________________________________________
   - `message`: Commit message.
   - **Returns:** True if a commit was created, False if nothing to commit or the commit failed (e.g. pre-commit hook rejection).
 
-- **commit_staged** — Commit already-staged changes without re-staging. Unlike :meth:`commit_all`, this does **not** run `git add -A` first. Use when the caller has already staged the desired changes (e.g. via :meth:`stage_all`).<br/>`commit_staged(wt_dir: Path, message: str) -> bool`
+- **commit_staged** — Commit already-staged changes without re-staging. Unlike :meth:`commit_all`, this does **not** run `git add -A` first. Use when the caller has already staged the desired changes (e.g. via :meth:`stage_all`).<br/>`commit_staged(wt_dir: Path, message: str, *, no_verify: bool = False) -> bool`
 
   - `wt_dir`: Worktree directory with pre-staged changes.
   - `message`: Commit message.
+  - `no_verify`: If True, pass `--no-verify` to skip pre-commit and commit-msg hooks. Use for infrastructure commits (e.g. baseline snapshots) that must always succeed.
   - **Returns:** True if a commit was created, False if nothing was staged or the commit failed (e.g. pre-commit hook rejection).
 
 - **has_uncommitted_changes** — Check if the working tree or index has uncommitted changes.<br/>`has_uncommitted_changes(wt_dir: Path) -> bool`
@@ -934,17 +935,11 @@ ______________________________________________________________________
   - `wt_dir`: Worktree directory (must have staged changes).
   - **Returns:** The diff text, or empty string if no staged changes.
 
-- **checkout** — Checkout a branch in the main worktree.<br/>`checkout(repo: Path, branch: str) -> bool`
+- **checkout** — Checkout a branch in the main worktree.<br/>`checkout(repo: Path, branch: str) -> tuple[bool, str]`
 
   - `repo`: Git repo root path.
   - `branch`: Branch name to checkout.
-  - **Returns:** True if checkout succeeded, False otherwise.
-
-- **checkout_error** — Return the stderr from a failed checkout attempt.<br/>`checkout_error(repo: Path, branch: str) -> str`
-
-  - `repo`: Git repo root path.
-  - `branch`: Branch name that failed to checkout.
-  - **Returns:** The stderr text from the failed checkout.
+  - **Returns:** `(True, "")` on success, `(False, stderr)` on failure. The stderr string describes why the checkout failed (e.g. dirty working tree, missing branch).
 
 - **merge_branch** — Merge a branch into the current HEAD with `--no-edit`. On conflict, the merge is aborted to leave a clean worktree.<br/>`merge_branch(repo: Path, branch: str) -> MergeResult`
 
@@ -1131,9 +1126,9 @@ ______________________________________________________________________
 
   - **Returns:** Success message, or error message if merge fails.
 
-- **discard** — Throw away the task branch and worktree, checkout original. Every step is idempotent — safe to call multiple times.<br/>`discard() -> str`
+- **discard** — Throw away the task branch and worktree, checkout original. Every step is idempotent — safe to call multiple times. Acquires `repo_lock` to serialize against concurrent merge/release operations on the same repository.<br/>`discard() -> str`
 
-  - **Returns:** Confirmation message.
+  - **Returns:** Confirmation message (includes a warning if checkout to the original branch failed).
 
 - **merge_instructions** — Return human-readable merge/discard instructions.<br/>`merge_instructions() -> str`
 

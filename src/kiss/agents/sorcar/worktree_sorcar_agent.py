@@ -208,6 +208,63 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         GitWorktreeOps.prune(wt.repo_root)
         return True
 
+    def _do_merge(
+        self, wt: GitWorktree,
+    ) -> tuple[MergeResult | None, str]:
+        """Checkout, stash, squash-merge, pop for a worktree branch.
+
+        Serialized under ``repo_lock`` to prevent concurrent tabs from
+        interleaving operations on the main repository.
+
+        Args:
+            wt: The worktree state to merge.
+
+        Returns:
+            ``(result, stash_warning)`` where *result* is the merge
+            outcome (``None`` when checkout fails) and *stash_warning*
+            is a non-empty string if stash-pop failed.
+        """
+        stash_warning = ""
+        with repo_lock(wt.repo_root):
+            current = GitWorktreeOps.current_branch(wt.repo_root)
+            if current != wt.original_branch:
+                ok, err = GitWorktreeOps.checkout(
+                    wt.repo_root, wt.original_branch,
+                )
+                if not ok:
+                    logger.warning(
+                        "Cannot checkout '%s': %s",
+                        wt.original_branch, err,
+                    )
+                    return (None, err)
+
+            did_stash = GitWorktreeOps.stash_if_dirty(wt.repo_root)
+            if wt.baseline_commit:
+                result = GitWorktreeOps.squash_merge_from_baseline(
+                    wt.repo_root, wt.branch, wt.baseline_commit,
+                )
+            else:
+                result = GitWorktreeOps.squash_merge_branch(
+                    wt.repo_root, wt.branch,
+                )
+            if did_stash:
+                if not GitWorktreeOps.stash_pop(wt.repo_root):
+                    stash_warning = (
+                        "Your uncommitted changes could not be "
+                        "auto-restored after merging the previous "
+                        f"worktree ('{wt.branch}'). Run "
+                        "'git stash pop' to recover them."
+                    )
+                    logger.warning(
+                        "git stash pop failed after merge of '%s'",
+                        wt.branch,
+                    )
+
+            if result == MergeResult.SUCCESS:
+                GitWorktreeOps.delete_branch(wt.repo_root, wt.branch)
+
+        return (result, stash_warning)
+
     def _release_worktree(self) -> str | None:
         """Auto-commit, auto-merge, and clean up a pending worktree.
 
@@ -237,7 +294,6 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         wt = self._wt
 
         if not self._finalize_worktree():
-            # Auto-commit rejected — can't merge safely, preserve worktree
             self._merge_conflict_warning = (
                 f"Could not auto-commit worktree changes for "
                 f"'{wt.branch}' (a pre-commit hook may have rejected "
@@ -246,85 +302,60 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
             self._wt = None
             return None
 
-        # 2. Auto-merge into original branch
         if wt.original_branch:
-            with repo_lock(wt.repo_root):
-                current = GitWorktreeOps.current_branch(wt.repo_root)
-                if current != wt.original_branch:
-                    if not GitWorktreeOps.checkout(
-                        wt.repo_root, wt.original_branch,
-                    ):
-                        logger.warning(
-                            "Cannot checkout '%s' for auto-merge of '%s'",
-                            wt.original_branch, wt.branch,
-                        )
-                        self._wt = None
-                        return None
+            result, stash_warning = self._do_merge(wt)
+            if stash_warning:
+                self._stash_pop_warning = stash_warning
 
-                did_stash = GitWorktreeOps.stash_if_dirty(wt.repo_root)
-                if wt.baseline_commit:
-                    result = GitWorktreeOps.squash_merge_from_baseline(
-                        wt.repo_root, wt.branch, wt.baseline_commit,
-                    )
-                else:
-                    result = GitWorktreeOps.squash_merge_branch(
-                        wt.repo_root, wt.branch,
-                    )
-                if did_stash:
-                    if not GitWorktreeOps.stash_pop(wt.repo_root):
-                        self._stash_pop_warning = (
-                            "Your uncommitted changes could not be "
-                            "auto-restored after merging the previous "
-                            f"worktree ('{wt.branch}'). Run "
-                            "'git stash pop' to recover them."
-                        )
-                        logger.warning(
-                            "git stash pop failed after auto-merge of '%s'",
-                            wt.branch,
-                        )
-
-                if result == MergeResult.SUCCESS:
-                    GitWorktreeOps.delete_branch(wt.repo_root, wt.branch)
-                elif result == MergeResult.MERGE_FAILED:
-                    self._merge_conflict_warning = (
-                        f"Auto-merge of '{wt.branch}' into "
-                        f"'{wt.original_branch}' applied cleanly but "
-                        "the commit failed (a pre-commit hook may have "
-                        "rejected it). The branch is kept for manual "
-                        "resolution. Run:\n"
-                        f"    cd {wt.repo_root}\n"
-                        f"    git checkout {wt.original_branch}\n"
-                        f"    git merge --squash {wt.branch}\n"
-                        "    # fix pre-commit issues, then:\n"
-                        "    git commit --no-verify\n"
-                        f"    git branch -d {wt.branch}"
-                    )
-                    logger.warning(
-                        "Auto-merge of '%s' into '%s': commit failed "
-                        "(pre-commit hook?); branch kept",
-                        wt.branch, wt.original_branch,
-                    )
-                    self._wt = None
-                    return None
-                else:
-                    self._merge_conflict_warning = (
-                        f"Auto-merge of '{wt.branch}' into "
-                        f"'{wt.original_branch}' had conflicts. The "
-                        "branch is kept for manual resolution. Run:\n"
-                        f"    cd {wt.repo_root}\n"
-                        f"    git checkout {wt.original_branch}\n"
-                        f"    git merge --squash {wt.branch}\n"
-                        "    # resolve conflicts, then:\n"
-                        "    git add . && git commit\n"
-                        f"    git branch -d {wt.branch}"
-                    )
-                    logger.warning(
-                        "Auto-merge of '%s' into '%s' had conflicts; "
-                        "branch kept for manual resolution",
-                        wt.branch, wt.original_branch,
-                    )
-                    self._wt = None
-                    return None
+            if result is None:
+                # Checkout failed
+                self._merge_conflict_warning = (
+                    f"Auto-merge of '{wt.branch}' could not checkout "
+                    f"'{wt.original_branch}'. The branch is kept for "
+                    "manual resolution."
+                )
+                self._wt = None
+                return None
+            if result == MergeResult.MERGE_FAILED:
+                self._merge_conflict_warning = (
+                    f"Auto-merge of '{wt.branch}' into "
+                    f"'{wt.original_branch}' applied cleanly but "
+                    "the commit failed (a pre-commit hook may have "
+                    "rejected it). The branch is kept for manual "
+                    "resolution. Run:\n"
+                    f"    cd {wt.repo_root}\n"
+                    f"    git checkout {wt.original_branch}\n"
+                    f"    git merge --squash {wt.branch}\n"
+                    "    # fix pre-commit issues, then:\n"
+                    "    git commit --no-verify\n"
+                    f"    git branch -d {wt.branch}"
+                )
+                logger.warning(
+                    "Auto-merge of '%s' into '%s': commit failed "
+                    "(pre-commit hook?); branch kept",
+                    wt.branch, wt.original_branch,
+                )
+                self._wt = None
+                return None
+            if result == MergeResult.CONFLICT:
+                self._merge_conflict_warning = (
+                    f"Auto-merge of '{wt.branch}' into "
+                    f"'{wt.original_branch}' had conflicts. The "
+                    "branch is kept for manual resolution. Run:\n"
+                    f"    cd {wt.repo_root}\n"
+                    f"    git checkout {wt.original_branch}\n"
+                    f"    git merge --squash {wt.branch}\n"
+                    "    # resolve conflicts, then:\n"
+                    "    git add . && git commit\n"
+                    f"    git branch -d {wt.branch}"
+                )
+                logger.warning(
+                    "Auto-merge of '%s' into '%s' had conflicts; "
+                    "branch kept for manual resolution",
+                    wt.branch, wt.original_branch,
+                )
+                self._wt = None
+                return None
 
         released_branch = wt.original_branch
         self._wt = None
@@ -413,17 +444,20 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         # into the worktree and create a baseline commit so that
         # downstream operations (merge review, changed-file detection,
         # squash-merge) can diff against it and see only agent changes.
+        # Uses --no-verify to bypass pre-commit hooks — this is an
+        # infrastructure commit, not user code (BUG-C fix).
         baseline_commit: str | None = None
         if GitWorktreeOps.copy_dirty_state(repo, wt_dir):
             GitWorktreeOps.stage_all(wt_dir)
-            GitWorktreeOps.commit_staged(
+            if GitWorktreeOps.commit_staged(
                 wt_dir, "kiss: baseline from dirty state",
-            )
-            baseline_commit = GitWorktreeOps.head_sha(wt_dir)
-            if baseline_commit:
-                GitWorktreeOps.save_baseline_commit(
-                    repo, branch, baseline_commit,
-                )
+                no_verify=True,
+            ):
+                baseline_commit = GitWorktreeOps.head_sha(wt_dir)
+                if baseline_commit:
+                    GitWorktreeOps.save_baseline_commit(
+                        repo, branch, baseline_commit,
+                    )
 
         self._wt = GitWorktree(
             repo_root=repo,
@@ -574,52 +608,28 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
                     "Then retry: agent.merge()"
                 )
 
-        with repo_lock(wt.repo_root):
-            if not GitWorktreeOps.checkout(wt.repo_root, wt.original_branch):
-                # pragma: no cover — dirty main worktree
-                return (
-                    f"Cannot checkout '{wt.original_branch}': "
-                    f"{GitWorktreeOps.checkout_error(wt.repo_root, wt.original_branch)}\n"
-                    "Fix the issue and retry merge(), or call discard()."
-                )
+        result, stash_warning = self._do_merge(wt)
+        stash_suffix = ""
+        if stash_warning:
+            stash_suffix = (
+                "\n\n⚠️  " + stash_warning
+            )
 
-            # Stash any user edits so they don't block the squash merge
-            did_stash = GitWorktreeOps.stash_if_dirty(wt.repo_root)
-
-            if wt.baseline_commit:
-                result = GitWorktreeOps.squash_merge_from_baseline(
-                    wt.repo_root, wt.branch, wt.baseline_commit,
-                )
-            else:
-                result = GitWorktreeOps.squash_merge_branch(
-                    wt.repo_root, wt.branch,
-                )
-
-            # Restore stashed user edits
-            stash_warning = ""
-            if did_stash:
-                if not GitWorktreeOps.stash_pop(wt.repo_root):
-                    stash_warning = (
-                        "\n\n⚠️  Your uncommitted changes could not be "
-                        "auto-restored after the merge.  They are saved "
-                        "in the git stash — run 'git stash pop' to "
-                        "recover them."
-                    )
-                    logger.warning(
-                        "git stash pop failed after merge; user changes "
-                        "are in 'git stash list'",
-                    )
+        if result is None:
+            return (
+                f"Cannot checkout '{wt.original_branch}': "
+                f"{stash_warning}\n"
+                "Fix the issue and retry merge(), or call discard()."
+            )
 
         if result == MergeResult.SUCCESS:
-            GitWorktreeOps.delete_branch(wt.repo_root, wt.branch)
             self._wt = None
             return (
                 f"Successfully merged branch '{wt.branch}'."
-                + stash_warning
+                + stash_suffix
             )
 
         if result == MergeResult.MERGE_FAILED:
-            # Merge applied cleanly but commit failed (e.g. pre-commit hook)
             return (
                 f"Merge of '{wt.branch}' applied cleanly but the commit "
                 "failed (a pre-commit hook may have rejected it). "
@@ -632,7 +642,7 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
                 f"    git branch -d {wt.branch}\n"
                 "\nOr discard the branch:\n"
                 "    agent.discard()"
-                + stash_warning
+                + stash_suffix
             )
 
         # Conflict — state preserved so discard() still works
@@ -653,9 +663,12 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         """Throw away the task branch and worktree, checkout original.
 
         Every step is idempotent — safe to call multiple times.
+        Acquires ``repo_lock`` to serialize against concurrent
+        merge/release operations on the same repository.
 
         Returns:
-            Confirmation message.
+            Confirmation message (includes a warning if checkout
+            to the original branch failed).
 
         Raises:
             RuntimeError: If no worktree task is pending.
@@ -664,13 +677,22 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
             raise RuntimeError("No pending worktree task to discard")
 
         wt = self._wt
-        GitWorktreeOps.remove(wt.repo_root, wt.wt_dir)
-        GitWorktreeOps.prune(wt.repo_root)
-        if wt.original_branch:
-            GitWorktreeOps.checkout(wt.repo_root, wt.original_branch)
-        GitWorktreeOps.delete_branch(wt.repo_root, wt.branch)
+        checkout_warning = ""
+        with repo_lock(wt.repo_root):
+            GitWorktreeOps.remove(wt.repo_root, wt.wt_dir)
+            GitWorktreeOps.prune(wt.repo_root)
+            if wt.original_branch:
+                ok, err = GitWorktreeOps.checkout(
+                    wt.repo_root, wt.original_branch,
+                )
+                if not ok:
+                    checkout_warning = (
+                        f"\n⚠️  Could not checkout '{wt.original_branch}'"
+                        f": {err}"
+                    )
+            GitWorktreeOps.delete_branch(wt.repo_root, wt.branch)
         self._wt = None
-        return f"Discarded branch '{wt.branch}'."
+        return f"Discarded branch '{wt.branch}'.{checkout_warning}"
 
     # -- Instructions ------------------------------------------------------
 
