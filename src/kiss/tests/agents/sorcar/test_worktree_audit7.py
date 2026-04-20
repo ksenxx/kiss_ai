@@ -367,7 +367,8 @@ class TestBug32Fix:
 
     def test_cleanup_runs_when_no_tab_merging(self) -> None:
         """BUG-32 FIX: Merge data is cleaned when no tab is merging."""
-        merge_dir = _merge_data_dir()
+        # Use per-tab merge dir (BUG-38 fix)
+        merge_dir = _merge_data_dir("tab_a")
         merge_dir.mkdir(parents=True, exist_ok=True)
 
         pending = merge_dir / "pending-merge.json"

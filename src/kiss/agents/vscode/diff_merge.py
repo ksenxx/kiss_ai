@@ -181,33 +181,44 @@ def _snapshot_files(work_dir: str, fnames: set[str]) -> dict[str, str]:
     return result
 
 
-def _merge_data_dir() -> Path:
-    """Return the per-project directory for merge state files.
+def _merge_data_dir(tab_id: str = "") -> Path:
+    """Return the per-tab directory for merge state files.
 
-    Uses ``{artifact_root}/merge_dir/`` so merge-temp,
+    Uses ``{artifact_root}/merge_dir/{tab_id}/`` so merge-temp,
     untracked-base, and pending-merge.json live in the KISS artifacts
-    directory.
+    directory, isolated per tab to prevent concurrent merge sessions
+    from destroying each other's data.
+
+    Args:
+        tab_id: Frontend tab identifier.  When non-empty, the returned
+            path includes a tab-specific subdirectory.
 
     Returns:
         Path to the merge data directory.
     """
-    return config_module._artifact_root() / "merge_dir"
+    base = config_module._artifact_root() / "merge_dir"
+    if tab_id:
+        return base / tab_id
+    return base
 
 
-def _untracked_base_dir() -> Path:
+def _untracked_base_dir(tab_id: str = "") -> Path:
     """Return the directory for storing untracked file base copies.
 
-    Uses ``{artifact_root}/merge_dir/untracked-base/`` so copies
-    live alongside other merge artifacts.
+    Uses ``{artifact_root}/merge_dir/{tab_id}/untracked-base/`` so
+    copies live alongside other merge artifacts, isolated per tab.
+
+    Args:
+        tab_id: Frontend tab identifier for per-tab isolation.
 
     Returns:
         Path to the untracked-base directory.
     """
-    return _merge_data_dir() / "untracked-base"
+    return _merge_data_dir(tab_id) / "untracked-base"
 
 
 def _save_untracked_base(
-    work_dir: str, untracked: set[str],
+    work_dir: str, untracked: set[str], tab_id: str = "",
 ) -> None:
     """Save copies of untracked files before a task runs.
 
@@ -217,8 +228,9 @@ def _save_untracked_base(
     Args:
         work_dir: Repository root.
         untracked: Set of untracked file paths (relative to work_dir).
+        tab_id: Frontend tab identifier for per-tab isolation.
     """
-    base_dir = _untracked_base_dir()
+    base_dir = _untracked_base_dir(tab_id)
     if base_dir.exists():
         shutil.rmtree(base_dir)
     for fname in untracked:
@@ -394,7 +406,7 @@ def _prepare_merge_view(
         or ``error`` key on failure.
     """
     post_hunks = _parse_diff_hunks(work_dir, base_ref=base_ref)
-    ub_dir = _untracked_base_dir()
+    ub_dir = Path(data_dir) / "untracked-base"
     file_hunks: dict[str, list[dict[str, int]]] = {}
 
     def _file_changed(fname: str) -> bool:

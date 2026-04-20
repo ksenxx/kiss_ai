@@ -659,7 +659,6 @@ class TestBug17UntrackedBaseNotNukedInWorktreeMode:
         review data is not destroyed.
         """
         from kiss.agents.vscode.diff_merge import (
-            _save_untracked_base,
             _untracked_base_dir,
         )
 
@@ -681,6 +680,7 @@ class TestBug17UntrackedBaseNotNukedInWorktreeMode:
             # _save_untracked_base is not called at all.
             # We verify the guard exists by checking the source code:
             import inspect
+
             from kiss.agents.vscode.server import VSCodeServer
 
             source = inspect.getsource(VSCodeServer._run_task_inner)

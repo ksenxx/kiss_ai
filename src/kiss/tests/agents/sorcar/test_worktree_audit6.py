@@ -36,11 +36,9 @@ from __future__ import annotations
 
 import inspect
 import json
-import os
 import shutil
 import subprocess
 import tempfile
-import threading
 from pathlib import Path
 from typing import Any, cast
 
@@ -48,9 +46,7 @@ import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.git_worktree import (
     GitWorktree,
     GitWorktreeOps,
-    MergeResult,
     _git,
-    repo_lock,
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
@@ -253,10 +249,8 @@ class TestBug26MergeDeleteOutsideLock:
 
         # Find the repo_lock context manager and the delete_branch call
         lock_indent = None
-        lock_end_line = None
         delete_line = None
 
-        indent_stack: list[int] = []
         for i, line in enumerate(lines):
             stripped = line.lstrip()
             indent = len(line) - len(stripped)
@@ -324,7 +318,13 @@ class TestBug26MergeDeleteOutsideLock:
             # Detect end of `with` block: first non-blank line at or
             # below the `with` indent after the block has started.
             if lock_start is not None and lock_end is None:
-                if stripped and indent <= lock_indent and i > lock_start + 1:
+                past_start = i > lock_start + 1
+                if (
+                    stripped
+                    and lock_indent is not None
+                    and indent <= lock_indent
+                    and past_start
+                ):
                     lock_end = i
 
         assert lock_end is not None, "sanity: found end of repo_lock block"
