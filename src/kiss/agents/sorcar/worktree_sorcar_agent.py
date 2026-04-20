@@ -336,7 +336,9 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
 
         Every step is idempotent — safe to re-run after a crash.
         Auto-commits any uncommitted changes in the worktree before
-        merging.
+        merging.  If the main working tree has uncommitted changes,
+        they are stashed before the merge and restored afterward so
+        user edits don't block the merge.
 
         Returns:
             Success message, or error message if merge fails.
@@ -367,7 +369,18 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
                 "Fix the issue and retry merge(), or call discard()."
             )
 
+        # Stash any user edits so they don't block the squash merge
+        did_stash = GitWorktreeOps.stash_if_dirty(wt.repo_root)
+
         result = GitWorktreeOps.squash_merge_branch(wt.repo_root, wt.branch)
+
+        # Restore stashed user edits (best-effort)
+        if did_stash:
+            if not GitWorktreeOps.stash_pop(wt.repo_root):
+                logger.warning(
+                    "git stash pop failed after merge; user changes "
+                    "are in 'git stash list'",
+                )
 
         if result == MergeResult.SUCCESS:
             GitWorktreeOps.delete_branch(wt.repo_root, wt.branch)

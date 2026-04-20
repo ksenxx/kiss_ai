@@ -249,6 +249,43 @@ class GitWorktreeOps:
         return MergeResult.CONFLICT
 
     @staticmethod
+    def stash_if_dirty(repo: Path) -> bool:
+        """Stash uncommitted changes if the working tree or index is dirty.
+
+        Uses ``git stash push --include-untracked`` so both staged and
+        unstaged changes (including new files) are saved.
+
+        Args:
+            repo: Git repo root path.
+
+        Returns:
+            True if a stash entry was created, False if the tree was clean.
+        """
+        # Check working tree + index
+        status = _git("status", "--porcelain", cwd=repo)
+        if not status.stdout.strip():
+            return False
+        result = _git(
+            "stash", "push", "--include-untracked",
+            "-m", "kiss: auto-stash before merge",
+            cwd=repo,
+        )
+        return result.returncode == 0
+
+    @staticmethod
+    def stash_pop(repo: Path) -> bool:
+        """Pop the latest stash entry.
+
+        Args:
+            repo: Git repo root path.
+
+        Returns:
+            True if the pop succeeded, False on conflict or error.
+        """
+        result = _git("stash", "pop", cwd=repo)
+        return result.returncode == 0
+
+    @staticmethod
     def squash_merge_branch(repo: Path, branch: str) -> MergeResult:
         """Squash-merge a branch and commit the result.
 
@@ -267,6 +304,9 @@ class GitWorktreeOps:
         """
         result = _git("merge", "--squash", branch, cwd=repo)
         if result.returncode != 0:
+            logger.warning(
+                "squash merge failed: %s", result.stderr.strip(),
+            )
             _git("reset", "--hard", "HEAD", cwd=repo)
             return MergeResult.CONFLICT
         diff = _git("diff", "--cached", "--quiet", cwd=repo)
