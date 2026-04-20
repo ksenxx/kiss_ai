@@ -28,3 +28,10 @@
 - BUG-16: `_finalize_worktree` removes worktree even if auto-commit was REJECTED by pre-commit hook (still-unfixed BUG-6)
 - BUG-17: `_save_untracked_base` unconditionally deletes existing base dir — concurrent tab merge reviews can lose data
 - BUG-18: `_release_worktree` returns misleading "main" on merge conflict (semantically wrong return value, same root cause as BUG-13)
+- BUG-19 through BUG-24 (found in audit5) are in test_worktree_audit5.py — these are UNFIXED bugs confirmed by passing tests
+- BUG-19: `discard()` doesn't acquire `repo_lock` — checkout can race with merge/release from another tab
+- BUG-20: `_release_worktree` checkout failure silently orphans branch (no `_merge_conflict_warning` set)
+- BUG-21: `checkout_error()` re-executes `git checkout` — side-effecting diagnostic that can mutate repo state
+- BUG-22: `_check_merge_conflict` misses staged (but uncommitted) files — uses `unstaged_files` only
+- BUG-23: `_try_setup_worktree` doesn't check `commit_staged` return for baseline — wrong baseline on pre-commit hook rejection
+- BUG-24: `_get_worktree_changed_files` returns [] on git diff failure, triggering silent discard of agent work
