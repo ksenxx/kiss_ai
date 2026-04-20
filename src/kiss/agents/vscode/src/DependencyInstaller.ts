@@ -19,6 +19,9 @@ const MIN_PYTHON_MINOR = 13;
 const UV_VERSION = '0.11.2';
 const NODE_VERSION = 'v22.16.0';
 
+/** Guard against concurrent ensureDependencies calls. */
+let pendingDeps: Promise<void> | null = null;
+
 /**
  * Write a timestamped message to ~/.kiss/install.log and the developer console.
  */
@@ -83,9 +86,18 @@ export function getDefaultModel(): string {
 /**
  * Ensure all required dependencies are installed.
  * Shows a progress notification during first-time installation.
- * Safe to call multiple times — skips already-installed dependencies.
+ * Safe to call multiple times — uses a concurrency guard so overlapping
+ * calls reuse the in-flight check instead of racing.
  */
-export async function ensureDependencies(): Promise<void> {
+export function ensureDependencies(): Promise<void> {
+  if (pendingDeps) return pendingDeps;
+  pendingDeps = ensureDependenciesImpl().finally(() => {
+    pendingDeps = null;
+  });
+  return pendingDeps;
+}
+
+async function ensureDependenciesImpl(): Promise<void> {
   ensureLocalBinInPath();
   log('=== Dependency check started ===');
 
@@ -104,17 +116,25 @@ export async function ensureDependencies(): Promise<void> {
   let uvPath = findUvPath();
   let venvExists = fs.existsSync(path.join(kissProjectPath, '.venv'));
 
-  // If .venv exists but Python is too old, remove it so uv sync recreates it
-  if (uvPath && venvExists && !checkPythonVersion(uvPath, kissProjectPath)) {
-    try {
-      fs.rmSync(path.join(kissProjectPath, '.venv'), {
-        recursive: true,
-        force: true,
-      });
-    } catch {
-      /* ignored */
+  // If .venv exists but Python is genuinely too old, remove it so uv sync
+  // recreates it.  Transient errors (timeout, spawn failure) must NOT delete
+  // .venv — that causes unnecessary slow-path rebuilds on every activation.
+  if (uvPath && venvExists) {
+    const pyStatus = checkPythonVersion(uvPath, kissProjectPath);
+    if (pyStatus === 'too_old') {
+      log('Python version too old — removing .venv for recreation');
+      try {
+        fs.rmSync(path.join(kissProjectPath, '.venv'), {
+          recursive: true,
+          force: true,
+        });
+      } catch {
+        /* ignored */
+      }
+      venvExists = false;
+    } else if (pyStatus === 'error') {
+      log('Python version check failed (transient) — keeping .venv');
     }
-    venvExists = false;
   }
 
   let showRestartNotification = false;
@@ -141,9 +161,14 @@ export async function ensureDependencies(): Promise<void> {
         log(
           `Fast-path Playwright install failed: ${err instanceof Error ? err.message : err}`,
         );
-        vscode.window.showWarningMessage(
-          'KISS Sorcar: Chromium browser update failed in background. See ~/.kiss/install.log for details.',
-        );
+        // Only warn the user if Chromium is genuinely missing.  Playwright
+        // browsers are cached system-wide (outside .venv), so a transient
+        // background update failure is benign when chromium is already cached.
+        if (!isChromiumInstalled()) {
+          vscode.window.showWarningMessage(
+            'KISS Sorcar: Chromium browser update failed in background. See ~/.kiss/install.log for details.',
+          );
+        }
       });
     // Ensure git, Node.js, and VS Code CLI are available even on fast path
     if (!gitWorks()) {
@@ -247,7 +272,7 @@ export async function ensureDependencies(): Promise<void> {
         }
 
         // 6. Verify Python version meets minimum requirement
-        if (!checkPythonVersion(uvPath, kissProjectPath)) {
+        if (checkPythonVersion(uvPath, kissProjectPath) !== 'ok') {
           vscode.window.showErrorMessage(
             `KISS Sorcar requires Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR}+. ` +
               `Please install Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR} or later and restart VS Code.`,
@@ -470,9 +495,17 @@ async function installUv(): Promise<string | null> {
 /**
  * Check that the Python version in the project's .venv is >= MIN_PYTHON.
  * Runs `uv run python --version` and parses the output (e.g. "Python 3.13.2").
- * Returns true if the version meets the requirement, false otherwise.
+ *
+ * Returns ``'ok'`` when the version meets the requirement, ``'too_old'``
+ * when a valid version was parsed but is below the minimum, and ``'error'``
+ * when the check itself failed (timeout, spawn error, etc.).  Callers
+ * should only delete `.venv` on ``'too_old'`` — transient errors must not
+ * destroy a potentially valid environment.
  */
-function checkPythonVersion(uvPath: string, cwd: string): boolean {
+function checkPythonVersion(
+  uvPath: string,
+  cwd: string,
+): 'ok' | 'too_old' | 'error' {
   try {
     const output = execSync(`"${uvPath}" run python --version`, {
       cwd,
@@ -481,13 +514,47 @@ function checkPythonVersion(uvPath: string, cwd: string): boolean {
     }).trim();
     // Output format: "Python 3.13.2"
     const match = output.match(/Python\s+(\d+)\.(\d+)/);
-    if (!match) return false;
+    if (!match) return 'error';
     const major = parseInt(match[1], 10);
     const minor = parseInt(match[2], 10);
-    return (
+    if (
       major > MIN_PYTHON_MAJOR ||
       (major === MIN_PYTHON_MAJOR && minor >= MIN_PYTHON_MINOR)
+    ) {
+      return 'ok';
+    }
+    return 'too_old';
+  } catch {
+    return 'error';
+  }
+}
+
+/**
+ * Return the Playwright browsers cache directory for the current platform.
+ */
+function playwrightBrowsersPath(): string {
+  const env = process.env.PLAYWRIGHT_BROWSERS_PATH;
+  if (env) return env;
+  if (process.platform === 'darwin') {
+    return path.join(HOME_DIR, 'Library', 'Caches', 'ms-playwright');
+  } else if (process.platform === 'win32') {
+    return path.join(
+      process.env.LOCALAPPDATA || path.join(HOME_DIR, 'AppData', 'Local'),
+      'ms-playwright',
     );
+  }
+  return path.join(HOME_DIR, '.cache', 'ms-playwright');
+}
+
+/**
+ * Check if Playwright Chromium is already installed in the browser cache.
+ * Returns true if any chromium-* directory exists in the cache.
+ */
+function isChromiumInstalled(): boolean {
+  try {
+    const cacheDir = playwrightBrowsersPath();
+    if (!fs.existsSync(cacheDir)) return false;
+    return fs.readdirSync(cacheDir).some(e => e.startsWith('chromium-'));
   } catch {
     return false;
   }
