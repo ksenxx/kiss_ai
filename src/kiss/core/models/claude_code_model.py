@@ -18,7 +18,7 @@ import json
 import logging
 import shutil
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from kiss.core.kiss_error import KISSError
@@ -118,11 +118,12 @@ class ClaudeCodeModel(Model):
                 parts.append(f"[Tool Result]: {content}")
         return "\n\n".join(parts)
 
-    def _build_cli_args(self, use_streaming: bool = False) -> list[str]:
+    def _build_cli_args(self) -> list[str]:
         """Build the ``claude`` CLI argument list.
 
-        Args:
-            use_streaming: If True, use stream-json output format.
+        Always uses ``stream-json`` output format so that tokens can be
+        streamed incrementally and the process can be terminated early
+        (e.g. when a second assistant message is detected).
 
         Returns:
             List of CLI arguments.
@@ -139,18 +140,18 @@ class ClaudeCodeModel(Model):
         system_instruction = self.model_config.get("system_instruction")
         if system_instruction:
             args.extend(["--system-prompt", system_instruction])
-        if use_streaming:
-            args.extend([
-                "--output-format", "stream-json",
-                "--verbose",
-                "--include-partial-messages",
-            ])
-        else:
-            args.extend(["--output-format", "json"])
+        args.extend([
+            "--output-format", "stream-json",
+            "--verbose",
+            "--include-partial-messages",
+        ])
         return args
 
     def generate(self) -> tuple[str, Any]:
         """Generate a response using the Claude Code CLI.
+
+        Always uses streaming so tokens are delivered incrementally and the
+        process is terminated before a second assistant message is produced.
 
         Returns:
             tuple[str, Any]: (generated_text, parsed_json_response).
@@ -160,58 +161,8 @@ class ClaudeCodeModel(Model):
         """
         prompt = self._build_prompt()
         timeout = self.model_config.get("timeout", 300)
+        args = self._build_cli_args()
 
-        if self.token_callback is not None:
-            return self._generate_streaming(prompt, timeout)
-        return self._generate_blocking(prompt, timeout)
-
-    def _generate_blocking(self, prompt: str, timeout: int) -> tuple[str, Any]:
-        """Run claude CLI and get the full JSON response.
-
-        Args:
-            prompt: The prompt text to send.
-            timeout: Subprocess timeout in seconds.
-
-        Returns:
-            tuple[str, Any]: (generated_text, parsed_json_response).
-        """
-        args = self._build_cli_args(use_streaming=False)
-        try:
-            result = subprocess.run(
-                args,
-                input=prompt,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-        except subprocess.TimeoutExpired as e:  # pragma: no cover – requires real timeout
-            raise KISSError(f"Claude Code CLI timed out after {timeout}s") from e
-
-        if result.returncode != 0:  # pragma: no cover – requires CLI failure
-            raise KISSError(
-                f"Claude Code CLI failed (exit {result.returncode}): {result.stderr.strip()}"
-            )
-
-        try:
-            response = json.loads(result.stdout)
-        except json.JSONDecodeError as e:  # pragma: no cover – requires malformed output
-            raise KISSError(f"Failed to parse Claude Code CLI output: {e}") from e
-
-        content = response.get("result", "")
-        self.conversation.append({"role": "assistant", "content": content})
-        return content, response
-
-    def _generate_streaming(self, prompt: str, timeout: int) -> tuple[str, Any]:
-        """Run claude CLI with streaming output and invoke token callback.
-
-        Args:
-            prompt: The prompt text to send.
-            timeout: Subprocess timeout in seconds.
-
-        Returns:
-            tuple[str, Any]: (generated_text, parsed_result_json).
-        """
-        args = self._build_cli_args(use_streaming=True)
         try:
             proc = subprocess.Popen(
                 args,
@@ -228,30 +179,7 @@ class ClaudeCodeModel(Model):
         proc.stdin.close()
 
         assert proc.stdout is not None
-        content = ""
-        result_json: dict[str, Any] = {}
-        for line in proc.stdout:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            event_type = event.get("type")
-            if event_type == "assistant":
-                # Extract text from content blocks
-                msg = event.get("message", {})
-                for block in msg.get("content", []):
-                    if block.get("type") == "text":
-                        text = block.get("text", "")
-                        if text:
-                            content += text
-                            self._invoke_token_callback(text)
-            elif event_type == "result":
-                result_json = event
-                # The result contains the complete text; use it as authoritative
-                content = event.get("result", content)
+        content, result_json = self._parse_stream_events(proc.stdout)
 
         proc.wait(timeout=timeout)
         if proc.returncode != 0:  # pragma: no cover – requires CLI failure
@@ -261,6 +189,57 @@ class ClaudeCodeModel(Model):
             )
 
         self.conversation.append({"role": "assistant", "content": content})
+        return content, result_json
+
+    def _parse_stream_events(self, lines: Iterable[str]) -> tuple[str, dict[str, Any]]:
+        """Parse stream-json events, stopping before a second assistant message.
+
+        Iterates over newline-delimited JSON events from the Claude CLI.
+        Text from the first ``assistant`` event is accumulated and emitted
+        via the token callback.  If a second ``assistant`` event is
+        encountered, parsing stops immediately — the content from the
+        second (and subsequent) messages is discarded.
+
+        A ``result`` event (if received before a second assistant) is used
+        as the authoritative final content.
+
+        Args:
+            lines: An iterable of JSON strings (one event per line).
+
+        Returns:
+            Tuple of ``(content, result_json)`` where *content* is the text
+            from the first assistant message and *result_json* is the parsed
+            ``result`` event dict (or ``{}`` if none was received).
+        """
+        content = ""
+        result_json: dict[str, Any] = {}
+        assistant_count = 0
+
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            event_type = event.get("type")
+            if event_type == "assistant":
+                assistant_count += 1
+                if assistant_count > 1:
+                    break
+                msg = event.get("message", {})
+                for block in msg.get("content", []):
+                    if block.get("type") == "text":
+                        text = block.get("text", "")
+                        if text:
+                            content += text
+                            self._invoke_token_callback(text)
+            elif event_type == "result":
+                result_json = event
+                content = event.get("result", content)
+
         return content, result_json
 
     def generate_and_process_with_tools(
