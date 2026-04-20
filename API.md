@@ -921,6 +921,16 @@ ______________________________________________________________________
   - `branch`: Branch to merge.
   - **Returns:** :attr:`MergeResult.SUCCESS` or :attr:`MergeResult.CONFLICT`.
 
+- **stash_if_dirty** — Stash uncommitted changes if the working tree or index is dirty. Uses `git stash push --include-untracked` so both staged and unstaged changes (including new files) are saved.<br/>`stash_if_dirty(repo: Path) -> bool`
+
+  - `repo`: Git repo root path.
+  - **Returns:** True if a stash entry was created, False if the tree was clean.
+
+- **stash_pop** — Pop the latest stash entry.<br/>`stash_pop(repo: Path) -> bool`
+
+  - `repo`: Git repo root path.
+  - **Returns:** True if the pop succeeded, False on conflict or error.
+
 - **squash_merge_branch** — Squash-merge a branch and commit the result. Uses `git merge --squash` to apply all changes from *branch*, then commits them. The commit message is taken from git's auto-generated `SQUASH_MSG`. On conflict, resets to a clean state with `git reset --hard`.<br/>`squash_merge_branch(repo: Path, branch: str) -> MergeResult`
 
   - `repo`: Git repo root path.
@@ -1048,7 +1058,7 @@ ______________________________________________________________________
   - `**kwargs`: All other arguments forwarded to `StatefulSorcarAgent.run()`. The optional `use_worktree` kwarg (default `True`) gates the worktree behavior — when `False` the call is equivalent to `StatefulSorcarAgent.run()`.
   - **Returns:** YAML string with 'success' and 'summary' keys.
 
-- **merge** — Merge the task branch into the original branch. Every step is idempotent — safe to re-run after a crash. Auto-commits any uncommitted changes in the worktree before merging.<br/>`merge() -> str`
+- **merge** — Merge the task branch into the original branch. Every step is idempotent — safe to re-run after a crash. Auto-commits any uncommitted changes in the worktree before merging. If the main working tree has uncommitted changes, they are stashed before the merge and restored afterward so user edits don't block the merge.<br/>`merge() -> str`
 
   - **Returns:** Success message, or error message if merge fails.
 
