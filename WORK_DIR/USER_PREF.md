@@ -4,3 +4,4 @@
 - VS Code extension ID is `ksenxx.kiss-sorcar`.
 - VS Code extension source is at `src/kiss/agents/vscode/`.
 - Always uninstall the old extension before installing a new one to avoid stale state in VS Code's extensions.json.
+- User is interested in understanding KISS internals and architecture. Provide detailed, code-referenced answers when asked about how things work.
