@@ -240,7 +240,7 @@ class TestSystemPromptAnchored:
         import kiss.core.base as base_mod
 
         source = inspect.getsource(base_mod)
-        assert '_kiss_pkg_dir / "SORCAR.md"' in source or "_kiss_pkg_dir / 'SORCAR.md'" in source
+        assert '_kiss_pkg_dir / "SYSTEM.md"' in source or "_kiss_pkg_dir / 'SYSTEM.md'" in source
 
 
 # ---------------------------------------------------------------------------

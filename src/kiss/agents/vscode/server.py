@@ -19,7 +19,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar.git_worktree import GitWorktreeOps
+from kiss.agents.sorcar.git_worktree import GitWorktreeOps, repo_lock
 from kiss.agents.sorcar.persistence import (
     _append_chat_event,
     _get_adjacent_task_by_chat_id,
@@ -165,6 +165,7 @@ class _TabState:
         "task_thread",
         "user_answer_queue",
         "is_merging",
+        "is_running_non_wt",
     )
 
     def __init__(self, tab_id: str, default_model: str) -> None:
@@ -177,6 +178,7 @@ class _TabState:
         self.task_thread: threading.Thread | None = None
         self.user_answer_queue: queue.Queue[str] | None = None
         self.is_merging: bool = False
+        self.is_running_non_wt: bool = False
 
 
 class VSCodeServer:
@@ -229,6 +231,16 @@ class VSCodeServer:
                 tab = _TabState(tab_id, self._default_model)
                 self._tab_states[tab_id] = tab
             return tab
+
+    def _any_non_wt_running(self) -> bool:
+        """True if any tab is running a non-worktree task on the main tree.
+
+        Must be called with ``_state_lock`` held.
+
+        Returns:
+            True if at least one tab has ``is_running_non_wt`` set.
+        """
+        return any(t.is_running_non_wt for t in self._tab_states.values())
 
     def run(self) -> None:
         """Main loop: read commands from stdin, execute them."""
@@ -432,19 +444,61 @@ class VSCodeServer:
 
         self.printer.broadcast({"type": "clear", "chat_id": tab.agent.chat_id})
 
+        # Fix 4 (defense-in-depth): block a new non-worktree task while
+        # a worktree merge is in progress on the same repo.
+        if not tab.use_worktree:
+            with self._state_lock:
+                if any(
+                    t.is_merging and t.use_worktree
+                    for t in self._tab_states.values()
+                ):
+                    self.printer.broadcast({
+                        "type": "error",
+                        "text": "A worktree merge is in progress. "
+                        "Wait for it to finish before starting a task.",
+                        "tabId": tab_id,
+                    })
+                    return
+
         # Git snapshot captures pre-task state — only needed for
         # non-worktree merge view (worktree mode uses baseline commits
         # and its own diff; saving here would nuke another tab's data).
         pre_hunks: dict[str, list[tuple[int, int, int, int]]] = {}
         pre_untracked: set[str] = set()
         pre_file_hashes: dict[str, str] | None = None
+        pre_head_sha: str | None = None
         if not tab.use_worktree:
-            pre_hunks = _parse_diff_hunks(work_dir)
-            pre_untracked = _capture_untracked(work_dir)
-            pre_file_hashes = _snapshot_files(
-                work_dir, set(pre_hunks.keys()) | pre_untracked,
-            )
-            _save_untracked_base(work_dir, pre_untracked | set(pre_hunks.keys()))
+            # Fix 2 (BUG-34): acquire repo_lock for an atomic snapshot
+            # so a concurrent worktree merge cannot interleave checkout /
+            # stash / squash-merge operations while the snapshot runs.
+            repo = GitWorktreeOps.discover_repo(Path(work_dir))
+            if repo:
+                with repo_lock(repo):
+                    pre_head_sha = GitWorktreeOps.head_sha(repo)
+                    pre_hunks = _parse_diff_hunks(work_dir)
+                    pre_untracked = _capture_untracked(work_dir)
+                    pre_file_hashes = _snapshot_files(
+                        work_dir, set(pre_hunks.keys()) | pre_untracked,
+                    )
+                    _save_untracked_base(
+                        work_dir,
+                        pre_untracked | set(pre_hunks.keys()),
+                        tab_id=tab_id,
+                    )
+            else:
+                pre_hunks = _parse_diff_hunks(work_dir)
+                pre_untracked = _capture_untracked(work_dir)
+                pre_file_hashes = _snapshot_files(
+                    work_dir, set(pre_hunks.keys()) | pre_untracked,
+                )
+                _save_untracked_base(
+                    work_dir,
+                    pre_untracked | set(pre_hunks.keys()),
+                    tab_id=tab_id,
+                )
+            # Fix 3 (BUG-35): mark this tab as running a non-worktree task
+            with self._state_lock:
+                tab.is_running_non_wt = True
 
         # start_recording inside try so stop_recording always runs (P14 fix)
         result_summary = "Agent Failed Abruptly"
@@ -515,10 +569,16 @@ class VSCodeServer:
                 )
                 self.printer.broadcast({"type": "tasks_updated"})
                 self.printer.reset()
+                # Fix 3: clear non-wt running flag before merge view
+                if not tab.use_worktree:
+                    with self._state_lock:
+                        tab.is_running_non_wt = False
                 if not tab.use_worktree:
                     try:
                         self._prepare_and_start_merge(
                             work_dir, pre_hunks, pre_untracked, pre_file_hashes,
+                            base_ref=pre_head_sha or "HEAD",
+                            tab_id=tab_id,
                         )
                     except BaseException:  # pragma: no cover — merge view error handler
                         logger.debug("Merge view error", exc_info=True)
@@ -588,6 +648,7 @@ class VSCodeServer:
         pre_untracked: set[str] | None = None,
         pre_file_hashes: dict[str, str] | None = None,
         base_ref: str = "HEAD",
+        tab_id: str = "",
     ) -> bool:
         """Prepare a merge view and start the merge session if changes exist.
 
@@ -603,11 +664,12 @@ class VSCodeServer:
             base_ref: Git ref to diff against (default ``"HEAD"``).
                 Pass a baseline commit SHA to include committed agent
                 changes in the merge review.
+            tab_id: Frontend tab identifier for per-tab merge data isolation.
 
         Returns:
             True if a merge session was started, False otherwise.
         """
-        merge_dir = str(_merge_data_dir())
+        merge_dir = str(_merge_data_dir(tab_id))
         merge_result = _prepare_merge_view(
             work_dir,
             merge_dir,
@@ -647,7 +709,7 @@ class VSCodeServer:
         base_ref = tab.agent._baseline_commit or "HEAD"
         try:
             return self._prepare_and_start_merge(
-                str(wt_dir), base_ref=base_ref,
+                str(wt_dir), base_ref=base_ref, tab_id=tab_id,
             )
         except BaseException:
             logger.debug("Worktree merge review error", exc_info=True)
@@ -686,15 +748,14 @@ class VSCodeServer:
             else:
                 for tab in self._tab_states.values():
                     tab.is_merging = False
-            # Only clean up merge data when no tab is still merging
-            any_merging = any(
-                t.is_merging for t in self._tab_states.values()
-            )
         event: dict[str, Any] = {"type": "merge_ended"}
         if tab_id is not None:
             event["tabId"] = tab_id
         self.printer.broadcast(event)
-        if not any_merging:
+        # Per-tab merge data cleanup — each tab has its own directory
+        if tab_id is not None:
+            _cleanup_merge_data(str(_merge_data_dir(tab_id)))
+        else:
             _cleanup_merge_data(str(_merge_data_dir()))
 
         # Emit deferred worktree_done after merge review completes
@@ -881,6 +942,26 @@ class VSCodeServer:
             tab_id: The frontend tab identifier.
         """
         tab = self._get_tab(tab_id)
+        # Fix 3 (BUG-35): if this tab has a pending worktree and a
+        # non-worktree task is running on the main tree, skip the
+        # auto-release to avoid stashing the running agent's work.
+        # The release will happen on the next new_chat or task start.
+        if tab.use_worktree and tab.agent._wt_pending:
+            with self._state_lock:
+                if self._any_non_wt_running():
+                    self.printer.broadcast({
+                        "type": "warning",
+                        "message": (
+                            "Another tab is running a task on the main working "
+                            "tree. The pending worktree branch will be merged "
+                            "when the task finishes."
+                        ),
+                        "tabId": tab_id,
+                    })
+                    # Reset chat state without releasing the worktree
+                    super(type(tab.agent), tab.agent).new_chat()
+                    self.printer.broadcast({"type": "showWelcome", "tabId": tab_id})
+                    return
         tab.agent.new_chat()
         # Surface warnings from auto-releasing a prior worktree
         if tab.agent._stash_pop_warning:
@@ -938,15 +1019,18 @@ class VSCodeServer:
         })
         self._emit_pending_worktree(tab_id)
 
-    def _restore_pending_merge(self) -> None:
+    def _restore_pending_merge(self, tab_id: str = "") -> None:
         """Restore a pending merge session from disk if one exists.
 
         Reads ``pending-merge.json`` from the merge data directory and
         sends ``merge_data`` and ``merge_started`` events so the VS Code
         extension re-opens the merge view with decorations and the
         webview shows the accept/reject toolbar.
+
+        Args:
+            tab_id: Frontend tab identifier for per-tab merge data.
         """
-        self._start_merge_session(str(_merge_data_dir() / "pending-merge.json"))
+        self._start_merge_session(str(_merge_data_dir(tab_id) / "pending-merge.json"))
 
     def _broadcast_worktree_done(self, changed: list[str], tab_id: str = "") -> None:
         """Broadcast a ``worktree_done`` event with the current worktree state.
@@ -1275,7 +1359,13 @@ class VSCodeServer:
             return True
 
         # Check 2: dirty main working-tree files that overlap with
-        # worktree changes (git merge would refuse)
+        # worktree changes (git merge would refuse).
+        # Fix 3 (BUG-37): skip this check when a non-worktree agent is
+        # running — its in-flight writes would cause false-positive
+        # conflict reports since they're not user edits.
+        with self._state_lock:
+            if self._any_non_wt_running():
+                return False
         dirty = set(GitWorktreeOps.unstaged_files(wt.repo_root))
         return bool(dirty & wt_files)
 
@@ -1357,6 +1447,18 @@ class VSCodeServer:
         if not wt._wt_pending:
             self._ensure_worktree_state(tab_id)
         if action == "merge":
+            # Fix 3 (BUG-35): refuse merge while a non-worktree task
+            # is writing to the main working tree — stash_if_dirty
+            # would capture the agent's in-flight edits.
+            with self._state_lock:
+                if self._any_non_wt_running():
+                    return {
+                        "success": False,
+                        "message": (
+                            "Another tab is running a task on the main working "
+                            "tree. Wait for it to finish before merging."
+                        ),
+                    }
             self.printer.broadcast({
                 "type": "worktree_progress",
                 "message": "Generating commit message…",

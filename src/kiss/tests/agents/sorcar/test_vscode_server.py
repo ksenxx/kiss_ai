@@ -1319,10 +1319,10 @@ class TestMergeSession(unittest.TestCase):
         import kiss.agents.vscode.server as srv_mod
 
         orig = dm._merge_data_dir
-        dm._merge_data_dir = lambda: self.merge_dir  # type: ignore[assignment]
+        dm._merge_data_dir = lambda tab_id="": self.merge_dir  # type: ignore[assignment]
         # Also patch the imported reference in server module
         orig_srv = srv_mod._merge_data_dir
-        srv_mod._merge_data_dir = lambda: self.merge_dir  # type: ignore[assignment]
+        srv_mod._merge_data_dir = lambda tab_id="": self.merge_dir  # type: ignore[assignment]
         try:
             self._write_merge_json()
             self.server._restore_pending_merge()
@@ -1342,9 +1342,9 @@ class TestMergeSession(unittest.TestCase):
         import kiss.agents.vscode.server as srv_mod
 
         orig = dm._merge_data_dir
-        dm._merge_data_dir = lambda: self.merge_dir  # type: ignore[assignment]
+        dm._merge_data_dir = lambda tab_id="": self.merge_dir  # type: ignore[assignment]
         orig_srv = srv_mod._merge_data_dir
-        srv_mod._merge_data_dir = lambda: self.merge_dir  # type: ignore[assignment]
+        srv_mod._merge_data_dir = lambda tab_id="": self.merge_dir  # type: ignore[assignment]
         try:
             self.server._handle_command({"type": "mergeAction", "action": "all-done"})
         finally:
@@ -2551,6 +2551,7 @@ class TestSorcarSidebarViewMessageHandling(unittest.TestCase):
             "complete", "mergeAction", "generateCommitMessage", "runPrompt",
             "worktreeAction", "resolveDroppedPaths", "focusEditor",
             "closeSecondaryBar", "getWelcomeSuggestions",
+            "webviewFocusChanged",
         }
         extra = sidebar_cases - known
         assert not extra, f"Sidebar has extra message handlers: {extra}"

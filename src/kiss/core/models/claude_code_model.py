@@ -228,6 +228,7 @@ class ClaudeCodeModel(Model):
         result_json: dict[str, Any] = {}
         assistant_count = 0
         current_block_type = ""
+        seen_assistant_id: str | None = None
 
         for line in lines:
             line = line.strip()
@@ -239,11 +240,24 @@ class ClaudeCodeModel(Model):
                 continue
 
             event_type = event.get("type")
+
+            # Unwrap stream_event containers (CLI wraps content_block_*
+            # and message_* events inside {"type":"stream_event","event":{...}})
+            if event_type == "stream_event":
+                event = event.get("event", {})
+                event_type = event.get("type")
+
             if event_type == "assistant":
-                assistant_count += 1
-                if assistant_count > 1:
-                    break
                 msg = event.get("message", {})
+                msg_id = msg.get("id")
+                # --include-partial-messages sends multiple assistant events
+                # for the same message (same id); only count genuinely new
+                # messages.  Events without an id are always treated as new.
+                if msg_id is None or msg_id != seen_assistant_id:
+                    assistant_count += 1
+                    if assistant_count > 1:
+                        break
+                    seen_assistant_id = msg_id
                 for block in msg.get("content", []):
                     block_type = block.get("type")
                     if block_type == "thinking":

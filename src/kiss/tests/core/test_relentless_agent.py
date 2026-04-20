@@ -239,9 +239,13 @@ class TestStallDetectionIntegration(unittest.TestCase):
                 verbose=False,
             )
         parsed = yaml.safe_load(result)
+        # Skip on transient API rate-limit failures (429 RESOURCE_EXHAUSTED)
+        summary = parsed.get("summary", "")
+        if "429" in summary or "RESOURCE_EXHAUSTED" in summary:
+            self.skipTest("Gemini API rate-limited (429)")
         self.assertFalse(parsed["success"])
         self.assertFalse(parsed.get("is_continue", True))
-        self.assertIn("STALL DETECTED", parsed["summary"])
+        self.assertIn("STALL DETECTED", summary)
 
     def test_stall_warning_added_after_threshold(self) -> None:
         """Stall warning is added after threshold continuations without common errors."""

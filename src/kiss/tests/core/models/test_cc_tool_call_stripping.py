@@ -114,7 +114,7 @@ class TestCCModelTokenBuffering(unittest.TestCase):
         # Strips tool calls from content before emitting
         assert "_strip_text_based_tool_calls" in src
         # Restores original callback
-        assert "self.token_callback = original_callback" in src
+        assert "self.token_callback = original_token_cb" in src
 
     def test_no_callback_no_buffering(self) -> None:
         """When there's no token_callback, no buffering occurs."""
@@ -127,9 +127,9 @@ class TestCCModelTokenBuffering(unittest.TestCase):
         """The original callback is replaced with buffer.append during generate."""
         src = inspect.getsource(ClaudeCodeModel.generate_and_process_with_tools)
         # original_callback is saved
-        assert "original_callback = self.token_callback" in src
+        assert "original_token_cb = self.token_callback" in src
         # conditional check before buffering
-        assert "if original_callback is not None:" in src
+        assert "if original_token_cb is not None:" in src
 
     def test_cleaned_text_emitted_with_tool_calls(self) -> None:
         """When tool calls found, cleaned text (no JSON) is emitted."""
@@ -147,7 +147,7 @@ class TestCCModelTokenBuffering(unittest.TestCase):
         src = inspect.getsource(ClaudeCodeModel.generate_and_process_with_tools)
         # Check that callback restore is in the finally block
         finally_idx = src.index("finally:")
-        restore_idx = src.index("self.token_callback = original_callback")
+        restore_idx = src.index("self.token_callback = original_token_cb")
         assert restore_idx > finally_idx
 
     def test_import_strip_function(self) -> None:

@@ -10,6 +10,7 @@
 - Worktree bugs 1-5 from audit (false conflict, rename ghost, stash pop loss, review skips commits, release returns wrong branch) are FIXED; test_worktree_bugfixes.py verifies all fixes
 - When testing `_replay_session`, must persist at least one chat event via `_append_chat_event` — otherwise the function returns early due to `not result.get("events")` check
 - `_check_merge_conflict` uses split fork points with baseline: `baseline^` for orig_diff, `baseline` for wt_diff — prevents user's dirty state from causing false conflict positives
+- `_check_merge_conflict` now suppresses false-positive dirty-file conflicts when a non-worktree agent is running (BUG-37 fix) via `_any_non_wt_running()` guard
 - `_get_worktree_changed_files` now uses `git merge-base` to find fork point, avoiding false positives when original branch advances
 - `_parse_diff_hunks` and `_prepare_merge_view` accept optional `base_ref` parameter (default "HEAD") to diff against baseline commit for worktree merge review
 - `_start_worktree_merge_review` passes baseline commit as `base_ref` so committed agent changes are visible in hunk review
@@ -19,7 +20,11 @@
 - `copy_dirty_state` now handles renames by deleting the old file path from the worktree
 - `_release_worktree` returns `None` (not `wt.original_branch`) on checkout failure so caller falls through to `current_branch()`
 - `merge()` and `_release_worktree()` surface stash_pop failure warnings to the user instead of silently logging
-- Pre-existing test failures: `test_check_merge_conflict_dirty_worktree` (wt_dir doesn't exist) and `test_sidebar_has_no_unknown_message_types` — NOT caused by worktree changes
+- `webviewFocusChanged` is a known message type in `SorcarSidebarView.ts` — included in the test's known types set
+- `_parse_stream_events` in `claude_code_model.py` unwraps `stream_event` containers and tracks assistant events by message `id` to handle `--include-partial-messages` partial updates
+- `base.py` loads `SYSTEM_PROMPT` from `_kiss_pkg_dir / "SYSTEM.md"` (not `SORCAR.md`) — the `test_sorcar_path_uses_pkg_dir` test matches this
+- cc tool call stripping tests check for `original_token_cb` (not `original_callback`) matching the current variable name in `claude_code_model.py`
+- Gemini API integration tests (e.g., stall detection) should skip on 429 RESOURCE_EXHAUSTED errors rather than fail — transient rate limit issue
 - BUG-12 through BUG-18 (found in audit4) are in test_worktree_audit4.py — these are UNFIXED bugs confirmed by passing tests
 - BUG-12: `squash_merge_from_baseline` doesn't check commit return code (same pattern as BUG-7 but on baseline path)
 - BUG-13: `_release_worktree` returns `original_branch` on merge conflict (not `None`), silently orphaning the branch with no user notification
@@ -44,9 +49,18 @@
 - BUG-30 through BUG-33 (found in audit7) are now FIXED; test_worktree_audit7.py verifies correct behavior
 - BUG-30 FIX: `_try_setup_worktree` now reads `current_branch(repo)` inside `repo_lock` when `released_branch` is None
 - BUG-31 FIX: Both `merge()` and `_release_worktree` now have explicit `MERGE_FAILED` handling with correct messages (mentioning commit failure and `--no-verify`)
-- BUG-32 FIX: `_finish_merge` now only calls `_cleanup_merge_data` when NO tab has `is_merging=True`
+- BUG-32 FIX: `_finish_merge` now cleans per-tab merge data dir (no longer global `any_merging` check)
 - BUG-33 FIX: `copy_dirty_state` uses `_unquote_git_path()` to decode C-style quoted filenames from `git status --porcelain`
 - `_unquote_git_path` is a public helper in `git_worktree.py` that handles all git C-style escape sequences (\\n, \\t, \\\\, \\", \\NNN octal)
 - `build-extension.sh` must NOT call `--uninstall-extension` before `--install-extension` — uninstall deactivates the running extension (disposing the `fs.watchFile` watcher), preventing auto-reload, and can cause VS Code to process the queued uninstall on restart before recognizing the new install
 - VS Code extension uses `activationEvents: ["onStartupFinished"]` (NOT `"*"`) — the old `"*"` was unreliable in modern VS Code and could cause the extension to not activate until a view was opened
 - `build-extension.sh` opens VS Code after installing the extension (`"$CODE" .` from the project root) so the auto-reload watcher triggers and the user sees the updated extension
+- BUG-34 through BUG-38 (found in audit8) are now FIXED; test_worktree_fixes.py verifies correct behavior
+- BUG-34 FIX: Non-worktree pre-task snapshot now runs inside `repo_lock(repo)` and captures `pre_head_sha` — atomic snapshot prevents concurrent worktree merge from corrupting state
+- BUG-35 FIX: `_handle_worktree_action("merge")` and `_new_chat` now check `_any_non_wt_running()` — refuse merge/release while a non-worktree agent is writing to the main tree
+- BUG-36 FIX: Post-task `_prepare_and_start_merge` receives `base_ref=pre_head_sha` instead of defaulting to "HEAD" — uses the same base for pre and post hunk subtraction
+- BUG-37 FIX: `_check_merge_conflict` returns `False` for dirty-file overlap when `_any_non_wt_running()` — dirty files are the agent's WIP, not user edits
+- BUG-38 FIX: `_merge_data_dir(tab_id)` returns per-tab paths; `_save_untracked_base`, `_prepare_and_start_merge`, `_finish_merge`, `_restore_pending_merge` all accept/use `tab_id`
+- `_TabState` has `is_running_non_wt: bool` — set True during non-worktree task execution, used by `_any_non_wt_running()` helper
+- Non-worktree task start is blocked (Fix 4 symmetric guard) when a worktree merge is in progress (`t.is_merging and t.use_worktree`)
+- `_prepare_merge_view` now derives `ub_dir` from its `data_dir` parameter instead of calling `_untracked_base_dir()` — consistent with per-tab merge dirs

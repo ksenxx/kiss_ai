@@ -288,13 +288,27 @@ class TestVSCodeServerUncoveredBranches:
             # Dirty the same file in the working tree
             (repo / "f.txt").write_text("dirty local change")
 
+            # Create an actual git worktree so wt_dir.exists() is True
+            wt_dir = repo / ".kiss-worktrees" / "test-wt"
+            subprocess.run(
+                ["git", "worktree", "add", "-b", "test-wt", str(wt_dir)],
+                cwd=repo, capture_output=True, check=True,
+            )
+            # The worktree also has the original f.txt; modify it there
+            # so it shows up in the diff against main
+            (wt_dir / "f.txt").write_text("worktree content")
+            subprocess.run(["git", "add", "-A"], cwd=wt_dir, capture_output=True)
+            subprocess.run(
+                ["git", "commit", "-m", "wt mod"], cwd=wt_dir, capture_output=True,
+            )
+
             server = VSCodeServer()
             tab = server._get_tab("0")
             tab.use_worktree = True
             tab.agent._wt = GitWorktree(
-                repo_root=repo, branch="test-branch",
+                repo_root=repo, branch="test-wt",
                 original_branch="main",
-                wt_dir=repo / ".kiss-worktrees" / "test-branch",
+                wt_dir=wt_dir,
             )
             server.work_dir = str(repo)
 
