@@ -39,17 +39,17 @@ function searchUpward(startDir: string): string | null {
 /**
  * Find the KISS project root directory.
  * Search order:
- * 0. Embedded kiss_project/ inside the extension (standalone mode)
+ * 0. Environment variable (explicit override, e.g. Docker containers)
  * 1. Configuration setting
  * 2. Search up from workspace folders
  * 3. Search up from extension directory
- * 4. Environment variable
+ * 4. Embedded kiss_project/ inside the extension (standalone mode)
  * 5. Common locations
  */
 export function findKissProject(): string | null {
-  // 0. Check for embedded kiss_project/ (standalone mode)
-  const embeddedPath = path.join(__dirname, '..', 'kiss_project');
-  if (isValidKissProject(embeddedPath)) return embeddedPath;
+  // 0. Environment variable (highest priority — explicit user/Docker override)
+  const envPath = process.env.KISS_PROJECT_PATH;
+  if (envPath && isValidKissProject(envPath)) return envPath;
 
   // 1. Check configuration setting
   const configPath = vscode.workspace
@@ -70,9 +70,9 @@ export function findKissProject(): string | null {
   const found = searchUpward(__dirname);
   if (found) return found;
 
-  // 4. Environment variable
-  const envPath = process.env.KISS_PROJECT_PATH;
-  if (envPath && isValidKissProject(envPath)) return envPath;
+  // 4. Check for embedded kiss_project/ (standalone mode fallback)
+  const embeddedPath = path.join(__dirname, '..', 'kiss_project');
+  if (isValidKissProject(embeddedPath)) return embeddedPath;
 
   // 5. Common locations
   const homeDir = process.env.HOME || process.env.USERPROFILE || '';
