@@ -11,3 +11,4 @@
 - `_check_merge_conflict` is now a pure query (no auto-commit side effect); uses fork-point-based file overlap detection
 - `_get_worktree_changed_files` now uses `git merge-base` to find fork point, avoiding false positives when original branch advances
 - `_replay_session` now restores `tab.use_worktree` from persisted `extra` JSON data
+- The canonical `SYSTEM.md` lives at `src/kiss/SYSTEM.md`; root-level `SYSTEM.md` is a duplicate that can be removed once `release.sh` is also updated to point to `src/kiss/SYSTEM.md`
