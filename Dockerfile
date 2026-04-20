@@ -2,13 +2,13 @@ FROM codercom/code-server:latest
 
 USER root
 
-# Install system dependencies (includes build tools for native Python packages)
+# System dependencies
 RUN apt-get update && apt-get install -y \
     git curl wget build-essential libssl-dev \
     ca-certificates gnupg sudo \
     && rm -rf /var/lib/apt/lists/*
 
-# Install uv (pre-installed so install.sh skips the download)
+# Install uv (Python package manager)
 ENV UV_VERSION=0.11.2
 RUN ARCH=$(uname -m) && \
     case "$ARCH" in \
@@ -19,24 +19,22 @@ RUN ARCH=$(uname -m) && \
     curl -fsSL "https://releases.astral.sh/github/uv/releases/download/${UV_VERSION}/uv-${TARGET}.tar.gz" \
     | tar xz -C /usr/local/bin --strip-components=1
 
-# Create the repo directory (owned by coder so git clone works)
-RUN mkdir -p /home/kiss && chown coder:coder /home/kiss
-
-# Ensure coder has passwordless sudo (needed for playwright install-deps)
+# Passwordless sudo for coder (needed for playwright install-deps)
 RUN echo "coder ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/coder
 
-# Copy startup script
+# Repo directory owned by coder
+RUN mkdir -p /home/kiss && chown coder:coder /home/kiss
+
+# Startup script
 COPY --chmod=755 docker-startup.sh /usr/local/bin/docker-startup.sh
 
 USER coder
 
-# Configure git defaults
 RUN git config --global init.defaultBranch main \
     && git config --global user.email "coder@kiss-sorcar" \
     && git config --global user.name "KISS Sorcar"
 
 WORKDIR /home/kiss
-
 EXPOSE 8080
 
 ENTRYPOINT ["/usr/local/bin/docker-startup.sh"]
