@@ -193,13 +193,15 @@ from kiss.core.models import Attachment, Model, AnthropicModel, ClaudeCodeModel,
 
 ##### `class Model(ABC)` — Abstract base class for LLM provider implementations.
 
-**Constructor:** `Model(model_name: str, model_config: dict[str, Any] | None = None, token_callback: TokenCallback | None = None)`
+**Constructor:** `Model(model_name: str, model_config: dict[str, Any] | None = None, token_callback: TokenCallback | None = None, thinking_callback: ThinkingCallback | None = None)`
 
 - `model_name`: The name/identifier of the model.
 
 - `model_config`: Optional dictionary of model configuration parameters.
 
 - `token_callback`: Optional callback invoked with each streamed text token.
+
+- `thinking_callback`: Optional callback invoked with `True` when a thinking block starts and `False` when it ends. Used by printers to switch between thinking and text display modes.
 
 - **reset_conversation** — Reset conversation state for reuse across sub-sessions. Clears the conversation history and usage info while keeping the HTTP client and model configuration intact.<br/>`reset_conversation() -> None`
 
@@ -271,11 +273,12 @@ ______________________________________________________________________
 - `model_name`: The name of the model to check.
 - **Returns:** str: The reason for flakiness, or empty string if not flaky.
 
-**`model`** — Get a model instance based on model name prefix.<br/>`def model(model_name: str, model_config: dict[str, Any] | None = None, token_callback: TokenCallback | None = None) -> Model`
+**`model`** — Get a model instance based on model name prefix.<br/>`def model(model_name: str, model_config: dict[str, Any] | None = None, token_callback: TokenCallback | None = None, thinking_callback: ThinkingCallback | None = None) -> Model`
 
 - `model_name`: The name of the model (with provider prefix if applicable). Accepts harbor-style `provider/model` names (e.g. `openai/gpt-5.4`, `anthropic/claude-opus-4-6`) — the redundant provider prefix is stripped automatically.
 - `model_config`: Optional dictionary of model configuration parameters. If it contains "base_url", routing is bypassed and an OpenAICompatibleModel is built with that base_url and optional "api_key".
 - `token_callback`: Optional callback invoked with each streamed text token.
+- `thinking_callback`: Optional callback invoked with `True` when a thinking block starts and `False` when it ends.
 - **Returns:** Model: An appropriate Model instance for the specified model.
 
 **`get_available_models`** — Return model names for which an API key is configured and generation is supported.<br/>`def get_available_models() -> list[str]`
@@ -456,6 +459,10 @@ ______________________________________________________________________
 
   - `token`: The text token to process.
 
+- **thinking_callback** — Handle thinking-block boundary events from the LLM. Called with `True` when a thinking block starts and `False` when it ends. Printers use this to switch between thinking and text display modes so that `token_callback` tokens are routed to the correct panel. The default implementation is a no-op.<br/>`thinking_callback(is_start: bool) -> None`
+
+  - `is_start`: `True` for block start, `False` for block end.
+
 - **reset** — Reset the printer's internal streaming state between messages.<br/>`reset() -> None`
 
 ##### `class MultiPrinter(Printer)`
@@ -472,6 +479,10 @@ ______________________________________________________________________
 - **token_callback** — Forward a streamed token to all child printers.<br/>`token_callback(token: str) -> None`
 
   - `token`: The text token to forward.
+
+- **thinking_callback** — Forward a thinking-block boundary event to all child printers.<br/>`thinking_callback(is_start: bool) -> None`
+
+  - `is_start`: `True` for block start, `False` for block end.
 
 - **reset** — Reset streaming state on all child printers.<br/>`reset() -> None`
   **`parse_result_yaml`** — Parse a YAML result string and return the dict if it has a 'summary' key. Used by both console and browser printers to extract structured result data from agent finish() output.<br/>`def parse_result_yaml(raw: str) -> dict[str, Any] | None`
@@ -521,6 +532,10 @@ ______________________________________________________________________
 
   - `token`: The text token to display.
 
+- **thinking_callback** — Handle thinking-block boundary events. Sets `_current_block_type` so `token_callback` uses the correct style, and prints ruler lines to bracket thinking output.<br/>`thinking_callback(is_start: bool) -> None`
+
+  - `is_start`: `True` when a thinking block starts, `False` when it ends.
+
 ______________________________________________________________________
 
 #### `kiss.agents.vscode.browser_ui` — *Shared browser UI components for KISS agent viewers.*
@@ -555,6 +570,10 @@ ______________________________________________________________________
 - **token_callback** — Broadcast a streamed token as a delta event.<br/>`token_callback(token: str) -> None`
 
   - `token`: The text token to broadcast.
+
+- **thinking_callback** — Handle thinking-block boundary events. Sets `_current_block_type` so that subsequent `token_callback` tokens are routed to the thinking panel, and broadcasts `thinking_start` / `thinking_end` events.<br/>`thinking_callback(is_start: bool) -> None`
+
+  - `is_start`: `True` when a thinking block starts, `False` when it ends.
 
 ______________________________________________________________________
 
@@ -3363,13 +3382,15 @@ ______________________________________________________________________
 
 ##### `class ClaudeCodeModel(Model)` — A model that delegates to the Claude Code CLI for LLM completions.
 
-**Constructor:** `ClaudeCodeModel(model_name: str, model_config: dict[str, Any] | None = None, token_callback: TokenCallback | None = None)`
+**Constructor:** `ClaudeCodeModel(model_name: str, model_config: dict[str, Any] | None = None, token_callback: TokenCallback | None = None, thinking_callback: ThinkingCallback | None = None)`
 
 - `model_name`: Full model name including `cc/` prefix (e.g. `cc/opus`).
 
 - `model_config`: Optional configuration. Recognised keys: - `system_instruction` (str): System prompt for the session. - `timeout` (int): Subprocess timeout in seconds (default 300).
 
 - `token_callback`: Optional callback invoked with each streamed text token.
+
+- `thinking_callback`: Optional callback invoked with `True` when a thinking block starts and `False` when it ends.
 
 - **initialize** — Initialize the conversation with an initial user prompt.<br/>`initialize(prompt: str, attachments: list[Attachment] | None = None) -> None`
 

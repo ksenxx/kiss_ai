@@ -25,6 +25,7 @@ from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import (
     Attachment,
     Model,
+    ThinkingCallback,
     TokenCallback,
     _build_text_based_tools_prompt,
     _parse_text_based_tool_calls,
@@ -69,6 +70,7 @@ class ClaudeCodeModel(Model):
         model_name: str,
         model_config: dict[str, Any] | None = None,
         token_callback: TokenCallback | None = None,
+        thinking_callback: ThinkingCallback | None = None,
     ):
         """Initialize a ClaudeCodeModel instance.
 
@@ -78,8 +80,15 @@ class ClaudeCodeModel(Model):
                 - ``system_instruction`` (str): System prompt for the session.
                 - ``timeout`` (int): Subprocess timeout in seconds (default 300).
             token_callback: Optional callback invoked with each streamed text token.
+            thinking_callback: Optional callback invoked with ``True`` when a
+                thinking block starts and ``False`` when it ends.
         """
-        super().__init__(model_name, model_config=model_config, token_callback=token_callback)
+        super().__init__(
+            model_name,
+            model_config=model_config,
+            token_callback=token_callback,
+            thinking_callback=thinking_callback,
+        )
         # Strip the "cc/" prefix for the --model flag sent to claude CLI
         self._cli_model = model_name[3:] if model_name.startswith("cc/") else model_name
 
@@ -195,10 +204,14 @@ class ClaudeCodeModel(Model):
         """Parse stream-json events, stopping before a second assistant message.
 
         Iterates over newline-delimited JSON events from the Claude CLI.
-        Text from the first ``assistant`` event is accumulated and emitted
-        via the token callback.  If a second ``assistant`` event is
+        Thinking blocks are streamed via the thinking callback, and text
+        blocks via the token callback.  If a second ``assistant`` event is
         encountered, parsing stops immediately — the content from the
         second (and subsequent) messages is discarded.
+
+        Also handles ``content_block_start`` / ``content_block_delta`` /
+        ``content_block_stop`` events emitted by the CLI with
+        ``--include-partial-messages``.
 
         A ``result`` event (if received before a second assistant) is used
         as the authoritative final content.
@@ -214,6 +227,7 @@ class ClaudeCodeModel(Model):
         content = ""
         result_json: dict[str, Any] = {}
         assistant_count = 0
+        current_block_type = ""
 
         for line in lines:
             line = line.strip()
@@ -231,11 +245,39 @@ class ClaudeCodeModel(Model):
                     break
                 msg = event.get("message", {})
                 for block in msg.get("content", []):
-                    if block.get("type") == "text":
+                    block_type = block.get("type")
+                    if block_type == "thinking":
+                        thinking_text = block.get("thinking", "")
+                        if thinking_text:
+                            self._invoke_thinking_callback(True)
+                            self._invoke_token_callback(thinking_text)
+                            self._invoke_thinking_callback(False)
+                    elif block_type == "text":
                         text = block.get("text", "")
                         if text:
                             content += text
                             self._invoke_token_callback(text)
+            elif event_type == "content_block_start":
+                block = event.get("content_block", {})
+                current_block_type = block.get("type", "")
+                if current_block_type == "thinking":
+                    self._invoke_thinking_callback(True)
+            elif event_type == "content_block_delta":
+                delta = event.get("delta", {})
+                delta_type = delta.get("type", "")
+                if delta_type == "thinking_delta":
+                    thinking_text = delta.get("thinking", "")
+                    if thinking_text:
+                        self._invoke_token_callback(thinking_text)
+                elif delta_type == "text_delta":
+                    text = delta.get("text", "")
+                    if text:
+                        content += text
+                        self._invoke_token_callback(text)
+            elif event_type == "content_block_stop":
+                if current_block_type == "thinking":
+                    self._invoke_thinking_callback(False)
+                current_block_type = ""
             elif event_type == "result":
                 result_json = event
                 content = event.get("result", content)
@@ -272,30 +314,48 @@ class ClaudeCodeModel(Model):
         )
         self.model_config = config
 
-        # Buffer streamed tokens so tool-call JSON can be stripped before
-        # it reaches the UI (Thoughts panel).  After generation the clean
-        # text is emitted via the original callback and the tool-calls are
-        # returned to the framework for proper Tool-panel rendering.
-        original_callback = self.token_callback
+        # Buffer streamed *text* tokens so tool-call JSON can be stripped
+        # before it reaches the UI.  Thinking tokens are passed through to
+        # the original callback immediately (tool-call JSON never appears
+        # inside thinking blocks), so the thoughts panel receives them in
+        # real time.
+        original_token_cb = self.token_callback
+        original_thinking_cb = self.thinking_callback
         buffer: list[str] = []
-        if original_callback is not None:
-            self.token_callback = buffer.append
+        in_thinking = False
+
+        if original_token_cb is not None:
+            def _thinking_wrapper(is_start: bool) -> None:
+                nonlocal in_thinking
+                in_thinking = is_start
+                if original_thinking_cb is not None:
+                    original_thinking_cb(is_start)
+
+            def _token_wrapper(token: str) -> None:
+                if in_thinking:
+                    original_token_cb(token)
+                else:
+                    buffer.append(token)
+
+            self.token_callback = _token_wrapper
+            self.thinking_callback = _thinking_wrapper
 
         try:
             content, response = self.generate()
         finally:
             self.model_config = original_config
-            self.token_callback = original_callback
+            self.token_callback = original_token_cb
+            self.thinking_callback = original_thinking_cb
 
         # generate() appended a plain assistant message — replace it with
         # one that includes tool_calls if any were found in the text.
         function_calls = _parse_text_based_tool_calls(content)
 
         # Emit cleaned text (without tool-call JSON) to the UI
-        if original_callback is not None:
+        if original_token_cb is not None:
             cleaned = _strip_text_based_tool_calls(content) if function_calls else content
             if cleaned:
-                original_callback(cleaned)
+                original_token_cb(cleaned)
 
         if function_calls:
             self._replace_last_assistant_with_tool_calls(content, function_calls)

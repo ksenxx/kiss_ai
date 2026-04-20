@@ -146,6 +146,22 @@ class ConsolePrinter(StreamEventParser, Printer):
         else:
             self._stream_delta(token)
 
+    def thinking_callback(self, is_start: bool) -> None:
+        """Handle thinking-block boundary events.
+
+        Sets ``_current_block_type`` so ``token_callback`` uses the correct
+        style, and prints ruler lines to bracket thinking output.
+
+        Args:
+            is_start: ``True`` when a thinking block starts, ``False`` when it ends.
+        """
+        if is_start:
+            self._current_block_type = "thinking"
+            self._on_thinking_start()
+        else:
+            self._current_block_type = ""
+            self._on_thinking_end()
+
     def _format_tool_call(self, name: str, tool_input: dict[str, Any]) -> None:
         file_path, lang = extract_path_and_lang(tool_input)
         parts: list[Any] = []

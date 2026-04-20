@@ -15,7 +15,7 @@ from typing import Any
 
 from kiss.core import config as config_module
 from kiss.core.kiss_error import KISSError
-from kiss.core.models.model import Model, TokenCallback
+from kiss.core.models.model import Model, ThinkingCallback, TokenCallback
 
 
 class ModelInfo:
@@ -734,6 +734,7 @@ def model(
     model_name: str,
     model_config: dict[str, Any] | None = None,
     token_callback: TokenCallback | None = None,
+    thinking_callback: ThinkingCallback | None = None,
 ) -> Model:
     """Get a model instance based on model name prefix.
 
@@ -746,6 +747,8 @@ def model(
             If it contains "base_url", routing is bypassed and an OpenAICompatibleModel
             is built with that base_url and optional "api_key".
         token_callback: Optional callback invoked with each streamed text token.
+        thinking_callback: Optional callback invoked with ``True`` when a
+            thinking block starts and ``False`` when it ends.
 
     Returns:
         Model: An appropriate Model instance for the specified model.
@@ -846,6 +849,7 @@ def model(
             model_name=model_name,
             model_config=model_config,
             token_callback=token_callback,
+            thinking_callback=thinking_callback,
         )
     raise KISSError(f"Unknown model name: {model_name}")
 
