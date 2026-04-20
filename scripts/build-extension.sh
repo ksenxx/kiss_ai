@@ -19,6 +19,9 @@ npm run copy-kiss
 echo "==> Packaging VSIX..."
 npm run package
 
+echo "==> Uninstalling old extension (if present)..."
+"$CODE" --uninstall-extension ksenxx.kiss-sorcar 2>/dev/null || true
+
 echo "==> Installing extension..."
 "$CODE" --install-extension kiss-sorcar.vsix --force
 
