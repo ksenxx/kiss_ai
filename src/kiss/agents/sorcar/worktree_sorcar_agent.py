@@ -92,6 +92,7 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
     def __init__(self, name: str) -> None:
         super().__init__(name)
         self._wt: GitWorktree | None = None
+        self._stash_pop_warning: str | None = None
 
     # -- Derived properties (preserve public API) --------------------------
 
@@ -229,7 +230,10 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
                         wt.original_branch, wt.branch,
                     )
                     self._wt = None
-                    return wt.original_branch
+                    # Return None — not the intended branch — so the
+                    # caller falls through to current_branch() and
+                    # records the *actual* branch we're on.
+                    return None
 
             did_stash = GitWorktreeOps.stash_if_dirty(wt.repo_root)
             if wt.baseline_commit:
@@ -242,6 +246,12 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
                 )
             if did_stash:
                 if not GitWorktreeOps.stash_pop(wt.repo_root):
+                    self._stash_pop_warning = (
+                        "Your uncommitted changes could not be "
+                        "auto-restored after merging the previous "
+                        f"worktree ('{wt.branch}'). Run "
+                        "'git stash pop' to recover them."
+                    )
                     logger.warning(
                         "git stash pop failed after auto-merge of '%s'",
                         wt.branch,
@@ -425,6 +435,13 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         # Notify VS Code extension so the worktree appears in the SCM panel
         printer = kwargs.get("printer")
         if printer and hasattr(printer, "broadcast"):
+            # Surface stash-pop failure from auto-releasing a prior worktree
+            if self._stash_pop_warning:
+                printer.broadcast({
+                    "type": "warning",
+                    "message": self._stash_pop_warning,
+                })
+                self._stash_pop_warning = None
             printer.broadcast({
                 "type": "worktree_created",
                 "worktreeDir": str(self._wt_dir),
@@ -498,9 +515,16 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
                 wt.repo_root, wt.branch,
             )
 
-        # Restore stashed user edits (best-effort)
+        # Restore stashed user edits
+        stash_warning = ""
         if did_stash:
             if not GitWorktreeOps.stash_pop(wt.repo_root):
+                stash_warning = (
+                    "\n\n⚠️  Your uncommitted changes could not be "
+                    "auto-restored after the merge.  They are saved "
+                    "in the git stash — run 'git stash pop' to "
+                    "recover them."
+                )
                 logger.warning(
                     "git stash pop failed after merge; user changes "
                     "are in 'git stash list'",
@@ -509,7 +533,10 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         if result == MergeResult.SUCCESS:
             GitWorktreeOps.delete_branch(wt.repo_root, wt.branch)
             self._wt = None
-            return f"Successfully merged branch '{wt.branch}'."
+            return (
+                f"Successfully merged branch '{wt.branch}'."
+                + stash_warning
+            )
 
         # Conflict — state preserved so discard() still works
         return (

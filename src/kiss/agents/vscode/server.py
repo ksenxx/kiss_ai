@@ -581,6 +581,7 @@ class VSCodeServer:
         pre_hunks: dict[str, list[tuple[int, int, int, int]]] | None = None,
         pre_untracked: set[str] | None = None,
         pre_file_hashes: dict[str, str] | None = None,
+        base_ref: str = "HEAD",
     ) -> bool:
         """Prepare a merge view and start the merge session if changes exist.
 
@@ -593,6 +594,9 @@ class VSCodeServer:
             pre_hunks: Pre-task diff hunks (empty dict when not applicable).
             pre_untracked: Pre-task untracked file set (empty when not applicable).
             pre_file_hashes: Pre-task MD5 hashes for change detection.
+            base_ref: Git ref to diff against (default ``"HEAD"``).
+                Pass a baseline commit SHA to include committed agent
+                changes in the merge review.
 
         Returns:
             True if a merge session was started, False otherwise.
@@ -604,6 +608,7 @@ class VSCodeServer:
             pre_hunks or {},
             pre_untracked or set(),
             pre_file_hashes,
+            base_ref=base_ref,
         )
         if merge_result.get("status") != "opened":
             return False
@@ -615,8 +620,10 @@ class VSCodeServer:
 
         Builds a merge view from the worktree directory so the user can
         accept/reject individual hunks before the worktree is committed
-        and merged.  The worktree starts clean from HEAD, so all
-        uncommitted changes are the agent's work.
+        and merged.  When a baseline commit exists (user had dirty
+        state), diffs against the baseline so that both committed and
+        uncommitted agent changes are included in the review while the
+        user's pre-existing dirty state is excluded.
 
         Args:
             tab_id: The tab whose worktree to review.
@@ -628,8 +635,14 @@ class VSCodeServer:
         wt_dir = tab.agent._wt_dir
         if wt_dir is None or not wt_dir.exists():
             return False
+        # Diff against the baseline commit when available so that
+        # committed agent changes are visible in the merge review,
+        # not just uncommitted ones (BUG-4 fix).
+        base_ref = tab.agent._baseline_commit or "HEAD"
         try:
-            return self._prepare_and_start_merge(str(wt_dir))
+            return self._prepare_and_start_merge(
+                str(wt_dir), base_ref=base_ref,
+            )
         except BaseException:
             logger.debug("Worktree merge review error", exc_info=True)
             return False
@@ -1195,21 +1208,27 @@ class VSCodeServer:
         if not wt_dir.exists():
             return False
 
-        # Use baseline commit (user's dirty state snapshot) when
-        # available so only agent changes are considered.  Fall back
-        # to the git merge-base for legacy worktrees without baseline.
+        # Determine fork points for conflict detection.
+        # For the *original branch* diff we need the HEAD at worktree
+        # creation time (before the baseline dirty-state commit) so that
+        # the user's own dirty edits aren't reported as "original branch
+        # changes".  For the *worktree* diff we use the baseline itself
+        # so only agent changes are visible.
         if wt.baseline_commit:
-            fork_point = wt.baseline_commit
+            # baseline^ = the commit the worktree branched from (HEAD at
+            # creation).  baseline = HEAD + user dirty state.
+            orig_fork = f"{wt.baseline_commit}^"
+            wt_fork = wt.baseline_commit
         else:
             mb = _git(str(wt_dir), "merge-base", "HEAD", wt.original_branch)
             if mb.returncode != 0 or not mb.stdout.strip():
                 return False
-            fork_point = mb.stdout.strip()
+            orig_fork = wt_fork = mb.stdout.strip()
 
         # Files changed on original branch since the fork
         orig_diff = _git(
             str(wt.repo_root), "diff", "--name-only",
-            fork_point, wt.original_branch,
+            orig_fork, wt.original_branch,
         )
         orig_files = (
             set(orig_diff.stdout.strip().splitlines())
@@ -1217,7 +1236,7 @@ class VSCodeServer:
         )
 
         # Files changed in the worktree (committed + uncommitted) since fork
-        wt_diff = _git(str(wt_dir), "diff", "--name-only", fork_point)
+        wt_diff = _git(str(wt_dir), "diff", "--name-only", wt_fork)
         wt_files = (
             set(wt_diff.stdout.strip().splitlines())
             if wt_diff.returncode == 0 else set()
