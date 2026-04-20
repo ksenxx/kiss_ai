@@ -3385,7 +3385,7 @@ ______________________________________________________________________
   - `prompt`: The initial user prompt.
   - `attachments`: Not supported — ignored with a warning if provided.
 
-- **generate** — Generate a response using the Claude Code CLI.<br/>`generate() -> tuple[str, Any]`
+- **generate** — Generate a response using the Claude Code CLI. Always uses streaming so tokens are delivered incrementally and the process is terminated before a second assistant message is produced.<br/>`generate() -> tuple[str, Any]`
 
   - **Returns:** tuple\[str, Any\]: (generated_text, parsed_json_response).
 
