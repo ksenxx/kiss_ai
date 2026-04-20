@@ -129,7 +129,7 @@ export function activate(context: vscode.ExtensionContext): void {
   // Countdown shown in the SCM input box while a commit message is being
   // generated. Starts at 15s, decrements every second, stays at 0 if the
   // agent is still generating. Cleared/replaced when the result arrives.
-  const commitCountdownSeconds = 15;
+  const commitCountdownSeconds = 20;
   let stopCommitCountdown: (() => void) | undefined;
   const startCommitCountdown = () => {
     stopCommitCountdown?.();
