@@ -22,6 +22,41 @@ logger = logging.getLogger(__name__)
 _SINGLETON_FILES = ("SingletonLock", "SingletonCookie", "SingletonSocket")
 
 
+def _get_frontmost_app() -> str | None:
+    """Return the name of the frontmost macOS application, or None on failure."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        r = subprocess.run(
+            [
+                "osascript",
+                "-e",
+                'tell application "System Events" to get name of first '
+                "application process whose frontmost is true",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        return r.stdout.strip() or None
+    except Exception:
+        return None
+
+
+def _activate_app(name: str | None) -> None:
+    """Bring *name* to the foreground on macOS. No-op if name is None or non-macOS."""
+    if not name or sys.platform != "darwin":
+        return
+    try:
+        subprocess.run(
+            ["osascript", "-e", f'tell application "{name}" to activate'],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except Exception:
+        pass
+
 
 INTERACTIVE_ROLES = {
     "link",
@@ -154,6 +189,7 @@ class WebUseTool:
         self._close_browser_only()
         from playwright.sync_api import sync_playwright
 
+        prev_app = _get_frontmost_app()
         try:
             if self._playwright is None:
                 self._playwright = sync_playwright().start()
@@ -182,6 +218,8 @@ class WebUseTool:
         except Exception:  # pragma: no cover — Playwright init failure
             self.close()
             raise
+        finally:
+            _activate_app(prev_app)
 
     def _clean_singleton_locks(self) -> None:
         """Remove stale Singleton* files from a previously crashed Chromium.
