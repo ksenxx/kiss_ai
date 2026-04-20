@@ -917,6 +917,12 @@ ______________________________________________________________________
   - `message`: Commit message.
   - **Returns:** True if a commit was created, False if nothing to commit or the commit failed (e.g. pre-commit hook rejection).
 
+- **commit_staged** — Commit already-staged changes without re-staging. Unlike :meth:`commit_all`, this does **not** run `git add -A` first. Use when the caller has already staged the desired changes (e.g. via :meth:`stage_all`).<br/>`commit_staged(wt_dir: Path, message: str) -> bool`
+
+  - `wt_dir`: Worktree directory with pre-staged changes.
+  - `message`: Commit message.
+  - **Returns:** True if a commit was created, False if nothing was staged or the commit failed (e.g. pre-commit hook rejection).
+
 - **staged_diff** — Return the staged diff text for the worktree.<br/>`staged_diff(wt_dir: Path) -> str`
 
   - `wt_dir`: Worktree directory (must have staged changes).

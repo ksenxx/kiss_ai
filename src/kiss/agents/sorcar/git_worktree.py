@@ -195,6 +195,33 @@ class GitWorktreeOps:
         return True
 
     @staticmethod
+    def commit_staged(wt_dir: Path, message: str) -> bool:
+        """Commit already-staged changes without re-staging.
+
+        Unlike :meth:`commit_all`, this does **not** run ``git add -A``
+        first.  Use when the caller has already staged the desired
+        changes (e.g. via :meth:`stage_all`).
+
+        Args:
+            wt_dir: Worktree directory with pre-staged changes.
+            message: Commit message.
+
+        Returns:
+            True if a commit was created, False if nothing was staged
+            or the commit failed (e.g. pre-commit hook rejection).
+        """
+        diff = _git("diff", "--cached", "--quiet", cwd=wt_dir)
+        if diff.returncode == 0:
+            return False
+        result = _git("commit", "-m", message, cwd=wt_dir)
+        if result.returncode != 0:
+            logger.warning(
+                "git commit failed: %s", result.stderr.strip(),
+            )
+            return False
+        return True
+
+    @staticmethod
     def staged_diff(wt_dir: Path) -> str:
         """Return the staged diff text for the worktree.
 

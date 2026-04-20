@@ -130,7 +130,6 @@ class TestBug5UseWorktreeNotRestored:
 
         # Simulate server restart: create fresh server + tab state
         server = VSCodeServer()
-        from kiss.agents.vscode.server import _TabState
 
         tab = server._get_tab("test-tab")
 
@@ -186,8 +185,6 @@ class TestBug6FinalizeIgnoresCommitFailure:
         wt_dir = agent._wt_dir
         assert wt_dir is not None and wt_dir.exists()
 
-        # Install a pre-commit hook that rejects all commits
-        hooks_dir = wt_dir / ".git" / "hooks"
         # Worktrees share hooks with the main repo
         main_hooks = self.repo / ".git" / "hooks"
         main_hooks.mkdir(exist_ok=True)
@@ -335,21 +332,25 @@ class TestBug7SquashMergeDoesntCheckCommit:
 # ---------------------------------------------------------------------------
 
 
-class TestInc2RedundantStageAll:
-    """_auto_commit_worktree calls stage_all() then commit_all() which
-    internally stages again — redundant git add -A.
+class TestInc2RedundantStageAllFixed:
+    """_auto_commit_worktree now calls stage_all() then commit_staged()
+    which does NOT re-stage — the redundant git add -A is eliminated.
     """
 
-    def test_auto_commit_calls_stage_twice(self) -> None:
-        """INC-2: _auto_commit_worktree stages changes redundantly."""
+    def test_auto_commit_uses_commit_staged(self) -> None:
+        """INC-2 FIX: _auto_commit_worktree uses commit_staged (no re-stage)."""
         import inspect
 
-        # _auto_commit_worktree calls stage_all explicitly
         src = inspect.getsource(WorktreeSorcarAgent._auto_commit_worktree)
+        # Uses stage_all to stage once
         assert "stage_all" in src
+        # Uses commit_staged (not commit_all) so no redundant git add -A
+        assert "commit_staged" in src
+        assert "commit_all" not in src
 
-        # commit_all also stages internally
-        src2 = inspect.getsource(GitWorktreeOps.commit_all)
-        assert '"add", "-A"' in src2 or "'add', '-A'" in src2
+    def test_commit_staged_does_not_stage(self) -> None:
+        """commit_staged does not run git add -A."""
+        import inspect
 
-        # Both are called in sequence — redundant git add -A
+        src = inspect.getsource(GitWorktreeOps.commit_staged)
+        assert "add" not in src or '"add", "-A"' not in src

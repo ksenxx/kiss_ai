@@ -158,6 +158,10 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
     def _auto_commit_worktree(self) -> bool:
         """Commit any uncommitted changes in the worktree.
 
+        Stages all changes once, generates a commit message from the
+        staged diff, then commits the already-staged changes (without
+        re-staging).
+
         Returns:
             True if a commit was created, False if nothing to commit.
         """
@@ -165,7 +169,7 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
             return False
         GitWorktreeOps.stage_all(self._wt.wt_dir)
         msg = _generate_commit_message(self._wt.wt_dir)
-        return GitWorktreeOps.commit_all(self._wt.wt_dir, msg)
+        return GitWorktreeOps.commit_staged(self._wt.wt_dir, msg)
 
     # -- Shared preamble ---------------------------------------------------
 
@@ -178,7 +182,7 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
             GitWorktreeOps.remove(wt.repo_root, wt.wt_dir)
         GitWorktreeOps.prune(wt.repo_root)
 
-    def _release_worktree(self) -> None:
+    def _release_worktree(self) -> str | None:
         """Auto-commit, auto-merge, and clean up a pending worktree.
 
         Called when the user starts a new chat or a new task without
@@ -193,9 +197,14 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
 
         Safe for concurrent use: other tabs' worktrees are unaffected
         because they run in separate directories.
+
+        Returns:
+            The branch name that the main worktree ends up on after
+            the release (i.e. the original branch), or ``None`` if
+            no worktree was pending.
         """
         if self._wt is None:
-            return
+            return None
         wt = self._wt
 
         self._finalize_worktree()
@@ -212,7 +221,7 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
                         wt.original_branch, wt.branch,
                     )
                     self._wt = None
-                    return
+                    return wt.original_branch
 
             did_stash = GitWorktreeOps.stash_if_dirty(wt.repo_root)
             result = GitWorktreeOps.squash_merge_branch(
@@ -234,7 +243,9 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
                     wt.branch, wt.original_branch,
                 )
 
+        released_branch = wt.original_branch
         self._wt = None
+        return released_branch
 
     # -- Chat lifecycle ----------------------------------------------------
 
@@ -268,9 +279,9 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         Returns:
             Worktree work directory path, or ``None`` on failure.
         """
-        self._release_worktree()
+        released_branch = self._release_worktree()
 
-        original_branch = GitWorktreeOps.current_branch(repo)
+        original_branch = released_branch or GitWorktreeOps.current_branch(repo)
         if original_branch is None:
             logger.warning("Detached HEAD, running task directly")
             return None
@@ -366,14 +377,16 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
             logger.warning("Not a git repo, running task directly")
             return super().run(prompt_template=prompt_template, **kwargs)
 
-        self._restore_from_git(repo)
-
-        # Pre-allocate a chat_id so the worktree branch name is stable.
-        # Without this, _chat_id would still be 0 here and the branch
-        # would be named kiss/wt-0-<ts>, but _add_task in super().run()
-        # would then assign a different id, breaking _restore_from_git.
+        # Pre-allocate a chat_id so the worktree branch name is stable
+        # and _restore_from_git can search for the right prefix.
+        # Without this, _chat_id would still be "" here and
+        # _restore_from_git would search for "kiss/wt--*" (no match),
+        # while _add_task in super().run() would later assign a
+        # different id — orphaning the old branch.
         if self._chat_id == "":
             self._chat_id = _allocate_chat_id()
+
+        self._restore_from_git(repo)
 
         wt_work_dir = self._try_setup_worktree(repo, work_dir_str)
         if wt_work_dir is None:
