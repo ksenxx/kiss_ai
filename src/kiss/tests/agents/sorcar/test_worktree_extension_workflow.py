@@ -69,11 +69,21 @@ def _make_repo(path: Path) -> Path:
 
 def _patch_super_run(
     return_value: str = "success: true\nsummary: test done\n",
+    raise_exc: BaseException | None = None,
 ) -> Any:
+    """Patch SorcarAgent's parent ``run()`` to return a canned value.
+
+    Args:
+        return_value: String to return from the fake run.
+        raise_exc: If set, the fake run raises this exception instead
+            of returning *return_value*.
+    """
     parent_class = cast(Any, SorcarAgent.__mro__[1])
     original = parent_class.run
 
     def fake_run(self_agent: object, **kwargs: object) -> str:
+        if raise_exc is not None:
+            raise raise_exc
         return return_value
 
     parent_class.run = fake_run
@@ -869,4 +879,150 @@ class TestServerWorktreeWorkflow:
         assert r.stdout.strip() == "0"
 
         server._get_tab("0").agent.discard()
+
+    # -- worktree_done on failure/stop (regression) ------------------------
+
+    def test_worktree_no_changes_auto_discarded_on_failure(self) -> None:
+        """Worktree is auto-discarded when agent fails with no file changes.
+
+        When the exception happens before any file changes, the
+        worktree is discarded automatically and no worktree_done event
+        is emitted (nothing for the user to merge).
+        """
+        _unpatch_super_run(self.original_run)
+        self.original_run = _patch_super_run(raise_exc=RuntimeError("boom"))
+
+        server, events = _make_server(self.repo)
+        server._run_task_inner({
+            "prompt": "failing task",
+            "workDir": str(self.repo),
+            "tabId": "0",
+            "useWorktree": True,
+            "model": "test-model",
+        })
+
+        # No files changed → agent auto-discards → no worktree_done
+        wt_events = [e for e in events if e["type"] == "worktree_done"]
+        assert len(wt_events) == 0
+        # WorktreeSorcarAgent catches RuntimeError → task_done, not task_error
+        done_events = [e for e in events if e["type"] == "task_done"]
+        assert len(done_events) == 1
+        # Worktree was auto-discarded
+        assert not server._get_tab("0").agent._wt_pending
+
+    def test_worktree_no_changes_auto_discarded_on_stop(self) -> None:
+        """Worktree is auto-discarded when user stops with no file changes."""
+        _unpatch_super_run(self.original_run)
+        self.original_run = _patch_super_run(raise_exc=KeyboardInterrupt("stopped"))
+
+        server, events = _make_server(self.repo)
+        server._run_task_inner({
+            "prompt": "stopped task",
+            "workDir": str(self.repo),
+            "tabId": "0",
+            "useWorktree": True,
+            "model": "test-model",
+        })
+
+        stopped_events = [e for e in events if e["type"] == "task_stopped"]
+        assert len(stopped_events) == 1
+        assert not server._get_tab("0").agent._wt_pending
+
+    def test_worktree_merge_review_shown_on_failure_with_changes(self) -> None:
+        """Merge/diff review UI is shown when agent fails after making changes.
+
+        Regression: previously the merge/diff + worktree action UI was
+        only shown on success, leaving the user with no way to merge or
+        discard after a failure.  Now the merge review (merge_data +
+        merge_started) is emitted in the finally block so the user can
+        still review and accept/reject changes.
+        """
+        _unpatch_super_run(self.original_run)
+        parent_class = cast(Any, SorcarAgent.__mro__[1])
+        original_parent_run = parent_class.run
+
+        def fake_run_with_changes(self_agent: object, **kwargs: object) -> str:
+            wt_dir = getattr(self_agent, "_wt_dir", None)
+            if wt_dir is not None:
+                (Path(wt_dir) / "agent_output.txt").write_text("partial work")
+            else:
+                work_dir = kwargs.get("work_dir", "")
+                if work_dir:
+                    Path(str(work_dir), "agent_output.txt").write_text("partial work")
+            raise RuntimeError("task crashed after writing files")
+
+        parent_class.run = fake_run_with_changes
+        self.original_run = original_parent_run
+
+        server, events = _make_server(self.repo)
+        server._run_task_inner({
+            "prompt": "crashing task",
+            "workDir": str(self.repo),
+            "tabId": "0",
+            "useWorktree": True,
+            "model": "test-model",
+        })
+
+        # The merge review UI should be shown (merge_data + merge_started)
+        # so the user can review and accept/reject the agent's partial work
+        merge_events = [e for e in events if e["type"] == "merge_data"]
+        assert len(merge_events) == 1
+        merge_started = [e for e in events if e["type"] == "merge_started"]
+        assert len(merge_started) == 1
+        # Worktree is still pending (waiting for user to finish merge review)
+        assert server._get_tab("0").agent._wt_pending
+
+        # After merge review finishes, worktree_done is emitted
+        server._finish_merge("0")
+        wt_done = [e for e in events if e["type"] == "worktree_done"]
+        assert len(wt_done) == 1
+        assert len(wt_done[0].get("changedFiles", [])) > 0
+
+        # Clean up
+        tab = server._get_tab("0")
+        if tab.agent._wt_pending:
+            tab.agent.discard()
+
+    def test_worktree_merge_review_shown_on_stop_with_changes(self) -> None:
+        """Merge/diff review UI is shown when user stops after agent made changes.
+
+        Same as the failure test but with KeyboardInterrupt (user stop).
+        """
+        _unpatch_super_run(self.original_run)
+        parent_class = cast(Any, SorcarAgent.__mro__[1])
+        original_parent_run = parent_class.run
+
+        def fake_run_with_changes(self_agent: object, **kwargs: object) -> str:
+            wt_dir = getattr(self_agent, "_wt_dir", None)
+            if wt_dir is not None:
+                (Path(wt_dir) / "agent_output.txt").write_text("partial work")
+            else:
+                work_dir = kwargs.get("work_dir", "")
+                if work_dir:
+                    Path(str(work_dir), "agent_output.txt").write_text("partial work")
+            raise KeyboardInterrupt("stopped after writing files")
+
+        parent_class.run = fake_run_with_changes
+        self.original_run = original_parent_run
+
+        server, events = _make_server(self.repo)
+        server._run_task_inner({
+            "prompt": "stopped task",
+            "workDir": str(self.repo),
+            "tabId": "0",
+            "useWorktree": True,
+            "model": "test-model",
+        })
+
+        # Merge review UI should be shown
+        merge_events = [e for e in events if e["type"] == "merge_data"]
+        assert len(merge_events) == 1
+        # task_stopped should also be emitted
+        stopped = [e for e in events if e["type"] == "task_stopped"]
+        assert len(stopped) == 1
+
+        # Clean up
+        tab = server._get_tab("0")
+        if tab.agent._wt_pending:
+            tab.agent.discard()
 

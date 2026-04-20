@@ -159,16 +159,18 @@ class TestMultiTaskIntegration(unittest.TestCase):
         assert "parse_task_tags(prompt)" in self._src
 
     def test_loops_over_subtasks(self) -> None:
-        """_run_task_inner iterates over subtasks with enumerate."""
-        assert "for task_idx, task_prompt in enumerate(subtasks):" in self._src
+        """_run_task_inner iterates over subtasks."""
+        assert "for task_prompt in subtasks:" in self._src
 
     def test_agent_run_uses_task_prompt(self) -> None:
         """agent.run() receives the individual subtask prompt, not the full prompt."""
         assert "prompt_template=task_prompt" in self._src
 
-    def test_is_last_guards_worktree(self) -> None:
-        """Worktree broadcast only happens on the last subtask."""
-        assert "if is_last and tab.use_worktree" in self._src
+    def test_worktree_check_after_loop(self) -> None:
+        """Worktree broadcast is in the finally block, after the loop."""
+        loop_pos = self._src.index("for task_prompt in subtasks:")
+        wt_pos = self._src.index("if tab.use_worktree and tab.agent._wt_pending:")
+        assert wt_pos > loop_pos
 
     def test_interrupt_breaks_loop(self) -> None:
         """KeyboardInterrupt breaks out of the subtask loop."""
@@ -177,18 +179,11 @@ class TestMultiTaskIntegration(unittest.TestCase):
         after = self._src[ki_idx:ki_idx + 300]
         assert "break" in after
 
-    def test_is_last_computation(self) -> None:
-        """is_last is correctly computed as the final index check."""
-        assert "is_last = task_idx == len(subtasks) - 1" in self._src
-
-    def test_single_task_is_always_last(self) -> None:
-        """For a single task, is_last is True on the only iteration."""
-        # parse_task_tags("plain text") returns ["plain text"]
-        # so len(subtasks) == 1, task_idx == 0, is_last == True
-        result = parse_task_tags("plain text")
-        assert len(result) == 1
-        # Verify: 0 == 1 - 1 == 0 → True
-        assert 0 == len(result) - 1
+    def test_worktree_check_in_finally_block(self) -> None:
+        """Worktree merge review is in the finally block, not the inner try."""
+        # The worktree merge check must be in the finally block so it
+        # runs on success, failure, and user-stop alike.
+        assert "if tab.use_worktree and tab.agent._wt_pending:" in self._src
 
     def test_merge_view_only_runs_once(self) -> None:
         """_prepare_merge_view is NOT inside the subtask loop.
@@ -198,7 +193,7 @@ class TestMultiTaskIntegration(unittest.TestCase):
         """
         # The merge view code is in the finally block, outside the for loop
         # Verify _prepare_merge_view is NOT between the for loop markers
-        loop_start = self._src.index("for task_idx, task_prompt in enumerate(subtasks):")
+        loop_start = self._src.index("for task_prompt in subtasks:")
         # Find the break from the loop (KeyboardInterrupt handler)
         # The for loop ends before the "except BaseException" outer handler
         outer_except = self._src.index("except BaseException:")
@@ -207,7 +202,7 @@ class TestMultiTaskIntegration(unittest.TestCase):
 
     def test_followup_only_runs_once(self) -> None:
         """_generate_followup_async is NOT inside the subtask loop."""
-        loop_start = self._src.index("for task_idx, task_prompt in enumerate(subtasks):")
+        loop_start = self._src.index("for task_prompt in subtasks:")
         outer_except = self._src.index("except BaseException:")
         loop_body = self._src[loop_start:outer_except]
         assert "_generate_followup_async" not in loop_body
@@ -215,13 +210,13 @@ class TestMultiTaskIntegration(unittest.TestCase):
     def test_git_snapshot_before_loop(self) -> None:
         """Git snapshot is taken once before the subtask loop."""
         snapshot_pos = self._src.index("_parse_diff_hunks")
-        loop_pos = self._src.index("for task_idx, task_prompt in enumerate(subtasks):")
+        loop_pos = self._src.index("for task_prompt in subtasks:")
         assert snapshot_pos < loop_pos
 
     def test_recording_spans_all_subtasks(self) -> None:
         """start_recording is before the loop, stop_recording is after."""
         start_pos = self._src.index("self.printer.start_recording()")
-        loop_pos = self._src.index("for task_idx, task_prompt in enumerate(subtasks):")
+        loop_pos = self._src.index("for task_prompt in subtasks:")
         assert start_pos < loop_pos
         # stop_recording is in the finally block, after the loop
         stop_pos = self._src.index("self.printer.stop_recording()")
