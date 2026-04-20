@@ -139,7 +139,7 @@
           "group": "navigation@-1"
         }
       ],
-      "scm/inputBox": [
+      "scm/title": [
         {
           "command": "kissSorcar.generateCommitMessage",
           "when": "scmProvider == git",
