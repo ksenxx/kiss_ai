@@ -448,8 +448,7 @@ class VSCodeServer:
             self.printer._persist_agents[tab_id] = tab.agent
             tab.task_history_id = None
             subtasks = parse_task_tags(prompt)
-            for task_idx, task_prompt in enumerate(subtasks):
-                is_last = task_idx == len(subtasks) - 1
+            for task_prompt in subtasks:
                 try:
                     tab.agent.run(
                         prompt_template=task_prompt,
@@ -464,13 +463,6 @@ class VSCodeServer:
                     )
                     result_summary = self._extract_result_summary() or "No summary available"
                     task_end_event = {"type": "task_done"}
-                    if is_last and tab.use_worktree and tab.agent._wt_pending:
-                        changed = self._get_worktree_changed_files(tab_id)
-                        if changed:
-                            if not self._start_worktree_merge_review(tab_id):
-                                self._broadcast_worktree_done(changed, tab_id)
-                        else:
-                            tab.agent.discard()
                 except KeyboardInterrupt:
                     result_summary = "Task stopped by user"
                     task_end_event = {"type": "task_stopped"}
@@ -524,6 +516,16 @@ class VSCodeServer:
                         )
                     except BaseException:  # pragma: no cover — merge view error handler
                         logger.debug("Merge view error", exc_info=True)
+                if tab.use_worktree and tab.agent._wt_pending:
+                    try:
+                        changed = self._get_worktree_changed_files(tab_id)
+                        if changed:
+                            if not self._start_worktree_merge_review(tab_id):
+                                self._broadcast_worktree_done(changed, tab_id)
+                        else:
+                            tab.agent.discard()
+                    except BaseException:
+                        logger.debug("Worktree merge review error", exc_info=True)
                 if task_end_event:  # pragma: no branch — always set
                     self.printer.broadcast(task_end_event)
                 if tab.task_history_id is not None:
