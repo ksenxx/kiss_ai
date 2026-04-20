@@ -70,6 +70,11 @@ build_vscode_extension() {
     npm ci
     npm run package
 
+    # npm run package hardcodes -o kiss-sorcar.vsix; rename to match the buggy name
+    if [[ -f "kiss-sorcar.vsix" ]]; then
+        mv kiss-sorcar.vsix kiss-sorcar-buggy.vsix
+    fi
+
     if [[ ! -f "kiss-sorcar-buggy.vsix" ]]; then
         print_error "VSIX file not found: kiss-sorcar-buggy.vsix"
         cd - > /dev/null
@@ -104,70 +109,6 @@ publish_vscode_extension() {
     print_info "View at: https://marketplace.visualstudio.com/items?itemName=ksenxx.kiss-sorcar-buggy"
 }
 
-upload_to_github_release() {
-    local version="$1"
-    local tag_name="v$version"
-    local vsix_asset="${VSCODE_EXT_DIR}/kiss-sorcar-buggy.vsix"
-
-    if ! command -v gh &>/dev/null; then
-        print_warn "gh CLI not found — skipping GitHub release upload"
-        return
-    fi
-
-    if ! gh release view "$tag_name" --repo ksenxx/kiss_ai &>/dev/null; then
-        print_warn "GitHub release $tag_name not found — skipping upload"
-        return
-    fi
-
-    print_step "Uploading VSIX to GitHub release $tag_name..."
-    gh release upload "$tag_name" "$vsix_asset" --repo ksenxx/kiss_ai --clobber
-    print_info "VSIX uploaded to release $tag_name"
-}
-
-install_local_extension() {
-    local vsix_path="${VSCODE_EXT_DIR}/kiss-sorcar-buggy.vsix"
-
-    # Install into VS Code
-    local code_cli=""
-    for candidate in \
-        "$(command -v code 2>/dev/null || true)" \
-        "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code" \
-        "$HOME/.local/bin/code"; do
-        if [[ -n "$candidate" && -x "$candidate" ]]; then
-            code_cli="$candidate"
-            break
-        fi
-    done
-    if [[ -n "$code_cli" ]]; then
-        print_step "Installing extension into VS Code..."
-        if "$code_cli" --install-extension "$vsix_path" --force 2>&1; then
-            print_info "Extension installed into VS Code"
-        else
-            print_warn "Failed to install extension into VS Code — continuing"
-        fi
-    else
-        print_info "VS Code CLI not found — skipping local VS Code install"
-    fi
-
-    # Install into Cursor
-    local cursor_cli=""
-    if command -v cursor &>/dev/null; then
-        cursor_cli="cursor"
-    elif [[ -x "/Applications/Cursor.app/Contents/Resources/app/bin/cursor" ]]; then
-        cursor_cli="/Applications/Cursor.app/Contents/Resources/app/bin/cursor"
-    fi
-    if [[ -n "$cursor_cli" ]]; then
-        print_step "Installing extension into Cursor IDE..."
-        if "$cursor_cli" --install-extension "$vsix_path" --force 2>&1; then
-            print_info "Extension installed into Cursor IDE"
-        else
-            print_warn "Failed to install extension into Cursor IDE — continuing"
-        fi
-    else
-        print_info "Cursor IDE not found — skipping local Cursor install"
-    fi
-}
-
 # =============================================================================
 # Main
 # =============================================================================
@@ -184,11 +125,9 @@ main() {
     # Step 2: Publish to VS Code marketplace
     publish_vscode_extension "$VERSION"
 
-    # Step 3: Upload to existing GitHub release (if it exists)
-    upload_to_github_release "$VERSION"
-
-    # Step 4: Install locally
-    install_local_extension
+    # Step 3: Remove local VSIX artifact
+    rm -f "${VSCODE_EXT_DIR}/kiss-sorcar-buggy.vsix"
+    print_info "Removed local kiss-sorcar-buggy.vsix"
 
     echo
     print_info "========================================"
