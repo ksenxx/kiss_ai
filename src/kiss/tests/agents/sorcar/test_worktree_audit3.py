@@ -1,7 +1,6 @@
-"""Tests confirming bugs found in worktree audit round 3.
+"""Tests verifying fixes for worktree bugs BUG-8 through BUG-11.
 
-Each test confirms a specific bug exists in the current code, labeled
-BUG-8 through BUG-11.
+Each test verifies the CORRECT behavior after the fix was applied.
 """
 
 from __future__ import annotations
@@ -14,6 +13,7 @@ from typing import Any, cast
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.git_worktree import _git
+from kiss.agents.sorcar.persistence import _append_chat_event
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 
 # ---------------------------------------------------------------------------
@@ -97,20 +97,13 @@ def _make_server(repo: Path) -> tuple:
 
 
 # ---------------------------------------------------------------------------
-# BUG-8: _get_worktree_changed_files false positives when original branch
-#         advances (e.g. another tab merges while worktree is active)
+# BUG-8 FIX: _get_worktree_changed_files uses fork point, not branch tip
 # ---------------------------------------------------------------------------
 
 
-class TestBug8ChangedFilesFalsePositives:
-    """_get_worktree_changed_files reports files the agent didn't change
-    when the original branch advances after the worktree was created.
-
-    The method compares the worktree working tree against the CURRENT tip
-    of the original branch (`git diff --name-only <original_branch>`),
-    not the fork point.  When the original branch advances (e.g. another
-    worktree merges), files changed on main but NOT by the agent appear
-    in the diff.
+class TestBug8Fix:
+    """After fix, _get_worktree_changed_files only reports files the agent
+    actually changed, even when the original branch has advanced.
     """
 
     def setup_method(self) -> None:
@@ -124,15 +117,8 @@ class TestBug8ChangedFilesFalsePositives:
         _restore_db(self.db_saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_changed_files_includes_unrelated_files_after_main_advances(self) -> None:
-        """BUG-8: Unrelated files appear as 'changed' when main branch advances.
-
-        1. Create a worktree from main
-        2. Agent modifies fileA.txt in the worktree
-        3. Advance main via a temp branch (add unrelated_file.txt)
-        4. _get_worktree_changed_files should only report fileA.txt,
-           but it also reports unrelated_file.txt
-        """
+    def test_changed_files_excludes_unrelated_after_main_advances(self) -> None:
+        """Only agent-modified files appear, not unrelated files from main."""
 
         server, events = _make_server(self.repo)
         tab = server._get_tab("0")
@@ -146,9 +132,7 @@ class TestBug8ChangedFilesFalsePositives:
         # Agent modifies fileA.txt in the worktree
         (wt_dir / "fileA.txt").write_text("agent modified A\n")
 
-        # Now advance the original branch with an unrelated commit.
-        # We can't use a worktree on main (already checked out), so we
-        # use a temp branch, commit there, and fast-forward main.
+        # Advance the original branch with an unrelated commit
         original_branch = tab.agent._original_branch
         assert original_branch is not None
 
@@ -158,40 +142,50 @@ class TestBug8ChangedFilesFalsePositives:
         _git("add", "-A", cwd=tmp_wt)
         _git("commit", "-m", "advance with unrelated file", cwd=tmp_wt)
         _git("worktree", "remove", str(tmp_wt), "--force", cwd=self.repo)
-        # Fast-forward main to include the new commit
         _git("checkout", original_branch, cwd=self.repo)
         _git("merge", "--ff-only", "tmp-advance", cwd=self.repo)
         _git("branch", "-d", "tmp-advance", cwd=self.repo)
 
-        # Now get changed files
+        # Get changed files
         changed = server._get_worktree_changed_files("0")
 
-        # Agent only changed fileA.txt, so that's what should be reported
+        # Agent only changed fileA.txt — that's all that should appear
         assert "fileA.txt" in changed
-
-        # BUG: unrelated_file.txt shows up because the diff is against
-        # the current tip of main (which now has unrelated_file.txt),
-        # not against the fork point.  The worktree doesn't have
-        # unrelated_file.txt, so git sees it as "different".
-        assert "unrelated_file.txt" in changed, (
-            "BUG-8 confirmed: unrelated file from main advancement "
-            "appears as 'changed' in the worktree"
+        assert "unrelated_file.txt" not in changed, (
+            "BUG-8 FIX: unrelated files from main advancement "
+            "should NOT appear as changed"
         )
+
+        tab.agent.discard()
+
+    def test_changed_files_still_reports_agent_changes(self) -> None:
+        """Sanity check: agent-modified files are still reported correctly."""
+
+        server, events = _make_server(self.repo)
+        tab = server._get_tab("0")
+        tab.use_worktree = True
+
+        tab.agent.run(prompt_template="task1", work_dir=str(self.repo))
+        wt_dir = tab.agent._wt_dir
+        assert wt_dir is not None
+
+        (wt_dir / "fileA.txt").write_text("agent modified A\n")
+        (wt_dir / "new_file.txt").write_text("brand new\n")
+
+        changed = server._get_worktree_changed_files("0")
+        assert "fileA.txt" in changed
+        assert "new_file.txt" in changed
 
         tab.agent.discard()
 
 
 # ---------------------------------------------------------------------------
-# BUG-9: _check_merge_conflict has hidden auto-commit side effect
+# BUG-9 FIX: _check_merge_conflict is a pure query (no auto-commit)
 # ---------------------------------------------------------------------------
 
 
-class TestBug9CheckConflictAutoCommitSideEffect:
-    """_check_merge_conflict calls _auto_commit_worktree() as a side effect,
-    meaning that merely checking for conflicts commits all uncommitted
-    changes in the worktree.  This happens before the user explicitly
-    chooses 'Commit and Merge'.
-    """
+class TestBug9Fix:
+    """After fix, _check_merge_conflict does NOT commit worktree changes."""
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
@@ -204,14 +198,8 @@ class TestBug9CheckConflictAutoCommitSideEffect:
         _restore_db(self.db_saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_check_conflict_commits_worktree_changes(self) -> None:
-        """BUG-9: _check_merge_conflict auto-commits as a side effect.
-
-        1. Create a worktree task
-        2. Agent writes a file (uncommitted)
-        3. Call _check_merge_conflict (a "query" method)
-        4. Verify the file got committed as a side effect
-        """
+    def test_check_conflict_does_not_commit(self) -> None:
+        """_check_merge_conflict must not create any commits."""
 
         server, events = _make_server(self.repo)
         tab = server._get_tab("0")
@@ -232,32 +220,25 @@ class TestBug9CheckConflictAutoCommitSideEffect:
              f"{original}..{branch}"],
             capture_output=True, text=True,
         )
-        assert r.stdout.strip() == "0", "No commits should exist before check"
+        assert r.stdout.strip() == "0", "No commits before check"
 
-        # Call _check_merge_conflict — this is supposed to be a query
+        # Call _check_merge_conflict
         server._check_merge_conflict("0")
 
-        # BUG: the "query" method auto-committed the worktree changes
+        # BUG-9 FIX: no commits should have been created
         r = subprocess.run(
             ["git", "-C", str(self.repo), "rev-list", "--count",
              f"{original}..{branch}"],
             capture_output=True, text=True,
         )
-        assert r.stdout.strip() != "0", (
-            "BUG-9 confirmed: _check_merge_conflict auto-committed "
-            "worktree changes as a side effect"
+        assert r.stdout.strip() == "0", (
+            "BUG-9 FIX: _check_merge_conflict must not create commits"
         )
 
         tab.agent.discard()
 
-    def test_broadcast_worktree_done_commits_via_check_conflict(self) -> None:
-        """BUG-9: _broadcast_worktree_done triggers auto-commit through
-        _check_merge_conflict, committing changes before user acts.
-
-        This is the real-world impact: when _run_task_inner finishes and
-        broadcasts worktree_done, the worktree changes are silently
-        committed before the user clicks 'Commit and Merge'.
-        """
+    def test_broadcast_worktree_done_does_not_commit(self) -> None:
+        """_broadcast_worktree_done must not auto-commit via conflict check."""
 
         server, events = _make_server(self.repo)
         tab = server._get_tab("0")
@@ -271,32 +252,91 @@ class TestBug9CheckConflictAutoCommitSideEffect:
 
         (wt_dir / "agent_output.txt").write_text("work\n")
 
-        # _broadcast_worktree_done is what _run_task_inner calls
         server._broadcast_worktree_done(["agent_output.txt"], "0")
 
-        # BUG: changes are now committed even though user hasn't acted
+        # BUG-9 FIX: no commits should have been created
         r = subprocess.run(
             ["git", "-C", str(self.repo), "rev-list", "--count",
              f"{original}..{branch}"],
             capture_output=True, text=True,
         )
-        assert r.stdout.strip() != "0", (
-            "BUG-9 confirmed: _broadcast_worktree_done auto-committed "
-            "changes before user chose 'Commit and Merge'"
+        assert r.stdout.strip() == "0", (
+            "BUG-9 FIX: _broadcast_worktree_done must not auto-commit"
         )
+
+        tab.agent.discard()
+
+    def test_conflict_detected_when_both_sides_modify_same_file(self) -> None:
+        """Conflict is reported when the same file is changed on both sides."""
+
+        server, events = _make_server(self.repo)
+        tab = server._get_tab("0")
+        tab.use_worktree = True
+
+        tab.agent.run(prompt_template="task1", work_dir=str(self.repo))
+        wt_dir = tab.agent._wt_dir
+        original = tab.agent._original_branch
+        assert wt_dir is not None and original is not None
+
+        # Agent modifies fileA.txt in worktree
+        (wt_dir / "fileA.txt").write_text("agent version\n")
+
+        # Advance original branch with a conflicting change to fileA.txt
+        tmp_wt = self.repo / ".kiss-worktrees" / "tmp_conflict"
+        _git("worktree", "add", "-b", "tmp-conflict", str(tmp_wt), cwd=self.repo)
+        (tmp_wt / "fileA.txt").write_text("main version\n")
+        _git("add", "-A", cwd=tmp_wt)
+        _git("commit", "-m", "conflicting change", cwd=tmp_wt)
+        _git("worktree", "remove", str(tmp_wt), "--force", cwd=self.repo)
+        _git("checkout", original, cwd=self.repo)
+        _git("merge", "--ff-only", "tmp-conflict", cwd=self.repo)
+        _git("branch", "-d", "tmp-conflict", cwd=self.repo)
+
+        # Should detect conflict
+        assert server._check_merge_conflict("0") is True
+
+        tab.agent.discard()
+
+    def test_no_conflict_when_different_files_changed(self) -> None:
+        """No conflict when original and worktree modify different files."""
+
+        server, events = _make_server(self.repo)
+        tab = server._get_tab("0")
+        tab.use_worktree = True
+
+        tab.agent.run(prompt_template="task1", work_dir=str(self.repo))
+        wt_dir = tab.agent._wt_dir
+        original = tab.agent._original_branch
+        assert wt_dir is not None and original is not None
+
+        # Agent modifies fileA.txt in worktree
+        (wt_dir / "fileA.txt").write_text("agent version\n")
+
+        # Advance original branch with a non-conflicting change
+        tmp_wt = self.repo / ".kiss-worktrees" / "tmp_noconflict"
+        _git("worktree", "add", "-b", "tmp-noconflict", str(tmp_wt), cwd=self.repo)
+        (tmp_wt / "other_file.txt").write_text("other content\n")
+        _git("add", "-A", cwd=tmp_wt)
+        _git("commit", "-m", "non-conflicting change", cwd=tmp_wt)
+        _git("worktree", "remove", str(tmp_wt), "--force", cwd=self.repo)
+        _git("checkout", original, cwd=self.repo)
+        _git("merge", "--ff-only", "tmp-noconflict", cwd=self.repo)
+        _git("branch", "-d", "tmp-noconflict", cwd=self.repo)
+
+        # Should NOT detect conflict (different files)
+        assert server._check_merge_conflict("0") is False
 
         tab.agent.discard()
 
 
 # ---------------------------------------------------------------------------
-# BUG-10: _replay_session doesn't restore use_worktree from persisted data
+# BUG-10 FIX: _replay_session restores use_worktree from persisted data
 # ---------------------------------------------------------------------------
 
 
-class TestBug10ReplayDoesNotRestoreUseWorktree:
-    """After server restart, _replay_session calls _emit_pending_worktree
-    but tab.use_worktree is still False (never restored from persisted
-    'extra' data), so the pending worktree is invisible.
+class TestBug10Fix:
+    """After fix, _replay_session restores use_worktree and emits
+    worktree_done after restart.
     """
 
     def setup_method(self) -> None:
@@ -310,16 +350,9 @@ class TestBug10ReplayDoesNotRestoreUseWorktree:
         _restore_db(self.db_saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_replay_session_does_not_emit_worktree_done(self) -> None:
-        """BUG-10: After restart, _replay_session fails to emit worktree_done
-        because use_worktree is not restored from persisted data.
-
-        1. Run a worktree task → pending worktree exists
-        2. Persist task with is_worktree=True in extra data
-        3. Simulate server restart (new server, fresh tab state)
-        4. Call _replay_session to resume the chat
-        5. Expected: worktree_done event emitted
-        6. Actual: no worktree_done because use_worktree is False
+    def test_replay_session_restores_use_worktree(self) -> None:
+        """After restart, _replay_session sets use_worktree=True from
+        persisted extra data, and emits worktree_done.
         """
 
         # Step 1: Original server runs a worktree task
@@ -332,7 +365,12 @@ class TestBug10ReplayDoesNotRestoreUseWorktree:
         task_id = tab1.agent._last_task_id
         assert task_id is not None
 
-        # Persist is_worktree=True
+        # Persist events and extra data (events needed for _replay_session
+        # to not return early)
+        _append_chat_event(
+            {"type": "text_delta", "text": "working..."},
+            task_id=task_id,
+        )
         th._save_task_extra(
             {"is_worktree": True, "model": "test"},
             task_id=task_id,
@@ -341,38 +379,60 @@ class TestBug10ReplayDoesNotRestoreUseWorktree:
         # Step 2: Simulate server restart
         server2, events2 = _make_server(self.repo)
 
-        # Step 3: Resume session (what the extension does on restart)
+        # Step 3: Resume session
         server2._replay_session(chat_id, "0")
 
-        # BUG: tab.use_worktree is still False after replay
+        # BUG-10 FIX: use_worktree is now restored from persisted data
         tab2 = server2._get_tab("0")
-        assert tab2.use_worktree is False, (
-            "BUG-10 confirmed: use_worktree not restored from persisted data"
+        assert tab2.use_worktree is True, (
+            "BUG-10 FIX: use_worktree should be restored from persisted data"
         )
 
-        # BUG: no worktree_done event because _emit_pending_worktree returns early
+        # BUG-10 FIX: worktree_done event should be emitted
         wt_events = [e for e in events2 if e["type"] == "worktree_done"]
-        assert len(wt_events) == 0, (
-            "BUG-10 confirmed: worktree_done not emitted after restart "
-            "because use_worktree is False"
+        assert len(wt_events) >= 1, (
+            "BUG-10 FIX: worktree_done should be emitted after restart"
         )
 
         # Clean up the original worktree
         tab1.agent.discard()
 
+    def test_replay_session_without_worktree_keeps_false(self) -> None:
+        """When extra doesn't have is_worktree, use_worktree stays False."""
+
+        server1, events1 = _make_server(self.repo)
+        tab1 = server1._get_tab("0")
+        # Run without worktree
+        tab1.agent.run(prompt_template="task1", work_dir=str(self.repo))
+        chat_id = tab1.agent.chat_id
+        task_id = tab1.agent._last_task_id
+        assert task_id is not None
+
+        _append_chat_event(
+            {"type": "text_delta", "text": "working..."},
+            task_id=task_id,
+        )
+        th._save_task_extra(
+            {"is_worktree": False, "model": "test"},
+            task_id=task_id,
+        )
+
+        server2, events2 = _make_server(self.repo)
+        server2._replay_session(chat_id, "0")
+
+        tab2 = server2._get_tab("0")
+        assert tab2.use_worktree is False
+
 
 # ---------------------------------------------------------------------------
-# BUG-11: test_emit_pending_worktree_after_restart masks BUG-10
+# BUG-11 FIX: existing test no longer needs manual use_worktree=True
+# (BUG-10 fix makes this work automatically through _replay_session)
 # ---------------------------------------------------------------------------
 
 
-class TestBug11ExistingTestMasksBug:
-    """The existing regression test for emit_pending_worktree_after_restart
-    manually sets use_worktree=True on the new server, bypassing the real
-    restart flow where use_worktree would be False.
-
-    This test demonstrates that the existing test in
-    test_worktree_extension_workflow.py doesn't catch BUG-10.
+class TestBug11Fix:
+    """With BUG-10 fixed, the real restart flow now works without
+    manually setting use_worktree=True.
     """
 
     def setup_method(self) -> None:
@@ -386,16 +446,9 @@ class TestBug11ExistingTestMasksBug:
         _restore_db(self.db_saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_existing_test_manually_sets_use_worktree(self) -> None:
-        """BUG-11: The existing test bypasses the bug by setting use_worktree.
-
-        In the existing test, _make_server sets use_worktree=True on
-        the new server.  In a real restart, the extension sends a
-        resumeSession command — use_worktree is never set.
-
-        Compare:
-        - Existing test: server2._get_tab("0").use_worktree = True  (manual)
-        - Real restart: _replay_session called → use_worktree stays False
+    def test_real_restart_flow_emits_worktree_done(self) -> None:
+        """Without manually setting use_worktree=True, pending worktree
+        is visible after restart thanks to BUG-10 fix.
         """
 
         # Original server
@@ -404,26 +457,28 @@ class TestBug11ExistingTestMasksBug:
         tab1.use_worktree = True
         tab1.agent.run(prompt_template="task1", work_dir=str(self.repo))
         chat_id = tab1.agent.chat_id
+        task_id = tab1.agent._last_task_id
+        assert task_id is not None
 
-        # Simulate restart WITH manual use_worktree=True (like existing test)
-        server_with_flag, events_with = _make_server(self.repo)
-        server_with_flag._get_tab("0").use_worktree = True  # <- masks bug
-        server_with_flag._get_tab("0").agent.resume_chat_by_id(chat_id)
-        server_with_flag._emit_pending_worktree("0")
-        wt_with = [e for e in events_with if e["type"] == "worktree_done"]
-        # Existing test passes because use_worktree was manually set
-        assert len(wt_with) == 1, "Works with manual use_worktree=True"
+        _append_chat_event(
+            {"type": "text_delta", "text": "working..."},
+            task_id=task_id,
+        )
+        th._save_task_extra(
+            {"is_worktree": True, "model": "test"},
+            task_id=task_id,
+        )
 
-        # Simulate restart WITHOUT manual flag (real restart behavior)
+        # Simulate restart WITHOUT manual use_worktree=True
         server_real, events_real = _make_server(self.repo)
-        # use_worktree defaults to False — just like a real restart
-        server_real._get_tab("0").agent.resume_chat_by_id(chat_id)
-        server_real._emit_pending_worktree("0")
+        # Just call _replay_session, like the real restart flow
+        server_real._replay_session(chat_id, "0")
+
+        # BUG-11 FIX: worktree_done should be emitted without manual flag
         wt_real = [e for e in events_real if e["type"] == "worktree_done"]
-        # BUG-11: No worktree_done because use_worktree is False
-        assert len(wt_real) == 0, (
-            "BUG-11 confirmed: without manual use_worktree=True, "
-            "pending worktree is invisible after restart"
+        assert len(wt_real) >= 1, (
+            "BUG-11 FIX: pending worktree should be visible after "
+            "restart without manual use_worktree=True"
         )
 
         # Clean up

@@ -874,6 +874,20 @@ class VSCodeServer:
             return
         tab = self._get_tab(tab_id) if tab_id else self._get_tab(str(chat_id))
         tab.agent.resume_chat_by_id(chat_id)
+
+        # Restore use_worktree from persisted extra data (BUG-10 fix).
+        # Without this, pending worktrees are invisible after restart
+        # because _emit_pending_worktree returns early when use_worktree
+        # is False.
+        extra_str = str(result.get("extra", "") or "")
+        if extra_str:
+            try:
+                extra = json.loads(extra_str)
+                if extra.get("is_worktree"):
+                    tab.use_worktree = True
+            except (json.JSONDecodeError, TypeError):
+                pass
+
         self.printer.broadcast({
             "type": "task_events",
             "events": result["events"],
@@ -1153,25 +1167,23 @@ class VSCodeServer:
     def _check_merge_conflict(self, tab_id: str = "") -> bool:
         """Check if merging the worktree branch into original would conflict.
 
-        Auto-commits any uncommitted worktree changes first so that
-        the branch comparison reflects the actual working-tree state.
-        Then checks two things:
+        Pure query — does **not** commit or otherwise mutate git state
+        (BUG-9 fix).  Uses file-level overlap detection between:
 
-        1. Tree-level conflicts via
-           :meth:`GitWorktreeOps.would_merge_conflict`
-           (``git merge-tree --write-tree``).
-        2. Uncommitted changes in the main working tree that overlap
-           with files modified by the merge (which would cause
-           ``git merge`` to refuse the merge), computed as the
-           intersection of
-           :meth:`GitWorktreeOps.branch_diff_files` and
-           :meth:`GitWorktreeOps.unstaged_files`.
+        1. Files changed on the original branch since the fork point.
+        2. Files changed in the worktree (committed + uncommitted)
+           since the fork point.
+
+        When both sides modify the same file, reports a potential
+        conflict.  Also checks for dirty main working-tree files that
+        overlap with the worktree changes (which would cause
+        ``git merge`` to refuse).
 
         Args:
             tab_id: The tab whose worktree to check.
 
         Returns:
-            True if the merge would fail, False otherwise.
+            True if the merge would likely fail, False otherwise.
         """
         tab = self._get_tab(tab_id)
         if not tab.use_worktree:
@@ -1179,24 +1191,42 @@ class VSCodeServer:
         wt = tab.agent._wt
         if wt is None or wt.original_branch is None:
             return False
-        # Commit uncommitted worktree changes so the branch comparison
-        # reflects the actual working-tree state (fixes BUG-2: without
-        # this, the worktree branch has zero new commits and the conflict
-        # check always returns False).
-        tab.agent._auto_commit_worktree()
-        # Check 1: tree-level merge conflicts (dry-run, no working-tree touch)
-        if GitWorktreeOps.would_merge_conflict(
-            wt.repo_root, wt.original_branch, wt.branch,
-        ):
-            return True
-        # Check 2: dirty working-tree files that overlap with merge changes
-        merge_files = set(GitWorktreeOps.branch_diff_files(
-            wt.repo_root, wt.original_branch, wt.branch,
-        ))
-        if not merge_files:
+        wt_dir = wt.wt_dir
+        if not wt_dir.exists():
             return False
+
+        # Find the fork point between worktree branch and original
+        mb = _git(str(wt_dir), "merge-base", "HEAD", wt.original_branch)
+        if mb.returncode != 0 or not mb.stdout.strip():
+            return False
+        fork_point = mb.stdout.strip()
+
+        # Files changed on original branch since the fork
+        orig_diff = _git(
+            str(wt.repo_root), "diff", "--name-only",
+            fork_point, wt.original_branch,
+        )
+        orig_files = (
+            set(orig_diff.stdout.strip().splitlines())
+            if orig_diff.returncode == 0 else set()
+        )
+
+        # Files changed in the worktree (committed + uncommitted) since fork
+        wt_diff = _git(str(wt_dir), "diff", "--name-only", fork_point)
+        wt_files = (
+            set(wt_diff.stdout.strip().splitlines())
+            if wt_diff.returncode == 0 else set()
+        )
+        wt_files.update(_capture_untracked(str(wt_dir)))
+
+        # Check 1: both sides modified the same file → likely conflict
+        if orig_files & wt_files:
+            return True
+
+        # Check 2: dirty main working-tree files that overlap with
+        # worktree changes (git merge would refuse)
         dirty = set(GitWorktreeOps.unstaged_files(wt.repo_root))
-        return bool(dirty & merge_files)
+        return bool(dirty & wt_files)
 
     def _get_worktree_changed_files(self, tab_id: str = "") -> list[str]:
         """List files changed in the worktree vs the original branch.
@@ -1222,10 +1252,15 @@ class VSCodeServer:
             return []
         wt_dir = wt._wt_dir
         if wt_dir and wt_dir.exists():
-            # Compare worktree working tree against original branch
-            # (includes both committed and uncommitted changes)
-            tracked = _git(str(wt_dir), "diff", "--name-only",
-                           wt._original_branch)
+            # Compare worktree working tree against the fork point
+            # (merge-base), not the current tip of the original branch.
+            # This avoids false positives when the original branch
+            # advances after the worktree was created (BUG-8 fix).
+            base_ref = wt._original_branch
+            mb = _git(str(wt_dir), "merge-base", "HEAD", wt._original_branch)
+            if mb.returncode == 0 and mb.stdout.strip():
+                base_ref = mb.stdout.strip()
+            tracked = _git(str(wt_dir), "diff", "--name-only", base_ref)
             files = (tracked.stdout.strip().splitlines()
                      if tracked.returncode == 0 else [])
             files.extend(_capture_untracked(str(wt_dir)))
@@ -1234,8 +1269,13 @@ class VSCodeServer:
         if not wt._wt_branch:
             return []
         repo_root = str(wt._repo_root) if wt._repo_root else self.work_dir
+        # Use fork point for branch-to-branch diff too (BUG-8 fix)
+        base_ref = wt._original_branch
+        mb = _git(repo_root, "merge-base", wt._original_branch, wt._wt_branch)
+        if mb.returncode == 0 and mb.stdout.strip():
+            base_ref = mb.stdout.strip()
         result = _git(repo_root, "diff", "--name-only",
-                      wt._original_branch,
+                      base_ref,
                       wt._wt_branch)
         return result.stdout.strip().splitlines() if result.returncode == 0 else []
 

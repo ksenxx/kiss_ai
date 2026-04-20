@@ -6,4 +6,8 @@
 - The `_git` function in `git_worktree.py` (keyword `cwd`) differs from `_git` in `diff_merge.py` (positional `cwd`) — be careful with imports
 - Use `setup_method`/`teardown_method` pattern (not pytest fixtures) for worktree tests
 - Known bugs: BUG-1 through BUG-7 + INC-1/INC-2 are in test_worktree_audit.py / test_worktree_audit2.py
-- New bugs BUG-8 through BUG-11 are in test_worktree_audit3.py
+- BUG-8 through BUG-11 (found in audit3) are now FIXED in server.py; test_worktree_audit3.py verifies correct behavior
+- When testing `_replay_session`, must persist at least one chat event via `_append_chat_event` — otherwise the function returns early due to `not result.get("events")` check
+- `_check_merge_conflict` is now a pure query (no auto-commit side effect); uses fork-point-based file overlap detection
+- `_get_worktree_changed_files` now uses `git merge-base` to find fork point, avoiding false positives when original branch advances
+- `_replay_session` now restores `tab.use_worktree` from persisted `extra` JSON data
