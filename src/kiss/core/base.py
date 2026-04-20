@@ -51,10 +51,6 @@ if sys.platform == "win32":  # pragma: no branch
             "`Get-Content` instead of `cat`.\n"
         )
 
-_sorcar_path = _kiss_pkg_dir / "SORCAR.md"
-if _sorcar_path.exists():  # pragma: no branch
-    SYSTEM_PROMPT += "\n" + _sorcar_path.read_text()
-
 
 class Base:
     """Base class for all KISS agents with common state management and persistence."""
