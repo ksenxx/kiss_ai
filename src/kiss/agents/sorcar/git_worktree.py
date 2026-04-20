@@ -275,7 +275,9 @@ class GitWorktreeOps:
         return True
 
     @staticmethod
-    def commit_staged(wt_dir: Path, message: str) -> bool:
+    def commit_staged(
+        wt_dir: Path, message: str, *, no_verify: bool = False,
+    ) -> bool:
         """Commit already-staged changes without re-staging.
 
         Unlike :meth:`commit_all`, this does **not** run ``git add -A``
@@ -285,6 +287,9 @@ class GitWorktreeOps:
         Args:
             wt_dir: Worktree directory with pre-staged changes.
             message: Commit message.
+            no_verify: If True, pass ``--no-verify`` to skip pre-commit
+                and commit-msg hooks.  Use for infrastructure commits
+                (e.g. baseline snapshots) that must always succeed.
 
         Returns:
             True if a commit was created, False if nothing was staged
@@ -293,7 +298,10 @@ class GitWorktreeOps:
         diff = _git("diff", "--cached", "--quiet", cwd=wt_dir)
         if diff.returncode == 0:
             return False
-        result = _git("commit", "-m", message, cwd=wt_dir)
+        cmd = ["commit", "-m", message]
+        if no_verify:
+            cmd.append("--no-verify")
+        result = _git(*cmd, cwd=wt_dir)
         if result.returncode != 0:
             logger.warning(
                 "git commit failed: %s", result.stderr.strip(),
@@ -328,7 +336,7 @@ class GitWorktreeOps:
         return result.stdout.strip()
 
     @staticmethod
-    def checkout(repo: Path, branch: str) -> bool:
+    def checkout(repo: Path, branch: str) -> tuple[bool, str]:
         """Checkout a branch in the main worktree.
 
         Args:
@@ -336,24 +344,14 @@ class GitWorktreeOps:
             branch: Branch name to checkout.
 
         Returns:
-            True if checkout succeeded, False otherwise.
+            ``(True, "")`` on success, ``(False, stderr)`` on failure.
+            The stderr string describes why the checkout failed (e.g.
+            dirty working tree, missing branch).
         """
         result = _git("checkout", branch, cwd=repo)
-        return result.returncode == 0
-
-    @staticmethod
-    def checkout_error(repo: Path, branch: str) -> str:
-        """Return the stderr from a failed checkout attempt.
-
-        Args:
-            repo: Git repo root path.
-            branch: Branch name that failed to checkout.
-
-        Returns:
-            The stderr text from the failed checkout.
-        """
-        result = _git("checkout", branch, cwd=repo)
-        return result.stderr.strip()
+        if result.returncode == 0:
+            return (True, "")
+        return (False, result.stderr.strip())
 
     @staticmethod
     def merge_branch(repo: Path, branch: str) -> MergeResult:
@@ -768,7 +766,6 @@ class GitWorktreeOps:
         for line in status.stdout.splitlines():
             if len(line) < 4:
                 continue
-            xy = line[:2]
             fname = _unquote_git_path(line[3:])
             # Handle renames: "R  old -> new"
             old_name: str | None = None
@@ -780,12 +777,9 @@ class GitWorktreeOps:
             src = repo / fname
             dst = wt_dir / fname
 
-            if "D" in xy:
-                # File deleted (staged or unstaged)
-                if dst.exists():
-                    dst.unlink()
-                    copied = True
-            elif src.is_file():
+            if src.is_file():
+                # File exists in working tree — copy it regardless
+                # of index status (handles DM: staged delete + re-add).
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 _shutil.copy2(str(src), str(dst))
                 copied = True
@@ -795,6 +789,10 @@ class GitWorktreeOps:
                     old_dst = wt_dir / old_name
                     if old_dst.exists():
                         old_dst.unlink()
+            elif dst.exists():
+                # File gone from working tree — delete from worktree
+                dst.unlink()
+                copied = True
             elif src.is_dir():
                 # Submodule or directory entry — skip
                 continue

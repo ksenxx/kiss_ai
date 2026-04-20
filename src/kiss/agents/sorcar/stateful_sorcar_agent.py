@@ -109,6 +109,7 @@ class StatefulSorcarAgent(SorcarAgent):
         Returns:
             YAML string with 'success' and 'summary' keys.
         """
+        skip_persistence = kwargs.pop("_skip_persistence", False)
         agent_prompt = self.build_chat_prompt(prompt_template)
         task_id, self._chat_id = _add_task(prompt_template, chat_id=self._chat_id)
         self._last_task_id = task_id
@@ -127,21 +128,22 @@ class StatefulSorcarAgent(SorcarAgent):
             result_summary = "Task failed"
             raise
         finally:
-            _save_task_result(task_id=task_id, result=result_summary)
-            from kiss._version import __version__
+            if not skip_persistence:
+                _save_task_result(task_id=task_id, result=result_summary)
+                from kiss._version import __version__
 
-            _save_task_extra(
-                {
-                    "model": getattr(self, "model_name", ""),
-                    "work_dir": getattr(self, "work_dir", ""),
-                    "version": __version__,
-                    "tokens": self.total_tokens_used,
-                    "cost": round(self.budget_used, 6),
-                    "is_parallel": self._is_parallel,
-                    "is_worktree": type(self).__name__ == "WorktreeSorcarAgent",
-                },
-                task_id=task_id,
-            )
+                _save_task_extra(
+                    {
+                        "model": getattr(self, "model_name", ""),
+                        "work_dir": getattr(self, "work_dir", ""),
+                        "version": __version__,
+                        "tokens": self.total_tokens_used,
+                        "cost": round(self.budget_used, 6),
+                        "is_parallel": self._is_parallel,
+                        "is_worktree": type(self).__name__ == "WorktreeSorcarAgent",
+                    },
+                    task_id=task_id,
+                )
 
 
 

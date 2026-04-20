@@ -688,7 +688,11 @@ class TestBug17UntrackedBaseNotNukedInWorktreeMode:
                 "_run_task_inner should guard pre-task snapshot "
                 "with 'if not tab.use_worktree:'"
             )
-            assert "_save_untracked_base" in source
+            # _save_untracked_base is in _capture_pre_snapshot (called
+            # from _run_task_inner inside the non-worktree guard)
+            assert "_capture_pre_snapshot" in source
+            snap_source = inspect.getsource(VSCodeServer._capture_pre_snapshot)
+            assert "_save_untracked_base" in snap_source
 
             # Also verify that tab A's data survives when the guard fires
             assert (ub_dir / "tab_a_file.txt").exists(), (

@@ -231,48 +231,29 @@ class TestBug25ReleaseBranchOrphanedOnNoneOriginal:
 # ===================================================================
 
 
-class TestBug26MergeDeleteOutsideLock:
-    """BUG-26: merge() exits the `with repo_lock(...)` context before
-    calling delete_branch and setting self._wt = None.
-
-    Compare with _release_worktree which does delete_branch INSIDE
-    the lock.  The gap between lock release and branch deletion allows
-    a concurrent tab's _release_worktree to interleave — e.g. starting
-    a checkout/stash/merge sequence on the same repo while the branch
-    still exists.
+class TestBug26MergeDeleteInsideLock:
+    """BUG-26 FIX: merge() now delegates to _do_merge() which runs
+    delete_branch inside repo_lock. Both merge() and _release_worktree
+    use the same _do_merge() helper, so they are consistent.
     """
 
-    def test_merge_delete_branch_outside_lock(self) -> None:
-        """BUG-26: Confirm delete_branch is outside repo_lock in merge()."""
+    def test_merge_uses_do_merge(self) -> None:
+        """merge() delegates to _do_merge() for the locked operation."""
         source = inspect.getsource(WorktreeSorcarAgent.merge)
-        lines = source.splitlines()
+        assert "_do_merge" in source, (
+            "merge() must delegate to _do_merge()"
+        )
 
-        # Find the repo_lock context manager and the delete_branch call
-        lock_indent = None
-        delete_line = None
-
-        for i, line in enumerate(lines):
-            stripped = line.lstrip()
-            indent = len(line) - len(stripped)
-
-            if "with repo_lock(" in line:
-                lock_indent = indent
-                continue
-
-            if lock_indent is not None and "delete_branch" in line:
-                delete_line = i
-                # Check if this line is outside the with block
-                # (indent <= lock_indent means we've exited the with)
-                if indent <= lock_indent:
-                    # delete_branch is OUTSIDE the lock — BUG confirmed
-                    pass
-                break
-
-        assert delete_line is not None, "sanity: delete_branch found in merge()"
-
-    def test_release_has_delete_inside_lock(self) -> None:
-        """Contrast: _release_worktree puts delete_branch INSIDE the lock."""
+    def test_release_uses_do_merge(self) -> None:
+        """_release_worktree delegates to _do_merge() for the locked operation."""
         source = inspect.getsource(WorktreeSorcarAgent._release_worktree)
+        assert "_do_merge" in source, (
+            "_release_worktree must delegate to _do_merge()"
+        )
+
+    def test_do_merge_has_delete_inside_lock(self) -> None:
+        """_do_merge runs delete_branch inside repo_lock."""
+        source = inspect.getsource(WorktreeSorcarAgent._do_merge)
         lines = source.splitlines()
 
         lock_indent = None
@@ -285,61 +266,12 @@ class TestBug26MergeDeleteOutsideLock:
                 continue
 
             if lock_indent is not None and "delete_branch" in line:
-                # In _release_worktree, delete_branch should be inside lock
                 assert indent > lock_indent, (
-                    "Unexpectedly, _release_worktree also has delete_branch "
-                    "outside the lock"
+                    "delete_branch must be inside repo_lock"
                 )
                 break
-
-    def test_merge_wt_none_outside_lock(self) -> None:
-        """BUG-26: self._wt = None is also outside the lock in merge().
-
-        Uses line-position analysis: the `with repo_lock` block ends
-        when indentation returns to the with-statement's level.  Any
-        `self._wt = None` after that point is outside the lock.
-        """
-        source = inspect.getsource(WorktreeSorcarAgent.merge)
-        lines = source.splitlines()
-
-        lock_start = None
-        lock_indent = None
-        lock_end = None
-
-        for i, line in enumerate(lines):
-            stripped = line.lstrip()
-            indent = len(line) - len(stripped)
-
-            if "with repo_lock(" in line:
-                lock_start = i
-                lock_indent = indent
-                continue
-
-            # Detect end of `with` block: first non-blank line at or
-            # below the `with` indent after the block has started.
-            if lock_start is not None and lock_end is None:
-                past_start = i > lock_start + 1
-                if (
-                    stripped
-                    and lock_indent is not None
-                    and indent <= lock_indent
-                    and past_start
-                ):
-                    lock_end = i
-
-        assert lock_end is not None, "sanity: found end of repo_lock block"
-
-        # Find self._wt = None after the lock block
-        wt_none_after_lock = False
-        for i in range(lock_end, len(lines)):
-            if "self._wt = None" in lines[i]:
-                wt_none_after_lock = True
-                break
-
-        # BUG-26: self._wt = None appears after the lock block
-        assert wt_none_after_lock, (
-            "BUG-26 appears fixed: self._wt = None is now inside lock"
-        )
+        else:
+            raise AssertionError("delete_branch not found in _do_merge")
 
 
 # ===================================================================

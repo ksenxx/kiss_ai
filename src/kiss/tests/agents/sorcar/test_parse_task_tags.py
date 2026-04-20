@@ -167,9 +167,11 @@ class TestMultiTaskIntegration(unittest.TestCase):
         assert "prompt_template=task_prompt" in self._src
 
     def test_worktree_check_after_loop(self) -> None:
-        """Worktree broadcast is in the finally block, after the loop."""
+        """Worktree merge review is in the finally block, after the loop."""
         loop_pos = self._src.index("for task_prompt in subtasks:")
-        wt_pos = self._src.index("if tab.use_worktree and tab.agent._wt_pending:")
+        # The worktree merge review check (with _get_worktree_changed_files)
+        # must be in the finally block, after the subtask loop.
+        wt_pos = self._src.index("_get_worktree_changed_files")
         assert wt_pos > loop_pos
 
     def test_interrupt_breaks_loop(self) -> None:
@@ -209,7 +211,9 @@ class TestMultiTaskIntegration(unittest.TestCase):
 
     def test_git_snapshot_before_loop(self) -> None:
         """Git snapshot is taken once before the subtask loop."""
-        snapshot_pos = self._src.index("_parse_diff_hunks")
+        # Snapshot logic is in _capture_pre_snapshot (called from
+        # _run_task_inner before the loop).
+        snapshot_pos = self._src.index("_capture_pre_snapshot")
         loop_pos = self._src.index("for task_prompt in subtasks:")
         assert snapshot_pos < loop_pos
 

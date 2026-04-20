@@ -64,3 +64,16 @@
 - `_TabState` has `is_running_non_wt: bool` — set True during non-worktree task execution, used by `_any_non_wt_running()` helper
 - Non-worktree task start is blocked (Fix 4 symmetric guard) when a worktree merge is in progress (`t.is_merging and t.use_worktree`)
 - `_prepare_merge_view` now derives `ub_dir` from its `data_dir` parameter instead of calling `_untracked_base_dir()` — consistent with per-tab merge dirs
+- BUG-A/BUG-19 FIX: `discard()` now acquires `repo_lock` to serialize checkout + delete_branch against concurrent merge/release operations
+- BUG-B FIX: `_run_task_inner` now guards `_release_worktree` against `_any_non_wt_running()` — clears `_wt` and sets `_merge_conflict_warning` if guard fires (branch preserved in git)
+- BUG-C/BUG-23 FIX: Baseline commit uses `no_verify=True` to bypass pre-commit hooks; `_try_setup_worktree` checks `commit_staged` return value before setting `baseline_commit`
+- BUG-D FIX: `discard()` checks `checkout()` return and includes warning in return message if checkout fails
+- BUG-E/BUG-21 FIX: `checkout()` returns `tuple[bool, str]` (success, stderr); `checkout_error()` removed entirely
+- BUG-F FIX: `copy_dirty_state` checks file existence on disk first (`src.is_file()` → copy; else `dst.exists()` → delete) — correctly handles DM/DA status
+- INC-2 FIX: `_handle_worktree_action("discard")` now checks `_any_non_wt_running()` guard
+- INC-3 FIX: `_ensure_worktree_state` uses `GitWorktreeOps.discover_repo()` instead of `diff_merge._git()`
+- RED-1 FIX: `_do_merge(wt)` extracted as shared helper — both `merge()` and `_release_worktree` delegate to it (checkout → stash → merge → pop → delete all inside `repo_lock`)
+- RED-2 FIX: `StatefulSorcarAgent.run()` accepts `_skip_persistence` kwarg; `_run_task_inner` passes `_skip_persistence=True` to avoid double-save
+- RED-3 FIX: `_resolve_base_ref()` static method extracted for base-ref resolution (baseline or merge-base) — used by `_get_worktree_changed_files`
+- RED-4 FIX: `_capture_pre_snapshot()` static method extracted for non-worktree pre-task snapshot — deduplicates repo vs non-repo paths
+- `commit_staged` now accepts `no_verify: bool = False` keyword argument — when True, passes `--no-verify` to `git commit`

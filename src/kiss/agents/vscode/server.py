@@ -400,6 +400,49 @@ class VSCodeServer:
                     tab.user_answer_queue = None
                 self.printer.broadcast({"type": "status", "running": False})
 
+    @staticmethod
+    def _capture_pre_snapshot(
+        work_dir: str, repo: Path | None, tab_id: str,
+    ) -> tuple[
+        str | None,
+        dict[str, list[tuple[int, int, int, int]]],
+        set[str],
+        dict[str, str] | None,
+    ]:
+        """Capture pre-task git snapshot for non-worktree merge view.
+
+        When *repo* is not None, acquires ``repo_lock`` for atomicity.
+
+        Args:
+            work_dir: Repository root directory.
+            repo: Repo root Path (None when not in a git repo).
+            tab_id: Frontend tab identifier for per-tab isolation.
+
+        Returns:
+            ``(head_sha, hunks, untracked, file_hashes)`` tuple.
+        """
+        def _do_snapshot() -> tuple[
+            str | None,
+            dict[str, list[tuple[int, int, int, int]]],
+            set[str],
+            dict[str, str] | None,
+        ]:
+            head = GitWorktreeOps.head_sha(repo) if repo else None
+            hunks = _parse_diff_hunks(work_dir)
+            untracked = _capture_untracked(work_dir)
+            hashes = _snapshot_files(
+                work_dir, set(hunks.keys()) | untracked,
+            )
+            _save_untracked_base(
+                work_dir, untracked | set(hunks.keys()), tab_id=tab_id,
+            )
+            return head, hunks, untracked, hashes
+
+        if repo:
+            with repo_lock(repo):
+                return _do_snapshot()
+        return _do_snapshot()
+
     def _run_task_inner(self, cmd: dict[str, Any]) -> None:
         """Inner implementation of _run_task (without the status guarantee)."""
         prompt = cmd.get("prompt", "")
@@ -468,37 +511,27 @@ class VSCodeServer:
         pre_file_hashes: dict[str, str] | None = None
         pre_head_sha: str | None = None
         if not tab.use_worktree:
-            # Fix 2 (BUG-34): acquire repo_lock for an atomic snapshot
-            # so a concurrent worktree merge cannot interleave checkout /
-            # stash / squash-merge operations while the snapshot runs.
             repo = GitWorktreeOps.discover_repo(Path(work_dir))
-            if repo:
-                with repo_lock(repo):
-                    pre_head_sha = GitWorktreeOps.head_sha(repo)
-                    pre_hunks = _parse_diff_hunks(work_dir)
-                    pre_untracked = _capture_untracked(work_dir)
-                    pre_file_hashes = _snapshot_files(
-                        work_dir, set(pre_hunks.keys()) | pre_untracked,
-                    )
-                    _save_untracked_base(
-                        work_dir,
-                        pre_untracked | set(pre_hunks.keys()),
-                        tab_id=tab_id,
-                    )
-            else:
-                pre_hunks = _parse_diff_hunks(work_dir)
-                pre_untracked = _capture_untracked(work_dir)
-                pre_file_hashes = _snapshot_files(
-                    work_dir, set(pre_hunks.keys()) | pre_untracked,
-                )
-                _save_untracked_base(
-                    work_dir,
-                    pre_untracked | set(pre_hunks.keys()),
-                    tab_id=tab_id,
-                )
-            # Fix 3 (BUG-35): mark this tab as running a non-worktree task
+            pre_head_sha, pre_hunks, pre_untracked, pre_file_hashes = (
+                self._capture_pre_snapshot(work_dir, repo, tab_id)
+            )
             with self._state_lock:
                 tab.is_running_non_wt = True
+
+        # BUG-B fix: if this worktree tab has a pending branch from a
+        # prior run and a non-wt agent is writing to the main tree,
+        # clear the stale worktree reference (branch preserved in git)
+        # so _try_setup_worktree's _release_worktree is a no-op.
+        if tab.use_worktree and tab.agent._wt_pending:
+            with self._state_lock:
+                if self._any_non_wt_running():
+                    tab.agent._merge_conflict_warning = (
+                        f"Could not auto-merge branch "
+                        f"'{tab.agent._wt_branch}' because another "
+                        "task is running on the main working tree. "
+                        "The branch is preserved for manual resolution."
+                    )
+                    tab.agent._wt = None
 
         # start_recording inside try so stop_recording always runs (P14 fix)
         result_summary = "Agent Failed Abruptly"
@@ -520,6 +553,7 @@ class VSCodeServer:
                         ask_user_question_callback=self._ask_user_question,
                         is_parallel=tab.use_parallel,
                         use_worktree=tab.use_worktree,
+                        _skip_persistence=True,
                     )
                     result_summary = self._extract_result_summary() or "No summary available"
                     task_end_event = {"type": "task_done"}
@@ -1089,10 +1123,9 @@ class VSCodeServer:
         wt = tab.agent
         repo_root = wt._repo_root
         if repo_root is None:
-            toplevel = _git(self.work_dir, "rev-parse", "--show-toplevel")
-            if toplevel.returncode != 0:
+            repo_root = GitWorktreeOps.discover_repo(Path(self.work_dir))
+            if repo_root is None:
                 return
-            repo_root = Path(toplevel.stdout.strip())
         wt._restore_from_git(repo_root)
 
     def _generate_followup_async(
@@ -1369,6 +1402,32 @@ class VSCodeServer:
         dirty = set(GitWorktreeOps.unstaged_files(wt.repo_root))
         return bool(dirty & wt_files)
 
+    @staticmethod
+    def _resolve_base_ref(
+        git_dir: str, baseline: str | None, original_branch: str,
+        tip: str = "HEAD",
+    ) -> str:
+        """Resolve the base ref for worktree diff operations.
+
+        Uses the baseline commit when available, otherwise falls back
+        to ``git merge-base`` between *tip* and *original_branch*.
+
+        Args:
+            git_dir: Directory to run git commands in.
+            baseline: Baseline commit SHA, or ``None``.
+            original_branch: The user's original branch name.
+            tip: The tip ref to compute merge-base against (default ``HEAD``).
+
+        Returns:
+            A git ref string suitable for ``git diff``.
+        """
+        if baseline:
+            return baseline
+        mb = _git(git_dir, "merge-base", tip, original_branch)
+        if mb.returncode == 0 and mb.stdout.strip():
+            return mb.stdout.strip()
+        return original_branch
+
     def _get_worktree_changed_files(self, tab_id: str = "") -> list[str]:
         """List files changed in the worktree vs the original branch.
 
@@ -1393,17 +1452,9 @@ class VSCodeServer:
             return []
         wt_dir = wt._wt_dir
         if wt_dir and wt_dir.exists():
-            # Use baseline commit (user's dirty state snapshot) when
-            # available so only agent changes are listed.  Fall back
-            # to the merge-base for legacy worktrees (BUG-8 fix).
-            baseline = wt._baseline_commit
-            if baseline:
-                base_ref = baseline
-            else:
-                base_ref = wt._original_branch
-                mb = _git(str(wt_dir), "merge-base", "HEAD", wt._original_branch)
-                if mb.returncode == 0 and mb.stdout.strip():
-                    base_ref = mb.stdout.strip()
+            base_ref = self._resolve_base_ref(
+                str(wt_dir), wt._baseline_commit, wt._original_branch,
+            )
             tracked = _git(str(wt_dir), "diff", "--name-only", base_ref)
             files = (tracked.stdout.strip().splitlines()
                      if tracked.returncode == 0 else [])
@@ -1413,15 +1464,10 @@ class VSCodeServer:
         if not wt._wt_branch:
             return []
         repo_root = str(wt._repo_root) if wt._repo_root else self.work_dir
-        # Use baseline for branch-to-branch diff when available (BUG-8 fix)
-        baseline = wt._baseline_commit
-        if baseline:
-            base_ref = baseline
-        else:
-            base_ref = wt._original_branch
-            mb = _git(repo_root, "merge-base", wt._original_branch, wt._wt_branch)
-            if mb.returncode == 0 and mb.stdout.strip():
-                base_ref = mb.stdout.strip()
+        base_ref = self._resolve_base_ref(
+            repo_root, wt._baseline_commit, wt._original_branch,
+            tip=wt._wt_branch,
+        )
         result = _git(repo_root, "diff", "--name-only",
                       base_ref,
                       wt._wt_branch)
@@ -1467,6 +1513,17 @@ class VSCodeServer:
             success = "Successfully merged" in msg
             return {"success": success, "message": msg}
         elif action == "discard":
+            # INC-2 fix: guard discard's checkout against concurrent
+            # non-worktree task writing to the main tree.
+            with self._state_lock:
+                if self._any_non_wt_running():
+                    return {
+                        "success": False,
+                        "message": (
+                            "Another tab is running a task on the main working "
+                            "tree. Wait for it to finish before discarding."
+                        ),
+                    }
             msg = wt.discard()
             return {"success": True, "message": msg}
         return {"success": False, "message": f"Unknown action: {action}"}
