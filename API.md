@@ -915,7 +915,7 @@ ______________________________________________________________________
 
   - `wt_dir`: Worktree directory.
   - `message`: Commit message.
-  - **Returns:** True if a commit was created, False if nothing to commit.
+  - **Returns:** True if a commit was created, False if nothing to commit or the commit failed (e.g. pre-commit hook rejection).
 
 - **staged_diff** — Return the staged diff text for the worktree.<br/>`staged_diff(wt_dir: Path) -> str`
 

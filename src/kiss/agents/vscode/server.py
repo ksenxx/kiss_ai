@@ -1153,9 +1153,9 @@ class VSCodeServer:
     def _check_merge_conflict(self, tab_id: str = "") -> bool:
         """Check if merging the worktree branch into original would conflict.
 
-        Delegates all git operations to :class:`GitWorktreeOps` and
-        reads the pending worktree state from
-        :class:`WorktreeSorcarAgent`.  Checks two things:
+        Auto-commits any uncommitted worktree changes first so that
+        the branch comparison reflects the actual working-tree state.
+        Then checks two things:
 
         1. Tree-level conflicts via
            :meth:`GitWorktreeOps.would_merge_conflict`
@@ -1179,6 +1179,11 @@ class VSCodeServer:
         wt = tab.agent._wt
         if wt is None or wt.original_branch is None:
             return False
+        # Commit uncommitted worktree changes so the branch comparison
+        # reflects the actual working-tree state (fixes BUG-2: without
+        # this, the worktree branch has zero new commits and the conflict
+        # check always returns False).
+        tab.agent._auto_commit_worktree()
         # Check 1: tree-level merge conflicts (dry-run, no working-tree touch)
         if GitWorktreeOps.would_merge_conflict(
             wt.repo_root, wt.original_branch, wt.branch,

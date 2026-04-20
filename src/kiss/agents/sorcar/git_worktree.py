@@ -179,13 +179,19 @@ class GitWorktreeOps:
             message: Commit message.
 
         Returns:
-            True if a commit was created, False if nothing to commit.
+            True if a commit was created, False if nothing to commit
+            or the commit failed (e.g. pre-commit hook rejection).
         """
         _git("add", "-A", cwd=wt_dir)
         diff = _git("diff", "--cached", "--quiet", cwd=wt_dir)
         if diff.returncode == 0:
             return False
-        _git("commit", "-m", message, cwd=wt_dir)
+        result = _git("commit", "-m", message, cwd=wt_dir)
+        if result.returncode != 0:
+            logger.warning(
+                "git commit failed: %s", result.stderr.strip(),
+            )
+            return False
         return True
 
     @staticmethod

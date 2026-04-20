@@ -198,11 +198,7 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
             return
         wt = self._wt
 
-        # 1. Auto-commit with detailed LLM-generated message
-        if wt.wt_dir.exists():
-            self._auto_commit_worktree()
-            GitWorktreeOps.remove(wt.repo_root, wt.wt_dir)
-        GitWorktreeOps.prune(wt.repo_root)
+        self._finalize_worktree()
 
         # 2. Auto-merge into original branch
         if wt.original_branch:
@@ -431,10 +427,13 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
                 "Cannot merge: original branch is unknown (likely due to a "
                 "crash during setup).  Please specify the target branch "
                 "manually:\n"
-                f"    git checkout <branch> && git merge {wt.branch}"
+                f"    git checkout <branch> && git merge --squash {wt.branch}"
             )
 
-        self._finalize_worktree()
+        # Only finalize (auto-commit + remove worktree) on the first call.
+        # On retry after a conflict the worktree dir is already gone.
+        if wt.wt_dir.exists():
+            self._finalize_worktree()
 
         if not GitWorktreeOps.checkout(wt.repo_root, wt.original_branch):
             # pragma: no cover — dirty main worktree
@@ -467,7 +466,7 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
             "Merge conflict detected.  Resolve manually:\n"
             f"    cd {wt.repo_root}\n"
             f"    git checkout {wt.original_branch}\n"
-            f"    git merge {wt.branch}\n"
+            f"    git merge --squash {wt.branch}\n"
             "    # resolve conflicts in your editor\n"
             "    git add .\n"
             "    git commit\n"
@@ -520,7 +519,8 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
             "\nOr manually:\n"
             f"    cd {wt.repo_root}\n"
             f"    git checkout {orig}\n"
-            f"    git merge {wt.branch}\n"
+            f"    git merge --squash {wt.branch}\n"
+            "    git commit\n"
             f"    git branch -d {wt.branch}"
         )
 

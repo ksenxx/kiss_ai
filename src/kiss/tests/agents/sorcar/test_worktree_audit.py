@@ -1,11 +1,12 @@
-"""Audit tests for worktree mode: confirming bugs and inconsistencies.
+"""Tests verifying fixes for worktree mode bugs found during audit.
 
-Each test targets a specific bug or inconsistency found during code review.
-Tests are labeled BUG-N or INCONSISTENCY-N for traceability.
+Each test targets a specific bug fix and verifies the correct behavior.
+Tests are labeled BUG-N or FIX-N for traceability.
 """
 
 from __future__ import annotations
 
+import inspect
 import shutil
 import subprocess
 import tempfile
@@ -83,18 +84,12 @@ def _unpatch_super_run(original: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
-# BUG-1: commit_all doesn't check git commit return code
+# FIX-1: commit_all now checks git commit return code
 # ---------------------------------------------------------------------------
 
 
-class TestBug1CommitAllIgnoresFailure:
-    """commit_all returns True even when 'git commit' fails.
-
-    If ``git commit`` fails (e.g. pre-commit hook rejection, permissions),
-    ``commit_all`` still returns True because it doesn't check the commit
-    subprocess's return code. This means callers believe the commit
-    succeeded when it didn't.
-    """
+class TestFix1CommitAllChecksReturnCode:
+    """commit_all returns False when 'git commit' fails."""
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
@@ -103,52 +98,49 @@ class TestBug1CommitAllIgnoresFailure:
     def teardown_method(self) -> None:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_commit_all_returns_true_when_commit_fails(self) -> None:
-        """BUG-1: commit_all returns True even when git commit fails.
+    def test_commit_all_returns_false_when_commit_fails(self) -> None:
+        """FIX-1: commit_all returns False when git commit is rejected.
 
         We install a pre-commit hook that always rejects commits, then
-        call commit_all. It stages changes and reports True (committed),
-        but the commit was actually rejected by the hook.
+        call commit_all. It should return False because the commit failed.
         """
-        # Install a pre-commit hook that rejects all commits
         hooks_dir = self.repo / ".git" / "hooks"
         hooks_dir.mkdir(exist_ok=True)
         hook = hooks_dir / "pre-commit"
         hook.write_text("#!/bin/sh\nexit 1\n")
         hook.chmod(0o755)
 
-        # Make a change
         (self.repo / "new_file.txt").write_text("content")
 
-        # commit_all should detect this isn't committed
         result = GitWorktreeOps.commit_all(self.repo, "test commit")
 
-        # BUG: returns True (thinks commit succeeded) but commit was rejected
-        assert result is True, (
-            "commit_all returns True because it doesn't check git commit rc"
-        )
+        # Fixed: returns False because git commit was rejected by the hook
+        assert result is False
 
-        # Verify the commit was actually rejected (nothing was committed)
+        # Verify the commit was actually rejected
         log = _git("log", "--oneline", cwd=self.repo)
         commit_count = len(log.stdout.strip().splitlines())
-        assert commit_count == 1, (
-            "Only the initial commit should exist; the hook rejected the new one"
-        )
+        assert commit_count == 1
+
+    def test_commit_all_returns_true_on_success(self) -> None:
+        """commit_all returns True when git commit succeeds."""
+        (self.repo / "new_file.txt").write_text("content")
+        result = GitWorktreeOps.commit_all(self.repo, "test commit")
+        assert result is True
+
+    def test_commit_all_returns_false_when_nothing_to_commit(self) -> None:
+        """commit_all returns False when there are no changes."""
+        result = GitWorktreeOps.commit_all(self.repo, "test commit")
+        assert result is False
 
 
 # ---------------------------------------------------------------------------
-# BUG-2: _check_merge_conflict doesn't account for uncommitted changes
+# FIX-3: merge() conflict instructions now say 'git merge --squash'
 # ---------------------------------------------------------------------------
 
 
-class TestBug2ConflictCheckMissesUncommitted:
-    """_check_merge_conflict returns False even when uncommitted worktree
-    changes would conflict with the original branch.
-
-    Since _check_merge_conflict compares the worktree *branch* (not
-    working tree) against the original branch, and the agent's changes
-    aren't committed yet, the check always reports "no conflict".
-    """
+class TestFix3MergeInstructionsUseSquash:
+    """merge() conflict instructions correctly say 'git merge --squash'."""
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
@@ -161,88 +153,8 @@ class TestBug2ConflictCheckMissesUncommitted:
         _restore_db(self.db_saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_conflict_check_misses_uncommitted_worktree_changes(self) -> None:
-        """BUG-2: would_merge_conflict returns False for uncommitted conflicts.
-
-        Steps:
-        1. Agent creates a worktree (branch forked from original)
-        2. Modify README.md in the worktree (uncommitted)
-        3. Modify README.md on the original branch (committed)
-        4. would_merge_conflict compares branch vs original — but branch
-           has no commits, so it's comparing original with itself → False
-        """
-        agent = WorktreeSorcarAgent("test")
-        agent.run(prompt_template="task1", work_dir=str(self.repo))
-
-        wt_dir = agent._wt_dir
-        assert wt_dir is not None
-
-        # 1. Modify README.md in worktree (uncommitted)
-        (wt_dir / "README.md").write_text("worktree conflicting change\n")
-
-        # 2. Modify README.md on original branch (committed)
-        (self.repo / "README.md").write_text("main conflicting change\n")
-        _git("add", "-A", cwd=self.repo)
-        _git("commit", "-m", "conflict on main", cwd=self.repo)
-
-        # 3. Check: would_merge_conflict compares branch (no commits)
-        #    vs original (has new commit). Since the branch has no commits
-        #    beyond the fork point, git sees no tree difference.
-        wt = agent._wt
-        assert wt is not None
-        has_conflict = GitWorktreeOps.would_merge_conflict(
-            wt.repo_root, wt.original_branch, wt.branch,  # type: ignore[arg-type]
-        )
-
-        # BUG: This returns False because branch has no commits
-        # (the conflicting change is uncommitted in the worktree)
-        assert has_conflict is False, (
-            "would_merge_conflict returns False because uncommitted "
-            "changes aren't on the branch yet"
-        )
-
-        # But after auto-commit and merge, there IS a real conflict
-        GitWorktreeOps.commit_all(wt_dir, "commit worktree changes")
-        actual_conflict = GitWorktreeOps.would_merge_conflict(
-            wt.repo_root, wt.original_branch, wt.branch,  # type: ignore[arg-type]
-        )
-        assert actual_conflict is True, (
-            "After committing, the conflict is detectable"
-        )
-
-        agent.discard()
-
-
-# ---------------------------------------------------------------------------
-# BUG-3: merge() conflict instructions suggest wrong merge strategy
-# ---------------------------------------------------------------------------
-
-
-class TestBug3MergeInstructionsInconsistency:
-    """merge() conflict instructions tell user to run 'git merge' but
-    the agent uses 'git merge --squash'. Following the manual instructions
-    would produce a merge commit instead of a squash commit.
-    """
-
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        self.db_saved = _redirect_db(self.tmpdir)
-        self.repo = _make_repo(Path(self.tmpdir) / "repo")
-        self.original_run = _patch_super_run()
-
-    def teardown_method(self) -> None:
-        _unpatch_super_run(self.original_run)
-        _restore_db(self.db_saved)
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_conflict_instructions_say_merge_not_squash(self) -> None:
-        """BUG-3: Conflict instructions use 'git merge' not 'git merge --squash'.
-
-        The agent merges using squash_merge_branch (git merge --squash),
-        but the conflict recovery instructions tell the user to run
-        'git merge <branch>' (a regular merge), which would create a
-        merge commit — a different history shape than the agent intended.
-        """
+    def test_conflict_instructions_say_squash(self) -> None:
+        """FIX-3: Conflict instructions use 'git merge --squash'."""
         agent = WorktreeSorcarAgent("test")
         agent.run(prompt_template="task1", work_dir=str(self.repo))
 
@@ -252,7 +164,6 @@ class TestBug3MergeInstructionsInconsistency:
         GitWorktreeOps.stage_all(wt_dir)
         GitWorktreeOps.commit_all(wt_dir, "wt conflict")
 
-        # Create conflicting change on original
         (self.repo / "README.md").write_text("main change\n")
         _git("add", "-A", cwd=self.repo)
         _git("commit", "-m", "main conflict", cwd=self.repo)
@@ -260,69 +171,82 @@ class TestBug3MergeInstructionsInconsistency:
         msg = agent.merge()
         assert "Merge conflict" in msg
 
-        # BUG: Instructions say "git merge" but agent uses squash merge
         branch = agent._wt_branch
         assert branch is not None
-        assert f"git merge {branch}" in msg
-        assert "git merge --squash" not in msg, (
-            "Instructions should say 'git merge --squash' to match "
-            "agent behavior, but they say 'git merge'"
+        # Fixed: instructions now use --squash to match agent behavior
+        assert f"git merge --squash {branch}" in msg
+
+        agent.discard()
+
+    def test_merge_instructions_say_squash(self) -> None:
+        """merge_instructions() also uses 'git merge --squash'."""
+        agent = WorktreeSorcarAgent("test")
+        agent.run(prompt_template="task1", work_dir=str(self.repo))
+
+        instructions = agent.merge_instructions()
+        assert "git merge --squash" in instructions
+
+        agent.discard()
+
+    def test_unknown_branch_instructions_say_squash(self) -> None:
+        """When original_branch is None, instructions still say --squash."""
+        agent = WorktreeSorcarAgent("test")
+        agent.run(prompt_template="task1", work_dir=str(self.repo))
+
+        # Force original_branch to None
+        from kiss.agents.sorcar.git_worktree import GitWorktree
+        assert agent._wt is not None
+        agent._wt = GitWorktree(
+            repo_root=agent._wt.repo_root,
+            branch=agent._wt.branch,
+            original_branch=None,
+            wt_dir=agent._wt.wt_dir,
         )
 
+        msg = agent.merge()
+        assert "git merge --squash" in msg
+
+        # Restore for cleanup
+        agent._wt = GitWorktree(
+            repo_root=agent._wt.repo_root,
+            branch=agent._wt.branch,
+            original_branch="main",
+            wt_dir=agent._wt.wt_dir,
+        )
         agent.discard()
 
 
 # ---------------------------------------------------------------------------
-# INCONSISTENCY-1: _release_worktree duplicates _finalize_worktree logic
+# FIX-INC1: _release_worktree calls _finalize_worktree
 # ---------------------------------------------------------------------------
 
 
-class TestInconsistency1DuplicateFinalization:
-    """_release_worktree duplicates the exact same auto-commit + remove +
-    prune logic that _finalize_worktree provides. If one is updated
-    without the other, they'll diverge.
+class TestFixInc1ReleaseCallsFinalize:
+    """_release_worktree now calls _finalize_worktree() instead of
+    duplicating its logic.
     """
 
-    def test_release_and_finalize_have_duplicate_code(self) -> None:
-        """INCONSISTENCY-1: _release_worktree inlines _finalize_worktree logic.
-
-        Both methods do:
-            if wt.wt_dir.exists():
-                self._auto_commit_worktree()
-                GitWorktreeOps.remove(wt.repo_root, wt.wt_dir)
-            GitWorktreeOps.prune(wt.repo_root)
-
-        _release_worktree should call _finalize_worktree() instead.
-        """
-        import inspect
-
-        finalize_src = inspect.getsource(WorktreeSorcarAgent._finalize_worktree)
-        release_src = inspect.getsource(WorktreeSorcarAgent._release_worktree)
-
-        # Both contain the same worktree removal pattern
-        assert "self._auto_commit_worktree()" in finalize_src
-        assert "self._auto_commit_worktree()" in release_src
-        assert "GitWorktreeOps.remove(" in finalize_src
-        assert "GitWorktreeOps.remove(" in release_src
-        assert "GitWorktreeOps.prune(" in finalize_src
-        assert "GitWorktreeOps.prune(" in release_src
-
-        # But _release_worktree doesn't call _finalize_worktree
-        assert "_finalize_worktree" not in release_src, (
-            "_release_worktree duplicates _finalize_worktree instead of "
-            "calling it"
+    def test_release_calls_finalize(self) -> None:
+        """FIX-INC1: _release_worktree delegates to _finalize_worktree."""
+        release_src = inspect.getsource(
+            WorktreeSorcarAgent._release_worktree
         )
+        assert "_finalize_worktree" in release_src
+
+        # And doesn't duplicate the low-level operations
+        assert "GitWorktreeOps.remove(" not in release_src
+        assert "GitWorktreeOps.prune(" not in release_src
 
 
 # ---------------------------------------------------------------------------
-# BUG-4: merge() after conflict still allows re-call (no clear error)
+# FIX-4: merge() skips finalization on retry after conflict
 # ---------------------------------------------------------------------------
 
 
-class TestBug4MergeRetryAfterConflict:
-    """After merge() returns a conflict message, self._wt remains set.
-    Calling merge() again repeats the entire finalize + squash-merge cycle
-    without telling the user it's a retry or that the worktree dir is gone.
+class TestFix4MergeRetrySkipsFinalize:
+    """After merge() returns a conflict, calling merge() again skips
+    _finalize_worktree since the worktree dir is already gone, and
+    goes straight to the squash merge retry.
     """
 
     def setup_method(self) -> None:
@@ -336,11 +260,8 @@ class TestBug4MergeRetryAfterConflict:
         _restore_db(self.db_saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_merge_can_be_called_twice_after_conflict(self) -> None:
-        """BUG-4: merge() doesn't clear self._wt on conflict, so it can
-        be called again. The second call tries the full cycle again
-        (finalize + squash merge), but the worktree dir is already gone.
-        """
+    def test_merge_retry_after_conflict_is_safe(self) -> None:
+        """FIX-4: merge() retries cleanly after a conflict."""
         agent = WorktreeSorcarAgent("test")
         agent.run(prompt_template="task1", work_dir=str(self.repo))
 
@@ -356,14 +277,37 @@ class TestBug4MergeRetryAfterConflict:
 
         msg1 = agent.merge()
         assert "Merge conflict" in msg1
-        assert agent._wt_pending  # still pending after conflict
-
-        # The worktree dir is already removed by _finalize_worktree
+        assert agent._wt_pending
         assert not wt_dir.exists()
 
-        # But merge() can be called again (no RuntimeError)
+        # Retry is safe and gives the same result
         msg2 = agent.merge()
-        assert "Merge conflict" in msg2  # same conflict
+        assert "Merge conflict" in msg2
 
-        # Eventually discard to clean up
         agent.discard()
+
+    def test_merge_retry_succeeds_after_conflict_resolved(self) -> None:
+        """FIX-4: merge() succeeds on retry after user resolves conflict."""
+        agent = WorktreeSorcarAgent("test")
+        agent.run(prompt_template="task1", work_dir=str(self.repo))
+
+        wt_dir = agent._wt_dir
+        assert wt_dir is not None
+        (wt_dir / "README.md").write_text("worktree change\n")
+        GitWorktreeOps.stage_all(wt_dir)
+        GitWorktreeOps.commit_all(wt_dir, "wt conflict")
+
+        (self.repo / "README.md").write_text("main change\n")
+        _git("add", "-A", cwd=self.repo)
+        _git("commit", "-m", "main conflict", cwd=self.repo)
+
+        msg1 = agent.merge()
+        assert "Merge conflict" in msg1
+
+        # Simulate user resolving: reset main branch to match worktree content
+        _git("reset", "--hard", "HEAD~1", cwd=self.repo)
+
+        # Retry now succeeds
+        msg2 = agent.merge()
+        assert "Successfully merged" in msg2
+        assert not agent._wt_pending
