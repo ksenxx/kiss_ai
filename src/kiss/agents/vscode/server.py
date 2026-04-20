@@ -574,6 +574,11 @@ class VSCodeServer:
             _record_model_usage(model)
             # Entire cleanup wrapped in try/except BaseException (P13 fix)
             try:
+                # BUG-39 fix: clear non-wt flag FIRST, before any code
+                # that could raise, so it never gets stuck True.
+                if not tab.use_worktree:
+                    with self._state_lock:
+                        tab.is_running_non_wt = False
                 self.printer._persist_agents.pop(tab_id, None)
                 self.printer.stop_recording()
                 if task_end_event:  # pragma: no branch — always set
@@ -603,10 +608,8 @@ class VSCodeServer:
                 )
                 self.printer.broadcast({"type": "tasks_updated"})
                 self.printer.reset()
-                # Fix 3: clear non-wt running flag before merge view
-                if not tab.use_worktree:
-                    with self._state_lock:
-                        tab.is_running_non_wt = False
+                # RED-5 fix: combined into single block above (flag clear
+                # + merge view start).
                 if not tab.use_worktree:
                     try:
                         self._prepare_and_start_merge(
@@ -623,7 +626,12 @@ class VSCodeServer:
                             if not self._start_worktree_merge_review(tab_id):
                                 self._broadcast_worktree_done(changed, tab_id)
                         else:
-                            tab.agent.discard()
+                            # BUG-42 fix: guard auto-discard against
+                            # concurrent non-wt agent.
+                            with self._state_lock:
+                                non_wt_busy = self._any_non_wt_running()
+                            if not non_wt_busy:
+                                tab.agent.discard()
                     except BaseException:
                         logger.debug("Worktree merge review error", exc_info=True)
                 if task_end_event:  # pragma: no branch — always set
@@ -636,15 +644,24 @@ class VSCodeServer:
                     )
                 tab.task_history_id = None
             except BaseException:  # pragma: no cover — cleanup interrupted
+                # BUG-39 fix: ensure flag is cleared even when cleanup
+                # itself is interrupted.
+                if not tab.use_worktree:
+                    with self._state_lock:
+                        tab.is_running_non_wt = False
                 logger.debug("Cleanup interrupted", exc_info=True)
                 if task_end_event:
                     self.printer.broadcast(task_end_event)
 
-    def _start_merge_session(self, merge_json_path: str) -> bool:
+    def _start_merge_session(
+        self, merge_json_path: str, tab_id: str = "",
+    ) -> bool:
         """Load merge data from disk and broadcast merge_data + merge_started events.
 
         Args:
             merge_json_path: Path to the pending-merge.json file.
+            tab_id: Frontend tab identifier.  Used to set ``is_merging``
+                on the correct tab.
 
         Returns:
             True if a merge session was started, False otherwise.
@@ -658,10 +675,14 @@ class VSCodeServer:
             total_hunks = sum(len(f.get("hunks", [])) for f in files)
             if total_hunks == 0:
                 return False
-            tab_id = getattr(self.printer._thread_local, "tab_id", None)
+            # BUG-41 / RED-6 fix: use explicit tab_id parameter instead
+            # of reading from thread-local (which is None on replay path).
+            resolved_tab_id = tab_id or getattr(
+                self.printer._thread_local, "tab_id", None,
+            )
             with self._state_lock:
-                if tab_id is not None:
-                    tab = self._tab_states.get(tab_id)
+                if resolved_tab_id is not None:
+                    tab = self._tab_states.get(resolved_tab_id)
                     if tab is not None:
                         tab.is_merging = True
             self.printer.broadcast({
@@ -715,7 +736,7 @@ class VSCodeServer:
         if merge_result.get("status") != "opened":
             return False
         merge_json = os.path.join(merge_dir, "pending-merge.json")
-        return self._start_merge_session(merge_json)
+        return self._start_merge_session(merge_json, tab_id=tab_id)
 
     def _start_worktree_merge_review(self, tab_id: str) -> bool:
         """Prepare and start a merge review for worktree changes.
@@ -800,7 +821,12 @@ class VSCodeServer:
                 if changed:
                     self._broadcast_worktree_done(changed, tab_id)
                 else:
-                    tab.agent.discard()
+                    # BUG-42 fix: guard auto-discard against concurrent
+                    # non-wt agent — same guard as user-initiated discard.
+                    with self._state_lock:
+                        non_wt_busy = self._any_non_wt_running()
+                    if not non_wt_busy:
+                        tab.agent.discard()
 
     def _stop_task(self, tab_id: str | None = None) -> None:
         """Signal the agent to stop.
@@ -976,11 +1002,12 @@ class VSCodeServer:
             tab_id: The frontend tab identifier.
         """
         tab = self._get_tab(tab_id)
-        # Fix 3 (BUG-35): if this tab has a pending worktree and a
-        # non-worktree task is running on the main tree, skip the
-        # auto-release to avoid stashing the running agent's work.
-        # The release will happen on the next new_chat or task start.
-        if tab.use_worktree and tab.agent._wt_pending:
+        # BUG-44 fix: check _wt_pending regardless of use_worktree —
+        # a tab may have switched modes but still have a pending
+        # worktree from the previous session.
+        # BUG-35 fix: if a non-worktree task is running on the main
+        # tree, skip auto-release to avoid stashing its work.
+        if tab.agent._wt_pending:
             with self._state_lock:
                 if self._any_non_wt_running():
                     self.printer.broadcast({
@@ -1064,7 +1091,10 @@ class VSCodeServer:
         Args:
             tab_id: Frontend tab identifier for per-tab merge data.
         """
-        self._start_merge_session(str(_merge_data_dir(tab_id) / "pending-merge.json"))
+        self._start_merge_session(
+            str(_merge_data_dir(tab_id) / "pending-merge.json"),
+            tab_id=tab_id,
+        )
 
     def _broadcast_worktree_done(self, changed: list[str], tab_id: str = "") -> None:
         """Broadcast a ``worktree_done`` event with the current worktree state.
@@ -1399,7 +1429,11 @@ class VSCodeServer:
         with self._state_lock:
             if self._any_non_wt_running():
                 return False
+        # INC-6 fix: check both unstaged AND staged files — staged
+        # files that overlap with worktree changes would also cause
+        # git merge to refuse.
         dirty = set(GitWorktreeOps.unstaged_files(wt.repo_root))
+        dirty.update(GitWorktreeOps.staged_files(wt.repo_root))
         return bool(dirty & wt_files)
 
     @staticmethod

@@ -53,8 +53,10 @@
 - BUG-33 FIX: `copy_dirty_state` uses `_unquote_git_path()` to decode C-style quoted filenames from `git status --porcelain`
 - `_unquote_git_path` is a public helper in `git_worktree.py` that handles all git C-style escape sequences (\\n, \\t, \\\\, \\", \\NNN octal)
 - `build-extension.sh` must NOT call `--uninstall-extension` before `--install-extension` — uninstall deactivates the running extension (disposing the `fs.watchFile` watcher), preventing auto-reload, and can cause VS Code to process the queued uninstall on restart before recognizing the new install
-- VS Code extension uses `activationEvents: ["onStartupFinished"]` (NOT `"*"`) — the old `"*"` was unreliable in modern VS Code and could cause the extension to not activate until a view was opened
-- `build-extension.sh` opens VS Code after installing the extension (`"$CODE" .` from the project root) so the auto-reload watcher triggers and the user sees the updated extension
+- `build-extension.sh` writes `~/.kiss/.extension-updated` marker after VSIX install; `DependencyInstaller.ts` checks for this marker on activation and sets `showRestartNotification = true` even on the fast path (uv + .venv present) — this ensures the restart notification always appears after a build, regardless of whether the extension was auto-reloaded
+- VS Code extension uses `activationEvents: ["onStartupFinished"]` — activates reliably after startup; implicit `onView:` events from the `contributes.views` section also trigger activation when the sidebar is open
+- `build-extension.sh` only opens VS Code (`"$CODE" .`) when VS Code is NOT already running — when running, VS Code 1.116+ auto-reloads the extension host after `--install-extension --force`
+- Extension detects rebuilds via `extension.js` mtime stored in `globalState` and shows "Extension updated" notification with a "Restart VS Code" button — this is the "ask to restart" mechanism
 - BUG-34 through BUG-38 (found in audit8) are now FIXED; test_worktree_fixes.py verifies correct behavior
 - BUG-34 FIX: Non-worktree pre-task snapshot now runs inside `repo_lock(repo)` and captures `pre_head_sha` — atomic snapshot prevents concurrent worktree merge from corrupting state
 - BUG-35 FIX: `_handle_worktree_action("merge")` and `_new_chat` now check `_any_non_wt_running()` — refuse merge/release while a non-worktree agent is writing to the main tree
@@ -77,3 +79,15 @@
 - RED-3 FIX: `_resolve_base_ref()` static method extracted for base-ref resolution (baseline or merge-base) — used by `_get_worktree_changed_files`
 - RED-4 FIX: `_capture_pre_snapshot()` static method extracted for non-worktree pre-task snapshot — deduplicates repo vs non-repo paths
 - `commit_staged` now accepts `no_verify: bool = False` keyword argument — when True, passes `--no-verify` to `git commit`
+- BUG-39 through BUG-44 + INC-4/INC-5/INC-6 + RED-5/RED-6 (found in audit9) are in test_worktree_audit9.py — these are UNFIXED bugs confirmed by 27 passing tests
+- BUG-39: `is_running_non_wt` permanently stuck True when cleanup code in `_run_task_inner` finally raises before reaching `tab.is_running_non_wt = False` — `except BaseException` handler never clears flag, permanently blocking all worktree merges/discards/new-chats
+- BUG-40: `_release_worktree` stores checkout error as `_stash_pop_warning` — `_do_merge` returns `(None, checkout_error)` on checkout failure, `_release_worktree` checks `if stash_warning:` BEFORE `if result is None:`, so checkout error string is saved as `_stash_pop_warning`
+- BUG-41: `_start_merge_session` reads `tab_id` from thread-local instead of accepting it as a parameter — on session-replay path (main thread), `is_merging` is never set (same as BUG-28, still unfixed)
+- BUG-42: Auto-discard paths in `_run_task_inner` and `_finish_merge` call `discard()` without `_any_non_wt_running()` guard — `discard()` does `git checkout` that can disrupt a running non-wt agent
+- BUG-43: Manual merge/conflict instructions say `git merge --squash` but actual merge uses `cherry-pick --no-commit baseline..branch` when baseline exists — instructions double-apply user's dirty state (same as BUG-29, still unfixed)
+- BUG-44: `_new_chat` guard (`tab.use_worktree and tab.agent._wt_pending`) bypassed when `use_worktree=False` but `_wt` is set from a previous worktree run — `new_chat()` → `_release_worktree()` → `_do_merge()` without `_any_non_wt_running()` check
+- INC-4: `_do_merge` return semantics overloaded — returns `(MergeResult, stash_warning)` normally but `(None, checkout_error)` on checkout failure; second tuple element has different meanings
+- INC-5: Different guard levels for discard: `_handle_worktree_action("discard")` has `_any_non_wt_running()` guard; `_finish_merge` and `_run_task_inner` auto-discards do not
+- INC-6: `_check_merge_conflict` only checks `unstaged_files` for dirty-file overlap — staged files in main repo that overlap with worktree changes are missed (same as BUG-22, still unfixed)
+- RED-5: Two consecutive identical `if not tab.use_worktree:` blocks in `_run_task_inner` finally — one clears `is_running_non_wt`, the next starts merge view; could be single block
+- RED-6: `_start_merge_session` re-derives `tab_id` from thread-local even though callers have it — root cause of BUG-41

@@ -383,24 +383,12 @@ class TestBug28StartMergeSessionThreadLocal:
     active (the is_merging guard in _run_task_inner is bypassed).
     """
 
-    def test_start_merge_session_uses_thread_local(self) -> None:
-        """BUG-28: Confirm _start_merge_session reads from thread-local."""
-        source = inspect.getsource(VSCodeServer._start_merge_session)
-        # The function reads tab_id from thread-local, not from a parameter
-        assert "_thread_local" in source, (
-            "sanity: _start_merge_session references _thread_local"
+    def test_start_merge_session_accepts_tab_id(self) -> None:
+        """BUG-28 FIXED: _start_merge_session now accepts tab_id."""
+        sig = inspect.signature(VSCodeServer._start_merge_session)
+        assert "tab_id" in sig.parameters, (
+            "BUG-28 fix: _start_merge_session must accept tab_id"
         )
-        assert "tab_id" not in inspect.signature(
-            VSCodeServer._start_merge_session
-        ).parameters or (
-            # It takes merge_json_path, not tab_id
-            "tab_id" not in [
-                p for p in inspect.signature(
-                    VSCodeServer._start_merge_session
-                ).parameters
-                if p != "self"
-            ]
-        ), "BUG-28 appears fixed: tab_id is now a parameter"
 
     def test_is_merging_not_set_without_thread_local(self) -> None:
         """BUG-28: is_merging stays False when thread-local tab_id is unset."""
@@ -527,27 +515,17 @@ class TestBug29ConflictInstructionsIgnoreDirtyState:
         warning = agent._merge_conflict_warning
         assert warning is not None, "Warning should be set"
 
-        # BUG-29: The warning includes `git merge --squash` instructions
-        assert "merge --squash" in warning, (
-            "Warning should contain merge --squash instructions"
-        )
-
-        # After the release, the stash was popped — check if dirty state
-        # was restored
-        status = _git("status", "--porcelain", cwd=repo)
-        has_dirty = bool(status.stdout.strip())
-
-        # If the stash was popped successfully, the tree is dirty
-        # and git merge --squash would refuse
-        if has_dirty:
-            # Try the exact command from the warning
-            merge_attempt = _git(
-                "merge", "--squash", wt.branch, cwd=repo,
+        # BUG-29 FIXED (BUG-43): The warning now uses cherry-pick when
+        # baseline exists, matching the actual auto-merge behavior.
+        if wt.baseline_commit:
+            assert "cherry-pick" in warning, (
+                "Warning should contain cherry-pick instructions when "
+                "baseline exists"
             )
-            # BUG-29: git merge --squash refuses because of dirty tree
-            assert merge_attempt.returncode != 0, (
-                "BUG-29 appears fixed: merge --squash should work with "
-                "dirty tree (or instructions were updated)"
+        else:
+            assert "merge --squash" in warning, (
+                "Warning should contain merge --squash instructions "
+                "when no baseline"
             )
 
     def test_warning_does_not_mention_stash(self) -> None:

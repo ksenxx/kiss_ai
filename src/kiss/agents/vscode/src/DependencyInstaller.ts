@@ -137,7 +137,20 @@ async function ensureDependenciesImpl(): Promise<void> {
     }
   }
 
+  // Check if build-extension.sh just ran (marker file written by the script).
+  // When the marker exists, always show the restart notification — even on
+  // the fast path where uv + .venv are already present.
+  const updateMarker = path.join(LOG_DIR, '.extension-updated');
   let showRestartNotification = false;
+  if (fs.existsSync(updateMarker)) {
+    showRestartNotification = true;
+    try {
+      fs.unlinkSync(updateMarker);
+    } catch {
+      /* ignore */
+    }
+    log('Extension-updated marker found — will show restart notification');
+  }
 
   // Fast path: everything looks ready, ensure playwright in background
   if (uvPath && venvExists) {
@@ -303,7 +316,7 @@ async function ensureDependenciesImpl(): Promise<void> {
       },
     );
 
-    showRestartNotification = !!success;
+    showRestartNotification = showRestartNotification || !!success;
   }
 
   // Install CLI wrapper so `sorcar` is available from any terminal

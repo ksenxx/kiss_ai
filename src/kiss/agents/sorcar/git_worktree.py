@@ -544,6 +544,22 @@ class GitWorktreeOps:
         return [f for f in result.stdout.strip().splitlines() if f]
 
     @staticmethod
+    def staged_files(repo: Path) -> list[str]:
+        """List files with staged (cached) changes in the index.
+
+        Args:
+            repo: Git repo root path.
+
+        Returns:
+            List of files staged for commit, or an empty list if the
+            command fails.
+        """
+        result = _git("diff", "--cached", "--name-only", cwd=repo)
+        if result.returncode != 0:
+            return []
+        return [f for f in result.stdout.strip().splitlines() if f]
+
+    @staticmethod
     def manual_merge_branch(repo: Path, branch: str) -> ManualMergeResult:
         """Merge with ``--no-commit --no-ff`` for interactive review.
 

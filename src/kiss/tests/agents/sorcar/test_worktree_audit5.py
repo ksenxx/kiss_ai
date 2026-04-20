@@ -271,8 +271,8 @@ class TestBug22ConflictMissesStaged:
         tab.use_worktree = True
 
         has_conflict = server._check_merge_conflict("t22")
-        # Known limitation: staged overlap not detected
-        assert has_conflict is False
+        # Fixed (INC-6): staged overlap is now detected
+        assert has_conflict is True
 
     def test_unstaged_files_only_returns_unstaged(self) -> None:
         """unstaged_files() uses git diff --name-only (no --cached)."""
@@ -405,14 +405,16 @@ class TestBug24SilentDiscardOnGitFailure:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_caller_discards_on_empty_changed_files(self) -> None:
-        """_run_task_inner calls discard() when changed=[]."""
+        """_run_task_inner calls discard() when changed=[], guarded
+        by _any_non_wt_running() (BUG-42 fix)."""
         source = inspect.getsource(VSCodeServer._run_task_inner)
         assert "discard()" in source
         lines = source.splitlines()
         found_pattern = False
         for i, line in enumerate(lines):
             if "tab.agent.discard()" in line:
-                for j in range(i - 1, max(i - 5, 0), -1):
+                # Look for else: within 10 lines (guard adds more lines)
+                for j in range(i - 1, max(i - 10, 0), -1):
                     if "else:" in lines[j]:
                         found_pattern = True
                         break

@@ -988,6 +988,11 @@ ______________________________________________________________________
   - `repo`: Git repo root path.
   - **Returns:** List of files with uncommitted, unstaged modifications, or an empty list if the command fails.
 
+- **staged_files** — List files with staged (cached) changes in the index.<br/>`staged_files(repo: Path) -> list[str]`
+
+  - `repo`: Git repo root path.
+  - **Returns:** List of files staged for commit, or an empty list if the command fails.
+
 - **manual_merge_branch** — Merge with `--no-commit --no-ff` for interactive review. On success (no conflicts), unstages changes via `git reset HEAD` so the user can selectively stage hunks.<br/>`manual_merge_branch(repo: Path, branch: str) -> ManualMergeResult`
 
   - `repo`: Git repo root path.

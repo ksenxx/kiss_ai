@@ -79,6 +79,25 @@ def _generate_commit_message(wt_dir: Path) -> str:
         return fallback
 
 
+def _manual_merge_cmd(wt: GitWorktree) -> str:
+    """Return the correct manual merge command for a worktree.
+
+    When a baseline commit exists, the auto-merge uses
+    ``cherry-pick --no-commit baseline..branch`` to replay only agent
+    commits.  ``git merge --squash`` would incorrectly include the
+    baseline's dirty-state snapshot.
+
+    Args:
+        wt: The worktree state.
+
+    Returns:
+        A shell command string for manual merge.
+    """
+    if wt.baseline_commit:
+        return f"git cherry-pick --no-commit {wt.baseline_commit}..{wt.branch}"
+    return f"git merge --squash {wt.branch}"
+
+
 class WorktreeSorcarAgent(StatefulSorcarAgent):
     """SorcarAgent that isolates every task in a git worktree.
 
@@ -210,7 +229,7 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
 
     def _do_merge(
         self, wt: GitWorktree,
-    ) -> tuple[MergeResult | None, str]:
+    ) -> tuple[MergeResult, str]:
         """Checkout, stash, squash-merge, pop for a worktree branch.
 
         Serialized under ``repo_lock`` to prevent concurrent tabs from
@@ -221,8 +240,9 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
 
         Returns:
             ``(result, stash_warning)`` where *result* is the merge
-            outcome (``None`` when checkout fails) and *stash_warning*
-            is a non-empty string if stash-pop failed.
+            outcome and *stash_warning* is a non-empty string if
+            stash-pop failed.  Checkout failures return
+            ``(MergeResult.CHECKOUT_FAILED, "")``.
         """
         stash_warning = ""
         with repo_lock(wt.repo_root):
@@ -236,7 +256,7 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
                         "Cannot checkout '%s': %s",
                         wt.original_branch, err,
                     )
-                    return (None, err)
+                    return (MergeResult.CHECKOUT_FAILED, "")
 
             did_stash = GitWorktreeOps.stash_if_dirty(wt.repo_root)
             if wt.baseline_commit:
@@ -307,8 +327,9 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
             if stash_warning:
                 self._stash_pop_warning = stash_warning
 
-            if result is None:
-                # Checkout failed
+            merge_cmd = _manual_merge_cmd(wt)
+
+            if result == MergeResult.CHECKOUT_FAILED:
                 self._merge_conflict_warning = (
                     f"Auto-merge of '{wt.branch}' could not checkout "
                     f"'{wt.original_branch}'. The branch is kept for "
@@ -325,7 +346,7 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
                     "resolution. Run:\n"
                     f"    cd {wt.repo_root}\n"
                     f"    git checkout {wt.original_branch}\n"
-                    f"    git merge --squash {wt.branch}\n"
+                    f"    {merge_cmd}\n"
                     "    # fix pre-commit issues, then:\n"
                     "    git commit --no-verify\n"
                     f"    git branch -d {wt.branch}"
@@ -344,7 +365,7 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
                     "branch is kept for manual resolution. Run:\n"
                     f"    cd {wt.repo_root}\n"
                     f"    git checkout {wt.original_branch}\n"
-                    f"    git merge --squash {wt.branch}\n"
+                    f"    {merge_cmd}\n"
                     "    # resolve conflicts, then:\n"
                     "    git add . && git commit\n"
                     f"    git branch -d {wt.branch}"
@@ -587,11 +608,12 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         wt = self._wt
 
         if wt.original_branch is None:
+            merge_cmd = _manual_merge_cmd(wt)
             return (
                 "Cannot merge: original branch is unknown (likely due to a "
                 "crash during setup).  Please specify the target branch "
                 "manually:\n"
-                f"    git checkout <branch> && git merge --squash {wt.branch}"
+                f"    git checkout <branch> && {merge_cmd}"
             )
 
         # Only finalize (auto-commit + remove worktree) on the first call.
@@ -609,16 +631,16 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
                 )
 
         result, stash_warning = self._do_merge(wt)
+        merge_cmd = _manual_merge_cmd(wt)
         stash_suffix = ""
         if stash_warning:
             stash_suffix = (
                 "\n\n⚠️  " + stash_warning
             )
 
-        if result is None:
+        if result == MergeResult.CHECKOUT_FAILED:
             return (
-                f"Cannot checkout '{wt.original_branch}': "
-                f"{stash_warning}\n"
+                f"Cannot checkout '{wt.original_branch}'.\n"
                 "Fix the issue and retry merge(), or call discard()."
             )
 
@@ -636,7 +658,7 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
                 "The branch is kept — retry manually:\n"
                 f"    cd {wt.repo_root}\n"
                 f"    git checkout {wt.original_branch}\n"
-                f"    git merge --squash {wt.branch}\n"
+                f"    {merge_cmd}\n"
                 "    # fix pre-commit issues, then:\n"
                 "    git commit --no-verify\n"
                 f"    git branch -d {wt.branch}\n"
@@ -650,7 +672,7 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
             "Merge conflict detected.  Resolve manually:\n"
             f"    cd {wt.repo_root}\n"
             f"    git checkout {wt.original_branch}\n"
-            f"    git merge --squash {wt.branch}\n"
+            f"    {merge_cmd}\n"
             "    # resolve conflicts in your editor\n"
             "    git add .\n"
             "    git commit\n"
@@ -706,6 +728,7 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
             return "No pending worktree task."
         wt = self._wt
         orig = wt.original_branch or "<branch>"
+        merge_cmd = _manual_merge_cmd(wt)
         return (
             f"Task completed on branch: {wt.branch}\n"
             "\nTo commit and merge:\n"
@@ -715,7 +738,7 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
             "\nOr manually:\n"
             f"    cd {wt.repo_root}\n"
             f"    git checkout {orig}\n"
-            f"    git merge --squash {wt.branch}\n"
+            f"    {merge_cmd}\n"
             "    git commit\n"
             f"    git branch -d {wt.branch}"
         )

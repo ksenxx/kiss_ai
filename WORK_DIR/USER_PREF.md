@@ -20,3 +20,11 @@
 - `GitWorktree` dataclass has a `baseline_commit: str | None = None` field.
 - `squash_merge_from_baseline()` uses `git cherry-pick --no-commit baseline..branch` to replay only agent commits. For very small files where the user's dirty changes and agent's changes are on adjacent lines, cherry-pick may report a conflict (this is expected behavior since git's merge algorithm can't distinguish adjacent edits).
 - For legacy worktrees without baseline (created before the feature), all merge paths fall back to the original `squash_merge_branch()` behavior.
+- `_do_merge()` returns `tuple[MergeResult, str]` (never None). Uses `MergeResult.CHECKOUT_FAILED` for checkout failures instead of overloading None.
+- `_manual_merge_cmd(wt)` helper generates the correct manual merge command: `git cherry-pick --no-commit baseline..branch` when baseline exists, `git merge --squash branch` otherwise.
+- `_start_merge_session()` accepts an explicit `tab_id` parameter (with thread-local fallback) so `is_merging` is always set correctly.
+- All auto-discard paths (`_run_task_inner`, `_finish_merge`) check `_any_non_wt_running()` before calling `discard()`, consistent with user-initiated discard.
+- `_check_merge_conflict()` checks both `unstaged_files()` and `staged_files()` for dirty-file overlap.
+- `GitWorktreeOps.staged_files()` returns files staged in the index (`git diff --cached --name-only`).
+- `is_running_non_wt` flag is cleared at the very start of `_run_task_inner`'s finally try block AND in the except handler, preventing it from getting permanently stuck.
+- `_new_chat()` guard checks `tab.agent._wt_pending` regardless of `tab.use_worktree` to handle mode switches.
