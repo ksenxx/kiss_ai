@@ -58,6 +58,11 @@ build_vscode_extension() {
     print_step "Building VS Code extension..."
     cp "$README_FILE" "$VSCODE_EXT_DIR/README.md"
     print_info "Copied $README_FILE to $VSCODE_EXT_DIR/README.md"
+
+    # Rename extension to "KISS Sorcar Buggy" for experimental builds
+    sed -i.bak 's/"displayName": "KISS Sorcar"/"displayName": "KISS Sorcar Buggy"/' "$VSCODE_EXT_DIR/package.json"
+    print_info "Set extension displayName to 'KISS Sorcar Buggy'"
+
     cd "$VSCODE_EXT_DIR"
     npm ci
     npm run package
@@ -72,6 +77,10 @@ build_vscode_extension() {
     rm -rf out kiss_project
     print_info "Cleaned up build artifacts (out/, kiss_project/)"
     cd - > /dev/null
+
+    # Restore original package.json
+    mv "$VSCODE_EXT_DIR/package.json.bak" "$VSCODE_EXT_DIR/package.json"
+    print_info "Restored original package.json"
 }
 
 publish_vscode_extension() {
