@@ -49,23 +49,27 @@ fi
 cd "$SCRIPT_DIR"
 
 # ---------------------------------------------------------------------------
-# 2. Build the VS Code extension VSIX if needed, then build Docker image
+# 2. Obtain GitHub token for cloning the private repo inside the container
 # ---------------------------------------------------------------------------
-VSIX="src/kiss/agents/vscode/kiss-sorcar.vsix"
-
-if [[ ! -f "$VSIX" ]]; then
-    step "Building VS Code extension (kiss-sorcar.vsix)..."
-    cd src/kiss/agents/vscode
-    npm ci
-    npm run package
-    cd "$SCRIPT_DIR"
+GH_TOKEN=""
+if command -v gh &>/dev/null && gh auth status &>/dev/null 2>&1; then
+    GH_TOKEN="$(gh auth token 2>/dev/null || true)"
 fi
 
+if [[ -z "$GH_TOKEN" ]]; then
+    warn "Could not obtain a GitHub token via 'gh auth token'."
+    warn "The container will not be able to clone the private repo."
+    warn "Run 'gh auth login' first, or export GH_TOKEN manually."
+fi
+
+# ---------------------------------------------------------------------------
+# 3. Build Docker image
+# ---------------------------------------------------------------------------
 step "Building Docker image '$IMAGE' (uses cache if unchanged)..."
 docker build -t "$IMAGE" . 2>&1
 
 # ---------------------------------------------------------------------------
-# 3. Stop / remove any existing container
+# 4. Stop / remove any existing container
 # ---------------------------------------------------------------------------
 if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
     step "Removing existing container '$CONTAINER'..."
@@ -73,7 +77,7 @@ if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
 fi
 
 # ---------------------------------------------------------------------------
-# 4. Collect API keys from environment
+# 5. Collect API keys from environment
 # ---------------------------------------------------------------------------
 ENV_ARGS=()
 for key in ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY TOGETHER_API_KEY OPENROUTER_API_KEY; do
@@ -87,8 +91,13 @@ if [[ ${#ENV_ARGS[@]} -eq 0 ]]; then
     warn "  ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY"
 fi
 
+# Pass GitHub token for private repo access
+if [[ -n "$GH_TOKEN" ]]; then
+    ENV_ARGS+=(-e "GH_TOKEN=${GH_TOKEN}")
+fi
+
 # ---------------------------------------------------------------------------
-# 5. Start container
+# 6. Start container
 # ---------------------------------------------------------------------------
 step "Starting container '$CONTAINER' on port $PORT..."
 docker run -d \
@@ -100,18 +109,29 @@ docker run -d \
 info "Container started. Waiting for KISS Sorcar to be ready..."
 
 # ---------------------------------------------------------------------------
-# 6. Wait for code-server to respond
+# 7. Wait for code-server to respond (longer timeout: install.sh runs at first start)
 # ---------------------------------------------------------------------------
 URL="http://localhost:${PORT}"
-for i in $(seq 1 30); do
+info "First start clones the repo and runs install.sh — this may take several minutes..."
+info "Run 'docker logs -f ${CONTAINER}' in another terminal to watch progress."
+for i in $(seq 1 600); do
     if curl -sf "${URL}" -o /dev/null 2>/dev/null; then
         break
+    fi
+    if (( i % 30 == 0 )); then
+        info "Still waiting... (${i}s elapsed)"
+    fi
+    # Check if the container is still running
+    if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
+        echo "ERROR: Container '$CONTAINER' exited unexpectedly."
+        echo "Check logs with: docker logs $CONTAINER"
+        exit 1
     fi
     sleep 1
 done
 
 # ---------------------------------------------------------------------------
-# 7. Open the browser
+# 8. Open the browser
 # ---------------------------------------------------------------------------
 info "KISS Sorcar is ready at ${URL}"
 info "Opening browser..."
