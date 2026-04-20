@@ -34,6 +34,7 @@
       - [`kiss.agents.sorcar.worktree_sorcar_agent`](#kissagentssorcarworktree_sorcar_agent)
     - [`kiss.agents.vscode`](#kissagentsvscode)
       - [`kiss.agents.vscode.helpers`](#kissagentsvscodehelpers)
+        \- [`kiss.agents.vscode.node_modules.flatted.python.flatted`](#kissagentsvscodenode_modulesflattedpythonflatted)
       - [`kiss.agents.vscode.server`](#kissagentsvscodeserver)
   - [`kiss.benchmarks`](#kissbenchmarks)
     - [`kiss.benchmarks.generate_dashboard`](#kissbenchmarksgenerate_dashboard)
@@ -1071,6 +1072,8 @@ ______________________________________________________________________
 
 **Constructor:** `WorktreeSorcarAgent(name: str) -> None`
 
+- **new_chat** — Reset to a new chat session, auto-merging any pending worktree. If a worktree task is pending from the previous session, it is auto-committed with a detailed LLM message and squash-merged into the original branch before the chat state is reset.<br/>`new_chat() -> None`
+
 - **run** — Run a task on an isolated git worktree branch. Creates a new worktree and branch, redirects `work_dir` into the worktree, and delegates to `StatefulSorcarAgent.run()`. Each call starts a fresh worktree; any previously pending branch from an earlier run is left as-is in git for the user to merge or discard later. Falls back to direct execution (no worktree) when: - `use_worktree` kwarg is explicitly `False` - `work_dir` is not inside a git repo - The repo has no commits - HEAD is detached (no merge target) - Any git command fails during setup<br/>`run(prompt_template: str = '', **kwargs: Any) -> str`
 
   - `prompt_template`: The task prompt.
@@ -1085,13 +1088,9 @@ ______________________________________________________________________
 
   - **Returns:** Confirmation message.
 
-- **do_nothing** — Leave the worktree branch as-is without any git operation. Clears the pending worktree state so the user regains control and can start new tasks. The branch and any committed work remain in git for the user to merge or discard manually later.<br/>`do_nothing() -> str`
+- **merge_instructions** — Return human-readable merge/discard instructions.<br/>`merge_instructions() -> str`
 
-  - **Returns:** Informational message with the branch name.
-
-- **merge_instructions** — Return human-readable merge/discard/do-nothing instructions.<br/>`merge_instructions() -> str`
-
-  - **Returns:** Multi-line string with merge, discard, and do-nothing instructions.
+  - **Returns:** Multi-line string with merge and discard instructions.
 
 - **cleanup** — Scan for orphaned `kiss/wt-*` branches and worktrees.<br/>`cleanup(repo_root: Path | str) -> str`
 
@@ -1133,6 +1132,14 @@ ______________________________________________________________________
 - `usage`: File usage counts keyed by path (insertion order encodes recency, last key = most recently used).
 - `limit`: Maximum number of results to return.
 - **Returns:** Sorted list of dicts with `type` (`"frequent"` or `"file"`) and `text` keys.
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.node_modules.flatted.python.flatted`
+
+**`parse`**<br/>`def parse(value, *args, **kwargs)`
+
+**`stringify`**<br/>`def stringify(value, *args, **kwargs)`
 
 ______________________________________________________________________
 

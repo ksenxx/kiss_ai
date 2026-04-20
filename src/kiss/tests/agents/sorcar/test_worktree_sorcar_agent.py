@@ -111,12 +111,12 @@ class TestWorktreeSorcarAgent:
         first_branch = agent._wt_branch
         assert first_branch is not None
 
-        # A second task in the same session starts a new worktree
-        # instead of being blocked by the pending first branch.
+        # A second task in the same session starts a new worktree.
+        # The first worktree is auto-merged and its branch deleted.
         result = agent.run(prompt_template="task2", work_dir=str(self.repo))
         assert "test done" in result
         assert agent._wt_branch is not None
-        assert agent._wt_branch != first_branch
+        agent.discard()
 
     # 4. No blocking (different session)
 
@@ -386,6 +386,77 @@ class TestWorktreeSorcarAgent:
         assert check.returncode != 0
 
     # 46. cleanup_partial when wt_dir exists
+
+
+    # -- Edge case: new_chat() releases pending worktree --------------------
+
+    def test_new_chat_releases_pending_worktree(self) -> None:
+        """new_chat() auto-merges the pending worktree before resetting.
+
+        Simulates the VS Code "New Chat" button being clicked while
+        worktree action buttons are visible.  The agent should auto-
+        commit, auto-merge, and clean up the old branch.
+        """
+        agent = self._agent()
+
+        # Task 1 — creates a worktree
+        agent.run(prompt_template="task1", work_dir=str(self.repo))
+        old_branch = agent._wt_branch
+        old_wt_dir = agent._wt_dir
+        assert old_branch is not None
+        assert old_wt_dir is not None
+        assert old_wt_dir.exists()
+
+        # Simulate "New Chat" — should release the pending worktree
+        agent.new_chat()
+        assert agent._chat_id == ""
+        assert agent._wt is None  # properly cleared
+        assert not old_wt_dir.exists()  # worktree dir removed
+
+        # Old branch should be gone (merged and deleted)
+        check = _git(
+            "rev-parse", "--verify", f"refs/heads/{old_branch}",
+            cwd=self.repo,
+        )
+        assert check.returncode != 0, (
+            "Old branch should be deleted after auto-merge"
+        )
+
+        # Can start a new task without issues
+        agent.run(prompt_template="task2", work_dir=str(self.repo))
+        assert agent._wt_branch is not None
+        agent.discard()
+
+    def test_consecutive_run_releases_previous_worktree(self) -> None:
+        """Consecutive run() calls auto-merge the previous worktree."""
+        agent = self._agent()
+
+        # Task 1
+        agent.run(prompt_template="task1", work_dir=str(self.repo))
+        old_branch = agent._wt_branch
+        old_wt_dir = agent._wt_dir
+        assert old_branch is not None
+        assert old_wt_dir is not None
+        assert old_wt_dir.exists()
+
+        import time as t
+        t.sleep(1.1)  # Ensure different timestamp for branch name
+
+        # Task 2 — should release task 1's worktree first
+        agent.run(prompt_template="task2", work_dir=str(self.repo))
+        new_branch = agent._wt_branch
+        assert new_branch is not None
+        assert new_branch != old_branch
+
+        # Old worktree dir removed and branch deleted (auto-merged)
+        assert not old_wt_dir.exists()
+        check = _git(
+            "rev-parse", "--verify", f"refs/heads/{old_branch}",
+            cwd=self.repo,
+        )
+        assert check.returncode != 0
+
+        agent.discard()
 
 
 class TestCliAgentSelection:

@@ -659,9 +659,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
             ? 'Committing and merging worktree…'
             : wtAction === 'discard'
               ? 'Discarding worktree…'
-              : wtAction === 'do_nothing'
-                ? 'Finishing up…'
-                : 'Processing worktree action…';
+              : 'Processing worktree action…';
         const worktreeTimeout = 120_000;
         vscode.window.withProgress(
           {

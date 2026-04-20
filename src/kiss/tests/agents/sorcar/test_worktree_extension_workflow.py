@@ -284,126 +284,12 @@ class TestWorktreeWorkflow:
         agent.discard()
         assert not wt_dir.exists()
 
-    # -- Do nothing --------------------------------------------------------
+    # -- do_nothing removed (simplified to 2 buttons) -----------------------
 
-    def test_do_nothing_preserves_branch(self) -> None:
-        """After do_nothing, the task branch still exists in git."""
+    def test_do_nothing_method_does_not_exist(self) -> None:
+        """WorktreeSorcarAgent no longer has a do_nothing() method."""
         agent = self._agent()
-        agent.run(prompt_template="task1", work_dir=str(self.repo))
-        branch = agent._wt_branch
-        assert branch is not None
-
-        agent.do_nothing()
-        assert _branch_exists(self.repo, branch)
-
-    def test_do_nothing_does_not_propagate_changes(self) -> None:
-        """After do_nothing, original branch does NOT have task changes."""
-        agent = self._agent()
-        agent.run(prompt_template="task1", work_dir=str(self.repo))
-        wt_dir = agent._wt_dir
-        assert wt_dir is not None
-        (wt_dir / "new.txt").write_text("task output")
-        subprocess.run(
-            ["git", "-C", str(wt_dir), "add", "."],
-            capture_output=True, check=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(wt_dir), "commit", "-m", "task"],
-            capture_output=True, check=True,
-        )
-
-        agent.do_nothing()
-        assert not _file_in_repo(self.repo, "new.txt")
-
-    def test_do_nothing_restores_original_branch_as_head(self) -> None:
-        """After do_nothing, HEAD is back on the original branch."""
-        agent = self._agent()
-        agent.run(prompt_template="task1", work_dir=str(self.repo))
-
-        agent.do_nothing()
-        assert _current_branch(self.repo) == "main"
-
-    def test_do_nothing_removes_worktree_dir(self) -> None:
-        """After do_nothing, the worktree directory is removed."""
-        agent = self._agent()
-        agent.run(prompt_template="task1", work_dir=str(self.repo))
-        wt_dir = agent._wt_dir
-        assert wt_dir is not None
-
-        agent.do_nothing()
-        assert not wt_dir.exists()
-
-    def test_do_nothing_clears_pending_state(self) -> None:
-        """After do_nothing, the agent no longer reports a pending task."""
-        agent = self._agent()
-        agent.run(prompt_template="task1", work_dir=str(self.repo))
-        assert agent._wt_pending
-
-        agent.do_nothing()
-        assert not agent._wt_pending
-
-    def test_do_nothing_auto_commits_uncommitted_changes(self) -> None:
-        """Uncommitted changes in the worktree are auto-committed on do_nothing."""
-        agent = self._agent()
-        agent.run(prompt_template="task1", work_dir=str(self.repo))
-        wt_dir = agent._wt_dir
-        assert wt_dir is not None
-        branch = agent._wt_branch
-        assert branch is not None
-
-        (wt_dir / "uncommitted.txt").write_text("auto-commit me")
-
-        agent.do_nothing()
-        # The branch should still have the auto-committed change
-        r = subprocess.run(
-            ["git", "-C", str(self.repo), "log", branch,
-             "--oneline", "--format=%s"],
-            capture_output=True, text=True,
-        )
-        assert r.returncode == 0
-        # Should have at least one commit beyond initial
-        assert len(r.stdout.strip().splitlines()) > 1
-
-    def test_do_nothing_returns_informational_message(self) -> None:
-        """do_nothing() returns a message with the branch name."""
-        agent = self._agent()
-        agent.run(prompt_template="task1", work_dir=str(self.repo))
-        branch = agent._wt_branch
-        assert branch is not None
-
-        msg = agent.do_nothing()
-        assert branch in msg
-        assert "git merge" in msg
-        assert "git branch -d" in msg
-
-    def test_do_nothing_raises_when_no_pending_task(self) -> None:
-        """do_nothing() raises RuntimeError when no task is pending."""
-        agent = self._agent()
-        with pytest.raises(RuntimeError, match="No pending worktree task"):
-            agent.do_nothing()
-
-    def test_do_nothing_then_new_task_starts_fresh_worktree(self) -> None:
-        """After do_nothing, a new task starts a fresh worktree branch.
-
-        The old branch persists in git (do_nothing leaves it), but the
-        agent no longer refuses new tasks — it creates a new worktree
-        branch for task2 instead.
-        """
-        agent = self._agent()
-        agent.run(prompt_template="task1", work_dir=str(self.repo))
-        old_branch = agent._wt_branch
-        assert old_branch is not None
-        agent.do_nothing()
-
-        # The next run creates a new worktree rather than blocking.
-        result = agent.run(prompt_template="task2", work_dir=str(self.repo))
-        assert "test done" in result
-        assert agent._wt_pending
-        assert agent._wt_branch is not None
-        assert agent._wt_branch != old_branch
-
-        # The old branch is still in git, orphaned.
-        assert _branch_exists(self.repo, old_branch)
+        assert not hasattr(agent, "do_nothing")
 
     # -- Auto-commit -------------------------------------------------------
 
@@ -457,14 +343,14 @@ class TestWorktreeWorkflow:
     # -- Merge instructions format -----------------------------------------
 
     def test_merge_instructions_contain_all_options(self) -> None:
-        """merge_instructions mentions merge(), discard(), and do_nothing()."""
+        """merge_instructions mentions merge() and discard() but not do_nothing()."""
         agent = self._agent()
         agent.run(prompt_template="task1", work_dir=str(self.repo))
 
         instructions = agent.merge_instructions()
         assert "agent.merge()" in instructions
         assert "agent.discard()" in instructions
-        assert "agent.do_nothing()" in instructions
+        assert "do_nothing" not in instructions
         assert agent._wt_branch is not None
         assert agent._wt_branch in instructions
         agent.discard()
@@ -475,7 +361,7 @@ class TestWorktreeWorkflow:
         result = agent.run(prompt_template="task1", work_dir=str(self.repo))
         assert "agent.merge()" not in result
         assert "agent.discard()" not in result
-        assert "agent.do_nothing()" not in result
+        assert "do_nothing" not in result
         assert agent._wt_pending
         agent.discard()
 
@@ -605,40 +491,19 @@ class TestServerWorktreeWorkflow:
         server._handle_worktree_action("discard", "0")
         assert not _file_in_repo(self.repo, "changed.txt")
 
-    # -- Do nothing via server ---------------------------------------------
+    # -- do_nothing removed via server (returns unknown action) -----
 
-    def test_server_do_nothing_returns_success(self) -> None:
-        """do_nothing via server returns success."""
+    def test_server_do_nothing_rejected_as_unknown(self) -> None:
+        """do_nothing action is rejected as unknown after simplification."""
         server, events = _make_server(self.repo)
         self._setup_pending_worktree(server)
 
         result = server._handle_worktree_action("do_nothing", "0")
-        assert result["success"] is True
-        assert "Left branch" in result["message"]
+        assert result["success"] is False
+        assert "Unknown action" in result["message"]
 
-    def test_server_do_nothing_preserves_branch(self) -> None:
-        """After do_nothing via server, the task branch still exists."""
-        server, events = _make_server(self.repo)
-        branch = self._setup_pending_worktree(server)
-
-        server._handle_worktree_action("do_nothing", "0")
-        assert _branch_exists(self.repo, branch)
-
-    def test_server_do_nothing_cleans_agent_state(self) -> None:
-        """After do_nothing via server, agent no longer reports pending."""
-        server, events = _make_server(self.repo)
-        self._setup_pending_worktree(server)
-
-        server._handle_worktree_action("do_nothing", "0")
-        assert not server._get_tab("0").agent._wt_pending
-
-    def test_server_do_nothing_does_not_propagate_changes(self) -> None:
-        """After do_nothing via server, changes are not on original branch."""
-        server, events = _make_server(self.repo)
-        self._setup_pending_worktree(server)
-
-        server._handle_worktree_action("do_nothing", "0")
-        assert not _file_in_repo(self.repo, "changed.txt")
+        # Clean up — agent still pending
+        server._get_tab("0").agent.discard()
 
     # -- Command routing ---------------------------------------------------
 

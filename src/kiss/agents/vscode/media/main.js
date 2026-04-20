@@ -2206,7 +2206,7 @@
     clearWorktreeBar();
     const bar = mkEl('div', 'wt-bar');
     const label = mkEl('span', 'wt-label');
-    label.textContent = 'Auto-commit and merge, Discard, or Do Nothing?';
+    label.textContent = 'Auto-commit and merge or Discard?';
     bar.appendChild(label);
 
     const btns = mkEl('div', 'wt-btns');
@@ -2232,20 +2232,8 @@
       });
     });
 
-    const doNothingBtn = mkEl('button', 'wt-btn wt-donothing');
-    doNothingBtn.textContent = 'Do Nothing';
-    doNothingBtn.addEventListener('click', () => {
-      disableWtBtns();
-      vscode.postMessage({
-        type: 'worktreeAction',
-        action: 'do_nothing',
-        tabId: activeTabId,
-      });
-    });
-
     btns.appendChild(mergeBtn);
     btns.appendChild(discardBtn);
-    btns.appendChild(doNothingBtn);
     bar.appendChild(btns);
 
     // Hide the input container and show the worktree bar in its place

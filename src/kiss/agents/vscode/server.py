@@ -1241,12 +1241,11 @@ class VSCodeServer:
         server process restart where in-memory state was lost).
 
         Args:
-            action: One of ``"merge"``, ``"discard"``, or ``"do_nothing"``.
+            action: One of ``"merge"`` or ``"discard"``.
             tab_id: The tab whose worktree to act on.
 
         Returns:
-            Dict with ``success`` bool, ``message`` string, and
-            optionally ``manual`` bool.
+            Dict with ``success`` bool and ``message`` string.
         """
         tab = self._get_tab(tab_id)
         if not tab.use_worktree:
@@ -1264,9 +1263,6 @@ class VSCodeServer:
             return {"success": success, "message": msg}
         elif action == "discard":
             msg = wt.discard()
-            return {"success": True, "message": msg}
-        elif action == "do_nothing":
-            msg = wt.do_nothing()
             return {"success": True, "message": msg}
         return {"success": False, "message": f"Unknown action: {action}"}
 

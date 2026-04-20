@@ -49,7 +49,7 @@ export type FromWebviewMessage =
   | {type: 'focusEditor'}
   | {type: 'closeSecondaryBar'}
   | {type: 'getInputHistory'}
-  | {type: 'worktreeAction'; action: 'merge' | 'discard' | 'do_nothing'}
+  | {type: 'worktreeAction'; action: 'merge' | 'discard'}
   | {type: 'resolveDroppedPaths'; uris: string[]}
   | {type: 'webviewFocusChanged'; focused: boolean}
   | {
@@ -187,7 +187,7 @@ export interface AgentCommand {
   path?: string;
   chatId?: number | string;
   activeFileContent?: string;
-  action?: 'merge' | 'discard' | 'do_nothing' | 'all-done';
+  action?: 'merge' | 'discard' | 'all-done';
   useWorktree?: boolean;
   useParallel?: boolean;
   task?: string;
