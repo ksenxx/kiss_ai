@@ -9,7 +9,12 @@
 - `copy-kiss.sh` now copies from `src/kiss/SYSTEM.md` instead of root `SYSTEM.md`.
 - `scm/inputBox` is a proposed API; the extension uses `scm/title` (stable) instead.
 - `GitWorktreeOps.commit_staged()` commits already-staged changes without re-staging; used by `_auto_commit_worktree` to avoid redundant `git add -A`.
-- `_release_worktree()` returns the branch name it ended on (or None), so callers can reuse it instead of calling `current_branch()` again.
+- `_release_worktree()` returns the original branch name on success, or `None` on failure (no worktree pending, checkout failure, merge conflict, or auto-commit rejection). Callers fall through to `current_branch()` when `None`.
+- `_release_worktree()` sets `_merge_conflict_warning` when auto-merge conflicts occur, so the user is notified. `_new_chat()` in server.py broadcasts both `_stash_pop_warning` and `_merge_conflict_warning`.
+- `_finalize_worktree()` returns `bool` — `True` if cleanup succeeded, `False` if uncommitted changes remain (auto-commit rejected by pre-commit hook). When `False`, the worktree directory is preserved to prevent data loss.
+- `squash_merge_branch()` and `squash_merge_from_baseline()` both check the `git commit` return code and return `MergeResult.MERGE_FAILED` if the commit is rejected.
+- `repo_lock(repo)` in `git_worktree.py` provides per-repo threading locks. `_release_worktree()` and `merge()` use it to serialize checkout→stash→merge→pop sequences across concurrent tabs.
+- In `_run_task_inner`, pre-task git snapshot (`_parse_diff_hunks`, `_capture_untracked`, `_save_untracked_base`) is skipped when `tab.use_worktree=True` — worktree mode uses baseline commits instead, and calling these would nuke another tab's merge review data.
 - In `WorktreeSorcarAgent.run()`, `_chat_id` is allocated before `_restore_from_git()` so the branch prefix search is always meaningful.
 - Worktree mode now copies user's dirty state (staged, unstaged, untracked) into the worktree and creates a "baseline commit". The baseline SHA is stored in `git config branch.<name>.kiss-baseline`. All downstream operations (merge review, changed-file detection, conflict checking, squash-merge) diff against the baseline to isolate agent-only changes.
 - `GitWorktree` dataclass has a `baseline_commit: str | None = None` field.

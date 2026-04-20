@@ -432,13 +432,19 @@ class VSCodeServer:
 
         self.printer.broadcast({"type": "clear", "chat_id": tab.agent.chat_id})
 
-        # Git snapshot captures pre-task state (may be slow for large repos)
-        pre_hunks = _parse_diff_hunks(work_dir)
-        pre_untracked = _capture_untracked(work_dir)
-        pre_file_hashes = _snapshot_files(
-            work_dir, set(pre_hunks.keys()) | pre_untracked,
-        )
-        _save_untracked_base(work_dir, pre_untracked | set(pre_hunks.keys()))
+        # Git snapshot captures pre-task state — only needed for
+        # non-worktree merge view (worktree mode uses baseline commits
+        # and its own diff; saving here would nuke another tab's data).
+        pre_hunks: dict[str, list[tuple[int, int, int, int]]] = {}
+        pre_untracked: set[str] = set()
+        pre_file_hashes: dict[str, str] | None = None
+        if not tab.use_worktree:
+            pre_hunks = _parse_diff_hunks(work_dir)
+            pre_untracked = _capture_untracked(work_dir)
+            pre_file_hashes = _snapshot_files(
+                work_dir, set(pre_hunks.keys()) | pre_untracked,
+            )
+            _save_untracked_base(work_dir, pre_untracked | set(pre_hunks.keys()))
 
         # start_recording inside try so stop_recording always runs (P14 fix)
         result_summary = "Agent Failed Abruptly"
@@ -862,14 +868,30 @@ class VSCodeServer:
 
         Resets the agent's ``chat_id`` to ``""`` so the next task starts
         a fresh session.  The tab_id (frontend key) does not change.
-        Broadcasts a ``showWelcome`` event so the frontend displays the
-        welcome messages in the tab.
+        Broadcasts any pending warnings (stash-pop failure or merge
+        conflict) from the auto-release, then emits ``showWelcome``
+        so the frontend displays the welcome messages in the tab.
 
         Args:
             tab_id: The frontend tab identifier.
         """
         tab = self._get_tab(tab_id)
         tab.agent.new_chat()
+        # Surface warnings from auto-releasing a prior worktree
+        if tab.agent._stash_pop_warning:
+            self.printer.broadcast({
+                "type": "warning",
+                "message": tab.agent._stash_pop_warning,
+                "tabId": tab_id,
+            })
+            tab.agent._stash_pop_warning = None
+        if tab.agent._merge_conflict_warning:
+            self.printer.broadcast({
+                "type": "warning",
+                "message": tab.agent._merge_conflict_warning,
+                "tabId": tab_id,
+            })
+            tab.agent._merge_conflict_warning = None
         self.printer.broadcast({"type": "showWelcome", "tabId": tab_id})
 
     def _replay_session(self, chat_id: str, tab_id: str = "") -> None:

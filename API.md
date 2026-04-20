@@ -923,6 +923,11 @@ ______________________________________________________________________
   - `message`: Commit message.
   - **Returns:** True if a commit was created, False if nothing was staged or the commit failed (e.g. pre-commit hook rejection).
 
+- **has_uncommitted_changes** — Check if the working tree or index has uncommitted changes.<br/>`has_uncommitted_changes(wt_dir: Path) -> bool`
+
+  - `wt_dir`: Git working directory to check.
+  - **Returns:** True if there are staged, unstaged, or untracked changes.
+
 - **staged_diff** — Return the staged diff text for the worktree.<br/>`staged_diff(wt_dir: Path) -> str`
 
   - `wt_dir`: Worktree directory (must have staged changes).
@@ -1068,6 +1073,11 @@ ______________________________________________________________________
 
   - `repo`: Root of the git repository to scan.
   - **Returns:** Summary of findings and any cleanup actions taken.
+
+**`repo_lock`** — Return a per-repo threading lock for multi-step git operations. Concurrent tabs operating on the same main repository must serialize their checkout → stash → merge → pop sequences to prevent interleaving that could corrupt the working tree.<br/>`def repo_lock(repo: Path) -> threading.Lock`
+
+- `repo`: Git repo root path.
+- **Returns:** A :class:`threading.Lock` specific to the resolved repo path.
 
 ______________________________________________________________________
 

@@ -10,10 +10,36 @@ from __future__ import annotations
 import enum
 import logging
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# Per-repo locks for serializing multi-step git operations
+# (checkout → stash → merge → pop) across concurrent tabs.
+_repo_locks: dict[str, threading.Lock] = {}
+_repo_locks_guard = threading.Lock()
+
+
+def repo_lock(repo: Path) -> threading.Lock:
+    """Return a per-repo threading lock for multi-step git operations.
+
+    Concurrent tabs operating on the same main repository must
+    serialize their checkout → stash → merge → pop sequences to
+    prevent interleaving that could corrupt the working tree.
+
+    Args:
+        repo: Git repo root path.
+
+    Returns:
+        A :class:`threading.Lock` specific to the resolved repo path.
+    """
+    key = str(repo.resolve())
+    with _repo_locks_guard:
+        if key not in _repo_locks:
+            _repo_locks[key] = threading.Lock()
+        return _repo_locks[key]
 
 
 def _git(
@@ -227,6 +253,19 @@ class GitWorktreeOps:
         return True
 
     @staticmethod
+    def has_uncommitted_changes(wt_dir: Path) -> bool:
+        """Check if the working tree or index has uncommitted changes.
+
+        Args:
+            wt_dir: Git working directory to check.
+
+        Returns:
+            True if there are staged, unstaged, or untracked changes.
+        """
+        status = _git("status", "--porcelain", cwd=wt_dir)
+        return bool(status.stdout.strip())
+
+    @staticmethod
     def staged_diff(wt_dir: Path) -> str:
         """Return the staged diff text for the worktree.
 
@@ -349,7 +388,14 @@ class GitWorktreeOps:
             return MergeResult.CONFLICT
         diff = _git("diff", "--cached", "--quiet", cwd=repo)
         if diff.returncode != 0:
-            _git("commit", "--no-edit", cwd=repo)
+            commit_result = _git("commit", "--no-edit", cwd=repo)
+            if commit_result.returncode != 0:
+                logger.warning(
+                    "squash merge commit failed: %s",
+                    commit_result.stderr.strip(),
+                )
+                _git("reset", "--hard", "HEAD", cwd=repo)
+                return MergeResult.MERGE_FAILED
         return MergeResult.SUCCESS
 
     @staticmethod
@@ -771,7 +817,14 @@ class GitWorktreeOps:
             msg = f"kiss: merged from {branch}"
             if body:
                 msg += f"\n\n{body}"
-            _git("commit", "-m", msg, cwd=repo)
+            commit_result = _git("commit", "-m", msg, cwd=repo)
+            if commit_result.returncode != 0:
+                logger.warning(
+                    "squash merge commit failed: %s",
+                    commit_result.stderr.strip(),
+                )
+                _git("reset", "--hard", "HEAD", cwd=repo)
+                return MergeResult.MERGE_FAILED
         return MergeResult.SUCCESS
 
     @staticmethod

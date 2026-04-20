@@ -157,8 +157,8 @@ class TestBug5UseWorktreeNotRestored:
 
 
 class TestBug6FinalizeIgnoresCommitFailure:
-    """_finalize_worktree removes the worktree even if auto-commit fails,
-    silently losing the agent's uncommitted work.
+    """BUG-6 FIX: _finalize_worktree now preserves the worktree when
+    auto-commit fails, preventing data loss.
     """
 
     def setup_method(self) -> None:
@@ -173,11 +173,9 @@ class TestBug6FinalizeIgnoresCommitFailure:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_finalize_removes_worktree_despite_commit_failure(self) -> None:
-        """BUG-6: Worktree removed even though auto-commit failed.
-
-        The BUG-1 fix made commit_all() return False on failure, but
-        _finalize_worktree still ignores this and removes the worktree,
-        losing the agent's uncommitted changes.
+        """BUG-6 FIX: _finalize_worktree returns False and preserves
+        the worktree directory when auto-commit is rejected by a
+        pre-commit hook, preventing data loss.
         """
         agent = WorktreeSorcarAgent("test")
         agent.run(prompt_template="task1", work_dir=str(self.repo))
@@ -198,21 +196,19 @@ class TestBug6FinalizeIgnoresCommitFailure:
         # Verify the commit would fail
         assert GitWorktreeOps.commit_all(wt_dir, "test") is False
 
-        # _finalize_worktree ignores the failure and removes the worktree
-        agent._finalize_worktree()
+        # FIX: _finalize_worktree returns False and preserves worktree
+        result = agent._finalize_worktree()
+        assert result is False
 
-        # BUG: worktree is gone, agent's work is lost
-        assert not wt_dir.exists()
-
-        # The branch exists but has no commit with agent_work.txt
-        branch = agent._wt_branch
-        assert branch is not None
-        show = _git("show", f"{branch}:agent_work.txt", cwd=self.repo)
-        # The file was never committed, so git show fails
-        assert show.returncode != 0
+        # FIX: worktree is preserved — agent's work is NOT lost
+        assert wt_dir.exists()
+        assert (wt_dir / "agent_work.txt").read_text() == "important work\n"
 
         # Clean up
         hook.unlink()
+        branch = agent._wt_branch
+        assert branch is not None
+        GitWorktreeOps.remove(self.repo, wt_dir)
         GitWorktreeOps.delete_branch(self.repo, branch)
 
 
@@ -222,9 +218,8 @@ class TestBug6FinalizeIgnoresCommitFailure:
 
 
 class TestBug7SquashMergeDoesntCheckCommit:
-    """squash_merge_branch() returns SUCCESS even when git commit fails,
-    causing the caller to delete the source branch while changes are
-    only staged (not committed).
+    """BUG-7 FIX: squash_merge_branch() now returns MERGE_FAILED when
+    git commit fails, preventing the source branch from being deleted.
     """
 
     def setup_method(self) -> None:
@@ -232,55 +227,36 @@ class TestBug7SquashMergeDoesntCheckCommit:
         self.repo = _make_repo(Path(self.tmpdir) / "repo")
 
     def teardown_method(self) -> None:
-        # Remove pre-commit hook if it exists
         hook = self.repo / ".git" / "hooks" / "pre-commit"
         if hook.exists():
             hook.unlink()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_squash_merge_returns_success_even_when_commit_fails(self) -> None:
-        """BUG-7: squash_merge_branch returns SUCCESS even when the
-        git commit --no-edit fails (e.g. pre-commit hook rejection).
+        """BUG-7 FIX: squash_merge_branch returns MERGE_FAILED when
+        the git commit is rejected by a pre-commit hook.
         """
-        # Create a feature branch with changes
         _git("checkout", "-b", "feature", cwd=self.repo)
         (self.repo / "feature.txt").write_text("feature work\n")
         _git("add", "-A", cwd=self.repo)
         _git("commit", "-m", "feature commit", cwd=self.repo)
 
-        # Switch back to main
         _git("checkout", "main", cwd=self.repo)
 
-        # Install a pre-commit hook that rejects commits
         hooks_dir = self.repo / ".git" / "hooks"
         hooks_dir.mkdir(exist_ok=True)
         hook = hooks_dir / "pre-commit"
         hook.write_text("#!/bin/sh\nexit 1\n")
         hook.chmod(0o755)
 
-        # squash_merge_branch should return CONFLICT or some failure,
-        # but it returns SUCCESS because it doesn't check commit return code
         result = GitWorktreeOps.squash_merge_branch(self.repo, "feature")
 
-        # BUG: returns SUCCESS even though commit failed
-        assert result == MergeResult.SUCCESS
-
-        # The changes are staged but NOT committed
-        diff_cached = _git("diff", "--cached", "--quiet", cwd=self.repo)
-        assert diff_cached.returncode != 0, "Changes still staged (not committed)"
-
-        # Verify the commit was actually rejected
-        log = _git("log", "--oneline", cwd=self.repo)
-        commit_count = len(log.stdout.strip().splitlines())
-        assert commit_count == 1, "No new commit was created"
-
-        # In the real flow, the caller would now delete the feature branch:
-        # GitWorktreeOps.delete_branch(self.repo, "feature")
-        # leaving changes stuck in staging with source branch gone.
+        # FIX: returns MERGE_FAILED, not SUCCESS
+        assert result == MergeResult.MERGE_FAILED
 
     def test_full_merge_flow_deletes_branch_despite_commit_failure(self) -> None:
-        """BUG-7: Full merge flow deletes source branch even though
-        squash commit failed, leaving changes orphaned in staging area.
+        """BUG-7 FIX: Full merge flow does NOT delete source branch
+        when squash commit fails — agent work is preserved.
         """
         tmpdir2 = tempfile.mkdtemp()
         db_saved = _redirect_db(tmpdir2)
@@ -297,7 +273,6 @@ class TestBug7SquashMergeDoesntCheckCommit:
             branch = agent._wt_branch
             assert branch is not None
 
-            # Install hook ONLY on main repo (worktree uses same hooks)
             hooks_dir = self.repo / ".git" / "hooks"
             hooks_dir.mkdir(exist_ok=True)
             hook = hooks_dir / "pre-commit"
@@ -306,18 +281,11 @@ class TestBug7SquashMergeDoesntCheckCommit:
 
             msg = agent.merge()
 
-            # BUG: merge reports success despite commit failure
-            assert "Successfully merged" in msg
+            # FIX: merge does NOT report success
+            assert "Successfully merged" not in msg
 
-            # But branch is deleted
-            assert not GitWorktreeOps.branch_exists(self.repo, branch)
-
-            # Changes are staged but not committed
-            diff_cached = _git("diff", "--cached", "--quiet", cwd=self.repo)
-            assert diff_cached.returncode != 0
-
-            # Clean up staged changes
-            _git("reset", "--hard", "HEAD", cwd=self.repo)
+            # FIX: branch is preserved
+            assert GitWorktreeOps.branch_exists(self.repo, branch)
         finally:
             hook_path = self.repo / ".git" / "hooks" / "pre-commit"
             if hook_path.exists():
