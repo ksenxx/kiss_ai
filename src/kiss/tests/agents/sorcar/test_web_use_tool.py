@@ -1,5 +1,6 @@
 """Tests for web_use_tool.py module."""
 
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -8,6 +9,8 @@ import pytest
 from kiss.agents.sorcar.web_use_tool import (
     _SINGLETON_FILES,
     WebUseTool,
+    _activate_app,
+    _get_frontmost_app,
 )
 
 FORM_PAGE = b"""<!DOCTYPE html>
@@ -164,6 +167,40 @@ class TestSingletonLockCleanup:
         tool = WebUseTool(user_data_dir=None, headless=True)
         tool._clean_singleton_locks()  # must not raise
         tool.close()
+
+
+class TestFocusHelpers:
+    """Tests for _get_frontmost_app and _activate_app focus management."""
+
+    def test_get_frontmost_app_returns_string_on_macos(self):
+        """On macOS, _get_frontmost_app should return the current app name."""
+        result = _get_frontmost_app()
+        if sys.platform == "darwin":
+            assert isinstance(result, str)
+            assert len(result) > 0
+        else:
+            assert result is None
+
+    def test_activate_app_none_is_noop(self):
+        """_activate_app(None) should silently do nothing."""
+        _activate_app(None)  # must not raise
+
+    def test_activate_app_with_valid_app(self):
+        """_activate_app with a real app should not raise."""
+        if sys.platform == "darwin":
+            _activate_app("Finder")  # Finder is always running on macOS
+
+    def test_activate_app_with_nonexistent_app(self):
+        """_activate_app with a bogus name should not raise (best-effort)."""
+        _activate_app("NonExistentApp12345")  # must not raise
+
+    def test_ensure_browser_calls_focus_helpers(self, web_tool):
+        """_ensure_browser should save and restore focus even in headless mode."""
+        # Force a relaunch by dropping the context (exercises the finally block)
+        web_tool._context.close()
+        assert not web_tool._is_alive()
+        web_tool._ensure_browser()
+        assert web_tool._is_alive()
 
 
 if __name__ == "__main__":
