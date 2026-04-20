@@ -98,7 +98,7 @@ For simple single-file tasks, skip formal planning and execute directly.
 
 ## Self-Improvement Loop
 
-- Read the lessons in WORK_DIR/USER_PREF.md at the start of each task.
+- Read the instructions in WORK_DIR/USER_PREF.md at the start of each task.
 - Just before finishing an agent task, update WORK_DIR/USER_PREF.md
   to capture the user preferences and invariants about the project.
   You MUST carefully and thoroughly get rid of the user preferences
