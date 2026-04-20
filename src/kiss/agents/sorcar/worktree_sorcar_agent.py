@@ -285,6 +285,27 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
 
                 if result == MergeResult.SUCCESS:
                     GitWorktreeOps.delete_branch(wt.repo_root, wt.branch)
+                elif result == MergeResult.MERGE_FAILED:
+                    self._merge_conflict_warning = (
+                        f"Auto-merge of '{wt.branch}' into "
+                        f"'{wt.original_branch}' applied cleanly but "
+                        "the commit failed (a pre-commit hook may have "
+                        "rejected it). The branch is kept for manual "
+                        "resolution. Run:\n"
+                        f"    cd {wt.repo_root}\n"
+                        f"    git checkout {wt.original_branch}\n"
+                        f"    git merge --squash {wt.branch}\n"
+                        "    # fix pre-commit issues, then:\n"
+                        "    git commit --no-verify\n"
+                        f"    git branch -d {wt.branch}"
+                    )
+                    logger.warning(
+                        "Auto-merge of '%s' into '%s': commit failed "
+                        "(pre-commit hook?); branch kept",
+                        wt.branch, wt.original_branch,
+                    )
+                    self._wt = None
+                    return None
                 else:
                     self._merge_conflict_warning = (
                         f"Auto-merge of '{wt.branch}' into "
@@ -343,7 +364,11 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         """
         released_branch = self._release_worktree()
 
-        original_branch = released_branch or GitWorktreeOps.current_branch(repo)
+        if released_branch is not None:
+            original_branch = released_branch
+        else:
+            with repo_lock(repo):
+                original_branch = GitWorktreeOps.current_branch(repo)
         if original_branch is None:
             logger.warning("Detached HEAD, running task directly")
             return None
@@ -590,6 +615,23 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
             self._wt = None
             return (
                 f"Successfully merged branch '{wt.branch}'."
+                + stash_warning
+            )
+
+        if result == MergeResult.MERGE_FAILED:
+            # Merge applied cleanly but commit failed (e.g. pre-commit hook)
+            return (
+                f"Merge of '{wt.branch}' applied cleanly but the commit "
+                "failed (a pre-commit hook may have rejected it). "
+                "The branch is kept — retry manually:\n"
+                f"    cd {wt.repo_root}\n"
+                f"    git checkout {wt.original_branch}\n"
+                f"    git merge --squash {wt.branch}\n"
+                "    # fix pre-commit issues, then:\n"
+                "    git commit --no-verify\n"
+                f"    git branch -d {wt.branch}\n"
+                "\nOr discard the branch:\n"
+                "    agent.discard()"
                 + stash_warning
             )
 

@@ -41,6 +41,12 @@
 - BUG-27: `cleanup_orphans` unconditionally deletes `kiss/wt-*` branches with no worktree — deletes branches preserved for manual merge conflict resolution
 - BUG-28: `_start_merge_session` reads `tab_id` from thread-local — fails to set `is_merging` when called from main thread (session replay path)
 - BUG-29: `_release_worktree` conflict instructions say `git merge --squash` but stash pop already restored dirty state, so merge --squash will refuse
+- BUG-30 through BUG-33 (found in audit7) are now FIXED; test_worktree_audit7.py verifies correct behavior
+- BUG-30 FIX: `_try_setup_worktree` now reads `current_branch(repo)` inside `repo_lock` when `released_branch` is None
+- BUG-31 FIX: Both `merge()` and `_release_worktree` now have explicit `MERGE_FAILED` handling with correct messages (mentioning commit failure and `--no-verify`)
+- BUG-32 FIX: `_finish_merge` now only calls `_cleanup_merge_data` when NO tab has `is_merging=True`
+- BUG-33 FIX: `copy_dirty_state` uses `_unquote_git_path()` to decode C-style quoted filenames from `git status --porcelain`
+- `_unquote_git_path` is a public helper in `git_worktree.py` that handles all git C-style escape sequences (\\n, \\t, \\\\, \\", \\NNN octal)
 - `build-extension.sh` must NOT call `--uninstall-extension` before `--install-extension` — uninstall deactivates the running extension (disposing the `fs.watchFile` watcher), preventing auto-reload, and can cause VS Code to process the queued uninstall on restart before recognizing the new install
 - VS Code extension uses `activationEvents: ["onStartupFinished"]` (NOT `"*"`) — the old `"*"` was unreliable in modern VS Code and could cause the extension to not activate until a view was opened
 - `build-extension.sh` opens VS Code after installing the extension (`"$CODE" .` from the project root) so the auto-reload watcher triggers and the user sees the updated extension

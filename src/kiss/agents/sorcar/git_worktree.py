@@ -107,6 +107,55 @@ class ManualMergeResult:
     has_conflicts: bool
 
 
+def _unquote_git_path(path: str) -> str:
+    """Unquote a C-style quoted filename from ``git status --porcelain``.
+
+    Git quotes filenames containing non-ASCII bytes (>0x7F), control
+    characters, double-quotes, or backslashes.  The quoted form is
+    surrounded by double-quotes with C-style escape sequences
+    (``\\n``, ``\\t``, ``\\\\``, ``\\"``, ``\\NNN`` octal).
+
+    When the path is not quoted (no surrounding double-quotes), it is
+    returned unchanged.
+
+    Args:
+        path: Raw filename string from ``git status --porcelain`` output.
+
+    Returns:
+        The unquoted filename.
+    """
+    if not (path.startswith('"') and path.endswith('"')):
+        return path
+    inner = path[1:-1]
+    raw = bytearray()
+    i = 0
+    _esc = {
+        "n": 0x0A, "t": 0x09, "\\": 0x5C, '"': 0x22,
+        "a": 0x07, "b": 0x08, "f": 0x0C, "r": 0x0D, "v": 0x0B,
+    }
+    while i < len(inner):
+        if inner[i] == "\\" and i + 1 < len(inner):
+            nxt = inner[i + 1]
+            if nxt in _esc:
+                raw.append(_esc[nxt])
+                i += 2
+            elif (
+                nxt.isdigit()
+                and i + 3 < len(inner)
+                and inner[i + 2].isdigit()
+                and inner[i + 3].isdigit()
+            ):
+                raw.append(int(inner[i + 1 : i + 4], 8))
+                i += 4
+            else:
+                raw.append(ord("\\"))
+                i += 1
+        else:
+            raw.extend(inner[i].encode("utf-8"))
+            i += 1
+    return raw.decode("utf-8", errors="surrogateescape")
+
+
 class GitWorktreeOps:
     """Stateless helper class with all git worktree operations.
 
@@ -720,11 +769,13 @@ class GitWorktreeOps:
             if len(line) < 4:
                 continue
             xy = line[:2]
-            fname = line[3:]
+            fname = _unquote_git_path(line[3:])
             # Handle renames: "R  old -> new"
             old_name: str | None = None
             if " -> " in fname:
                 old_name, fname = fname.split(" -> ", 1)
+                old_name = _unquote_git_path(old_name)
+                fname = _unquote_git_path(fname)
 
             src = repo / fname
             dst = wt_dir / fname

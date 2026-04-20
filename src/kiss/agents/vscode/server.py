@@ -686,11 +686,16 @@ class VSCodeServer:
             else:
                 for tab in self._tab_states.values():
                     tab.is_merging = False
+            # Only clean up merge data when no tab is still merging
+            any_merging = any(
+                t.is_merging for t in self._tab_states.values()
+            )
         event: dict[str, Any] = {"type": "merge_ended"}
         if tab_id is not None:
             event["tabId"] = tab_id
         self.printer.broadcast(event)
-        _cleanup_merge_data(str(_merge_data_dir()))
+        if not any_merging:
+            _cleanup_merge_data(str(_merge_data_dir()))
 
         # Emit deferred worktree_done after merge review completes
         if tab_id is not None:
