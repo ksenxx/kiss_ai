@@ -17,7 +17,7 @@
     "Other"
   ],
   "activationEvents": [
-    "*"
+    "onStartupFinished"
   ],
   "icon": "media/icon.png",
   "main": "./out/extension.js",
@@ -193,7 +193,7 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "copy-kiss": "bash copy-kiss.sh",
-    "package": "vsce package --no-dependencies --allow-star-activation --allow-missing-repository -o kiss-sorcar.vsix",
+    "package": "vsce package --no-dependencies --allow-missing-repository -o kiss-sorcar.vsix",
     "lint": "npm run lint:ts && npm run lint:css && npm run lint:html",
     "lint:ts": "eslint 'src/**/*.ts' 'media/**/*.js' --ignore-pattern 'media/**/*.min.js'",
     "lint:css": "stylelint 'media/**/*.css' --ignore-pattern 'media/**/*.min.css'",

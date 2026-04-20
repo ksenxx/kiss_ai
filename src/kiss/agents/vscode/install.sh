@@ -241,7 +241,7 @@ export PATH="$HOME/.local/bin:$PATH"
     echo ""
 
     echo "--- Package VSIX ---"
-    npx vsce package --no-dependencies --allow-star-activation --allow-missing-repository -o kiss-sorcar.vsix 2>&1
+    npx vsce package --no-dependencies --allow-missing-repository -o kiss-sorcar.vsix 2>&1
     echo ""
 
     echo "--- Check Python version ---"

@@ -19,13 +19,16 @@ npm run copy-kiss
 echo "==> Packaging VSIX..."
 npm run package
 
-echo "==> Uninstalling old extension (if present)..."
-"$CODE" --uninstall-extension ksenxx.kiss-sorcar 2>/dev/null || true
-
 echo "==> Installing extension..."
 "$CODE" --install-extension kiss-sorcar.vsix --force
 
 echo "==> Cleaning up build artifacts..."
 rm -rf "$EXT_DIR/out" "$EXT_DIR/kiss_project" "$EXT_DIR/kiss-sorcar.vsix"
 
+echo "==> Opening VS Code..."
+cd "$PROJECT_ROOT"
+"$CODE" .
+
 echo "==> Done. KISS Sorcar extension installed successfully."
+echo "    VS Code should auto-reload shortly."
+echo "    If not, press Cmd+Shift+P and run 'Reload Window'."
