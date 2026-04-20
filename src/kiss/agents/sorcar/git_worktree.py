@@ -676,8 +676,9 @@ class GitWorktreeOps:
             xy = line[:2]
             fname = line[3:]
             # Handle renames: "R  old -> new"
+            old_name: str | None = None
             if " -> " in fname:
-                fname = fname.split(" -> ", 1)[1]
+                old_name, fname = fname.split(" -> ", 1)
 
             src = repo / fname
             dst = wt_dir / fname
@@ -691,6 +692,12 @@ class GitWorktreeOps:
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 _shutil.copy2(str(src), str(dst))
                 copied = True
+                # Remove the old path in the worktree on renames so the
+                # agent doesn't see a ghost of the pre-rename file.
+                if old_name is not None:
+                    old_dst = wt_dir / old_name
+                    if old_dst.exists():
+                        old_dst.unlink()
             elif src.is_dir():
                 # Submodule or directory entry — skip
                 continue

@@ -119,16 +119,22 @@ def _parse_hunk_line(line: str) -> tuple[int, int, int, int] | None:
     )
 
 
-def _parse_diff_hunks(work_dir: str) -> dict[str, list[tuple[int, int, int, int]]]:
-    """Parse ``git diff -U0 HEAD`` output into per-file hunk lists.
+def _parse_diff_hunks(
+    work_dir: str,
+    base_ref: str = "HEAD",
+) -> dict[str, list[tuple[int, int, int, int]]]:
+    """Parse ``git diff -U0 <base_ref>`` output into per-file hunk lists.
 
     Args:
         work_dir: Repository root directory.
+        base_ref: The git ref to diff against (default ``"HEAD"``).
+            Pass a baseline commit SHA to include committed changes
+            between the baseline and the current working tree.
 
     Returns:
         Dict mapping filename to list of (old_start, old_count, new_start, new_count).
     """
-    result = _git(work_dir, "diff", "-U0", "HEAD", "--no-color")
+    result = _git(work_dir, "diff", "-U0", base_ref, "--no-color")
     hunks: dict[str, list[tuple[int, int, int, int]]] = {}
     current_file = ""
     for line in result.stdout.split("\n"):
@@ -365,6 +371,7 @@ def _prepare_merge_view(
     pre_hunks: dict[str, list[tuple[int, int, int, int]]],
     pre_untracked: set[str],
     pre_file_hashes: dict[str, str] | None = None,
+    base_ref: str = "HEAD",
 ) -> dict[str, Any]:
     """Prepare merge-view data comparing pre-task and post-task states.
 
@@ -378,12 +385,15 @@ def _prepare_merge_view(
         pre_hunks: Pre-task diff hunks from ``_parse_diff_hunks``.
         pre_untracked: Pre-task untracked file set.
         pre_file_hashes: Pre-task MD5 hashes for change detection.
+        base_ref: Git ref to diff against (default ``"HEAD"``).
+            Pass a baseline commit SHA to include changes committed
+            by the agent between the baseline and the working tree.
 
     Returns:
         Dict with ``status``/``count``/``hunk_count`` on success,
         or ``error`` key on failure.
     """
-    post_hunks = _parse_diff_hunks(work_dir)
+    post_hunks = _parse_diff_hunks(work_dir, base_ref=base_ref)
     ub_dir = _untracked_base_dir()
     file_hunks: dict[str, list[dict[str, int]]] = {}
 
@@ -434,7 +444,7 @@ def _prepare_merge_view(
         if saved_base.is_file():
             shutil.copy2(saved_base, base_path)
         else:
-            base_result = _git(work_dir, "show", f"HEAD:{fname}")
+            base_result = _git(work_dir, "show", f"{base_ref}:{fname}")
             base_path.write_text(
                 base_result.stdout if base_result.returncode == 0 else "",
             )

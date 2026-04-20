@@ -1,15 +1,22 @@
 # User Preferences
 
 - When auditing code, write tests that CONFIRM bugs exist (assertions pass when buggy behavior is present)
-- Worktree-related code spans: `git_worktree.py`, `worktree_sorcar_agent.py`, `stateful_sorcar_agent.py`, `server.py` (VSCode integration), `persistence.py`
+- Worktree-related code spans: `git_worktree.py`, `worktree_sorcar_agent.py`, `stateful_sorcar_agent.py`, `server.py` (VSCode integration), `persistence.py`, `diff_merge.py`
 - Test helpers pattern: `_redirect_db`, `_restore_db`, `_make_repo`, `_patch_super_run`, `_unpatch_super_run` — reused across worktree test files
 - The `_git` function in `git_worktree.py` (keyword `cwd`) differs from `_git` in `diff_merge.py` (positional `cwd`) — be careful with imports
 - Use `setup_method`/`teardown_method` pattern (not pytest fixtures) for worktree tests
 - Known bugs: BUG-1 through BUG-7 + INC-1/INC-2 are in test_worktree_audit.py / test_worktree_audit2.py
 - BUG-8 through BUG-11 (found in audit3) are now FIXED in server.py; test_worktree_audit3.py verifies correct behavior
+- Worktree bugs 1-5 from audit (false conflict, rename ghost, stash pop loss, review skips commits, release returns wrong branch) are FIXED; test_worktree_bugfixes.py verifies all fixes
 - When testing `_replay_session`, must persist at least one chat event via `_append_chat_event` — otherwise the function returns early due to `not result.get("events")` check
-- `_check_merge_conflict` is now a pure query (no auto-commit side effect); uses fork-point-based file overlap detection
+- `_check_merge_conflict` uses split fork points with baseline: `baseline^` for orig_diff, `baseline` for wt_diff — prevents user's dirty state from causing false conflict positives
 - `_get_worktree_changed_files` now uses `git merge-base` to find fork point, avoiding false positives when original branch advances
+- `_parse_diff_hunks` and `_prepare_merge_view` accept optional `base_ref` parameter (default "HEAD") to diff against baseline commit for worktree merge review
+- `_start_worktree_merge_review` passes baseline commit as `base_ref` so committed agent changes are visible in hunk review
 - `_replay_session` now restores `tab.use_worktree` from persisted `extra` JSON data
 - The canonical `SYSTEM.md` lives at `src/kiss/SYSTEM.md`; root-level `SYSTEM.md` is a duplicate that can be removed once `release.sh` is also updated to point to `src/kiss/SYSTEM.md`
 - VS Code extension `package.json` uses `scm/title` (stable API) for the generate-commit-message button, NOT `scm/inputBox` (proposed API)
+- `copy_dirty_state` now handles renames by deleting the old file path from the worktree
+- `_release_worktree` returns `None` (not `wt.original_branch`) on checkout failure so caller falls through to `current_branch()`
+- `merge()` and `_release_worktree()` surface stash_pop failure warnings to the user instead of silently logging
+- Pre-existing test failures: `test_check_merge_conflict_dirty_worktree` (wt_dir doesn't exist) and `test_sidebar_has_no_unknown_message_types` — NOT caused by worktree changes
