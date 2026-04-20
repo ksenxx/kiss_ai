@@ -73,6 +73,7 @@ class KISSAgent(Base):
         self.verbose = verbose if verbose is not None else True
         self.set_printer(printer, verbose=self.verbose)
         token_callback = self.printer.token_callback if self.printer else None
+        thinking_callback = self.printer.thinking_callback if self.printer else None
 
         # Reuse existing model client if model name and config haven't changed
         existing = getattr(self, "model", None)
@@ -83,9 +84,15 @@ class KISSAgent(Base):
         ):
             existing.reset_conversation()
             existing.token_callback = token_callback
+            existing.thinking_callback = thinking_callback
             self.model = existing
         else:
-            self.model = model(model_name, model_config=model_config, token_callback=token_callback)
+            self.model = model(
+                model_name,
+                model_config=model_config,
+                token_callback=token_callback,
+                thinking_callback=thinking_callback,
+            )
         self.is_agentic = is_agentic
         self.max_steps = max_steps if max_steps is not None else 100
         self.max_budget = max_budget if max_budget is not None else 10.0

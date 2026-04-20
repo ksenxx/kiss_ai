@@ -337,6 +337,23 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
             )
             self.broadcast({"type": delta_type, "text": token})
 
+    def thinking_callback(self, is_start: bool) -> None:
+        """Handle thinking-block boundary events.
+
+        Sets ``_current_block_type`` so that subsequent ``token_callback``
+        tokens are routed to the thinking panel, and broadcasts
+        ``thinking_start`` / ``thinking_end`` events.
+
+        Args:
+            is_start: ``True`` when a thinking block starts, ``False`` when it ends.
+        """
+        if is_start:
+            self._current_block_type = "thinking"
+            self.broadcast({"type": "thinking_start"})
+        else:
+            self._current_block_type = ""
+            self.broadcast({"type": "thinking_end"})
+
     def _format_tool_call(self, name: str, tool_input: dict[str, Any]) -> None:
         file_path, lang = extract_path_and_lang(tool_input)
         event: dict[str, Any] = {"type": "tool_call", "name": name}

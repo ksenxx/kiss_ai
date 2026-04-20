@@ -29,6 +29,10 @@ logger = logging.getLogger(__name__)
 # Type alias for the synchronous token streaming callback.
 TokenCallback = Callable[[str], None]
 
+# Type alias for the thinking-block boundary callback.
+# Called with ``True`` when a thinking block starts, ``False`` when it ends.
+ThinkingCallback = Callable[[bool], None]
+
 SUPPORTED_MIME_TYPES = {
     "image/jpeg",
     "image/png",
@@ -178,6 +182,7 @@ class Model(ABC):
         model_name: str,
         model_config: dict[str, Any] | None = None,
         token_callback: TokenCallback | None = None,
+        thinking_callback: ThinkingCallback | None = None,
     ):
         """Initialize a Model instance.
 
@@ -185,10 +190,14 @@ class Model(ABC):
             model_name: The name/identifier of the model.
             model_config: Optional dictionary of model configuration parameters.
             token_callback: Optional callback invoked with each streamed text token.
+            thinking_callback: Optional callback invoked with ``True`` when a
+                thinking block starts and ``False`` when it ends.  Used by
+                printers to switch between thinking and text display modes.
         """
         self.model_name = model_name
         self.model_config = model_config or {}
         self.token_callback = token_callback
+        self.thinking_callback = thinking_callback
         self.usage_info_for_messages: str = ""
         self.conversation: list[Any] = []
         self.client: Any = None
@@ -197,6 +206,15 @@ class Model(ABC):
         """Invoke the token callback synchronously."""
         if self.token_callback is not None:
             self.token_callback(token)
+
+    def _invoke_thinking_callback(self, is_start: bool) -> None:
+        """Invoke the thinking callback synchronously.
+
+        Args:
+            is_start: ``True`` when a thinking block starts, ``False`` when it ends.
+        """
+        if self.thinking_callback is not None:
+            self.thinking_callback(is_start)
 
     def reset_conversation(self) -> None:
         """Reset conversation state for reuse across sub-sessions.

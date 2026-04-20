@@ -234,6 +234,20 @@ class Printer(ABC):
             token: The text token to process.
         """
 
+    def thinking_callback(self, is_start: bool) -> None:
+        """Handle thinking-block boundary events from the LLM.
+
+        Called with ``True`` when a thinking block starts and ``False``
+        when it ends.  Printers use this to switch between thinking and
+        text display modes so that ``token_callback`` tokens are routed
+        to the correct panel.
+
+        The default implementation is a no-op.
+
+        Args:
+            is_start: ``True`` for block start, ``False`` for block end.
+        """
+
     @abstractmethod
     def reset(self) -> None:
         """Reset the printer's internal streaming state between messages."""
@@ -269,6 +283,15 @@ class MultiPrinter(Printer):
         """
         for p in self.printers:
             p.token_callback(token)
+
+    def thinking_callback(self, is_start: bool) -> None:
+        """Forward a thinking-block boundary event to all child printers.
+
+        Args:
+            is_start: ``True`` for block start, ``False`` for block end.
+        """
+        for p in self.printers:
+            p.thinking_callback(is_start)
 
     def reset(self) -> None:
         """Reset streaming state on all child printers."""
