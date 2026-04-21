@@ -203,37 +203,53 @@ def _merge_data_dir(tab_id: str = "") -> Path:
 
 
 def _untracked_base_dir(tab_id: str = "") -> Path:
-    """Return the directory for storing untracked file base copies.
+    """Return the directory for storing pre-task base file copies.
 
-    Uses ``{artifact_root}/merge_dir/{tab_id}/untracked-base/`` so
-    copies live alongside other merge artifacts, isolated per tab.
+    Uses ``{artifact_root}/merge_dir/{tab_id}/untracked-base/`` so copies
+    live alongside other merge artifacts, isolated per tab.
+
+    Only the non-worktree merge flow populates this directory (via
+    :func:`_save_untracked_base`).  The worktree flow diffs against the
+    baseline commit, which already captures all pre-task dirty state,
+    so ``git show {baseline}:{fname}`` yields the correct base content
+    and this directory remains empty.
 
     Args:
         tab_id: Frontend tab identifier for per-tab isolation.
 
     Returns:
-        Path to the untracked-base directory.
+        Path to the pre-task base-copy directory.
     """
     return _merge_data_dir(tab_id) / "untracked-base"
 
 
 def _save_untracked_base(
-    work_dir: str, untracked: set[str], tab_id: str = "",
+    work_dir: str, files: set[str], tab_id: str = "",
 ) -> None:
-    """Save copies of untracked files before a task runs.
+    """Save copies of pre-task dirty files for later merge-view diffing.
 
-    These copies serve as the "base" for merge-view diffs when an agent
-    modifies a pre-existing untracked file.
+    Despite the historical name, this is called with the union of
+    untracked **and** tracked-modified files (see the ``untracked |
+    set(hunks.keys())`` call site in
+    :mod:`kiss.agents.vscode.task_runner`).  Each copy serves as the
+    "base" against which the agent's post-task changes are diffed, so
+    the merge view shows only what the agent did — on top of whatever
+    dirty state the user already had.
+
+    Only used by the non-worktree merge flow.  The worktree flow
+    relies on its baseline commit instead (see
+    :func:`_untracked_base_dir`).
 
     Args:
         work_dir: Repository root.
-        untracked: Set of untracked file paths (relative to work_dir).
+        files: Relative paths (to ``work_dir``) whose current on-disk
+            contents should be saved as the pre-task base.
         tab_id: Frontend tab identifier for per-tab isolation.
     """
     base_dir = _untracked_base_dir(tab_id)
     if base_dir.exists():
         shutil.rmtree(base_dir)
-    for fname in untracked:
+    for fname in files:
         fpath = Path(work_dir) / fname
         try:
             if not fpath.is_file() or fpath.stat().st_size > 2_000_000:  # pragma: no cover

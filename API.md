@@ -34,6 +34,7 @@
       - [`kiss.agents.sorcar.worktree_sorcar_agent`](#kissagentssorcarworktree_sorcar_agent)
     - [`kiss.agents.vscode`](#kissagentsvscode)
       - [`kiss.agents.vscode.helpers`](#kissagentsvscodehelpers)
+        \- [`kiss.agents.vscode.node_modules.flatted.python.flatted`](#kissagentsvscodenode_modulesflattedpythonflatted)
       - [`kiss.agents.vscode.printer`](#kissagentsvscodeprinter)
       - [`kiss.agents.vscode.server`](#kissagentsvscodeserver)
       - [`kiss.agents.vscode.tab_state`](#kissagentsvscodetab_state)
@@ -1147,6 +1148,14 @@ ______________________________________________________________________
 - `usage`: File usage counts keyed by path (insertion order encodes recency, last key = most recently used).
 - `limit`: Maximum number of results to return.
 - **Returns:** Sorted list of dicts with `type` (`"frequent"` or `"file"`) and `text` keys.
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.node_modules.flatted.python.flatted`
+
+**`parse`**<br/>`def parse(value, *args, **kwargs)`
+
+**`stringify`**<br/>`def stringify(value, *args, **kwargs)`
 
 ______________________________________________________________________
 
