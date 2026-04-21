@@ -259,7 +259,7 @@ class TestTypescriptIsRunningFix(unittest.TestCase):
         block = source[idx:idx + 300]
         assert "this._runningTabs" in block
         # Python server always sends status:running:false after task end events
-        with open("src/kiss/agents/vscode/server.py") as f:
+        with open("src/kiss/agents/vscode/task_runner.py") as f:
             py_source = f.read()
         assert '"type": "status", "running": False' in py_source
 

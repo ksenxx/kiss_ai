@@ -1279,12 +1279,12 @@ class TestMergeSession(unittest.TestCase):
     def test_finish_merge_cleans_up_data_dir(self) -> None:
         """_finish_merge removes the merge data directory."""
         import kiss.agents.vscode.diff_merge as dm
-        import kiss.agents.vscode.server as srv_mod
+        import kiss.agents.vscode.merge_flow as mf
 
         orig_dm = dm._merge_data_dir
-        orig_srv = srv_mod._merge_data_dir
+        orig_mf = mf._merge_data_dir
         dm._merge_data_dir = lambda tab_id="": self.merge_dir  # type: ignore[assignment]
-        srv_mod._merge_data_dir = lambda tab_id="": self.merge_dir  # type: ignore[assignment]
+        mf._merge_data_dir = lambda tab_id="": self.merge_dir  # type: ignore[assignment]
         try:
             path = self._write_merge_json()
             self.server._start_merge_session(path)
@@ -1293,7 +1293,7 @@ class TestMergeSession(unittest.TestCase):
             assert not self.merge_dir.exists()
         finally:
             dm._merge_data_dir = orig_dm  # type: ignore[assignment]
-            srv_mod._merge_data_dir = orig_srv  # type: ignore[assignment]
+            mf._merge_data_dir = orig_mf  # type: ignore[assignment]
 
     def test_merging_blocks_same_tab(self) -> None:
         """Cannot start a task on the same tab that has a merge in progress."""
@@ -1324,17 +1324,17 @@ class TestMergeSession(unittest.TestCase):
         self.events.clear()
 
         import kiss.agents.vscode.diff_merge as dm
-        import kiss.agents.vscode.server as srv_mod
+        import kiss.agents.vscode.merge_flow as mf
 
         orig = dm._merge_data_dir
         dm._merge_data_dir = lambda tab_id="": self.merge_dir  # type: ignore[assignment]
-        orig_srv = srv_mod._merge_data_dir
-        srv_mod._merge_data_dir = lambda tab_id="": self.merge_dir  # type: ignore[assignment]
+        orig_mf = mf._merge_data_dir
+        mf._merge_data_dir = lambda tab_id="": self.merge_dir  # type: ignore[assignment]
         try:
             self.server._handle_command({"type": "mergeAction", "action": "all-done"})
         finally:
             dm._merge_data_dir = orig  # type: ignore[assignment]
-            srv_mod._merge_data_dir = orig_srv  # type: ignore[assignment]
+            mf._merge_data_dir = orig_mf  # type: ignore[assignment]
         types = [e["type"] for e in self.events]
         assert "merge_ended" in types
 
