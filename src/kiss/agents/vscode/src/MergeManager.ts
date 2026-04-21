@@ -28,14 +28,14 @@ interface MergeFileState {
   hunks: ProcessedHunk[];
 }
 
-interface MergeFileData {
+export interface MergeFileData {
   name: string;
   base: string;
   current: string;
   hunks: Array<{bs: number; bc: number; cs: number; cc: number}>;
 }
 
-interface MergeData {
+export interface MergeData {
   branch?: string;
   files: MergeFileData[];
 }
