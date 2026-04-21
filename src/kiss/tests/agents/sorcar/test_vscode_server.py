@@ -1283,8 +1283,8 @@ class TestMergeSession(unittest.TestCase):
 
         orig_dm = dm._merge_data_dir
         orig_srv = srv_mod._merge_data_dir
-        dm._merge_data_dir = lambda: self.merge_dir  # type: ignore[assignment]
-        srv_mod._merge_data_dir = lambda: self.merge_dir  # type: ignore[assignment]
+        dm._merge_data_dir = lambda tab_id="": self.merge_dir  # type: ignore[assignment]
+        srv_mod._merge_data_dir = lambda tab_id="": self.merge_dir  # type: ignore[assignment]
         try:
             path = self._write_merge_json()
             self.server._start_merge_session(path)

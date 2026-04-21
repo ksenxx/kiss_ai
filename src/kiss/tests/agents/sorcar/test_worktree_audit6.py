@@ -175,15 +175,18 @@ class TestBug25ReleaseBranchOrphanedOnNoneOriginal:
         # BUG-25: returns None (correct for failure) but...
         assert result is None
 
-        # BUG-25: branch still exists — never deleted
+        # BUG-25 / BUG-50 fix: branch is still preserved (for manual
+        # resolution) but a warning is now set so the user knows.
         assert GitWorktreeOps.branch_exists(repo, branch_name), (
-            "BUG-25 appears fixed: branch was deleted"
+            "Branch must be preserved for manual resolution"
         )
 
-        # BUG-25: no warning set — user has no idea
-        assert agent._merge_conflict_warning is None, (
-            "BUG-25 appears fixed: warning is now set"
+        # BUG-50 fix: warning is now set so the user is notified
+        assert agent._merge_conflict_warning is not None, (
+            "BUG-50 fix: warning should be set on orphan branch"
         )
+        assert branch_name in agent._merge_conflict_warning
+        assert "original branch is unknown" in agent._merge_conflict_warning
         assert agent._stash_pop_warning is None
 
         # BUG-25: worktree dir was removed by _finalize_worktree
@@ -340,18 +343,19 @@ class TestBug27CleanupDeletesConflictBranch:
             "Worktree dir should be removed by _finalize_worktree"
         )
 
-        # BUG-27: cleanup_orphans sees the branch with no worktree
-        # and deletes it — losing agent's work
+        # BUG-58 fix: cleanup_orphans preserves branches that still
+        # have a ``kiss-original`` config entry (pending-merge) so the
+        # agent's work is not lost after a conflict.
         cleanup_output = GitWorktreeOps.cleanup_orphans(repo)
 
-        # BUG-27: The branch was deleted by cleanup_orphans
-        assert not GitWorktreeOps.branch_exists(repo, branch_name), (
-            "BUG-27 appears fixed: cleanup_orphans no longer deletes "
+        assert GitWorktreeOps.branch_exists(repo, branch_name), (
+            "BUG-58 fix: cleanup_orphans must preserve "
             "conflict-preserved branches"
         )
-        assert "Deleted" in cleanup_output, (
-            "cleanup_orphans should report deleting the branch"
+        assert "Pending-merge branches (kept)" in cleanup_output, (
+            "cleanup_orphans should classify the branch as pending-merge"
         )
+        assert branch_name in cleanup_output
 
     def test_cleanup_orphans_does_not_check_unmerged(self) -> None:
         """BUG-27: Confirm cleanup_orphans has no unmerged-commit check."""
@@ -528,23 +532,13 @@ class TestBug29ConflictInstructionsIgnoreDirtyState:
                 "when no baseline"
             )
 
-    def test_warning_does_not_mention_stash(self) -> None:
-        """BUG-29: Confirm the conflict warning doesn't mention stashing."""
+    def test_warning_mentions_stash_pop(self) -> None:
+        """BUG-29 fix: the conflict warning tells the user to run
+        ``git stash pop`` when the auto-merge stashed their uncommitted
+        changes, so they can restore them after resolving the conflict.
+        """
         source = inspect.getsource(WorktreeSorcarAgent._release_worktree)
-        # Find the _merge_conflict_warning assignment in the conflict path
-        # (the one with "had conflicts")
-        lines = source.splitlines()
-        in_conflict_warning = False
-        warning_text = ""
-        for line in lines:
-            if "had conflicts" in line:
-                in_conflict_warning = True
-            if in_conflict_warning:
-                warning_text += line
-                if line.strip().endswith(")") or line.strip().endswith('")'):
-                    break
-
-        # BUG-29: The warning doesn't tell the user to stash first
-        assert "stash" not in warning_text.lower(), (
-            "BUG-29 appears fixed: conflict warning now mentions stashing"
-        )
+        # The warning appends ``stash_suffix`` which contains the
+        # ``git stash pop`` instruction when a stash was created.
+        assert "stash_suffix" in source
+        assert "git stash pop" in source

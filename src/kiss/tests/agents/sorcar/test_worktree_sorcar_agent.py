@@ -181,6 +181,12 @@ class TestWorktreeSorcarAgent:
         _git("worktree", "remove", str(wt_dir), "--force", cwd=self.repo)
         _git("worktree", "prune", cwd=self.repo)
 
+        # BUG-58 fix: cleanup preserves branches that still have a
+        # ``kiss-original`` config entry (pending-merge).  Remove it
+        # so this test exercises the true-orphan deletion path.
+        _git("config", "--remove-section", f"branch.{branch}",
+             cwd=self.repo)
+
         result = WorktreeSorcarAgent.cleanup(self.repo)
         assert "Deleted" in result or "orphan" in result.lower() or "1 kiss/wt-*" in result
 

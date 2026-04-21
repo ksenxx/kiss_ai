@@ -103,13 +103,14 @@ class TestBug19DiscardRepoLock:
             agent._chat_id = "a"
             wt_work = agent._try_setup_worktree(repo, str(repo))
             assert wt_work is not None
+            assert agent._wt is not None
             (agent._wt.wt_dir / "a.txt").write_text("a\n")
             GitWorktreeOps.commit_all(agent._wt.wt_dir, "agent-a work")
 
             lock = repo_lock(repo)
             lock.acquire()
+            completed = threading.Event()
             try:
-                completed = threading.Event()
 
                 def try_discard() -> None:
                     agent.discard()
@@ -359,13 +360,18 @@ class TestBug23BaselineCommitFixed:
 
 
 class TestBug24SilentDiscardOnGitFailure:
-    """BUG-24: _get_worktree_changed_files returns [] when git diff fails.
-    This is a known conservative behavior — no false-positive changes.
-    The auto-discard is safe because no real changes were detected.
+    """BUG-24 + BUG-51: _get_worktree_changed_files originally returned []
+    when git diff failed (conservative).  The BUG-51 fix replaced that
+    behavior with a fallback to ``git status --porcelain`` so real
+    agent changes are not silently discarded when ``git diff`` fails
+    (e.g. due to a bad baseline SHA).
     """
 
-    def test_get_changed_files_returns_empty_on_diff_failure(self) -> None:
-        """Returns [] on git diff failure (conservative)."""
+    def test_get_changed_files_falls_back_to_status_on_diff_failure(
+        self,
+    ) -> None:
+        """BUG-51 fix: returns files from ``git status`` fallback when
+        ``git diff`` against the baseline fails."""
         tmpdir = tempfile.mkdtemp()
         saved = _redirect_db(tmpdir)
         try:
@@ -398,24 +404,28 @@ class TestBug24SilentDiscardOnGitFailure:
             )
 
             changed_after = server._get_worktree_changed_files("t24")
-            assert changed_after == []
+            # BUG-51 fix: the agent's committed change is still
+            # reported via the ``git status`` fallback so the
+            # auto-discard path does not silently lose work.
+            assert "important.txt" in changed_after
 
         finally:
             _restore_db(saved)
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_caller_discards_on_empty_changed_files(self) -> None:
-        """_run_task_inner calls discard() when changed=[], guarded
-        by _any_non_wt_running() (BUG-42 fix)."""
-        source = inspect.getsource(VSCodeServer._run_task_inner)
-        assert "discard()" in source
-        lines = source.splitlines()
-        found_pattern = False
-        for i, line in enumerate(lines):
-            if "tab.agent.discard()" in line:
-                # Look for else: within 10 lines (guard adds more lines)
-                for j in range(i - 1, max(i - 10, 0), -1):
-                    if "else:" in lines[j]:
-                        found_pattern = True
-                        break
-        assert found_pattern
+        """_present_pending_worktree calls discard() when changed=[],
+        guarded by _any_non_wt_running() (BUG-42 + RED-10 consolidation).
+
+        _run_task_inner delegates to _present_pending_worktree, which
+        owns the auto-discard logic.
+        """
+        present_source = inspect.getsource(
+            VSCodeServer._present_pending_worktree,
+        )
+        assert "discard()" in present_source
+        assert "_any_non_wt_running" in present_source
+
+        # _run_task_inner delegates to _present_pending_worktree
+        runner_source = inspect.getsource(VSCodeServer._run_task_inner)
+        assert "_present_pending_worktree" in runner_source
