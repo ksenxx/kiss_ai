@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import enum
 import logging
+import shutil
 import subprocess
 import threading
 from dataclasses import dataclass
@@ -818,6 +819,18 @@ class GitWorktreeOps:
     def cleanup_orphans(repo: Path) -> str:
         """Scan for orphaned ``kiss/wt-*`` branches and worktrees.
 
+        Cleans up three distinct forms of stale state:
+
+        1.  ``kiss/wt-*`` branches with no active git worktree and no
+            ``kiss-original`` config (true orphan branches).
+        2.  Registered worktree bookkeeping entries whose directory
+            is gone (``git worktree prune``).
+        3.  Directories under ``.kiss-worktrees/`` that are not
+            registered as git worktrees (orphan directories — e.g.
+            leftover files from a crashed agent session or a manually
+            unlinked worktree).  Pending-merge branches (those with
+            ``kiss-original`` set) are never removed — BUG-58.
+
         Args:
             repo: Root of the git repository to scan.
 
@@ -834,9 +847,12 @@ class GitWorktreeOps:
 
         wt_result = _git("worktree", "list", "--porcelain", cwd=repo)
         worktree_branches: set[str] = set()
+        registered_dirs: set[Path] = set()
         for line in wt_result.stdout.splitlines():
             if line.startswith("branch refs/heads/kiss/wt-"):
                 worktree_branches.add(line.split("refs/heads/")[1])
+            elif line.startswith("worktree "):
+                registered_dirs.add(Path(line.split(" ", 1)[1]).resolve())
 
         # BUG-58 fix: branches with a kiss-original config entry are
         # pending merge (worktree removed but merge not yet done).
@@ -870,7 +886,25 @@ class GitWorktreeOps:
         _git("worktree", "prune", cwd=repo)
         lines.append("Ran git worktree prune.")
 
-        if not orphan_branches:
+        # Scan .kiss-worktrees/ for orphan directories (not registered
+        # as a git worktree).  This catches leftover directories from
+        # crashed agent sessions, manual .git unlinks, or pre-BUG-58
+        # cleanups that removed the branch but not the directory.
+        wt_root = repo / ".kiss-worktrees"
+        orphan_dirs: list[str] = []
+        if wt_root.is_dir():
+            for child in sorted(wt_root.iterdir()):
+                if not child.is_dir():
+                    continue
+                if child.resolve() in registered_dirs:
+                    continue
+                shutil.rmtree(child, ignore_errors=True)
+                orphan_dirs.append(child.name)
+
+        if orphan_dirs:
+            lines.append(f"Orphan directories removed: {orphan_dirs}")
+
+        if not orphan_branches and not orphan_dirs:
             lines.append("No orphans found.")
 
         return "\n".join(lines)
