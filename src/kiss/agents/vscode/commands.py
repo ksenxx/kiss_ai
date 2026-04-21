@@ -1,0 +1,245 @@
+"""Command handlers for the VS Code server.
+
+Split out of ``server.py`` for organisation.  ``_CommandsMixin``
+provides one ``_cmd_*`` method per frontend command type plus the
+class-level ``_HANDLERS`` dispatch table consumed by
+``VSCodeServer._handle_command``.
+"""
+
+from __future__ import annotations
+
+import logging
+import queue
+import threading
+from typing import TYPE_CHECKING, Any
+
+from kiss.agents.sorcar.persistence import (
+    _load_history,
+    _record_file_usage,
+    _save_last_model,
+)
+
+if TYPE_CHECKING:
+    from kiss.agents.vscode.printer import VSCodePrinter
+    from kiss.agents.vscode.tab_state import _TabState
+
+logger = logging.getLogger(__name__)
+
+
+class _CommandsMixin:
+    """Methods that implement frontend command handlers."""
+
+    if TYPE_CHECKING:
+        # Provided by ``VSCodeServer`` / sibling mixins at runtime.
+        printer: VSCodePrinter
+        _state_lock: threading.Lock
+        _tab_states: dict[str, _TabState]
+        _default_model: str
+        _complete_seq: int
+        _complete_seq_latest: int
+        _complete_queue: queue.Queue[tuple[str, int, str, str]] | None
+        _last_active_file: str
+        _last_active_content: str
+
+        def _get_tab(self, tab_id: str) -> _TabState: ...
+        def _run_task(self, cmd: dict[str, Any]) -> None: ...
+        def _stop_task(self, tab_id: str | None = None) -> None: ...
+        def _get_models(self) -> None: ...
+        def _get_history(
+            self, query: str | None, offset: int = 0, generation: int = 0
+        ) -> None: ...
+        def _get_files(self, prefix: str) -> None: ...
+        def _refresh_file_cache(self) -> None: ...
+        def _replay_session(self, chat_id: str, tab_id: str = "") -> None: ...
+        def _handle_merge_action(
+            self, action: str, tab_id: str | None = None
+        ) -> None: ...
+        def _new_chat(self, tab_id: str) -> None: ...
+        def _ensure_complete_worker(self) -> None: ...
+        def _get_input_history(self) -> None: ...
+        def _get_adjacent_task(
+            self, chat_id: str, task: str, direction: str, tab_id: str = "",
+        ) -> None: ...
+        def _generate_commit_message(self) -> None: ...
+        def _handle_worktree_action(
+            self, action: str, tab_id: str = "",
+        ) -> dict[str, Any]: ...
+        def _handle_autocommit_action(
+            self, action: str, tab_id: str = "",
+        ) -> None: ...
+
+    # -- Command handlers (one per command type) -------------------------
+
+    def _cmd_run(self, cmd: dict[str, Any]) -> None:
+        """Start an agent task in a background thread."""
+        tab_id = cmd.get("tabId", "")
+        tab = self._get_tab(tab_id)
+        with self._state_lock:
+            if tab.task_thread is not None and tab.task_thread.is_alive():
+                self.printer.broadcast({
+                    "type": "error",
+                    "text": "Task already running",
+                    "tabId": tab_id,
+                })
+                self.printer.broadcast({"type": "status", "running": False, "tabId": tab_id})
+                return
+            # RC-NEW-1: create stop_event and queue before starting
+            # the thread so _stop_task always finds a valid event.
+            tab.stop_event = threading.Event()
+            tab.user_answer_queue = queue.Queue(maxsize=1)
+            thread = threading.Thread(
+                target=self._run_task, args=(cmd,), daemon=True
+            )
+            tab.task_thread = thread
+            thread.start()
+
+    def _cmd_stop(self, cmd: dict[str, Any]) -> None:
+        """Stop a running task."""
+        self._stop_task(cmd.get("tabId"))
+
+    def _cmd_get_models(self, cmd: dict[str, Any]) -> None:
+        """Send available models list."""
+        self._get_models()
+
+    def _cmd_select_model(self, cmd: dict[str, Any]) -> None:
+        """Update the selected model for a tab."""
+        tab_id = cmd.get("tabId", "")
+        tab = self._get_tab(tab_id)
+        model = cmd.get("model", tab.selected_model)
+        tab.selected_model = model
+        with self._state_lock:
+            self._default_model = model  # new tabs inherit latest selection
+        _save_last_model(model)
+
+    def _cmd_get_history(self, cmd: dict[str, Any]) -> None:
+        """Send conversation history."""
+        self._get_history(cmd.get("query"), cmd.get("offset", 0), cmd.get("generation", 0))
+
+    def _cmd_get_files(self, cmd: dict[str, Any]) -> None:
+        """Send file list for autocomplete."""
+        self._get_files(cmd.get("prefix", ""))
+
+    def _cmd_refresh_files(self, cmd: dict[str, Any]) -> None:
+        """Refresh the file cache."""
+        self._refresh_file_cache()
+
+    def _cmd_record_file_usage(self, cmd: dict[str, Any]) -> None:
+        """Record a file access for usage-based sorting."""
+        path = cmd.get("path", "")
+        if path:
+            _record_file_usage(path)
+
+    def _cmd_user_answer(self, cmd: dict[str, Any]) -> None:
+        """Route a user answer to the correct tab's queue."""
+        ans_tab = cmd.get("tabId")
+        with self._state_lock:
+            ans_state = self._tab_states.get(ans_tab) if ans_tab is not None else None
+            q = ans_state.user_answer_queue if ans_state is not None else None
+        if q is None:
+            logger.debug("userAnswer dropped: no queue for tabId=%s", ans_tab)
+            return
+        # Drain any stale answer, then put the new one (P2/D3 fix)
+        while not q.empty():
+            try:
+                q.get_nowait()
+            except queue.Empty:  # pragma: no cover — race guard
+                break
+        q.put(cmd.get("answer", ""))
+
+    def _cmd_resume_session(self, cmd: dict[str, Any]) -> None:
+        """Replay a previous chat session."""
+        raw_id = cmd.get("chatId")
+        chat_id = str(raw_id) if raw_id else ""
+        if chat_id:
+            self._replay_session(chat_id, cmd.get("tabId", ""))
+
+    def _cmd_merge_action(self, cmd: dict[str, Any]) -> None:
+        """Handle merge accept/reject from the extension."""
+        self._handle_merge_action(cmd.get("action", ""), cmd.get("tabId"))
+
+    def _cmd_new_chat(self, cmd: dict[str, Any]) -> None:
+        """Start a new chat session."""
+        self._new_chat(cmd.get("tabId", ""))
+
+    def _cmd_complete(self, cmd: dict[str, Any]) -> None:
+        """Ghost text autocomplete request."""
+        query = cmd.get("query", "")
+        active_file = cmd.get("activeFile")
+        active_content = cmd.get("activeFileContent")
+        with self._state_lock:
+            if active_file:
+                self._last_active_file = active_file
+            if active_content is not None:
+                self._last_active_content = active_content
+            snapshot_file = self._last_active_file
+            snapshot_content = self._last_active_content
+            self._complete_seq += 1
+            seq = self._complete_seq
+            self._complete_seq_latest = seq
+        if query:
+            self._ensure_complete_worker()
+            self._complete_queue.put((query, seq, snapshot_file, snapshot_content))  # type: ignore[union-attr]
+
+    def _cmd_get_input_history(self, cmd: dict[str, Any]) -> None:
+        """Send deduplicated task texts for arrow-key cycling."""
+        self._get_input_history()
+
+    def _cmd_get_adjacent_task(self, cmd: dict[str, Any]) -> None:
+        """Send events for the adjacent task in the same chat session."""
+        tab_id = cmd.get("tabId", "")
+        adj_tab = self._get_tab(tab_id)
+        chat_id = adj_tab.agent.chat_id
+        if chat_id == "":
+            entries = _load_history(limit=1)
+            if entries:
+                chat_id = str(entries[0].get("chat_id", "") or "")
+        self._get_adjacent_task(
+            chat_id,
+            cmd.get("task", ""),
+            cmd.get("direction", "prev"),
+            tab_id,
+        )
+
+    def _cmd_generate_commit_message(self, cmd: dict[str, Any]) -> None:
+        """Generate a git commit message in the background."""
+        threading.Thread(
+            target=self._generate_commit_message, daemon=True
+        ).start()
+
+    def _cmd_worktree_action(self, cmd: dict[str, Any]) -> None:
+        """Execute a worktree merge/discard action."""
+        action = cmd.get("action", "")
+        wt_tab_id = cmd.get("tabId", "")
+        try:
+            result = self._handle_worktree_action(action, wt_tab_id)
+        except Exception as e:
+            logger.debug("Worktree action error", exc_info=True)
+            result = {"success": False, "message": str(e)}
+        self.printer.broadcast({"type": "worktree_result", "tabId": wt_tab_id, **result})
+
+    def _cmd_autocommit_action(self, cmd: dict[str, Any]) -> None:
+        """Process the user's reply to an autocommit prompt."""
+        self._handle_autocommit_action(
+            cmd.get("action", ""), cmd.get("tabId", ""),
+        )
+
+    _HANDLERS: dict[str, Any] = {
+        "run": _cmd_run,
+        "stop": _cmd_stop,
+        "getModels": _cmd_get_models,
+        "selectModel": _cmd_select_model,
+        "getHistory": _cmd_get_history,
+        "getFiles": _cmd_get_files,
+        "refreshFiles": _cmd_refresh_files,
+        "recordFileUsage": _cmd_record_file_usage,
+        "userAnswer": _cmd_user_answer,
+        "resumeSession": _cmd_resume_session,
+        "mergeAction": _cmd_merge_action,
+        "newChat": _cmd_new_chat,
+        "complete": _cmd_complete,
+        "getInputHistory": _cmd_get_input_history,
+        "getAdjacentTask": _cmd_get_adjacent_task,
+        "generateCommitMessage": _cmd_generate_commit_message,
+        "worktreeAction": _cmd_worktree_action,
+        "autocommitAction": _cmd_autocommit_action,
+    }

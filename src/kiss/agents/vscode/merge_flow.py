@@ -1,0 +1,772 @@
+"""Merge / worktree / autocommit flow mixin for the VS Code server.
+
+Owns:
+- Non-worktree merge view (prepare + start + finish + autocommit).
+- Worktree lifecycle presentation (ensure, emit pending, broadcast done).
+- Worktree merge/discard user actions + conflict checking.
+
+Split out of ``server.py`` for organisation.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import threading
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+from kiss.agents.sorcar.git_worktree import GitWorktreeOps, repo_lock
+from kiss.agents.vscode.diff_merge import (
+    _capture_untracked,
+    _cleanup_merge_data,
+    _git,
+    _merge_data_dir,
+    _prepare_merge_view,
+)
+from kiss.agents.vscode.helpers import clean_llm_output, fast_model_for
+from kiss.agents.vscode.tab_state import _TabState
+from kiss.core.kiss_agent import KISSAgent
+
+if TYPE_CHECKING:
+    from kiss.agents.vscode.printer import VSCodePrinter
+
+logger = logging.getLogger(__name__)
+
+
+class _MergeFlowMixin:
+    """Merge-view, worktree-action, and autocommit methods."""
+
+    if TYPE_CHECKING:
+        # Provided by ``VSCodeServer`` / sibling mixins at runtime.
+        printer: VSCodePrinter
+        work_dir: str
+        _state_lock: threading.Lock
+        _tab_states: dict[str, _TabState]
+
+        def _get_tab(self, tab_id: str) -> _TabState: ...
+        def _any_non_wt_running(self) -> bool: ...
+
+    def _start_merge_session(
+        self, merge_json_path: str, tab_id: str = "",
+    ) -> bool:
+        """Load merge data from disk and broadcast merge_data + merge_started events.
+
+        Args:
+            merge_json_path: Path to the pending-merge.json file.
+            tab_id: Frontend tab identifier.  Used to set ``is_merging``
+                on the correct tab.
+
+        Returns:
+            True if a merge session was started, False otherwise.
+        """
+        try:
+            with open(merge_json_path) as f:
+                merge_data = json.load(f)
+            files = merge_data.get("files", [])
+            if not files:
+                return False
+            total_hunks = sum(len(f.get("hunks", [])) for f in files)
+            if total_hunks == 0:
+                return False
+            # BUG-41 / RED-6 fix: use explicit tab_id parameter instead
+            # of reading from thread-local (which is None on replay path).
+            resolved_tab_id = tab_id or getattr(
+                self.printer._thread_local, "tab_id", None,
+            )
+            resolved_tab: _TabState | None = None
+            with self._state_lock:
+                if resolved_tab_id is not None:
+                    resolved_tab = self._tab_states.get(resolved_tab_id)
+                    if resolved_tab is not None:
+                        resolved_tab.is_merging = True
+            # BUG-67 fix: if broadcast raises (e.g. BrokenPipeError),
+            # clear is_merging so the tab is not permanently locked.
+            try:
+                merge_data_event: dict[str, Any] = {
+                    "type": "merge_data",
+                    "data": merge_data,
+                    "hunk_count": total_hunks,
+                }
+                merge_started_event: dict[str, Any] = {"type": "merge_started"}
+                if resolved_tab_id is not None:
+                    merge_data_event["tabId"] = resolved_tab_id
+                    merge_started_event["tabId"] = resolved_tab_id
+                self.printer.broadcast(merge_data_event)
+                self.printer.broadcast(merge_started_event)
+            except BaseException:
+                with self._state_lock:
+                    if resolved_tab is not None:
+                        resolved_tab.is_merging = False
+                raise
+            return True
+        except (OSError, json.JSONDecodeError, KeyError):
+            logger.debug("Failed to load merge data", exc_info=True)
+            return False
+
+    def _prepare_and_start_merge(
+        self,
+        work_dir: str,
+        pre_hunks: dict[str, list[tuple[int, int, int, int]]] | None = None,
+        pre_untracked: set[str] | None = None,
+        pre_file_hashes: dict[str, str] | None = None,
+        base_ref: str = "HEAD",
+        tab_id: str = "",
+    ) -> bool:
+        """Prepare a merge view and start the merge session if changes exist.
+
+        Combines ``_prepare_merge_view`` and ``_start_merge_session``
+        into a single call to eliminate the repeated prepare→check→start
+        sequence.
+
+        Args:
+            work_dir: Repository root (or worktree) directory.
+            pre_hunks: Pre-task diff hunks (empty dict when not applicable).
+            pre_untracked: Pre-task untracked file set (empty when not applicable).
+            pre_file_hashes: Pre-task MD5 hashes for change detection.
+            base_ref: Git ref to diff against (default ``"HEAD"``).
+                Pass a baseline commit SHA to include committed agent
+                changes in the merge review.
+            tab_id: Frontend tab identifier for per-tab merge data isolation.
+
+        Returns:
+            True if a merge session was started, False otherwise.
+        """
+        merge_dir = str(_merge_data_dir(tab_id))
+        merge_result = _prepare_merge_view(
+            work_dir,
+            merge_dir,
+            pre_hunks or {},
+            pre_untracked or set(),
+            pre_file_hashes,
+            base_ref=base_ref,
+        )
+        if merge_result.get("status") != "opened":
+            return False
+        merge_json = os.path.join(merge_dir, "pending-merge.json")
+        return self._start_merge_session(merge_json, tab_id=tab_id)
+
+    def _start_worktree_merge_review(self, tab_id: str) -> bool:
+        """Prepare and start a merge review for worktree changes.
+
+        Builds a merge view from the worktree directory so the user can
+        accept/reject individual hunks before the worktree is committed
+        and merged.  When a baseline commit exists (user had dirty
+        state), diffs against the baseline so that both committed and
+        uncommitted agent changes are included in the review while the
+        user's pre-existing dirty state is excluded.
+
+        Args:
+            tab_id: The tab whose worktree to review.
+
+        Returns:
+            True if a merge session was started, False otherwise.
+        """
+        tab = self._get_tab(tab_id)
+        wt_dir = tab.agent._wt_dir
+        if wt_dir is None or not wt_dir.exists():
+            return False
+        # Diff against the baseline commit when available so that
+        # committed agent changes are visible in the merge review,
+        # not just uncommitted ones (BUG-4 fix).
+        base_ref = tab.agent._baseline_commit or "HEAD"
+        try:
+            return self._prepare_and_start_merge(
+                str(wt_dir), base_ref=base_ref, tab_id=tab_id,
+            )
+        except BaseException:
+            logger.debug("Worktree merge review error", exc_info=True)
+            return False
+
+    def _handle_merge_action(self, action: str, tab_id: str | None = None) -> None:
+        """Handle merge accept/reject actions from the extension.
+
+        Only ``all-done`` triggers cleanup. Individual ``accept``/``reject``
+        actions are tracked on the TypeScript side; the Python server
+        only needs to know when the entire merge session is finished.
+
+        Args:
+            action: The merge action string (e.g. ``"all-done"``).
+            tab_id: The tab whose merge session is being finished.
+        """
+        if action == "all-done":
+            self._finish_merge(tab_id)
+
+    def _finish_merge(self, tab_id: str | None = None) -> None:
+        """End the merge session for a specific tab.
+
+        When a worktree task is pending, emits ``worktree_done`` so the
+        user sees merge/discard buttons only after the hunk review is
+        complete.
+
+        Args:
+            tab_id: The tab whose merge session is finished. When *None*,
+                all merge sessions are cleared.
+        """
+        with self._state_lock:
+            if tab_id is not None:
+                tab = self._tab_states.get(tab_id)
+                if tab is not None:
+                    tab.is_merging = False
+            else:
+                for tab in self._tab_states.values():
+                    tab.is_merging = False
+        event: dict[str, Any] = {"type": "merge_ended"}
+        if tab_id is not None:
+            event["tabId"] = tab_id
+        self.printer.broadcast(event)
+        # Per-tab merge data cleanup — each tab has its own directory
+        if tab_id is not None:
+            _cleanup_merge_data(str(_merge_data_dir(tab_id)))
+        else:
+            _cleanup_merge_data(str(_merge_data_dir()))
+
+        # Emit deferred worktree_done after merge review completes
+        if tab_id is not None:
+            self._present_pending_worktree(tab_id, try_merge_review=False)
+
+        # After the user finishes the non-worktree merge review, prompt
+        # them to auto-commit any remaining dirty state on the main
+        # branch (accepted hunks, pre-existing edits, untracked files).
+        if tab_id is not None:
+            with self._state_lock:
+                tab = self._tab_states.get(tab_id)
+            if tab is not None and not tab.use_worktree:
+                changed = self._main_dirty_files()
+                if changed:
+                    self.printer.broadcast({
+                        "type": "autocommit_prompt",
+                        "tabId": tab_id,
+                        "changedFiles": changed,
+                    })
+
+    def _main_dirty_files(self) -> list[str]:
+        """List modified, staged and untracked files in the main working tree.
+
+        Uses ``git status --porcelain -uall`` so untracked files inside
+        new directories are also reported.  Returns an empty list when
+        the working tree is clean or ``work_dir`` is not a git repo.
+
+        Returns:
+            De-duplicated list of file paths (relative to ``work_dir``).
+        """
+        repo = GitWorktreeOps.discover_repo(Path(self.work_dir))
+        if repo is None:
+            return []
+        result = _git(self.work_dir, "status", "--porcelain", "-uall")
+        if result.returncode != 0:
+            return []
+        files: list[str] = []
+        for line in result.stdout.splitlines():
+            if len(line) < 4:
+                continue
+            path = line[3:]
+            # Renames are "A -> B"; report the new path.
+            if " -> " in path:
+                path = path.split(" -> ", 1)[1]
+            path = path.strip().strip('"')
+            if path and path not in files:
+                files.append(path)
+        return files
+
+    def _handle_autocommit_action(
+        self, action: str, tab_id: str = "",
+    ) -> None:
+        """Process the user's reply to an ``autocommit_prompt``.
+
+        Args:
+            action: ``"commit"`` to stage-all + generate-message + commit;
+                ``"skip"`` to leave the working tree untouched.
+            tab_id: The tab that owns the prompt (echoed in the
+                ``autocommit_done`` event).
+        """
+        if action == "skip":
+            self.printer.broadcast({
+                "type": "autocommit_done",
+                "success": True,
+                "committed": False,
+                "message": "Left changes uncommitted.",
+                "tabId": tab_id,
+            })
+            return
+        if action != "commit":
+            self.printer.broadcast({
+                "type": "autocommit_done",
+                "success": False,
+                "committed": False,
+                "message": f"Unknown autocommit action: {action}",
+                "tabId": tab_id,
+            })
+            return
+        try:
+            repo = GitWorktreeOps.discover_repo(Path(self.work_dir))
+            if repo is None:
+                self.printer.broadcast({
+                    "type": "autocommit_done",
+                    "success": False,
+                    "committed": False,
+                    "message": "Not a git repository.",
+                    "tabId": tab_id,
+                })
+                return
+            with repo_lock(repo):
+                self.printer.broadcast({
+                    "type": "autocommit_progress",
+                    "message": "Staging changes…",
+                    "tabId": tab_id,
+                })
+                _git(self.work_dir, "add", "-A")
+                diff = _git(self.work_dir, "diff", "--cached")
+                if not diff.stdout.strip():
+                    self.printer.broadcast({
+                        "type": "autocommit_done",
+                        "success": True,
+                        "committed": False,
+                        "message": "Nothing to commit.",
+                        "tabId": tab_id,
+                    })
+                    return
+                self.printer.broadcast({
+                    "type": "autocommit_progress",
+                    "message": "Generating commit message…",
+                    "tabId": tab_id,
+                })
+                msg = self._compose_commit_message(diff.stdout) or "Auto-commit"
+                self.printer.broadcast({
+                    "type": "autocommit_progress",
+                    "message": "Committing…",
+                    "tabId": tab_id,
+                })
+                ok = GitWorktreeOps.commit_staged(repo, msg)
+            if ok:
+                subject = msg.splitlines()[0] if msg.splitlines() else msg
+                self.printer.broadcast({
+                    "type": "autocommit_done",
+                    "success": True,
+                    "committed": True,
+                    "message": f"Committed: {subject}",
+                    "commitMessage": msg,
+                    "tabId": tab_id,
+                })
+            else:
+                self.printer.broadcast({
+                    "type": "autocommit_done",
+                    "success": False,
+                    "committed": False,
+                    "message": "git commit failed (pre-commit hook?).",
+                    "tabId": tab_id,
+                })
+        except Exception as e:  # pragma: no cover — unexpected git/LLM error
+            logger.debug("Autocommit action failed", exc_info=True)
+            self.printer.broadcast({
+                "type": "autocommit_done",
+                "success": False,
+                "committed": False,
+                "message": str(e),
+                "tabId": tab_id,
+            })
+
+    def _compose_commit_message(self, diff_text: str) -> str:  # pragma: no cover
+        """Generate a git commit message for *diff_text* via an LLM.
+
+        Exposed as a method so tests can substitute a deterministic
+        replacement without mocking the underlying LLM stack.
+
+        Args:
+            diff_text: Output of ``git diff --cached``.
+
+        Returns:
+            The cleaned commit-message string.
+        """
+        agent = KISSAgent("Auto Commit Message")
+        raw = agent.run(
+            model_name=fast_model_for(),
+            prompt_template=(
+                "Generate a nicely markdown formatted, informative git commit "
+                "message for these changes. Use conventional commit format "
+                "with a clear subject line (type: description) and optionally "
+                "a body with bullet points for multiple changes. Return ONLY "
+                "the commit message text, no quotes or markdown fences.\n\n"
+                "{context}"
+            ),
+            arguments={"context": f"Diff:\n{diff_text}"},
+            is_agentic=False,
+            verbose=False,
+        )
+        return clean_llm_output(raw)
+
+    # ---- Worktree lifecycle presentation -------------------------------
+
+    def _broadcast_worktree_done(self, changed: list[str], tab_id: str = "") -> None:
+        """Broadcast a ``worktree_done`` event with the current worktree state.
+
+        Args:
+            changed: List of file paths changed in the worktree.
+            tab_id: The tab that owns the worktree.
+        """
+        wt = self._get_tab(tab_id).agent
+        event: dict[str, Any] = {
+            "type": "worktree_done",
+            "branch": wt._wt_branch,
+            "worktreeDir": str(wt._wt_dir),
+            "originalBranch": wt._original_branch,
+            "changedFiles": changed,
+            "hasConflict": self._check_merge_conflict(tab_id) if changed else False,
+        }
+        if tab_id:
+            event["tabId"] = tab_id
+        self.printer.broadcast(event)
+
+    def _emit_pending_worktree(self, tab_id: str = "") -> None:
+        """Emit merge review or ``worktree_done`` for a pending worktree branch.
+
+        Called after replaying a session.  Restores worktree state
+        from git (for post-restart resume) and delegates to
+        :meth:`_present_pending_worktree`.
+
+        Args:
+            tab_id: The tab to check for pending worktree.
+        """
+        tab = self._get_tab(tab_id)
+        if not tab.use_worktree:
+            return
+        self._ensure_worktree_state(tab_id)
+        self._present_pending_worktree(tab_id, try_merge_review=True)
+
+    def _present_pending_worktree(
+        self, tab_id: str, *, try_merge_review: bool,
+    ) -> None:
+        """Auto-discard, start merge review, or emit ``worktree_done``.
+
+        Single source of truth for post-task / post-merge-review /
+        session-resume handling of a pending worktree (RED-10 fix).
+
+        Behavior:
+        - No pending worktree: return.
+        - Worktree has changed files and *try_merge_review* is True:
+          attempt to start a merge review; on failure broadcast
+          ``worktree_done``.
+        - Worktree has changed files and *try_merge_review* is False
+          (merge review already finished): broadcast ``worktree_done``.
+        - Worktree has no changes and no non-wt task is running:
+          auto-discard.
+        - Worktree has no changes but a non-wt task is running:
+          broadcast ``worktree_done`` so the user is aware of the
+          pending branch and can take manual action later
+          (BUG-68 fix — previously silent for the post-task and
+          post-merge-review paths).
+
+        Args:
+            tab_id: The tab with a pending worktree.
+            try_merge_review: Whether to attempt starting a merge
+                review before falling back.  Pass False after a
+                merge review has already been completed.
+        """
+        tab = self._get_tab(tab_id)
+        if not tab.use_worktree or not tab.agent._wt_pending:
+            return
+        changed = self._get_worktree_changed_files(tab_id)
+        if changed and try_merge_review and self._start_worktree_merge_review(tab_id):
+            return
+        if not changed:
+            with self._state_lock:
+                non_wt_busy = self._any_non_wt_running()
+            if not non_wt_busy:
+                tab.agent.discard()
+                return
+        self._broadcast_worktree_done(changed, tab_id)
+
+    def _ensure_worktree_state(self, tab_id: str = "") -> None:
+        """Restore agent worktree state from git if not already set.
+
+        Discovers the repo root and calls ``_restore_from_git()`` so
+        that ``merge()``/``discard()`` work even after a server process
+        restart where in-memory state was lost.
+        Only applicable when using the worktree agent.
+
+        Args:
+            tab_id: The tab whose worktree state to restore.
+        """
+        tab = self._get_tab(tab_id)
+        if not tab.use_worktree:
+            return
+        wt = tab.agent
+        repo_root = wt._repo_root
+        if repo_root is None:
+            repo_root = GitWorktreeOps.discover_repo(Path(self.work_dir))
+            if repo_root is None:
+                return
+        wt._restore_from_git(repo_root)
+
+    # ---- Conflict / change detection -----------------------------------
+
+    def _check_merge_conflict(self, tab_id: str = "") -> bool:
+        """Check if merging the worktree branch into original would conflict.
+
+        Pure query — does **not** commit or otherwise mutate git state
+        (BUG-9 fix).  Uses file-level overlap detection between:
+
+        1. Files changed on the original branch since the fork point.
+        2. Files changed in the worktree (committed + uncommitted)
+           since the fork point.
+
+        When both sides modify the same file, reports a potential
+        conflict.  Also checks for dirty main working-tree files that
+        overlap with the worktree changes (which would cause
+        ``git merge`` to refuse).
+
+        Args:
+            tab_id: The tab whose worktree to check.
+
+        Returns:
+            True if the merge would likely fail, False otherwise.
+        """
+        tab = self._get_tab(tab_id)
+        if not tab.use_worktree:
+            return False
+        wt = tab.agent._wt
+        if wt is None or wt.original_branch is None:
+            return False
+        wt_dir = wt.wt_dir
+        if not wt_dir.exists():
+            return False
+
+        # Determine fork points for conflict detection.
+        # For the *original branch* diff we need the HEAD at worktree
+        # creation time (before the baseline dirty-state commit) so that
+        # the user's own dirty edits aren't reported as "original branch
+        # changes".  For the *worktree* diff we use the baseline itself
+        # so only agent changes are visible.
+        #
+        # BUG-56 fix: validate baseline with git cat-file -t before
+        # using it (consistent with _resolve_base_ref's BUG-51 fix).
+        # An invalid baseline would make both diff commands fail
+        # silently and return False (no conflict) even when there is
+        # one.
+        baseline_valid = False
+        if wt.baseline_commit:
+            check = _git(
+                str(wt_dir), "cat-file", "-t", wt.baseline_commit,
+            )
+            baseline_valid = (
+                check.returncode == 0
+                and check.stdout.strip() == "commit"
+            )
+        if baseline_valid:
+            assert wt.baseline_commit is not None  # guarded by baseline_valid
+            # baseline^ = the commit the worktree branched from (HEAD at
+            # creation).  baseline = HEAD + user dirty state.
+            orig_fork = f"{wt.baseline_commit}^"
+            wt_fork: str = wt.baseline_commit
+        else:
+            mb = _git(str(wt_dir), "merge-base", "HEAD", wt.original_branch)
+            if mb.returncode != 0 or not mb.stdout.strip():
+                return False
+            orig_fork = wt_fork = mb.stdout.strip()
+
+        # Files changed on original branch since the fork
+        orig_diff = _git(
+            str(wt.repo_root), "diff", "--name-only",
+            orig_fork, wt.original_branch,
+        )
+        orig_files = (
+            set(orig_diff.stdout.strip().splitlines())
+            if orig_diff.returncode == 0 else set()
+        )
+
+        # Files changed in the worktree (committed + uncommitted) since fork
+        wt_diff = _git(str(wt_dir), "diff", "--name-only", wt_fork)
+        wt_files = (
+            set(wt_diff.stdout.strip().splitlines())
+            if wt_diff.returncode == 0 else set()
+        )
+        wt_files.update(_capture_untracked(str(wt_dir)))
+
+        # Check 1: both sides modified the same file → likely conflict
+        if orig_files & wt_files:
+            return True
+
+        # Check 2: dirty main working-tree files that overlap with
+        # worktree changes (git merge would refuse).
+        # Fix 3 (BUG-37): skip this check when a non-worktree agent is
+        # running — its in-flight writes would cause false-positive
+        # conflict reports since they're not user edits.
+        with self._state_lock:
+            if self._any_non_wt_running():
+                return False
+        # INC-6 fix: check both unstaged AND staged files — staged
+        # files that overlap with worktree changes would also cause
+        # git merge to refuse.
+        # BUG-70 fix: also check untracked files in main.  The auto-
+        # merge flow (``stash --include-untracked`` → squash-merge →
+        # ``stash pop``) fails at pop when the squash recreates an
+        # untracked file, because pop can't overwrite the now-
+        # existing file.
+        dirty = set(GitWorktreeOps.unstaged_files(wt.repo_root))
+        dirty.update(GitWorktreeOps.staged_files(wt.repo_root))
+        dirty.update(_capture_untracked(str(wt.repo_root)))
+        return bool(dirty & wt_files)
+
+    @staticmethod
+    def _resolve_base_ref(
+        git_dir: str, baseline: str | None, original_branch: str,
+        tip: str = "HEAD",
+    ) -> str:
+        """Resolve the base ref for worktree diff operations.
+
+        Uses the baseline commit when available **and valid** (i.e. the
+        SHA exists in the repository), otherwise falls back to
+        ``git merge-base`` between *tip* and *original_branch*.
+
+        BUG-51 fix: validates baseline SHA with ``git cat-file -t``
+        before returning it.  An invalid baseline (e.g. from a
+        force-pushed branch or corrupt config) is silently ignored
+        so callers get a usable ref instead of a guaranteed-to-fail one.
+
+        Args:
+            git_dir: Directory to run git commands in.
+            baseline: Baseline commit SHA, or ``None``.
+            original_branch: The user's original branch name.
+            tip: The tip ref to compute merge-base against (default ``HEAD``).
+
+        Returns:
+            A git ref string suitable for ``git diff``.
+        """
+        if baseline:
+            check = _git(git_dir, "cat-file", "-t", baseline)
+            if check.returncode == 0 and check.stdout.strip() == "commit":
+                return baseline
+            # Invalid baseline — fall through to merge-base
+        mb = _git(git_dir, "merge-base", tip, original_branch)
+        if mb.returncode == 0 and mb.stdout.strip():
+            return mb.stdout.strip()
+        return original_branch
+
+    def _get_worktree_changed_files(self, tab_id: str = "") -> list[str]:
+        """List files changed in the worktree vs the original branch.
+
+        Detects both committed changes on the worktree branch and
+        uncommitted changes in the worktree working tree.  When the
+        worktree directory exists, runs ``git diff`` and
+        ``git ls-files --others`` inside it so that uncommitted
+        edits and new files are included.  Falls back to a branch-
+        to-branch diff when the worktree has already been removed.
+
+        Args:
+            tab_id: The tab whose worktree to check.
+
+        Returns:
+            Sorted deduplicated list of relative file paths.
+        """
+        tab = self._get_tab(tab_id)
+        if not tab.use_worktree:
+            return []
+        wt = tab.agent
+        if not wt._original_branch:
+            return []
+        wt_dir = wt._wt_dir
+        if wt_dir and wt_dir.exists():
+            base_ref = self._resolve_base_ref(
+                str(wt_dir), wt._baseline_commit, wt._original_branch,
+            )
+            tracked = _git(str(wt_dir), "diff", "--name-only", base_ref)
+            if tracked.returncode == 0:
+                files = tracked.stdout.strip().splitlines()
+            else:
+                # BUG-51 fix: git diff failed — fall back to
+                # git status to detect any changes rather than
+                # returning [] which would trigger auto-discard.
+                status = _git(str(wt_dir), "status", "--porcelain")
+                files = [
+                    line[3:].strip()
+                    for line in status.stdout.splitlines()
+                    if len(line) >= 4 and line[3:].strip()
+                ]
+            files.extend(_capture_untracked(str(wt_dir)))
+            return sorted(set(files))
+        # Worktree already removed — fall back to branch diff
+        if not wt._wt_branch:
+            return []
+        repo_root = str(wt._repo_root) if wt._repo_root else self.work_dir
+        base_ref = self._resolve_base_ref(
+            repo_root, wt._baseline_commit, wt._original_branch,
+            tip=wt._wt_branch,
+        )
+        result = _git(repo_root, "diff", "--name-only",
+                      base_ref,
+                      wt._wt_branch)
+        return result.stdout.strip().splitlines() if result.returncode == 0 else []
+
+    def _check_worktree_busy(self, tab: _TabState, verb: str) -> dict[str, Any] | None:
+        """Return an error dict if a worktree action should be refused, else None.
+
+        Checks both the tab's own task and any non-worktree task running
+        on the main tree (BUG-35, BUG-72 fixes).
+
+        Args:
+            tab: The per-tab state to check.
+            verb: Human-readable action name (e.g. ``"merging"``).
+
+        Returns:
+            Error dict with ``success: False`` when busy, otherwise ``None``.
+        """
+        with self._state_lock:
+            if tab.is_task_active:
+                return {
+                    "success": False,
+                    "message": (
+                        f"A worktree task is still running on this tab. "
+                        f"Wait for it to finish (or stop it) before {verb}."
+                    ),
+                }
+            if self._any_non_wt_running():
+                return {
+                    "success": False,
+                    "message": (
+                        "Another tab is running a task on the main working "
+                        f"tree. Wait for it to finish before {verb}."
+                    ),
+                }
+        return None
+
+    def _handle_worktree_action(self, action: str, tab_id: str = "") -> dict[str, Any]:
+        """Execute a worktree merge/discard/manual action.
+
+        Restores agent worktree state from git if needed (e.g. after a
+        server process restart where in-memory state was lost).
+
+        Args:
+            action: One of ``"merge"`` or ``"discard"``.
+            tab_id: The tab whose worktree to act on.
+
+        Returns:
+            Dict with ``success`` bool and ``message`` string.
+        """
+        tab = self._get_tab(tab_id)
+        if not tab.use_worktree:
+            return {"success": False, "message": "Worktree mode is not enabled"}
+        wt = tab.agent
+        if not wt._wt_pending:
+            self._ensure_worktree_state(tab_id)
+        if action == "merge":
+            busy = self._check_worktree_busy(tab, "merging")
+            if busy:
+                return busy
+            progress_event: dict[str, Any] = {
+                "type": "worktree_progress",
+                "message": "Generating commit message…",
+            }
+            if tab_id:
+                progress_event["tabId"] = tab_id
+            self.printer.broadcast(progress_event)
+            msg = wt.merge()
+            success = "Successfully merged" in msg
+            return {"success": success, "message": msg}
+        elif action == "discard":
+            busy = self._check_worktree_busy(tab, "discarding")
+            if busy:
+                return busy
+            msg = wt.discard()
+            return {"success": True, "message": msg}
+        return {"success": False, "message": f"Unknown action: {action}"}

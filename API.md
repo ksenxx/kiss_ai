@@ -34,8 +34,9 @@
       - [`kiss.agents.sorcar.worktree_sorcar_agent`](#kissagentssorcarworktree_sorcar_agent)
     - [`kiss.agents.vscode`](#kissagentsvscode)
       - [`kiss.agents.vscode.helpers`](#kissagentsvscodehelpers)
-        \- [`kiss.agents.vscode.node_modules.flatted.python.flatted`](#kissagentsvscodenode_modulesflattedpythonflatted)
+      - [`kiss.agents.vscode.printer`](#kissagentsvscodeprinter)
       - [`kiss.agents.vscode.server`](#kissagentsvscodeserver)
+      - [`kiss.agents.vscode.tab_state`](#kissagentsvscodetab_state)
   - [`kiss.benchmarks`](#kissbenchmarks)
     - [`kiss.benchmarks.generate_dashboard`](#kissbenchmarksgenerate_dashboard)
     - [`kiss.benchmarks.swebench_pro`](#kissbenchmarksswebench_pro)
@@ -1149,15 +1150,7 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.agents.vscode.node_modules.flatted.python.flatted`
-
-**`parse`**<br/>`def parse(value, *args, **kwargs)`
-
-**`stringify`**<br/>`def stringify(value, *args, **kwargs)`
-
-______________________________________________________________________
-
-#### `kiss.agents.vscode.server` — *VS Code extension backend server for Sorcar agent.*
+#### `kiss.agents.vscode.printer` — *VS Code extension printer — writes JSON events to stdout.*
 
 ##### `class VSCodePrinter(BaseBrowserPrinter)` — Printer that outputs JSON events to stdout for VS Code extension.
 
@@ -1166,15 +1159,23 @@ ______________________________________________________________________
 - **broadcast** — Write event as a JSON line to stdout, record it, and persist to DB. Injects `tabId` from thread-local storage when available so the frontend can route events to the correct chat tab. Display events are persisted to the database via `_append_chat_event` as they are created, provided a per-tab agent with a valid `_last_task_id` is registered in `_persist_agents`. The `_record_event` call and the stdout write are performed inside a single `_lock` critical section so recording order is guaranteed to match stdout-write order even under concurrent broadcasts. `_stdout_lock` is nested inside `_lock` for defence-in-depth against any future caller that writes to stdout directly.<br/>`broadcast(event: dict[str, Any]) -> None`
   - `event`: The event dictionary to emit.
 
-##### `class VSCodeServer` — Backend server for VS Code extension.
+______________________________________________________________________
+
+#### `kiss.agents.vscode.server` — *VS Code extension backend server for Sorcar agent.*
+
+##### `class VSCodeServer(_CommandsMixin, _TaskRunnerMixin, _MergeFlowMixin, _AutocompleteMixin)` — Backend server for VS Code extension.
 
 **Constructor:** `VSCodeServer() -> None`
 
 - **run** — Main loop: read commands from stdin, execute them.<br/>`run() -> None`
-  **`parse_task_tags`** — Parse `<task>...</task>` tags from *text* and return individual tasks. When the input contains one or more `<task>` blocks with non-empty content, each block's content is returned as a separate list element. If no valid `<task>` blocks are found (or all are empty/whitespace), the original *text* is returned as a single-element list so that callers can always iterate without special-casing.<br/>`def parse_task_tags(text: str) -> list[str]`
+
+______________________________________________________________________
+
+#### `kiss.agents.vscode.tab_state` — *Per-tab state and small text helpers for the VS Code server.*
+
+**`parse_task_tags`** — Parse `<task>...</task>` tags from *text* and return individual tasks. When the input contains one or more `<task>` blocks with non-empty content, each block's content is returned as a separate list element. If no valid `<task>` blocks are found (or all are empty/whitespace), the original *text* is returned as a single-element list so that callers can always iterate without special-casing.<br/>`def parse_task_tags(text: str) -> list[str]`
 
 - `text`: Input text potentially containing `<task>...</task>` tags.
-
 - **Returns:** List of task strings. Always contains at least one element.
 
 ______________________________________________________________________
