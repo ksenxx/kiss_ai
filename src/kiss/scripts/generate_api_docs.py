@@ -9,16 +9,18 @@ from pathlib import Path
 KISS_SRC = Path(__file__).resolve().parent.parent
 PROJECT_ROOT = KISS_SRC.parent.parent
 OUTPUT = PROJECT_ROOT / "API.md"
-EXCLUDE_DIRS = {
-    "tests",
-    "scripts",
-    "evals",
-    "viz_trajectory",
-    "demo",
-    "__pycache__",
-    "obsolete",
+
+# Explicit allowlist of files to include in API docs.
+INCLUDE_FILES: set[Path] = {
+    Path("core/kiss_agent.py"),
+    Path("core/relentless_agent.py"),
+    Path("agents/sorcar/sorcar_agent.py"),
+    Path("agents/sorcar/stateful_sorcar_agent.py"),
+    Path("agents/sorcar/git_worktree.py"),
+    Path("agents/sorcar/worktree_sorcar_agent.py"),
 }
-EXCLUDE_FILES = {"_version.py", "conftest.py", "novelty_prompts.py"}
+# Directories whose __init__.py and all .py files are included.
+INCLUDE_DIRS: set[Path] = {Path("channels")}
 
 
 @dataclass
@@ -273,9 +275,12 @@ def _file_to_module(path: Path) -> str:
     return ".".join(parts)
 
 
-def _should_skip(path: Path) -> bool:
+def _is_included(path: Path) -> bool:
+    """Return True if *path* is in the explicit allowlist."""
     rel = path.relative_to(KISS_SRC)
-    return any(p in EXCLUDE_DIRS or p in EXCLUDE_FILES or p.startswith(".") for p in rel.parts)
+    if rel in INCLUDE_FILES:
+        return True
+    return any(rel.parts[: len(d.parts)] == d.parts for d in INCLUDE_DIRS)
 
 
 def _find_def_in_file(path: Path, name: str) -> ClassInfo | FuncInfo | None:
@@ -315,7 +320,7 @@ def discover_modules() -> list[ModuleDoc]:
     documented_per_file: dict[Path, set[str]] = {}
 
     for init_path in sorted(KISS_SRC.rglob("__init__.py")):
-        if _should_skip(init_path):
+        if not _is_included(init_path):
             continue
         module_name = _file_to_module(init_path)
         source = init_path.read_text()
@@ -360,7 +365,7 @@ def discover_modules() -> list[ModuleDoc]:
         )
 
     for py_file in sorted(KISS_SRC.rglob("*.py")):
-        if py_file.name == "__init__.py" or _should_skip(py_file):
+        if py_file.name == "__init__.py" or not _is_included(py_file):
             continue
         module_name = _file_to_module(py_file)
         classes, functions = _extract_public_from_file(py_file)
@@ -385,41 +390,13 @@ def discover_modules() -> list[ModuleDoc]:
 
 def _sort_modules(modules: list[ModuleDoc]) -> list[ModuleDoc]:
     order = [
-        "kiss",
-        "kiss.core",
         "kiss.core.kiss_agent",
-        "kiss.core.base",
-        "kiss.core.config",
-        "kiss.core.config_builder",
-        "kiss.core.models",
-        "kiss.core.models.model",
-        "kiss.core.models.model_info",
-        "kiss.core.models.openai_compatible_model",
-        "kiss.core.models.anthropic_model",
-        "kiss.core.models.gemini_model",
-        "kiss.core.printer",
-        "kiss.core.print_to_console",
-        "kiss.agents.vscode.browser_ui",
-        "kiss.agents.sorcar.useful_tools",
-        "kiss.agents.sorcar.web_use_tool",
-        "kiss.core.utils",
-        "kiss.core.kiss_error",
-        "kiss.agents",
-        "kiss.agents.kiss",
-        "kiss.agents.sorcar",
         "kiss.core.relentless_agent",
         "kiss.agents.sorcar.sorcar_agent",
-        "kiss.agents.sorcar.sorcar",
-
-        "kiss.agents.obsolete.gepa",
-        "kiss.agents.obsolete.gepa.gepa",
-        "kiss.agents.obsolete.kiss_evolve",
-        "kiss.agents.obsolete.kiss_evolve.kiss_evolve",
-        "kiss.agents.imo_agent",
-        "kiss.agents.imo_agent.imo_agent",
-        "kiss.agents.imo_agent.config",
-        "kiss.docker",
-        "kiss.docker.docker_manager",
+        "kiss.agents.sorcar.stateful_sorcar_agent",
+        "kiss.agents.sorcar.git_worktree",
+        "kiss.agents.sorcar.worktree_sorcar_agent",
+        "kiss.channels",
     ]
     rank = {name: i for i, name in enumerate(order)}
 
