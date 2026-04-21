@@ -97,8 +97,8 @@ For simple single-file tasks, skip formal planning and execute directly.
 ## Self-Improvement Loop
 
 - Read the instructions in $PWD/USER_PREFS.md at the start of each task.
-- Then update $PWD/USER_PREFS.md to capture the user preferences and 
-  invariants by analyzing the task.  DO NOT ADD ANY CODE SNIPPETS OR SYMBOLS.
+- Then update $PWD/USER_PREFS.md to capture the user preferences and
+  invariants by analyzing the task. DO NOT ADD ANY CODE SNIPPETS OR SYMBOLS.
   You MUST carefully and thoroughly get rid of the user preferences
   and invariants that conflict with the newly added ones.
 
