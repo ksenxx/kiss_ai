@@ -321,7 +321,7 @@ class TestGenerateCommitMessage(unittest.TestCase):
         """generateCommitMessage command calls _generate_commit_message."""
         import inspect
 
-        src = inspect.getsource(VSCodeServer._handle_command)
+        src = inspect.getsource(VSCodeServer._cmd_generate_commit_message)
         assert "target=self._generate_commit_message" in src
 
     def test_no_model_param(self) -> None:
