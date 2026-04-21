@@ -17,7 +17,7 @@
 - Call finish(success=True, is_continue=False, summary="detailed summary of what was accomplished
   and if the user asks the agent for information, show it in the summary
   as nicely formatted markdown text.")
-  immediately when task is complete.
+  once the task is complete and all Pre-Finish Verification checks have passed.
 - **The user cannot see intermediate chat. Show whatever user asks in the summary of the finish tool call.**
 - You can call the public API of PageDrop with curl to upload an HTML file:
 
