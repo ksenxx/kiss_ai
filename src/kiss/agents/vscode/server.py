@@ -166,6 +166,7 @@ class _TabState:
         "user_answer_queue",
         "is_merging",
         "is_running_non_wt",
+        "is_task_active",
     )
 
     def __init__(self, tab_id: str, default_model: str) -> None:
@@ -179,6 +180,15 @@ class _TabState:
         self.user_answer_queue: queue.Queue[str] | None = None
         self.is_merging: bool = False
         self.is_running_non_wt: bool = False
+        # BUG-71/BUG-72 fix: True while ``agent.run()`` is executing
+        # and writing to the worktree / working tree.  Cleared in
+        # ``_run_task_inner``'s finally block BEFORE any
+        # ``worktree_done`` broadcast so merge/discard actions that
+        # arrive after the task finishes are not spuriously refused.
+        # Checked by ``_new_chat`` and ``_handle_worktree_action`` to
+        # refuse destructive operations while the agent is still
+        # writing to ``wt_dir``.
+        self.is_task_active: bool = False
 
 
 class VSCodeServer:
@@ -482,6 +492,11 @@ class VSCodeServer:
                 return
             tab.use_worktree = bool(cmd.get("useWorktree", False))
             tab.use_parallel = bool(cmd.get("useParallel", False))
+            # BUG-71/BUG-72 fix: mark the tab as actively running a task
+            # so concurrent ``_new_chat`` / ``_handle_worktree_action``
+            # calls refuse rather than racing with ``agent.run()``'s
+            # writes to ``wt_dir`` / the main tree.
+            tab.is_task_active = True
             stop_event = tab.stop_event
         self.printer._thread_local.stop_event = stop_event
 
@@ -586,6 +601,14 @@ class VSCodeServer:
             _record_model_usage(model)
             # Entire cleanup wrapped in try/except BaseException (P13 fix)
             try:
+                # BUG-71/BUG-72 fix: the agent's ``run()`` has returned,
+                # so it is no longer writing to ``wt_dir`` / the main
+                # tree.  Clear the flag BEFORE any ``worktree_done``
+                # broadcast (below) so merge/discard UI actions that
+                # arrive immediately after the task finishes are not
+                # spuriously refused.
+                with self._state_lock:
+                    tab.is_task_active = False
                 self.printer._persist_agents.pop(tab_id, None)
                 self.printer.stop_recording()
                 # BUG-61 fix: prepare the non-worktree merge view
@@ -655,8 +678,12 @@ class VSCodeServer:
             except BaseException:  # pragma: no cover — cleanup interrupted
                 # BUG-39 fix: ensure flag is cleared even when cleanup
                 # itself is interrupted.
-                if not tab.use_worktree:
-                    with self._state_lock:
+                # BUG-71/BUG-72 safety: clear ``is_task_active`` too
+                # so the tab is not permanently locked against
+                # new-chat / merge / discard after an interrupt.
+                with self._state_lock:
+                    tab.is_task_active = False
+                    if not tab.use_worktree:
                         tab.is_running_non_wt = False
                 logger.debug("Cleanup interrupted", exc_info=True)
                 if task_end_event:
@@ -1190,6 +1217,20 @@ class VSCodeServer:
                     "type": "error",
                     "text": "Cannot start a new chat while a merge review is in progress."
                             " Accept or reject all changes first.",
+                    "tabId": tab_id,
+                })
+                return
+            # BUG-71 fix: refuse while the tab's own agent task is
+            # actively writing to ``wt_dir`` — calling
+            # ``tab.agent.new_chat()`` would trigger
+            # ``_release_worktree -> _finalize_worktree`` which
+            # force-removes ``wt_dir`` mid-write and corrupts the
+            # agent's in-progress edits.
+            if tab.is_task_active:
+                self.printer.broadcast({
+                    "type": "error",
+                    "text": "Cannot start a new chat while a task is running."
+                            " Stop the task first.",
                     "tabId": tab_id,
                 })
                 return
@@ -1782,7 +1823,18 @@ class VSCodeServer:
             # Fix 3 (BUG-35): refuse merge while a non-worktree task
             # is writing to the main working tree — stash_if_dirty
             # would capture the agent's in-flight edits.
+            # BUG-72 fix: refuse while the tab's own worktree task is
+            # still writing to ``wt_dir`` — ``agent.merge()``'s
+            # ``_finalize_worktree`` force-removes ``wt_dir`` mid-write.
             with self._state_lock:
+                if tab.is_task_active:
+                    return {
+                        "success": False,
+                        "message": (
+                            "A worktree task is still running on this tab. "
+                            "Wait for it to finish (or stop it) before merging."
+                        ),
+                    }
                 if self._any_non_wt_running():
                     return {
                         "success": False,
@@ -1801,7 +1853,18 @@ class VSCodeServer:
         elif action == "discard":
             # INC-2 fix: guard discard's checkout against concurrent
             # non-worktree task writing to the main tree.
+            # BUG-72 fix: refuse while the tab's own worktree task is
+            # still writing to ``wt_dir`` — ``agent.discard()`` force-
+            # removes ``wt_dir`` mid-write.
             with self._state_lock:
+                if tab.is_task_active:
+                    return {
+                        "success": False,
+                        "message": (
+                            "A worktree task is still running on this tab. "
+                            "Wait for it to finish (or stop it) before discarding."
+                        ),
+                    }
                 if self._any_non_wt_running():
                     return {
                         "success": False,
