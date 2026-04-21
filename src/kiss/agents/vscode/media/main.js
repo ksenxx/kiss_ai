@@ -1094,11 +1094,9 @@
         }
         break;
       case 'thinking_end':
-        if (tState.thinkEl) {
-          tState.thinkEl.querySelector('.lbl').innerHTML =
-            '<span class="arrow collapsed">\u25BE</span> Thinking (click to expand)';
-          tState.thinkEl.querySelector('.cnt').classList.add('hidden');
-        }
+        // Keep the thinking panel expanded so the streamed thinking
+        // tokens remain visible after the block ends.  The user can
+        // still click the "Thinking" label to manually collapse.
         tState.thinkEl = null;
         break;
       case 'text_delta':
