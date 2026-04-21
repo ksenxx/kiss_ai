@@ -229,6 +229,14 @@ class ClaudeCodeModel(Model):
         assistant_count = 0
         current_block_type = ""
         seen_assistant_id: str | None = None
+        # When --include-partial-messages is set, the CLI streams tokens via
+        # content_block_* events AND emits redundant ``assistant`` snapshots
+        # with the same accumulated content.  Once a content_block_* event
+        # has been observed, the content_block_* stream is the authoritative
+        # source — re-processing content from ``assistant`` snapshots would
+        # duplicate thinking_start/end boundaries, causing the UI to collapse
+        # the thoughts panel into a bare "Thinking (click to expand)" bar.
+        saw_content_block = False
 
         for line in lines:
             line = line.strip()
@@ -258,6 +266,11 @@ class ClaudeCodeModel(Model):
                     if assistant_count > 1:
                         break
                     seen_assistant_id = msg_id
+                # Skip content processing when the content_block_* stream
+                # has already (or will) carry the same tokens — avoids
+                # duplicate callbacks and premature thinking_end emission.
+                if saw_content_block:
+                    continue
                 for block in msg.get("content", []):
                     block_type = block.get("type")
                     if block_type == "thinking":
@@ -272,6 +285,7 @@ class ClaudeCodeModel(Model):
                             content += text
                             self._invoke_token_callback(text)
             elif event_type == "content_block_start":
+                saw_content_block = True
                 block = event.get("content_block", {})
                 current_block_type = block.get("type", "")
                 if current_block_type == "thinking":
