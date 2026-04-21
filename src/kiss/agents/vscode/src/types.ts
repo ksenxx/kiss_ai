@@ -2,6 +2,8 @@
  * Type definitions for VS Code extension messaging.
  */
 
+import {MergeData} from './MergeManager';
+
 /** Attachment for file uploads */
 export interface Attachment {
   name: string;
@@ -28,6 +30,7 @@ export type FromWebviewMessage =
       useWorktree?: boolean;
       useParallel?: boolean;
       tabId?: string;
+      workDir?: string;
     }
   | {type: 'stop'; tabId?: string}
   | {type: 'selectModel'; model: string; tabId?: string}
@@ -38,7 +41,11 @@ export type FromWebviewMessage =
   | {type: 'userActionDone'}
   | {type: 'openFile'; path: string; line?: number}
   | {type: 'recordFileUsage'; path: string}
-  | {type: 'ready'; tabId?: string}
+  | {
+      type: 'ready';
+      tabId?: string;
+      restoredTabs?: Array<{tabId: string; chatId: string}>;
+    }
   | {type: 'resumeSession'; id: number; tabId?: string}
   | {type: 'getWelcomeSuggestions'}
   | {type: 'complete'; query: string}
@@ -49,7 +56,7 @@ export type FromWebviewMessage =
   | {type: 'focusEditor'}
   | {type: 'closeSecondaryBar'}
   | {type: 'getInputHistory'}
-  | {type: 'worktreeAction'; action: 'merge' | 'discard'}
+  | {type: 'worktreeAction'; action: 'merge' | 'discard'; tabId?: string}
   | {type: 'autocommitAction'; action: 'commit' | 'skip'; tabId?: string}
   | {type: 'resolveDroppedPaths'; uris: string[]}
   | {type: 'webviewFocusChanged'; focused: boolean}
@@ -61,7 +68,9 @@ export type FromWebviewMessage =
     };
 
 /** Messages from extension to webview (matches browser event protocol) */
-export type ToWebviewMessage =
+export type ToWebviewMessage = ToWebviewMessageBody & {tabId?: string};
+
+type ToWebviewMessageBody =
   // Streaming events (same as browser BaseBrowserPrinter)
   | {type: 'thinking_start'}
   | {type: 'thinking_delta'; text: string}
@@ -124,9 +133,9 @@ export type ToWebviewMessage =
   | {type: 'followup_suggestion'; text: string}
   | {type: 'tasks_updated'}
   | {type: 'welcome_suggestions'; suggestions: Array<{text: string}>}
-  | {type: 'task_events'; events: any[]; task?: string; chat_id?: number}
+  | {type: 'task_events'; events: unknown[]; task?: string; chat_id?: number}
   | {type: 'ghost'; suggestion: string; query: string}
-  | {type: 'merge_data'; data: any; hunk_count: number}
+  | {type: 'merge_data'; data: MergeData; hunk_count: number}
   | {type: 'merge_started'}
   | {type: 'merge_ended'}
   | {type: 'commitMessage'; message: string; error?: string}
@@ -160,7 +169,7 @@ export type ToWebviewMessage =
       type: 'adjacent_task_events';
       direction: string;
       task: string;
-      events: any[];
+      events: unknown[];
     }
   | {type: 'triggerStop'};
 

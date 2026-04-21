@@ -128,27 +128,26 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _setupProcessListeners(proc: AgentProcess, tabId: string): void {
     proc.on('message', (msg: ToWebviewMessage) => {
       // Inject tabId if the Python side didn't set it
-      const msgAny = msg as any;
-      if (msgAny.tabId === undefined && tabId) {
-        msgAny.tabId = tabId;
+      if (msg.tabId === undefined && tabId) {
+        msg.tabId = tabId;
       }
 
       if (msg.type === 'commitMessage') {
-        this._onCommitMessage.fire(msg as any);
+        this._onCommitMessage.fire({message: msg.message, error: msg.error});
       }
-      if (msg.type === 'models' && (msg as any).selected) {
-        this._selectedModel = (msg as any).selected;
+      if (msg.type === 'models' && msg.selected) {
+        this._selectedModel = msg.selected;
       }
       if (msg.type === 'merge_data') {
-        const mergeTabId = (msg as any).tabId as string | undefined;
+        const mergeTabId = msg.tabId;
         if (mergeTabId !== undefined) {
           this._mergeOwnerTabIdQueue.push(mergeTabId);
         }
-        void this._mergeManager.openMerge((msg as any).data);
+        void this._mergeManager.openMerge(msg.data);
       }
       if (msg.type === 'worktree_created' || msg.type === 'worktree_done') {
-        const dir = (msg as any).worktreeDir;
-        const wtTabId = (msg as any).tabId as string | undefined;
+        const dir = msg.worktreeDir;
+        const wtTabId = msg.tabId;
         if (dir) {
           if (wtTabId !== undefined) {
             this._worktreeDirs.set(wtTabId, dir);
@@ -157,17 +156,17 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         }
       }
       if (msg.type === 'worktree_progress') {
-        const wpTabId = (msg as any).tabId as string | undefined;
+        const wpTabId = msg.tabId;
         const progress =
           wpTabId !== undefined
             ? this._worktreeProgresses.get(wpTabId)
             : this._worktreeProgresses.values().next().value;
         if (progress) {
-          progress.report({message: (msg as any).message});
+          progress.report({message: msg.message});
         }
       }
       if (msg.type === 'worktree_result') {
-        const wrTabId = (msg as any).tabId as string | undefined;
+        const wrTabId = msg.tabId;
         if (wrTabId !== undefined) {
           const resolve = this._worktreeActionResolves.get(wrTabId);
           if (resolve) {
@@ -179,17 +178,16 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           // Fallback: resolve all pending
           this._resolveAllWorktreeActions();
         }
-        const result = msg as any;
-        if (result.success) {
+        if (msg.success) {
           vscode.window.showInformationMessage(
-            result.message || 'Worktree action completed.',
+            msg.message || 'Worktree action completed.',
           );
         } else {
           vscode.window.showErrorMessage(
-            result.message || 'Worktree action failed.',
+            msg.message || 'Worktree action failed.',
           );
         }
-        if (result.success && wrTabId !== undefined) {
+        if (msg.success && wrTabId !== undefined) {
           const wtDir = this._worktreeDirs.get(wrTabId);
           if (wtDir) {
             void this._closeWorktreeInScm(wtDir);
@@ -200,7 +198,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
       this._sendToWebview(msg);
       if (msg.type === 'status') {
-        const statusTabId = (msg as any).tabId as string | undefined;
+        const statusTabId = msg.tabId;
         if (msg.running) {
           if (statusTabId !== undefined) this._runningTabs.add(statusTabId);
         } else {
@@ -363,11 +361,11 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     const started = proc.start(effectiveWorkDir);
     if (!started) {
       if (tabId !== undefined) this._runningTabs.delete(tabId);
-      this._sendToWebview({type: 'status', running: false, tabId} as any);
+      this._sendToWebview({type: 'status', running: false, tabId});
       return;
     }
-    this._sendToWebview({type: 'setTaskText', text: prompt, tabId} as any);
-    this._sendToWebview({type: 'status', running: true, tabId} as any);
+    this._sendToWebview({type: 'setTaskText', text: prompt, tabId});
+    this._sendToWebview({type: 'status', running: true, tabId});
     proc.sendCommand({
       type: 'run',
       prompt,
@@ -384,7 +382,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private async _handleMessage(message: FromWebviewMessage): Promise<void> {
     switch (message.type) {
       case 'ready': {
-        const readyTabId = (message as any).tabId as string | undefined;
+        const readyTabId = message.tabId;
         if (readyTabId) this._activeTabId = readyTabId;
         // Use the tab's task process if it exists, otherwise the service process
         const readyProc = readyTabId
@@ -396,9 +394,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         this._sendActiveFileInfo();
         this._sendToWebview({type: 'focusInput'} as ToWebviewMessage);
         // Auto-reload events for restored tabs that had active sessions
-        const restoredTabs = (message as any).restoredTabs as
-          | Array<{tabId: string; chatId: string}>
-          | undefined;
+        const restoredTabs = message.restoredTabs;
         if (restoredTabs && restoredTabs.length > 0) {
           const svc = this._getServiceProcess();
           for (const rt of restoredTabs) {
@@ -413,11 +409,11 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       }
 
       case 'submit': {
-        const tabId = (message as any).tabId as string | undefined;
+        const tabId = message.tabId;
         if (tabId) this._activeTabId = tabId;
         if (tabId !== undefined && this._runningTabs.has(tabId)) return;
 
-        const tabWorkDir = (message as any).workDir as string | undefined;
+        const tabWorkDir = message.workDir;
         const effectiveWorkDir = tabWorkDir || this._getWorkDir();
 
         const trimmed = message.prompt.trim();
@@ -450,7 +446,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       }
 
       case 'stop': {
-        const stopTabId = (message as any).tabId as string | undefined;
+        const stopTabId = message.tabId;
         if (stopTabId !== undefined) {
           const stopProc = this._taskProcesses.get(stopTabId);
           if (stopProc) stopProc.sendCommand({type: 'stop', tabId: stopTabId});
@@ -463,7 +459,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
       case 'selectModel': {
         this._selectedModel = message.model;
-        const selTabId = (message as any).tabId as string | undefined;
+        const selTabId = message.tabId;
         // Persist model selection via service process
         this._getServiceProcess().sendCommand({
           type: 'selectModel',
@@ -481,7 +477,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         break;
 
       case 'newChat': {
-        const newChatTabId = (message as any).tabId as string | undefined;
+        const newChatTabId = message.tabId;
         const newChatProc = newChatTabId
           ? this._getTabProcess(newChatTabId)
           : this._getServiceProcess();
@@ -558,7 +554,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         break;
 
       case 'resumeSession': {
-        const resumeTabId = (message as any).tabId as string | undefined;
+        const resumeTabId = message.tabId;
         const resumeProc = resumeTabId
           ? this._getTabProcess(resumeTabId)
           : this._getServiceProcess();
@@ -571,15 +567,15 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       }
 
       case 'getAdjacentTask': {
-        const adjTabId = (message as any).tabId as string | undefined;
+        const adjTabId = message.tabId;
         const adjProc = adjTabId
           ? this._getTabProcess(adjTabId)
           : this._getServiceProcess();
         adjProc.sendCommand({
           type: 'getAdjacentTask',
           tabId: adjTabId,
-          task: (message as any).task,
-          direction: (message as any).direction,
+          task: message.task,
+          direction: message.direction,
         });
         break;
       }
@@ -615,7 +611,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           'accept-file': () => this._mergeManager.acceptFile(),
           'reject-file': () => this._mergeManager.rejectFile(),
         };
-        const mAction = (message as any).action;
+        const mAction = message.action;
         const handler = mergeDispatch[mAction];
         if (handler) handler();
         else if (mAction === 'all-done') {
@@ -652,8 +648,8 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       }
 
       case 'worktreeAction': {
-        const wtAction = (message as any).action;
-        const wtTabId = (message as any).tabId as string | undefined;
+        const wtAction = message.action;
+        const wtTabId = message.tabId;
         const progressTitle =
           wtAction === 'merge'
             ? 'Committing and merging worktree…'
@@ -698,8 +694,8 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       }
 
       case 'autocommitAction': {
-        const acAction = (message as any).action;
-        const acTabId = (message as any).tabId as string | undefined;
+        const acAction = message.action;
+        const acTabId = message.tabId;
         const acProc = acTabId
           ? this._getTabProcess(acTabId)
           : this._getServiceProcess();
@@ -728,7 +724,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       }
 
       case 'webviewFocusChanged':
-        this._webviewHasFocus = (message as any).focused;
+        this._webviewHasFocus = message.focused;
         break;
 
       case 'focusEditor':
