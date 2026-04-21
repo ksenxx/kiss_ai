@@ -30,7 +30,6 @@ curl -s -X POST https://pagedrop.io/api/upload \
 - READ large files in chunks.
 - Create temporary files in $PWD/tmp
 - Use ultra thinking
-- Do not push or modify git remotes. Ask user permission if you have to.
 
 ## Pre-flight Checks
 
