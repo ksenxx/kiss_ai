@@ -26,7 +26,7 @@ RUN echo "coder ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/coder
 RUN mkdir -p /home/kiss && chown coder:coder /home/kiss
 
 # Startup script
-COPY --chmod=755 docker-startup.sh /usr/local/bin/docker-startup.sh
+COPY --chmod=755 scripts/docker-startup.sh /usr/local/bin/docker-startup.sh
 
 USER coder
 
