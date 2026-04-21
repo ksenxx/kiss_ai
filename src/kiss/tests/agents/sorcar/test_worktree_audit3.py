@@ -352,7 +352,7 @@ class TestBug10Fix:
 
     def test_replay_session_restores_use_worktree(self) -> None:
         """After restart, _replay_session sets use_worktree=True from
-        persisted extra data, and emits worktree_done.
+        persisted extra data, and emits worktree_done or merge_started.
         """
 
         # Step 1: Original server runs a worktree task
@@ -364,6 +364,12 @@ class TestBug10Fix:
         chat_id = tab1.agent.chat_id
         task_id = tab1.agent._last_task_id
         assert task_id is not None
+
+        # Create a real change in the worktree so it's not auto-discarded
+        # (BUG-66 fix: empty worktrees are now auto-discarded on resume)
+        wt_dir = tab1.agent._wt_dir
+        assert wt_dir is not None
+        (wt_dir / "agent_output.txt").write_text("agent work\n")
 
         # Persist events and extra data (events needed for _replay_session
         # to not return early)
@@ -388,10 +394,14 @@ class TestBug10Fix:
             "BUG-10 FIX: use_worktree should be restored from persisted data"
         )
 
-        # BUG-10 FIX: worktree_done event should be emitted
-        wt_events = [e for e in events2 if e["type"] == "worktree_done"]
+        # BUG-10 FIX: worktree_done or merge_started event should be emitted
+        wt_events = [
+            e for e in events2
+            if e["type"] in ("worktree_done", "merge_started")
+        ]
         assert len(wt_events) >= 1, (
-            "BUG-10 FIX: worktree_done should be emitted after restart"
+            "BUG-10 FIX: worktree_done or merge_started should be emitted "
+            "after restart"
         )
 
         # Clean up the original worktree
@@ -460,6 +470,12 @@ class TestBug11Fix:
         task_id = tab1.agent._last_task_id
         assert task_id is not None
 
+        # Create a real change in the worktree so it's not auto-discarded
+        # (BUG-66 fix: empty worktrees are now auto-discarded on resume)
+        wt_dir = tab1.agent._wt_dir
+        assert wt_dir is not None
+        (wt_dir / "agent_output.txt").write_text("agent work\n")
+
         _append_chat_event(
             {"type": "text_delta", "text": "working..."},
             task_id=task_id,
@@ -474,8 +490,12 @@ class TestBug11Fix:
         # Just call _replay_session, like the real restart flow
         server_real._replay_session(chat_id, "0")
 
-        # BUG-11 FIX: worktree_done should be emitted without manual flag
-        wt_real = [e for e in events_real if e["type"] == "worktree_done"]
+        # BUG-11 FIX: worktree_done or merge_started should be emitted
+        # without manual flag
+        wt_real = [
+            e for e in events_real
+            if e["type"] in ("worktree_done", "merge_started")
+        ]
         assert len(wt_real) >= 1, (
             "BUG-11 FIX: pending worktree should be visible after "
             "restart without manual use_worktree=True"

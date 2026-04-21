@@ -28,3 +28,6 @@
 - `GitWorktreeOps.staged_files()` returns files staged in the index (`git diff --cached --name-only`).
 - `is_running_non_wt` flag is cleared at the very start of `_run_task_inner`'s finally try block AND in the except handler, preventing it from getting permanently stuck.
 - `_new_chat()` guard checks `tab.agent._wt_pending` regardless of `tab.use_worktree` to handle mode switches.
+- `_emit_pending_worktree()` auto-discards empty-change worktrees on session resume (BUG-66 fix), consistent with `_run_task_inner` and `_finish_merge`. Guarded by `_any_non_wt_running()`.
+- `_start_merge_session()` clears `is_merging` if broadcast raises (BUG-67 fix) — prevents the tab from being permanently locked by a failed stdout write.
+- `_restore_pending_merge()` was removed as dead code (RED-9) — no production caller.

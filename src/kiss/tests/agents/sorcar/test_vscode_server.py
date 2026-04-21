@@ -1313,24 +1313,9 @@ class TestMergeSession(unittest.TestCase):
         # No "merge review" error for a different tab
         assert not any("merge review" in e.get("text", "") for e in errors)
 
-    def test_restore_pending_merge_from_disk(self) -> None:
-        """_restore_pending_merge re-opens a merge session from disk."""
-        import kiss.agents.vscode.diff_merge as dm
-        import kiss.agents.vscode.server as srv_mod
-
-        orig = dm._merge_data_dir
-        dm._merge_data_dir = lambda tab_id="": self.merge_dir  # type: ignore[assignment]
-        # Also patch the imported reference in server module
-        orig_srv = srv_mod._merge_data_dir
-        srv_mod._merge_data_dir = lambda tab_id="": self.merge_dir  # type: ignore[assignment]
-        try:
-            self._write_merge_json()
-            self.server._restore_pending_merge()
-            types = [e["type"] for e in self.events]
-            assert "merge_data" in types
-        finally:
-            dm._merge_data_dir = orig  # type: ignore[assignment]
-            srv_mod._merge_data_dir = orig_srv  # type: ignore[assignment]
+    def test_restore_pending_merge_removed(self) -> None:
+        """_restore_pending_merge was dead code and has been removed (RED-9)."""
+        assert not hasattr(self.server, "_restore_pending_merge")
 
     def test_merge_command_routing(self) -> None:
         """mergeAction command is routed through _handle_command."""

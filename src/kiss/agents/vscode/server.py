@@ -693,17 +693,26 @@ class VSCodeServer:
             resolved_tab_id = tab_id or getattr(
                 self.printer._thread_local, "tab_id", None,
             )
+            resolved_tab: _TabState | None = None
             with self._state_lock:
                 if resolved_tab_id is not None:
-                    tab = self._tab_states.get(resolved_tab_id)
-                    if tab is not None:
-                        tab.is_merging = True
-            self.printer.broadcast({
-                "type": "merge_data",
-                "data": merge_data,
-                "hunk_count": total_hunks,
-            })
-            self.printer.broadcast({"type": "merge_started"})
+                    resolved_tab = self._tab_states.get(resolved_tab_id)
+                    if resolved_tab is not None:
+                        resolved_tab.is_merging = True
+            # BUG-67 fix: if broadcast raises (e.g. BrokenPipeError),
+            # clear is_merging so the tab is not permanently locked.
+            try:
+                self.printer.broadcast({
+                    "type": "merge_data",
+                    "data": merge_data,
+                    "hunk_count": total_hunks,
+                })
+                self.printer.broadcast({"type": "merge_started"})
+            except BaseException:
+                with self._state_lock:
+                    if resolved_tab is not None:
+                        resolved_tab.is_merging = False
+                raise
             return True
         except (OSError, json.JSONDecodeError, KeyError):
             logger.debug("Failed to load merge data", exc_info=True)
@@ -1107,22 +1116,6 @@ class VSCodeServer:
         })
         self._emit_pending_worktree(tab_id)
 
-    def _restore_pending_merge(self, tab_id: str = "") -> None:
-        """Restore a pending merge session from disk if one exists.
-
-        Reads ``pending-merge.json`` from the merge data directory and
-        sends ``merge_data`` and ``merge_started`` events so the VS Code
-        extension re-opens the merge view with decorations and the
-        webview shows the accept/reject toolbar.
-
-        Args:
-            tab_id: Frontend tab identifier for per-tab merge data.
-        """
-        self._start_merge_session(
-            str(_merge_data_dir(tab_id) / "pending-merge.json"),
-            tab_id=tab_id,
-        )
-
     def _broadcast_worktree_done(self, changed: list[str], tab_id: str = "") -> None:
         """Broadcast a ``worktree_done`` event with the current worktree state.
 
@@ -1148,6 +1141,11 @@ class VSCodeServer:
         branch is committed.  Falls back to ``worktree_done`` if the
         review cannot be started (e.g. no uncommitted changes).
 
+        When the worktree has no changed files, auto-discards it
+        (consistent with ``_run_task_inner`` and ``_finish_merge``),
+        guarded by ``_any_non_wt_running`` to avoid disrupting a
+        concurrent non-worktree task.  BUG-66 fix.
+
         Args:
             tab_id: The tab to check for pending worktree.
         """
@@ -1161,6 +1159,15 @@ class VSCodeServer:
         changed = self._get_worktree_changed_files(tab_id)
         if changed and self._start_worktree_merge_review(tab_id):
             return
+        # BUG-66 fix: auto-discard empty-change worktrees on session
+        # resume, consistent with _run_task_inner and _finish_merge.
+        # Guard against concurrent non-wt task the same way.
+        if not changed:
+            with self._state_lock:
+                non_wt_busy = self._any_non_wt_running()
+            if not non_wt_busy:
+                wt.discard()
+                return
         self._broadcast_worktree_done(changed, tab_id)
 
     def _ensure_worktree_state(self, tab_id: str = "") -> None:

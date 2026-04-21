@@ -253,11 +253,10 @@ class TestBug41Red6Fix:
             "Must pass tab_id to _start_merge_session"
         )
 
-    def test_restore_pending_merge_passes_tab_id(self):
-        """_restore_pending_merge passes tab_id to _start_merge_session."""
-        src = inspect.getsource(VSCodeServer._restore_pending_merge)
-        assert "tab_id=tab_id" in src, (
-            "Must pass tab_id to _start_merge_session"
+    def test_restore_pending_merge_removed(self):
+        """_restore_pending_merge was dead code and has been removed (RED-9)."""
+        assert not hasattr(VSCodeServer, "_restore_pending_merge"), (
+            "_restore_pending_merge should be removed (RED-9 dead code)"
         )
 
     def test_is_merging_set_with_explicit_tab_id(self, tmp_path):
