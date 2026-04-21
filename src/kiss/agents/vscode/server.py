@@ -258,13 +258,18 @@ class VSCodeServer:
             line = line.strip()
             if not line:
                 continue
+            cmd: dict[str, Any] = {}
             try:
                 cmd = json.loads(line)
                 self._handle_command(cmd)
             except json.JSONDecodeError as e:
                 self.printer.broadcast({"type": "error", "text": f"Invalid JSON: {e}"})
             except Exception as e:  # pragma: no cover
-                self.printer.broadcast({"type": "error", "text": str(e)})
+                event: dict[str, Any] = {"type": "error", "text": str(e)}
+                tab_id = cmd.get("tabId") if isinstance(cmd, dict) else None
+                if tab_id is not None:
+                    event["tabId"] = tab_id
+                self.printer.broadcast(event)
 
     def _handle_command(self, cmd: dict[str, Any]) -> None:
         """Dispatch a command from VS Code to the appropriate handler."""
@@ -273,7 +278,11 @@ class VSCodeServer:
         if handler is not None:
             handler(self, cmd)
         else:
-            self.printer.broadcast({"type": "error", "text": f"Unknown command: {cmd_type}"})
+            event: dict[str, Any] = {"type": "error", "text": f"Unknown command: {cmd_type}"}
+            tab_id = cmd.get("tabId")
+            if tab_id is not None:
+                event["tabId"] = tab_id
+            self.printer.broadcast(event)
 
     # -- Command handlers (one per command type) -------------------------
 
@@ -393,7 +402,8 @@ class VSCodeServer:
 
     def _cmd_get_adjacent_task(self, cmd: dict[str, Any]) -> None:
         """Send events for the adjacent task in the same chat session."""
-        adj_tab = self._get_tab(cmd.get("tabId", ""))
+        tab_id = cmd.get("tabId", "")
+        adj_tab = self._get_tab(tab_id)
         chat_id = adj_tab.agent.chat_id
         if chat_id == "":
             entries = _load_history(limit=1)
@@ -403,6 +413,7 @@ class VSCodeServer:
             chat_id,
             cmd.get("task", ""),
             cmd.get("direction", "prev"),
+            tab_id,
         )
 
     def _cmd_generate_commit_message(self, cmd: dict[str, Any]) -> None:
@@ -781,12 +792,17 @@ class VSCodeServer:
             # BUG-67 fix: if broadcast raises (e.g. BrokenPipeError),
             # clear is_merging so the tab is not permanently locked.
             try:
-                self.printer.broadcast({
+                merge_data_event: dict[str, Any] = {
                     "type": "merge_data",
                     "data": merge_data,
                     "hunk_count": total_hunks,
-                })
-                self.printer.broadcast({"type": "merge_started"})
+                }
+                merge_started_event: dict[str, Any] = {"type": "merge_started"}
+                if resolved_tab_id is not None:
+                    merge_data_event["tabId"] = resolved_tab_id
+                    merge_started_event["tabId"] = resolved_tab_id
+                self.printer.broadcast(merge_data_event)
+                self.printer.broadcast(merge_started_event)
             except BaseException:
                 with self._state_lock:
                     if resolved_tab is not None:
@@ -1376,14 +1392,17 @@ class VSCodeServer:
             tab_id: The tab that owns the worktree.
         """
         wt = self._get_tab(tab_id).agent
-        self.printer.broadcast({
+        event: dict[str, Any] = {
             "type": "worktree_done",
             "branch": wt._wt_branch,
             "worktreeDir": str(wt._wt_dir),
             "originalBranch": wt._original_branch,
             "changedFiles": changed,
             "hasConflict": self._check_merge_conflict(tab_id) if changed else False,
-        })
+        }
+        if tab_id:
+            event["tabId"] = tab_id
+        self.printer.broadcast(event)
 
     def _emit_pending_worktree(self, tab_id: str = "") -> None:
         """Emit merge review or ``worktree_done`` for a pending worktree branch.
@@ -1911,10 +1930,13 @@ class VSCodeServer:
             busy = self._check_worktree_busy(tab, "merging")
             if busy:
                 return busy
-            self.printer.broadcast({
+            progress_event: dict[str, Any] = {
                 "type": "worktree_progress",
                 "message": "Generating commit message…",
-            })
+            }
+            if tab_id:
+                progress_event["tabId"] = tab_id
+            self.printer.broadcast(progress_event)
             msg = wt.merge()
             success = "Successfully merged" in msg
             return {"success": success, "message": msg}
@@ -1926,21 +1948,27 @@ class VSCodeServer:
             return {"success": True, "message": msg}
         return {"success": False, "message": f"Unknown action: {action}"}
 
-    def _get_adjacent_task(self, chat_id: str, task: str, direction: str) -> None:
+    def _get_adjacent_task(
+        self, chat_id: str, task: str, direction: str, tab_id: str = "",
+    ) -> None:
         """Send events for the adjacent task in the same chat session.
 
         Args:
             chat_id: The string chat session identifier.
             task: Current task description string (used as timestamp reference).
             direction: ``"prev"`` or ``"next"``.
+            tab_id: Frontend tab identifier used to route the event.
         """
         result = _get_adjacent_task_by_chat_id(chat_id, task, direction)
-        self.printer.broadcast({
+        event: dict[str, Any] = {
             "type": "adjacent_task_events",
             "direction": direction,
             "task": result["task"] if result else "",
             "events": result["events"] if result else [],
-        })
+        }
+        if tab_id:
+            event["tabId"] = tab_id
+        self.printer.broadcast(event)
 
     def _generate_commit_message(self) -> None:
         """Generate a git commit message from current changes."""
