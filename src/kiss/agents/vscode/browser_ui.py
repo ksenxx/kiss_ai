@@ -73,11 +73,43 @@ class _BashState:
 class BaseBrowserPrinter(StreamEventParser, Printer):
     """Base printer for browser-based UIs.
 
-    With per-task processes (one task thread per printer instance),
-    thread-local redirections (S12/S13) and multi-tab state (bash dict,
-    recording owner, client queue) are no longer needed.  Each printer
-    instance serves exactly one task thread.
+    Stream-parsing state (``_current_block_type``, ``_tool_name``,
+    ``_tool_json_buffer``) is stored in thread-local storage so
+    concurrent task threads cannot corrupt each other's in-flight
+    parsing.  Recording is per-tab (keyed by ``tab_id``) so one
+    task's ``stop_recording()`` does not destroy another tab's
+    recorded events.
     """
+
+    # -- Thread-local stream state properties ----------------------------
+    # Override the instance attributes set by ``StreamEventParser.__init__``
+    # with properties that delegate to ``self._thread_local``.  This makes
+    # ``parse_stream_event()`` and ``reset_stream_state()`` (inherited from
+    # ``StreamEventParser``) transparently per-thread.
+
+    @property
+    def _current_block_type(self) -> str:  # type: ignore[override]
+        return getattr(self._thread_local, "_cbt", "")
+
+    @_current_block_type.setter
+    def _current_block_type(self, value: str) -> None:
+        self._thread_local._cbt = value
+
+    @property
+    def _tool_name(self) -> str:  # type: ignore[override]
+        return getattr(self._thread_local, "_tn", "")
+
+    @_tool_name.setter
+    def _tool_name(self, value: str) -> None:
+        self._thread_local._tn = value
+
+    @property
+    def _tool_json_buffer(self) -> str:  # type: ignore[override]
+        return getattr(self._thread_local, "_tjb", "")
+
+    @_tool_json_buffer.setter
+    def _tool_json_buffer(self, value: str) -> None:
+        self._thread_local._tjb = value
 
     def __init__(self) -> None:
         self._thread_local = threading.local()
@@ -88,7 +120,7 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
         self.tokens_offset: int = 0
         self.budget_offset: float = 0.0
         self.steps_offset: int = 0
-        self._recording: list[dict[str, Any]] | None = None
+        self._recordings: dict[str, list[dict[str, Any]]] = {}
 
     def reset(self) -> None:
         """Reset internal streaming and tool-parsing state for a new turn."""
@@ -125,10 +157,20 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
                     return  # stale — discard
             self.broadcast({"type": "system_output", "text": text})
 
+    def _recording_key(self) -> str:
+        """Return the per-tab key for the current thread's recording.
+
+        Uses thread-local ``tab_id`` so each task thread records into
+        its own list.  Falls back to ``""`` for callers that don't set
+        a tab_id (e.g. unit tests).
+        """
+        return getattr(self._thread_local, "tab_id", None) or ""
+
     def start_recording(self) -> None:
-        """Start recording broadcast events."""
+        """Start recording broadcast events for the current tab."""
+        key = self._recording_key()
         with self._lock:
-            self._recording = []
+            self._recordings[key] = []
 
     @staticmethod
     def _filter_and_coalesce(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -144,18 +186,18 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
         return _coalesce_events(filtered)
 
     def stop_recording(self) -> list[dict[str, Any]]:
-        """Stop recording and return its display events.
+        """Stop recording for the current tab and return its display events.
 
         Returns:
             List of display-relevant events with consecutive deltas merged.
         """
+        key = self._recording_key()
         with self._lock:
-            raw = self._recording or []
-            self._recording = None
+            raw = self._recordings.pop(key, [])
         return self._filter_and_coalesce(raw)
 
     def peek_recording(self) -> list[dict[str, Any]]:
-        """Return a snapshot of the current recording without stopping it.
+        """Return a snapshot of the current tab's recording without stopping it.
 
         Used for periodic crash-recovery flushes: the caller can persist
         a snapshot of events to the database while recording continues.
@@ -163,17 +205,26 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
         Returns:
             List of display-relevant events with consecutive deltas merged.
         """
+        key = self._recording_key()
         with self._lock:
-            raw = list(self._recording) if self._recording is not None else []
+            rec = self._recordings.get(key)
+            raw = list(rec) if rec is not None else []
         return self._filter_and_coalesce(raw)
 
     def _record_event(self, event: dict[str, Any]) -> None:
-        """Append event to the active recording if one exists.
+        """Append event to the active recording for the event's tab.
+
+        Looks up the recording list by ``tabId`` from the event (set by
+        ``VSCodePrinter.broadcast``), falling back to the thread-local
+        ``tab_id``.  This ensures timer-thread broadcasts (bash flush)
+        are routed to the correct tab's recording.
 
         Must be called with ``self._lock`` held.
         """
-        if self._recording is not None:
-            self._recording.append(event)
+        key = event.get("tabId") or getattr(self._thread_local, "tab_id", None) or ""
+        rec = self._recordings.get(key)
+        if rec is not None:
+            rec.append(event)
 
     def broadcast(self, event: dict[str, Any]) -> None:
         """Broadcast an event and record it.

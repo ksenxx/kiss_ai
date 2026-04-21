@@ -595,14 +595,15 @@ class TestRecordingIsolation(unittest.TestCase):
     """Recording captures all broadcast events (no owner filtering needed
     with per-task processes — each process has its own printer)."""
 
-    def test_recording_captures_all_events(self) -> None:
-        """All broadcast events are recorded regardless of tabId."""
+    def test_recording_captures_own_tab_events(self) -> None:
+        """Recording captures events for the current tab (per-tab isolation)."""
         import io
         import sys
 
         from kiss.agents.vscode.server import VSCodePrinter
 
         printer = VSCodePrinter()
+        printer._thread_local.tab_id = "1"
 
         printer.start_recording()
 
@@ -610,8 +611,8 @@ class TestRecordingIsolation(unittest.TestCase):
         old_stdout = sys.stdout
         sys.stdout = buf
         try:
-            printer.broadcast({"type": "tool_call", "name": "Read", "tabId": "1"})
-            printer.broadcast({"type": "tool_result", "content": "ok", "tabId": "2"})
+            printer.broadcast({"type": "tool_call", "name": "Read"})
+            printer.broadcast({"type": "tool_result", "content": "ok"})
             printer.broadcast({"type": "prompt", "text": "global event"})
         finally:
             sys.stdout = old_stdout
@@ -622,14 +623,15 @@ class TestRecordingIsolation(unittest.TestCase):
         assert types == ["tool_call", "tool_result", "prompt"]
 
     def test_stop_recording_clears_state(self) -> None:
-        """stop_recording clears the recording list."""
+        """stop_recording removes the tab's recording entry."""
         from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 
         printer = BaseBrowserPrinter()
         printer.start_recording()
-        assert printer._recording is not None
+        key = printer._recording_key()
+        assert key in printer._recordings
         printer.stop_recording()
-        assert printer._recording is None
+        assert key not in printer._recordings
 
 
 if __name__ == "__main__":
