@@ -157,11 +157,11 @@ class TestRunSkipsImpossibleTasks:
 class TestSetup:
     """Verify setup runs the expected installation steps."""
 
-    def test_setup_three_steps(self) -> None:
+    def test_setup_two_steps(self) -> None:
         agent = _make_agent()
         env = FakeEnvironment()
         asyncio.run(agent.setup(env))  # type: ignore[arg-type]
-        assert len(env.exec_calls) == 3
+        assert len(env.exec_calls) == 2
         assert "curl" in env.exec_calls[0]
         # Step 2: installs from uploaded local wheel, not PyPI
         assert "uv tool install --python 3.13" in env.exec_calls[1]
@@ -170,11 +170,9 @@ class TestSetup:
         src, dst = env.uploaded_files[0]
         assert src.endswith(".whl")
         assert dst.startswith("/tmp/kiss_agent_framework-")
-        # Step 3 uses the tool's own Python to decode base64 and write
-        # SYSTEM.md — avoids depending on shell `base64` command.
-        assert "python3" in env.exec_calls[2]
-        assert "base64" in env.exec_calls[2]
-        assert "SYSTEM.md" in env.exec_calls[2]
+        # No SYSTEM.md or extra prompt is written into the container.
+        for call in env.exec_calls:
+            assert "SYSTEM.md" not in call
 
     def test_setup_aborts_on_uv_failure(self) -> None:
         agent = _make_agent()
@@ -188,7 +186,7 @@ class TestSetup:
         agent = _make_agent()
         env = FakeEnvironment(fail_commands={"uv tool install"})
         asyncio.run(agent.setup(env))  # type: ignore[arg-type]
-        # First step succeeds, second fails, third not attempted
+        # First step succeeds, second fails; no further steps.
         assert len(env.exec_calls) == 2
         # Wheel was uploaded before the install command ran
         assert len(env.uploaded_files) == 1

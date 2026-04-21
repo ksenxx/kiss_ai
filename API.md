@@ -1240,7 +1240,7 @@ ______________________________________________________________________
 
 - **version** — Return the agent version string.<br/>`version() -> str | None`
 
-- **setup** — Install sorcar inside the harbor container. Installs uv, then kiss-agent-framework as a uv tool (which manages its own Python), and writes a tbench-specific SYSTEM.md that replaces the generic IDE system prompt with terminal-bench instructions. Each step is run separately so failures are logged clearly and do not silently abort the chain.<br/>`async setup(environment: BaseEnvironment) -> None`
+- **setup** — Install sorcar inside the harbor container. Installs uv, then kiss-agent-framework as a uv tool (which manages its own Python). Each step is run separately so failures are logged clearly and do not silently abort the chain.<br/>`async setup(environment: BaseEnvironment) -> None`
 
   - `environment`: The harbor execution environment.
 
@@ -1306,7 +1306,7 @@ ______________________________________________________________________
 
 ##### `class TestSetup` — Verify setup runs the expected installation steps.
 
-- **test_setup_three_steps**<br/>`test_setup_three_steps() -> None`
+- **test_setup_two_steps**<br/>`test_setup_two_steps() -> None`
 - **test_setup_aborts_on_uv_failure**<br/>`test_setup_aborts_on_uv_failure() -> None`
 - **test_setup_aborts_on_pip_failure**<br/>`test_setup_aborts_on_pip_failure() -> None`
 

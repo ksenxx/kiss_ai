@@ -14,7 +14,6 @@ Usage with harbor CLI:
 
 from __future__ import annotations
 
-import base64
 import logging
 import os
 import re
@@ -28,7 +27,6 @@ from harbor.environments.base import BaseEnvironment, ExecResult
 from harbor.models.agent.context import AgentContext
 
 from kiss._version import __version__
-from kiss.benchmarks.terminal_bench.tbench_prompt import TBENCH_SYSTEM_PROMPT
 
 # Phrases that uniquely identify tasks known to always timeout.
 # These tasks have failed 0/6 across multiple evaluation runs due to
@@ -178,10 +176,9 @@ class SorcarHarborAgent(BaseAgent):
         """Install sorcar inside the harbor container.
 
         Installs uv, then kiss-agent-framework as a uv tool (which
-        manages its own Python), and writes a tbench-specific SYSTEM.md
-        that replaces the generic IDE system prompt with terminal-bench
-        instructions.  Each step is run separately so failures are
-        logged clearly and do not silently abort the chain.
+        manages its own Python).  Each step is run separately so
+        failures are logged clearly and do not silently abort the
+        chain.
 
         Args:
             environment: The harbor execution environment.
@@ -203,27 +200,11 @@ class SorcarHarborAgent(BaseAgent):
         wheel = _get_wheel()
         container_wheel = f"/tmp/{wheel.name}"
         await environment.upload_file(wheel, container_wheel)
-        if not await self._exec_check(
+        await self._exec_check(
             environment,
             'export PATH="/root/.local/bin:$PATH"'
             f" && uv tool install --python 3.13 {container_wheel}",
             "install kiss-agent-framework",
-        ):
-            return
-
-        # Step 3: Write the terminal-bench SYSTEM.md using the tool's own
-        # Python to decode base64, avoiding dependency on shell `base64`
-        # command which is missing in some minimal Docker images.
-        b64 = base64.b64encode(TBENCH_SYSTEM_PROMPT.encode()).decode()
-        await self._exec_check(
-            environment,
-            'export PATH="/root/.local/bin:$PATH"'
-            " && /root/.local/share/uv/tools"
-            "/kiss-agent-framework/bin/python3 -c "
-            '"import base64; from pathlib import Path; import kiss;'
-            " d = Path(kiss.__file__).parent;"
-            f' (d / \\"SYSTEM.md\\").write_text(base64.b64decode(\\"{b64}\\").decode())"',
-            "write SYSTEM.md",
         )
 
     async def _run_sorcar(
