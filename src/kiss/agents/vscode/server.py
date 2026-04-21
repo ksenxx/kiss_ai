@@ -376,6 +376,10 @@ class VSCodeServer:
                 logger.debug("Worktree action error", exc_info=True)
                 result = {"success": False, "message": str(e)}
             self.printer.broadcast({"type": "worktree_result", "tabId": wt_tab_id, **result})
+        elif cmd_type == "autocommitAction":
+            self._handle_autocommit_action(
+                cmd.get("action", ""), cmd.get("tabId", ""),
+            )
         else:
             self.printer.broadcast({"type": "error", "text": f"Unknown command: {cmd_type}"})
 
@@ -830,6 +834,161 @@ class VSCodeServer:
         # Emit deferred worktree_done after merge review completes
         if tab_id is not None:
             self._present_pending_worktree(tab_id, try_merge_review=False)
+
+        # After the user finishes the non-worktree merge review, prompt
+        # them to auto-commit any remaining dirty state on the main
+        # branch (accepted hunks, pre-existing edits, untracked files).
+        if tab_id is not None:
+            with self._state_lock:
+                tab = self._tab_states.get(tab_id)
+            if tab is not None and not tab.use_worktree:
+                changed = self._main_dirty_files()
+                if changed:
+                    self.printer.broadcast({
+                        "type": "autocommit_prompt",
+                        "tabId": tab_id,
+                        "changedFiles": changed,
+                    })
+
+    def _main_dirty_files(self) -> list[str]:
+        """List modified, staged and untracked files in the main working tree.
+
+        Uses ``git status --porcelain -uall`` so untracked files inside
+        new directories are also reported.  Returns an empty list when
+        the working tree is clean or ``work_dir`` is not a git repo.
+
+        Returns:
+            De-duplicated list of file paths (relative to ``work_dir``).
+        """
+        repo = GitWorktreeOps.discover_repo(Path(self.work_dir))
+        if repo is None:
+            return []
+        result = _git(self.work_dir, "status", "--porcelain", "-uall")
+        if result.returncode != 0:
+            return []
+        files: list[str] = []
+        for line in result.stdout.splitlines():
+            if len(line) < 4:
+                continue
+            path = line[3:]
+            # Renames are "A -> B"; report the new path.
+            if " -> " in path:
+                path = path.split(" -> ", 1)[1]
+            path = path.strip().strip('"')
+            if path and path not in files:
+                files.append(path)
+        return files
+
+    def _handle_autocommit_action(
+        self, action: str, tab_id: str = "",
+    ) -> None:
+        """Process the user's reply to an ``autocommit_prompt``.
+
+        Args:
+            action: ``"commit"`` to stage-all + generate-message + commit;
+                ``"skip"`` to leave the working tree untouched.
+            tab_id: The tab that owns the prompt (echoed in the
+                ``autocommit_done`` event).
+        """
+        if action == "skip":
+            self.printer.broadcast({
+                "type": "autocommit_done",
+                "success": True,
+                "committed": False,
+                "message": "Left changes uncommitted.",
+                "tabId": tab_id,
+            })
+            return
+        if action != "commit":
+            self.printer.broadcast({
+                "type": "autocommit_done",
+                "success": False,
+                "committed": False,
+                "message": f"Unknown autocommit action: {action}",
+                "tabId": tab_id,
+            })
+            return
+        try:
+            repo = GitWorktreeOps.discover_repo(Path(self.work_dir))
+            if repo is None:
+                self.printer.broadcast({
+                    "type": "autocommit_done",
+                    "success": False,
+                    "committed": False,
+                    "message": "Not a git repository.",
+                    "tabId": tab_id,
+                })
+                return
+            with repo_lock(repo):
+                _git(self.work_dir, "add", "-A")
+                diff = _git(self.work_dir, "diff", "--cached")
+                if not diff.stdout.strip():
+                    self.printer.broadcast({
+                        "type": "autocommit_done",
+                        "success": True,
+                        "committed": False,
+                        "message": "Nothing to commit.",
+                        "tabId": tab_id,
+                    })
+                    return
+                msg = self._compose_commit_message(diff.stdout) or "Auto-commit"
+                ok = GitWorktreeOps.commit_staged(repo, msg)
+            if ok:
+                subject = msg.splitlines()[0] if msg.splitlines() else msg
+                self.printer.broadcast({
+                    "type": "autocommit_done",
+                    "success": True,
+                    "committed": True,
+                    "message": f"Committed: {subject}",
+                    "commitMessage": msg,
+                    "tabId": tab_id,
+                })
+            else:
+                self.printer.broadcast({
+                    "type": "autocommit_done",
+                    "success": False,
+                    "committed": False,
+                    "message": "git commit failed (pre-commit hook?).",
+                    "tabId": tab_id,
+                })
+        except Exception as e:  # pragma: no cover — unexpected git/LLM error
+            logger.debug("Autocommit action failed", exc_info=True)
+            self.printer.broadcast({
+                "type": "autocommit_done",
+                "success": False,
+                "committed": False,
+                "message": str(e),
+                "tabId": tab_id,
+            })
+
+    def _compose_commit_message(self, diff_text: str) -> str:  # pragma: no cover
+        """Generate a git commit message for *diff_text* via an LLM.
+
+        Exposed as a method so tests can substitute a deterministic
+        replacement without mocking the underlying LLM stack.
+
+        Args:
+            diff_text: Output of ``git diff --cached``.
+
+        Returns:
+            The cleaned commit-message string.
+        """
+        agent = KISSAgent("Auto Commit Message")
+        raw = agent.run(
+            model_name=fast_model_for(),
+            prompt_template=(
+                "Generate a nicely markdown formatted, informative git commit "
+                "message for these changes. Use conventional commit format "
+                "with a clear subject line (type: description) and optionally "
+                "a body with bullet points for multiple changes. Return ONLY "
+                "the commit message text, no quotes or markdown fences.\n\n"
+                "{context}"
+            ),
+            arguments={"context": f"Diff:\n{diff_text}"},
+            is_agentic=False,
+            verbose=False,
+        )
+        return clean_llm_output(raw)
 
     def _stop_task(self, tab_id: str | None = None) -> None:
         """Signal the agent to stop.

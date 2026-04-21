@@ -50,6 +50,7 @@ export type FromWebviewMessage =
   | {type: 'closeSecondaryBar'}
   | {type: 'getInputHistory'}
   | {type: 'worktreeAction'; action: 'merge' | 'discard'}
+  | {type: 'autocommitAction'; action: 'commit' | 'skip'; tabId?: string}
   | {type: 'resolveDroppedPaths'; uris: string[]}
   | {type: 'webviewFocusChanged'; focused: boolean}
   | {
@@ -145,6 +146,15 @@ export type ToWebviewMessage =
     }
   | {type: 'worktree_progress'; message: string}
   | {type: 'worktree_result'; success: boolean; message: string}
+  | {type: 'autocommit_prompt'; changedFiles: string[]; tabId?: string}
+  | {
+      type: 'autocommit_done';
+      success: boolean;
+      committed: boolean;
+      message: string;
+      commitMessage?: string;
+      tabId?: string;
+    }
   | {type: 'droppedPaths'; paths: string[]}
   | {
       type: 'adjacent_task_events';
@@ -173,6 +183,7 @@ export interface AgentCommand {
     | 'generateCommitMessage'
     | 'getInputHistory'
     | 'worktreeAction'
+    | 'autocommitAction'
     | 'getAdjacentTask';
   prompt?: string;
   model?: string;
@@ -187,7 +198,7 @@ export interface AgentCommand {
   path?: string;
   chatId?: number | string;
   activeFileContent?: string;
-  action?: 'merge' | 'discard' | 'all-done';
+  action?: 'merge' | 'discard' | 'all-done' | 'commit' | 'skip';
   useWorktree?: boolean;
   useParallel?: boolean;
   task?: string;
