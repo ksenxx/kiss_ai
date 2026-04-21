@@ -267,131 +267,187 @@ class VSCodeServer:
                 self.printer.broadcast({"type": "error", "text": str(e)})
 
     def _handle_command(self, cmd: dict[str, Any]) -> None:
-        """Handle a command from VS Code."""
-
-        cmd_type = cmd.get("type")
-
-        if cmd_type == "run":
-            tab_id = cmd.get("tabId", "")
-            tab = self._get_tab(tab_id)
-            with self._state_lock:
-                if tab.task_thread is not None and tab.task_thread.is_alive():
-                    self.printer.broadcast({
-                        "type": "error",
-                        "text": "Task already running",
-                        "tabId": tab_id,
-                    })
-                    self.printer.broadcast({"type": "status", "running": False, "tabId": tab_id})
-                    return
-                # RC-NEW-1: create stop_event and queue before starting
-                # the thread so _stop_task always finds a valid event.
-                tab.stop_event = threading.Event()
-                tab.user_answer_queue = queue.Queue(maxsize=1)
-                thread = threading.Thread(
-                    target=self._run_task, args=(cmd,), daemon=True
-                )
-                tab.task_thread = thread
-                thread.start()
-        elif cmd_type == "stop":
-            self._stop_task(cmd.get("tabId"))
-        elif cmd_type == "getModels":
-            self._get_models()
-        elif cmd_type == "selectModel":
-            tab_id = cmd.get("tabId", "")
-            tab = self._get_tab(tab_id)
-            model = cmd.get("model", tab.selected_model)
-            tab.selected_model = model
-            with self._state_lock:
-                self._default_model = model  # new tabs inherit latest selection
-            _save_last_model(model)
-        elif cmd_type == "getHistory":
-            self._get_history(cmd.get("query"), cmd.get("offset", 0), cmd.get("generation", 0))
-        elif cmd_type == "getFiles":
-            self._get_files(cmd.get("prefix", ""))
-        elif cmd_type == "refreshFiles":
-            self._refresh_file_cache()
-        elif cmd_type == "recordFileUsage":
-            path = cmd.get("path", "")
-            if path:
-                _record_file_usage(path)
-        elif cmd_type == "userAnswer":
-            # Route answer to the correct tab's queue — require tabId
-            ans_tab = cmd.get("tabId")
-            with self._state_lock:
-                ans_state = self._tab_states.get(ans_tab) if ans_tab is not None else None
-                q = ans_state.user_answer_queue if ans_state is not None else None
-            if q is None:
-                logger.debug("userAnswer dropped: no queue for tabId=%s", ans_tab)
-                return
-            # Drain any stale answer, then put the new one (P2/D3 fix)
-            while not q.empty():
-                try:
-                    q.get_nowait()
-                except queue.Empty:  # pragma: no cover — race guard
-                    break
-            q.put(cmd.get("answer", ""))
-        elif cmd_type == "resumeSession":
-            raw_id = cmd.get("chatId")
-            chat_id = str(raw_id) if raw_id else ""
-            if chat_id:
-                self._replay_session(chat_id, cmd.get("tabId", ""))
-        elif cmd_type == "mergeAction":
-            self._handle_merge_action(cmd.get("action", ""), cmd.get("tabId"))
-        elif cmd_type == "newChat":
-            self._new_chat(cmd.get("tabId", ""))
-        elif cmd_type == "complete":
-            query = cmd.get("query", "")
-            active_file = cmd.get("activeFile")
-            active_content = cmd.get("activeFileContent")
-            with self._state_lock:
-                if active_file:
-                    self._last_active_file = active_file
-                if active_content is not None:
-                    self._last_active_content = active_content
-                snapshot_file = self._last_active_file
-                snapshot_content = self._last_active_content
-                self._complete_seq += 1
-                seq = self._complete_seq
-                self._complete_seq_latest = seq
-            if query:
-                self._ensure_complete_worker()
-                self._complete_queue.put((query, seq, snapshot_file, snapshot_content))  # type: ignore[union-attr]
-        elif cmd_type == "getInputHistory":
-            self._get_input_history()
-        elif cmd_type == "getAdjacentTask":
-            adj_tab = self._get_tab(cmd.get("tabId", ""))
-            # Get the current chat_id for this tab - if the agent doesn't have one,
-            # look up the most recent chat_id from history for adjacent task navigation
-            chat_id = adj_tab.agent.chat_id
-            if chat_id == "":
-                # No active chat_id in this tab, look up the most recent one from history
-                entries = _load_history(limit=1)
-                if entries:
-                    chat_id = str(entries[0].get("chat_id", "") or "")
-            self._get_adjacent_task(
-                chat_id,
-                cmd.get("task", ""),
-                cmd.get("direction", "prev"),
-            )
-        elif cmd_type == "generateCommitMessage":
-            threading.Thread(
-                target=self._generate_commit_message, daemon=True
-            ).start()
-        elif cmd_type == "worktreeAction":
-            action = cmd.get("action", "")
-            wt_tab_id = cmd.get("tabId", "")
-            try:
-                result = self._handle_worktree_action(action, wt_tab_id)
-            except Exception as e:
-                logger.debug("Worktree action error", exc_info=True)
-                result = {"success": False, "message": str(e)}
-            self.printer.broadcast({"type": "worktree_result", "tabId": wt_tab_id, **result})
-        elif cmd_type == "autocommitAction":
-            self._handle_autocommit_action(
-                cmd.get("action", ""), cmd.get("tabId", ""),
-            )
+        """Dispatch a command from VS Code to the appropriate handler."""
+        cmd_type: str = cmd.get("type", "")
+        handler = self._HANDLERS.get(cmd_type)
+        if handler is not None:
+            handler(self, cmd)
         else:
             self.printer.broadcast({"type": "error", "text": f"Unknown command: {cmd_type}"})
+
+    # -- Command handlers (one per command type) -------------------------
+
+    def _cmd_run(self, cmd: dict[str, Any]) -> None:
+        """Start an agent task in a background thread."""
+        tab_id = cmd.get("tabId", "")
+        tab = self._get_tab(tab_id)
+        with self._state_lock:
+            if tab.task_thread is not None and tab.task_thread.is_alive():
+                self.printer.broadcast({
+                    "type": "error",
+                    "text": "Task already running",
+                    "tabId": tab_id,
+                })
+                self.printer.broadcast({"type": "status", "running": False, "tabId": tab_id})
+                return
+            # RC-NEW-1: create stop_event and queue before starting
+            # the thread so _stop_task always finds a valid event.
+            tab.stop_event = threading.Event()
+            tab.user_answer_queue = queue.Queue(maxsize=1)
+            thread = threading.Thread(
+                target=self._run_task, args=(cmd,), daemon=True
+            )
+            tab.task_thread = thread
+            thread.start()
+
+    def _cmd_stop(self, cmd: dict[str, Any]) -> None:
+        """Stop a running task."""
+        self._stop_task(cmd.get("tabId"))
+
+    def _cmd_get_models(self, cmd: dict[str, Any]) -> None:
+        """Send available models list."""
+        self._get_models()
+
+    def _cmd_select_model(self, cmd: dict[str, Any]) -> None:
+        """Update the selected model for a tab."""
+        tab_id = cmd.get("tabId", "")
+        tab = self._get_tab(tab_id)
+        model = cmd.get("model", tab.selected_model)
+        tab.selected_model = model
+        with self._state_lock:
+            self._default_model = model  # new tabs inherit latest selection
+        _save_last_model(model)
+
+    def _cmd_get_history(self, cmd: dict[str, Any]) -> None:
+        """Send conversation history."""
+        self._get_history(cmd.get("query"), cmd.get("offset", 0), cmd.get("generation", 0))
+
+    def _cmd_get_files(self, cmd: dict[str, Any]) -> None:
+        """Send file list for autocomplete."""
+        self._get_files(cmd.get("prefix", ""))
+
+    def _cmd_refresh_files(self, cmd: dict[str, Any]) -> None:
+        """Refresh the file cache."""
+        self._refresh_file_cache()
+
+    def _cmd_record_file_usage(self, cmd: dict[str, Any]) -> None:
+        """Record a file access for usage-based sorting."""
+        path = cmd.get("path", "")
+        if path:
+            _record_file_usage(path)
+
+    def _cmd_user_answer(self, cmd: dict[str, Any]) -> None:
+        """Route a user answer to the correct tab's queue."""
+        ans_tab = cmd.get("tabId")
+        with self._state_lock:
+            ans_state = self._tab_states.get(ans_tab) if ans_tab is not None else None
+            q = ans_state.user_answer_queue if ans_state is not None else None
+        if q is None:
+            logger.debug("userAnswer dropped: no queue for tabId=%s", ans_tab)
+            return
+        # Drain any stale answer, then put the new one (P2/D3 fix)
+        while not q.empty():
+            try:
+                q.get_nowait()
+            except queue.Empty:  # pragma: no cover — race guard
+                break
+        q.put(cmd.get("answer", ""))
+
+    def _cmd_resume_session(self, cmd: dict[str, Any]) -> None:
+        """Replay a previous chat session."""
+        raw_id = cmd.get("chatId")
+        chat_id = str(raw_id) if raw_id else ""
+        if chat_id:
+            self._replay_session(chat_id, cmd.get("tabId", ""))
+
+    def _cmd_merge_action(self, cmd: dict[str, Any]) -> None:
+        """Handle merge accept/reject from the extension."""
+        self._handle_merge_action(cmd.get("action", ""), cmd.get("tabId"))
+
+    def _cmd_new_chat(self, cmd: dict[str, Any]) -> None:
+        """Start a new chat session."""
+        self._new_chat(cmd.get("tabId", ""))
+
+    def _cmd_complete(self, cmd: dict[str, Any]) -> None:
+        """Ghost text autocomplete request."""
+        query = cmd.get("query", "")
+        active_file = cmd.get("activeFile")
+        active_content = cmd.get("activeFileContent")
+        with self._state_lock:
+            if active_file:
+                self._last_active_file = active_file
+            if active_content is not None:
+                self._last_active_content = active_content
+            snapshot_file = self._last_active_file
+            snapshot_content = self._last_active_content
+            self._complete_seq += 1
+            seq = self._complete_seq
+            self._complete_seq_latest = seq
+        if query:
+            self._ensure_complete_worker()
+            self._complete_queue.put((query, seq, snapshot_file, snapshot_content))  # type: ignore[union-attr]
+
+    def _cmd_get_input_history(self, cmd: dict[str, Any]) -> None:
+        """Send deduplicated task texts for arrow-key cycling."""
+        self._get_input_history()
+
+    def _cmd_get_adjacent_task(self, cmd: dict[str, Any]) -> None:
+        """Send events for the adjacent task in the same chat session."""
+        adj_tab = self._get_tab(cmd.get("tabId", ""))
+        chat_id = adj_tab.agent.chat_id
+        if chat_id == "":
+            entries = _load_history(limit=1)
+            if entries:
+                chat_id = str(entries[0].get("chat_id", "") or "")
+        self._get_adjacent_task(
+            chat_id,
+            cmd.get("task", ""),
+            cmd.get("direction", "prev"),
+        )
+
+    def _cmd_generate_commit_message(self, cmd: dict[str, Any]) -> None:
+        """Generate a git commit message in the background."""
+        threading.Thread(
+            target=self._generate_commit_message, daemon=True
+        ).start()
+
+    def _cmd_worktree_action(self, cmd: dict[str, Any]) -> None:
+        """Execute a worktree merge/discard action."""
+        action = cmd.get("action", "")
+        wt_tab_id = cmd.get("tabId", "")
+        try:
+            result = self._handle_worktree_action(action, wt_tab_id)
+        except Exception as e:
+            logger.debug("Worktree action error", exc_info=True)
+            result = {"success": False, "message": str(e)}
+        self.printer.broadcast({"type": "worktree_result", "tabId": wt_tab_id, **result})
+
+    def _cmd_autocommit_action(self, cmd: dict[str, Any]) -> None:
+        """Process the user's reply to an autocommit prompt."""
+        self._handle_autocommit_action(
+            cmd.get("action", ""), cmd.get("tabId", ""),
+        )
+
+    _HANDLERS: dict[str, Any] = {
+        "run": _cmd_run,
+        "stop": _cmd_stop,
+        "getModels": _cmd_get_models,
+        "selectModel": _cmd_select_model,
+        "getHistory": _cmd_get_history,
+        "getFiles": _cmd_get_files,
+        "refreshFiles": _cmd_refresh_files,
+        "recordFileUsage": _cmd_record_file_usage,
+        "userAnswer": _cmd_user_answer,
+        "resumeSession": _cmd_resume_session,
+        "mergeAction": _cmd_merge_action,
+        "newChat": _cmd_new_chat,
+        "complete": _cmd_complete,
+        "getInputHistory": _cmd_get_input_history,
+        "getAdjacentTask": _cmd_get_adjacent_task,
+        "generateCommitMessage": _cmd_generate_commit_message,
+        "worktreeAction": _cmd_worktree_action,
+        "autocommitAction": _cmd_autocommit_action,
+    }
 
     def _run_task(self, cmd: dict[str, Any]) -> None:
         """Run the agent with the given task.
@@ -1800,6 +1856,38 @@ class VSCodeServer:
                       wt._wt_branch)
         return result.stdout.strip().splitlines() if result.returncode == 0 else []
 
+    def _check_worktree_busy(self, tab: _TabState, verb: str) -> dict[str, Any] | None:
+        """Return an error dict if a worktree action should be refused, else None.
+
+        Checks both the tab's own task and any non-worktree task running
+        on the main tree (BUG-35, BUG-72 fixes).
+
+        Args:
+            tab: The per-tab state to check.
+            verb: Human-readable action name (e.g. ``"merging"``).
+
+        Returns:
+            Error dict with ``success: False`` when busy, otherwise ``None``.
+        """
+        with self._state_lock:
+            if tab.is_task_active:
+                return {
+                    "success": False,
+                    "message": (
+                        f"A worktree task is still running on this tab. "
+                        f"Wait for it to finish (or stop it) before {verb}."
+                    ),
+                }
+            if self._any_non_wt_running():
+                return {
+                    "success": False,
+                    "message": (
+                        "Another tab is running a task on the main working "
+                        f"tree. Wait for it to finish before {verb}."
+                    ),
+                }
+        return None
+
     def _handle_worktree_action(self, action: str, tab_id: str = "") -> dict[str, Any]:
         """Execute a worktree merge/discard/manual action.
 
@@ -1820,29 +1908,9 @@ class VSCodeServer:
         if not wt._wt_pending:
             self._ensure_worktree_state(tab_id)
         if action == "merge":
-            # Fix 3 (BUG-35): refuse merge while a non-worktree task
-            # is writing to the main working tree — stash_if_dirty
-            # would capture the agent's in-flight edits.
-            # BUG-72 fix: refuse while the tab's own worktree task is
-            # still writing to ``wt_dir`` — ``agent.merge()``'s
-            # ``_finalize_worktree`` force-removes ``wt_dir`` mid-write.
-            with self._state_lock:
-                if tab.is_task_active:
-                    return {
-                        "success": False,
-                        "message": (
-                            "A worktree task is still running on this tab. "
-                            "Wait for it to finish (or stop it) before merging."
-                        ),
-                    }
-                if self._any_non_wt_running():
-                    return {
-                        "success": False,
-                        "message": (
-                            "Another tab is running a task on the main working "
-                            "tree. Wait for it to finish before merging."
-                        ),
-                    }
+            busy = self._check_worktree_busy(tab, "merging")
+            if busy:
+                return busy
             self.printer.broadcast({
                 "type": "worktree_progress",
                 "message": "Generating commit message…",
@@ -1851,28 +1919,9 @@ class VSCodeServer:
             success = "Successfully merged" in msg
             return {"success": success, "message": msg}
         elif action == "discard":
-            # INC-2 fix: guard discard's checkout against concurrent
-            # non-worktree task writing to the main tree.
-            # BUG-72 fix: refuse while the tab's own worktree task is
-            # still writing to ``wt_dir`` — ``agent.discard()`` force-
-            # removes ``wt_dir`` mid-write.
-            with self._state_lock:
-                if tab.is_task_active:
-                    return {
-                        "success": False,
-                        "message": (
-                            "A worktree task is still running on this tab. "
-                            "Wait for it to finish (or stop it) before discarding."
-                        ),
-                    }
-                if self._any_non_wt_running():
-                    return {
-                        "success": False,
-                        "message": (
-                            "Another tab is running a task on the main working "
-                            "tree. Wait for it to finish before discarding."
-                        ),
-                    }
+            busy = self._check_worktree_busy(tab, "discarding")
+            if busy:
+                return busy
             msg = wt.discard()
             return {"success": True, "message": msg}
         return {"success": False, "message": f"Unknown action: {action}"}
@@ -1915,22 +1964,8 @@ class VSCodeServer:
             })
 
     def _generate_commit_message_llm(self, diff_text: str) -> None:  # pragma: no cover
-        """Call LLM to generate commit message from diff text."""
-        agent = KISSAgent("Commit Message Generator")
-        raw = agent.run(
-            model_name=fast_model_for(),
-            prompt_template=(
-                "Generate a nicely markdown formatted, informative git commit message for "
-                "these changes. Use conventional commit format with a clear subject "
-                "line (type: description) and optionally a body with bullet points "
-                "for multiple changes. Return ONLY the commit message text, no "
-                "quotes or markdown fences.\n\n{context}"
-            ),
-            arguments={"context": f"Diff:\n{diff_text}"},
-            is_agentic=False,
-            verbose=False,
-        )
-        msg = clean_llm_output(raw)
+        """Call LLM to generate commit message from diff text and broadcast it."""
+        msg = self._compose_commit_message(diff_text)
         self.printer.broadcast({"type": "commitMessage", "message": msg})
 
 
