@@ -127,7 +127,6 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "cc/opus": _mi(200000, 0.00, 0.00),
     "cc/sonnet": _mi(200000, 0.00, 0.00),
     "claude-3-5-haiku": _mi(200000, 0.80, 4.00),  # Alias for claude-3-5-haiku-20241022
-    "claude-3-haiku-20240307": _mi(200000, 0.25, 1.25),
     "claude-haiku-4-5": _mi(200000, 1.00, 5.00),
     "claude-haiku-4-5-20251001": _mi(200000, 1.00, 5.00),  # Snapshot version
     "claude-opus-4": _mi(200000, 15.00, 75.00),
@@ -357,7 +356,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/deepseek/deepseek-r1-distill-llama-70b": _mi(131072, 0.70, 0.80),
     "openrouter/deepseek/deepseek-r1-distill-qwen-32b": _mi(32768, 0.29, 0.29),
     "openrouter/deepseek/deepseek-v3.1-terminus": _mi(163840, 0.21, 0.79, fc=False, gen=False),
-    "openrouter/deepseek/deepseek-v3.2": _mi(163840, 0.26, 0.42),
+    "openrouter/deepseek/deepseek-v3.2": _mi(131072, 0.252, 0.378),
     "openrouter/deepseek/deepseek-v3.2-exp": _mi(163840, 0.27, 0.41),
     "openrouter/deepseek/deepseek-v3.2-speciale": _mi(163840, 0.40, 1.20),  # Specialized variant
     "openrouter/essentialai/rnj-1-instruct": _mi(32768, 0.15, 0.15, fc=False),
@@ -381,7 +380,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/google/gemma-3-27b-it": _mi(131072, 0.08, 0.16, fc=False),
     "openrouter/google/gemma-3-4b-it": _mi(131072, 0.04, 0.08, fc=False),
     "openrouter/google/gemma-3n-e4b-it": _mi(32768, 0.06, 0.12, fc=False),
-    "openrouter/google/gemma-4-26b-a4b-it": _mi(262144, 0.08, 0.35),  # NEW
+    "openrouter/google/gemma-4-26b-a4b-it": _mi(262144, 0.07, 0.35),  # NEW
     "openrouter/google/gemma-4-31b-it": _mi(262144, 0.13, 0.38),  # NEW
     "openrouter/google/lyria-3-clip-preview": _mi(1048576, 0.00, 0.00),  # NEW: needs pricing
     "openrouter/google/lyria-3-pro-preview": _mi(1048576, 0.00, 0.00),  # NEW: needs pricing
@@ -400,7 +399,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/meta-llama/llama-3.2-11b-vision-instruct": _mi(131072, 0.245, 0.245, fc=False),
     "openrouter/meta-llama/llama-3.2-1b-instruct": _mi(60000, 0.03, 0.20, fc=False),
     "openrouter/meta-llama/llama-3.2-3b-instruct": _mi(80000, 0.051, 0.34, fc=False),
-    "openrouter/meta-llama/llama-3.3-70b-instruct": _mi(131072, 0.10, 0.32, fc=False, gen=False),
+    "openrouter/meta-llama/llama-3.3-70b-instruct": _mi(131072, 0.12, 0.38, fc=False, gen=False),
     "openrouter/meta-llama/llama-4-maverick": _mi(1048576, 0.15, 0.60, fc=False),
     "openrouter/meta-llama/llama-4-scout": _mi(327680, 0.08, 0.30, fc=False),
     "openrouter/meta-llama/llama-guard-3-8b": _mi(131072, 0.48, 0.03, fc=False),  # Safety model
@@ -412,7 +411,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/minimax/minimax-m2": _mi(196608, 0.255, 1.00, fc=False),
     "openrouter/minimax/minimax-m2-her": _mi(65536, 0.30, 1.20, fc=False),  # Roleplay model
     "openrouter/minimax/minimax-m2.1": _mi(196608, 0.29, 0.95),
-    "openrouter/minimax/minimax-m2.5": _mi(196608, 0.118, 0.99),
+    "openrouter/minimax/minimax-m2.5": _mi(196608, 0.15, 1.20),
     "openrouter/minimax/minimax-m2.7": _mi(196608, 0.30, 1.20),  # NEW
     "openrouter/mistralai/codestral-2508": _mi(256000, 0.30, 0.90, fc=False),
     "openrouter/mistralai/devstral-2512": _mi(262144, 0.40, 2.00, fc=False),
@@ -442,7 +441,8 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/moonshotai/kimi-k2": _mi(131072, 0.57, 2.30, fc=False),  # Unreliable FC
     "openrouter/moonshotai/kimi-k2-0905": _mi(262144, 0.40, 2.00, fc=False),  # Unreliable FC
     "openrouter/moonshotai/kimi-k2-thinking": _mi(262144, 0.60, 2.50, fc=False),  # SLOW
-    "openrouter/moonshotai/kimi-k2.5": _mi(262144, 0.383, 1.72),  # Multimodal + agentic
+    "openrouter/moonshotai/kimi-k2.5": _mi(262144, 0.44, 2.00),  # Multimodal + agentic
+    "openrouter/moonshotai/kimi-k2.6": _mi(262144, 0.60, 2.80),  # NEW
     "openrouter/morph/morph-v3-fast": _mi(81920, 0.80, 1.20, fc=False),
     "openrouter/morph/morph-v3-large": _mi(262144, 0.90, 1.90, fc=False),
     "openrouter/nex-agi/deepseek-v3.1-nex-n1": _mi(131072, 0.135, 0.50, fc=False),
@@ -499,6 +499,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/openai/gpt-5.3-chat": _mi(128000, 1.75, 14.00),  # NEW
     "openrouter/openai/gpt-5.3-codex": _mi(400000, 1.75, 14.00),  # NEW
     "openrouter/openai/gpt-5.4": _mi(1050000, 2.50, 15.00),  # NEW
+    "openrouter/openai/gpt-5.4-image-2": _mi(272000, 8.00, 15.00, fc=False),  # NEW
     "openrouter/openai/gpt-5.4-mini": _mi(400000, 0.75, 4.50),  # NEW
     "openrouter/openai/gpt-5.4-nano": _mi(400000, 0.20, 1.25),  # NEW
     "openrouter/openai/gpt-5.4-pro": _mi(1050000, 30.00, 180.00),  # NEW
@@ -607,12 +608,13 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/z-ai/glm-4.5v": _mi(65536, 0.60, 1.80, fc=False),
     "openrouter/z-ai/glm-4.6": _mi(204800, 0.39, 1.90, fc=False),  # Unreliable FC
     "openrouter/z-ai/glm-4.6v": _mi(131072, 0.30, 0.90),
-    "openrouter/z-ai/glm-4.7": _mi(202752, 0.39, 1.75),
+    "openrouter/z-ai/glm-4.7": _mi(202752, 0.38, 1.74),
     "openrouter/z-ai/glm-4.7-flash": _mi(202752, 0.06, 0.40),
-    "openrouter/z-ai/glm-5": _mi(80000, 0.72, 2.30),  # 744B MoE - FC verified
+    "openrouter/z-ai/glm-5": _mi(202752, 0.65, 2.08),  # 744B MoE - FC verified
     "openrouter/z-ai/glm-5-turbo": _mi(202752, 1.20, 4.00),  # NEW
-    "openrouter/z-ai/glm-5.1": _mi(202752, 0.95, 3.15),  # NEW
+    "openrouter/z-ai/glm-5.1": _mi(202752, 1.05, 3.50),  # NEW
     "openrouter/z-ai/glm-5v-turbo": _mi(202752, 1.20, 4.00),  # NEW
+    "openrouter/~anthropic/claude-opus-latest": _mi(1000000, 5.00, 25.00),  # NEW
     "Qwen/Qwen2-VL-72B-Instruct": _mi(32768, 1.20, 1.20),  # NEW
     "Qwen/Qwen2.5-14B-Instruct": _mi(32768, 0.80, 0.80),  # NEW
     "Qwen/Qwen2.5-72B-Instruct": _mi(32768, 1.20, 1.20),  # NEW
