@@ -2342,6 +2342,7 @@
     div.textContent = (ev && ev.message) || '';
     O.appendChild(div);
     sb();
+    focusInputWithRetry();
   }
 
   // --- Merge toolbar (shown in input area, replacing textarea) ---

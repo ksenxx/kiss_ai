@@ -920,6 +920,11 @@ class VSCodeServer:
                 })
                 return
             with repo_lock(repo):
+                self.printer.broadcast({
+                    "type": "autocommit_progress",
+                    "message": "Staging changes…",
+                    "tabId": tab_id,
+                })
                 _git(self.work_dir, "add", "-A")
                 diff = _git(self.work_dir, "diff", "--cached")
                 if not diff.stdout.strip():
@@ -931,7 +936,17 @@ class VSCodeServer:
                         "tabId": tab_id,
                     })
                     return
+                self.printer.broadcast({
+                    "type": "autocommit_progress",
+                    "message": "Generating commit message…",
+                    "tabId": tab_id,
+                })
                 msg = self._compose_commit_message(diff.stdout) or "Auto-commit"
+                self.printer.broadcast({
+                    "type": "autocommit_progress",
+                    "message": "Committing…",
+                    "tabId": tab_id,
+                })
                 ok = GitWorktreeOps.commit_staged(repo, msg)
             if ok:
                 subject = msg.splitlines()[0] if msg.splitlines() else msg

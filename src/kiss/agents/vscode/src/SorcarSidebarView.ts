@@ -50,13 +50,21 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     string,
     vscode.Progress<{message?: string}>
   > = new Map();
+  private _autocommitActionResolves: Map<string, () => void> = new Map();
+  private _autocommitProgresses: Map<
+    string,
+    vscode.Progress<{message?: string}>
+  > = new Map();
   private _disposed: boolean = false;
 
-  /** Resolve all pending worktree action promises and clear tracking maps. */
+  /** Resolve all pending worktree/autocommit action promises and clear maps. */
   private _resolveAllWorktreeActions(): void {
     for (const resolve of this._worktreeActionResolves.values()) resolve();
     this._worktreeActionResolves.clear();
     this._worktreeProgresses.clear();
+    for (const resolve of this._autocommitActionResolves.values()) resolve();
+    this._autocommitActionResolves.clear();
+    this._autocommitProgresses.clear();
   }
 
   constructor(extensionUri: vscode.Uri, mergeManager: MergeManager) {
@@ -193,6 +201,34 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
             void this._closeWorktreeInScm(wtDir);
             this._worktreeDirs.delete(wrTabId);
           }
+        }
+      }
+      if (msg.type === 'autocommit_progress') {
+        const apTabId = msg.tabId;
+        const progress =
+          apTabId !== undefined
+            ? this._autocommitProgresses.get(apTabId)
+            : this._autocommitProgresses.values().next().value;
+        if (progress) {
+          progress.report({message: msg.message});
+        }
+      }
+      if (msg.type === 'autocommit_done') {
+        const adTabId = msg.tabId;
+        if (adTabId !== undefined) {
+          const resolve = this._autocommitActionResolves.get(adTabId);
+          if (resolve) {
+            resolve();
+            this._autocommitActionResolves.delete(adTabId);
+          }
+          this._autocommitProgresses.delete(adTabId);
+        }
+        if (msg.success) {
+          vscode.window.showInformationMessage(
+            msg.message || 'Auto-commit completed.',
+          );
+        } else {
+          vscode.window.showErrorMessage(msg.message || 'Auto-commit failed.');
         }
       }
 
@@ -696,6 +732,34 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       case 'autocommitAction': {
         const acAction = message.action;
         const acTabId = message.tabId;
+        if (acAction === 'commit') {
+          const autocommitTimeout = 120_000;
+          vscode.window.withProgress(
+            {
+              location: vscode.ProgressLocation.Notification,
+              title: 'Auto-committing…',
+            },
+            progress => {
+              if (acTabId !== undefined) {
+                this._autocommitProgresses.set(acTabId, progress);
+              }
+              return new Promise<void>(resolve => {
+                if (acTabId !== undefined) {
+                  this._autocommitActionResolves.set(acTabId, resolve);
+                }
+                setTimeout(() => {
+                  if (
+                    acTabId !== undefined &&
+                    this._autocommitActionResolves.get(acTabId) === resolve
+                  ) {
+                    this._autocommitActionResolves.delete(acTabId);
+                    resolve();
+                  }
+                }, autocommitTimeout);
+              });
+            },
+          );
+        }
         const acProc = acTabId
           ? this._getTabProcess(acTabId)
           : this._getServiceProcess();
