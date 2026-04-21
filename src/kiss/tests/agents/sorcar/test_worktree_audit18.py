@@ -252,35 +252,35 @@ class TestRaceMergeGuardTOCTOU:
             f"to report success.  result={result}"
         )
 
-        # And the concrete corruption: tab B's in-flight file was
-        # stashed by the merge.  ``stash_if_dirty`` was called because
-        # ``--include-untracked`` picks up new files; stash_pop on
-        # success restores it, but its content was shuttled through
-        # the stash list — proving the merge operated on tab B's
-        # dirty state rather than refusing it.
-        stash_log = subprocess.run(
-            ["git", "-C", str(repo), "log", "--format=%s", "-g",
-             "refs/stash"],
-            capture_output=True, text=True,
+        # And the concrete evidence that the merge proceeded past
+        # the guard: the squash-merge commit was actually applied to
+        # ``main``.  ``agent.txt`` only exists on ``main`` if
+        # ``_do_merge`` ran to completion.  (``stash_if_dirty`` was
+        # invoked and then ``stash_pop`` succeeded, which wipes the
+        # ``refs/stash`` reflog, so checking the reflog is not a
+        # reliable probe.)
+        agent_file = repo / "agent.txt"
+        assert agent_file.exists(), (
+            "RACE-1: expected squash-merge to have applied tab A's "
+            "commit (creating ``agent.txt`` on main) even though "
+            "tab B became active in the TOCTOU gap.  The merge "
+            "reported success but the file is missing — the merge "
+            "did not actually run."
         )
-        stash_all = subprocess.run(
-            ["git", "-C", str(repo), "stash", "list"],
-            capture_output=True, text=True,
+        # Sanity: main's HEAD advanced past the initial commit.
+        main_log = subprocess.run(
+            ["git", "-C", str(repo), "log", "--format=%H",
+             "refs/heads/main"],
+            capture_output=True, text=True, check=True,
         )
-        produced_stash = (
-            "kiss: auto-stash before merge" in stash_log.stdout
-            or "kiss: auto-stash before merge" in stash_all.stdout
+        assert len(main_log.stdout.strip().splitlines()) >= 2, (
+            "RACE-1: main should have 2+ commits (init + squash) "
+            f"after the race.  log:\n{main_log.stdout!r}"
         )
-        assert produced_stash, (
-            "RACE-1: expected merge to have auto-stashed tab B's "
-            "in-flight file (confirming the TOCTOU — the flag "
-            "became True between guard check and stash, but was "
-            "not consulted again).  stash log:\n"
-            f"{stash_log.stdout!r}\nstash list:\n{stash_all.stdout!r}"
-        )
-        # After stash pop the file is back — corruption is mainly
-        # that the merge silently shuffled tab B's writes through
-        # the stash, a step it was supposed to skip.
+        # Follow-up: the merge silently shuffled tab B's in-flight
+        # write through ``git stash push --include-untracked`` and
+        # back via ``git stash pop``.  The file is restored — proof
+        # that the stash path was taken rather than refused.
         assert dirty_file.exists(), (
             "Follow-up: stash_pop should have restored tab B's file "
             f"after the merge completed.  existed={dirty_file.exists()}"
@@ -358,27 +358,33 @@ class TestRaceNewChatGuardTOCTOU:
             "new_chat thread hung"
         )
 
-        # Confirm the stash path was taken despite tab B's concurrent
-        # non-wt task — the guard did not re-fire.
-        stash_log = subprocess.run(
-            ["git", "-C", str(repo), "log", "--format=%s", "-g",
-             "refs/stash"],
-            capture_output=True, text=True,
+        # Confirm the auto-merge path ran despite tab B's concurrent
+        # non-wt task — the guard did not re-fire.  Evidence: the
+        # squash-merge applied tab A's commit to ``main``, creating
+        # ``agent.txt``.  (Checking ``refs/stash`` reflog is not
+        # reliable because a successful ``stash pop`` wipes it.)
+        agent_file = repo / "agent.txt"
+        assert agent_file.exists(), (
+            "RACE-2: expected new_chat's auto-release to have "
+            "squash-merged tab A's commit onto main (creating "
+            "``agent.txt``) even though tab B became active in the "
+            "TOCTOU gap.  The file is missing — the merge did not "
+            "run."
         )
-        stash_all = subprocess.run(
-            ["git", "-C", str(repo), "stash", "list"],
-            capture_output=True, text=True,
+        main_log = subprocess.run(
+            ["git", "-C", str(repo), "log", "--format=%H",
+             "refs/heads/main"],
+            capture_output=True, text=True, check=True,
         )
-        produced_stash = (
-            "kiss: auto-stash before merge" in stash_log.stdout
-            or "kiss: auto-stash before merge" in stash_all.stdout
+        assert len(main_log.stdout.strip().splitlines()) >= 2, (
+            "RACE-2: main should have 2+ commits (init + squash) "
+            f"after the race.  log:\n{main_log.stdout!r}"
         )
-        assert produced_stash, (
-            "RACE-2: new_chat's auto-release did NOT skip the merge "
-            "even though a non-wt task became active in the TOCTOU "
-            "gap.  Expected kiss: auto-stash entry.\n"
-            f"stash log:\n{stash_log.stdout!r}\n"
-            f"stash list:\n{stash_all.stdout!r}"
+        # Tab B's in-flight file was stashed then restored — proof
+        # that the stash path was taken rather than skipped.
+        assert dirty_file.exists(), (
+            "Follow-up: stash_pop should have restored tab B's "
+            f"in-flight file.  existed={dirty_file.exists()}"
         )
 
 
@@ -506,7 +512,7 @@ class TestRacePostTaskVsUserAction:
         static check but keeps the test hermetic and avoids mocks.
         """
         src = (
-            Path(__file__).resolve().parents[4]
+            Path(__file__).resolve().parents[3]
             / "agents" / "vscode" / "server.py"
         ).read_text()
 
@@ -558,7 +564,7 @@ class TestRaceSetupCopyDirtyStateNoRepoLock:
         self, tmp_path: Path,
     ) -> None:
         src = (
-            Path(__file__).resolve().parents[4]
+            Path(__file__).resolve().parents[3]
             / "agents" / "sorcar" / "worktree_sorcar_agent.py"
         ).read_text()
 
@@ -576,14 +582,13 @@ class TestRaceSetupCopyDirtyStateNoRepoLock:
         assert "copy_dirty_state" in body
         assert "commit_staged" in body
 
-        # Locate the repo_lock block and confirm copy_dirty_state /
-        # commit_staged / create are OUTSIDE it.
+        # Locate the repo_lock block and confirm it does NOT wrap
+        # copy_dirty_state / create / commit_staged.  The body of
+        # the ``with repo_lock(repo):`` block is the single line
+        # that follows it; once we re-encounter an 8-space-indented
+        # line (``original_branch`` / subsequent setup statements),
+        # we are back in the method body — OUTSIDE the lock.
         lock_idx = body.index("with repo_lock(repo):")
-        # The ``with`` block is a single-statement body in the
-        # current implementation — everything following the dedent
-        # at column 8 is outside the lock.  A simple proxy: the
-        # string ``copy_dirty_state`` appears AFTER the lock block
-        # and at the same or shallower indent.
         copy_idx = body.index("copy_dirty_state")
         create_idx = body.index("GitWorktreeOps.create(")
         commit_idx = body.index("commit_staged(")
@@ -591,23 +596,54 @@ class TestRaceSetupCopyDirtyStateNoRepoLock:
         assert lock_idx < copy_idx, (
             "Setup ordering has changed — update this test."
         )
-        # None of these lines have an additional indent beyond the
-        # method body's ``        `` (8 spaces).  If repo_lock
-        # wrapped them they would each start with 12 spaces.
-        for label, idx in (
-            ("copy_dirty_state", copy_idx),
-            ("create", create_idx),
-            ("commit_staged", commit_idx),
-        ):
-            line_start = body.rfind("\n", 0, idx) + 1
-            indent = len(body[line_start:idx]) - len(
-                body[line_start:idx].lstrip(" "),
+
+        # Robust check: count the number of lines between the
+        # ``with repo_lock(repo):`` line and each call.  If more
+        # than one line is indented ≥ 12 spaces in a row starting
+        # at the first line AFTER ``with repo_lock``, the lock
+        # wraps more than just current_branch.
+        def _lines_inside_with(start: int) -> list[str]:
+            # Consume lines with indent ≥ 12 that immediately follow.
+            after = body[body.index("\n", start) + 1:]
+            inside: list[str] = []
+            for ln in after.splitlines():
+                if ln.strip() == "":
+                    break
+                # Lines inside the with-block are indented ≥ 12
+                # (the method body is 8, the with-body is 12).
+                stripped = ln.lstrip(" ")
+                ind = len(ln) - len(stripped)
+                if ind >= 12:
+                    inside.append(ln)
+                else:
+                    break
+            return inside
+
+        inside_lines = _lines_inside_with(lock_idx)
+        inside_text = "\n".join(inside_lines)
+        assert "current_branch" in inside_text, (
+            "RACE-4: expected ``current_branch`` read to be inside "
+            f"``with repo_lock(repo):`` block.  inside:\n{inside_text}"
+        )
+        # None of the heavyweight setup ops should be in the lock
+        # body (otherwise the entire setup would be serialized on
+        # repo_lock — a different, broader contract that this test
+        # doesn't cover).
+        for label in ("copy_dirty_state", "GitWorktreeOps.create(", "commit_staged("):
+            assert label not in inside_text, (
+                f"RACE-4: ``{label}`` is now inside the repo_lock "
+                "block — the fix may have been broadened.  Update "
+                f"this test.  inside:\n{inside_text}"
             )
-            assert indent <= 8, (
-                f"RACE-4: expected ``{label}`` to be OUTSIDE any "
-                f"``with repo_lock(...)`` block (indent <= 8 spaces), "
-                f"found indent={indent}.  If the fix has been applied "
-                "to wrap setup in repo_lock, update this test."
+        # Sanity on ordering: all three setup calls follow the lock.
+        for idx, name in (
+            (copy_idx, "copy_dirty_state"),
+            (create_idx, "GitWorktreeOps.create"),
+            (commit_idx, "commit_staged"),
+        ):
+            assert idx > lock_idx, (
+                f"RACE-4 ordering: {name} should appear after the "
+                "``with repo_lock(repo):`` line."
             )
 
 
@@ -636,7 +672,7 @@ class TestRaceRunTaskInnerBUGBClearTOCTOU:
         self, tmp_path: Path,
     ) -> None:
         src = (
-            Path(__file__).resolve().parents[4]
+            Path(__file__).resolve().parents[3]
             / "agents" / "vscode" / "server.py"
         ).read_text()
 

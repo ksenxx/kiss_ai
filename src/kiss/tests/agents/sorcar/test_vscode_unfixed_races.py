@@ -140,24 +140,19 @@ class TestCompleteSeqCounterRace(unittest.TestCase):
         # We assert the structural defect exists (no lock protects the counter).
         import inspect
 
-        src = inspect.getsource(type(server)._handle_command)
-        # The "complete" branch writes _complete_seq and _complete_seq_latest
-        # Verify RACE 1 is FIXED: counter writes are now INSIDE _state_lock.
+        # After the dispatch-table refactor, the "complete" command is
+        # handled by _cmd_complete (not inline in _handle_command).
+        src = inspect.getsource(type(server)._cmd_complete)
+        # Verify RACE 1 is FIXED: counter writes are INSIDE _state_lock.
         self.assertIn("self._complete_seq += 1", src)
         self.assertIn("self._complete_seq_latest = seq", src)
-        # Find the "complete" branch and verify the counter writes are
-        # INSIDE the _state_lock block (between lock acquire and the
-        # next dedented line after the with-block).
-        complete_idx = src.index('"complete"')
-        complete_section = src[complete_idx:complete_idx + 800]
-        lock_start = complete_section.index("with self._state_lock:")
-        seq_write = complete_section.index("self._complete_seq += 1")
+        lock_start = src.index("with self._state_lock:")
+        seq_write = src.index("self._complete_seq += 1")
         self.assertGreater(
             seq_write, lock_start,
             "_complete_seq should be inside _state_lock block — race fixed",
         )
         # Also verify the reader (_complete) now reads under lock
-        import inspect
         complete_src = inspect.getsource(type(server)._complete)
         self.assertIn("with self._state_lock:", complete_src)
 
@@ -275,13 +270,12 @@ class TestDefaultModelNoLock(unittest.TestCase):
         """Structural test: selectModel changes _default_model inside lock."""
         import inspect
 
-        src = inspect.getsource(VSCodeServer._handle_command)
-        # Find the selectModel branch
-        idx = src.index('"selectModel"')
-        section = src[idx:idx + 400]
+        # After the dispatch-table refactor, selectModel is handled by
+        # _cmd_select_model (not inline in _handle_command).
+        src = inspect.getsource(VSCodeServer._cmd_select_model)
         # The _default_model write should come AFTER _state_lock
-        lock_idx = section.index("self._state_lock")
-        model_idx = section.index("self._default_model = model")
+        lock_idx = src.index("self._state_lock")
+        model_idx = src.index("self._default_model = model")
         self.assertGreater(
             model_idx, lock_idx,
             "_default_model should be written inside _state_lock — race fixed",
@@ -371,15 +365,14 @@ class TestUserAnswerQueueStaleReference(unittest.TestCase):
         """Verify the userAnswer handler reads queue under _state_lock (fixed)."""
         import inspect
 
-        src = inspect.getsource(VSCodeServer._handle_command)
-        # Find the userAnswer section
-        idx = src.index('"userAnswer"')
-        section = src[idx:idx + 500]
+        # After the dispatch-table refactor, userAnswer is handled by
+        # _cmd_user_answer (not inline in _handle_command).
+        src = inspect.getsource(VSCodeServer._cmd_user_answer)
         # The queue is accessed via ans_state.user_answer_queue
-        self.assertIn("ans_state.user_answer_queue", section)
-        self.assertIn("self._tab_states.get(ans_tab)", section)
+        self.assertIn("ans_state.user_answer_queue", src)
+        self.assertIn("self._tab_states.get(ans_tab)", src)
         # Verify _state_lock appears before the _tab_states.get
-        lines = section.split("\n")
+        lines = src.split("\n")
         found_lock = False
         for line in lines:
             if "_state_lock" in line:

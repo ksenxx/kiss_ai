@@ -334,15 +334,33 @@ class TestBug42Inc5Fix:
         )
 
     def test_all_discard_paths_consistent(self):
-        """All discard paths in the server share the same guard."""
+        """All discard paths in the server share the same guard.
+
+        ``_handle_worktree_action`` delegates its busy check to the
+        shared helper ``_check_worktree_busy``, which in turn consults
+        ``_any_non_wt_running``.  The helper is therefore the point
+        where the guard is enforced; the caller just invokes it.
+        """
+        # _check_worktree_busy is the shared guard helper used by
+        # _handle_worktree_action for both merge and discard paths.
+        busy_src = inspect.getsource(VSCodeServer._check_worktree_busy)
+        assert "_any_non_wt_running" in busy_src, (
+            "_check_worktree_busy must consult _any_non_wt_running"
+        )
         for name in (
             "_present_pending_worktree",
             "_handle_worktree_action",
         ):
             src = inspect.getsource(getattr(VSCodeServer, name))
             if "tab.agent.discard()" in src or "wt.discard()" in src:
-                assert "_any_non_wt_running" in src, (
-                    f"{name} must guard discard with _any_non_wt_running"
+                # Either the method checks _any_non_wt_running directly,
+                # or it delegates to _check_worktree_busy (which does).
+                assert (
+                    "_any_non_wt_running" in src
+                    or "_check_worktree_busy" in src
+                ), (
+                    f"{name} must guard discard with _any_non_wt_running "
+                    "(directly or via _check_worktree_busy)"
                 )
 
 

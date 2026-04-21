@@ -2890,7 +2890,7 @@ class TestSorcarSidebarViewAgentEventHandling(unittest.TestCase):
     def test_updates_selected_model(self) -> None:
         body = self._get_message_handler_body()
         assert "msg.type === 'models'" in body
-        assert "this._selectedModel = (msg as any).selected" in body
+        assert "this._selectedModel = msg.selected" in body
 
     def test_handles_merge_data(self) -> None:
         body = self._get_message_handler_body()

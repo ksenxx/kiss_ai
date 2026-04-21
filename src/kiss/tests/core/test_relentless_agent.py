@@ -78,11 +78,19 @@ class TestFinish(unittest.TestCase):
 @requires_gemini_api_key
 class TestContinuation(unittest.TestCase):
     def test_empty_summary_no_progress(self) -> None:
-        """Empty summary -> no progress_section added."""
+        """Empty summary -> no progress_section added.
+
+        When every sub-session returns ``is_continue=True`` with an
+        empty summary, the relentless agent has no progress to carry
+        forward and should exhaust ``max_sub_sessions`` and raise
+        ``KISSError``.  If the Gemini API rate-limits mid-loop, a
+        non-KISS exception is caught and converted into an error
+        payload (no KISSError is raised) — skip in that case.
+        """
         agent = RelentlessAgent("EmptySummary")
         with tempfile.TemporaryDirectory() as td:
-            with self.assertRaises(KISSError):
-                agent.run(
+            try:
+                result = agent.run(
                     model_name=TEST_MODEL,
                     prompt_template=(
                         "Call finish(success=False, is_continue=True, summary='')"
@@ -93,6 +101,20 @@ class TestContinuation(unittest.TestCase):
                     work_dir=td,
                     verbose=False,
                 )
+            except KISSError:
+                return  # expected path — test passes
+            # Non-error return path: the sub-session loop converted a
+            # non-KISS exception into an error payload.  If that was a
+            # transient rate-limit, skip; otherwise the test has
+            # uncovered a genuine regression.
+            parsed = yaml.safe_load(result)
+            summary = (parsed or {}).get("summary", "")
+            if "429" in summary or "RESOURCE_EXHAUSTED" in summary:
+                self.skipTest("Gemini API rate-limited (429)")
+            self.fail(
+                f"Expected KISSError after exhausting sub-sessions, got: "
+                f"{result!r}"
+            )
 
 
 @requires_gemini_api_key
