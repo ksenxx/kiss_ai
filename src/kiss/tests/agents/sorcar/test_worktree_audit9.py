@@ -84,42 +84,39 @@ def _make_repo(tmp_path: Path, name: str = "repo") -> Path:
 
 
 class TestBug39Fix:
-    """BUG-39 FIX: Verify `is_running_non_wt = False` is the first
-    thing in the try block AND is also present in the except handler."""
+    """BUG-39 FIX: Verify `is_running_non_wt = False` is guaranteed
+    to run (via try/finally or except handler) AND is also present in
+    the outer except handler.
 
-    def test_flag_cleared_at_start_of_try(self):
-        """The flag clear is the first operation in the finally's try block,
-        before any calls that could raise."""
+    NOTE: BUG-61 supersedes the original BUG-39 ordering.  The flag
+    clear now happens AFTER `_prepare_and_start_merge` (so the merge
+    view diff is captured while concurrent worktree merges are blocked),
+    but is wrapped in a ``finally`` so it never gets stuck True.
+    """
+
+    def test_flag_cleared_via_finally_after_merge_view(self):
+        """The flag clear is inside a finally block that follows the
+        merge view preparation, guaranteeing it always runs.
+        (BUG-61 fix supersedes original BUG-39 ordering.)"""
         src = inspect.getsource(VSCodeServer._run_task_inner)
-        finally_pos = src.rfind("finally:")
-        finally_block = src[finally_pos:]
+        # Use the outer finally (contains _record_model_usage)
+        outer_finally = src.find("_record_model_usage")
+        assert outer_finally > 0
+        finally_block = src[outer_finally:]
 
-        # Find the try block inside finally
-        try_pos = finally_block.find("try:")
-        try_block = finally_block[try_pos:]
-
-        # The flag clear should be the first meaningful operation
-        # after the try: and its comment
-        lines = try_block.split("\n")
-        first_ops = []
-        past_try = False
-        for line in lines:
-            stripped = line.strip()
-            if stripped == "try:":
-                past_try = True
-                continue
-            if past_try and stripped and not stripped.startswith("#"):
-                first_ops.append(stripped)
-                if len(first_ops) >= 3:
-                    break
-
-        # First non-comment op should be the guard + flag clear
-        found_early = any(
-            "is_running_non_wt = False" in op for op in first_ops
+        # The flag clear must be present in the finally block
+        assert "is_running_non_wt = False" in finally_block, (
+            "BUG-39: flag clear must be in the finally block"
         )
-        assert found_early, (
-            f"BUG-39 fix: flag clear should be in first operations, "
-            f"got: {first_ops}"
+
+        # The merge view must appear BEFORE the flag clear (BUG-61)
+        merge_pos = finally_block.find("_prepare_and_start_merge")
+        flag_pos = finally_block.find("is_running_non_wt = False")
+        assert merge_pos > 0 and flag_pos > 0, (
+            "Both merge view and flag clear must be in the finally block"
+        )
+        assert merge_pos < flag_pos, (
+            "BUG-61: merge view must be prepared BEFORE flag is cleared"
         )
 
     def test_flag_cleared_in_except_handler(self):
@@ -615,18 +612,24 @@ class TestRed5Fix:
                 f"RED-5: two blocks are only {gap} chars apart — redundant"
             )
 
-    def test_flag_clear_separated_from_merge_view(self):
-        """Flag clear and merge view are in different parts of the block."""
+    def test_flag_clear_after_merge_view(self):
+        """Flag clear is AFTER merge view (BUG-61 fix supersedes RED-5).
+
+        The merge view must capture a diff while `is_running_non_wt`
+        is True, then the flag is cleared in a ``finally`` block.
+        """
         src = inspect.getsource(VSCodeServer._run_task_inner)
-        finally_pos = src.rfind("finally:")
-        finally_block = src[finally_pos:]
+        # Use the outer finally (contains _record_model_usage)
+        outer_finally = src.find("_record_model_usage")
+        assert outer_finally > 0
+        finally_block = src[outer_finally:]
 
         flag_pos = finally_block.find("tab.is_running_non_wt = False")
         merge_pos = finally_block.find("_prepare_and_start_merge")
         assert flag_pos > 0 and merge_pos > 0
-        # Flag clear is well before merge view start
-        assert merge_pos - flag_pos > 200, (
-            "Flag clear should be well before merge view start"
+        # BUG-61: merge view BEFORE flag clear
+        assert merge_pos < flag_pos, (
+            "BUG-61: merge view must be before flag clear"
         )
 
 

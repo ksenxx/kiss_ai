@@ -130,8 +130,15 @@ def _unquote_git_path(path: str) -> str:
     raw = bytearray()
     i = 0
     _esc = {
-        "n": 0x0A, "t": 0x09, "\\": 0x5C, '"': 0x22,
-        "a": 0x07, "b": 0x08, "f": 0x0C, "r": 0x0D, "v": 0x0B,
+        "n": 0x0A,
+        "t": 0x09,
+        "\\": 0x5C,
+        '"': 0x22,
+        "a": 0x07,
+        "b": 0x08,
+        "f": 0x0C,
+        "r": 0x0D,
+        "v": 0x0B,
     }
     while i < len(inner):
         if inner[i] == "\\" and i + 1 < len(inner):
@@ -209,9 +216,7 @@ class GitWorktreeOps:
         """
         result = _git("worktree", "add", "-b", branch, str(wt_dir), cwd=repo)
         if result.returncode != 0:
-            logger.warning(
-                "Failed to create worktree: %s", result.stderr.strip()
-            )
+            logger.warning("Failed to create worktree: %s", result.stderr.strip())
             return False
         return True
 
@@ -224,13 +229,9 @@ class GitWorktreeOps:
             wt_dir: Worktree directory to remove.
         """
         if wt_dir.exists():
-            result = _git(
-                "worktree", "remove", str(wt_dir), "--force", cwd=repo
-            )
+            result = _git("worktree", "remove", str(wt_dir), "--force", cwd=repo)
             if result.returncode != 0:  # pragma: no cover — lock/perm
-                logger.warning(
-                    "worktree remove failed: %s", result.stderr.strip()
-                )
+                logger.warning("worktree remove failed: %s", result.stderr.strip())
 
     @staticmethod
     def prune(repo: Path) -> None:
@@ -269,14 +270,18 @@ class GitWorktreeOps:
         result = _git("commit", "-m", message, cwd=wt_dir)
         if result.returncode != 0:
             logger.warning(
-                "git commit failed: %s", result.stderr.strip(),
+                "git commit failed: %s",
+                result.stderr.strip(),
             )
             return False
         return True
 
     @staticmethod
     def commit_staged(
-        wt_dir: Path, message: str, *, no_verify: bool = False,
+        wt_dir: Path,
+        message: str,
+        *,
+        no_verify: bool = False,
     ) -> bool:
         """Commit already-staged changes without re-staging.
 
@@ -304,7 +309,8 @@ class GitWorktreeOps:
         result = _git(*cmd, cwd=wt_dir)
         if result.returncode != 0:
             logger.warning(
-                "git commit failed: %s", result.stderr.strip(),
+                "git commit failed: %s",
+                result.stderr.strip(),
             )
             return False
         return True
@@ -354,25 +360,6 @@ class GitWorktreeOps:
         return (False, result.stderr.strip())
 
     @staticmethod
-    def merge_branch(repo: Path, branch: str) -> MergeResult:
-        """Merge a branch into the current HEAD with ``--no-edit``.
-
-        On conflict, the merge is aborted to leave a clean worktree.
-
-        Args:
-            repo: Git repo root path.
-            branch: Branch to merge.
-
-        Returns:
-            :attr:`MergeResult.SUCCESS` or :attr:`MergeResult.CONFLICT`.
-        """
-        result = _git("merge", branch, "--no-edit", cwd=repo)
-        if result.returncode == 0:
-            return MergeResult.SUCCESS
-        _git("merge", "--abort", cwd=repo)
-        return MergeResult.CONFLICT
-
-    @staticmethod
     def stash_if_dirty(repo: Path) -> bool:
         """Stash uncommitted changes if the working tree or index is dirty.
 
@@ -390,8 +377,11 @@ class GitWorktreeOps:
         if not status.stdout.strip():
             return False
         result = _git(
-            "stash", "push", "--include-untracked",
-            "-m", "kiss: auto-stash before merge",
+            "stash",
+            "push",
+            "--include-untracked",
+            "-m",
+            "kiss: auto-stash before merge",
             cwd=repo,
         )
         return result.returncode == 0
@@ -429,7 +419,8 @@ class GitWorktreeOps:
         result = _git("merge", "--squash", branch, cwd=repo)
         if result.returncode != 0:
             logger.warning(
-                "squash merge failed: %s", result.stderr.strip(),
+                "squash merge failed: %s",
+                result.stderr.strip(),
             )
             _git("reset", "--hard", "HEAD", cwd=repo)
             return MergeResult.CONFLICT
@@ -444,88 +435,6 @@ class GitWorktreeOps:
                 _git("reset", "--hard", "HEAD", cwd=repo)
                 return MergeResult.MERGE_FAILED
         return MergeResult.SUCCESS
-
-    @staticmethod
-    def apply_branch_to_working_tree(
-        repo: Path, branch: str,
-    ) -> MergeResult:
-        """Apply a branch's changes to the working tree as unstaged edits.
-
-        Captures the set of files that will change (``git diff
-        --name-only HEAD..branch``), runs ``git merge --squash`` to
-        stage them, then unstages *only* those files with
-        ``git reset HEAD -- <files>`` so any pre-existing staged
-        changes the user had are preserved.
-
-        On merge failure (e.g. dirty index that overlaps the branch),
-        restores the pre-merge state of the affected files with
-        ``git reset HEAD -- <files>`` + ``git checkout -- <files>``
-        so unrelated user changes are untouched.
-
-        Args:
-            repo: Git repo root path.
-            branch: Branch whose changes to apply.
-
-        Returns:
-            :attr:`MergeResult.SUCCESS` or :attr:`MergeResult.CONFLICT`.
-        """
-        diff = _git("diff", "--name-only", f"HEAD..{branch}", cwd=repo)
-        merge_files = [
-            f for f in diff.stdout.strip().splitlines() if f
-        ]
-        result = _git("merge", "--squash", branch, cwd=repo)
-        if result.returncode != 0:
-            # git refused (e.g. dirty index overlaps the merge) —
-            # nothing was written, leave the user's state alone.
-            return MergeResult.CONFLICT
-        if merge_files:  # pragma: no branch — non-empty for real merges
-            _git("reset", "HEAD", "--", *merge_files, cwd=repo)
-        return MergeResult.SUCCESS
-
-    @staticmethod
-    def would_merge_conflict(
-        repo: Path, base: str, branch: str,
-    ) -> bool:
-        """Dry-run check for tree-level merge conflicts.
-
-        Runs ``git merge-tree --write-tree`` which performs a merge
-        entirely in memory without touching the working tree or index.
-        A non-zero exit code indicates the three-way merge would
-        produce textual conflicts.
-
-        Args:
-            repo: Git repo root path.
-            base: The branch that would receive the merge.
-            branch: The branch that would be merged in.
-
-        Returns:
-            True if the merge would have tree-level conflicts, False
-            if it would apply cleanly.
-        """
-        result = _git(
-            "merge-tree", "--write-tree", base, branch, cwd=repo,
-        )
-        return result.returncode != 0
-
-    @staticmethod
-    def branch_diff_files(
-        repo: Path, base: str, branch: str,
-    ) -> list[str]:
-        """List files that differ between two branches/revisions.
-
-        Args:
-            repo: Git repo root path.
-            base: First branch or revision.
-            branch: Second branch or revision.
-
-        Returns:
-            List of file paths that differ between *base* and *branch*,
-            or an empty list if the command fails.
-        """
-        result = _git("diff", "--name-only", base, branch, cwd=repo)
-        if result.returncode != 0:
-            return []
-        return [f for f in result.stdout.strip().splitlines() if f]
 
     @staticmethod
     def unstaged_files(repo: Path) -> list[str]:
@@ -573,15 +482,14 @@ class GitWorktreeOps:
         Returns:
             A :class:`ManualMergeResult` with status and conflict info.
         """
-        result = _git(
-            "merge", "--no-commit", "--no-ff", branch, cwd=repo
-        )
+        result = _git("merge", "--no-commit", "--no-ff", branch, cwd=repo)
         has_conflicts = "CONFLICT" in (result.stdout + result.stderr)
 
         if result.returncode != 0 and not has_conflicts:
-            return ManualMergeResult(
-                status=MergeResult.MERGE_FAILED, has_conflicts=False
-            )
+            # BUG-62 fix: abort any partial merge state (MERGE_HEAD)
+            # so the repo is clean for subsequent operations.
+            _git("merge", "--abort", cwd=repo)
+            return ManualMergeResult(status=MergeResult.MERGE_FAILED, has_conflicts=False)
 
         if not has_conflicts:
             _git("reset", "HEAD", cwd=repo)
@@ -590,7 +498,7 @@ class GitWorktreeOps:
         return ManualMergeResult(status=status, has_conflicts=has_conflicts)
 
     @staticmethod
-    def delete_branch(repo: Path, branch: str) -> None:
+    def delete_branch(repo: Path, branch: str) -> bool:
         """Delete a branch and its git config section (best-effort).
 
         Tries ``-d`` first (safe delete), falls back to ``-D`` (force).
@@ -599,11 +507,32 @@ class GitWorktreeOps:
         Args:
             repo: Git repo root path.
             branch: Branch name to delete.
+
+        Returns:
+            True if the branch was deleted (or never existed), False
+            if git refused both ``-d`` and ``-D`` — typically because
+            the branch is the current HEAD of a worktree and cannot
+            be deleted without first switching away.
         """
-        result = _git("branch", "-d", branch, cwd=repo)
-        if result.returncode != 0:
-            _git("branch", "-D", branch, cwd=repo)
+        safe = _git("branch", "-d", branch, cwd=repo)
+        if safe.returncode == 0:
+            _git("config", "--remove-section", f"branch.{branch}", cwd=repo)
+            return True
+        force = _git("branch", "-D", branch, cwd=repo)
+        if force.returncode == 0:
+            _git("config", "--remove-section", f"branch.{branch}", cwd=repo)
+            return True
+        # BUG-63 fix: surface deletion failure so callers can warn the user.
+        if GitWorktreeOps.branch_exists(repo, branch):
+            logger.warning(
+                "Failed to delete branch '%s': %s",
+                branch,
+                force.stderr.strip(),
+            )
+            return False
+        # Branch is already gone (race); treat as success.
         _git("config", "--remove-section", f"branch.{branch}", cwd=repo)
+        return True
 
     @staticmethod
     def branch_exists(repo: Path, branch: str) -> bool:
@@ -616,9 +545,7 @@ class GitWorktreeOps:
         Returns:
             True if the branch exists.
         """
-        result = _git(
-            "rev-parse", "--verify", f"refs/heads/{branch}", cwd=repo
-        )
+        result = _git("rev-parse", "--verify", f"refs/heads/{branch}", cwd=repo)
         return result.returncode == 0
 
     @staticmethod
@@ -678,15 +605,11 @@ class GitWorktreeOps:
         Returns:
             The original branch name, or ``None`` if not stored.
         """
-        result = _git(
-            "config", f"branch.{branch}.kiss-original", cwd=repo
-        )
+        result = _git("config", f"branch.{branch}.kiss-original", cwd=repo)
         return result.stdout.strip() or None
 
     @staticmethod
-    def save_original_branch(
-        repo: Path, branch: str, original: str
-    ) -> bool:
+    def save_original_branch(repo: Path, branch: str, original: str) -> bool:
         """Store the original branch in git config.
 
         Args:
@@ -697,9 +620,7 @@ class GitWorktreeOps:
         Returns:
             True if config was saved successfully, False otherwise.
         """
-        result = _git(
-            "config", f"branch.{branch}.kiss-original", original, cwd=repo
-        )
+        result = _git("config", f"branch.{branch}.kiss-original", original, cwd=repo)
         if result.returncode != 0:  # pragma: no cover — git config failure
             logger.warning(
                 "Failed to store original branch in git config: %s",
@@ -710,7 +631,9 @@ class GitWorktreeOps:
 
     @staticmethod
     def save_baseline_commit(
-        repo: Path, branch: str, sha: str,
+        repo: Path,
+        branch: str,
+        sha: str,
     ) -> bool:
         """Store the baseline commit SHA in git config.
 
@@ -727,7 +650,10 @@ class GitWorktreeOps:
             True if config was saved successfully, False otherwise.
         """
         result = _git(
-            "config", f"branch.{branch}.kiss-baseline", sha, cwd=repo,
+            "config",
+            f"branch.{branch}.kiss-baseline",
+            sha,
+            cwd=repo,
         )
         if result.returncode != 0:  # pragma: no cover — git config failure
             logger.warning(
@@ -750,7 +676,9 @@ class GitWorktreeOps:
             worktree or legacy worktree without baseline support).
         """
         result = _git(
-            "config", f"branch.{branch}.kiss-baseline", cwd=repo,
+            "config",
+            f"branch.{branch}.kiss-baseline",
+            cwd=repo,
         )
         return result.stdout.strip() or None
 
@@ -831,7 +759,9 @@ class GitWorktreeOps:
 
     @staticmethod
     def squash_merge_from_baseline(
-        repo: Path, branch: str, baseline: str,
+        repo: Path,
+        branch: str,
+        baseline: str,
     ) -> MergeResult:
         """Squash-merge only the agent's changes (after baseline) into HEAD.
 
@@ -853,16 +783,33 @@ class GitWorktreeOps:
         Returns:
             :attr:`MergeResult.SUCCESS` or :attr:`MergeResult.CONFLICT`.
         """
-        # Check if there are any commits after baseline
+        # Check if there are any commits after baseline.
+        # BUG-59 fix: check returncode — if rev-list fails (invalid
+        # baseline SHA), return CONFLICT so the caller can fall back
+        # to squash_merge_branch.
         log_result = _git(
-            "rev-list", "--count", f"{baseline}..{branch}", cwd=repo,
+            "rev-list",
+            "--count",
+            f"{baseline}..{branch}",
+            cwd=repo,
         )
+        if log_result.returncode != 0:
+            logger.warning(
+                "rev-list failed for baseline %s..%s: %s",
+                baseline,
+                branch,
+                log_result.stderr.strip(),
+            )
+            return MergeResult.CONFLICT
         count = log_result.stdout.strip()
         if count == "0":
             return MergeResult.SUCCESS  # no agent changes
 
         result = _git(
-            "cherry-pick", "--no-commit", f"{baseline}..{branch}", cwd=repo,
+            "cherry-pick",
+            "--no-commit",
+            f"{baseline}..{branch}",
+            cwd=repo,
         )
         if result.returncode != 0:
             logger.warning(
@@ -876,7 +823,10 @@ class GitWorktreeOps:
         diff_check = _git("diff", "--cached", "--quiet", cwd=repo)
         if diff_check.returncode != 0:
             log_msgs = _git(
-                "log", "--oneline", f"{baseline}..{branch}", cwd=repo,
+                "log",
+                "--oneline",
+                f"{baseline}..{branch}",
+                cwd=repo,
             )
             body = log_msgs.stdout.strip()
             msg = f"kiss: merged from {branch}"
@@ -922,11 +872,7 @@ class GitWorktreeOps:
             "refs/heads/kiss/wt-*",
             cwd=repo,
         )
-        branches = (
-            result.stdout.strip().splitlines()
-            if result.stdout.strip()
-            else []
-        )
+        branches = result.stdout.strip().splitlines() if result.stdout.strip() else []
 
         wt_result = _git("worktree", "list", "--porcelain", cwd=repo)
         worktree_branches: set[str] = set()
@@ -954,19 +900,13 @@ class GitWorktreeOps:
         ]
 
         if pending_branches:
-            lines.append(
-                f"Pending-merge branches (kept): {pending_branches}"
-            )
+            lines.append(f"Pending-merge branches (kept): {pending_branches}")
 
         if orphan_branches:
-            lines.append(
-                f"Orphaned branches (no worktree): {orphan_branches}"
-            )
+            lines.append(f"Orphaned branches (no worktree): {orphan_branches}")
             for b in orphan_branches:
                 _git("branch", "-D", b, cwd=repo)
-                _git(
-                    "config", "--remove-section", f"branch.{b}", cwd=repo
-                )
+                _git("config", "--remove-section", f"branch.{b}", cwd=repo)
                 lines.append(f"  Deleted: {b}")
 
         _git("worktree", "prune", cwd=repo)

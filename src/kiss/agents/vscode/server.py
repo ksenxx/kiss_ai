@@ -582,13 +582,29 @@ class VSCodeServer:
             _record_model_usage(model)
             # Entire cleanup wrapped in try/except BaseException (P13 fix)
             try:
-                # BUG-39 fix: clear non-wt flag FIRST, before any code
-                # that could raise, so it never gets stuck True.
-                if not tab.use_worktree:
-                    with self._state_lock:
-                        tab.is_running_non_wt = False
                 self.printer._persist_agents.pop(tab_id, None)
                 self.printer.stop_recording()
+                # BUG-61 fix: prepare the non-worktree merge view
+                # BEFORE clearing is_running_non_wt.  The diff capture
+                # must happen while the flag blocks concurrent worktree
+                # merges — otherwise a merge can modify the working
+                # tree between flag-clear and diff, corrupting the view.
+                # The flag is cleared in the finally below (and in the
+                # outer except handler) so it never gets stuck True
+                # even if the merge view preparation raises (BUG-39
+                # safety preserved).
+                if not tab.use_worktree:
+                    try:
+                        self._prepare_and_start_merge(
+                            work_dir, pre_hunks, pre_untracked, pre_file_hashes,
+                            base_ref=pre_head_sha or "HEAD",
+                            tab_id=tab_id,
+                        )
+                    except BaseException:  # pragma: no cover — merge view error handler
+                        logger.debug("Merge view error", exc_info=True)
+                    finally:
+                        with self._state_lock:
+                            tab.is_running_non_wt = False
                 if task_end_event:  # pragma: no branch — always set
                     _append_chat_event(
                         task_end_event,
@@ -616,17 +632,6 @@ class VSCodeServer:
                 )
                 self.printer.broadcast({"type": "tasks_updated"})
                 self.printer.reset()
-                # RED-5 fix: combined into single block above (flag clear
-                # + merge view start).
-                if not tab.use_worktree:
-                    try:
-                        self._prepare_and_start_merge(
-                            work_dir, pre_hunks, pre_untracked, pre_file_hashes,
-                            base_ref=pre_head_sha or "HEAD",
-                            tab_id=tab_id,
-                        )
-                    except BaseException:  # pragma: no cover — merge view error handler
-                        logger.debug("Merge view error", exc_info=True)
                 if tab.use_worktree and tab.agent._wt_pending:
                     try:
                         changed = self._get_worktree_changed_files(tab_id)

@@ -941,12 +941,6 @@ ______________________________________________________________________
   - `branch`: Branch name to checkout.
   - **Returns:** `(True, "")` on success, `(False, stderr)` on failure. The stderr string describes why the checkout failed (e.g. dirty working tree, missing branch).
 
-- **merge_branch** — Merge a branch into the current HEAD with `--no-edit`. On conflict, the merge is aborted to leave a clean worktree.<br/>`merge_branch(repo: Path, branch: str) -> MergeResult`
-
-  - `repo`: Git repo root path.
-  - `branch`: Branch to merge.
-  - **Returns:** :attr:`MergeResult.SUCCESS` or :attr:`MergeResult.CONFLICT`.
-
 - **stash_if_dirty** — Stash uncommitted changes if the working tree or index is dirty. Uses `git stash push --include-untracked` so both staged and unstaged changes (including new files) are saved.<br/>`stash_if_dirty(repo: Path) -> bool`
 
   - `repo`: Git repo root path.
@@ -962,26 +956,6 @@ ______________________________________________________________________
   - `repo`: Git repo root path.
   - `branch`: Branch to squash-merge.
   - **Returns:** :attr:`MergeResult.SUCCESS` or :attr:`MergeResult.CONFLICT`.
-
-- **apply_branch_to_working_tree** — Apply a branch's changes to the working tree as unstaged edits. Captures the set of files that will change (`git diff --name-only HEAD..branch`), runs `git merge --squash` to stage them, then unstages *only* those files with `git reset HEAD -- <files>` so any pre-existing staged changes the user had are preserved. On merge failure (e.g. dirty index that overlaps the branch), restores the pre-merge state of the affected files with `git reset HEAD -- <files>` + `git checkout -- <files>` so unrelated user changes are untouched.<br/>`apply_branch_to_working_tree(repo: Path, branch: str) -> MergeResult`
-
-  - `repo`: Git repo root path.
-  - `branch`: Branch whose changes to apply.
-  - **Returns:** :attr:`MergeResult.SUCCESS` or :attr:`MergeResult.CONFLICT`.
-
-- **would_merge_conflict** — Dry-run check for tree-level merge conflicts. Runs `git merge-tree --write-tree` which performs a merge entirely in memory without touching the working tree or index. A non-zero exit code indicates the three-way merge would produce textual conflicts.<br/>`would_merge_conflict(repo: Path, base: str, branch: str) -> bool`
-
-  - `repo`: Git repo root path.
-  - `base`: The branch that would receive the merge.
-  - `branch`: The branch that would be merged in.
-  - **Returns:** True if the merge would have tree-level conflicts, False if it would apply cleanly.
-
-- **branch_diff_files** — List files that differ between two branches/revisions.<br/>`branch_diff_files(repo: Path, base: str, branch: str) -> list[str]`
-
-  - `repo`: Git repo root path.
-  - `base`: First branch or revision.
-  - `branch`: Second branch or revision.
-  - **Returns:** List of file paths that differ between *base* and *branch*, or an empty list if the command fails.
 
 - **unstaged_files** — List files with unstaged changes in the working tree.<br/>`unstaged_files(repo: Path) -> list[str]`
 
@@ -999,10 +973,11 @@ ______________________________________________________________________
   - `branch`: Branch to merge.
   - **Returns:** A :class:`ManualMergeResult` with status and conflict info.
 
-- **delete_branch** — Delete a branch and its git config section (best-effort). Tries `-d` first (safe delete), falls back to `-D` (force). Also removes the `branch.<name>.*` config section.<br/>`delete_branch(repo: Path, branch: str) -> None`
+- **delete_branch** — Delete a branch and its git config section (best-effort). Tries `-d` first (safe delete), falls back to `-D` (force). Also removes the `branch.<name>.*` config section.<br/>`delete_branch(repo: Path, branch: str) -> bool`
 
   - `repo`: Git repo root path.
   - `branch`: Branch name to delete.
+  - **Returns:** True if the branch was deleted (or never existed), False if git refused both `-d` and `-D` — typically because the branch is the current HEAD of a worktree and cannot be deleted without first switching away.
 
 - **branch_exists** — Check if a branch exists.<br/>`branch_exists(repo: Path, branch: str) -> bool`
 
