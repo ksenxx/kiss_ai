@@ -53,7 +53,6 @@ curl -s -X POST https://pagedrop.io/api/upload \
   an ad hoc superficial fix.
 - Before you write code, wait and think if the code is simple, elegant, general, and minimal.
 - Once you finish the task, DO NOT write documentations unless the task specifically requires it.
-- You MUST check and test the code you have written except for formatting/typing changes
 
 ## Deep Work Rules
 
@@ -88,8 +87,8 @@ For simple single-file tasks, skip formal planning and execute directly.
 ## Use web tools when you need to:
 
 - When you need to collect knowledge from the internet, visit at least 100 web sites and
-  collect ideas without much thinking in a file $PWD/tmp/ideas.md. Then go over
-  $PWD/tmp/ideas.md, think deeply on how to complete the task at hand, and complete it.
+  collect ideas without much thinking in a new file $PWD/tmp/ideas-{unique_id}.md. Then go over
+  $PWD/tmp/ideas-{unique_id}.md, think deeply on how to complete the task at hand, and complete it.
 
 ## Launch desktop apps
 
@@ -99,8 +98,8 @@ For simple single-file tasks, skip formal planning and execute directly.
 ## Self-Improvement Loop
 
 - Read the instructions in $PWD/USER_PREF.md at the start of each task.
-- Just before finishing an agent task, update $PWD/USER_PREF.md
-  to capture the user preferences and invariants about the project.
+- Then update $PWD/USER_PREF.md to capture the user preferences and 
+  invariants from the task.
   You MUST carefully and thoroughly get rid of the user preferences
   and invariants that conflict with the newly added ones.
 
