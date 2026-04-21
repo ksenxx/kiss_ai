@@ -306,6 +306,144 @@ class TestThinkingBlocks:
         assert tokens == []
 
 
+class TestInterleavedPartialAndAssistant:
+    """Reproduce the BUG where --include-partial-messages emits BOTH granular
+    ``content_block_*`` events AND a final ``assistant`` event containing the
+    same content, causing thinking callbacks to be fired twice.
+
+    Real Claude CLI output (with ``--include-partial-messages``):
+    - granular ``content_block_start`` / ``content_block_delta`` / ``content_block_stop``
+      events stream tokens incrementally (wrapped in ``stream_event``),
+    - then a final ``assistant`` event arrives with the SAME accumulated content.
+
+    Without de-duplication the parser fires ``thinking_callback(True/False)``
+    twice — the second call races through ``thinking_start → full text →
+    thinking_end`` instantly, causing the UI to collapse the thinking panel
+    into the "Thinking (click to expand)" bar, so the user never sees the
+    streamed thinking tokens.
+    """
+
+    def test_interleaved_partial_and_final_assistant_no_duplicates(self) -> None:
+        """Thinking callbacks must fire exactly once when both event kinds appear."""
+        tokens: list[tuple[str, str]] = []  # (block_type, text)
+        thinking_events: list[bool] = []
+        in_thinking = False
+
+        def token_cb(text: str) -> None:
+            tokens.append(("thinking" if in_thinking else "text", text))
+
+        def thinking_cb(is_start: bool) -> None:
+            nonlocal in_thinking
+            in_thinking = is_start
+            thinking_events.append(is_start)
+
+        m = ClaudeCodeModel(
+            "cc/haiku",
+            token_callback=token_cb,
+            thinking_callback=thinking_cb,
+        )
+        m.initialize("test")
+
+        # Simulate real CLI output:
+        # 1) streamed content_block_* events (wrapped in stream_event),
+        # 2) a final assistant event with the full accumulated content.
+        events = [
+            {"type": "stream_event", "event": {
+                "type": "content_block_start",
+                "content_block": {"type": "thinking", "thinking": ""}}},
+            {"type": "stream_event", "event": {
+                "type": "content_block_delta",
+                "delta": {"type": "thinking_delta", "thinking": "Let me "}}},
+            {"type": "stream_event", "event": {
+                "type": "content_block_delta",
+                "delta": {"type": "thinking_delta", "thinking": "think..."}}},
+            {"type": "stream_event", "event": {"type": "content_block_stop"}},
+            {"type": "stream_event", "event": {
+                "type": "content_block_start",
+                "content_block": {"type": "text", "text": ""}}},
+            {"type": "stream_event", "event": {
+                "type": "content_block_delta",
+                "delta": {"type": "text_delta", "text": "Hi"}}},
+            {"type": "stream_event", "event": {"type": "content_block_stop"}},
+            # Final assistant event (redundant snapshot with same msg_id):
+            {"type": "assistant", "message": {
+                "id": "msg_abc",
+                "content": [
+                    {"type": "thinking", "thinking": "Let me think..."},
+                    {"type": "text", "text": "Hi"},
+                ]}},
+            {"type": "result", "result": "Hi", "usage": {}},
+        ]
+
+        content, _ = m._parse_stream_events(iter(json.dumps(e) for e in events))
+
+        # thinking_start and thinking_end must fire EXACTLY once each —
+        # no duplicate emission from the redundant assistant snapshot.
+        assert thinking_events == [True, False], (
+            f"Duplicate thinking boundaries: {thinking_events}"
+        )
+        # Thinking tokens delivered exactly once, in streamed chunks.
+        thinking_tokens = [t for bt, t in tokens if bt == "thinking"]
+        assert thinking_tokens == ["Let me ", "think..."], (
+            f"Thinking tokens wrong or duplicated: {thinking_tokens}"
+        )
+        # Text streamed exactly once.
+        text_tokens = [t for bt, t in tokens if bt == "text"]
+        assert text_tokens == ["Hi"], f"Text tokens duplicated: {text_tokens}"
+        assert content == "Hi"
+
+    def test_partial_assistant_snapshots_not_duplicated(self) -> None:
+        """Multiple partial assistant events (same msg_id) must not replay content."""
+        tokens: list[str] = []
+        thinking_events: list[bool] = []
+        in_thinking = False
+
+        def token_cb(text: str) -> None:
+            if in_thinking:
+                tokens.append(text)
+
+        def thinking_cb(is_start: bool) -> None:
+            nonlocal in_thinking
+            in_thinking = is_start
+            thinking_events.append(is_start)
+
+        m = ClaudeCodeModel(
+            "cc/haiku",
+            token_callback=token_cb,
+            thinking_callback=thinking_cb,
+        )
+        m.initialize("test")
+
+        # Intermediate "assistant" snapshots (same msg_id) interleaved with
+        # content_block_* events — classic CLI output with partial messages.
+        events = [
+            {"type": "stream_event", "event": {
+                "type": "content_block_start",
+                "content_block": {"type": "thinking"}}},
+            {"type": "stream_event", "event": {
+                "type": "content_block_delta",
+                "delta": {"type": "thinking_delta", "thinking": "abc"}}},
+            # Partial assistant snapshot (same msg_id):
+            {"type": "assistant", "message": {
+                "id": "msg_X",
+                "content": [{"type": "thinking", "thinking": "abc"}]}},
+            {"type": "stream_event", "event": {
+                "type": "content_block_delta",
+                "delta": {"type": "thinking_delta", "thinking": "def"}}},
+            # Another partial snapshot (same msg_id, accumulated):
+            {"type": "assistant", "message": {
+                "id": "msg_X",
+                "content": [{"type": "thinking", "thinking": "abcdef"}]}},
+            {"type": "stream_event", "event": {"type": "content_block_stop"}},
+            {"type": "result", "result": "", "usage": {}},
+        ]
+
+        m._parse_stream_events(iter(json.dumps(e) for e in events))
+
+        assert thinking_events == [True, False], thinking_events
+        assert tokens == ["abc", "def"], tokens
+
+
 class TestThinkingInToolMode:
     """Verify that generate_and_process_with_tools relays thinking tokens to the printer.
 
