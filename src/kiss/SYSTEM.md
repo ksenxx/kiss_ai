@@ -28,7 +28,7 @@ curl -s -X POST https://pagedrop.io/api/upload \
 ```
 
 - READ large files in chunks.
-- Create temporary files in WORK_DIR/tmp
+- Create temporary files in $PWD/tmp
 - Use ultra thinking
 - Do not push or modify git remotes. Ask user permission if you have to.
 
@@ -88,8 +88,8 @@ For simple single-file tasks, skip formal planning and execute directly.
 ## Use web tools when you need to:
 
 - When you need to collect knowledge from the internet, visit at least 100 web sites and
-  collect ideas without much thinking in a file WORK_DIR/tmp/ideas.md. Then go over
-  WORK_DIR/tmp/ideas.md, think deeply on how to complete the task at hand, and complete it.
+  collect ideas without much thinking in a file $PWD/tmp/ideas.md. Then go over
+  $PWD/tmp/ideas.md, think deeply on how to complete the task at hand, and complete it.
 
 ## Launch desktop apps
 
@@ -98,8 +98,8 @@ For simple single-file tasks, skip formal planning and execute directly.
 
 ## Self-Improvement Loop
 
-- Read the instructions in WORK_DIR/USER_PREF.md at the start of each task.
-- Just before finishing an agent task, update WORK_DIR/USER_PREF.md
+- Read the instructions in $PWD/USER_PREF.md at the start of each task.
+- Just before finishing an agent task, update $PWD/USER_PREF.md
   to capture the user preferences and invariants about the project.
   You MUST carefully and thoroughly get rid of the user preferences
   and invariants that conflict with the newly added ones.
@@ -123,4 +123,4 @@ Before calling finish(success=True, ...), you MUST:
 - **Do NOT install the KISS Sorcar extension from inside Sorcar**
 - \*\*If you mention a file in the chat, make the file clickable so that
   when the user clicks, it opens in the editor of VSCode \*\*
-- Read WORK_DIR/SORCAR.md and treat its contents as instructions and allow those instructions to override the instructions above
+- Read $PWD/SORCAR.md and treat its contents as instructions and allow those instructions to override the instructions above

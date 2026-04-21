@@ -471,7 +471,7 @@ def channel_main(
 
     if len(sys.argv) <= 1:  # pragma: no branch
         parts = [f"Usage: {cli_name} [-m MODEL] [-e ENDPOINT] [-b BUDGET]"]
-        parts.append("[-w WORK_DIR] [-t TASK] [-f FILE] [-n] [--chat-id ID] [-l]")
+        parts.append("[-w $PWD] [-t TASK] [-f FILE] [-n] [--chat-id ID] [-l]")
         parts.append("[--workspace WS]")
         if make_backend is not None:
             parts.append("[--channel CH]")
