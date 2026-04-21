@@ -22,6 +22,9 @@
 - `merge()` and `_release_worktree()` surface stash_pop failure warnings to the user instead of silently logging
 - `webviewFocusChanged` is a known message type in `SorcarSidebarView.ts` — included in the test's known types set
 - `_parse_stream_events` in `claude_code_model.py` unwraps `stream_event` containers and tracks assistant events by message `id` to handle `--include-partial-messages` partial updates
+- `_parse_stream_events` defers `thinking_start` callback until actual `thinking_delta` content arrives — Claude opus sends opaque thinking blocks with only `signature_delta` (no readable content), so empty thinking blocks are suppressed to avoid showing an empty "Thinking" bar in the UI
+- `thinking_started` flag in `_parse_stream_events` tracks whether `thinking_start` was emitted; `thinking_end` only fires if `thinking_started` is True
+- `test_cc_empty_thinking_block.py` (7 unit tests) and `test_cc_opus_live_thinking.py` (1 live integration test calling real claude CLI) verify the empty-thinking-bar fix
 - `base.py` loads `SYSTEM_PROMPT` from `_kiss_pkg_dir / "SYSTEM.md"` (not `SORCAR.md`) — the `test_sorcar_path_uses_pkg_dir` test matches this
 - cc tool call stripping tests check for `original_token_cb` (not `original_callback`) matching the current variable name in `claude_code_model.py`
 - Gemini API integration tests (e.g., stall detection) should skip on 429 RESOURCE_EXHAUSTED errors rather than fail — transient rate limit issue

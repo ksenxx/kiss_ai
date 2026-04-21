@@ -237,6 +237,11 @@ class ClaudeCodeModel(Model):
         # duplicate thinking_start/end boundaries, causing the UI to collapse
         # the thoughts panel into a bare "Thinking (click to expand)" bar.
         saw_content_block = False
+        # Defer thinking_start until actual thinking content (thinking_delta)
+        # arrives.  Claude opus sends thinking blocks with only
+        # signature_delta events and no readable content — emitting
+        # thinking_start/end for those would show an empty "Thinking" bar.
+        thinking_started = False
 
         for line in lines:
             line = line.strip()
@@ -288,14 +293,18 @@ class ClaudeCodeModel(Model):
                 saw_content_block = True
                 block = event.get("content_block", {})
                 current_block_type = block.get("type", "")
-                if current_block_type == "thinking":
-                    self._invoke_thinking_callback(True)
+                # Defer thinking_start — only emit when actual thinking
+                # content arrives (see thinking_delta handling below).
+                thinking_started = False
             elif event_type == "content_block_delta":
                 delta = event.get("delta", {})
                 delta_type = delta.get("type", "")
                 if delta_type == "thinking_delta":
                     thinking_text = delta.get("thinking", "")
                     if thinking_text:
+                        if not thinking_started:
+                            self._invoke_thinking_callback(True)
+                            thinking_started = True
                         self._invoke_token_callback(thinking_text)
                 elif delta_type == "text_delta":
                     text = delta.get("text", "")
@@ -303,8 +312,9 @@ class ClaudeCodeModel(Model):
                         content += text
                         self._invoke_token_callback(text)
             elif event_type == "content_block_stop":
-                if current_block_type == "thinking":
+                if current_block_type == "thinking" and thinking_started:
                     self._invoke_thinking_callback(False)
+                    thinking_started = False
                 current_block_type = ""
             elif event_type == "result":
                 result_json = event
