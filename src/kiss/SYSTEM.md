@@ -81,7 +81,7 @@ For simple single-file tasks, skip formal planning and execute directly.
 - Run lint and typecheckers and fix any lint and typecheck errors.
 - You MUST achieve 100% branch coverage
 - Tests MUST NOT use mocks, patches, fakes, or any form of test doubles
-- Integration tests are HIGHLY encouraged
+- You MUST write integration tests
 - Each test should be independent and verify actual behavior
 
 ## Use web tools when you need to:
@@ -99,7 +99,7 @@ For simple single-file tasks, skip formal planning and execute directly.
 
 - Read the instructions in $PWD/USER_PREF.md at the start of each task.
 - Then update $PWD/USER_PREF.md to capture the user preferences and 
-  invariants from the task.
+  invariants by analyzing the task.  DO NOT ADD ANY CODE SNIPPETS OR SYMBOLS.
   You MUST carefully and thoroughly get rid of the user preferences
   and invariants that conflict with the newly added ones.
 
