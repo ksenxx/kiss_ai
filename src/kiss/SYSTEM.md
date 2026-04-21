@@ -91,7 +91,7 @@ For simple single-file tasks, skip formal planning and execute directly.
 
 ## Launch desktop apps
 
-- Use screenshots, keyboard, and mouse to control the app.
+- Use screenshots, keyboard, and mouse to control a desktop app.
 - Do not launch VS Code or its extensions.
 
 ## Self-Improvement Loop

@@ -293,6 +293,24 @@ def _get_history_entry(idx: int) -> _HistoryEntry | None:
 
 
 
+def _resolve_task_id(
+    db: sqlite3.Connection,
+    task_id: int | None,
+    task: str | None,
+) -> int | None:
+    """Resolve a stable row id, falling back to the most recent task.
+
+    Args:
+        db: Active database connection.
+        task_id: Explicit row id when available.
+        task: Fallback task description for legacy callers.
+
+    Returns:
+        The resolved row id, or ``None`` if not found.
+    """
+    return task_id if task_id is not None else _most_recent_task_id(db, task)
+
+
 def _save_task_result(
     result: str,
     task_id: int | None = None,
@@ -307,12 +325,12 @@ def _save_task_result(
     """
     db = _get_db()
     with _db_lock:
-        resolved_task_id = task_id if task_id is not None else _most_recent_task_id(db, task)
-        if resolved_task_id is None:
+        resolved = _resolve_task_id(db, task_id, task)
+        if resolved is None:
             return
         db.execute(
             "UPDATE task_history SET result = ? WHERE id = ?",
-            (result, resolved_task_id),
+            (result, resolved),
         )
         db.commit()
 
@@ -335,12 +353,12 @@ def _save_task_extra(
     """
     db = _get_db()
     with _db_lock:
-        resolved_task_id = task_id if task_id is not None else _most_recent_task_id(db, task)
-        if resolved_task_id is None:
+        resolved = _resolve_task_id(db, task_id, task)
+        if resolved is None:
             return
         db.execute(
             "UPDATE task_history SET extra = ? WHERE id = ?",
-            (json.dumps(extra), resolved_task_id),
+            (json.dumps(extra), resolved),
         )
         db.commit()
 
@@ -359,21 +377,21 @@ def _append_chat_event(
     """
     db = _get_db()
     with _db_lock:
-        resolved_task_id = task_id if task_id is not None else _most_recent_task_id(db, task)
-        if resolved_task_id is None:
+        resolved = _resolve_task_id(db, task_id, task)
+        if resolved is None:
             return
         row = db.execute(
             "SELECT COALESCE(MAX(seq), -1) + 1 AS next_seq FROM events WHERE task_id = ?",
-            (resolved_task_id,),
+            (resolved,),
         ).fetchone()
         next_seq = row["next_seq"] if row else 0
         db.execute(
             "INSERT INTO events (task_id, seq, event_json, timestamp) VALUES (?, ?, ?, ?)",
-            (resolved_task_id, next_seq, json.dumps(event), time.time()),
+            (resolved, next_seq, json.dumps(event), time.time()),
         )
         db.execute(
             "UPDATE task_history SET has_events = 1 WHERE id = ?",
-            (resolved_task_id,),
+            (resolved,),
         )
         db.commit()
 

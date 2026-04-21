@@ -74,6 +74,47 @@ def fast_model_for() -> str:
     return "claude-haiku-4-5"
 
 
+def generate_commit_message_from_diff(diff_text: str) -> str:
+    """Generate a git commit message from a diff via LLM.
+
+    Uses a fast/cheap model to produce a conventional-commit-style
+    message.  Returns a fallback string on any failure.
+
+    Args:
+        diff_text: Output of ``git diff --cached`` or similar.
+
+    Returns:
+        The cleaned commit-message string, or ``"kiss: auto-commit agent work"``
+        on failure.
+    """
+    from kiss.core.kiss_agent import KISSAgent
+
+    fallback = "kiss: auto-commit agent work"
+    if not diff_text:
+        return fallback
+    try:
+        agent = KISSAgent("Commit Message Generator")
+        raw = agent.run(
+            model_name=fast_model_for(),
+            prompt_template=(
+                "Generate a concise git commit message for these "
+                "changes. Use conventional commit format with a "
+                "clear subject line (type: description) and "
+                "optionally a body with bullet points for multiple "
+                "changes. Return ONLY the commit message text, no "
+                "quotes or markdown fences.\n\n{context}"
+            ),
+            arguments={"context": f"Diff:\n{diff_text}"},
+            is_agentic=False,
+            verbose=False,
+        )
+        msg = clean_llm_output(raw)
+        return msg if msg else fallback
+    except Exception:
+        logger.debug("Commit message generation failed", exc_info=True)
+        return fallback
+
+
 def generate_followup_text(task: str, result: str, model: str) -> str:
     """Generate a follow-up task suggestion via LLM.
 

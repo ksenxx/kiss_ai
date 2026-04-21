@@ -1134,6 +1134,11 @@ ______________________________________________________________________
 
 - **Returns:** A fast model name for the first available provider.
 
+**`generate_commit_message_from_diff`** — Generate a git commit message from a diff via LLM. Uses a fast/cheap model to produce a conventional-commit-style message. Returns a fallback string on any failure.<br/>`def generate_commit_message_from_diff(diff_text: str) -> str`
+
+- `diff_text`: Output of `git diff --cached` or similar.
+- **Returns:** The cleaned commit-message string, or `"kiss: auto-commit agent work"` on failure.
+
 **`generate_followup_text`** — Generate a follow-up task suggestion via LLM.<br/>`def generate_followup_text(task: str, result: str, model: str) -> str`
 
 - `task`: The completed task description.

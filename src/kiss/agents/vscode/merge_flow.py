@@ -25,14 +25,26 @@ from kiss.agents.vscode.diff_merge import (
     _merge_data_dir,
     _prepare_merge_view,
 )
-from kiss.agents.vscode.helpers import clean_llm_output, fast_model_for
 from kiss.agents.vscode.tab_state import _TabState
-from kiss.core.kiss_agent import KISSAgent
 
 if TYPE_CHECKING:
     from kiss.agents.vscode.printer import VSCodePrinter
 
 logger = logging.getLogger(__name__)
+
+
+def _is_valid_baseline(git_dir: str, sha: str) -> bool:
+    """Check if *sha* refers to a valid commit object in *git_dir*.
+
+    Args:
+        git_dir: Directory to run the git command in.
+        sha: Object SHA to validate.
+
+    Returns:
+        True if *sha* is a commit that exists in the repo.
+    """
+    check = _git(git_dir, "cat-file", "-t", sha)
+    return check.returncode == 0 and check.stdout.strip() == "commit"
 
 
 class _MergeFlowMixin:
@@ -379,22 +391,9 @@ class _MergeFlowMixin:
         Returns:
             The cleaned commit-message string.
         """
-        agent = KISSAgent("Auto Commit Message")
-        raw = agent.run(
-            model_name=fast_model_for(),
-            prompt_template=(
-                "Generate a nicely markdown formatted, informative git commit "
-                "message for these changes. Use conventional commit format "
-                "with a clear subject line (type: description) and optionally "
-                "a body with bullet points for multiple changes. Return ONLY "
-                "the commit message text, no quotes or markdown fences.\n\n"
-                "{context}"
-            ),
-            arguments={"context": f"Diff:\n{diff_text}"},
-            is_agentic=False,
-            verbose=False,
-        )
-        return clean_llm_output(raw)
+        from kiss.agents.vscode.helpers import generate_commit_message_from_diff
+
+        return generate_commit_message_from_diff(diff_text)
 
     # ---- Worktree lifecycle presentation -------------------------------
 
@@ -544,15 +543,10 @@ class _MergeFlowMixin:
         # An invalid baseline would make both diff commands fail
         # silently and return False (no conflict) even when there is
         # one.
-        baseline_valid = False
-        if wt.baseline_commit:
-            check = _git(
-                str(wt_dir), "cat-file", "-t", wt.baseline_commit,
-            )
-            baseline_valid = (
-                check.returncode == 0
-                and check.stdout.strip() == "commit"
-            )
+        baseline_valid = bool(
+            wt.baseline_commit
+            and _is_valid_baseline(str(wt_dir), wt.baseline_commit)
+        )
         if baseline_valid:
             assert wt.baseline_commit is not None  # guarded by baseline_valid
             # baseline^ = the commit the worktree branched from (HEAD at
@@ -633,11 +627,8 @@ class _MergeFlowMixin:
         Returns:
             A git ref string suitable for ``git diff``.
         """
-        if baseline:
-            check = _git(git_dir, "cat-file", "-t", baseline)
-            if check.returncode == 0 and check.stdout.strip() == "commit":
-                return baseline
-            # Invalid baseline — fall through to merge-base
+        if baseline and _is_valid_baseline(git_dir, baseline):
+            return baseline
         mb = _git(git_dir, "merge-base", tip, original_branch)
         if mb.returncode == 0 and mb.stdout.strip():
             return mb.stdout.strip()

@@ -659,8 +659,6 @@ class GitWorktreeOps:
             True if any dirty state was copied, False if the main
             worktree was clean.
         """
-        import shutil as _shutil
-
         status = _git("status", "--porcelain", "-uall", cwd=repo)
         if not status.stdout.strip():
             return False
@@ -684,7 +682,7 @@ class GitWorktreeOps:
                 # File exists in working tree — copy it regardless
                 # of index status (handles DM: staged delete + re-add).
                 dst.parent.mkdir(parents=True, exist_ok=True)
-                _shutil.copy2(str(src), str(dst))
+                shutil.copy2(str(src), str(dst))
                 copied = True
                 # Remove the old path in the worktree on renames so the
                 # agent doesn't see a ghost of the pre-rename file.

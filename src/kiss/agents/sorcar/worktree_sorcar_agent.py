@@ -38,9 +38,8 @@ logger = logging.getLogger(__name__)
 def _generate_commit_message(wt_dir: Path) -> str:
     """Generate a commit message for worktree changes using an LLM.
 
-    Gets the staged diff and asks a fast model to produce a
-    conventional-commit-style message.  Returns a fallback message
-    on any failure.
+    Gets the staged diff and delegates to
+    :func:`~kiss.agents.vscode.helpers.generate_commit_message_from_diff`.
 
     Args:
         wt_dir: The worktree directory containing staged changes.
@@ -48,35 +47,10 @@ def _generate_commit_message(wt_dir: Path) -> str:
     Returns:
         A commit message string.
     """
-    fallback = "kiss: auto-commit agent work"
-    try:
-        diff_text = GitWorktreeOps.staged_diff(wt_dir)
-        if not diff_text:
-            return fallback
+    from kiss.agents.vscode.helpers import generate_commit_message_from_diff
 
-        from kiss.agents.vscode.helpers import fast_model_for
-        from kiss.core.kiss_agent import KISSAgent
-
-        agent = KISSAgent("Commit Message Generator")
-        raw = agent.run(
-            model_name=fast_model_for(),
-            prompt_template=(
-                "Generate a concise git commit message for these "
-                "changes. Use conventional commit format with a "
-                "clear subject line (type: description) and "
-                "optionally a body with bullet points for multiple "
-                "changes. Return ONLY the commit message text, no "
-                "quotes or markdown fences.\n\n{context}"
-            ),
-            arguments={"context": f"Diff:\n{diff_text}"},
-            is_agentic=False,
-            verbose=False,
-        )
-        msg = raw.strip().strip('"').strip("'")
-        return msg if msg else fallback
-    except Exception:
-        logger.debug("Commit message generation failed", exc_info=True)
-        return fallback
+    diff_text = GitWorktreeOps.staged_diff(wt_dir)
+    return generate_commit_message_from_diff(diff_text)
 
 
 def _manual_merge_cmd(wt: GitWorktree) -> str:
