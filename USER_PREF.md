@@ -25,27 +25,9 @@
 - `base.py` loads `SYSTEM_PROMPT` from `_kiss_pkg_dir / "SYSTEM.md"` (not `SORCAR.md`) — the `test_sorcar_path_uses_pkg_dir` test matches this
 - cc tool call stripping tests check for `original_token_cb` (not `original_callback`) matching the current variable name in `claude_code_model.py`
 - Gemini API integration tests (e.g., stall detection) should skip on 429 RESOURCE_EXHAUSTED errors rather than fail — transient rate limit issue
-- BUG-12 through BUG-18 (found in audit4) are in test_worktree_audit4.py — these are UNFIXED bugs confirmed by passing tests
-- BUG-12: `squash_merge_from_baseline` doesn't check commit return code (same pattern as BUG-7 but on baseline path)
-- BUG-13: `_release_worktree` returns `original_branch` on merge conflict (not `None`), silently orphaning the branch with no user notification
-- BUG-14: `_new_chat` in server.py doesn't check/broadcast `_stash_pop_warning` — warning only appears on next task run
-- BUG-15: No git-level locking for concurrent tab releases — `GitWorktreeOps` and `_release_worktree` have no mutex
-- BUG-16: `_finalize_worktree` removes worktree even if auto-commit was REJECTED by pre-commit hook (still-unfixed BUG-6)
-- BUG-17: `_save_untracked_base` unconditionally deletes existing base dir — concurrent tab merge reviews can lose data
-- BUG-18: `_release_worktree` returns misleading "main" on merge conflict (semantically wrong return value, same root cause as BUG-13)
-- BUG-19 through BUG-24 (found in audit5) are in test_worktree_audit5.py — these are UNFIXED bugs confirmed by passing tests
-- BUG-19: `discard()` doesn't acquire `repo_lock` — checkout can race with merge/release from another tab
-- BUG-20: `_release_worktree` checkout failure silently orphans branch (no `_merge_conflict_warning` set)
-- BUG-21: `checkout_error()` re-executes `git checkout` — side-effecting diagnostic that can mutate repo state
-- BUG-22: `_check_merge_conflict` misses staged (but uncommitted) files — uses `unstaged_files` only
-- BUG-23: `_try_setup_worktree` doesn't check `commit_staged` return for baseline — wrong baseline on pre-commit hook rejection
-- BUG-24: `_get_worktree_changed_files` returns [] on git diff failure, triggering silent discard of agent work
-- BUG-25 through BUG-29 (found in audit6) are in test_worktree_audit6.py — these are UNFIXED bugs confirmed by passing tests
-- BUG-25: `_release_worktree` orphans branch silently when `original_branch` is `None` — worktree dir removed, branch never deleted, no warning set
-- BUG-26: `merge()` calls `delete_branch` and sets `self._wt = None` outside `repo_lock` — inconsistent with `_release_worktree` which does both inside lock
-- BUG-27: `cleanup_orphans` unconditionally deletes `kiss/wt-*` branches with no worktree — deletes branches preserved for manual merge conflict resolution
-- BUG-28: `_start_merge_session` reads `tab_id` from thread-local — fails to set `is_merging` when called from main thread (session replay path)
-- BUG-29: `_release_worktree` conflict instructions say `git merge --squash` but stash pop already restored dirty state, so merge --squash will refuse
+- BUG-12 through BUG-18 (found in audit4) — now FIXED (BUG-12 commit check, BUG-13/18 return None, BUG-14 broadcast, BUG-15 repo_lock, BUG-16 finalize check, BUG-17 per-tab dirs)
+- BUG-19 through BUG-24 (found in audit5) — now FIXED (BUG-19/A discard lock, BUG-20 warning, BUG-21/E checkout tuple, BUG-22/INC-6 staged files, BUG-23/C no_verify, BUG-24/51 diff fallback)
+- BUG-25 through BUG-29 (found in audit6) — BUG-25/50 FIXED (warning on None original_branch), BUG-26 not a real bug (per-agent state), BUG-27 by-design (cleanup is for orphans), BUG-28/41 FIXED (tab_id param), BUG-29/49 FIXED (no stash pop on failure)
 - BUG-30 through BUG-33 (found in audit7) are now FIXED; test_worktree_audit7.py verifies correct behavior
 - BUG-30 FIX: `_try_setup_worktree` now reads `current_branch(repo)` inside `repo_lock` when `released_branch` is None
 - BUG-31 FIX: Both `merge()` and `_release_worktree` now have explicit `MERGE_FAILED` handling with correct messages (mentioning commit failure and `--no-verify`)
@@ -79,15 +61,21 @@
 - RED-3 FIX: `_resolve_base_ref()` static method extracted for base-ref resolution (baseline or merge-base) — used by `_get_worktree_changed_files`
 - RED-4 FIX: `_capture_pre_snapshot()` static method extracted for non-worktree pre-task snapshot — deduplicates repo vs non-repo paths
 - `commit_staged` now accepts `no_verify: bool = False` keyword argument — when True, passes `--no-verify` to `git commit`
-- BUG-39 through BUG-44 + INC-4/INC-5/INC-6 + RED-5/RED-6 (found in audit9) are in test_worktree_audit9.py — these are UNFIXED bugs confirmed by 27 passing tests
-- BUG-39: `is_running_non_wt` permanently stuck True when cleanup code in `_run_task_inner` finally raises before reaching `tab.is_running_non_wt = False` — `except BaseException` handler never clears flag, permanently blocking all worktree merges/discards/new-chats
-- BUG-40: `_release_worktree` stores checkout error as `_stash_pop_warning` — `_do_merge` returns `(None, checkout_error)` on checkout failure, `_release_worktree` checks `if stash_warning:` BEFORE `if result is None:`, so checkout error string is saved as `_stash_pop_warning`
-- BUG-41: `_start_merge_session` reads `tab_id` from thread-local instead of accepting it as a parameter — on session-replay path (main thread), `is_merging` is never set (same as BUG-28, still unfixed)
-- BUG-42: Auto-discard paths in `_run_task_inner` and `_finish_merge` call `discard()` without `_any_non_wt_running()` guard — `discard()` does `git checkout` that can disrupt a running non-wt agent
-- BUG-43: Manual merge/conflict instructions say `git merge --squash` but actual merge uses `cherry-pick --no-commit baseline..branch` when baseline exists — instructions double-apply user's dirty state (same as BUG-29, still unfixed)
-- BUG-44: `_new_chat` guard (`tab.use_worktree and tab.agent._wt_pending`) bypassed when `use_worktree=False` but `_wt` is set from a previous worktree run — `new_chat()` → `_release_worktree()` → `_do_merge()` without `_any_non_wt_running()` check
-- INC-4: `_do_merge` return semantics overloaded — returns `(MergeResult, stash_warning)` normally but `(None, checkout_error)` on checkout failure; second tuple element has different meanings
-- INC-5: Different guard levels for discard: `_handle_worktree_action("discard")` has `_any_non_wt_running()` guard; `_finish_merge` and `_run_task_inner` auto-discards do not
-- INC-6: `_check_merge_conflict` only checks `unstaged_files` for dirty-file overlap — staged files in main repo that overlap with worktree changes are missed (same as BUG-22, still unfixed)
-- RED-5: Two consecutive identical `if not tab.use_worktree:` blocks in `_run_task_inner` finally — one clears `is_running_non_wt`, the next starts merge view; could be single block
-- RED-6: `_start_merge_session` re-derives `tab_id` from thread-local even though callers have it — root cause of BUG-41
+- BUG-39 through BUG-44 + INC-4/INC-5/INC-6 + RED-5/RED-6 (found in audit9) are now FIXED; test_worktree_audit9.py verifies correct behavior
+- BUG-39 FIX: `is_running_non_wt` cleared at start of finally try-block AND in outer except handler
+- BUG-40/INC-4 FIX: `_do_merge` returns `(MergeResult.CHECKOUT_FAILED, "")` — consistent return semantics
+- BUG-41/RED-6 FIX: `_start_merge_session` accepts explicit `tab_id` parameter
+- BUG-42/INC-5 FIX: Auto-discard paths check `_any_non_wt_running()` guard
+- BUG-43 FIX: `_manual_merge_cmd` returns cherry-pick when baseline exists
+- BUG-44 FIX: `_new_chat` checks `_wt_pending` regardless of `use_worktree`
+- INC-6 FIX: `_check_merge_conflict` checks both `unstaged_files()` AND `staged_files()`
+- RED-5 FIX: Single `if not tab.use_worktree:` block in finally
+- BUG-49 through BUG-51 (found in audit10) are now FIXED; test_worktree_audit10.py verifies correct behavior (11 tests)
+- BUG-49 FIX: `_do_merge` does NOT pop stash on CONFLICT or MERGE_FAILED — tree stays clean so manual merge instructions work; stash_warning tells user to `git stash pop` after resolving; stash is still popped on SUCCESS
+- BUG-50 FIX: `_release_worktree` sets `_merge_conflict_warning` when `original_branch` is None, so the user knows the branch exists and needs manual cleanup
+- BUG-51 FIX: `_resolve_base_ref` validates baseline SHA with `git cat-file -t` before using it — invalid baseline falls through to merge-base; `_get_worktree_changed_files` falls back to `git status --porcelain` when `git diff` fails, preventing silent auto-discard of agent work
+- BUG-55 through BUG-58 (found in audit11) are now FIXED; test_worktree_audit11.py verifies correct behavior (12 tests)
+- BUG-55 FIX: `is_running_non_wt` is set BEFORE `_capture_pre_snapshot` in `_run_task_inner` — closes TOCTOU gap where a concurrent worktree merge could modify the main tree between snapshot and flag set; snapshot failure clears the flag via try/except
+- BUG-56 FIX: `_check_merge_conflict` validates baseline commit with `git cat-file -t` before using `baseline^`/`baseline` as fork points — consistent with `_resolve_base_ref`'s BUG-51 fix; invalid baseline falls through to merge-base
+- BUG-57 FIX: `_file_changed` in `_prepare_merge_view` returns `True` on OSError (file existed in pre_file_hashes but was deleted); manifest building creates empty placeholder file in `merge-temp/.deleted/` for deleted files so the merge view can display deletions
+- BUG-58 FIX: `cleanup_orphans` checks `load_original_branch()` config before deleting — branches with `kiss-original` config are pending merge (not orphaned) and are skipped; true orphans (no config) are still deleted

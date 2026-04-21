@@ -268,16 +268,28 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
                     wt.repo_root, wt.branch,
                 )
             if did_stash:
-                if not GitWorktreeOps.stash_pop(wt.repo_root):
+                if result == MergeResult.SUCCESS:
+                    if not GitWorktreeOps.stash_pop(wt.repo_root):
+                        stash_warning = (
+                            "Your uncommitted changes could not be "
+                            "auto-restored after merging the previous "
+                            f"worktree ('{wt.branch}'). Run "
+                            "'git stash pop' to recover them."
+                        )
+                        logger.warning(
+                            "git stash pop failed after merge of '%s'",
+                            wt.branch,
+                        )
+                else:
+                    # BUG-49 fix: do NOT pop stash on CONFLICT or
+                    # MERGE_FAILED — the manual merge instructions
+                    # need a clean tree.  The stash is safe for the
+                    # user to pop after resolving the merge.
                     stash_warning = (
-                        "Your uncommitted changes could not be "
-                        "auto-restored after merging the previous "
-                        f"worktree ('{wt.branch}'). Run "
-                        "'git stash pop' to recover them."
-                    )
-                    logger.warning(
-                        "git stash pop failed after merge of '%s'",
-                        wt.branch,
+                        "Your uncommitted changes were saved before "
+                        "the merge attempt and are safe in "
+                        "'git stash'. After resolving the merge, "
+                        "run 'git stash pop' to restore them."
                     )
 
             if result == MergeResult.SUCCESS:
@@ -322,61 +334,79 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
             self._wt = None
             return None
 
-        if wt.original_branch:
-            result, stash_warning = self._do_merge(wt)
-            if stash_warning:
-                self._stash_pop_warning = stash_warning
+        if not wt.original_branch:
+            # BUG-50 fix: warn the user so the branch is not silently
+            # orphaned with no notification.
+            self._merge_conflict_warning = (
+                f"Could not auto-merge branch '{wt.branch}' because "
+                "the original branch is unknown (likely due to a crash "
+                "during setup).  The branch is kept for manual resolution."
+            )
+            self._wt = None
+            return None
 
-            merge_cmd = _manual_merge_cmd(wt)
+        result, stash_warning = self._do_merge(wt)
+        if stash_warning:
+            self._stash_pop_warning = stash_warning
 
-            if result == MergeResult.CHECKOUT_FAILED:
-                self._merge_conflict_warning = (
-                    f"Auto-merge of '{wt.branch}' could not checkout "
-                    f"'{wt.original_branch}'. The branch is kept for "
-                    "manual resolution."
-                )
-                self._wt = None
-                return None
-            if result == MergeResult.MERGE_FAILED:
-                self._merge_conflict_warning = (
-                    f"Auto-merge of '{wt.branch}' into "
-                    f"'{wt.original_branch}' applied cleanly but "
-                    "the commit failed (a pre-commit hook may have "
-                    "rejected it). The branch is kept for manual "
-                    "resolution. Run:\n"
-                    f"    cd {wt.repo_root}\n"
-                    f"    git checkout {wt.original_branch}\n"
-                    f"    {merge_cmd}\n"
-                    "    # fix pre-commit issues, then:\n"
-                    "    git commit --no-verify\n"
-                    f"    git branch -d {wt.branch}"
-                )
-                logger.warning(
-                    "Auto-merge of '%s' into '%s': commit failed "
-                    "(pre-commit hook?); branch kept",
-                    wt.branch, wt.original_branch,
-                )
-                self._wt = None
-                return None
-            if result == MergeResult.CONFLICT:
-                self._merge_conflict_warning = (
-                    f"Auto-merge of '{wt.branch}' into "
-                    f"'{wt.original_branch}' had conflicts. The "
-                    "branch is kept for manual resolution. Run:\n"
-                    f"    cd {wt.repo_root}\n"
-                    f"    git checkout {wt.original_branch}\n"
-                    f"    {merge_cmd}\n"
-                    "    # resolve conflicts, then:\n"
-                    "    git add . && git commit\n"
-                    f"    git branch -d {wt.branch}"
-                )
-                logger.warning(
-                    "Auto-merge of '%s' into '%s' had conflicts; "
-                    "branch kept for manual resolution",
-                    wt.branch, wt.original_branch,
-                )
-                self._wt = None
-                return None
+        merge_cmd = _manual_merge_cmd(wt)
+
+        stash_suffix = ""
+        if stash_warning:
+            stash_suffix = (
+                "\n    git stash pop  # restore your uncommitted changes"
+            )
+
+        if result == MergeResult.CHECKOUT_FAILED:
+            self._merge_conflict_warning = (
+                f"Auto-merge of '{wt.branch}' could not checkout "
+                f"'{wt.original_branch}'. The branch is kept for "
+                "manual resolution."
+            )
+            self._wt = None
+            return None
+        if result == MergeResult.MERGE_FAILED:
+            self._merge_conflict_warning = (
+                f"Auto-merge of '{wt.branch}' into "
+                f"'{wt.original_branch}' applied cleanly but "
+                "the commit failed (a pre-commit hook may have "
+                "rejected it). The branch is kept for manual "
+                "resolution. Run:\n"
+                f"    cd {wt.repo_root}\n"
+                f"    git checkout {wt.original_branch}\n"
+                f"    {merge_cmd}\n"
+                "    # fix pre-commit issues, then:\n"
+                "    git commit --no-verify\n"
+                f"    git branch -d {wt.branch}"
+                + stash_suffix
+            )
+            logger.warning(
+                "Auto-merge of '%s' into '%s': commit failed "
+                "(pre-commit hook?); branch kept",
+                wt.branch, wt.original_branch,
+            )
+            self._wt = None
+            return None
+        if result == MergeResult.CONFLICT:
+            self._merge_conflict_warning = (
+                f"Auto-merge of '{wt.branch}' into "
+                f"'{wt.original_branch}' had conflicts. The "
+                "branch is kept for manual resolution. Run:\n"
+                f"    cd {wt.repo_root}\n"
+                f"    git checkout {wt.original_branch}\n"
+                f"    {merge_cmd}\n"
+                "    # resolve conflicts, then:\n"
+                "    git add . && git commit\n"
+                f"    git branch -d {wt.branch}"
+                + stash_suffix
+            )
+            logger.warning(
+                "Auto-merge of '%s' into '%s' had conflicts; "
+                "branch kept for manual resolution",
+                wt.branch, wt.original_branch,
+            )
+            self._wt = None
+            return None
 
         released_branch = wt.original_branch
         self._wt = None
@@ -651,6 +681,12 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
                 + stash_suffix
             )
 
+        # BUG-49 fix: include stash pop step in failure instructions
+        # when user had uncommitted changes (stash was not popped).
+        stash_step = ""
+        if stash_warning:
+            stash_step = "    git stash pop  # restore your uncommitted changes\n"
+
         if result == MergeResult.MERGE_FAILED:
             return (
                 f"Merge of '{wt.branch}' applied cleanly but the commit "
@@ -662,7 +698,8 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
                 "    # fix pre-commit issues, then:\n"
                 "    git commit --no-verify\n"
                 f"    git branch -d {wt.branch}\n"
-                "\nOr discard the branch:\n"
+                + stash_step
+                + "\nOr discard the branch:\n"
                 "    agent.discard()"
                 + stash_suffix
             )
@@ -677,7 +714,8 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
             "    git add .\n"
             "    git commit\n"
             f"    git branch -d {wt.branch}\n"
-            "\nOr discard the branch:\n"
+            + stash_step
+            + "\nOr discard the branch:\n"
             "    agent.discard()"
         )
 

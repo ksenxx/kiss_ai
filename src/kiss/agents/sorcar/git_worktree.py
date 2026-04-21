@@ -934,13 +934,29 @@ class GitWorktreeOps:
             if line.startswith("branch refs/heads/kiss/wt-"):
                 worktree_branches.add(line.split("refs/heads/")[1])
 
-        orphan_branches = [
-            b for b in branches if b not in worktree_branches
-        ]
+        # BUG-58 fix: branches with a kiss-original config entry are
+        # pending merge (worktree removed but merge not yet done).
+        # Do NOT delete them — the user's agent work would be lost.
+        orphan_branches: list[str] = []
+        pending_branches: list[str] = []
+        for b in branches:
+            if b in worktree_branches:
+                continue
+            original = GitWorktreeOps.load_original_branch(repo, b)
+            if original is not None:
+                pending_branches.append(b)
+            else:
+                orphan_branches.append(b)
+
         lines = [
             f"Found {len(branches)} kiss/wt-* branch(es), "
             f"{len(worktree_branches)} active worktree(s)."
         ]
+
+        if pending_branches:
+            lines.append(
+                f"Pending-merge branches (kept): {pending_branches}"
+            )
 
         if orphan_branches:
             lines.append(

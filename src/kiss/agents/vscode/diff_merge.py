@@ -415,8 +415,11 @@ def _prepare_merge_view(
         try:
             cur = hashlib.md5((Path(work_dir) / fname).read_bytes()).hexdigest()
         except OSError:
-            logger.debug("Exception caught", exc_info=True)
-            return False
+            # BUG-57 fix: file existed in pre_file_hashes but can't be
+            # read now — it was deleted (or became unreadable).  That
+            # IS a change; return True so deleted files appear in the
+            # merge view.
+            return True
         return cur != pre_file_hashes[fname]
 
     for fname, hunks in post_hunks.items():
@@ -448,8 +451,14 @@ def _prepare_merge_view(
     manifest_files: list[dict[str, Any]] = []
     for fname, fh in file_hunks.items():
         current_path = Path(work_dir) / fname
+        # BUG-57 fix: handle deleted files by creating an empty
+        # placeholder so the merge view can display the deletion.
         if not current_path.is_file():
-            continue
+            deleted_dir = merge_dir / ".deleted"
+            deleted_placeholder = deleted_dir / fname
+            deleted_placeholder.parent.mkdir(parents=True, exist_ok=True)
+            deleted_placeholder.write_text("")
+            current_path = deleted_placeholder
         base_path = merge_dir / fname
         base_path.parent.mkdir(parents=True, exist_ok=True)
         saved_base = ub_dir / fname

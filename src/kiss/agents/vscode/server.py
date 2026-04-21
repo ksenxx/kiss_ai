@@ -511,12 +511,20 @@ class VSCodeServer:
         pre_file_hashes: dict[str, str] | None = None
         pre_head_sha: str | None = None
         if not tab.use_worktree:
-            repo = GitWorktreeOps.discover_repo(Path(work_dir))
-            pre_head_sha, pre_hunks, pre_untracked, pre_file_hashes = (
-                self._capture_pre_snapshot(work_dir, repo, tab_id)
-            )
+            # BUG-55 fix: set is_running_non_wt BEFORE capturing the
+            # snapshot so concurrent worktree merges are blocked during
+            # the entire snapshot + task window (closes TOCTOU gap).
             with self._state_lock:
                 tab.is_running_non_wt = True
+            try:
+                repo = GitWorktreeOps.discover_repo(Path(work_dir))
+                pre_head_sha, pre_hunks, pre_untracked, pre_file_hashes = (
+                    self._capture_pre_snapshot(work_dir, repo, tab_id)
+                )
+            except BaseException:
+                with self._state_lock:
+                    tab.is_running_non_wt = False
+                raise
 
         # BUG-B fix: if this worktree tab has a pending branch from a
         # prior run and a non-wt agent is writing to the main tree,
@@ -1388,11 +1396,27 @@ class VSCodeServer:
         # the user's own dirty edits aren't reported as "original branch
         # changes".  For the *worktree* diff we use the baseline itself
         # so only agent changes are visible.
+        #
+        # BUG-56 fix: validate baseline with git cat-file -t before
+        # using it (consistent with _resolve_base_ref's BUG-51 fix).
+        # An invalid baseline would make both diff commands fail
+        # silently and return False (no conflict) even when there is
+        # one.
+        baseline_valid = False
         if wt.baseline_commit:
+            check = _git(
+                str(wt_dir), "cat-file", "-t", wt.baseline_commit,
+            )
+            baseline_valid = (
+                check.returncode == 0
+                and check.stdout.strip() == "commit"
+            )
+        if baseline_valid:
+            assert wt.baseline_commit is not None  # guarded by baseline_valid
             # baseline^ = the commit the worktree branched from (HEAD at
             # creation).  baseline = HEAD + user dirty state.
             orig_fork = f"{wt.baseline_commit}^"
-            wt_fork = wt.baseline_commit
+            wt_fork: str = wt.baseline_commit
         else:
             mb = _git(str(wt_dir), "merge-base", "HEAD", wt.original_branch)
             if mb.returncode != 0 or not mb.stdout.strip():
@@ -1443,8 +1467,14 @@ class VSCodeServer:
     ) -> str:
         """Resolve the base ref for worktree diff operations.
 
-        Uses the baseline commit when available, otherwise falls back
-        to ``git merge-base`` between *tip* and *original_branch*.
+        Uses the baseline commit when available **and valid** (i.e. the
+        SHA exists in the repository), otherwise falls back to
+        ``git merge-base`` between *tip* and *original_branch*.
+
+        BUG-51 fix: validates baseline SHA with ``git cat-file -t``
+        before returning it.  An invalid baseline (e.g. from a
+        force-pushed branch or corrupt config) is silently ignored
+        so callers get a usable ref instead of a guaranteed-to-fail one.
 
         Args:
             git_dir: Directory to run git commands in.
@@ -1456,7 +1486,10 @@ class VSCodeServer:
             A git ref string suitable for ``git diff``.
         """
         if baseline:
-            return baseline
+            check = _git(git_dir, "cat-file", "-t", baseline)
+            if check.returncode == 0 and check.stdout.strip() == "commit":
+                return baseline
+            # Invalid baseline — fall through to merge-base
         mb = _git(git_dir, "merge-base", tip, original_branch)
         if mb.returncode == 0 and mb.stdout.strip():
             return mb.stdout.strip()
@@ -1490,8 +1523,18 @@ class VSCodeServer:
                 str(wt_dir), wt._baseline_commit, wt._original_branch,
             )
             tracked = _git(str(wt_dir), "diff", "--name-only", base_ref)
-            files = (tracked.stdout.strip().splitlines()
-                     if tracked.returncode == 0 else [])
+            if tracked.returncode == 0:
+                files = tracked.stdout.strip().splitlines()
+            else:
+                # BUG-51 fix: git diff failed — fall back to
+                # git status to detect any changes rather than
+                # returning [] which would trigger auto-discard.
+                status = _git(str(wt_dir), "status", "--porcelain")
+                files = [
+                    line[3:].strip()
+                    for line in status.stdout.splitlines()
+                    if len(line) >= 4 and line[3:].strip()
+                ]
             files.extend(_capture_untracked(str(wt_dir)))
             return sorted(set(files))
         # Worktree already removed — fall back to branch diff
