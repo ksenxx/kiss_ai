@@ -1,8 +1,9 @@
 """Tests for the Cron Manager Daemon.
 
-Tests cover: cron parsing, job management, socket communication,
-daemon start/stop/restart, persistence across restarts, concurrent
-clients, error handling, and process kill recovery.
+The daemon now delegates scheduling/execution/persistence to the system
+``crontab`` command. Tests substitute a tiny Python-based fake ``crontab``
+binary (installed via a shebang script) so that real subprocess plumbing is
+exercised without touching the developer's actual crontab.
 """
 
 from __future__ import annotations
@@ -16,7 +17,6 @@ import textwrap
 import threading
 import time
 from collections.abc import Generator
-from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -24,12 +24,18 @@ import pytest
 from kiss.channels.cron_manager_daemon import (
     CronClient,
     CronDaemon,
+    CronJob,
     _is_running,
-    _load_jobs,
+    _parse_kiss_jobs,
+    _read_crontab,
     _read_pid,
-    _save_jobs,
-    cron_matches_time,
-    parse_cron_expression,
+    _remove_kiss_block,
+    _validate_command,
+    _validate_schedule,
+    _write_crontab,
+    daemon_status,
+    start_daemon,
+    stop_daemon,
 )
 
 # ---------------------------------------------------------------------------
@@ -39,49 +45,75 @@ from kiss.channels.cron_manager_daemon import (
 _counter = 0
 
 
-@pytest.fixture()
-def test_paths(tmp_path: Path) -> dict[str, Path]:
-    """Provide isolated paths for a test run.
+def _make_crontab_script(tmp_path: Path, name: str = "crontab") -> tuple[Path, Path]:
+    """Create a fake ``crontab`` executable that reads/writes a per-test tab file.
 
-    Uses /tmp for the socket to avoid AF_UNIX path length limits on macOS.
+    Returns ``(script_path, tab_path)``.
     """
+    tab = tmp_path / "tab"
+    tab.write_text("")
+    script = tmp_path / name
+    script.write_text(
+        textwrap.dedent(f"""\
+        #!{sys.executable}
+        import sys, pathlib
+        TAB = pathlib.Path({str(tab)!r})
+        args = sys.argv[1:]
+        if args == ["-l"]:
+            content = TAB.read_text() if TAB.exists() else ""
+            if content:
+                sys.stdout.write(content)
+                sys.exit(0)
+            sys.stderr.write("no crontab for test\\n")
+            sys.exit(1)
+        elif args == ["-"]:
+            TAB.write_text(sys.stdin.read())
+            sys.exit(0)
+        else:
+            sys.stderr.write(f"unknown args: {{args}}\\n")
+            sys.exit(2)
+        """)
+    )
+    script.chmod(0o755)
+    return script, tab
+
+
+@pytest.fixture
+def crontab_env(tmp_path: Path) -> dict[str, Path]:
+    """Fresh fake crontab + isolated socket/pid paths per test."""
     global _counter  # noqa: PLW0603
     _counter += 1
     tag = f"{os.getpid()}_{_counter}"
-    sock = Path(f"/tmp/_kiss_test_{tag}.sock")
+    script, tab = _make_crontab_script(tmp_path)
     return {
-        "sock": sock,
-        "pid": tmp_path / "cron_test.pid",
-        "jobs": tmp_path / "cron_test_jobs.json",
+        "crontab": script,
+        "tab": tab,
+        # macOS AF_UNIX path limit is ~104 chars; put sockets under /tmp
+        "sock": Path(f"/tmp/_kiss_cron_test_{tag}.sock"),
+        "pid": tmp_path / "cron.pid",
     }
 
 
-@pytest.fixture()
-def daemon(test_paths: dict[str, Path]) -> CronDaemon:
-    """Create a CronDaemon with test-specific paths."""
+@pytest.fixture
+def daemon(crontab_env: dict[str, Path]) -> CronDaemon:
     return CronDaemon(
-        sock_path=test_paths["sock"],
-        pid_path=test_paths["pid"],
-        jobs_path=test_paths["jobs"],
+        sock_path=crontab_env["sock"],
+        pid_path=crontab_env["pid"],
+        crontab_cmd=str(crontab_env["crontab"]),
     )
 
 
-@pytest.fixture()
-def running_daemon(test_paths: dict[str, Path]) -> Generator[CronDaemon]:
-    """Start a CronDaemon in a background thread and yield it.
-
-    Cleans up on exit.
-    """
+@pytest.fixture
+def running_daemon(crontab_env: dict[str, Path]) -> Generator[CronDaemon]:
     d = CronDaemon(
-        sock_path=test_paths["sock"],
-        pid_path=test_paths["pid"],
-        jobs_path=test_paths["jobs"],
+        sock_path=crontab_env["sock"],
+        pid_path=crontab_env["pid"],
+        crontab_cmd=str(crontab_env["crontab"]),
     )
     t = threading.Thread(target=d.run, daemon=True)
     t.start()
-    # Wait for socket to be ready
     for _ in range(100):
-        if test_paths["sock"].exists():
+        if crontab_env["sock"].exists():
             break
         time.sleep(0.05)
     else:
@@ -89,137 +121,204 @@ def running_daemon(test_paths: dict[str, Path]) -> Generator[CronDaemon]:
     yield d
     d._stop_event.set()
     t.join(timeout=5)
-    # Clean up socket if still present
-    test_paths["sock"].unlink(missing_ok=True)
+    crontab_env["sock"].unlink(missing_ok=True)
 
 
-@pytest.fixture()
-def client(test_paths: dict[str, Path], running_daemon: CronDaemon) -> CronClient:
-    """Return a CronClient connected to the running test daemon."""
-    return CronClient(sock_path=test_paths["sock"])
+@pytest.fixture
+def client(
+    crontab_env: dict[str, Path], running_daemon: CronDaemon
+) -> CronClient:
+    return CronClient(sock_path=crontab_env["sock"])
 
 
 # ---------------------------------------------------------------------------
-# Cron expression parsing
+# Parse / mutate helpers
 # ---------------------------------------------------------------------------
 
 
-class TestCronParsing:
-    def test_wildcard(self) -> None:
-        parsed = parse_cron_expression("* * * * *")
-        assert parsed["minute"] == set(range(0, 60))
-        assert parsed["hour"] == set(range(0, 24))
-        assert parsed["dom"] == set(range(1, 32))
-        assert parsed["month"] == set(range(1, 13))
-        assert parsed["dow"] == set(range(0, 7))
+class TestParseKissJobs:
+    def test_empty(self) -> None:
+        assert _parse_kiss_jobs("") == []
 
-    def test_step(self) -> None:
-        parsed = parse_cron_expression("*/15 */6 * * *")
-        assert parsed["minute"] == {0, 15, 30, 45}
-        assert parsed["hour"] == {0, 6, 12, 18}
+    def test_single(self) -> None:
+        content = "# KISS-JOB abc123 2025-01-01T00:00:00\n* * * * * echo hi\n"
+        jobs = _parse_kiss_jobs(content)
+        assert jobs == [
+            CronJob("abc123", "* * * * *", "echo hi", "2025-01-01T00:00:00")
+        ]
 
-    def test_range(self) -> None:
-        parsed = parse_cron_expression("0 9-17 * * *")
-        assert parsed["minute"] == {0}
-        assert parsed["hour"] == set(range(9, 18))
+    def test_multiple_in_order(self) -> None:
+        content = (
+            "# KISS-JOB a1 2025-01-01T00:00:00\n"
+            "*/5 * * * * echo a\n"
+            "# KISS-JOB b2 2025-01-02T00:00:00\n"
+            "0 9 * * * echo b\n"
+        )
+        jobs = _parse_kiss_jobs(content)
+        assert [j.id for j in jobs] == ["a1", "b2"]
+        assert jobs[0].schedule == "*/5 * * * *"
+        assert jobs[1].command == "echo b"
 
-    def test_range_with_step(self) -> None:
-        parsed = parse_cron_expression("0 0-23/2 * * *")
-        assert parsed["hour"] == {0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22}
+    def test_mixed_with_non_kiss(self) -> None:
+        content = (
+            "# user comment\n"
+            "0 0 * * * user_command\n"
+            "# KISS-JOB kiss1 ts\n"
+            "* * * * * echo kiss\n"
+            "SHELL=/bin/bash\n"
+        )
+        jobs = _parse_kiss_jobs(content)
+        assert len(jobs) == 1
+        assert jobs[0].id == "kiss1"
+        assert jobs[0].command == "echo kiss"
 
-    def test_comma_list(self) -> None:
-        parsed = parse_cron_expression("0,30 * * * *")
-        assert parsed["minute"] == {0, 30}
+    def test_orphan_marker_skipped(self) -> None:
+        # Marker at EOF without schedule line below.
+        content = "# KISS-JOB orphan 2025-01-01T00:00:00\n"
+        assert _parse_kiss_jobs(content) == []
 
-    def test_specific_values(self) -> None:
-        parsed = parse_cron_expression("5 3 15 6 2")
-        assert parsed["minute"] == {5}
-        assert parsed["hour"] == {3}
-        assert parsed["dom"] == {15}
-        assert parsed["month"] == {6}
-        assert parsed["dow"] == {2}
+    def test_malformed_marker_skipped(self) -> None:
+        # Marker with only 3 fields (no created_at) — skipped.
+        content = "# KISS-JOB\n* * * * * echo x\n"
+        assert _parse_kiss_jobs(content) == []
 
-    def test_invalid_field_count(self) -> None:
+    def test_malformed_schedule_skipped(self) -> None:
+        # Schedule line has only 4 fields + command — not 5 fields.
+        content = "# KISS-JOB id1 ts\n* * * * \n"
+        assert _parse_kiss_jobs(content) == []
+
+    def test_command_with_spaces_preserved(self) -> None:
+        content = (
+            "# KISS-JOB id1 ts\n"
+            "*/5 * * * * /bin/sh -c 'echo hello world'\n"
+        )
+        jobs = _parse_kiss_jobs(content)
+        assert jobs[0].command == "/bin/sh -c 'echo hello world'"
+
+
+class TestRemoveKissBlock:
+    def test_no_match_returns_false(self) -> None:
+        content = "# KISS-JOB aaa ts\n* * * * * echo\n"
+        new, removed = _remove_kiss_block(content, "bbb")
+        assert not removed
+        assert new == content
+
+    def test_removes_target(self) -> None:
+        content = (
+            "# KISS-JOB aaa ts\n* * * * * echo a\n"
+            "# KISS-JOB bbb ts\n0 0 * * * echo b\n"
+        )
+        new, removed = _remove_kiss_block(content, "aaa")
+        assert removed
+        assert "aaa" not in new
+        assert "bbb" in new
+        assert new.endswith("\n")
+
+    def test_preserves_non_kiss(self) -> None:
+        content = (
+            "SHELL=/bin/bash\n"
+            "# KISS-JOB x ts\n"
+            "* * * * * echo x\n"
+            "0 0 * * * user\n"
+        )
+        new, removed = _remove_kiss_block(content, "x")
+        assert removed
+        assert "SHELL=/bin/bash" in new
+        assert "0 0 * * * user" in new
+
+    def test_removing_last_entry_drops_trailing_newline(self) -> None:
+        content = "# KISS-JOB only ts\n* * * * * echo\n"
+        new, removed = _remove_kiss_block(content, "only")
+        assert removed
+        assert new == ""
+
+    def test_malformed_marker_not_treated_as_block(self) -> None:
+        # Marker without created_at must not swallow the next line.
+        content = "# KISS-JOB\nregular line\n"
+        new, removed = _remove_kiss_block(content, "anything")
+        assert not removed
+        assert new == content
+
+
+class TestValidators:
+    def test_schedule_ok(self) -> None:
+        _validate_schedule("*/5 * * * *")
+
+    def test_schedule_wrong_count(self) -> None:
         with pytest.raises(ValueError, match="5 fields"):
-            parse_cron_expression("* *")
+            _validate_schedule("* * *")
 
-    def test_invalid_value_out_of_range(self) -> None:
-        with pytest.raises(ValueError, match="out of range"):
-            parse_cron_expression("60 * * * *")
+    def test_schedule_empty(self) -> None:
+        with pytest.raises(ValueError, match="5 fields"):
+            _validate_schedule("")
 
-    def test_invalid_step_zero(self) -> None:
-        with pytest.raises(ValueError, match="Invalid step"):
-            parse_cron_expression("*/0 * * * *")
+    def test_command_ok(self) -> None:
+        _validate_command("echo hi")
 
-    def test_invalid_range_step_zero(self) -> None:
-        with pytest.raises(ValueError, match="Invalid step"):
-            parse_cron_expression("0-10/0 * * * *")
+    def test_command_empty(self) -> None:
+        with pytest.raises(ValueError, match="empty"):
+            _validate_command("   ")
 
+    def test_command_multiline(self) -> None:
+        with pytest.raises(ValueError, match="single line"):
+            _validate_command("echo hi\nrm -rf /")
 
-class TestCronMatching:
-    def test_matches_every_minute(self) -> None:
-        parsed = parse_cron_expression("* * * * *")
-        now = datetime(2025, 7, 15, 10, 30)
-        assert cron_matches_time(parsed, now)
-
-    def test_matches_specific_time(self) -> None:
-        # 2025-07-15 is a Tuesday (weekday=1)
-        parsed = parse_cron_expression("30 10 15 7 1")
-        dt = datetime(2025, 7, 15, 10, 30)
-        assert cron_matches_time(parsed, dt)
-
-    def test_no_match_wrong_minute(self) -> None:
-        parsed = parse_cron_expression("0 * * * *")
-        dt = datetime(2025, 7, 15, 10, 30)
-        assert not cron_matches_time(parsed, dt)
-
-    def test_no_match_wrong_hour(self) -> None:
-        parsed = parse_cron_expression("30 11 * * *")
-        dt = datetime(2025, 7, 15, 10, 30)
-        assert not cron_matches_time(parsed, dt)
-
-    def test_no_match_wrong_day(self) -> None:
-        parsed = parse_cron_expression("30 10 16 * *")
-        dt = datetime(2025, 7, 15, 10, 30)
-        assert not cron_matches_time(parsed, dt)
-
-    def test_no_match_wrong_month(self) -> None:
-        parsed = parse_cron_expression("30 10 15 8 *")
-        dt = datetime(2025, 7, 15, 10, 30)
-        assert not cron_matches_time(parsed, dt)
-
-    def test_no_match_wrong_dow(self) -> None:
-        # Tuesday=1, test with Wednesday=2
-        parsed = parse_cron_expression("30 10 * * 2")
-        dt = datetime(2025, 7, 15, 10, 30)  # Tuesday
-        assert not cron_matches_time(parsed, dt)
+    def test_command_carriage_return(self) -> None:
+        with pytest.raises(ValueError, match="single line"):
+            _validate_command("echo hi\rrm")
 
 
 # ---------------------------------------------------------------------------
-# Job persistence
+# Low-level crontab read/write
 # ---------------------------------------------------------------------------
 
 
-class TestJobPersistence:
-    def test_save_and_load(self, tmp_path: Path) -> None:
-        path = tmp_path / "jobs.json"
-        jobs = {"abc123": {"id": "abc123", "schedule": "* * * * *", "command": "echo hi"}}
-        _save_jobs(path, jobs)
-        loaded = _load_jobs(path)
-        assert loaded == jobs
+class TestReadWriteCrontab:
+    def test_read_empty_returns_blank(
+        self, crontab_env: dict[str, Path]
+    ) -> None:
+        # tab file starts empty → fake returns rc=1 with "no crontab"
+        assert _read_crontab(str(crontab_env["crontab"])) == ""
 
-    def test_load_missing_file(self, tmp_path: Path) -> None:
-        assert _load_jobs(tmp_path / "nonexistent.json") == {}
+    def test_write_then_read(self, crontab_env: dict[str, Path]) -> None:
+        _write_crontab(
+            "# KISS-JOB x ts\n* * * * * echo\n", str(crontab_env["crontab"])
+        )
+        assert _read_crontab(str(crontab_env["crontab"])) == (
+            "# KISS-JOB x ts\n* * * * * echo\n"
+        )
 
-    def test_load_corrupt_json(self, tmp_path: Path) -> None:
-        path = tmp_path / "bad.json"
-        path.write_text("not json")
-        assert _load_jobs(path) == {}
+    def test_write_adds_trailing_newline(
+        self, crontab_env: dict[str, Path]
+    ) -> None:
+        _write_crontab("abc", str(crontab_env["crontab"]))
+        assert crontab_env["tab"].read_text() == "abc\n"
 
-    def test_load_non_dict_json(self, tmp_path: Path) -> None:
-        path = tmp_path / "array.json"
-        path.write_text("[1,2,3]")
-        assert _load_jobs(path) == {}
+    def test_write_empty_no_newline_added(
+        self, crontab_env: dict[str, Path]
+    ) -> None:
+        _write_crontab("", str(crontab_env["crontab"]))
+        assert crontab_env["tab"].read_text() == ""
+
+    def test_read_raises_on_unexpected_failure(self, tmp_path: Path) -> None:
+        broken = tmp_path / "crontab"
+        broken.write_text(
+            f'#!{sys.executable}\nimport sys\n'
+            'sys.stderr.write("database error\\n"); sys.exit(2)\n'
+        )
+        broken.chmod(0o755)
+        with pytest.raises(RuntimeError, match="failed"):
+            _read_crontab(str(broken))
+
+    def test_write_raises_on_failure(self, tmp_path: Path) -> None:
+        broken = tmp_path / "crontab"
+        broken.write_text(
+            f'#!{sys.executable}\nimport sys\n'
+            'sys.stderr.write("bad schedule\\n"); sys.exit(1)\n'
+        )
+        broken.chmod(0o755)
+        with pytest.raises(RuntimeError, match="failed"):
+            _write_crontab("bad\n", str(broken))
 
 
 # ---------------------------------------------------------------------------
@@ -228,64 +327,98 @@ class TestJobPersistence:
 
 
 class TestPidHelpers:
-    def test_read_pid_missing(self, tmp_path: Path) -> None:
+    def test_read_missing(self, tmp_path: Path) -> None:
         assert _read_pid(tmp_path / "nope.pid") is None
 
-    def test_read_pid_valid(self, tmp_path: Path) -> None:
+    def test_read_valid(self, tmp_path: Path) -> None:
         p = tmp_path / "test.pid"
         p.write_text("12345")
         assert _read_pid(p) == 12345
 
-    def test_read_pid_invalid(self, tmp_path: Path) -> None:
+    def test_read_invalid(self, tmp_path: Path) -> None:
         p = tmp_path / "bad.pid"
         p.write_text("not a number")
         assert _read_pid(p) is None
 
-    def test_is_running_current_process(self) -> None:
+    def test_is_running_self(self) -> None:
         assert _is_running(os.getpid())
 
-    def test_is_running_dead_pid(self) -> None:
-        # PID 99999999 is almost certainly not running
+    def test_is_running_dead(self) -> None:
         assert not _is_running(99999999)
 
 
 # ---------------------------------------------------------------------------
-# Daemon command handling (unit tests)
+# Daemon command handling (in-process unit tests)
 # ---------------------------------------------------------------------------
 
 
 class TestDaemonCommands:
-    def test_add_and_list(self, daemon: CronDaemon) -> None:
-        cmd = {"action": "add", "schedule": "* * * * *", "command": "echo x"}
-        resp = daemon._handle_command(cmd)
+    def test_add_and_list(
+        self, daemon: CronDaemon, crontab_env: dict[str, Path]
+    ) -> None:
+        resp = daemon._handle_command(
+            {"action": "add", "schedule": "* * * * *", "command": "echo x"}
+        )
         assert resp["status"] == "ok"
         job_id = resp["job_id"]
+        assert len(job_id) == 12
+
+        tab = crontab_env["tab"].read_text()
+        assert "# KISS-JOB " + job_id in tab
+        assert "* * * * * echo x" in tab
 
         resp = daemon._handle_command({"action": "list"})
         assert resp["status"] == "ok"
         assert len(resp["jobs"]) == 1
         assert resp["jobs"][0]["id"] == job_id
+        assert resp["jobs"][0]["command"] == "echo x"
 
     def test_add_invalid_schedule(self, daemon: CronDaemon) -> None:
-        resp = daemon._handle_command({"action": "add", "schedule": "bad", "command": "echo x"})
+        resp = daemon._handle_command(
+            {"action": "add", "schedule": "bad", "command": "echo x"}
+        )
         assert resp["status"] == "error"
+        assert "5 fields" in resp["message"]
 
-    def test_add_missing_fields(self, daemon: CronDaemon) -> None:
-        resp = daemon._handle_command({"action": "add", "schedule": "", "command": ""})
+    def test_add_empty_command_validator(self, daemon: CronDaemon) -> None:
+        # Daemon rejects missing command at the dispatch layer first.
+        resp = daemon._handle_command(
+            {"action": "add", "schedule": "* * * * *", "command": ""}
+        )
+        assert resp["status"] == "error"
+        assert "Missing" in resp["message"]
+
+    def test_add_newline_command_rejected(self, daemon: CronDaemon) -> None:
+        resp = daemon._handle_command(
+            {
+                "action": "add",
+                "schedule": "* * * * *",
+                "command": "echo a\nrm -rf /",
+            }
+        )
+        assert resp["status"] == "error"
+        assert "single line" in resp["message"]
+
+    def test_add_missing_schedule(self, daemon: CronDaemon) -> None:
+        resp = daemon._handle_command(
+            {"action": "add", "schedule": "", "command": "echo x"}
+        )
         assert resp["status"] == "error"
 
     def test_remove(self, daemon: CronDaemon) -> None:
-        cmd = {"action": "add", "schedule": "* * * * *", "command": "echo x"}
-        resp = daemon._handle_command(cmd)
+        resp = daemon._handle_command(
+            {"action": "add", "schedule": "* * * * *", "command": "echo x"}
+        )
         job_id = resp["job_id"]
         resp = daemon._handle_command({"action": "remove", "job_id": job_id})
         assert resp["status"] == "ok"
         resp = daemon._handle_command({"action": "list"})
-        assert len(resp["jobs"]) == 0
+        assert resp["jobs"] == []
 
     def test_remove_nonexistent(self, daemon: CronDaemon) -> None:
         resp = daemon._handle_command({"action": "remove", "job_id": "nope"})
         assert resp["status"] == "error"
+        assert "not found" in resp["message"]
 
     def test_remove_missing_id(self, daemon: CronDaemon) -> None:
         resp = daemon._handle_command({"action": "remove", "job_id": ""})
@@ -294,7 +427,18 @@ class TestDaemonCommands:
     def test_status(self, daemon: CronDaemon) -> None:
         resp = daemon._handle_command({"action": "status"})
         assert resp["status"] == "ok"
-        assert "pid" in resp
+        assert resp["pid"] == os.getpid()
+        assert resp["job_count"] == 0
+
+    def test_status_counts_jobs(self, daemon: CronDaemon) -> None:
+        daemon._handle_command(
+            {"action": "add", "schedule": "* * * * *", "command": "echo a"}
+        )
+        daemon._handle_command(
+            {"action": "add", "schedule": "0 0 * * *", "command": "echo b"}
+        )
+        resp = daemon._handle_command({"action": "status"})
+        assert resp["job_count"] == 2
 
     def test_stop(self, daemon: CronDaemon) -> None:
         resp = daemon._handle_command({"action": "stop"})
@@ -305,18 +449,116 @@ class TestDaemonCommands:
         resp = daemon._handle_command({"action": "bogus"})
         assert resp["status"] == "error"
 
-    def test_persistence(self, daemon: CronDaemon, test_paths: dict[str, Path]) -> None:
-        cmd = {"action": "add", "schedule": "0 * * * *", "command": "echo persisted"}
-        daemon._handle_command(cmd)
-        # Reload from disk
-        loaded = _load_jobs(test_paths["jobs"])
-        assert len(loaded) == 1
-        job = list(loaded.values())[0]
-        assert job["command"] == "echo persisted"
+    def test_non_kiss_entries_preserved(
+        self, daemon: CronDaemon, crontab_env: dict[str, Path]
+    ) -> None:
+        crontab_env["tab"].write_text("SHELL=/bin/bash\n0 9 * * * user_job\n")
+        daemon._handle_command(
+            {"action": "add", "schedule": "* * * * *", "command": "echo kiss"}
+        )
+        tab = crontab_env["tab"].read_text()
+        assert "SHELL=/bin/bash" in tab
+        assert "0 9 * * * user_job" in tab
+        # list only returns KISS-owned
+        resp = daemon._handle_command({"action": "list"})
+        assert len(resp["jobs"]) == 1
+
+    def test_list_surface_crontab_error(self, tmp_path: Path) -> None:
+        broken = tmp_path / "crontab"
+        broken.write_text(
+            f'#!{sys.executable}\nimport sys\n'
+            'sys.stderr.write("disk error\\n"); sys.exit(2)\n'
+        )
+        broken.chmod(0o755)
+        d = CronDaemon(
+            sock_path=tmp_path / "s.sock",
+            pid_path=tmp_path / "p.pid",
+            crontab_cmd=str(broken),
+        )
+        resp = d._handle_command({"action": "list"})
+        assert resp["status"] == "error"
+        assert "failed" in resp["message"]
+
+    def test_add_surfaces_write_error(self, tmp_path: Path) -> None:
+        broken = tmp_path / "crontab"
+        # Reads empty (rc=1 + "no crontab"), but rejects writes.
+        broken.write_text(
+            f'#!{sys.executable}\n'
+            'import sys\n'
+            'args = sys.argv[1:]\n'
+            'if args == ["-l"]:\n'
+            '    sys.stderr.write("no crontab\\n"); sys.exit(1)\n'
+            'sys.stderr.write("write denied\\n"); sys.exit(1)\n'
+        )
+        broken.chmod(0o755)
+        d = CronDaemon(
+            sock_path=tmp_path / "s.sock",
+            pid_path=tmp_path / "p.pid",
+            crontab_cmd=str(broken),
+        )
+        resp = d._handle_command(
+            {"action": "add", "schedule": "* * * * *", "command": "echo x"}
+        )
+        assert resp["status"] == "error"
+        assert "failed" in resp["message"]
+
+    def test_add_preserves_no_trailing_newline(
+        self, daemon: CronDaemon, crontab_env: dict[str, Path]
+    ) -> None:
+        """Existing crontab content without trailing newline is normalized."""
+        crontab_env["tab"].write_text("EXISTING_LINE_NO_NEWLINE")
+        resp = daemon._handle_command(
+            {"action": "add", "schedule": "* * * * *", "command": "echo x"}
+        )
+        assert resp["status"] == "ok"
+        tab = crontab_env["tab"].read_text()
+        assert tab.startswith("EXISTING_LINE_NO_NEWLINE\n")
+        assert "# KISS-JOB" in tab
+
+    def test_remove_surfaces_write_error(self, tmp_path: Path) -> None:
+        """``_remove_job`` surfaces a crontab-write RuntimeError as status=error."""
+        tab = tmp_path / "tab"
+        tab.write_text("# KISS-JOB abc ts\n* * * * * echo\n")
+        script = tmp_path / "crontab"
+        script.write_text(
+            f'#!{sys.executable}\n'
+            'import sys, pathlib\n'
+            f'TAB = pathlib.Path({str(tab)!r})\n'
+            'args = sys.argv[1:]\n'
+            'if args == ["-l"]:\n'
+            '    sys.stdout.write(TAB.read_text()); sys.exit(0)\n'
+            'sys.stderr.write("write denied\\n"); sys.exit(1)\n'
+        )
+        script.chmod(0o755)
+        d = CronDaemon(
+            sock_path=tmp_path / "s.sock",
+            pid_path=tmp_path / "p.pid",
+            crontab_cmd=str(script),
+        )
+        resp = d._handle_command({"action": "remove", "job_id": "abc"})
+        assert resp["status"] == "error"
+        assert "failed" in resp["message"]
+
+    def test_status_tolerates_crontab_error(self, tmp_path: Path) -> None:
+        broken = tmp_path / "crontab"
+        broken.write_text(
+            f'#!{sys.executable}\nimport sys\n'
+            'sys.stderr.write("boom\\n"); sys.exit(2)\n'
+        )
+        broken.chmod(0o755)
+        d = CronDaemon(
+            sock_path=tmp_path / "s.sock",
+            pid_path=tmp_path / "p.pid",
+            crontab_cmd=str(broken),
+        )
+        resp = d._handle_command({"action": "status"})
+        assert resp["status"] == "ok"
+        assert resp["job_count"] == -1
+        assert "warning" in resp
 
 
 # ---------------------------------------------------------------------------
-# Client-daemon integration (socket communication)
+# Client–daemon integration (socket)
 # ---------------------------------------------------------------------------
 
 
@@ -330,6 +572,7 @@ class TestClientDaemonIntegration:
         assert len(jobs) == 1
         assert jobs[0]["id"] == job_id
         assert jobs[0]["schedule"] == "*/5 * * * *"
+        assert jobs[0]["command"] == "echo integration"
 
         client.remove_job(job_id)
         assert client.list_jobs() == []
@@ -337,31 +580,37 @@ class TestClientDaemonIntegration:
     def test_status(self, client: CronClient) -> None:
         resp = client.status()
         assert resp["status"] == "ok"
-        assert resp["pid"] == os.getpid()  # daemon runs in our process
+        assert resp["pid"] == os.getpid()
+        assert resp["job_count"] == 0
 
-    def test_add_invalid_schedule(self, client: CronClient) -> None:
+    def test_add_invalid_schedule_raises(self, client: CronClient) -> None:
         with pytest.raises(RuntimeError, match="5 fields"):
             client.add_job("bad", "echo x")
 
-    def test_multiple_jobs(self, client: CronClient) -> None:
-        ids = [client.add_job(f"0 {h} * * *", f"echo job{h}") for h in range(5)]
+    def test_remove_unknown_raises(self, client: CronClient) -> None:
+        with pytest.raises(RuntimeError, match="not found"):
+            client.remove_job("nosuch123456")
+
+    def test_multiple_jobs_unique_ids(self, client: CronClient) -> None:
+        ids = [client.add_job(f"0 {h} * * *", f"echo j{h}") for h in range(5)]
+        assert len(set(ids)) == 5
         jobs = client.list_jobs()
         assert len(jobs) == 5
         for jid in ids:
             client.remove_job(jid)
         assert client.list_jobs() == []
 
-    def test_concurrent_clients(self, client: CronClient, test_paths: dict[str, Path]) -> None:
-        """Multiple clients adding jobs concurrently."""
+    def test_concurrent_clients(
+        self, client: CronClient, crontab_env: dict[str, Path]
+    ) -> None:
         results: list[str] = []
         errors: list[Exception] = []
 
         def worker(i: int) -> None:
             try:
-                c = CronClient(sock_path=test_paths["sock"])
-                jid = c.add_job("* * * * *", f"echo concurrent-{i}")
-                results.append(jid)
-            except Exception as e:
+                c = CronClient(sock_path=crontab_env["sock"])
+                results.append(c.add_job("* * * * *", f"echo c-{i}"))
+            except Exception as e:  # noqa: BLE001
                 errors.append(e)
 
         threads = [threading.Thread(target=worker, args=(i,)) for i in range(10)]
@@ -371,114 +620,85 @@ class TestClientDaemonIntegration:
             t.join(timeout=10)
 
         assert not errors, f"Errors: {errors}"
-        assert len(results) == 10
-        assert len(set(results)) == 10  # all unique IDs
-
+        assert len(set(results)) == 10
         jobs = client.list_jobs()
+        # All 10 concurrent adds must land in the crontab (mutex correctness).
         assert len(jobs) == 10
 
     def test_client_unreachable(self, tmp_path: Path) -> None:
-        """Client raises ConnectionError when daemon is not running."""
         c = CronClient(sock_path=tmp_path / "no_such.sock")
         with pytest.raises(ConnectionError):
             c.list_jobs()
 
 
 # ---------------------------------------------------------------------------
-# Daemon stop via client
+# Daemon lifecycle
 # ---------------------------------------------------------------------------
 
 
 class TestDaemonStopViaClient:
-    def test_stop_daemon(self, test_paths: dict[str, Path]) -> None:
+    def test_stop_cleans_up(self, crontab_env: dict[str, Path]) -> None:
         d = CronDaemon(
-            sock_path=test_paths["sock"],
-            pid_path=test_paths["pid"],
-            jobs_path=test_paths["jobs"],
+            sock_path=crontab_env["sock"],
+            pid_path=crontab_env["pid"],
+            crontab_cmd=str(crontab_env["crontab"]),
         )
         t = threading.Thread(target=d.run, daemon=True)
         t.start()
         for _ in range(100):
-            if test_paths["sock"].exists():
+            if crontab_env["sock"].exists():
                 break
             time.sleep(0.05)
 
-        c = CronClient(sock_path=test_paths["sock"])
+        c = CronClient(sock_path=crontab_env["sock"])
         c.stop_daemon()
         t.join(timeout=5)
         assert not t.is_alive()
-        assert not test_paths["sock"].exists()
-        # PID file should be cleaned up
-        assert not test_paths["pid"].exists()
-        # Extra cleanup just in case
-        test_paths["sock"].unlink(missing_ok=True)
-
-
-# ---------------------------------------------------------------------------
-# Daemon restart with persistence
-# ---------------------------------------------------------------------------
+        assert not crontab_env["sock"].exists()
+        assert not crontab_env["pid"].exists()
 
 
 class TestDaemonRestart:
-    def test_jobs_survive_restart(self, test_paths: dict[str, Path]) -> None:
-        """Jobs added before restart are still present after restart."""
-        # Start daemon #1
-        d1 = CronDaemon(
-            sock_path=test_paths["sock"],
-            pid_path=test_paths["pid"],
-            jobs_path=test_paths["jobs"],
-        )
-        t1 = threading.Thread(target=d1.run, daemon=True)
-        t1.start()
-        for _ in range(100):
-            if test_paths["sock"].exists():
-                break
-            time.sleep(0.05)
+    def test_jobs_persist_via_crontab_across_restart(
+        self, crontab_env: dict[str, Path]
+    ) -> None:
+        def boot() -> tuple[CronDaemon, threading.Thread]:
+            d = CronDaemon(
+                sock_path=crontab_env["sock"],
+                pid_path=crontab_env["pid"],
+                crontab_cmd=str(crontab_env["crontab"]),
+            )
+            t = threading.Thread(target=d.run, daemon=True)
+            t.start()
+            for _ in range(100):
+                if crontab_env["sock"].exists():
+                    break
+                time.sleep(0.05)
+            return d, t
 
-        c1 = CronClient(sock_path=test_paths["sock"])
+        _, t1 = boot()
+        c1 = CronClient(sock_path=crontab_env["sock"])
         job_id = c1.add_job("0 12 * * *", "echo survive")
-
-        # Stop daemon #1
         c1.stop_daemon()
         t1.join(timeout=5)
 
-        # Start daemon #2 with same paths
-        d2 = CronDaemon(
-            sock_path=test_paths["sock"],
-            pid_path=test_paths["pid"],
-            jobs_path=test_paths["jobs"],
-        )
-        t2 = threading.Thread(target=d2.run, daemon=True)
-        t2.start()
-        for _ in range(100):
-            if test_paths["sock"].exists():
-                break
-            time.sleep(0.05)
-
-        c2 = CronClient(sock_path=test_paths["sock"])
+        _, t2 = boot()
+        c2 = CronClient(sock_path=crontab_env["sock"])
         jobs = c2.list_jobs()
         assert len(jobs) == 1
         assert jobs[0]["id"] == job_id
         assert jobs[0]["command"] == "echo survive"
-
-        # Clean up
         c2.stop_daemon()
         t2.join(timeout=5)
-        test_paths["sock"].unlink(missing_ok=True)
-
-
-# ---------------------------------------------------------------------------
-# Process kill and restart (subprocess-based)
-# ---------------------------------------------------------------------------
 
 
 class TestProcessKillRestart:
-    def test_kill_and_restart(self, test_paths: dict[str, Path]) -> None:
-        """Simulate killing the daemon process and restarting it."""
+    def test_kill_and_restart(self, crontab_env: dict[str, Path]) -> None:
+        """Hard-killing the daemon must not lose jobs — they live in crontab."""
         src_root = str(Path(__file__).parents[3])
-        sock = str(test_paths["sock"])
-        pid = str(test_paths["pid"])
-        jobs = str(test_paths["jobs"])
+        sock = str(crontab_env["sock"])
+        pid = str(crontab_env["pid"])
+        cron = str(crontab_env["crontab"])
         daemon_script = textwrap.dedent(f"""\
             import sys
             sys.path.insert(0, {src_root!r})
@@ -487,65 +707,42 @@ class TestProcessKillRestart:
             d = CronDaemon(
                 sock_path=Path({sock!r}),
                 pid_path=Path({pid!r}),
-                jobs_path=Path({jobs!r}),
+                crontab_cmd={cron!r},
             )
             d.run()
         """)
 
-        # Start daemon in subprocess
-        proc = subprocess.Popen(
-            [sys.executable, "-c", daemon_script],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        try:
-            # Wait for socket
-            for _ in range(100):
-                if test_paths["sock"].exists():
-                    break
-                time.sleep(0.05)
-            else:
-                out, err = proc.communicate(timeout=2)
-                raise RuntimeError(f"Daemon subprocess did not start: {err.decode()}")
-
-            # Add a job
-            c = CronClient(sock_path=test_paths["sock"])
-            job_id = c.add_job("30 2 * * *", "echo killed-test")
-            assert len(c.list_jobs()) == 1
-
-            # Kill the process (SIGKILL - hard kill)
-            proc.kill()
-            proc.wait(timeout=5)
-
-            # Socket and PID file may still be there (stale)
-            test_paths["sock"].unlink(missing_ok=True)
-
-            # Restart daemon in new subprocess
-            proc2 = subprocess.Popen(
+        def launch() -> subprocess.Popen[bytes]:
+            proc = subprocess.Popen(
                 [sys.executable, "-c", daemon_script],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
+            for _ in range(100):
+                if crontab_env["sock"].exists():
+                    return proc
+                time.sleep(0.05)
+            out, err = proc.communicate(timeout=2)
+            raise RuntimeError(f"Daemon did not start: {err.decode()}")
+
+        proc = launch()
+        try:
+            c = CronClient(sock_path=crontab_env["sock"])
+            job_id = c.add_job("30 2 * * *", "echo killed")
+            assert len(c.list_jobs()) == 1
+
+            proc.kill()
+            proc.wait(timeout=5)
+            crontab_env["sock"].unlink(missing_ok=True)
+
+            proc2 = launch()
             try:
-                for _ in range(100):
-                    if test_paths["sock"].exists():
-                        break
-                    time.sleep(0.05)
-                else:
-                    out, err = proc2.communicate(timeout=2)
-                    raise RuntimeError(f"Daemon subprocess did not restart: {err.decode()}")
-
-                # Jobs should persist
-                c2 = CronClient(sock_path=test_paths["sock"])
-                jobs_list = c2.list_jobs()
-                assert len(jobs_list) == 1
-                assert jobs_list[0]["id"] == job_id
-                assert jobs_list[0]["command"] == "echo killed-test"
-
-                # Can still add new jobs
-                c2.add_job("0 0 * * *", "echo new-after-restart")
+                c2 = CronClient(sock_path=crontab_env["sock"])
+                jobs = c2.list_jobs()
+                assert len(jobs) == 1
+                assert jobs[0]["id"] == job_id
+                c2.add_job("0 0 * * *", "echo new")
                 assert len(c2.list_jobs()) == 2
-
                 c2.stop_daemon()
                 proc2.wait(timeout=5)
             finally:
@@ -556,104 +753,232 @@ class TestProcessKillRestart:
             if proc.poll() is None:
                 proc.kill()
                 proc.wait()
-            test_paths["sock"].unlink(missing_ok=True)
+            crontab_env["sock"].unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
-# Handle client edge cases
+# Client edge cases
 # ---------------------------------------------------------------------------
 
 
 class TestClientEdgeCases:
-    def test_send_invalid_json(
-        self, test_paths: dict[str, Path], running_daemon: CronDaemon
+    def test_invalid_json(
+        self, crontab_env: dict[str, Path], running_daemon: CronDaemon
     ) -> None:
-        """Send raw invalid JSON bytes to the daemon socket."""
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
-            sock.settimeout(5.0)
-            sock.connect(str(test_paths["sock"]))
-            sock.sendall(b"not json at all{{{")
-            sock.shutdown(socket.SHUT_WR)
-            data = sock.recv(4096)
+            s.settimeout(5.0)
+            s.connect(str(crontab_env["sock"]))
+            s.sendall(b"not json{{{")
+            s.shutdown(socket.SHUT_WR)
+            data = s.recv(4096)
             resp = json.loads(data)
             assert resp["status"] == "error"
             assert "Invalid JSON" in resp["message"]
         finally:
-            sock.close()
+            s.close()
 
-    def test_send_empty_connection(
-        self, test_paths: dict[str, Path], running_daemon: CronDaemon
+    def test_empty_connection(
+        self, crontab_env: dict[str, Path], running_daemon: CronDaemon
     ) -> None:
-        """Connect and immediately close — daemon should not crash."""
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
-            sock.settimeout(5.0)
-            sock.connect(str(test_paths["sock"]))
+            s.settimeout(5.0)
+            s.connect(str(crontab_env["sock"]))
         finally:
-            sock.close()
-        # Daemon should still be responsive
+            s.close()
         time.sleep(0.1)
-        c = CronClient(sock_path=test_paths["sock"])
-        resp = c.status()
-        assert resp["status"] == "ok"
+        c = CronClient(sock_path=crontab_env["sock"])
+        assert c.status()["status"] == "ok"
 
-    def test_stop_daemon_client_method(self, tmp_path: Path) -> None:
-        """CronClient.stop_daemon() doesn't raise when daemon is gone."""
-        c = CronClient(sock_path=tmp_path / "gone.sock")
-        # Should not raise — stop_daemon catches ConnectionError
-        c.stop_daemon()
+    def test_message_too_large(
+        self, crontab_env: dict[str, Path], running_daemon: CronDaemon
+    ) -> None:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            s.settimeout(10.0)
+            s.connect(str(crontab_env["sock"]))
+            # > 1 MB of garbage
+            s.sendall(b"x" * (1_048_576 + 10))
+            s.shutdown(socket.SHUT_WR)
+            data = b""
+            while True:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+            resp = json.loads(data)
+            assert resp["status"] == "error"
+            assert "too large" in resp["message"].lower()
+        finally:
+            s.close()
+
+    def test_stop_daemon_when_gone(self, tmp_path: Path) -> None:
+        # Should silently swallow ConnectionError.
+        CronClient(sock_path=tmp_path / "gone.sock").stop_daemon()
 
 
 # ---------------------------------------------------------------------------
-# Scheduler job execution
+# Top-level process-management helpers
 # ---------------------------------------------------------------------------
 
 
-class TestJobExecution:
-    def test_run_job(self, daemon: CronDaemon, tmp_path: Path) -> None:
-        """Directly test _run_job to verify subprocess execution."""
-        marker = tmp_path / "ran.txt"
-        daemon._jobs["test"] = {
-            "id": "test",
-            "schedule": "* * * * *",
-            "command": f"echo done > {marker}",
-            "last_run": None,
-            "run_count": 0,
-        }
-        daemon._run_job("test", f"echo done > {marker}")
-        assert marker.read_text().strip() == "done"
-        assert daemon._jobs["test"]["run_count"] == 1
-        assert daemon._jobs["test"]["last_run"] is not None
+class TestLifecycleHelpers:
+    def test_stop_daemon_no_pid_file(self, tmp_path: Path) -> None:
+        msg = stop_daemon(
+            sock_path=tmp_path / "s.sock", pid_path=tmp_path / "p.pid"
+        )
+        assert msg == "Daemon not running (no PID file)"
 
-    def test_run_job_failure(self, daemon: CronDaemon) -> None:
-        """_run_job handles command failure gracefully."""
-        daemon._jobs["fail"] = {
-            "id": "fail",
-            "schedule": "* * * * *",
-            "command": "false",
-            "last_run": None,
-            "run_count": 0,
-        }
-        # Should not raise
-        daemon._run_job("fail", "false")
-        assert daemon._jobs["fail"]["run_count"] == 1
+    def test_stop_daemon_stale_pid(self, tmp_path: Path) -> None:
+        pid_path = tmp_path / "p.pid"
+        pid_path.write_text("99999999")  # dead PID
+        msg = stop_daemon(
+            sock_path=tmp_path / "s.sock", pid_path=pid_path
+        )
+        assert "stale PID" in msg
+        assert not pid_path.exists()
 
-    def test_run_job_nonexistent_command(self, daemon: CronDaemon) -> None:
-        """_run_job handles missing commands."""
-        daemon._jobs["bad"] = {
-            "id": "bad",
-            "schedule": "* * * * *",
-            "command": "/nonexistent/command",
-            "last_run": None,
-            "run_count": 0,
-        }
-        daemon._run_job("bad", "/nonexistent/command")
-        # run_count still increments (shell returns error but doesn't throw)
-        assert daemon._jobs["bad"]["run_count"] == 1
+    def test_daemon_status_no_pid_file(self, tmp_path: Path) -> None:
+        msg = daemon_status(
+            pid_path=tmp_path / "p.pid", sock_path=tmp_path / "s.sock"
+        )
+        assert msg == "Daemon not running (no PID file)"
 
-    def test_run_job_removed_during_execution(self, daemon: CronDaemon) -> None:
-        """_run_job handles the case where the job is removed while running."""
-        # Don't add to _jobs — simulate removal
-        daemon._run_job("ghost", "echo ghost")
-        # Should not raise — just skips the metadata update
+    def test_daemon_status_stale_pid(self, tmp_path: Path) -> None:
+        pid_path = tmp_path / "p.pid"
+        pid_path.write_text("99999999")
+        msg = daemon_status(pid_path=pid_path, sock_path=tmp_path / "s.sock")
+        assert "stale PID" in msg
+
+    def test_daemon_status_running(
+        self, crontab_env: dict[str, Path], running_daemon: CronDaemon
+    ) -> None:
+        # PID file is written by the running daemon.
+        msg = daemon_status(
+            pid_path=crontab_env["pid"], sock_path=crontab_env["sock"]
+        )
+        assert "running" in msg
+        assert f"pid={os.getpid()}" in msg
+        assert "jobs=0" in msg
+
+    def test_daemon_status_socket_unreachable(self, tmp_path: Path) -> None:
+        pid_path = tmp_path / "p.pid"
+        pid_path.write_text(str(os.getpid()))  # this process is alive
+        msg = daemon_status(
+            pid_path=pid_path, sock_path=tmp_path / "no_such.sock"
+        )
+        assert "socket not responding" in msg
+
+    def test_start_daemon_already_running(
+        self, crontab_env: dict[str, Path], running_daemon: CronDaemon
+    ) -> None:
+        msg = start_daemon(
+            sock_path=crontab_env["sock"],
+            pid_path=crontab_env["pid"],
+            foreground=True,
+        )
+        assert "already running" in msg
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+class TestCLI:
+    def _run_cli(
+        self, tmp_path: Path, *args: str
+    ) -> subprocess.CompletedProcess[str]:
+        """Invoke ``python -m`` CLI with a sandboxed $HOME so defaults are clean."""
+        env = os.environ.copy()
+        env["HOME"] = str(tmp_path)
+        env["PYTHONPATH"] = str(Path(__file__).parents[3])
+        return subprocess.run(
+            [sys.executable, "-m", "kiss.channels.cron_manager_daemon", *args],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+
+    def test_no_args_exits(self, tmp_path: Path) -> None:
+        r = self._run_cli(tmp_path)
+        assert r.returncode == 1
+        assert "Usage:" in r.stdout
+
+    def test_unknown_command(self, tmp_path: Path) -> None:
+        r = self._run_cli(tmp_path, "wat")
+        assert r.returncode == 1
+        assert "Unknown command" in r.stdout
+
+    def test_status_no_daemon(self, tmp_path: Path) -> None:
+        r = self._run_cli(tmp_path, "status")
+        assert r.returncode == 0
+        assert "Daemon not running (no PID file)" in r.stdout
+
+    def test_stop_no_daemon(self, tmp_path: Path) -> None:
+        r = self._run_cli(tmp_path, "stop")
+        assert r.returncode == 0
+        assert "Daemon not running (no PID file)" in r.stdout
+
+    def test_start_foreground_then_stop(self) -> None:
+        """Launch the real daemon in the foreground, then stop it cleanly."""
+        # macOS AF_UNIX paths are capped at ~104 chars, so rooting HOME under
+        # pytest's tmp_path overflows. Use a short /tmp directory instead.
+        short_home = Path(f"/tmp/_kiss_cli_{os.getpid()}_{time.monotonic_ns()}")
+        short_home.mkdir()
+        env = os.environ.copy()
+        env["HOME"] = str(short_home)
+        env["PYTHONPATH"] = str(Path(__file__).parents[3])
+        log_out = short_home / "daemon.log"
+        with log_out.open("wb") as lo:
+            proc = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "kiss.channels.cron_manager_daemon",
+                    "start",
+                    "--foreground",
+                ],
+                env=env,
+                stdout=lo,
+                stderr=lo,
+                stdin=subprocess.DEVNULL,
+            )
+        try:
+            sock = short_home / ".kiss" / "cron_manager.sock"
+            for _ in range(200):
+                if sock.exists():
+                    break
+                time.sleep(0.05)
+            else:
+                proc.kill()
+                proc.wait(timeout=2)
+                raise RuntimeError(
+                    f"daemon start failed: {log_out.read_text()}"
+                )
+
+            stop = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "kiss.channels.cron_manager_daemon",
+                    "stop",
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            assert "Daemon stopped" in stop.stdout
+            proc.wait(timeout=5)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+            import shutil
+
+            shutil.rmtree(short_home, ignore_errors=True)

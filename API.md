@@ -34,7 +34,6 @@
       - [`kiss.agents.sorcar.worktree_sorcar_agent`](#kissagentssorcarworktree_sorcar_agent)
     - [`kiss.agents.vscode`](#kissagentsvscode)
       - [`kiss.agents.vscode.helpers`](#kissagentsvscodehelpers)
-        \- [`kiss.agents.vscode.node_modules.flatted.python.flatted`](#kissagentsvscodenode_modulesflattedpythonflatted)
       - [`kiss.agents.vscode.server`](#kissagentsvscodeserver)
   - [`kiss.benchmarks`](#kissbenchmarks)
     - [`kiss.benchmarks.generate_dashboard`](#kissbenchmarksgenerate_dashboard)
@@ -1149,14 +1148,6 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.agents.vscode.node_modules.flatted.python.flatted`
-
-**`parse`**<br/>`def parse(value, *args, **kwargs)`
-
-**`stringify`**<br/>`def stringify(value, *args, **kwargs)`
-
-______________________________________________________________________
-
 #### `kiss.agents.vscode.server` — *VS Code extension backend server for Sorcar agent.*
 
 ##### `class VSCodePrinter(BaseBrowserPrinter)` — Printer that outputs JSON events to stdout for VS Code extension.
@@ -1529,68 +1520,50 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.channels.cron_manager_daemon` — *Cron Manager Daemon — scheduled task manager with Unix domain socket interface.*
+#### `kiss.channels.cron_manager_daemon` — *Cron Manager Daemon — thin Unix-socket proxy over the system `crontab`.*
 
-##### `class CronDaemon` — Daemon process that manages cron jobs via a Unix domain socket.
+##### `class CronJob` — A KISS-owned cron entry parsed from the system crontab.
 
-**Constructor:** `CronDaemon(sock_path: Path = SOCK_PATH, pid_path: Path = PID_PATH, jobs_path: Path = JOBS_PATH) -> None`
+##### `class CronDaemon` — Unix-domain-socket daemon proxying job commands to system `crontab`.
 
-- **run** — Start the daemon (foreground mode). Loads persisted jobs, writes the PID file, starts the scheduler thread, and enters the socket server loop. On shutdown (via `stop` command or signal), cleans up all resources.<br/>`run() -> None`
+**Constructor:** `CronDaemon(sock_path: Path = SOCK_PATH, pid_path: Path = PID_PATH, crontab_cmd: str = 'crontab') -> None`
 
-##### `class CronClient` — Client for communicating with the Cron Manager Daemon.
+- **run** — Run the daemon in the current process. Writes the PID file, installs signal handlers (when invoked from the main thread), enters the socket-accept loop, and cleans up on exit.<br/>`run() -> None`
+
+##### `class CronClient` — Client for the Cron Manager Daemon.
 
 **Constructor:** `CronClient(sock_path: Path = SOCK_PATH) -> None`
 
-- **add_job** — Add a cron job.<br/>`add_job(schedule: str, command: str) -> str`
+- **add_job** — Add a cron job and return its identifier.<br/>`add_job(schedule: str, command: str) -> str`
 
-  - `schedule`: Cron expression (5 fields), e.g. `"*/5 * * * *"`.
-  - `command`: Shell command to run on schedule.
-  - **Returns:** The job ID string.
+  - `schedule`: Five-field cron expression, e.g. `"*/5 * * * *"`.
+  - `command`: Shell command to run on schedule (single line).
+  - **Returns:** The 12-character job identifier.
 
-- **remove_job** — Remove a cron job.<br/>`remove_job(job_id: str) -> None`
+- **remove_job** — Remove the cron job with identifier `job_id`.<br/>`remove_job(job_id: str) -> None`
 
-  - `job_id`: The job identifier to remove.
+- **list_jobs** — Return every KISS-owned cron job currently installed.<br/>`list_jobs() -> list[dict[str, Any]]`
 
-- **list_jobs** — List all cron jobs.<br/>`list_jobs() -> list[dict[str, Any]]`
+- **status** — Return the daemon's status payload (`pid`, `job_count`, ...).<br/>`status() -> dict[str, Any]`
 
-  - **Returns:** List of job dictionaries.
-
-- **status** — Get daemon status.<br/>`status() -> dict[str, Any]`
-
-  - **Returns:** Status dictionary with `pid`, `job_count`, etc.
-
-- **stop_daemon** — Send stop command to the daemon.<br/>`stop_daemon() -> None`
-  **`parse_cron_expression`** — Parse a 5-field cron expression into matched value sets. Fields: minute hour day-of-month month day-of-week<br/>`def parse_cron_expression(expr: str) -> dict[str, set[int]]`
-
-- `expr`: Cron expression string, e.g. `"*/5 * * * *"`.
-
-- **Returns:** Dictionary with keys `minute`, `hour`, `dom`, `month`, `dow` each mapping to a set of matching integer values.
-
-**`cron_matches_time`** — Check whether a parsed cron schedule matches a specific datetime.<br/>`def cron_matches_time(parsed: dict[str, set[int]], dt: datetime) -> bool`
-
-- `parsed`: Output of :func:`parse_cron_expression`.
-- `dt`: The datetime to check against.
-- **Returns:** True if all five fields match the datetime.
-
-**`start_daemon`** — Start the cron manager daemon.<br/>`def start_daemon(sock_path: Path = SOCK_PATH, pid_path: Path = PID_PATH, jobs_path: Path = JOBS_PATH, foreground: bool = False) -> str`
+- **stop_daemon** — Ask the daemon to shut down. Silent if the daemon is already gone.<br/>`stop_daemon() -> None`
+  **`start_daemon`** — Start the cron manager daemon. Does nothing if an instance is already running. When `foreground` is `False` (the default) the process double-forks first. The call blocks for the lifetime of the daemon when run in the foreground.<br/>`def start_daemon(sock_path: Path = SOCK_PATH, pid_path: Path = PID_PATH, foreground: bool = False) -> str`
 
 - `sock_path`: Path for the Unix domain socket.
+
 - `pid_path`: Path for the PID file.
-- `jobs_path`: Path for the jobs persistence file.
-- `foreground`: If True, run in the foreground (don't daemonize).
-- **Returns:** Status message string.
 
-**`stop_daemon`** — Stop the cron manager daemon. Tries a graceful stop via the socket first, then falls back to SIGTERM.<br/>`def stop_daemon(sock_path: Path = SOCK_PATH, pid_path: Path = PID_PATH) -> str`
+- `foreground`: If `True`, run in the foreground without daemonizing.
 
-- `sock_path`: Path to the daemon socket.
-- `pid_path`: Path to the PID file.
-- **Returns:** Status message string.
+- **Returns:** A human-readable status message (returned only after the daemon exits; normally a long-running call).
 
-**`daemon_status`** — Check the daemon status.<br/>`def daemon_status(pid_path: Path = PID_PATH, sock_path: Path = SOCK_PATH) -> str`
+**`stop_daemon`** — Ask a running daemon to exit. Tries a graceful stop through the socket first, then falls back to `SIGTERM` against the PID in `pid_path`.<br/>`def stop_daemon(sock_path: Path = SOCK_PATH, pid_path: Path = PID_PATH) -> str`
 
-- `pid_path`: Path to the PID file.
-- `sock_path`: Path to the daemon socket.
+- `sock_path`: Path of the daemon's Unix domain socket.
+- `pid_path`: Path of the daemon's PID file.
 - **Returns:** Human-readable status string.
+
+**`daemon_status`** — Return a human-readable description of the daemon's running state.<br/>`def daemon_status(pid_path: Path = PID_PATH, sock_path: Path = SOCK_PATH) -> str`
 
 ______________________________________________________________________
 
