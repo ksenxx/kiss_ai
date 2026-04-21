@@ -634,17 +634,9 @@ class VSCodeServer:
                 self.printer.reset()
                 if tab.use_worktree and tab.agent._wt_pending:
                     try:
-                        changed = self._get_worktree_changed_files(tab_id)
-                        if changed:
-                            if not self._start_worktree_merge_review(tab_id):
-                                self._broadcast_worktree_done(changed, tab_id)
-                        else:
-                            # BUG-42 fix: guard auto-discard against
-                            # concurrent non-wt agent.
-                            with self._state_lock:
-                                non_wt_busy = self._any_non_wt_running()
-                            if not non_wt_busy:
-                                tab.agent.discard()
+                        self._present_pending_worktree(
+                            tab_id, try_merge_review=True,
+                        )
                     except BaseException:
                         logger.debug("Worktree merge review error", exc_info=True)
                 if task_end_event:  # pragma: no branch — always set
@@ -837,18 +829,7 @@ class VSCodeServer:
 
         # Emit deferred worktree_done after merge review completes
         if tab_id is not None:
-            tab = self._get_tab(tab_id)
-            if tab.use_worktree and tab.agent._wt_pending:
-                changed = self._get_worktree_changed_files(tab_id)
-                if changed:
-                    self._broadcast_worktree_done(changed, tab_id)
-                else:
-                    # BUG-42 fix: guard auto-discard against concurrent
-                    # non-wt agent — same guard as user-initiated discard.
-                    with self._state_lock:
-                        non_wt_busy = self._any_non_wt_running()
-                    if not non_wt_busy:
-                        tab.agent.discard()
+            self._present_pending_worktree(tab_id, try_merge_review=False)
 
     def _stop_task(self, tab_id: str | None = None) -> None:
         """Signal the agent to stop.
@@ -1136,15 +1117,9 @@ class VSCodeServer:
     def _emit_pending_worktree(self, tab_id: str = "") -> None:
         """Emit merge review or ``worktree_done`` for a pending worktree branch.
 
-        Called after replaying a session.  Tries to start a merge/diff
-        review first so the user can accept/reject hunks before the
-        branch is committed.  Falls back to ``worktree_done`` if the
-        review cannot be started (e.g. no uncommitted changes).
-
-        When the worktree has no changed files, auto-discards it
-        (consistent with ``_run_task_inner`` and ``_finish_merge``),
-        guarded by ``_any_non_wt_running`` to avoid disrupting a
-        concurrent non-worktree task.  BUG-66 fix.
+        Called after replaying a session.  Restores worktree state
+        from git (for post-restart resume) and delegates to
+        :meth:`_present_pending_worktree`.
 
         Args:
             tab_id: The tab to check for pending worktree.
@@ -1152,21 +1127,49 @@ class VSCodeServer:
         tab = self._get_tab(tab_id)
         if not tab.use_worktree:
             return
-        wt = tab.agent
         self._ensure_worktree_state(tab_id)
-        if not wt._wt_pending:
+        self._present_pending_worktree(tab_id, try_merge_review=True)
+
+    def _present_pending_worktree(
+        self, tab_id: str, *, try_merge_review: bool,
+    ) -> None:
+        """Auto-discard, start merge review, or emit ``worktree_done``.
+
+        Single source of truth for post-task / post-merge-review /
+        session-resume handling of a pending worktree (RED-10 fix).
+
+        Behavior:
+        - No pending worktree: return.
+        - Worktree has changed files and *try_merge_review* is True:
+          attempt to start a merge review; on failure broadcast
+          ``worktree_done``.
+        - Worktree has changed files and *try_merge_review* is False
+          (merge review already finished): broadcast ``worktree_done``.
+        - Worktree has no changes and no non-wt task is running:
+          auto-discard.
+        - Worktree has no changes but a non-wt task is running:
+          broadcast ``worktree_done`` so the user is aware of the
+          pending branch and can take manual action later
+          (BUG-68 fix — previously silent for the post-task and
+          post-merge-review paths).
+
+        Args:
+            tab_id: The tab with a pending worktree.
+            try_merge_review: Whether to attempt starting a merge
+                review before falling back.  Pass False after a
+                merge review has already been completed.
+        """
+        tab = self._get_tab(tab_id)
+        if not tab.use_worktree or not tab.agent._wt_pending:
             return
         changed = self._get_worktree_changed_files(tab_id)
-        if changed and self._start_worktree_merge_review(tab_id):
+        if changed and try_merge_review and self._start_worktree_merge_review(tab_id):
             return
-        # BUG-66 fix: auto-discard empty-change worktrees on session
-        # resume, consistent with _run_task_inner and _finish_merge.
-        # Guard against concurrent non-wt task the same way.
         if not changed:
             with self._state_lock:
                 non_wt_busy = self._any_non_wt_running()
             if not non_wt_busy:
-                wt.discard()
+                tab.agent.discard()
                 return
         self._broadcast_worktree_done(changed, tab_id)
 
@@ -1482,8 +1485,14 @@ class VSCodeServer:
         # INC-6 fix: check both unstaged AND staged files — staged
         # files that overlap with worktree changes would also cause
         # git merge to refuse.
+        # BUG-70 fix: also check untracked files in main.  The auto-
+        # merge flow (``stash --include-untracked`` → squash-merge →
+        # ``stash pop``) fails at pop when the squash recreates an
+        # untracked file, because pop can't overwrite the now-
+        # existing file.
         dirty = set(GitWorktreeOps.unstaged_files(wt.repo_root))
         dirty.update(GitWorktreeOps.staged_files(wt.repo_root))
+        dirty.update(_capture_untracked(str(wt.repo_root)))
         return bool(dirty & wt_files)
 
     @staticmethod

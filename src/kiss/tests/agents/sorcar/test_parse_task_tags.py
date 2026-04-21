@@ -167,11 +167,14 @@ class TestMultiTaskIntegration(unittest.TestCase):
         assert "prompt_template=task_prompt" in self._src
 
     def test_worktree_check_after_loop(self) -> None:
-        """Worktree merge review is in the finally block, after the loop."""
+        """Worktree merge review is in the finally block, after the loop.
+
+        After the RED-10 refactor the block delegates to
+        ``_present_pending_worktree`` instead of calling
+        ``_get_worktree_changed_files`` directly.
+        """
         loop_pos = self._src.index("for task_prompt in subtasks:")
-        # The worktree merge review check (with _get_worktree_changed_files)
-        # must be in the finally block, after the subtask loop.
-        wt_pos = self._src.index("_get_worktree_changed_files")
+        wt_pos = self._src.index("_present_pending_worktree")
         assert wt_pos > loop_pos
 
     def test_interrupt_breaks_loop(self) -> None:

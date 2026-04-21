@@ -297,33 +297,48 @@ class TestBug42Inc5Fix:
     _finish_merge now checks _any_non_wt_running() before discard."""
 
     def test_run_task_inner_auto_discard_guarded(self):
-        """_run_task_inner's worktree auto-discard checks the guard."""
-        src = inspect.getsource(VSCodeServer._run_task_inner)
-        # Find the auto-discard in the worktree path
-        discard_pos = src.find("tab.agent.discard()")
+        """_run_task_inner's worktree auto-discard is guarded.
+
+        After RED-10 refactor the guard lives in the shared helper
+        ``_present_pending_worktree``; ``_run_task_inner`` delegates
+        to it, so the guard must be present in the helper.
+        """
+        helper_src = inspect.getsource(VSCodeServer._present_pending_worktree)
+        # The guard must appear before the discard call in the helper.
+        discard_pos = helper_src.find("tab.agent.discard()")
         assert discard_pos > 0
-        # The guard should appear before the discard call
-        context = src[max(0, discard_pos - 500):discard_pos]
+        context = helper_src[max(0, discard_pos - 500):discard_pos]
         assert "_any_non_wt_running" in context, (
-            "Auto-discard must check _any_non_wt_running"
+            "Auto-discard in the shared helper must check _any_non_wt_running"
+        )
+        # _run_task_inner must delegate to the shared helper.
+        runner_src = inspect.getsource(VSCodeServer._run_task_inner)
+        assert "_present_pending_worktree" in runner_src, (
+            "_run_task_inner must delegate pending-worktree handling "
+            "to the shared helper"
         )
 
     def test_finish_merge_auto_discard_guarded(self):
-        """_finish_merge's auto-discard checks the guard."""
-        src = inspect.getsource(VSCodeServer._finish_merge)
-        assert "_any_non_wt_running" in src, (
-            "Auto-discard in _finish_merge must check _any_non_wt_running"
+        """_finish_merge's auto-discard is guarded via the shared helper."""
+        finish_src = inspect.getsource(VSCodeServer._finish_merge)
+        assert "_present_pending_worktree" in finish_src, (
+            "_finish_merge must delegate pending-worktree handling "
+            "to the shared helper"
         )
-        # Guard should be before discard
-        guard_pos = src.find("_any_non_wt_running")
-        discard_pos = src.find("tab.agent.discard()")
+        helper_src = inspect.getsource(VSCodeServer._present_pending_worktree)
+        guard_pos = helper_src.find("_any_non_wt_running")
+        discard_pos = helper_src.find("tab.agent.discard()")
+        assert guard_pos > 0 and discard_pos > 0
         assert guard_pos < discard_pos, (
-            "Guard must precede discard call"
+            "Guard must precede discard call in the shared helper"
         )
 
     def test_all_discard_paths_consistent(self):
-        """All three discard paths now have the same guard level."""
-        for name in ("_run_task_inner", "_finish_merge", "_handle_worktree_action"):
+        """All discard paths in the server share the same guard."""
+        for name in (
+            "_present_pending_worktree",
+            "_handle_worktree_action",
+        ):
             src = inspect.getsource(getattr(VSCodeServer, name))
             if "tab.agent.discard()" in src or "wt.discard()" in src:
                 assert "_any_non_wt_running" in src, (
