@@ -16,32 +16,6 @@ export function activate(context: vscode.ExtensionContext): void {
   ensureLocalBinInPath();
   console.log('KISS Sorcar extension activating...');
 
-  // Detect extension update (rebuild) and prompt for restart.
-  // Compares extension.js mtime with the value stored on the previous
-  // activation.  Shows an "Extension updated" notification only after
-  // a build-extension.sh run, not on every normal startup.
-  const extJsPath_ = path.join(context.extensionPath, 'out', 'extension.js');
-  try {
-    const stat = fs.statSync(extJsPath_);
-    const prevMtime = context.globalState.get<number>('extMtime', 0);
-    const isUpdate = prevMtime > 0 && stat.mtimeMs !== prevMtime;
-    void context.globalState.update('extMtime', stat.mtimeMs);
-    if (isUpdate) {
-      vscode.window
-        .showInformationMessage(
-          'KISS Sorcar: Extension updated successfully! Restart VS Code to apply all changes.',
-          'Restart VS Code',
-        )
-        .then(choice => {
-          if (choice === 'Restart VS Code') {
-            vscode.commands.executeCommand('workbench.action.reloadWindow');
-          }
-        });
-    }
-  } catch {
-    /* ignore stat errors */
-  }
-
   mergeManager = new MergeManager();
   context.subscriptions.push({dispose: () => mergeManager?.dispose()});
 

@@ -38,7 +38,7 @@
 - `build-extension.sh` writes `~/.kiss/.extension-updated` marker after VSIX install; `DependencyInstaller.ts` checks for this marker on activation and sets `showRestartNotification = true` even on the fast path (uv + .venv present) — this ensures the restart notification always appears after a build, regardless of whether the extension was auto-reloaded
 - VS Code extension uses `activationEvents: ["onStartupFinished"]` — activates reliably after startup; implicit `onView:` events from the `contributes.views` section also trigger activation when the sidebar is open
 - `build-extension.sh` only opens VS Code (`"$CODE" .`) when VS Code is NOT already running — when running, VS Code 1.116+ auto-reloads the extension host after `--install-extension --force`
-- Extension detects rebuilds via `extension.js` mtime stored in `globalState` and shows "Extension updated" notification with a "Restart VS Code" button — this is the "ask to restart" mechanism
+- Extension restart notification is handled ONLY by the marker-based mechanism in `DependencyInstaller.ts` (via `~/.kiss/.extension-updated`). The mtime-based detection in `extension.ts` was removed to prevent duplicate "restart VS Code" notifications.
 - BUG-34 through BUG-38 (found in audit8) are now FIXED; test_worktree_fixes.py verifies correct behavior
 - BUG-34 FIX: Non-worktree pre-task snapshot now runs inside `repo_lock(repo)` and captures `pre_head_sha` — atomic snapshot prevents concurrent worktree merge from corrupting state
 - BUG-35 FIX: `_handle_worktree_action("merge")` and `_new_chat` now check `_any_non_wt_running()` — refuse merge/release while a non-worktree agent is writing to the main tree
