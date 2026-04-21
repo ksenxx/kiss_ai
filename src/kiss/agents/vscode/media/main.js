@@ -1931,6 +1931,12 @@
       case 'worktree_result':
         handleWorktreeResult(ev);
         break;
+      case 'autocommit_prompt':
+        showAutocommitActions(ev);
+        break;
+      case 'autocommit_done':
+        handleAutocommitResult(ev);
+        break;
       case 'task_done': {
         let doneT0 = t0;
         if (!doneT0 && ev.tabId !== undefined) {
@@ -2257,6 +2263,83 @@
     const div = mkEl('div', 'ev ' + cls);
     const msg = ev.message || '';
     div.textContent = msg;
+    O.appendChild(div);
+    sb();
+  }
+
+  // --- Autocommit prompt UI (non-worktree mode) ---
+  // After the user resolves all merge-diff hunks, the backend sends an
+  // `autocommit_prompt` event when the main branch still has dirty
+  // state.  We show "Auto commit" / "Do nothing" buttons in the input
+  // area, matching the worktree merge/discard bar.
+
+  let autocommitBar = null;
+
+  function clearAutocommitBar() {
+    if (autocommitBar && autocommitBar.parentNode) {
+      autocommitBar.parentNode.removeChild(autocommitBar);
+    }
+    autocommitBar = null;
+    if (inputContainer) inputContainer.style.display = '';
+  }
+
+  function showAutocommitActions(ev) {
+    clearAutocommitBar();
+    const bar = mkEl('div', 'wt-bar');
+    const label = mkEl('span', 'wt-label');
+    const n = (ev && ev.changedFiles && ev.changedFiles.length) || 0;
+    label.textContent =
+      n === 1
+        ? '1 uncommitted change on main. Auto commit?'
+        : n + ' uncommitted changes on main. Auto commit?';
+    bar.appendChild(label);
+
+    const btns = mkEl('div', 'wt-btns');
+    const commitBtn = mkEl('button', 'wt-btn wt-merge');
+    commitBtn.textContent = 'Auto commit';
+    commitBtn.addEventListener('click', () => {
+      disableAutocommitBtns();
+      vscode.postMessage({
+        type: 'autocommitAction',
+        action: 'commit',
+        tabId: (ev && ev.tabId) || activeTabId,
+      });
+    });
+
+    const skipBtn = mkEl('button', 'wt-btn wt-discard');
+    skipBtn.textContent = 'Do nothing';
+    skipBtn.addEventListener('click', () => {
+      disableAutocommitBtns();
+      vscode.postMessage({
+        type: 'autocommitAction',
+        action: 'skip',
+        tabId: (ev && ev.tabId) || activeTabId,
+      });
+    });
+
+    btns.appendChild(commitBtn);
+    btns.appendChild(skipBtn);
+    bar.appendChild(btns);
+
+    if (inputContainer) inputContainer.style.display = 'none';
+    const area = document.getElementById('input-area');
+    area.insertBefore(bar, area.firstChild);
+    autocommitBar = bar;
+  }
+
+  function disableAutocommitBtns() {
+    if (!autocommitBar) return;
+    const btns = autocommitBar.querySelectorAll('.wt-btn');
+    btns.forEach(b => {
+      b.disabled = true;
+    });
+  }
+
+  function handleAutocommitResult(ev) {
+    clearAutocommitBar();
+    const cls = ev && ev.success ? 'wt-result-ok' : 'wt-result-err';
+    const div = mkEl('div', 'ev ' + cls);
+    div.textContent = (ev && ev.message) || '';
     O.appendChild(div);
     sb();
   }
