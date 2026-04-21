@@ -452,6 +452,7 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         """
         released_branch = self._release_worktree()
 
+        original_branch: str | None
         if released_branch is not None:
             original_branch = released_branch
         else:
@@ -530,6 +531,32 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         wt_work_dir.mkdir(parents=True, exist_ok=True)
         return wt_work_dir
 
+    # -- Warning flushing --------------------------------------------------
+
+    def _flush_warnings(self, printer: Any) -> None:
+        """Broadcast and clear any pending stash/merge warnings.
+
+        Called on every ``run()`` code path (success and all three
+        fallbacks) so that warnings set by ``_release_worktree`` or by
+        server-side BUG-B handling are never silently dropped.
+
+        Args:
+            printer: An object with a ``broadcast(event)`` method, or
+                any other value (ignored when ``broadcast`` is absent).
+        """
+        if printer is None or not hasattr(printer, "broadcast"):
+            return
+        if self._stash_pop_warning:
+            printer.broadcast(
+                {"type": "warning", "message": self._stash_pop_warning}
+            )
+            self._stash_pop_warning = None
+        if self._merge_conflict_warning:
+            printer.broadcast(
+                {"type": "warning", "message": self._merge_conflict_warning}
+            )
+            self._merge_conflict_warning = None
+
     # -- Main entry point --------------------------------------------------
 
     def run(  # type: ignore[override]
@@ -564,6 +591,9 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
             YAML string with 'success' and 'summary' keys.
         """
         if not kwargs.pop("use_worktree", True):
+            # BUG-64 fix: flush any pending warnings (e.g. set by the
+            # BUG-B handler in the server) before falling back.
+            self._flush_warnings(kwargs.get("printer"))
             return super().run(prompt_template=prompt_template, **kwargs)
 
         work_dir_str = kwargs.get("work_dir")
@@ -572,6 +602,8 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         repo = GitWorktreeOps.discover_repo(discovery_dir)
         if repo is None:
             logger.warning("Not a git repo, running task directly")
+            # BUG-64 fix: flush warnings on not-a-repo fallback.
+            self._flush_warnings(kwargs.get("printer"))
             return super().run(prompt_template=prompt_template, **kwargs)
 
         # Pre-allocate a chat_id so the worktree branch name is stable
@@ -587,28 +619,16 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
 
         wt_work_dir = self._try_setup_worktree(repo, work_dir_str)
         if wt_work_dir is None:
+            # BUG-64 fix: flush any warnings that _release_worktree
+            # (called inside _try_setup_worktree) may have set before
+            # the subsequent setup failure.
+            self._flush_warnings(kwargs.get("printer"))
             return super().run(prompt_template=prompt_template, **kwargs)
 
         # Notify VS Code extension so the worktree appears in the SCM panel
         printer = kwargs.get("printer")
+        self._flush_warnings(printer)
         if printer and hasattr(printer, "broadcast"):
-            # Surface warnings from auto-releasing a prior worktree
-            if self._stash_pop_warning:
-                printer.broadcast(
-                    {
-                        "type": "warning",
-                        "message": self._stash_pop_warning,
-                    }
-                )
-                self._stash_pop_warning = None
-            if self._merge_conflict_warning:
-                printer.broadcast(
-                    {
-                        "type": "warning",
-                        "message": self._merge_conflict_warning,
-                    }
-                )
-                self._merge_conflict_warning = None
             printer.broadcast(
                 {
                     "type": "worktree_created",

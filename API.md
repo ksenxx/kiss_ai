@@ -878,8 +878,6 @@ ______________________________________________________________________
 
 ##### `class MergeResult(enum.Enum)` — Outcome of a merge operation.
 
-##### `class ManualMergeResult` — Outcome of a manual (--no-commit) merge operation.
-
 ##### `class GitWorktreeOps` — Stateless helper class with all git worktree operations.
 
 - **discover_repo** — Find the git repo root containing *path*.<br/>`discover_repo(path: Path) -> Path | None`
@@ -966,12 +964,6 @@ ______________________________________________________________________
 
   - `repo`: Git repo root path.
   - **Returns:** List of files staged for commit, or an empty list if the command fails.
-
-- **manual_merge_branch** — Merge with `--no-commit --no-ff` for interactive review. On success (no conflicts), unstages changes via `git reset HEAD` so the user can selectively stage hunks.<br/>`manual_merge_branch(repo: Path, branch: str) -> ManualMergeResult`
-
-  - `repo`: Git repo root path.
-  - `branch`: Branch to merge.
-  - **Returns:** A :class:`ManualMergeResult` with status and conflict info.
 
 - **delete_branch** — Delete a branch and its git config section (best-effort). Tries `-d` first (safe delete), falls back to `-D` (force). Also removes the `branch.<name>.*` config section.<br/>`delete_branch(repo: Path, branch: str) -> bool`
 

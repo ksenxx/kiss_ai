@@ -94,19 +94,6 @@ class MergeResult(enum.Enum):
     MERGE_FAILED = "merge_failed"
 
 
-@dataclass(frozen=True)
-class ManualMergeResult:
-    """Outcome of a manual (--no-commit) merge operation.
-
-    Attributes:
-        status: The merge outcome.
-        has_conflicts: True if CONFLICT was detected in merge output.
-    """
-
-    status: MergeResult
-    has_conflicts: bool
-
-
 def _unquote_git_path(path: str) -> str:
     """Unquote a C-style quoted filename from ``git status --porcelain``.
 
@@ -467,35 +454,6 @@ class GitWorktreeOps:
         if result.returncode != 0:
             return []
         return [f for f in result.stdout.strip().splitlines() if f]
-
-    @staticmethod
-    def manual_merge_branch(repo: Path, branch: str) -> ManualMergeResult:
-        """Merge with ``--no-commit --no-ff`` for interactive review.
-
-        On success (no conflicts), unstages changes via ``git reset HEAD``
-        so the user can selectively stage hunks.
-
-        Args:
-            repo: Git repo root path.
-            branch: Branch to merge.
-
-        Returns:
-            A :class:`ManualMergeResult` with status and conflict info.
-        """
-        result = _git("merge", "--no-commit", "--no-ff", branch, cwd=repo)
-        has_conflicts = "CONFLICT" in (result.stdout + result.stderr)
-
-        if result.returncode != 0 and not has_conflicts:
-            # BUG-62 fix: abort any partial merge state (MERGE_HEAD)
-            # so the repo is clean for subsequent operations.
-            _git("merge", "--abort", cwd=repo)
-            return ManualMergeResult(status=MergeResult.MERGE_FAILED, has_conflicts=False)
-
-        if not has_conflicts:
-            _git("reset", "HEAD", cwd=repo)
-
-        status = MergeResult.CONFLICT if has_conflicts else MergeResult.SUCCESS
-        return ManualMergeResult(status=status, has_conflicts=has_conflicts)
 
     @staticmethod
     def delete_branch(repo: Path, branch: str) -> bool:

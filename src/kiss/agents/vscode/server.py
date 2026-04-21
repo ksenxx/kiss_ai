@@ -1015,6 +1015,20 @@ class VSCodeServer:
             tab_id: The frontend tab identifier.
         """
         tab = self._get_tab(tab_id)
+        # BUG-65 fix: refuse while a merge review is active — calling
+        # ``tab.agent.new_chat()`` would trigger ``_release_worktree``
+        # which auto-commits and squash-merges, destroying the user's
+        # hunk-picking intent and leaving the VS Code merge view
+        # stale.  Symmetric with the ``_run_task_inner`` guard.
+        with self._state_lock:
+            if tab.is_merging:
+                self.printer.broadcast({
+                    "type": "error",
+                    "text": "Cannot start a new chat while a merge review is in progress."
+                            " Accept or reject all changes first.",
+                    "tabId": tab_id,
+                })
+                return
         # BUG-44 fix: check _wt_pending regardless of use_worktree —
         # a tab may have switched modes but still have a pending
         # worktree from the previous session.
