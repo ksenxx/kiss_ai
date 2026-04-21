@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import shlex
 import subprocess
 import threading
@@ -55,39 +54,6 @@ _SKIP_PHRASES: tuple[str, ...] = (
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _parse_test_counts(output: str) -> tuple[int, int]:
-    """Extract passed and total test counts from pytest or bash test output.
-
-    Recognises pytest summary lines ("5 passed, 2 failed") and TAP-style
-    lines ("ok 1", "not ok 2") that terminal-bench tasks commonly produce.
-    Returns (passed, total). Both are 0 when no test lines are found.
-
-    Args:
-        output: Combined stdout/stderr from running the test suite.
-
-    Returns:
-        Tuple of (passed_count, total_count).
-    """
-    # pytest: "5 passed, 2 failed, 1 error" or "3 passed"
-    pytest_match = re.search(
-        r"(\d+) passed(?:,\s*(\d+) failed)?(?:,\s*(\d+) error(?:s)?)?",
-        output,
-    )
-    if pytest_match:
-        passed = int(pytest_match.group(1))
-        failed = int(pytest_match.group(2) or 0)
-        errors = int(pytest_match.group(3) or 0)
-        return passed, passed + failed + errors
-
-    # TAP: count "ok N" vs "not ok N" lines
-    ok_count = len(re.findall(r"^ok \d+", output, re.MULTILINE))
-    not_ok_count = len(re.findall(r"^not ok \d+", output, re.MULTILINE))
-    if ok_count or not_ok_count:
-        return ok_count, ok_count + not_ok_count
-
-    return 0, 0
 
 
 _wheel_lock = threading.Lock()
@@ -241,10 +207,6 @@ class SorcarHarborAgent(BaseAgent):
     ) -> None:
         """Run sorcar with the task instruction inside the container.
 
-        After the first sorcar run, automatically runs the task's
-        test.sh and retries once with failure output if tests don't
-        pass.
-
         Args:
             instruction: Natural language task description from harbor.
             environment: The harbor execution environment.
@@ -269,41 +231,10 @@ class SorcarHarborAgent(BaseAgent):
         model_flag = f"-m {self.model_name}" if self.model_name else ""
         env = {k: v for k in _API_KEY_VARS if (v := os.environ.get(k, ""))}
 
-        # First sorcar run.
         result = await self._run_sorcar(environment, instruction, env, model_flag)
 
-        # Auto-verify: run the test suite and retry once on failure.
-        test_result = await environment.exec(
-            "cd /app && bash test.sh 2>&1 | tail -80",
-            user="root",
-            timeout_sec=180,
-        )
-        test_out = test_result.stdout or ""
-        if test_result.return_code != 0 or "FAILED" in test_out:
-            logger.info("Tests failed after first run — retrying with failure context")
-            retry_task = (
-                "The verifier tests FAILED after your previous attempt."
-                " Fix the root cause and make ALL tests pass.\n\n"
-                f"Test output:\n{test_out}\n\n"
-                f"Original task: {instruction}"
-            )
-            result = await self._run_sorcar(
-                environment, retry_task, env, model_flag
-            )
-            # Re-run tests after retry to get updated metadata.
-            test_result = await environment.exec(
-                "cd /app && bash test.sh 2>&1 | tail -80",
-                user="root",
-                timeout_sec=180,
-            )
-            test_out = test_result.stdout or ""
-
-        passed, total = _parse_test_counts(test_out)
         context.metadata = {
             "stdout": result.stdout,
             "stderr": result.stderr,
             "return_code": result.return_code,
-            "tests_passed": passed,
-            "tests_total": total,
-            "partial_score": round(passed / total, 3) if total > 0 else None,
         }

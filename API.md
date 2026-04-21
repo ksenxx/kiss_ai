@@ -1244,7 +1244,7 @@ ______________________________________________________________________
 
   - `environment`: The harbor execution environment.
 
-- **run** — Run sorcar with the task instruction inside the container. After the first sorcar run, automatically runs the task's test.sh and retries once with failure output if tests don't pass.<br/>`async run(instruction: str, environment: BaseEnvironment, context: AgentContext) -> None`
+- **run** — Run sorcar with the task instruction inside the container.<br/>`async run(instruction: str, environment: BaseEnvironment, context: AgentContext) -> None`
 
   - `instruction`: Natural language task description from harbor.
   - `environment`: The harbor execution environment.
@@ -1302,7 +1302,7 @@ ______________________________________________________________________
 - **test_skip_compcert**<br/>`test_skip_compcert() -> None`
 - **test_skip_windows_311**<br/>`test_skip_windows_311() -> None`
 - **test_skip_ocaml_gc**<br/>`test_skip_ocaml_gc() -> None`
-- **test_non_skip_task_runs_normally** — A normal task runs which-check, sorcar, then verifies.<br/>`test_non_skip_task_runs_normally() -> None`
+- **test_non_skip_task_runs_normally** — A normal task runs which-check then sorcar exactly once.<br/>`test_non_skip_task_runs_normally() -> None`
 
 ##### `class TestSetup` — Verify setup runs the expected installation steps.
 
