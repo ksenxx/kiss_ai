@@ -1,12 +1,19 @@
-"""Cron Manager Daemon — scheduled task manager with Unix domain socket interface.
+"""Cron Manager Daemon — thin Unix-socket proxy over the system ``crontab``.
 
 Runs as a daemon process listening on ``~/.kiss/cron_manager.sock`` for
-cron job management commands from any KISS agent.  Jobs are stored in a
-JSON file at ``~/.kiss/cron_jobs.json`` so they survive daemon restarts.
+add / list / remove commands from any KISS agent.  Scheduling, execution
+and persistence are delegated to the host's cron service; this daemon
+only marshals JSON commands into ``crontab -l`` / ``crontab -`` calls.
+
+KISS-owned crontab entries are framed by a marker comment so user-authored
+lines are never disturbed::
+
+    # KISS-JOB <job_id> <created_at>
+    <schedule> <command>
 
 Daemon control::
 
-    python -m kiss.channels.cron_manager_daemon start
+    python -m kiss.channels.cron_manager_daemon start [--foreground]
     python -m kiss.channels.cron_manager_daemon stop
     python -m kiss.channels.cron_manager_daemon status
 
@@ -33,6 +40,7 @@ import sys
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -43,146 +51,171 @@ KISS_DIR = Path.home() / ".kiss"
 SOCK_PATH = KISS_DIR / "cron_manager.sock"
 PID_PATH = KISS_DIR / "cron_manager.pid"
 LOG_PATH = KISS_DIR / "cron_manager.log"
-JOBS_PATH = KISS_DIR / "cron_jobs.json"
 
-# Maximum message size: 1 MB
+# Maximum incoming message size: 1 MB
 _MAX_MSG = 1_048_576
 
+# Marker that tags KISS-owned crontab entries
+_MARKER = "# KISS-JOB"
+
 
 # ---------------------------------------------------------------------------
-# Cron expression parsing
+# System crontab helpers
 # ---------------------------------------------------------------------------
 
 
-def _parse_cron_field(field: str, lo: int, hi: int) -> set[int]:
-    """Parse a single cron field into a set of matching integer values.
-
-    Supports: ``*``, ``*/N``, ``N``, ``N-M``, ``N-M/S``, and comma-separated
-    combinations thereof.
+def _read_crontab(crontab_cmd: str) -> str:
+    """Return the current user's crontab contents.
 
     Args:
-        field: The cron field string (e.g. ``"*/5"``, ``"1,15"``, ``"0-23/2"``).
-        lo: Minimum valid value for this field (inclusive).
-        hi: Maximum valid value for this field (inclusive).
+        crontab_cmd: Path or name of the ``crontab`` executable.
 
     Returns:
-        Set of integers that match the field specification.
+        The crontab text, or ``""`` when the user has no crontab installed.
 
     Raises:
-        ValueError: If the field cannot be parsed.
+        RuntimeError: If ``crontab -l`` fails for a reason other than an
+            empty crontab.
     """
-    values: set[int] = set()
-    for part in field.split(","):
-        part = part.strip()
-        if part == "*":
-            values.update(range(lo, hi + 1))
-        elif part.startswith("*/"):
-            step = int(part[2:])
-            if step <= 0:
-                raise ValueError(f"Invalid step: {step}")
-            values.update(range(lo, hi + 1, step))
-        elif "-" in part and "/" in part:
-            range_part, step_str = part.split("/", 1)
-            start_str, end_str = range_part.split("-", 1)
-            start, end, step = int(start_str), int(end_str), int(step_str)
-            if step <= 0:
-                raise ValueError(f"Invalid step: {step}")
-            values.update(range(start, end + 1, step))
-        elif "-" in part:
-            start_str, end_str = part.split("-", 1)
-            values.update(range(int(start_str), int(end_str) + 1))
-        else:
-            values.add(int(part))
-    # Validate
-    for v in values:
-        if v < lo or v > hi:
-            raise ValueError(f"Value {v} out of range [{lo}, {hi}]")
-    return values
-
-
-def parse_cron_expression(expr: str) -> dict[str, set[int]]:
-    """Parse a 5-field cron expression into matched value sets.
-
-    Fields: minute hour day-of-month month day-of-week
-
-    Args:
-        expr: Cron expression string, e.g. ``"*/5 * * * *"``.
-
-    Returns:
-        Dictionary with keys ``minute``, ``hour``, ``dom``, ``month``, ``dow``
-        each mapping to a set of matching integer values.
-
-    Raises:
-        ValueError: If the expression does not have exactly 5 fields or
-            any field is invalid.
-    """
-    fields = expr.strip().split()
-    if len(fields) != 5:
-        raise ValueError(f"Cron expression must have 5 fields, got {len(fields)}: {expr!r}")
-    return {
-        "minute": _parse_cron_field(fields[0], 0, 59),
-        "hour": _parse_cron_field(fields[1], 0, 23),
-        "dom": _parse_cron_field(fields[2], 1, 31),
-        "month": _parse_cron_field(fields[3], 1, 12),
-        "dow": _parse_cron_field(fields[4], 0, 6),
-    }
-
-
-def cron_matches_time(parsed: dict[str, set[int]], dt: datetime) -> bool:
-    """Check whether a parsed cron schedule matches a specific datetime.
-
-    Args:
-        parsed: Output of :func:`parse_cron_expression`.
-        dt: The datetime to check against.
-
-    Returns:
-        True if all five fields match the datetime.
-    """
-    return (
-        dt.minute in parsed["minute"]
-        and dt.hour in parsed["hour"]
-        and dt.day in parsed["dom"]
-        and dt.month in parsed["month"]
-        and dt.weekday() in parsed["dow"]  # Monday=0, Sunday=6
+    result = subprocess.run(
+        [crontab_cmd, "-l"], capture_output=True, text=True, check=False
+    )
+    if result.returncode == 0:
+        return result.stdout
+    if "no crontab" in result.stderr.lower():
+        return ""
+    raise RuntimeError(
+        f"`{crontab_cmd} -l` failed (rc={result.returncode}): {result.stderr.strip()}"
     )
 
 
-# ---------------------------------------------------------------------------
-# Job persistence
-# ---------------------------------------------------------------------------
+def _write_crontab(content: str, crontab_cmd: str) -> None:
+    """Replace the current user's crontab with ``content``.
 
-
-def _load_jobs(path: Path) -> dict[str, dict[str, Any]]:
-    """Load jobs from the JSON file.
+    A trailing newline is appended if missing.
 
     Args:
-        path: Path to the jobs JSON file.
+        content: Full crontab text to install.
+        crontab_cmd: Path or name of the ``crontab`` executable.
+
+    Raises:
+        RuntimeError: If ``crontab -`` rejects the input.
+    """
+    if content and not content.endswith("\n"):
+        content += "\n"
+    result = subprocess.run(
+        [crontab_cmd, "-"],
+        input=content,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"`{crontab_cmd} -` failed (rc={result.returncode}): {result.stderr.strip()}"
+        )
+
+
+@dataclass(frozen=True)
+class CronJob:
+    """A KISS-owned cron entry parsed from the system crontab.
+
+    Attributes:
+        id: Short unique identifier used to remove the job later.
+        schedule: Five-field cron expression (minute hour dom month dow).
+        command: The shell command scheduled to run.
+        created_at: ISO-8601 timestamp recorded when the job was added.
+    """
+
+    id: str
+    schedule: str
+    command: str
+    created_at: str
+
+
+def _parse_kiss_jobs(content: str) -> list[CronJob]:
+    """Extract KISS-owned jobs from raw crontab ``content``, in order.
+
+    Entries whose marker line is malformed, orphaned (no schedule line
+    follows), or whose schedule line does not have five fields plus a
+    command are silently skipped.
+
+    Args:
+        content: Full crontab text.
 
     Returns:
-        Dictionary mapping job ID to job data.
+        The list of parsed :class:`CronJob` instances in file order.
     """
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text())
-        if not isinstance(data, dict):
-            return {}
-        return data
-    except (json.JSONDecodeError, OSError):
-        return {}
+    jobs: list[CronJob] = []
+    lines = content.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith(_MARKER):
+            parts = line.split(None, 3)
+            if len(parts) == 4 and i + 1 < len(lines):
+                job_id, created_at = parts[2], parts[3]
+                fields = lines[i + 1].split(None, 5)
+                if len(fields) == 6:
+                    jobs.append(
+                        CronJob(job_id, " ".join(fields[:5]), fields[5], created_at)
+                    )
+                    i += 2
+                    continue
+        i += 1
+    return jobs
 
 
-def _save_jobs(path: Path, jobs: dict[str, dict[str, Any]]) -> None:
-    """Save jobs to the JSON file atomically.
+def _remove_kiss_block(content: str, job_id: str) -> tuple[str, bool]:
+    """Strip the two-line KISS block for ``job_id`` from ``content``.
+
+    Non-KISS lines and other KISS blocks are left untouched.
 
     Args:
-        path: Path to the jobs JSON file.
-        jobs: Dictionary mapping job ID to job data.
+        content: Full crontab text.
+        job_id: Job identifier to remove.
+
+    Returns:
+        ``(new_content, removed)`` — ``new_content`` equals ``content``
+        untouched when ``removed`` is ``False``.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(jobs, indent=2))
-    tmp.replace(path)
+    lines = content.splitlines()
+    kept: list[str] = []
+    removed = False
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith(_MARKER):
+            parts = line.split(None, 3)
+            if len(parts) == 4 and parts[2] == job_id and i + 1 < len(lines):
+                i += 2
+                removed = True
+                continue
+        kept.append(line)
+        i += 1
+    if not removed:
+        return content, False
+    new_content = "\n".join(kept)
+    if kept:
+        new_content += "\n"
+    return new_content, True
+
+
+def _validate_schedule(schedule: str) -> None:
+    """Raise :class:`ValueError` unless ``schedule`` has five whitespace fields."""
+    fields = schedule.strip().split()
+    if len(fields) != 5:
+        raise ValueError(
+            f"Cron schedule must have 5 fields, got {len(fields)}: {schedule!r}"
+        )
+
+
+def _validate_command(command: str) -> None:
+    """Raise :class:`ValueError` unless ``command`` is non-empty and single-line."""
+    if not command.strip():
+        raise ValueError("Command must not be empty")
+    if "\n" in command or "\r" in command:
+        raise ValueError("Command must be a single line")
 
 
 # ---------------------------------------------------------------------------
@@ -191,119 +224,106 @@ def _save_jobs(path: Path, jobs: dict[str, dict[str, Any]]) -> None:
 
 
 class CronDaemon:
-    """Daemon process that manages cron jobs via a Unix domain socket.
+    """Unix-domain-socket daemon proxying job commands to system ``crontab``.
 
-    The daemon listens for JSON commands on the socket at
-    ``~/.kiss/cron_manager.sock`` and runs a scheduler thread that
-    checks every 30 seconds for jobs that need to execute.
+    The daemon owns no scheduling state — each incoming request is
+    translated into one or two ``crontab`` invocations under a mutex so
+    concurrent add/remove operations are race-free.  System cron performs
+    the actual scheduling, execution, and persistence.
 
-    Attributes:
-        sock_path: Path to the Unix domain socket.
-        pid_path: Path to the PID file.
-        jobs_path: Path to the persistent jobs file.
+    Args:
+        sock_path: Path for the Unix domain socket the daemon listens on.
+        pid_path: Path for the daemon PID file.
+        crontab_cmd: Name or absolute path of the ``crontab`` executable.
+            Tests may point this at a fake binary; production uses ``"crontab"``.
     """
 
     def __init__(
         self,
         sock_path: Path = SOCK_PATH,
         pid_path: Path = PID_PATH,
-        jobs_path: Path = JOBS_PATH,
+        crontab_cmd: str = "crontab",
     ) -> None:
         self.sock_path = sock_path
         self.pid_path = pid_path
-        self.jobs_path = jobs_path
-        self._jobs: dict[str, dict[str, Any]] = {}
+        self.crontab_cmd = crontab_cmd
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._server_socket: socket.socket | None = None
-        # Track which minute we last ran jobs for to avoid double-execution
-        self._last_run_minute: str = ""
 
-    # -- Job management -----------------------------------------------------
+    # -- Job operations ------------------------------------------------------
 
     def _add_job(self, schedule: str, command: str) -> dict[str, Any]:
-        """Add a new cron job.
-
-        Args:
-            schedule: Cron expression (5 fields).
-            command: Shell command to execute.
-
-        Returns:
-            Response dict with status and job_id.
-        """
-        # Validate cron expression
+        """Add a new job to the system crontab and return a response dict."""
         try:
-            parse_cron_expression(schedule)
+            _validate_schedule(schedule)
+            _validate_command(command)
         except ValueError as e:
             return {"status": "error", "message": str(e)}
-
         job_id = uuid.uuid4().hex[:12]
-        job = {
-            "id": job_id,
-            "schedule": schedule,
-            "command": command,
-            "created_at": datetime.now().isoformat(),
-            "last_run": None,
-            "run_count": 0,
-        }
+        created_at = datetime.now().isoformat()
+        block = f"{_MARKER} {job_id} {created_at}\n{schedule} {command}\n"
         with self._lock:
-            self._jobs[job_id] = job
-            _save_jobs(self.jobs_path, self._jobs)
+            try:
+                current = _read_crontab(self.crontab_cmd)
+                if current and not current.endswith("\n"):
+                    current += "\n"
+                _write_crontab(current + block, self.crontab_cmd)
+            except RuntimeError as e:
+                return {"status": "error", "message": str(e)}
         logger.info("Added job %s: %s -> %s", job_id, schedule, command)
         return {"status": "ok", "job_id": job_id}
 
     def _remove_job(self, job_id: str) -> dict[str, Any]:
-        """Remove a cron job by ID.
-
-        Args:
-            job_id: The job identifier.
-
-        Returns:
-            Response dict with status.
-        """
+        """Remove a job from the system crontab and return a response dict."""
         with self._lock:
-            if job_id not in self._jobs:
-                return {"status": "error", "message": f"Job {job_id!r} not found"}
-            del self._jobs[job_id]
-            _save_jobs(self.jobs_path, self._jobs)
+            try:
+                current = _read_crontab(self.crontab_cmd)
+                new_content, removed = _remove_kiss_block(current, job_id)
+                if not removed:
+                    return {"status": "error", "message": f"Job {job_id!r} not found"}
+                _write_crontab(new_content, self.crontab_cmd)
+            except RuntimeError as e:
+                return {"status": "error", "message": str(e)}
         logger.info("Removed job %s", job_id)
         return {"status": "ok", "message": f"Job {job_id!r} removed"}
 
     def _list_jobs(self) -> dict[str, Any]:
-        """List all cron jobs.
-
-        Returns:
-            Response dict with job list.
-        """
+        """Return a response dict listing every KISS-owned crontab entry."""
         with self._lock:
-            return {"status": "ok", "jobs": list(self._jobs.values())}
+            try:
+                current = _read_crontab(self.crontab_cmd)
+            except RuntimeError as e:
+                return {"status": "error", "message": str(e)}
+        jobs = [
+            {
+                "id": j.id,
+                "schedule": j.schedule,
+                "command": j.command,
+                "created_at": j.created_at,
+            }
+            for j in _parse_kiss_jobs(current)
+        ]
+        return {"status": "ok", "jobs": jobs}
 
     def _get_status(self) -> dict[str, Any]:
-        """Get daemon status information.
+        """Return a response dict with the daemon PID and KISS job count."""
+        try:
+            with self._lock:
+                count = len(_parse_kiss_jobs(_read_crontab(self.crontab_cmd)))
+        except RuntimeError as e:
+            return {
+                "status": "ok",
+                "pid": os.getpid(),
+                "job_count": -1,
+                "warning": str(e),
+            }
+        return {"status": "ok", "pid": os.getpid(), "job_count": count}
 
-        Returns:
-            Response dict with daemon status.
-        """
-        with self._lock:
-            job_count = len(self._jobs)
-        return {
-            "status": "ok",
-            "pid": os.getpid(),
-            "job_count": job_count,
-            "uptime_info": "running",
-        }
-
-    # -- Command dispatch ---------------------------------------------------
+    # -- Command dispatch ----------------------------------------------------
 
     def _handle_command(self, data: dict[str, Any]) -> dict[str, Any]:
-        """Dispatch a command from a client.
-
-        Args:
-            data: Parsed JSON command with at least an ``"action"`` key.
-
-        Returns:
-            Response dictionary.
-        """
+        """Dispatch a parsed JSON command and return the response payload."""
         action = data.get("action")
         if action == "add":
             schedule = data.get("schedule", "")
@@ -311,32 +331,24 @@ class CronDaemon:
             if not schedule or not command:
                 return {"status": "error", "message": "Missing 'schedule' or 'command'"}
             return self._add_job(schedule, command)
-        elif action == "remove":
+        if action == "remove":
             job_id = data.get("job_id", "")
             if not job_id:
                 return {"status": "error", "message": "Missing 'job_id'"}
             return self._remove_job(job_id)
-        elif action == "list":
+        if action == "list":
             return self._list_jobs()
-        elif action == "status":
+        if action == "status":
             return self._get_status()
-        elif action == "stop":
+        if action == "stop":
             self._stop_event.set()
             return {"status": "ok", "message": "Daemon stopping"}
-        else:
-            return {"status": "error", "message": f"Unknown action: {action!r}"}
+        return {"status": "error", "message": f"Unknown action: {action!r}"}
 
-    # -- Client connection handler ------------------------------------------
+    # -- Connection handling -------------------------------------------------
 
     def _handle_client(self, conn: socket.socket) -> None:
-        """Handle a single client connection.
-
-        Reads a JSON message, dispatches the command, and sends back the
-        JSON response.
-
-        Args:
-            conn: Connected client socket.
-        """
+        """Read one JSON request from ``conn``, dispatch, and send the reply."""
         try:
             conn.settimeout(10.0)
             chunks: list[bytes] = []
@@ -349,26 +361,21 @@ class CronDaemon:
                 total += len(chunk)
                 if total > _MAX_MSG:
                     conn.sendall(
-                        json.dumps({"status": "error", "message": "Message too large"}).encode()
+                        json.dumps(
+                            {"status": "error", "message": "Message too large"}
+                        ).encode()
                     )
                     return
-                # Check if we have a complete JSON message
-                try:
-                    data = json.loads(b"".join(chunks))
-                    break
-                except json.JSONDecodeError:
-                    continue
-
             if not chunks:
                 return
-
             raw = b"".join(chunks)
             try:
                 data = json.loads(raw)
             except json.JSONDecodeError:
-                conn.sendall(json.dumps({"status": "error", "message": "Invalid JSON"}).encode())
+                conn.sendall(
+                    json.dumps({"status": "error", "message": "Invalid JSON"}).encode()
+                )
                 return
-
             response = self._handle_command(data)
             conn.sendall(json.dumps(response).encode())
         except (OSError, TimeoutError):
@@ -376,72 +383,9 @@ class CronDaemon:
         finally:
             conn.close()
 
-    # -- Scheduler ----------------------------------------------------------
-
-    def _scheduler_loop(self) -> None:
-        """Run the cron scheduler loop.
-
-        Checks every 30 seconds for jobs whose schedule matches the
-        current minute. Each job runs at most once per matching minute.
-        """
-        while not self._stop_event.is_set():
-            now = datetime.now()
-            minute_key = now.strftime("%Y-%m-%d %H:%M")
-            if minute_key != self._last_run_minute:
-                self._last_run_minute = minute_key
-                with self._lock:
-                    jobs_snapshot = list(self._jobs.items())
-                for job_id, job in jobs_snapshot:
-                    try:
-                        parsed = parse_cron_expression(job["schedule"])
-                        if cron_matches_time(parsed, now):
-                            logger.info("Running job %s: %s", job_id, job["command"])
-                            threading.Thread(
-                                target=self._run_job, args=(job_id, job["command"]), daemon=True
-                            ).start()
-                    except (ValueError, KeyError):
-                        logger.warning("Invalid job %s, skipping", job_id)
-            self._stop_event.wait(timeout=30)
-
-    def _run_job(self, job_id: str, command: str) -> None:
-        """Execute a cron job command in a subprocess.
-
-        Args:
-            job_id: The job identifier (for logging and updating metadata).
-            command: Shell command to execute.
-        """
-        try:
-            result = subprocess.run(
-                command,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=3600,
-            )
-            logger.info(
-                "Job %s completed (rc=%d): stdout=%r stderr=%r",
-                job_id,
-                result.returncode,
-                result.stdout[:200],
-                result.stderr[:200],
-            )
-        except subprocess.TimeoutExpired:
-            logger.warning("Job %s timed out after 3600s", job_id)
-        except OSError as e:
-            logger.error("Job %s failed: %s", job_id, e)
-        # Update run metadata
-        with self._lock:
-            if job_id in self._jobs:
-                self._jobs[job_id]["last_run"] = datetime.now().isoformat()
-                self._jobs[job_id]["run_count"] = self._jobs[job_id].get("run_count", 0) + 1
-                _save_jobs(self.jobs_path, self._jobs)
-
-    # -- Socket server ------------------------------------------------------
-
     def _serve(self) -> None:
-        """Main server loop: accept connections and dispatch to handlers."""
+        """Accept incoming connections until the stop event is set."""
         self.sock_path.parent.mkdir(parents=True, exist_ok=True)
-        # Clean stale socket
         if self.sock_path.exists():
             self.sock_path.unlink()
 
@@ -454,7 +398,9 @@ class CronDaemon:
         while not self._stop_event.is_set():
             try:
                 conn, _ = self._server_socket.accept()
-                threading.Thread(target=self._handle_client, args=(conn,), daemon=True).start()
+                threading.Thread(
+                    target=self._handle_client, args=(conn,), daemon=True
+                ).start()
             except TimeoutError:
                 continue
             except OSError:
@@ -463,41 +409,28 @@ class CronDaemon:
                 break
 
     def _cleanup(self) -> None:
-        """Clean up socket and PID files on shutdown."""
-        if self._server_socket:
+        """Close the server socket and remove the socket / PID files."""
+        if self._server_socket is not None:
             try:
                 self._server_socket.close()
             except OSError:
                 pass
-        if self.sock_path.exists():
-            try:
-                self.sock_path.unlink()
-            except OSError:
-                pass
-        if self.pid_path.exists():
-            try:
-                self.pid_path.unlink()
-            except OSError:
-                pass
-
-    # -- Public entry points ------------------------------------------------
+        for path in (self.sock_path, self.pid_path):
+            if path.exists():
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
 
     def run(self) -> None:
-        """Start the daemon (foreground mode).
+        """Run the daemon in the current process.
 
-        Loads persisted jobs, writes the PID file, starts the scheduler
-        thread, and enters the socket server loop.  On shutdown (via
-        ``stop`` command or signal), cleans up all resources.
+        Writes the PID file, installs signal handlers (when invoked from the
+        main thread), enters the socket-accept loop, and cleans up on exit.
         """
         self.sock_path.parent.mkdir(parents=True, exist_ok=True)
         self.pid_path.write_text(str(os.getpid()))
 
-        # Load persisted jobs
-        with self._lock:
-            self._jobs = _load_jobs(self.jobs_path)
-        logger.info("Loaded %d persisted jobs", len(self._jobs))
-
-        # Handle signals for graceful shutdown (only works in main thread)
         def _signal_handler(signum: int, frame: Any) -> None:
             logger.info("Received signal %d, shutting down", signum)
             self._stop_event.set()
@@ -506,39 +439,32 @@ class CronDaemon:
             signal.signal(signal.SIGTERM, _signal_handler)
             signal.signal(signal.SIGINT, _signal_handler)
         except ValueError:
-            pass  # Not in main thread — signals handled via stop command
-
-        # Start scheduler thread
-        scheduler_thread = threading.Thread(target=self._scheduler_loop, daemon=True)
-        scheduler_thread.start()
+            pass  # Not main thread — shutdown happens via stop command.
 
         try:
             self._serve()
         finally:
             self._stop_event.set()
-            scheduler_thread.join(timeout=5)
             self._cleanup()
             logger.info("Daemon stopped")
 
 
 # ---------------------------------------------------------------------------
-# Daemonize helper
+# Daemonize and process management
 # ---------------------------------------------------------------------------
 
 
 def _daemonize() -> None:
-    """Double-fork to fully detach from the controlling terminal.
+    """Double-fork to detach from the controlling terminal.
 
-    After this call the process is a proper daemon: detached from the
-    terminal, in its own session, with stdin/stdout/stderr redirected
-    to /dev/null (logging goes to the log file).
+    Redirects stdio to ``/dev/null``; logs are written through the
+    ``logging`` module to a file configured by :func:`start_daemon`.
     """
     if os.fork() > 0:
         sys.exit(0)
     os.setsid()
     if os.fork() > 0:
         sys.exit(0)
-    # Redirect standard file descriptors
     sys.stdout.flush()
     sys.stderr.flush()
     devnull = os.open(os.devnull, os.O_RDWR)
@@ -548,20 +474,8 @@ def _daemonize() -> None:
     os.close(devnull)
 
 
-# ---------------------------------------------------------------------------
-# Process management helpers
-# ---------------------------------------------------------------------------
-
-
 def _read_pid(pid_path: Path = PID_PATH) -> int | None:
-    """Read the daemon PID from the PID file.
-
-    Args:
-        pid_path: Path to the PID file.
-
-    Returns:
-        The PID as an integer, or None if the file is missing or invalid.
-    """
+    """Return the PID recorded in ``pid_path`` or ``None`` if unreadable."""
     if not pid_path.exists():
         return None
     try:
@@ -571,14 +485,7 @@ def _read_pid(pid_path: Path = PID_PATH) -> int | None:
 
 
 def _is_running(pid: int) -> bool:
-    """Check whether a process with the given PID is alive.
-
-    Args:
-        pid: Process ID to check.
-
-    Returns:
-        True if the process exists and is reachable.
-    """
+    """Return ``True`` if a process with ``pid`` exists and is reachable."""
     try:
         os.kill(pid, 0)
         return True
@@ -589,25 +496,27 @@ def _is_running(pid: int) -> bool:
 def start_daemon(
     sock_path: Path = SOCK_PATH,
     pid_path: Path = PID_PATH,
-    jobs_path: Path = JOBS_PATH,
     foreground: bool = False,
 ) -> str:
     """Start the cron manager daemon.
 
+    Does nothing if an instance is already running.  When ``foreground``
+    is ``False`` (the default) the process double-forks first.  The call
+    blocks for the lifetime of the daemon when run in the foreground.
+
     Args:
         sock_path: Path for the Unix domain socket.
         pid_path: Path for the PID file.
-        jobs_path: Path for the jobs persistence file.
-        foreground: If True, run in the foreground (don't daemonize).
+        foreground: If ``True``, run in the foreground without daemonizing.
 
     Returns:
-        Status message string.
+        A human-readable status message (returned only after the daemon
+        exits; normally a long-running call).
     """
     pid = _read_pid(pid_path)
-    if pid and _is_running(pid):
+    if pid is not None and _is_running(pid):
         return f"Daemon already running (pid={pid})"
 
-    # Clean up stale files
     for p in (sock_path, pid_path):
         if p.exists():
             p.unlink()
@@ -615,7 +524,7 @@ def start_daemon(
     if not foreground:
         _daemonize()
 
-    # Set up file logging
+    sock_path.parent.mkdir(parents=True, exist_ok=True)
     log_path = sock_path.parent / "cron_manager.log"
     logging.basicConfig(
         filename=str(log_path),
@@ -623,81 +532,62 @@ def start_daemon(
         format="%(asctime)s %(levelname)s %(message)s",
     )
 
-    daemon = CronDaemon(sock_path=sock_path, pid_path=pid_path, jobs_path=jobs_path)
-    daemon.run()
+    CronDaemon(sock_path=sock_path, pid_path=pid_path).run()
     return "Daemon stopped"
 
 
-def stop_daemon(
-    sock_path: Path = SOCK_PATH,
-    pid_path: Path = PID_PATH,
-) -> str:
-    """Stop the cron manager daemon.
+def stop_daemon(sock_path: Path = SOCK_PATH, pid_path: Path = PID_PATH) -> str:
+    """Ask a running daemon to exit.
 
-    Tries a graceful stop via the socket first, then falls back to
-    SIGTERM.
+    Tries a graceful stop through the socket first, then falls back to
+    ``SIGTERM`` against the PID in ``pid_path``.
 
     Args:
-        sock_path: Path to the daemon socket.
-        pid_path: Path to the PID file.
+        sock_path: Path of the daemon's Unix domain socket.
+        pid_path: Path of the daemon's PID file.
 
     Returns:
-        Status message string.
+        Human-readable status string.
     """
-    # Try graceful stop via socket
-    try:
-        client = CronClient(sock_path=sock_path)
-        client.stop_daemon()
-        # Wait for process to exit
-        pid = _read_pid(pid_path)
-        if pid:
-            for _ in range(50):
-                if not _is_running(pid):
-                    break
-                time.sleep(0.1)
-            else:
-                os.kill(pid, signal.SIGTERM)
-        return "Daemon stopped"
-    except (ConnectionError, OSError):
-        pass
-
-    # Fall back to SIGTERM
     pid = _read_pid(pid_path)
-    if not pid:
+    if pid is None:
         return "Daemon not running (no PID file)"
     if not _is_running(pid):
         pid_path.unlink(missing_ok=True)
         return "Daemon not running (stale PID file cleaned)"
+
+    # The daemon removes its PID file in ``_cleanup`` before the process
+    # exits, so a missing PID file is a reliable "shutdown completed"
+    # signal even when the process briefly lingers as a zombie that
+    # hasn't yet been reaped by its parent.
+    def _stopped() -> bool:
+        return not pid_path.exists() or not _is_running(pid)
+
+    CronClient(sock_path=sock_path).stop_daemon()
+    for _ in range(50):
+        if _stopped():
+            return "Daemon stopped"
+        time.sleep(0.1)
+
     os.kill(pid, signal.SIGTERM)
     for _ in range(50):
-        if not _is_running(pid):
+        if _stopped():
             break
         time.sleep(0.1)
     return "Daemon stopped"
 
 
 def daemon_status(
-    pid_path: Path = PID_PATH,
-    sock_path: Path = SOCK_PATH,
+    pid_path: Path = PID_PATH, sock_path: Path = SOCK_PATH
 ) -> str:
-    """Check the daemon status.
-
-    Args:
-        pid_path: Path to the PID file.
-        sock_path: Path to the daemon socket.
-
-    Returns:
-        Human-readable status string.
-    """
+    """Return a human-readable description of the daemon's running state."""
     pid = _read_pid(pid_path)
-    if not pid:
+    if pid is None:
         return "Daemon not running (no PID file)"
     if not _is_running(pid):
         return f"Daemon not running (stale PID file for pid={pid})"
-    # Try socket connection
     try:
-        client = CronClient(sock_path=sock_path)
-        resp = client.status()
+        resp = CronClient(sock_path=sock_path).status()
         return f"Daemon running (pid={pid}, jobs={resp.get('job_count', '?')})"
     except (ConnectionError, OSError):
         return f"Daemon running (pid={pid}) but socket not responding"
@@ -709,13 +599,13 @@ def daemon_status(
 
 
 class CronClient:
-    """Client for communicating with the Cron Manager Daemon.
+    """Client for the Cron Manager Daemon.
 
-    Sends JSON commands over the Unix domain socket and returns
-    parsed responses.
+    Sends a single JSON command per connection over the Unix domain
+    socket and returns the parsed JSON reply.
 
     Args:
-        sock_path: Path to the daemon's Unix domain socket.
+        sock_path: Path of the daemon's Unix domain socket.
             Defaults to ``~/.kiss/cron_manager.sock``.
     """
 
@@ -723,16 +613,11 @@ class CronClient:
         self.sock_path = sock_path
 
     def _send(self, data: dict[str, Any]) -> dict[str, Any]:
-        """Send a command and return the response.
-
-        Args:
-            data: Command dictionary to send.
-
-        Returns:
-            Parsed JSON response dictionary.
+        """Send ``data`` to the daemon and return the decoded response.
 
         Raises:
-            ConnectionError: If the daemon is not reachable.
+            ConnectionError: If the socket cannot be reached or the
+                response is not valid JSON.
         """
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
@@ -757,18 +642,18 @@ class CronClient:
             sock.close()
 
     def add_job(self, schedule: str, command: str) -> str:
-        """Add a cron job.
+        """Add a cron job and return its identifier.
 
         Args:
-            schedule: Cron expression (5 fields), e.g. ``"*/5 * * * *"``.
-            command: Shell command to run on schedule.
+            schedule: Five-field cron expression, e.g. ``"*/5 * * * *"``.
+            command: Shell command to run on schedule (single line).
 
         Returns:
-            The job ID string.
+            The 12-character job identifier.
 
         Raises:
             ConnectionError: If the daemon is not reachable.
-            RuntimeError: If the daemon returns an error.
+            RuntimeError: If the daemon rejects the request.
         """
         resp = self._send({"action": "add", "schedule": schedule, "command": command})
         if resp.get("status") != "ok":
@@ -777,24 +662,18 @@ class CronClient:
         return job_id
 
     def remove_job(self, job_id: str) -> None:
-        """Remove a cron job.
-
-        Args:
-            job_id: The job identifier to remove.
+        """Remove the cron job with identifier ``job_id``.
 
         Raises:
             ConnectionError: If the daemon is not reachable.
-            RuntimeError: If the daemon returns an error.
+            RuntimeError: If the daemon rejects the request (e.g. unknown id).
         """
         resp = self._send({"action": "remove", "job_id": job_id})
         if resp.get("status") != "ok":
             raise RuntimeError(resp.get("message", "Unknown error"))
 
     def list_jobs(self) -> list[dict[str, Any]]:
-        """List all cron jobs.
-
-        Returns:
-            List of job dictionaries.
+        """Return every KISS-owned cron job currently installed.
 
         Raises:
             ConnectionError: If the daemon is not reachable.
@@ -804,10 +683,7 @@ class CronClient:
         return jobs
 
     def status(self) -> dict[str, Any]:
-        """Get daemon status.
-
-        Returns:
-            Status dictionary with ``pid``, ``job_count``, etc.
+        """Return the daemon's status payload (``pid``, ``job_count``, ...).
 
         Raises:
             ConnectionError: If the daemon is not reachable.
@@ -815,19 +691,15 @@ class CronClient:
         return self._send({"action": "status"})
 
     def stop_daemon(self) -> None:
-        """Send stop command to the daemon.
-
-        Raises:
-            ConnectionError: If the daemon is not reachable.
-        """
+        """Ask the daemon to shut down. Silent if the daemon is already gone."""
         try:
             self._send({"action": "stop"})
         except ConnectionError:
-            pass  # Daemon may close before responding
+            pass
 
 
 # ---------------------------------------------------------------------------
-# CLI entry point
+# CLI
 # ---------------------------------------------------------------------------
 
 
