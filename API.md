@@ -34,7 +34,6 @@
       - [`kiss.agents.sorcar.worktree_sorcar_agent`](#kissagentssorcarworktree_sorcar_agent)
     - [`kiss.agents.vscode`](#kissagentsvscode)
       - [`kiss.agents.vscode.helpers`](#kissagentsvscodehelpers)
-        \- [`kiss.agents.vscode.node_modules.flatted.python.flatted`](#kissagentsvscodenode_modulesflattedpythonflatted)
       - [`kiss.agents.vscode.printer`](#kissagentsvscodeprinter)
       - [`kiss.agents.vscode.server`](#kissagentsvscodeserver)
       - [`kiss.agents.vscode.tab_state`](#kissagentsvscodetab_state)
@@ -549,13 +548,13 @@ ______________________________________________________________________
 
 - **reset** — Reset internal streaming and tool-parsing state for a new turn.<br/>`reset() -> None`
 
-- **start_recording** — Start recording broadcast events.<br/>`start_recording() -> None`
+- **start_recording** — Start recording broadcast events for the current tab.<br/>`start_recording() -> None`
 
-- **stop_recording** — Stop recording and return its display events.<br/>`stop_recording() -> list[dict[str, Any]]`
+- **stop_recording** — Stop recording for the current tab and return its display events.<br/>`stop_recording() -> list[dict[str, Any]]`
 
   - **Returns:** List of display-relevant events with consecutive deltas merged.
 
-- **peek_recording** — Return a snapshot of the current recording without stopping it. Used for periodic crash-recovery flushes: the caller can persist a snapshot of events to the database while recording continues.<br/>`peek_recording() -> list[dict[str, Any]]`
+- **peek_recording** — Return a snapshot of the current tab's recording without stopping it. Used for periodic crash-recovery flushes: the caller can persist a snapshot of events to the database while recording continues.<br/>`peek_recording() -> list[dict[str, Any]]`
 
   - **Returns:** List of display-relevant events with consecutive deltas merged.
 
@@ -1153,14 +1152,6 @@ ______________________________________________________________________
 - `usage`: File usage counts keyed by path (insertion order encodes recency, last key = most recently used).
 - `limit`: Maximum number of results to return.
 - **Returns:** Sorted list of dicts with `type` (`"frequent"` or `"file"`) and `text` keys.
-
-______________________________________________________________________
-
-#### `kiss.agents.vscode.node_modules.flatted.python.flatted`
-
-**`parse`**<br/>`def parse(value, *args, **kwargs)`
-
-**`stringify`**<br/>`def stringify(value, *args, **kwargs)`
 
 ______________________________________________________________________
 
