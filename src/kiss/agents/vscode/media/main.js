@@ -1990,6 +1990,12 @@
   function updateInputDisabled() {
     const blocked = isRunning || isMerging;
     inp.disabled = blocked;
+    // Keep sendBtn.disabled in sync with blocked so that transitions
+    // driven solely by isMerging (e.g. merge_ended in non-worktree mode)
+    // also re-enable the send button.  Previously sendBtn.disabled was
+    // only updated from setRunningState(), leaving it stuck disabled
+    // after the auto-commit flow completed.
+    sendBtn.disabled = blocked;
     if (blocked) {
       clearGhost();
       hideAC();
@@ -2000,7 +2006,6 @@
     isRunning = running;
     sendBtn.style.display = running ? 'none' : 'flex';
     stopBtn.style.display = running ? 'flex' : 'none';
-    sendBtn.disabled = running || isMerging;
 
     if (uploadBtn) uploadBtn.disabled = running;
     if (worktreeToggleBtn) worktreeToggleBtn.disabled = running;
