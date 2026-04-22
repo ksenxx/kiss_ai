@@ -88,7 +88,7 @@ class _TaskRunnerMixin:
                     tab.task_thread = None
                     tab.stop_event = None
                     tab.user_answer_queue = None
-                self.printer.broadcast({"type": "status", "running": False})
+            self.printer.broadcast({"type": "status", "running": False})
 
     @staticmethod
     def _capture_pre_snapshot(
@@ -324,7 +324,7 @@ class _TaskRunnerMixin:
                 if task_end_event:
                     self.printer.broadcast(task_end_event)
 
-    def _stop_task(self, tab_id: str | None = None) -> None:
+    def _stop_task(self, tab_id: str = "") -> None:
         """Signal the agent to stop.
 
         Sets the cooperative stop event and, if the task thread doesn't
@@ -335,12 +335,12 @@ class _TaskRunnerMixin:
         call.
 
         Args:
-            tab_id: The tab to stop.  When *None*, the call is a no-op
-                — the previous behavior of stopping every tab's task
-                when the frontend omitted ``tabId`` violated per-tab
-                state isolation (C4 fix).
+            tab_id: The tab to stop.  When falsy (empty string), the
+                call is a no-op — a missing ``tabId`` at this layer
+                indicates a frontend bug that should not silently
+                stop every tab's task.
         """
-        if tab_id is None:
+        if not tab_id:
             logger.debug("_stop_task called without tab_id; ignoring")
             return
         with self._state_lock:

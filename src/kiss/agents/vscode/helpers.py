@@ -40,7 +40,7 @@ def model_vendor(name: str) -> tuple[str, int]:
     """
     if name.startswith("claude-") or name.startswith("cc/"):
         return "Anthropic", 0
-    if name.startswith(_OPENAI_PREFIXES) and not name.startswith("openai/"):
+    if name.startswith("openai/") or name.startswith(_OPENAI_PREFIXES):
         return "OpenAI", 1
     if name.startswith("gemini-"):
         return "Gemini", 2
