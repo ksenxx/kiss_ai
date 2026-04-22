@@ -31,10 +31,12 @@
   let ghostTimer = null;
   let currentGhost = '';
 
-  // Per-tab ask-user modal routing: each tab owns its own askQueue and
-  // askQuestionEl / askInputEl / askSubmitEl DOM nodes (see makeTab).  The
-  // shared #ask-user-slot hosts the active tab's triplet; switching tabs
-  // detaches and re-attaches so each tab's half-typed answer is preserved.
+  // Per-tab ask-user modal routing: each tab owns its own pending question
+  // string and askQuestionEl / askInputEl / askSubmitEl DOM nodes (see
+  // makeTab).  The shared #ask-user-slot hosts the active tab's triplet;
+  // switching tabs detaches and re-attaches so each tab's half-typed answer
+  // is preserved.  Because the modal blocks the tab's agent, at most one
+  // ask-user request is pending per tab at any time — no queue is needed.
 
   // Infinite scroll state for history sidebar
   let historyOffset = 0;
@@ -101,9 +103,10 @@
       streamPendingPanel: false,
       lastTaskFailed: false,
       hasRunTask: false,
-      // Ask-user modal: per-tab queue of pending questions (FIFO; head is
-      // currently displayed when this tab is active) and per-tab DOM nodes.
-      askQueue: [],
+      // Ask-user modal: the currently-pending question for this tab (or
+      // null if none) and per-tab DOM nodes.  Only one ask can be pending
+      // at a time because the agent blocks on the user answer.
+      askPendingQuestion: null,
       askQuestionEl: null,
       askInputEl: null,
       askSubmitEl: null,
@@ -1588,9 +1591,8 @@
           return t.id === askTabId;
         });
         if (!askTab) break;
-        const wasEmpty = askTab.askQueue.length === 0;
-        askTab.askQueue.push(ev.question || '');
-        if (wasEmpty) showNextAskForTab(askTab);
+        askTab.askPendingQuestion = ev.question || '';
+        showAskForTab(askTab);
         break;
       }
       case 'error':
@@ -2852,28 +2854,29 @@
   }
 
   /**
-   * Advance the tab's ask queue: if non-empty, render the head question;
-   * when the tab is active, show the modal.  If empty and the tab is active,
-   * hide the modal.
+   * Render the tab's pending ask-user question into its triplet and, if
+   * the tab is active, mount the triplet into the shared slot and show the
+   * modal.  If the tab has no pending question and is active, hide the
+   * modal.
    */
-  function showNextAskForTab(tab) {
-    if (tab.askQueue.length === 0) {
+  function showAskForTab(tab) {
+    if (tab.askPendingQuestion === null) {
       if (tab.id === activeTabId) clearAskSlot();
       return;
     }
     ensureAskElementsForTab(tab);
-    setAskQuestionTextForTab(tab, tab.askQueue[0]);
+    setAskQuestionTextForTab(tab, tab.askPendingQuestion);
     tab.askInputEl.value = '';
     if (tab.id === activeTabId) mountAskForTab(tab);
   }
 
-  /** Submit the current answer for the given tab; pop queue and advance. */
+  /** Submit the current answer for the given tab; clear pending question. */
   function submitAskForTab(tab) {
     const answer = tab.askInputEl ? tab.askInputEl.value : '';
     vscode.postMessage({type: 'userAnswer', answer: answer, tabId: tab.id});
-    tab.askQueue.shift();
+    tab.askPendingQuestion = null;
     if (tab.askInputEl) tab.askInputEl.value = '';
-    showNextAskForTab(tab);
+    if (tab.id === activeTabId) clearAskSlot();
   }
 
   /**
@@ -2886,7 +2889,7 @@
     const tab = tabs.find(t => {
       return t.id === activeTabId;
     });
-    if (!tab || tab.askQueue.length === 0) return;
+    if (!tab || tab.askPendingQuestion === null) return;
     ensureAskElementsForTab(tab);
     mountAskForTab(tab);
   }
