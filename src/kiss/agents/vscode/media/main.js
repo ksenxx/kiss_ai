@@ -504,7 +504,12 @@
     restoreTab(tab);
     renderTabBar();
     persistTabState();
-    // New tab is never running
+    // Sync the module-global running state with the fresh tab (isRunning
+    // is false on newly made tabs).  Without this, restoreTab's final
+    // updateInputDisabled() would read the *previous* tab's stale
+    // isRunning and leave inp / sendBtn disabled.  Mirrors switchToTab
+    // and closeTab.
+    setRunningState(tab.isRunning);
     vscode.postMessage({type: 'getWelcomeSuggestions'});
     focusInputWithRetry();
   }

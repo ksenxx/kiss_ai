@@ -3189,7 +3189,12 @@ class TestWebviewTabBarJS(unittest.TestCase):
 
     def test_create_new_tab_resets_ui_via_restore_tab(self) -> None:
         """createNewTab delegates DOM reset to restoreTab(tab) on a
-        freshly-built empty tab (which has default clean state)."""
+        freshly-built empty tab (which has default clean state).  It
+        still must explicitly sync the module-global running state with
+        the fresh tab via setRunningState — restoreTab only restores
+        isMerging, so without this the previous tab's running flag
+        would persist and leave the new tab's input / sendBtn disabled.
+        """
         idx = self._js.index("function createNewTab()")
         end = self._js.index("\n  function ", idx + 1)
         body = self._js[idx:end]
@@ -3199,7 +3204,13 @@ class TestWebviewTabBarJS(unittest.TestCase):
         assert "clearOutput()" not in body
         assert "clearWorktreeBar()" not in body
         assert "setTaskText('')" not in body
-        assert "setRunningState(false)" not in body
+        # Running-state sync is explicit: either setRunningState(false)
+        # or setRunningState(tab.isRunning) (tab.isRunning is false for
+        # a freshly made tab).
+        assert (
+            "setRunningState(false)" in body
+            or "setRunningState(tab.isRunning)" in body
+        )
 
     def test_create_new_tab_renders_tab_bar(self) -> None:
         idx = self._js.index("function createNewTab()")
