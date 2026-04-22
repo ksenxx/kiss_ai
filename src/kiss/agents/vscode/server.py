@@ -232,7 +232,11 @@ class VSCodeServer(
         """
         with self._state_lock:
             tab = self._tab_states.get(tab_id)
-            if tab is not None and (tab.is_task_active or tab.is_merging):
+            if tab is not None and (
+                tab.is_task_active
+                or tab.is_merging
+                or (tab.task_thread is not None and tab.task_thread.is_alive())
+            ):
                 return
             self._tab_states.pop(tab_id, None)
         if tab is not None and tab.agent._wt_pending:
@@ -289,7 +293,8 @@ class VSCodeServer(
             try:
                 extra = json.loads(extra_str)
                 if extra.get("is_worktree"):
-                    tab.use_worktree = True
+                    with self._state_lock:
+                        tab.use_worktree = True
             except (json.JSONDecodeError, TypeError):
                 pass
 
