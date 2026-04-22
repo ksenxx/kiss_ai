@@ -225,8 +225,6 @@ class _MergeFlowMixin:
 
         self._present_pending_worktree(tab_id, try_merge_review=False)
 
-        with self._state_lock:
-            tab = self._tab_states.get(tab_id)
         if tab is not None and not tab.use_worktree:
             changed = self._main_dirty_files()
             if changed:

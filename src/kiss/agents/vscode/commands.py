@@ -79,7 +79,7 @@ class _CommandsMixin:
                     "text": "Task already running",
                     "tabId": tab_id,
                 })
-                self.printer.broadcast({"type": "status", "running": False, "tabId": tab_id})
+                self.printer.broadcast({"type": "status", "running": True, "tabId": tab_id})
                 return
             tab.stop_event = threading.Event()
             tab.user_answer_queue = queue.Queue(maxsize=1)

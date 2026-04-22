@@ -326,7 +326,7 @@ def _hunk_to_dict(bs: int, bc: int, cs: int, cc: int) -> dict[str, int]:
     Returns:
         Dict with keys bs, bc, cs, cc (0-based start lines).
     """
-    return {"bs": bs - 1, "bc": bc, "cs": cs if cc == 0 else cs - 1, "cc": cc}
+    return {"bs": bs if bc == 0 else bs - 1, "bc": bc, "cs": cs if cc == 0 else cs - 1, "cc": cc}
 
 
 def _file_as_new_hunks(fpath: Path) -> list[dict[str, int]]:
