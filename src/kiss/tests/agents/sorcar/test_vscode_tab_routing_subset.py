@@ -201,7 +201,14 @@ class TestAdjacentTaskRouted(unittest.TestCase):
         assert len(ate) == 1
         assert ate[0].get("tabId") == "t-19"
 
-    def test_no_tab_id_omits_field(self) -> None:
+    def test_no_tab_id_still_tags_event(self) -> None:
+        """Empty tab_id still carries a (empty) tabId field (B4 fix).
+
+        Previously, an empty tab_id caused the event to be emitted
+        untagged, which reached every tab's frontend handler and
+        overwrote whichever tab was active.  With the fix the event
+        always carries a tabId so no tab mis-interprets it.
+        """
         server, events = _make_server()
         server._get_adjacent_task(
             chat_id="does-not-exist",
@@ -211,7 +218,8 @@ class TestAdjacentTaskRouted(unittest.TestCase):
         )
         ate = [e for e in events if e.get("type") == "adjacent_task_events"]
         assert len(ate) == 1
-        assert "tabId" not in ate[0]
+        assert "tabId" in ate[0]
+        assert ate[0]["tabId"] == ""
 
 
 if __name__ == "__main__":

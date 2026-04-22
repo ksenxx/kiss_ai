@@ -334,17 +334,17 @@ class _TaskRunnerMixin:
         call.
 
         Args:
-            tab_id: The tab to stop.  When *None*, stops all running tabs.
+            tab_id: The tab to stop.  When *None*, the call is a no-op
+                — the previous behavior of stopping every tab's task
+                when the frontend omitted ``tabId`` violated per-tab
+                state isolation (C4 fix).
         """
+        if tab_id is None:
+            logger.debug("_stop_task called without tab_id; ignoring")
+            return
         with self._state_lock:
-            if tab_id is not None:
-                tab = self._tab_states.get(tab_id)
-                pairs = [(tab.stop_event, tab.task_thread)] if tab is not None else []
-            else:
-                pairs = [
-                    (t.stop_event, t.task_thread)
-                    for t in self._tab_states.values()
-                ]
+            tab = self._tab_states.get(tab_id)
+            pairs = [(tab.stop_event, tab.task_thread)] if tab is not None else []
         for stop_event, task_thread in pairs:
             if stop_event:
                 stop_event.set()

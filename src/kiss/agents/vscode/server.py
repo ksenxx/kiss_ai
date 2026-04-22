@@ -302,14 +302,22 @@ class VSCodeServer(
         Sets the tab's agent chat_id to match the resumed session.
         The tab_id (frontend key in ``_tab_states``) does not change.
 
+        When ``tab_id`` is empty the call is a no-op — the previous
+        behavior of synthesizing a phantom tab keyed by ``chat_id`` and
+        mutating its ``use_worktree`` flag violated per-tab state
+        isolation (C2/C3 fix).
+
         Args:
             chat_id: The string chat session identifier to replay.
             tab_id: The frontend tab identifier.
         """
+        if not tab_id:
+            logger.debug("_replay_session called without tab_id; ignoring")
+            return
         result = _load_latest_chat_events_by_chat_id(chat_id)
         if not result or not result.get("events"):
             return
-        tab = self._get_tab(tab_id) if tab_id else self._get_tab(str(chat_id))
+        tab = self._get_tab(tab_id)
         tab.agent.resume_chat_by_id(chat_id)
 
         extra_str = str(result.get("extra", "") or "")
@@ -395,9 +403,8 @@ class VSCodeServer(
             "direction": direction,
             "task": result["task"] if result else "",
             "events": result["events"] if result else [],
+            "tabId": tab_id,
         }
-        if tab_id:
-            event["tabId"] = tab_id
         self.printer.broadcast(event)
 
     def _generate_commit_message(self) -> None:

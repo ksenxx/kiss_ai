@@ -14,7 +14,6 @@ import threading
 from typing import TYPE_CHECKING, Any
 
 from kiss.agents.sorcar.persistence import (
-    _load_history,
     _record_file_usage,
     _save_last_model,
 )
@@ -187,14 +186,16 @@ class _CommandsMixin:
         self._get_input_history()
 
     def _cmd_get_adjacent_task(self, cmd: dict[str, Any]) -> None:
-        """Send events for the adjacent task in the same chat session."""
+        """Send events for the adjacent task in the same chat session.
+
+        Uses only the tab's own agent chat_id.  Previously, when the tab
+        had no chat_id the handler fell back to the globally-latest
+        chat in history, causing arrow-key navigation in one tab to
+        traverse a *different* tab's conversation (C1 fix).
+        """
         tab_id = cmd.get("tabId", "")
         adj_tab = self._get_tab(tab_id)
         chat_id = adj_tab.agent.chat_id
-        if chat_id == "":
-            entries = _load_history(limit=1)
-            if entries:
-                chat_id = str(entries[0].get("chat_id", "") or "")
         self._get_adjacent_task(
             chat_id,
             cmd.get("task", ""),
@@ -203,10 +204,20 @@ class _CommandsMixin:
         )
 
     def _cmd_generate_commit_message(self, cmd: dict[str, Any]) -> None:
-        """Generate a git commit message in the background."""
-        threading.Thread(
-            target=self._generate_commit_message, daemon=True
-        ).start()
+        """Generate a git commit message in the background.
+
+        Runs the generator in a daemon thread and captures the caller's
+        ``tabId`` so all ``commitMessage`` events broadcast from the
+        worker are tagged via ``printer._thread_local.tab_id``.  This
+        prevents the result from leaking into other tabs (B5 fix).
+        """
+        tab_id = cmd.get("tabId", "")
+
+        def _run() -> None:
+            self.printer._thread_local.tab_id = tab_id
+            self._generate_commit_message()
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def _cmd_worktree_action(self, cmd: dict[str, Any]) -> None:
         """Execute a worktree merge/discard action."""

@@ -203,15 +203,20 @@ class TestStopRouting(unittest.TestCase):
         assert ev1.is_set()
         assert not ev2.is_set()
 
-    def test_stop_without_tabid_stops_all_tabs(self) -> None:
-        """Stop with no tabId sets all stop events."""
+    def test_stop_without_tabid_is_noop(self) -> None:
+        """Stop with no tabId is a no-op (C4 fix).
+
+        Previously, ``_stop_task(None)`` stopped every tab's task,
+        violating per-tab state isolation.  A missing tabId from the
+        frontend now silently does nothing.
+        """
         ev1, ev2 = threading.Event(), threading.Event()
         tab1 = self.server._get_tab("1")
         tab2 = self.server._get_tab("2")
         tab1.stop_event = ev1
         tab2.stop_event = ev2
-        t1 = threading.Thread(target=lambda: time.sleep(5), daemon=True)
-        t2 = threading.Thread(target=lambda: time.sleep(5), daemon=True)
+        t1 = threading.Thread(target=lambda: time.sleep(0.5), daemon=True)
+        t2 = threading.Thread(target=lambda: time.sleep(0.5), daemon=True)
         t1.start()
         t2.start()
         tab1.task_thread = t1
@@ -220,8 +225,8 @@ class TestStopRouting(unittest.TestCase):
         self.server._handle_command({"type": "stop"})
         time.sleep(0.2)
 
-        assert ev1.is_set()
-        assert ev2.is_set()
+        assert not ev1.is_set()
+        assert not ev2.is_set()
 
 
 class TestConcurrentTabs(unittest.TestCase):
@@ -302,14 +307,18 @@ class TestMergeTabIsolation(unittest.TestCase):
         assert ended[0]["tabId"] == "42"
         assert self.server._get_tab("42").is_merging is False
 
-    def test_finish_merge_no_tab_omits_tabid(self) -> None:
-        """_finish_merge with no tab_id clears all and omits tabId."""
+    def test_finish_merge_no_tab_is_noop(self) -> None:
+        """_finish_merge with no tab_id is a no-op (B8 fix).
+
+        Previously it cleared every tab's ``is_merging`` flag and
+        emitted an untagged ``merge_ended``, violating per-tab state
+        isolation.
+        """
         self.server._get_tab("10").is_merging = True
         self.server._finish_merge()
         ended = [e for e in self.events if e["type"] == "merge_ended"]
-        assert len(ended) == 1
-        assert "tabId" not in ended[0]
-        assert self.server._get_tab("10").is_merging is False
+        assert ended == []
+        assert self.server._get_tab("10").is_merging is True
 
     def test_merging_tabs_are_independent(self) -> None:
         """Multiple tabs can be in merge state simultaneously."""

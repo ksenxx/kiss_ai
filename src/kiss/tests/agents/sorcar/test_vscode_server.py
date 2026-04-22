@@ -318,7 +318,11 @@ class TestGenerateCommitMessage(unittest.TestCase):
         import inspect
 
         src = inspect.getsource(VSCodeServer._cmd_generate_commit_message)
-        assert "target=self._generate_commit_message" in src
+        # B5 fix: the command now wraps the call so thread-local tab_id
+        # is set before broadcasting, but ``_generate_commit_message``
+        # is still the only work performed by the worker.
+        assert "self._generate_commit_message()" in src
+        assert "threading.Thread(target=_run" in src
 
     def test_no_model_param(self) -> None:
         """_generate_commit_message takes no model parameter."""
@@ -1238,10 +1242,10 @@ class TestMergeSession(unittest.TestCase):
     def test_handle_merge_action_all_done_finishes_merge(self) -> None:
         """mergeAction all-done calls _finish_merge and resets state."""
         path = self._write_merge_json()
-        self.server._start_merge_session(path)
+        self.server._start_merge_session(path, tab_id="m-tab")
         self.events.clear()
 
-        self.server._handle_merge_action("all-done")
+        self.server._handle_merge_action("all-done", tab_id="m-tab")
         types = [e["type"] for e in self.events]
         assert "merge_ended" in types
 
@@ -1252,7 +1256,7 @@ class TestMergeSession(unittest.TestCase):
         assert self.server._get_tab("0").is_merging is True
 
     def test_finish_merge_cleans_up_data_dir(self) -> None:
-        """_finish_merge removes the merge data directory."""
+        """_finish_merge removes the merge data directory for the tab."""
         import kiss.agents.vscode.diff_merge as dm
         import kiss.agents.vscode.merge_flow as mf
 
@@ -1262,9 +1266,9 @@ class TestMergeSession(unittest.TestCase):
         mf._merge_data_dir = lambda tab_id="": self.merge_dir  # type: ignore[assignment]
         try:
             path = self._write_merge_json()
-            self.server._start_merge_session(path)
+            self.server._start_merge_session(path, tab_id="fm-tab")
             assert self.merge_dir.exists()
-            self.server._finish_merge()
+            self.server._finish_merge("fm-tab")
             assert not self.merge_dir.exists()
         finally:
             dm._merge_data_dir = orig_dm  # type: ignore[assignment]
@@ -1292,7 +1296,7 @@ class TestMergeSession(unittest.TestCase):
     def test_merge_command_routing(self) -> None:
         """mergeAction command is routed through _handle_command."""
         path = self._write_merge_json()
-        self.server._start_merge_session(path)
+        self.server._start_merge_session(path, tab_id="mr-tab")
         self.events.clear()
 
         import kiss.agents.vscode.diff_merge as dm
@@ -1303,7 +1307,9 @@ class TestMergeSession(unittest.TestCase):
         orig_mf = mf._merge_data_dir
         mf._merge_data_dir = lambda tab_id="": self.merge_dir  # type: ignore[assignment]
         try:
-            self.server._handle_command({"type": "mergeAction", "action": "all-done"})
+            self.server._handle_command({
+                "type": "mergeAction", "action": "all-done", "tabId": "mr-tab",
+            })
         finally:
             dm._merge_data_dir = orig  # type: ignore[assignment]
             mf._merge_data_dir = orig_mf  # type: ignore[assignment]

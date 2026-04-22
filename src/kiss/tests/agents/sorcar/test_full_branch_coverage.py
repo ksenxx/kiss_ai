@@ -121,7 +121,7 @@ class TestReplaySessionWithEvents:
 
             server.printer.broadcast = capture  # type: ignore[assignment]
 
-            server._replay_session(chat_id)
+            server._replay_session(chat_id, tab_id="tab-replay")
 
             task_ev = [e for e in captured if e.get("type") == "task_events"]
             assert len(task_ev) == 1

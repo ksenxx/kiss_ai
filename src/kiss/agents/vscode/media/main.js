@@ -1793,6 +1793,7 @@
         break;
       }
       case 'adjacent_task_events':
+        if (ev.tabId !== undefined && ev.tabId !== activeTabId) break;
         renderAdjacentTask(ev.direction, ev.task, ev.events || []);
         break;
       case 'setTaskText': {

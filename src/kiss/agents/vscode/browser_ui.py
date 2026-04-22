@@ -130,10 +130,50 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
         self._lock = threading.Lock()
         self._bash_lock = threading.Lock()
         self._bash_states: dict[str, _BashState] = {}
-        self.tokens_offset: int = 0
-        self.budget_offset: float = 0.0
-        self.steps_offset: int = 0
+        self._tokens_offsets: dict[str, int] = {}
+        self._budget_offsets: dict[str, float] = {}
+        self._steps_offsets: dict[str, int] = {}
         self._recordings: dict[str, list[dict[str, Any]]] = {}
+
+    def _offset_key(self) -> str:
+        """Return the thread-local tab key for per-tab usage offsets.
+
+        Falls back to the empty string for threads without a tab_id
+        (e.g. unit tests that do not set ``_thread_local.tab_id``).
+        """
+        return getattr(self._thread_local, "tab_id", None) or ""
+
+    @property
+    def tokens_offset(self) -> int:
+        """Per-tab token-count offset used when broadcasting ``usage_info``.
+
+        Backed by a ``tab_id``-keyed dict so concurrent tasks on
+        different tabs never clobber each other's accumulated tokens
+        (A7 fix).
+        """
+        return self._tokens_offsets.get(self._offset_key(), 0)
+
+    @tokens_offset.setter
+    def tokens_offset(self, value: int) -> None:
+        self._tokens_offsets[self._offset_key()] = value
+
+    @property
+    def budget_offset(self) -> float:
+        """Per-tab dollar-budget offset used when broadcasting ``usage_info``."""
+        return self._budget_offsets.get(self._offset_key(), 0.0)
+
+    @budget_offset.setter
+    def budget_offset(self, value: float) -> None:
+        self._budget_offsets[self._offset_key()] = value
+
+    @property
+    def steps_offset(self) -> int:
+        """Per-tab step-count offset used when broadcasting ``usage_info``."""
+        return self._steps_offsets.get(self._offset_key(), 0)
+
+    @steps_offset.setter
+    def steps_offset(self, value: int) -> None:
+        self._steps_offsets[self._offset_key()] = value
 
     def cleanup_tab(self, tab_id: str) -> None:
         """Remove all per-tab state for *tab_id* to free memory.
@@ -152,6 +192,9 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
                 bs.timer.cancel()
         with self._lock:
             self._recordings.pop(key, None)
+            self._tokens_offsets.pop(key, None)
+            self._budget_offsets.pop(key, None)
+            self._steps_offsets.pop(key, None)
 
     def reset(self) -> None:
         """Reset internal streaming and tool-parsing state for a new turn."""

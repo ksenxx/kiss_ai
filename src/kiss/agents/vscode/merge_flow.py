@@ -205,40 +205,36 @@ class _MergeFlowMixin:
         complete.
 
         Args:
-            tab_id: The tab whose merge session is finished. When *None*,
-                all merge sessions are cleared.
+            tab_id: The tab whose merge session is finished.  When
+                *None*, the call is a no-op — the previous behavior of
+                clearing every tab's ``is_merging`` flag and emitting an
+                untagged ``merge_ended`` event violated per-tab state
+                isolation (B8 fix).  A missing ``tabId`` at this layer
+                indicates a frontend bug that should not silently tear
+                down every tab's merge state.
         """
+        if tab_id is None:
+            logger.debug("_finish_merge called without tab_id; ignoring")
+            return
         with self._state_lock:
-            if tab_id is not None:
-                tab = self._tab_states.get(tab_id)
-                if tab is not None:
-                    tab.is_merging = False
-            else:
-                for tab in self._tab_states.values():
-                    tab.is_merging = False
-        event: dict[str, Any] = {"type": "merge_ended"}
-        if tab_id is not None:
-            event["tabId"] = tab_id
-        self.printer.broadcast(event)
-        if tab_id is not None:
-            _cleanup_merge_data(str(_merge_data_dir(tab_id)))
-        else:
-            _cleanup_merge_data(str(_merge_data_dir()))
+            tab = self._tab_states.get(tab_id)
+            if tab is not None:
+                tab.is_merging = False
+        self.printer.broadcast({"type": "merge_ended", "tabId": tab_id})
+        _cleanup_merge_data(str(_merge_data_dir(tab_id)))
 
-        if tab_id is not None:
-            self._present_pending_worktree(tab_id, try_merge_review=False)
+        self._present_pending_worktree(tab_id, try_merge_review=False)
 
-        if tab_id is not None:
-            with self._state_lock:
-                tab = self._tab_states.get(tab_id)
-            if tab is not None and not tab.use_worktree:
-                changed = self._main_dirty_files()
-                if changed:
-                    self.printer.broadcast({
-                        "type": "autocommit_prompt",
-                        "tabId": tab_id,
-                        "changedFiles": changed,
-                    })
+        with self._state_lock:
+            tab = self._tab_states.get(tab_id)
+        if tab is not None and not tab.use_worktree:
+            changed = self._main_dirty_files()
+            if changed:
+                self.printer.broadcast({
+                    "type": "autocommit_prompt",
+                    "tabId": tab_id,
+                    "changedFiles": changed,
+                })
 
     def _main_dirty_files(self) -> list[str]:
         """List modified, staged and untracked files in the main working tree.
