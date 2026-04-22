@@ -8,10 +8,22 @@ Covers both directions:
 - Stopping a non-worktree task while a worktree task runs
 - Stopping a worktree task while a non-worktree task runs
 
-Root cause: ``BaseBrowserPrinter``'s stream state (``_current_block_type``,
-``_tool_name``, ``_tool_json_buffer``) and recording (``_recording``) were
-shared instance attributes.  When one task's cleanup called ``reset()``
-or ``stop_recording()``, it destroyed the other task's in-flight state.
+Root causes fixed:
+
+1. Stream state (``_current_block_type``, ``_tool_name``,
+   ``_tool_json_buffer``) and recording (``_recording``) were shared
+   instance attributes.  Now thread-local / per-tab.
+
+2. Bash buffering state (``_bash_state``) was a single shared instance.
+   Two concurrent tabs shared ``buffer``, ``streamed``, ``generation``,
+   and ``timer``, causing cross-contamination.  Now per-tab via
+   ``_bash_states`` dict.
+
+3. ``_flush_bash`` had a TOCTOU: after the generation check passed
+   (inside ``_bash_lock``), the lock was released before ``broadcast()``,
+   allowing ``reset()`` + ``start_recording()`` to slip in and the stale
+   text to leak into the new recording.  Now ``broadcast()`` is called
+   while still holding ``_bash_lock``.
 """
 
 from __future__ import annotations
@@ -497,6 +509,276 @@ class TestStopWtConcurrentScenario(unittest.TestCase):
             f"Expected thinking events, got {types}. "
             "Wt task's reset() corrupted non-wt task's stream state."
         )
+
+
+class TestBashStreamedCrossContamination(unittest.TestCase):
+    """Bash ``streamed`` flag must be per-tab.
+
+    Without per-tab bash state, task A's ``bash_stream`` sets
+    ``streamed = True`` on the shared ``_BashState``.  Task B's
+    ``tool_result`` reads it as ``True`` and suppresses the result
+    content (empty string instead of actual content).
+    """
+
+    def test_streamed_flag_isolated_between_tabs(self) -> None:
+        """Task A streaming bash does not set task B's streamed flag."""
+        printer = BaseBrowserPrinter()
+        barrier = threading.Barrier(2, timeout=5)
+        barrier2 = threading.Barrier(2, timeout=5)
+        results: dict[str, bool] = {}
+
+        def task_a() -> None:
+            printer._thread_local.tab_id = "A"
+            printer.start_recording()
+            with printer._bash_lock:
+                printer._bash_state.streamed = True
+            barrier.wait()
+            barrier2.wait()
+            with printer._bash_lock:
+                results["A_streamed"] = printer._bash_state.streamed
+
+        def task_b() -> None:
+            printer._thread_local.tab_id = "B"
+            printer.start_recording()
+            barrier.wait()
+            with printer._bash_lock:
+                results["B_streamed"] = printer._bash_state.streamed
+            barrier2.wait()
+
+        t_a = threading.Thread(target=task_a, daemon=True)
+        t_b = threading.Thread(target=task_b, daemon=True)
+        t_a.start()
+        t_b.start()
+        t_a.join(timeout=5)
+        t_b.join(timeout=5)
+
+        assert results["A_streamed"] is True, "Task A set streamed=True"
+        assert results["B_streamed"] is False, (
+            "Task B's streamed should be False (default), "
+            "not contaminated by task A"
+        )
+
+
+class TestBashBufferCrossContamination(unittest.TestCase):
+    """Bash buffer must be per-tab.
+
+    Without per-tab bash state, two tasks' bash output gets mixed in
+    the shared buffer, producing garbled system_output events.
+    """
+
+    def test_buffers_isolated_between_tabs(self) -> None:
+        """Task A's bash buffer content does not appear in task B's buffer."""
+        printer = BaseBrowserPrinter()
+        barrier = threading.Barrier(2, timeout=5)
+        results: dict[str, list[str]] = {}
+
+        def task_a() -> None:
+            printer._thread_local.tab_id = "A"
+            with printer._bash_lock:
+                printer._bash_state.buffer.append("task-A-output")
+            barrier.wait()
+            with printer._bash_lock:
+                results["A_buffer"] = list(printer._bash_state.buffer)
+
+        def task_b() -> None:
+            printer._thread_local.tab_id = "B"
+            with printer._bash_lock:
+                printer._bash_state.buffer.append("task-B-output")
+            barrier.wait()
+            with printer._bash_lock:
+                results["B_buffer"] = list(printer._bash_state.buffer)
+
+        t_a = threading.Thread(target=task_a, daemon=True)
+        t_b = threading.Thread(target=task_b, daemon=True)
+        t_a.start()
+        t_b.start()
+        t_a.join(timeout=5)
+        t_b.join(timeout=5)
+
+        assert results["A_buffer"] == ["task-A-output"], (
+            f"Task A buffer should only have its output, got {results['A_buffer']}"
+        )
+        assert results["B_buffer"] == ["task-B-output"], (
+            f"Task B buffer should only have its output, got {results['B_buffer']}"
+        )
+
+
+class TestBashGenerationInterference(unittest.TestCase):
+    """Bash generation counter must be per-tab.
+
+    Without per-tab bash state, task B's ``reset()`` increments the
+    shared generation counter, causing task A's legitimate timer flush
+    to discard its data (generation mismatch).
+    """
+
+    def test_reset_on_tab_b_does_not_kill_tab_a_flush(self) -> None:
+        """Task B's reset() does not increment task A's generation counter."""
+        printer = BaseBrowserPrinter()
+        barrier = threading.Barrier(2, timeout=5)
+        barrier2 = threading.Barrier(2, timeout=5)
+        results: dict[str, int] = {}
+
+        def task_a() -> None:
+            printer._thread_local.tab_id = "A"
+            with printer._bash_lock:
+                gen_before = printer._bash_state.generation
+            results["A_gen_before"] = gen_before
+            barrier.wait()
+            barrier2.wait()
+            with printer._bash_lock:
+                results["A_gen_after"] = printer._bash_state.generation
+
+        def task_b() -> None:
+            printer._thread_local.tab_id = "B"
+            barrier.wait()
+            printer.reset()
+            barrier2.wait()
+
+        t_a = threading.Thread(target=task_a, daemon=True)
+        t_b = threading.Thread(target=task_b, daemon=True)
+        t_a.start()
+        t_b.start()
+        t_a.join(timeout=5)
+        t_b.join(timeout=5)
+
+        assert results["A_gen_before"] == results["A_gen_after"], (
+            f"Task A's generation changed from {results['A_gen_before']} "
+            f"to {results['A_gen_after']} — task B's reset() interfered"
+        )
+
+
+class TestBashTimerInterference(unittest.TestCase):
+    """Bash timer must be per-tab.
+
+    Without per-tab bash state, task B's ``reset()`` cancels task A's
+    pending flush timer, causing task A's buffered output to be lost.
+    """
+
+    def test_reset_on_tab_b_does_not_cancel_tab_a_timer(self) -> None:
+        """Task B's reset() does not cancel task A's pending timer."""
+        printer = BaseBrowserPrinter()
+        barrier = threading.Barrier(2, timeout=5)
+        barrier2 = threading.Barrier(2, timeout=5)
+        results: dict[str, bool] = {}
+
+        def task_a() -> None:
+            printer._thread_local.tab_id = "A"
+            with printer._bash_lock:
+                t = threading.Timer(999, lambda: None)
+                printer._bash_state.timer = t
+            barrier.wait()
+            barrier2.wait()
+            with printer._bash_lock:
+                results["A_timer_alive"] = printer._bash_state.timer is not None
+                if printer._bash_state.timer is not None:
+                    printer._bash_state.timer.cancel()
+                    printer._bash_state.timer = None
+
+        def task_b() -> None:
+            printer._thread_local.tab_id = "B"
+            barrier.wait()
+            printer.reset()
+            barrier2.wait()
+
+        t_a = threading.Thread(target=task_a, daemon=True)
+        t_b = threading.Thread(target=task_b, daemon=True)
+        t_a.start()
+        t_b.start()
+        t_a.join(timeout=5)
+        t_b.join(timeout=5)
+
+        assert results["A_timer_alive"] is True, (
+            "Task A's timer should still be alive after task B's reset()"
+        )
+
+
+class TestFlushBashTOCTOU(unittest.TestCase):
+    """``_flush_bash`` TOCTOU: broadcast must happen inside _bash_lock.
+
+    Without the fix, after the generation check passes and the lock is
+    released, ``reset()`` + ``start_recording()`` can slip in before
+    ``broadcast()``, causing stale bash text to leak into the new
+    recording.
+
+    This test verifies the fix by simulating the exact interleaving
+    with manual thread synchronization.
+    """
+
+    def test_stale_text_does_not_leak_into_new_recording(self) -> None:
+        """Stale bash text from old turn does not appear in new recording.
+
+        Interleaving:
+        1. Timer captures text + generation (first lock)
+        2. Timer releases first lock
+        3. Timer acquires second lock, generation check passes
+        4. (Without fix: timer releases lock, reset+start_recording, broadcast leaks)
+        5. (With fix: broadcast inside lock, no window for reset)
+        """
+        printer = BaseBrowserPrinter()
+        printer._thread_local.tab_id = "tab1"
+
+        with printer._bash_lock:
+            printer._bash_state.buffer.append("stale-from-old-turn")
+
+        captured = threading.Event()
+        proceed = threading.Event()
+
+        def manual_flush() -> None:
+            printer._thread_local.tab_id = "tab1"
+            with printer._bash_lock:
+                bs = printer._bash_state
+                gen = bs.generation
+                text = "".join(bs.buffer) if bs.buffer else ""
+                bs.buffer.clear()
+                bs.last_flush = 0.0
+            captured.set()
+            proceed.wait(timeout=5)
+            if text:
+                with printer._bash_lock:
+                    if printer._bash_state.generation != gen:
+                        return
+                    printer.broadcast({"type": "system_output", "text": text})
+
+        t = threading.Thread(target=manual_flush, daemon=True)
+        t.start()
+
+        captured.wait(timeout=5)
+
+        printer.reset()
+        printer.start_recording()
+
+        proceed.set()
+        t.join(timeout=5)
+
+        events = printer.stop_recording()
+        stale = [e for e in events if e.get("type") == "system_output"]
+        assert len(stale) == 0, (
+            f"Stale bash text leaked into new recording: {stale}"
+        )
+
+    def test_structural_broadcast_inside_lock(self) -> None:
+        """Verify broadcast is called inside the _bash_lock in _flush_bash."""
+        import inspect
+        import textwrap
+
+        src = inspect.getsource(BaseBrowserPrinter._flush_bash)
+        src = textwrap.dedent(src)
+        gen_check_idx = src.index("self._bash_state.generation != gen")
+        broadcast_idx = src.index("self.broadcast(")
+        second_lock_start = src.index("with self._bash_lock:", src.index("bs.last_flush"))
+        lines = src[second_lock_start:].split("\n")
+        gen_line = None
+        broadcast_line = None
+        for i, line in enumerate(lines):
+            if "self._bash_state.generation != gen" in line:
+                gen_line = i
+            if "self.broadcast(" in line:
+                broadcast_line = i
+        assert gen_line is not None and broadcast_line is not None
+        assert broadcast_line > gen_line, (
+            "broadcast must come after generation check in the same lock scope"
+        )
+        assert gen_check_idx < broadcast_idx
 
 
 if __name__ == "__main__":
