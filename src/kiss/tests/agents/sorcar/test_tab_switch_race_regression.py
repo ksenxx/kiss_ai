@@ -744,11 +744,13 @@ class TestCreateNewTabDuringRunningTask(unittest.TestCase):
         cls.js = _MAIN_JS.read_text()
 
     def test_create_new_tab_does_not_reset_running_tab_id(self) -> None:
-        """createNewTab sets isRunning=false for the new tab but doesn't
-        touch runningTabId."""
+        """createNewTab creates a fresh tab (isRunning=false by default
+        from makeTab) and delegates DOM reset to restoreTab without
+        touching runningTabId."""
         idx = self.js.index("function createNewTab()")
         block = self.js[idx : idx + 1000]
-        assert "setRunningState(false)" in block
+        assert "makeTab(" in block
+        assert "restoreTab(tab)" in block
         assert "runningTabId" not in block
 
     def test_new_tab_scenario_via_node(self) -> None:
@@ -1022,11 +1024,20 @@ class TestPerTabAttachments(unittest.TestCase):
         assert "renderFileChips()" in body
 
     def test_create_new_tab_clears_attachments(self) -> None:
+        """createNewTab builds a fresh tab (with default attachments=[])
+        then calls restoreTab, which loads that empty list into the
+        shared ``attachments`` variable and re-renders the chip row."""
         idx = self.js.index("function createNewTab()")
         end = self.js.index("\n  function ", idx + 1)
         body = self.js[idx:end]
-        assert "attachments = []" in body
-        assert "renderFileChips()" in body
+        assert "makeTab(" in body
+        assert "restoreTab(tab)" in body
+        # And restoreTab itself applies the empty list + re-renders.
+        rt_idx = self.js.index("function restoreTab(tab)")
+        rt_end = self.js.index("\n  function ", rt_idx + 1)
+        rt_body = self.js[rt_idx:rt_end]
+        assert "attachments = tab.attachments" in rt_body
+        assert "renderFileChips()" in rt_body
 
 
 class TestPerTabInputValue(unittest.TestCase):
@@ -1052,11 +1063,19 @@ class TestPerTabInputValue(unittest.TestCase):
         assert "syncClearBtn()" in body
 
     def test_create_new_tab_preserves_input(self) -> None:
+        """Typed but unsent text carries over: createNewTab captures it
+        into ``tab.inputValue`` so the subsequent restoreTab installs it
+        back into the shared input box."""
         idx = self.js.index("function createNewTab()")
         end = self.js.index("\n  function ", idx + 1)
         body = self.js[idx:end]
         assert "const pendingText = inp.value" in body
-        assert "inp.value = pendingText" in body
+        assert "tab.inputValue = pendingText" in body
+        assert "restoreTab(tab)" in body
+        rt_idx = self.js.index("function restoreTab(tab)")
+        rt_end = self.js.index("\n  function ", rt_idx + 1)
+        rt_body = self.js[rt_idx:rt_end]
+        assert "inp.value = tab.inputValue" in rt_body
 
 
 class TestPerTabIsMerging(unittest.TestCase):
@@ -1093,11 +1112,23 @@ class TestPerTabIsMerging(unittest.TestCase):
         assert "ev.tabId !== undefined && ev.tabId !== activeTabId" in block
 
     def test_create_new_tab_clears_merging(self) -> None:
+        """A freshly-built tab has ``isMerging: false`` by default, and
+        restoreTab both copies that into the shared ``isMerging`` flag
+        and removes any existing merge toolbar from the DOM."""
         idx = self.js.index("function createNewTab()")
         end = self.js.index("\n  function ", idx + 1)
         body = self.js[idx:end]
-        assert "isMerging = false" in body
-        assert "hideMergeToolbar()" in body
+        assert "makeTab(" in body
+        assert "restoreTab(tab)" in body
+        mk_idx = self.js.index("function makeTab(title)")
+        mk_end = self.js.index("\n  function ", mk_idx + 1)
+        mk_body = self.js[mk_idx:mk_end]
+        assert "isMerging: false" in mk_body
+        rt_idx = self.js.index("function restoreTab(tab)")
+        rt_end = self.js.index("\n  function ", rt_idx + 1)
+        rt_body = self.js[rt_idx:rt_end]
+        assert "isMerging = tab.isMerging" in rt_body
+        assert "merge-toolbar" in rt_body
 
 
 class TestPerTabWorktreeBar(unittest.TestCase):

@@ -342,33 +342,6 @@ class TestFix3MainTreeBusyGuard:
         GitWorktreeOps.prune(repo)
         GitWorktreeOps.delete_branch(repo, wt.branch)
 
-    def test_new_chat_defers_release_when_non_wt_running(self) -> None:
-        """_new_chat skips auto-release when a non-wt agent is running."""
-        repo = _make_repo(Path(self._tmpdir) / "repo")
-        server = VSCodeServer()
-        server.work_dir = str(repo)
-
-        wt_agent = WorktreeSorcarAgent("wt")
-        wt_agent._chat_id = "wt_tab"
-        wt_work = wt_agent._try_setup_worktree(repo, str(repo))
-        assert wt_work is not None
-        assert wt_agent._wt_pending
-
-        wt_tab = server._get_tab("wt_tab")
-        wt_tab.agent = wt_agent
-        wt_tab.use_worktree = True
-
-        non_wt_tab = server._get_tab("non_wt_tab")
-        non_wt_tab.is_running_non_wt = True
-
-        server._new_chat("wt_tab")
-
-        assert wt_agent._wt_pending, (
-            "Fix 3: pending worktree must not be released when non-wt running"
-        )
-
-        non_wt_tab.is_running_non_wt = False
-        wt_agent.discard()
 
     def test_run_task_inner_source_sets_non_wt_flag(self) -> None:
         """_run_task_inner sets is_running_non_wt for non-worktree tasks."""

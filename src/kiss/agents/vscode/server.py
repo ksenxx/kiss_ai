@@ -237,63 +237,18 @@ class VSCodeServer(
     def _new_chat(self, tab_id: str) -> None:
         """Start a new chat session for the given tab.
 
-        Resets the agent's ``chat_id`` to ``""`` so the next task starts
-        a fresh session.  The tab_id (frontend key) does not change.
-        Broadcasts any pending warnings (stash-pop failure or merge
-        conflict) from the auto-release, then emits ``showWelcome``
-        so the frontend displays the welcome messages in the tab.
+        The ``newChat`` command is only issued by the frontend's
+        ``createNewTab`` flow, which always allocates a fresh tab id
+        that the backend has never seen before.  ``_get_tab`` creates a
+        clean ``_TabState``, so there is no prior run state (no active
+        task, no in-progress merge, no pending worktree, no carried-over
+        warnings) to guard against here.
 
         Args:
-            tab_id: The frontend tab identifier.
+            tab_id: The frontend tab identifier (a freshly-minted uuid).
         """
         tab = self._get_tab(tab_id)
-        with self._state_lock:
-            if tab.is_merging:
-                self.printer.broadcast({
-                    "type": "error",
-                    "text": "Cannot start a new chat while a merge review is in progress."
-                            " Accept or reject all changes first.",
-                    "tabId": tab_id,
-                })
-                return
-            if tab.is_task_active:
-                self.printer.broadcast({
-                    "type": "error",
-                    "text": "Cannot start a new chat while a task is running."
-                            " Stop the task first.",
-                    "tabId": tab_id,
-                })
-                return
-        if tab.agent._wt_pending:
-            with self._state_lock:
-                if self._any_non_wt_running():
-                    self.printer.broadcast({
-                        "type": "warning",
-                        "message": (
-                            "Another tab is running a task on the main working "
-                            "tree. The pending worktree branch will be merged "
-                            "when the task finishes."
-                        ),
-                        "tabId": tab_id,
-                    })
-                    super(type(tab.agent), tab.agent).new_chat()
-                    self.printer.broadcast({"type": "showWelcome", "tabId": tab_id})
-                    return
         tab.agent.new_chat()
-        if tab.agent._stash_pop_warning:
-            self.printer.broadcast({
-                "type": "warning",
-                "message": tab.agent._stash_pop_warning,
-                "tabId": tab_id,
-            })
-            tab.agent._stash_pop_warning = None
-        if tab.agent._merge_conflict_warning:
-            self.printer.broadcast({
-                "type": "warning",
-                "message": tab.agent._merge_conflict_warning,
-                "tabId": tab_id,
-            })
-            tab.agent._merge_conflict_warning = None
         self.printer.broadcast({"type": "showWelcome", "tabId": tab_id})
 
     def _replay_session(self, chat_id: str, tab_id: str = "") -> None:

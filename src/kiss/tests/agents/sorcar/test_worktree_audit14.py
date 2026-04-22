@@ -232,60 +232,6 @@ class TestBug64WarningsDroppedOnFallback:
         ), f"Regression: success-path warning lost.  Events: {printer.events}"
 
 
-class TestBug65NewChatDuringMerge:
-    """``_new_chat`` must refuse (or be inert) while a merge review
-    is active — otherwise ``tab.agent.new_chat()`` triggers
-    ``_release_worktree``, which auto-commits and squash-merges,
-    destroying the user's hunk-picking intent.
-    """
-
-    def test_new_chat_blocked_while_merging(self, tmp_path: Path) -> None:
-        from kiss.agents.vscode.server import VSCodeServer
-
-        repo = _make_repo(tmp_path / "repo")
-        server = VSCodeServer()
-        server.work_dir = str(repo)
-        tab_id = "tab1"
-        tab = server._get_tab(tab_id)
-        tab.use_worktree = True
-        agent = cast(WorktreeSorcarAgent, tab.agent)
-        branch = "kiss/wt-bug65-1"
-        wt_dir = repo / ".kiss-worktrees" / "kiss_wt-bug65-1"
-        assert GitWorktreeOps.create(repo, branch, wt_dir)
-        GitWorktreeOps.save_original_branch(repo, branch, "main")
-        agent._wt = GitWorktree(
-            repo_root=repo,
-            branch=branch,
-            original_branch="main",
-            wt_dir=wt_dir,
-            baseline_commit=None,
-        )
-        tab.is_merging = True
-
-        server.printer = cast(Any, _RecordingPrinter())
-        server._new_chat(tab_id)
-
-        assert GitWorktreeOps.branch_exists(repo, branch), (
-            "BUG-65: _new_chat destroyed the worktree branch while a "
-            "merge review was active.  User's hunk-picking intent lost."
-        )
-        assert agent._wt is not None, (
-            "BUG-65: _new_chat cleared the agent's worktree reference "
-            "during an active merge review."
-        )
-        assert tab.is_merging, "BUG-65: is_merging was cleared."
-
-        events = cast(_RecordingPrinter, server.printer).events
-        assert any(
-            e.get("type") in ("error", "warning") for e in events
-        ), (
-            f"BUG-65: no error/warning broadcast.  Events: {events}"
-        )
-
-        GitWorktreeOps.remove(repo, wt_dir)
-        GitWorktreeOps.delete_branch(repo, branch)
-
-
 class TestRed8ManualMergeBranchDeadCode:
     """``manual_merge_branch`` and ``ManualMergeResult`` are not
     referenced by any module under ``src/kiss/agents`` (production

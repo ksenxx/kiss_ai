@@ -356,9 +356,11 @@
     vscode.postMessage({type: 'closeTab', tabId: tabId});
     if (activeTabId === tabId) {
       if (tabs.length === 0) {
-        // Last tab closed — close the secondary bar and open a fresh new chat
+        // Last tab closed — just close the secondary bar; do not
+        // auto-create a replacement tab.
         vscode.postMessage({type: 'closeSecondaryBar'});
-        createNewTab();
+        activeTabId = '';
+        persistTabState();
         return;
       }
       // Switch to an adjacent tab
@@ -480,38 +482,17 @@
     const pendingText = inp.value || '';
     saveCurrentTab();
     const tab = makeTab('new chat');
+    tab.inputValue = pendingText;
     tabs.push(tab);
     activeTabId = tab.id;
     // Reset UI for fresh tab
-    clearOutput();
-    resetOutputState();
-    resetAdjacentState();
-    currentTaskName = '';
-    removeSpinner();
-    clearWorktreeBar();
-    clearUsageMetrics();
-    setTaskText('');
-    // Reset per-tab state for new tab (selectedModel inherited via makeTab)
-    attachments = [];
-    renderFileChips();
-    inp.value = pendingText;
-    syncClearBtn();
-    inp.style.height = 'auto';
-    inp.style.height = Math.min(inp.scrollHeight, 200) + 'px';
-    isMerging = false;
-    hideMergeToolbar();
-    t0 = null;
-    if (welcome) {
-      welcome.style.display = '';
-      O.appendChild(welcome);
-    }
+    // (empty fragment, "Ready" status, welcome visible, no merge,
+    // no worktree bar, etc.).  `restoreTab` applies that state to
+    // the shared DOM, so no additional manual resets are needed.
+    restoreTab(tab);
     renderTabBar();
     persistTabState();
     // New tab is never running
-    setRunningState(false);
-    stopTimer();
-    statusText.textContent = 'Ready';
-    vscode.postMessage({type: 'newChat', tabId: activeTabId});
     vscode.postMessage({type: 'getWelcomeSuggestions'});
     focusInputWithRetry();
   }
