@@ -76,9 +76,9 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
     Stream-parsing state (``_current_block_type``, ``_tool_name``,
     ``_tool_json_buffer``) is stored in thread-local storage so
     concurrent task threads cannot corrupt each other's in-flight
-    parsing.  Recording is per-tab (keyed by ``tab_id``) so one
-    task's ``stop_recording()`` does not destroy another tab's
-    recorded events.
+    parsing.  Recording and bash buffering are per-tab (keyed by
+    ``tab_id``) so one task's ``stop_recording()`` or ``reset()``
+    does not destroy another tab's state.
     """
 
 
@@ -106,12 +106,30 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
     def _tool_json_buffer(self, value: str) -> None:
         self._thread_local._tjb = value
 
+    @property
+    def _bash_state(self) -> _BashState:
+        """Return the bash buffering state for the current thread's tab.
+
+        Each tab gets its own ``_BashState`` so concurrent tasks on
+        different tabs cannot corrupt each other's bash buffer,
+        ``streamed`` flag, generation counter, or flush timer.
+
+        The caller should hold ``_bash_lock`` when accessing this in
+        multi-threaded production code.
+        """
+        key = getattr(self._thread_local, "tab_id", None) or ""
+        bs = self._bash_states.get(key)
+        if bs is None:
+            bs = _BashState()
+            self._bash_states[key] = bs
+        return bs
+
     def __init__(self) -> None:
         self._thread_local = threading.local()
         StreamEventParser.__init__(self)
         self._lock = threading.Lock()
         self._bash_lock = threading.Lock()
-        self._bash_state = _BashState()
+        self._bash_states: dict[str, _BashState] = {}
         self.tokens_offset: int = 0
         self.budget_offset: float = 0.0
         self.steps_offset: int = 0
@@ -133,9 +151,13 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
 
         Captures the generation counter inside ``_bash_lock`` along with
         the buffered text.  After releasing the lock, re-checks the
-        generation: if ``reset()`` ran in between (incrementing the
-        generation), the captured text is stale and is discarded instead
-        of being broadcast into the new turn's recording.
+        generation inside a second ``_bash_lock`` acquisition: if
+        ``reset()`` ran in between (incrementing the generation), the
+        captured text is stale and is discarded.  The ``broadcast()``
+        call is made while still holding the second lock to close the
+        TOCTOU window that would otherwise allow ``reset()`` +
+        ``start_recording()`` to slip in between the generation check
+        and the broadcast.
         """
         with self._bash_lock:
             bs = self._bash_state
@@ -150,7 +172,7 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
             with self._bash_lock:
                 if self._bash_state.generation != gen:
                     return
-            self.broadcast({"type": "system_output", "text": text})
+                self.broadcast({"type": "system_output", "text": text})
 
     def _recording_key(self) -> str:
         """Return the per-tab key for the current thread's recording.
