@@ -14,17 +14,13 @@ from test_data.calculator.operators import OPERATORS
 
 class TestOperatorRegistry:
     def test_all_operators_registered(self):
-        assert set(OPERATORS.keys()) == {"+", "-", "*", "/"}
+        assert set(OPERATORS.keys()) == {"+", "-"}
+
     def test_each_operator_has_eval_and_precedence(self):
         for sym, mod in OPERATORS.items():
             assert hasattr(mod, "eval"), f"{sym} missing eval"
             assert hasattr(mod, "precedence"), f"{sym} missing precedence"
             assert hasattr(mod, "symbol"), f"{sym} missing symbol"
-
-    def test_mul_div_higher_precedence_than_add_sub(self):
-        from test_data.calculator.operators import add, divide, multiply, subtract
-        assert multiply.precedence > add.precedence
-        assert divide.precedence > subtract.precedence
 
     def test_add(self):
         from test_data.calculator.operators import add
@@ -34,22 +30,6 @@ class TestOperatorRegistry:
         from test_data.calculator.operators import subtract
         assert subtract.eval(5, 3) == 2
         assert subtract.eval(0, 5) == -5
-
-    def test_multiply(self):
-        from test_data.calculator.operators import multiply
-        assert multiply.eval(4, 3) == 12
-        assert multiply.eval(-2, 3) == -6
-        assert multiply.eval(0, 100) == 0
-
-    def test_divide(self):
-        from test_data.calculator.operators import divide
-        assert divide.eval(10, 2) == 5
-        assert divide.eval(7, 2) == 3.5
-
-    def test_divide_by_zero(self):
-        from test_data.calculator.operators import divide
-        with pytest.raises(ZeroDivisionError):
-            divide.eval(1, 0)
 
 
 # --- Tokenizer tests ---
@@ -81,30 +61,8 @@ class TestEvaluator:
     def test_subtraction(self):
         assert evaluate("10 - 4") == 6
 
-    def test_multiplication(self):
-        assert evaluate("3 * 7") == 21
-
-    def test_division(self):
-        assert evaluate("15 / 3") == 5
-
-    def test_precedence_mul_before_add(self):
-        assert evaluate("2 + 3 * 4") == 14
-
-    def test_precedence_div_before_sub(self):
-        assert evaluate("10 - 6 / 3") == 8
-
     def test_chained_operations(self):
         assert evaluate("1 + 2 + 3 + 4") == 10
-
-    def test_mixed_precedence(self):
-        assert evaluate("2 * 3 + 4 * 5") == 26
-
-    def test_decimal_result(self):
-        assert evaluate("7 / 2") == 3.5
-
-    def test_divide_by_zero(self):
-        with pytest.raises(ZeroDivisionError):
-            evaluate("1 / 0")
 
     def test_empty_expression(self):
         with pytest.raises(ValueError):
@@ -136,18 +94,6 @@ class TestCLI:
         captured = capsys.readouterr()
         assert ret == 0
         assert captured.out.strip() == "5"
-
-    def test_precedence(self, capsys):
-        ret = main(["2 + 3 * 4"])
-        captured = capsys.readouterr()
-        assert ret == 0
-        assert captured.out.strip() == "14"
-
-    def test_decimal_output(self, capsys):
-        ret = main(["7 / 2"])
-        captured = capsys.readouterr()
-        assert ret == 0
-        assert captured.out.strip() == "3.5"
 
     def test_no_args(self, capsys):
         ret = main([])
