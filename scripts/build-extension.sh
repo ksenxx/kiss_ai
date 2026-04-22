@@ -20,6 +20,7 @@ echo "==> Packaging VSIX..."
 npm run package
 
 echo "==> Installing extension..."
+"$CODE" --uninstall-extension ksenxx.kiss-sorcar 2>/dev/null || true
 "$CODE" --install-extension kiss-sorcar.vsix --force
 
 # Write marker so the extension knows a fresh install just happened and
