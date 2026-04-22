@@ -3187,11 +3187,19 @@ class TestWebviewTabBarJS(unittest.TestCase):
         body = self._js[idx:end]
         assert "activeTabId = tab.id" in body
 
-    def test_create_new_tab_clears_output(self) -> None:
+    def test_create_new_tab_resets_ui_via_restore_tab(self) -> None:
+        """createNewTab delegates DOM reset to restoreTab(tab) on a
+        freshly-built empty tab (which has default clean state)."""
         idx = self._js.index("function createNewTab()")
         end = self._js.index("\n  function ", idx + 1)
         body = self._js[idx:end]
-        assert "clearOutput()" in body
+        assert "restoreTab(tab)" in body
+        # The manual reset block was removed — these individual resets
+        # are now handled by restoreTab / makeTab defaults.
+        assert "clearOutput()" not in body
+        assert "clearWorktreeBar()" not in body
+        assert "setTaskText('')" not in body
+        assert "setRunningState(false)" not in body
 
     def test_create_new_tab_renders_tab_bar(self) -> None:
         idx = self._js.index("function createNewTab()")
@@ -3273,13 +3281,34 @@ class TestWebviewTabBarJS(unittest.TestCase):
     def test_close_tab_function_exists(self) -> None:
         assert "function closeTab(tabId)" in self._js
 
-    def test_close_last_tab_creates_new_chat(self) -> None:
-        """Closing the last tab creates a fresh new chat."""
+    def test_close_last_tab_closes_secondary_bar_only(self) -> None:
+        """Closing the last tab sends closeSecondaryBar but does NOT
+        auto-create a replacement tab."""
         idx = self._js.index("function closeTab(tabId)")
         end = self._js.index("\n  function ", idx + 1)
         body = self._js[idx:end]
         assert "tabs.length === 0" in body
-        assert "createNewTab()" in body
+        assert "closeSecondaryBar" in body
+        # Extract the tabs.length===0 branch and assert it does not
+        # invoke createNewTab().
+        zero_idx = body.index("tabs.length === 0")
+        brace = body.index("{", zero_idx)
+        # Find the matching closing brace.
+        depth = 0
+        end_branch = brace
+        for i in range(brace, len(body)):
+            if body[i] == "{":
+                depth += 1
+            elif body[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    end_branch = i
+                    break
+        branch = body[brace:end_branch]
+        assert "createNewTab" not in branch, (
+            "closeTab's last-tab branch must not auto-create a new tab; "
+            f"branch body:\n{branch}"
+        )
 
     def test_close_tab_switches_to_adjacent_tab(self) -> None:
         idx = self._js.index("function closeTab(tabId)")

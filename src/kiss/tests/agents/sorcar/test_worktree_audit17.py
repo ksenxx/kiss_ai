@@ -92,61 +92,13 @@ class _RecordingPrinter:
         self.events.append(event)
 
 
-class TestBug71NewChatDuringRunningWorktreeTask:
-    """``_new_chat`` must refuse while the tab's own worktree task is
-    still running, otherwise ``tab.agent.new_chat()`` removes the
-    worktree directory mid-write."""
-
-    def test_new_chat_refused_while_task_active(self, tmp_path: Path) -> None:
-        repo = _make_repo(tmp_path / "repo")
-
-        server = VSCodeServer()
-        server.work_dir = str(repo)
-        printer = _RecordingPrinter()
-        server.printer = cast(Any, printer)
-
-        tab_id = "tab-bug71"
-        tab = server._get_tab(tab_id)
-        tab.use_worktree = True
-
-        agent = cast(WorktreeSorcarAgent, tab.agent)
-        wt = _create_wt(repo, "kiss/wt-bug71-1", agent)
-
-        tab.is_task_active = True
-
-        assert wt.wt_dir.exists(), "Pre-condition: wt_dir must exist"
-
-        server._new_chat(tab_id)
-
-        errors = [
-            e for e in printer.events
-            if e.get("type") == "error"
-            and "task" in e.get("text", "").lower()
-            and "running" in e.get("text", "").lower()
-        ]
-        assert errors, (
-            "BUG-71: _new_chat did not broadcast an error when a "
-            "worktree task was still running. "
-            f"Events: {printer.events}"
-        )
-
-        assert agent._wt is not None, (
-            "BUG-71: agent._wt was cleared despite task still running."
-        )
-
-        assert wt.wt_dir.exists(), (
-            "BUG-71: wt_dir was removed while the task was still "
-            "writing to it (tab.agent.new_chat -> _release_worktree "
-            "-> _finalize_worktree -> GitWorktreeOps.remove)."
-        )
-
-        welcome = [
-            e for e in printer.events if e.get("type") == "showWelcome"
-        ]
-        assert not welcome, (
-            "BUG-71: showWelcome broadcast despite the refusal. "
-            f"Events: {printer.events}"
-        )
+class TestNewChatSimpleBroadcast:
+    """``_new_chat`` on a fresh tab id simply resets the agent's chat
+    state and broadcasts ``showWelcome``.  (Earlier "refuse while a task
+    is running" guards were removed because the frontend always mints a
+    new tab id per ``newChat`` command, so the backend never observes a
+    tab whose previous run is still active.)
+    """
 
     def test_new_chat_regression_allowed_when_no_task(
         self, tmp_path: Path,

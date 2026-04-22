@@ -437,48 +437,6 @@ class TestBug43Fix:
             GitWorktreeOps.delete_branch(repo, branch)
 
 
-class TestBug44Fix:
-    """BUG-44 FIX: _new_chat guard checks agent._wt_pending regardless
-    of tab.use_worktree."""
-
-    def test_guard_does_not_require_use_worktree(self):
-        """The guard condition does NOT require tab.use_worktree."""
-        src = inspect.getsource(VSCodeServer._new_chat)
-        assert "tab.agent._wt_pending" in src
-        assert "tab.use_worktree and tab.agent._wt_pending" not in src, (
-            "Guard should NOT require use_worktree"
-        )
-
-    def test_worktree_pending_with_mode_switched(self, tmp_path):
-        """When use_worktree=False but _wt is set, the guard still fires."""
-        repo = _make_repo(tmp_path)
-        server = VSCodeServer()
-        server.work_dir = str(repo)
-
-        tab = server._get_tab("bypass-tab")
-        branch = "kiss/wt-bypass-test"
-        wt_dir = repo / ".kiss-worktrees" / "wt-bypass"
-        GitWorktreeOps.create(repo, branch, wt_dir)
-        GitWorktreeOps.save_original_branch(repo, branch, "main")
-
-        tab.agent._wt = GitWorktree(
-            repo_root=repo,
-            branch=branch,
-            original_branch="main",
-            wt_dir=wt_dir,
-        )
-        tab.use_worktree = False
-
-        assert tab.agent._wt_pending
-        assert tab.agent._wt_pending, "Guard should check _wt_pending alone"
-
-        GitWorktreeOps.remove(repo, wt_dir)
-        GitWorktreeOps.prune(repo)
-        if GitWorktreeOps.branch_exists(repo, branch):
-            GitWorktreeOps.delete_branch(repo, branch)
-        tab.agent._wt = None
-
-
 class TestInc6Fix:
     """INC-6 FIX: _check_merge_conflict checks both unstaged and staged files."""
 
