@@ -54,6 +54,7 @@ export type FromWebviewMessage =
   | {type: 'generateCommitMessage'}
   | {type: 'runPrompt'}
   | {type: 'focusEditor'}
+  | {type: 'closeTab'; tabId: string}
   | {type: 'closeSecondaryBar'}
   | {type: 'getInputHistory'}
   | {type: 'worktreeAction'; action: 'merge' | 'discard'; tabId?: string}
@@ -190,6 +191,7 @@ export interface AgentCommand {
     | 'mergeAction'
     | 'refreshFiles'
     | 'newChat'
+    | 'closeTab'
     | 'generateCommitMessage'
     | 'getInputHistory'
     | 'worktreeAction'

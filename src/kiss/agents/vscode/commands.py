@@ -54,6 +54,7 @@ class _CommandsMixin:
             self, action: str, tab_id: str | None = None
         ) -> None: ...
         def _new_chat(self, tab_id: str) -> None: ...
+        def _close_tab(self, tab_id: str) -> None: ...
         def _ensure_complete_worker(self) -> None: ...
         def _get_input_history(self) -> None: ...
         def _get_adjacent_task(
@@ -152,6 +153,12 @@ class _CommandsMixin:
         """Handle merge accept/reject from the extension."""
         self._handle_merge_action(cmd.get("action", ""), cmd.get("tabId"))
 
+    def _cmd_close_tab(self, cmd: dict[str, Any]) -> None:
+        """Clean up backend state for a closed frontend tab."""
+        tab_id = cmd.get("tabId", "")
+        if tab_id:
+            self._close_tab(tab_id)
+
     def _cmd_new_chat(self, cmd: dict[str, Any]) -> None:
         """Start a new chat session."""
         self._new_chat(cmd.get("tabId", ""))
@@ -230,6 +237,7 @@ class _CommandsMixin:
         "userAnswer": _cmd_user_answer,
         "resumeSession": _cmd_resume_session,
         "mergeAction": _cmd_merge_action,
+        "closeTab": _cmd_close_tab,
         "newChat": _cmd_new_chat,
         "complete": _cmd_complete,
         "getInputHistory": _cmd_get_input_history,

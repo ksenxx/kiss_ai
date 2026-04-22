@@ -797,6 +797,19 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         );
         break;
 
+      case 'closeTab': {
+        const closeTabId = message.tabId;
+        if (closeTabId) {
+          const closeProc = this._taskProcesses.get(closeTabId);
+          if (closeProc) {
+            closeProc.sendCommand({type: 'closeTab', tabId: closeTabId});
+          } else {
+            this._getServiceProcess().sendCommand({type: 'closeTab', tabId: closeTabId});
+          }
+        }
+        break;
+      }
+
       case 'closeSecondaryBar':
         vscode.commands.executeCommand('workbench.action.closeAuxiliaryBar');
         break;

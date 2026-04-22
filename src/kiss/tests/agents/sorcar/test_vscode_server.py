@@ -2465,7 +2465,7 @@ class TestSorcarSidebarViewMessageHandling(unittest.TestCase):
             "resumeSession", "getAdjacentTask",
             "complete", "mergeAction", "generateCommitMessage", "runPrompt",
             "worktreeAction", "resolveDroppedPaths", "focusEditor",
-            "closeSecondaryBar", "getWelcomeSuggestions",
+            "closeTab", "closeSecondaryBar", "getWelcomeSuggestions",
             "webviewFocusChanged", "autocommitAction",
         }
         extra = sidebar_cases - known

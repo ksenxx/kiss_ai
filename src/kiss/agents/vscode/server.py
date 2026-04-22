@@ -214,6 +214,26 @@ class VSCodeServer(
                 tasks.append(task)
         self.printer.broadcast({"type": "inputHistory", "tasks": tasks})
 
+    def _close_tab(self, tab_id: str) -> None:
+        """Clean up all backend state for a closed tab.
+
+        Removes the tab from ``_tab_states``, cleans up per-tab printer
+        state (bash buffers, recordings), and drops the persist-agent
+        reference.  Does nothing if the tab is currently running a task
+        or in a merge review — the frontend should stop/resolve those
+        first.
+
+        Args:
+            tab_id: The frontend tab identifier to close.
+        """
+        with self._state_lock:
+            tab = self._tab_states.get(tab_id)
+            if tab is not None and (tab.is_task_active or tab.is_merging):
+                return
+            self._tab_states.pop(tab_id, None)
+        self.printer.cleanup_tab(tab_id)
+        self.printer._persist_agents.pop(tab_id, None)
+
     def _new_chat(self, tab_id: str) -> None:
         """Start a new chat session for the given tab.
 

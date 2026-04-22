@@ -135,6 +135,24 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
         self.steps_offset: int = 0
         self._recordings: dict[str, list[dict[str, Any]]] = {}
 
+    def cleanup_tab(self, tab_id: str) -> None:
+        """Remove all per-tab state for *tab_id* to free memory.
+
+        Should be called when a tab is closed on the frontend.  Cancels
+        any pending bash flush timer and removes the tab's entries from
+        ``_bash_states`` and ``_recordings``.
+
+        Args:
+            tab_id: The frontend tab identifier to clean up.
+        """
+        key = tab_id or ""
+        with self._bash_lock:
+            bs = self._bash_states.pop(key, None)
+            if bs is not None and bs.timer is not None:
+                bs.timer.cancel()
+        with self._lock:
+            self._recordings.pop(key, None)
+
     def reset(self) -> None:
         """Reset internal streaming and tool-parsing state for a new turn."""
         self.reset_stream_state()

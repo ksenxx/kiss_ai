@@ -353,6 +353,7 @@
     });
     if (idx < 0) return;
     tabs.splice(idx, 1);
+    vscode.postMessage({type: 'closeTab', tabId: tabId});
     if (activeTabId === tabId) {
       if (tabs.length === 0) {
         // Last tab closed — close the secondary bar and open a fresh new chat

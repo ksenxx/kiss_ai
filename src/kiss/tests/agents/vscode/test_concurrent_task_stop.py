@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import threading
 import unittest
+from typing import Any
 
 from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 
@@ -779,6 +780,189 @@ class TestFlushBashTOCTOU(unittest.TestCase):
             "broadcast must come after generation check in the same lock scope"
         )
         assert gen_check_idx < broadcast_idx
+
+
+class TestCleanupTab(unittest.TestCase):
+    """``cleanup_tab`` removes per-tab state to prevent unbounded memory growth."""
+
+    def test_cleanup_removes_bash_state(self) -> None:
+        """After cleanup_tab, the tab's _BashState is removed from _bash_states."""
+        printer = BaseBrowserPrinter()
+        printer._thread_local.tab_id = "tab1"
+        with printer._bash_lock:
+            printer._bash_state.buffer.append("data")
+        assert "tab1" in printer._bash_states
+        printer.cleanup_tab("tab1")
+        assert "tab1" not in printer._bash_states
+
+    def test_cleanup_cancels_pending_timer(self) -> None:
+        """cleanup_tab cancels any pending bash flush timer for the tab."""
+        printer = BaseBrowserPrinter()
+        printer._thread_local.tab_id = "tab1"
+        t = threading.Timer(999, lambda: None)
+        t.start()
+        with printer._bash_lock:
+            printer._bash_state.timer = t
+        assert t.is_alive()
+        printer.cleanup_tab("tab1")
+        t.join(timeout=2)
+        assert not t.is_alive(), "Timer should have been cancelled by cleanup_tab"
+
+    def test_cleanup_removes_recording(self) -> None:
+        """After cleanup_tab, the tab's recording is removed from _recordings."""
+        printer = BaseBrowserPrinter()
+        printer._thread_local.tab_id = "tab1"
+        printer.start_recording()
+        assert "tab1" in printer._recordings
+        printer.cleanup_tab("tab1")
+        assert "tab1" not in printer._recordings
+
+    def test_cleanup_does_not_affect_other_tabs(self) -> None:
+        """cleanup_tab for one tab leaves other tabs' state intact."""
+        printer = BaseBrowserPrinter()
+
+        def setup_tab(tab_id: str) -> None:
+            printer._thread_local.tab_id = tab_id
+            with printer._bash_lock:
+                printer._bash_state.buffer.append(f"data-{tab_id}")
+            printer.start_recording()
+            with printer._lock:
+                printer._record_event({"type": "text_delta", "text": "x", "tabId": tab_id})
+
+        barrier = threading.Barrier(2, timeout=5)
+
+        def thread_setup(tab_id: str) -> None:
+            setup_tab(tab_id)
+            barrier.wait()
+
+        t1 = threading.Thread(target=thread_setup, args=("tab1",), daemon=True)
+        t2 = threading.Thread(target=thread_setup, args=("tab2",), daemon=True)
+        t1.start()
+        t2.start()
+        t1.join(timeout=5)
+        t2.join(timeout=5)
+
+        assert "tab1" in printer._bash_states
+        assert "tab2" in printer._bash_states
+        assert "tab1" in printer._recordings
+        assert "tab2" in printer._recordings
+
+        printer.cleanup_tab("tab1")
+
+        assert "tab1" not in printer._bash_states
+        assert "tab2" in printer._bash_states
+        assert "tab1" not in printer._recordings
+        assert "tab2" in printer._recordings
+        assert printer._bash_states["tab2"].buffer == ["data-tab2"]
+        assert len(printer._recordings["tab2"]) == 1
+
+    def test_cleanup_nonexistent_tab_is_noop(self) -> None:
+        """cleanup_tab for a tab that doesn't exist does not raise."""
+        printer = BaseBrowserPrinter()
+        printer.cleanup_tab("nonexistent")
+        assert "nonexistent" not in printer._bash_states
+        assert "nonexistent" not in printer._recordings
+
+    def test_cleanup_after_task_completes_frees_state(self) -> None:
+        """Simulates a full lifecycle: task runs, completes, tab is closed.
+
+        After cleanup, no per-tab entries remain in _bash_states or _recordings.
+        """
+        printer = BaseBrowserPrinter()
+        printer._thread_local.tab_id = "tab1"
+
+        printer.start_recording()
+        with printer._bash_lock:
+            printer._bash_state.buffer.append("output")
+            printer._bash_state.streamed = True
+        printer.broadcast({"type": "text_delta", "text": "hello"})
+        printer.stop_recording()
+        printer.reset()
+
+        assert "tab1" in printer._bash_states
+
+        printer.cleanup_tab("tab1")
+        assert "tab1" not in printer._bash_states
+        assert "tab1" not in printer._recordings
+
+
+class TestCloseTabServer(unittest.TestCase):
+    """_close_tab on VSCodeServer cleans up _tab_states, printer state,
+    and _persist_agents."""
+
+    @staticmethod
+    def _make_server() -> Any:
+        import os
+
+        os.environ.setdefault("KISS_WORKDIR", "/tmp")
+        from kiss.agents.vscode.server import VSCodeServer
+        return VSCodeServer()
+
+    def test_close_tab_removes_tab_state(self) -> None:
+        """_close_tab removes the tab from _tab_states."""
+        server = self._make_server()
+        server._get_tab("tab1")
+        assert "tab1" in server._tab_states
+        server._close_tab("tab1")
+        assert "tab1" not in server._tab_states
+
+    def test_close_tab_cleans_printer_bash_states(self) -> None:
+        """_close_tab removes the tab's bash state from the printer."""
+        server = self._make_server()
+        server._get_tab("tab1")
+        server.printer._thread_local.tab_id = "tab1"
+        with server.printer._bash_lock:
+            server.printer._bash_state.buffer.append("data")
+        assert "tab1" in server.printer._bash_states
+        server._close_tab("tab1")
+        assert "tab1" not in server.printer._bash_states
+
+    def test_close_tab_cleans_printer_recordings(self) -> None:
+        """_close_tab removes the tab's recording from the printer."""
+        server = self._make_server()
+        server._get_tab("tab1")
+        server.printer._thread_local.tab_id = "tab1"
+        server.printer.start_recording()
+        assert "tab1" in server.printer._recordings
+        server._close_tab("tab1")
+        assert "tab1" not in server.printer._recordings
+
+    def test_close_tab_cleans_persist_agents(self) -> None:
+        """_close_tab removes the tab's entry from _persist_agents."""
+        server = self._make_server()
+        tab = server._get_tab("tab1")
+        server.printer._persist_agents["tab1"] = tab.agent
+        server._close_tab("tab1")
+        assert "tab1" not in server.printer._persist_agents
+
+    def test_close_tab_skips_active_task(self) -> None:
+        """_close_tab does not remove a tab that has an active task."""
+        server = self._make_server()
+        tab = server._get_tab("tab1")
+        tab.is_task_active = True
+        server._close_tab("tab1")
+        assert "tab1" in server._tab_states
+
+    def test_close_tab_skips_merging_tab(self) -> None:
+        """_close_tab does not remove a tab that is in a merge review."""
+        server = self._make_server()
+        tab = server._get_tab("tab1")
+        tab.is_merging = True
+        server._close_tab("tab1")
+        assert "tab1" in server._tab_states
+
+    def test_close_tab_nonexistent_is_noop(self) -> None:
+        """_close_tab for an unknown tab_id does not raise."""
+        server = self._make_server()
+        server._close_tab("nonexistent")
+
+    def test_cmd_close_tab_dispatches(self) -> None:
+        """The closeTab command dispatches to _close_tab."""
+        server = self._make_server()
+        server._get_tab("tab1")
+        assert "tab1" in server._tab_states
+        server._handle_command({"type": "closeTab", "tabId": "tab1"})
+        assert "tab1" not in server._tab_states
 
 
 if __name__ == "__main__":
