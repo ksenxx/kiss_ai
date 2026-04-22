@@ -93,6 +93,7 @@
       inputValue: '',
       isMerging: false,
       worktreeBarEl: null,
+      autocommitBarEl: null,
       mergeToolbarEl: null,
       t0: null,
       workDir: '',
@@ -175,6 +176,14 @@
       tab.worktreeBarEl = null;
     }
     worktreeBar = null;
+    // Save autocommit bar (detach from DOM)
+    if (autocommitBar && autocommitBar.parentNode) {
+      tab.autocommitBarEl = autocommitBar;
+      autocommitBar.parentNode.removeChild(autocommitBar);
+    } else {
+      tab.autocommitBarEl = null;
+    }
+    autocommitBar = null;
     // Save merge toolbar (detach from DOM)
     const mergeBar = document.getElementById('merge-toolbar');
     if (mergeBar && mergeBar.parentNode) {
@@ -247,6 +256,16 @@
       const area = document.getElementById('input-area');
       area.insertBefore(worktreeBar, area.firstChild);
     }
+    // Restore autocommit bar
+    if (autocommitBar && autocommitBar.parentNode)
+      autocommitBar.parentNode.removeChild(autocommitBar);
+    autocommitBar = null;
+    if (tab.autocommitBarEl) {
+      autocommitBar = tab.autocommitBarEl;
+      tab.autocommitBarEl = null;
+      const acArea = document.getElementById('input-area');
+      acArea.insertBefore(autocommitBar, acArea.firstChild);
+    }
     // Restore merge toolbar
     const existingMerge = document.getElementById('merge-toolbar');
     if (existingMerge) existingMerge.remove();
@@ -257,7 +276,7 @@
       showMergeToolbar();
     }
     // Set inputContainer visibility based on active bars
-    if (worktreeBar || document.getElementById('merge-toolbar')) {
+    if (worktreeBar || autocommitBar || document.getElementById('merge-toolbar')) {
       if (inputContainer) inputContainer.style.display = 'none';
     } else {
       if (inputContainer) inputContainer.style.display = '';
@@ -1861,17 +1880,24 @@
         }
         break;
       case 'merge_data': {
-        if (ev.tabId !== undefined && ev.tabId !== activeTabId) break;
-        const mc = mkEl('div', 'ev merge-info');
-        mc.innerHTML =
+        const mdEl = mkEl('div', 'ev merge-info');
+        mdEl.innerHTML =
           '<div class="merge-info-hdr" style="color:var(--yellow);font-weight:600;font-size:var(--fs-base);margin-bottom:4px">' +
           '\u2731 Reviewing ' +
           (ev.hunk_count || 0) +
           ' change(s)</div>' +
           '<div class="merge-info-body" style="font-size:var(--fs-md);color:var(--dim)">Red = old lines, Green = new lines. ' +
           'Use the merge toolbar to accept or reject changes.</div>';
-        addCollapse(mc, mc.querySelector('.merge-info-hdr'));
-        O.appendChild(mc);
+        addCollapse(mdEl, mdEl.querySelector('.merge-info-hdr'));
+        if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
+          // Background tab: append to saved output fragment
+          const bgMdTab = tabs.find(t => t.id === ev.tabId);
+          if (bgMdTab && bgMdTab.outputFragment) {
+            bgMdTab.outputFragment.appendChild(mdEl);
+          }
+          break;
+        }
+        O.appendChild(mdEl);
         collapseOlderPanels();
         break;
       }
@@ -1928,15 +1954,59 @@
         }
         break;
       case 'worktree_done':
+        if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
+          // Background tab: create bar and save on tab state for restoreTab
+          const bgWtTab = tabs.find(t => t.id === ev.tabId);
+          if (bgWtTab) {
+            bgWtTab.worktreeBarEl = createWorktreeBar(ev.tabId);
+          }
+          break;
+        }
         showWorktreeActions(ev);
         break;
       case 'worktree_result':
+        if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
+          // Background tab: clear saved bar and append result to fragment
+          const bgWrTab = tabs.find(t => t.id === ev.tabId);
+          if (bgWrTab) {
+            bgWrTab.worktreeBarEl = null;
+            if (bgWrTab.outputFragment) {
+              const cls = ev.success ? 'wt-result-ok' : 'wt-result-err';
+              const div = mkEl('div', 'ev ' + cls);
+              div.textContent = ev.message || '';
+              bgWrTab.outputFragment.appendChild(div);
+            }
+          }
+          break;
+        }
         handleWorktreeResult(ev);
         break;
       case 'autocommit_prompt':
+        if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
+          // Background tab: create bar and save on tab state for restoreTab
+          const bgAcTab = tabs.find(t => t.id === ev.tabId);
+          if (bgAcTab) {
+            bgAcTab.autocommitBarEl = createAutocommitBar(ev);
+          }
+          break;
+        }
         showAutocommitActions(ev);
         break;
       case 'autocommit_done':
+        if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
+          // Background tab: clear saved bar and append result to fragment
+          const bgAdTab = tabs.find(t => t.id === ev.tabId);
+          if (bgAdTab) {
+            bgAdTab.autocommitBarEl = null;
+            if (bgAdTab.outputFragment) {
+              const cls = ev && ev.success ? 'wt-result-ok' : 'wt-result-err';
+              const div = mkEl('div', 'ev ' + cls);
+              div.textContent = (ev && ev.message) || '';
+              bgAdTab.outputFragment.appendChild(div);
+            }
+          }
+          break;
+        }
         handleAutocommitResult(ev);
         break;
       case 'task_done': {
@@ -2215,8 +2285,10 @@
     if (inputContainer) inputContainer.style.display = '';
   }
 
-  function showWorktreeActions(_ev) {
-    clearWorktreeBar();
+  /** Create a worktree merge/discard bar element. ownerTabId is captured
+   *  in button closures so the correct tab is targeted even if the user
+   *  switches tabs before clicking. */
+  function createWorktreeBar(ownerTabId) {
     const bar = mkEl('div', 'wt-bar');
     const label = mkEl('span', 'wt-label');
     label.textContent = 'Auto-commit and merge or Discard?';
@@ -2230,7 +2302,7 @@
       vscode.postMessage({
         type: 'worktreeAction',
         action: 'merge',
-        tabId: activeTabId,
+        tabId: ownerTabId,
       });
     });
 
@@ -2241,14 +2313,20 @@
       vscode.postMessage({
         type: 'worktreeAction',
         action: 'discard',
-        tabId: activeTabId,
+        tabId: ownerTabId,
       });
     });
 
     btns.appendChild(mergeBtn);
     btns.appendChild(discardBtn);
     bar.appendChild(btns);
+    return bar;
+  }
 
+  function showWorktreeActions(ev) {
+    clearWorktreeBar();
+    const ownerTabId = (ev && ev.tabId) || activeTabId;
+    const bar = createWorktreeBar(ownerTabId);
     // Hide the input container and show the worktree bar in its place
     if (inputContainer) inputContainer.style.display = 'none';
     const area = document.getElementById('input-area');
@@ -2290,8 +2368,10 @@
     if (inputContainer) inputContainer.style.display = '';
   }
 
-  function showAutocommitActions(ev) {
-    clearAutocommitBar();
+  /** Create an autocommit bar element. ownerTabId is captured in button
+   *  closures so the correct tab is targeted even after a tab switch. */
+  function createAutocommitBar(ev) {
+    const ownerTabId = (ev && ev.tabId) || activeTabId;
     const bar = mkEl('div', 'wt-bar');
     const label = mkEl('span', 'wt-label');
     const n = (ev && ev.changedFiles && ev.changedFiles.length) || 0;
@@ -2309,7 +2389,7 @@
       vscode.postMessage({
         type: 'autocommitAction',
         action: 'commit',
-        tabId: (ev && ev.tabId) || activeTabId,
+        tabId: ownerTabId,
       });
     });
 
@@ -2320,14 +2400,19 @@
       vscode.postMessage({
         type: 'autocommitAction',
         action: 'skip',
-        tabId: (ev && ev.tabId) || activeTabId,
+        tabId: ownerTabId,
       });
     });
 
     btns.appendChild(commitBtn);
     btns.appendChild(skipBtn);
     bar.appendChild(btns);
+    return bar;
+  }
 
+  function showAutocommitActions(ev) {
+    clearAutocommitBar();
+    const bar = createAutocommitBar(ev);
     if (inputContainer) inputContainer.style.display = 'none';
     const area = document.getElementById('input-area');
     area.insertBefore(bar, area.firstChild);

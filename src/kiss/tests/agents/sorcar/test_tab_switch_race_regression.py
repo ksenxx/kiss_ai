@@ -420,7 +420,7 @@ class TestMergeDataGuard(unittest.TestCase):
 
     def test_merge_data_guard_in_source(self) -> None:
         idx = self.js.index("case 'merge_data':")
-        block = self.js[idx : idx + 200]
+        block = self.js[idx : idx + 800]
         assert "ev.tabId !== undefined && ev.tabId !== activeTabId" in block
 
 
@@ -1305,7 +1305,10 @@ class TestInputContainerVisibility(unittest.TestCase):
         idx = self.js.index("function restoreTab(tab)")
         end = self.js.index("\n  function ", idx + 1)
         body = self.js[idx:end]
-        assert "worktreeBar || document.getElementById('merge-toolbar')" in body
+        assert (
+            "worktreeBar || autocommitBar || document.getElementById('merge-toolbar')"
+            in body
+        )
         assert "inputContainer.style.display = 'none'" in body
         assert "inputContainer.style.display = ''" in body
 
