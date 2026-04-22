@@ -2,8 +2,11 @@
 
 Verifies the refactor that makes ``#ask-user-question``, ``#ask-user-input``,
 and ``#ask-user-submit`` local to each tab (replaced by per-tab DOM nodes
-mounted into a shared ``#ask-user-slot``) and introduces a per-tab FIFO
-``askQueue`` so concurrent asks from multiple tabs are routed correctly.
+mounted into a shared ``#ask-user-slot``).
+
+Because the ask-user modal blocks the tab's agent, at most one ask-user
+question is pending per tab at any time — the implementation stores a
+single ``askPendingQuestion`` per tab (no queue is needed).
 
 These tests deliberately focus on the new invariants; pre-existing
 ``askUserTabId`` assertions in ``test_vscode_tabs.py`` are superseded.
@@ -90,9 +93,13 @@ class TestMainJsStructural(unittest.TestCase):
         """The shared slot element is resolved once at module init."""
         assert "getElementById('ask-user-slot')" in self.js
 
-    def test_tab_has_askqueue(self) -> None:
-        """Every tab carries its own FIFO queue of pending questions."""
-        assert "askQueue: []" in self.js
+    def test_tab_has_pending_question(self) -> None:
+        """Every tab carries its own single pending question slot (no queue)."""
+        assert "askPendingQuestion: null" in self.js
+
+    def test_no_queue(self) -> None:
+        """The legacy per-tab askQueue array is gone (modal is blocking)."""
+        assert "askQueue" not in self.js
 
     def test_tab_has_ask_elements(self) -> None:
         """Every tab carries its own question/input/submit element refs."""
@@ -100,13 +107,13 @@ class TestMainJsStructural(unittest.TestCase):
         assert "askInputEl: null" in self.js
         assert "askSubmitEl: null" in self.js
 
-    def test_askuser_handler_enqueues(self) -> None:
-        """The ``askUser`` event pushes onto the target tab's queue."""
+    def test_askuser_handler_sets_pending(self) -> None:
+        """The ``askUser`` event sets the target tab's pending question."""
         idx = self.js.index("case 'askUser':")
         block = self.js[idx : idx + 600]
-        assert "askQueue.push" in block
+        assert "askPendingQuestion" in block
         assert "ev.tabId" in block
-        assert "showNextAskForTab" in block
+        assert "showAskForTab" in block
 
     def test_submit_routes_tabid(self) -> None:
         """``submitAskForTab`` posts ``userAnswer`` with the tab's id."""
@@ -114,7 +121,7 @@ class TestMainJsStructural(unittest.TestCase):
         block = self.js[idx : idx + 600]
         assert "type: 'userAnswer'" in block
         assert "tabId: tab.id" in block
-        assert "askQueue.shift()" in block
+        assert "askPendingQuestion = null" in block
 
     def test_tab_switch_syncs_modal(self) -> None:
         """``restoreTab`` ends by syncing the modal to the newly active tab."""
@@ -126,7 +133,7 @@ class TestMainJsStructural(unittest.TestCase):
 
 # --------------------------------------------------------------------------
 # Behavioural tests: execute a minimal replay of the new helpers in Node.js
-# to verify queue and slot behaviour end-to-end without a real DOM.
+# to verify slot behaviour end-to-end without a real DOM.
 # --------------------------------------------------------------------------
 
 _JS_PREAMBLE = r"""
@@ -229,13 +236,13 @@ function mountAskForTab(tab) {
   modal.style.display = 'flex';
 }
 
-function showNextAskForTab(tab) {
-  if (tab.askQueue.length === 0) {
+function showAskForTab(tab) {
+  if (tab.askPendingQuestion === null) {
     if (tab.id === activeTabId) clearAskSlot();
     return;
   }
   ensureAskElementsForTab(tab);
-  setAskQuestionTextForTab(tab, tab.askQueue[0]);
+  setAskQuestionTextForTab(tab, tab.askPendingQuestion);
   tab.askInputEl.value = '';
   if (tab.id === activeTabId) mountAskForTab(tab);
 }
@@ -243,15 +250,15 @@ function showNextAskForTab(tab) {
 function submitAskForTab(tab) {
   var answer = tab.askInputEl ? tab.askInputEl.value : '';
   vscode.postMessage({type: 'userAnswer', answer: answer, tabId: tab.id});
-  tab.askQueue.shift();
+  tab.askPendingQuestion = null;
   if (tab.askInputEl) tab.askInputEl.value = '';
-  showNextAskForTab(tab);
+  if (tab.id === activeTabId) clearAskSlot();
 }
 
 function syncAskModalToActiveTab(tabs) {
   clearAskSlot();
   var tab = tabs.find(function (t) { return t.id === activeTabId; });
-  if (!tab || tab.askQueue.length === 0) return;
+  if (!tab || tab.askPendingQuestion === null) return;
   ensureAskElementsForTab(tab);
   mountAskForTab(tab);
 }
@@ -259,7 +266,7 @@ function syncAskModalToActiveTab(tabs) {
 function makeTab(id) {
   return {
     id: id,
-    askQueue: [],
+    askPendingQuestion: null,
     askQuestionEl: null,
     askInputEl: null,
     askSubmitEl: null,
@@ -271,9 +278,8 @@ function onAskUser(tabs, ev) {
   var askTabId = ev.tabId !== undefined ? ev.tabId : activeTabId;
   var askTab = tabs.find(function (t) { return t.id === askTabId; });
   if (!askTab) return;
-  var wasEmpty = askTab.askQueue.length === 0;
-  askTab.askQueue.push(ev.question || '');
-  if (wasEmpty) showNextAskForTab(askTab);
+  askTab.askPendingQuestion = ev.question || '';
+  showAskForTab(askTab);
 }
 """
 
@@ -288,7 +294,7 @@ def _run_node(script: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-class TestBehaviourPerTabQueue(unittest.TestCase):
+class TestBehaviourPerTabAsk(unittest.TestCase):
     """End-to-end behavioural checks for the per-tab ask-user pipeline."""
 
     def test_active_tab_ask_mounts_modal(self) -> None:
@@ -316,7 +322,7 @@ class TestBehaviourPerTabQueue(unittest.TestCase):
             onAskUser(tabs, {type: 'askUser', question: 'Q-B', tabId: 'B'});
             if (modal.style.display === 'flex') throw new Error('modal unexpectedly shown');
             if (slot.children.length !== 0) throw new Error('slot unexpectedly populated');
-            if (tabs[1].askQueue.length !== 1) throw new Error('queue not populated');
+            if (tabs[1].askPendingQuestion !== 'Q-B') throw new Error('pending not set');
             if (tabs[1].askQuestionEl === null) throw new Error('elements not created');
             console.log('OK');
             """
@@ -401,14 +407,14 @@ class TestBehaviourPerTabQueue(unittest.TestCase):
             if (m.tabId !== 'A') throw new Error('bad tabId');
             if (m.answer !== 'my answer') throw new Error('bad answer');
             if (modal.style.display !== 'none') throw new Error('modal not hidden after submit');
-            if (tabs[0].askQueue.length !== 0) throw new Error('queue not drained');
+            if (tabs[0].askPendingQuestion !== null) throw new Error('pending not cleared');
             console.log('OK');
             """
         )
         assert r.returncode == 0, r.stderr
         assert r.stdout.strip() == "OK"
 
-    def test_concurrent_asks_routed_independently(self) -> None:
+    def test_concurrent_asks_to_different_tabs_routed_independently(self) -> None:
         """Ask-to-B while A's modal is up does NOT hijack A's modal."""
         r = _run_node(
             r"""
@@ -419,7 +425,7 @@ class TestBehaviourPerTabQueue(unittest.TestCase):
             onAskUser(tabs, {type: 'askUser', question: 'Q-B', tabId: 'B'});
             if (slot.children[0].textContent !== 'Q-A')
               throw new Error('A hijacked by B');
-            if (tabs[1].askQueue.length !== 1) throw new Error('B queue wrong');
+            if (tabs[1].askPendingQuestion !== 'Q-B') throw new Error('B pending wrong');
             // Answer A.
             tabs[0].askInputEl.value = 'ans-A';
             tabs[0].askSubmitEl.click();
@@ -434,33 +440,6 @@ class TestBehaviourPerTabQueue(unittest.TestCase):
               throw new Error('A routing wrong: ' + JSON.stringify(posted[0]));
             if (posted[1].tabId !== 'B' || posted[1].answer !== 'ans-B')
               throw new Error('B routing wrong: ' + JSON.stringify(posted[1]));
-            console.log('OK');
-            """
-        )
-        assert r.returncode == 0, r.stderr
-        assert r.stdout.strip() == "OK"
-
-    def test_queued_asks_for_same_tab_are_served_in_order(self) -> None:
-        """Two asks pushed onto the same tab show up as Q1 then Q2 on submit."""
-        r = _run_node(
-            r"""
-            var tabs = [makeTab('A')];
-            activeTabId = 'A';
-            onAskUser(tabs, {type: 'askUser', question: 'Q1', tabId: 'A'});
-            // Simulate a second ask queued behind the first (hypothetical, but
-            // the queue must support it).
-            onAskUser(tabs, {type: 'askUser', question: 'Q2', tabId: 'A'});
-            if (slot.children[0].textContent !== 'Q1') throw new Error('Q1 not shown first');
-            if (tabs[0].askQueue.length !== 2) throw new Error('queue wrong length');
-            tabs[0].askInputEl.value = 'ans1';
-            tabs[0].askSubmitEl.click();
-            if (slot.children[0].textContent !== 'Q2') throw new Error('Q2 not shown after submit');
-            if (tabs[0].askInputEl.value !== '') throw new Error('input not cleared for next');
-            tabs[0].askInputEl.value = 'ans2';
-            tabs[0].askSubmitEl.click();
-            if (posted.map(function (m) { return m.answer; }).join(',') !== 'ans1,ans2')
-              throw new Error('answers out of order: ' + JSON.stringify(posted));
-            if (modal.style.display !== 'none') throw new Error('modal not hidden after drain');
             console.log('OK');
             """
         )
@@ -493,7 +472,7 @@ class TestBehaviourPerTabQueue(unittest.TestCase):
             activeTabId = 'A';
             onAskUser(tabs, {type: 'askUser', question: 'X', tabId: 'ghost'});
             if (modal.style.display === 'flex') throw new Error('modal opened for ghost tab');
-            if (tabs[0].askQueue.length !== 0) throw new Error('queue polluted');
+            if (tabs[0].askPendingQuestion !== null) throw new Error('pending polluted');
             console.log('OK');
             """
         )
