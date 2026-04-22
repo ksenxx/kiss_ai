@@ -161,7 +161,8 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
 
         Stages all changes once, generates a commit message from the
         staged diff, then commits the already-staged changes (without
-        re-staging).
+        re-staging).  Falls back to a generic commit message when the
+        LLM-based message generator is unavailable.
 
         Returns:
             True if a commit was created, False if nothing to commit.
@@ -169,7 +170,11 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         if self._wt is None or not self._wt.wt_dir.exists():
             return False
         GitWorktreeOps.stage_all(self._wt.wt_dir)
-        msg = _generate_commit_message(self._wt.wt_dir)
+        try:
+            msg = _generate_commit_message(self._wt.wt_dir)
+        except Exception:
+            logger.debug("LLM commit message generation failed; using fallback", exc_info=True)
+            msg = "kiss: auto-commit agent changes"
         return GitWorktreeOps.commit_staged(self._wt.wt_dir, msg)
 
 

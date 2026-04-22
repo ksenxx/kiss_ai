@@ -43,7 +43,6 @@ from typing import Any, cast
 import pytest
 
 from kiss.agents.sorcar.git_worktree import (
-    GitWorktree,
     GitWorktreeOps,
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent

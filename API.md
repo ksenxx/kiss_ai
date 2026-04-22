@@ -261,7 +261,7 @@ ______________________________________________________________________
   - `repo`: Git repo root path.
   - **Returns:** True if a stash entry was created, False if the tree was clean.
 
-- **stash_pop** — Pop the latest stash entry.<br/>`stash_pop(repo: Path) -> bool`
+- **stash_pop** — Pop the latest stash entry, preserving the staging state. Tries `git stash pop --index` first so that files that were staged before the stash stay staged after the pop. If `--index` fails (e.g. the merge changed a file that was in the index), falls back to plain `git stash pop` which restores all changes as unstaged.<br/>`stash_pop(repo: Path) -> bool`
 
   - `repo`: Git repo root path.
   - **Returns:** True if the pop succeeded, False on conflict or error.

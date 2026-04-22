@@ -373,7 +373,13 @@ class GitWorktreeOps:
 
     @staticmethod
     def stash_pop(repo: Path) -> bool:
-        """Pop the latest stash entry.
+        """Pop the latest stash entry, preserving the staging state.
+
+        Tries ``git stash pop --index`` first so that files that were
+        staged before the stash stay staged after the pop.  If
+        ``--index`` fails (e.g. the merge changed a file that was in
+        the index), falls back to plain ``git stash pop`` which
+        restores all changes as unstaged.
 
         Args:
             repo: Git repo root path.
@@ -381,6 +387,12 @@ class GitWorktreeOps:
         Returns:
             True if the pop succeeded, False on conflict or error.
         """
+        result = _git("stash", "pop", "--index", cwd=repo)
+        if result.returncode == 0:
+            return True
+        # --index can fail when staged changes conflict with the
+        # current tree.  Fall back to plain pop (loses staging state
+        # but preserves the content).
         result = _git("stash", "pop", cwd=repo)
         return result.returncode == 0
 

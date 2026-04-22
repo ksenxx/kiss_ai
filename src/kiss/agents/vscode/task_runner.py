@@ -180,6 +180,7 @@ class _TaskRunnerMixin:
                     t.is_merging and t.use_worktree
                     for t in self._tab_states.values()
                 ):
+                    tab.is_task_active = False
                     self.printer.broadcast({
                         "type": "error",
                         "text": "A worktree merge is in progress. "

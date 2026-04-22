@@ -223,6 +223,10 @@ class VSCodeServer(
         or in a merge review — the frontend should stop/resolve those
         first.
 
+        When the tab has a pending worktree, auto-merges it (just like
+        starting a new task would) before removing the tab, so the
+        worktree branch and directory are not orphaned.
+
         Args:
             tab_id: The frontend tab identifier to close.
         """
@@ -231,6 +235,11 @@ class VSCodeServer(
             if tab is not None and (tab.is_task_active or tab.is_merging):
                 return
             self._tab_states.pop(tab_id, None)
+        if tab is not None and tab.agent._wt_pending:
+            try:
+                tab.agent._release_worktree()
+            except Exception:
+                logger.debug("Worktree release on tab close failed", exc_info=True)
         self.printer.cleanup_tab(tab_id)
         self.printer._persist_agents.pop(tab_id, None)
 
