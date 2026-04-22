@@ -32,11 +32,6 @@ _SCOPES = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# Config persistence
-# ---------------------------------------------------------------------------
-
-
 def _token_path() -> Path:
     """Return the path to the stored OAuth2 token file."""
     return _GCHAT_DIR / "token.json"
@@ -75,7 +70,6 @@ def _load_service(sa_path: str = "") -> Any:
         except Exception:
             pass
 
-    # Fall back to OAuth2
     from google.auth.transport.requests import Request
     from google.oauth2.credentials import Credentials
 
@@ -134,11 +128,6 @@ def _clear_config() -> None:
     for path in [_token_path()]:
         if path.exists():  # pragma: no branch
             path.unlink()
-
-
-# ---------------------------------------------------------------------------
-# GoogleChatChannelBackend
-# ---------------------------------------------------------------------------
 
 
 class GoogleChatChannelBackend(ToolMethodBackend):
@@ -237,9 +226,6 @@ class GoogleChatChannelBackend(ToolMethodBackend):
             poll_interval=3.0,
         )
 
-    # -------------------------------------------------------------------
-    # Google Chat API tool methods
-    # -------------------------------------------------------------------
 
     def list_spaces(self, page_size: int = 20, page_token: str = "") -> str:
         """List Google Chat spaces (rooms and DMs).
@@ -471,11 +457,6 @@ class GoogleChatChannelBackend(ToolMethodBackend):
             )
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
-
-
-# ---------------------------------------------------------------------------
-# GoogleChatAgent
-# ---------------------------------------------------------------------------
 
 
 class GoogleChatAgent(BaseChannelAgent, StatefulSorcarAgent):

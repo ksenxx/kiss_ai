@@ -27,10 +27,6 @@ from kiss.agents.vscode.diff_merge import (
 )
 from kiss.agents.vscode.server import VSCodeServer, _TabState
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 
 def _redirect_db(tmpdir: str) -> tuple:
     old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
@@ -69,11 +65,6 @@ def _make_repo(path: Path) -> Path:
         capture_output=True, check=True,
     )
     return path
-
-
-# ===================================================================
-# Fix 1: Per-tab merge data directories (BUG-38)
-# ===================================================================
 
 
 class TestFix1PerTabMergeDirs:
@@ -127,18 +118,15 @@ class TestFix1PerTabMergeDirs:
                 capture_output=True, check=True,
             )
 
-            # Tab A creates merge view
             (repo / "file_a.py").write_text("modified by tab A\n")
             dir_a = str(_merge_data_dir("tab-A"))
             result_a = _prepare_merge_view(str(repo), dir_a, {}, set(), None)
             assert result_a.get("status") == "opened"
 
-            # Verify Tab A's data
             pending_a = Path(dir_a) / "pending-merge.json"
             data_a = json.loads(pending_a.read_text())
             assert any(f["name"] == "file_a.py" for f in data_a["files"])
 
-            # Tab B creates a different merge view
             subprocess.run(
                 ["git", "-C", str(repo), "checkout", "--", "file_a.py"],
                 capture_output=True, check=True,
@@ -148,13 +136,11 @@ class TestFix1PerTabMergeDirs:
             result_b = _prepare_merge_view(str(repo), dir_b, {}, set(), None)
             assert result_b.get("status") == "opened"
 
-            # Tab A's data should still be intact
             data_a_after = json.loads(pending_a.read_text())
             assert any(f["name"] == "file_a.py" for f in data_a_after["files"]), (
                 "Tab A data must survive Tab B's merge view preparation"
             )
 
-            # Tab B should have its own data
             pending_b = Path(dir_b) / "pending-merge.json"
             data_b = json.loads(pending_b.read_text())
             assert any(f["name"] == "new_file_b.txt" for f in data_b["files"])
@@ -177,18 +163,11 @@ class TestFix1PerTabMergeDirs:
         )
 
 
-# ===================================================================
-# Fix 2: Pin HEAD SHA at snapshot time (BUG-34 + BUG-36)
-# ===================================================================
-
-
 class TestFix2PinHeadSHA:
     """Verify pre-task snapshot is atomic and HEAD SHA is pinned."""
 
     def test_run_task_inner_acquires_repo_lock_for_snapshot(self) -> None:
         """The non-worktree snapshot helper should acquire repo_lock."""
-        # The snapshot logic lives in _capture_pre_snapshot (extracted
-        # from _run_task_inner for RED-4 deduplication).
         source = inspect.getsource(VSCodeServer._capture_pre_snapshot)
 
         assert "repo_lock(repo)" in source, (
@@ -198,7 +177,6 @@ class TestFix2PinHeadSHA:
             "Fix 2: must capture head_sha inside the snapshot"
         )
 
-        # _run_task_inner delegates to _capture_pre_snapshot
         inner_source = inspect.getsource(VSCodeServer._run_task_inner)
         assert "_capture_pre_snapshot" in inner_source, (
             "Fix 2: _run_task_inner must call _capture_pre_snapshot"
@@ -217,7 +195,6 @@ class TestFix2PinHeadSHA:
         try:
             repo = _make_repo(Path(tmpdir) / "repo")
 
-            # Create a second branch
             subprocess.run(
                 ["git", "-C", str(repo), "checkout", "-b", "feature"],
                 capture_output=True, check=True,
@@ -236,39 +213,28 @@ class TestFix2PinHeadSHA:
                 capture_output=True, check=True,
             )
 
-            # Pin HEAD SHA under repo_lock
             with repo_lock(repo):
                 pinned_sha = GitWorktreeOps.head_sha(repo)
-                _parse_diff_hunks(str(repo))  # snapshot under lock
+                _parse_diff_hunks(str(repo))
 
-            # Simulate concurrent checkout
             subprocess.run(
                 ["git", "-C", str(repo), "checkout", "feature"],
                 capture_output=True, check=True,
             )
 
-            # The pinned SHA is still valid
             current_sha = GitWorktreeOps.head_sha(repo)
             assert pinned_sha != current_sha, "sanity: HEAD moved"
             assert pinned_sha is not None, "pinned SHA must be valid"
 
-            # Can still diff against pinned SHA
             post_hunks = _parse_diff_hunks(str(repo), base_ref=pinned_sha)
-            # This should work without error
             assert isinstance(post_hunks, dict)
 
-            # Cleanup
             subprocess.run(
                 ["git", "-C", str(repo), "checkout", "main"],
                 capture_output=True, check=True,
             )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
-
-
-# ===================================================================
-# Fix 3: Main-tree busy guard (BUG-35 + BUG-37)
-# ===================================================================
 
 
 class TestFix3MainTreeBusyGuard:
@@ -305,7 +271,6 @@ class TestFix3MainTreeBusyGuard:
         server = VSCodeServer()
         server.work_dir = str(repo)
 
-        # Set up worktree tab
         wt_agent = WorktreeSorcarAgent("wt")
         wt_agent._chat_id = "wt_tab"
         wt_work = wt_agent._try_setup_worktree(repo, str(repo))
@@ -315,7 +280,6 @@ class TestFix3MainTreeBusyGuard:
         wt_tab.agent = wt_agent
         wt_tab.use_worktree = True
 
-        # Simulate a non-wt tab running
         non_wt_tab = server._get_tab("non_wt_tab")
         non_wt_tab.is_running_non_wt = True
 
@@ -323,7 +287,6 @@ class TestFix3MainTreeBusyGuard:
         assert result["success"] is False
         assert "running" in result["message"].lower()
 
-        # Cleanup
         non_wt_tab.is_running_non_wt = False
         wt_agent.discard()
 
@@ -354,24 +317,20 @@ class TestFix3MainTreeBusyGuard:
         (wt.wt_dir / "shared.py").write_text("worktree change\n")
         GitWorktreeOps.commit_all(wt.wt_dir, "wt changes")
 
-        # Dirty the file in main repo (simulating non-wt agent)
         (repo / "shared.py").write_text("non-wt agent edit\n")
 
         wt_tab = server._get_tab("wt_tab")
         wt_tab.agent = wt_agent
         wt_tab.use_worktree = True
 
-        # Without the flag, this would be a conflict
         non_wt_tab = server._get_tab("non_wt_tab")
 
-        # No non-wt running → would report conflict (dirty overlap)
         non_wt_tab.is_running_non_wt = False
         conflict_before = server._check_merge_conflict("wt_tab")
         assert conflict_before is True, (
             "sanity: dirty file does cause conflict when no non-wt running"
         )
 
-        # With non-wt running → suppressed (BUG-37 fix)
         non_wt_tab.is_running_non_wt = True
         conflict_after = server._check_merge_conflict("wt_tab")
         assert conflict_after is False, (
@@ -389,7 +348,6 @@ class TestFix3MainTreeBusyGuard:
         server = VSCodeServer()
         server.work_dir = str(repo)
 
-        # Set up worktree tab with pending worktree
         wt_agent = WorktreeSorcarAgent("wt")
         wt_agent._chat_id = "wt_tab"
         wt_work = wt_agent._try_setup_worktree(repo, str(repo))
@@ -400,19 +358,15 @@ class TestFix3MainTreeBusyGuard:
         wt_tab.agent = wt_agent
         wt_tab.use_worktree = True
 
-        # Simulate non-wt running
         non_wt_tab = server._get_tab("non_wt_tab")
         non_wt_tab.is_running_non_wt = True
 
-        # new_chat should NOT release the worktree
         server._new_chat("wt_tab")
 
-        # The worktree should still be pending
         assert wt_agent._wt_pending, (
             "Fix 3: pending worktree must not be released when non-wt running"
         )
 
-        # Cleanup
         non_wt_tab.is_running_non_wt = False
         wt_agent.discard()
 
@@ -421,11 +375,6 @@ class TestFix3MainTreeBusyGuard:
         source = inspect.getsource(VSCodeServer._run_task_inner)
         assert "is_running_non_wt = True" in source
         assert "is_running_non_wt = False" in source
-
-
-# ===================================================================
-# Fix 4: Symmetric guard — block non-wt start during wt merge
-# ===================================================================
 
 
 class TestFix4SymmetricGuard:
@@ -448,7 +397,6 @@ class TestFix4SymmetricGuard:
         non_wt_tab = server._get_tab("non_wt")
         non_wt_tab.use_worktree = False
 
-        # The check in _run_task_inner:
         with server._state_lock:
             would_block = any(
                 t.is_merging and t.use_worktree
@@ -463,7 +411,7 @@ class TestFix4SymmetricGuard:
         server = VSCodeServer()
         tab1 = server._get_tab("tab1")
         tab1.is_merging = True
-        tab1.use_worktree = False  # non-worktree merge
+        tab1.use_worktree = False
 
         with server._state_lock:
             would_block = any(

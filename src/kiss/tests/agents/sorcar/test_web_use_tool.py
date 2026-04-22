@@ -137,10 +137,8 @@ class TestCrashRecovery:
     def test_auto_relaunch_after_context_close(self, web_tool, http_server):
         web_tool.go_to_url(http_server + "/")
         assert web_tool._is_alive()
-        # Simulate a crash: drop the browser context without notifying the tool.
         web_tool._context.close()
         assert not web_tool._is_alive()
-        # Next call should transparently relaunch and succeed.
         result = web_tool.go_to_url(http_server + "/")
         assert "Test" in result
         assert web_tool._is_alive()
@@ -165,7 +163,7 @@ class TestSingletonLockCleanup:
     def test_clean_singleton_locks_no_profile(self):
         """Called on an in-memory tool — no-op, does not raise."""
         tool = WebUseTool(user_data_dir=None, headless=True)
-        tool._clean_singleton_locks()  # must not raise
+        tool._clean_singleton_locks()
         tool.close()
 
 
@@ -183,20 +181,19 @@ class TestFocusHelpers:
 
     def test_activate_app_none_is_noop(self):
         """_activate_app(None) should silently do nothing."""
-        _activate_app(None)  # must not raise
+        _activate_app(None)
 
     def test_activate_app_with_valid_app(self):
         """_activate_app with a real app should not raise."""
         if sys.platform == "darwin":
-            _activate_app("Finder")  # Finder is always running on macOS
+            _activate_app("Finder")
 
     def test_activate_app_with_nonexistent_app(self):
         """_activate_app with a bogus name should not raise (best-effort)."""
-        _activate_app("NonExistentApp12345")  # must not raise
+        _activate_app("NonExistentApp12345")
 
     def test_ensure_browser_calls_focus_helpers(self, web_tool):
         """_ensure_browser should save and restore focus even in headless mode."""
-        # Force a relaunch by dropping the context (exercises the finally block)
         web_tool._context.close()
         assert not web_tool._is_alive()
         web_tool._ensure_browser()

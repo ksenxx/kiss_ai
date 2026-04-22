@@ -50,7 +50,6 @@ class TestRunOnceConnectFailure:
     def test_run_once_raises_on_connect_failure(self) -> None:
         """run_once() raises RuntimeError when backend.connect() returns False."""
         backend = SlackChannelBackend()
-        # No token saved — connect() returns False immediately
         poller = ChannelRunner(
             backend=backend,
             channel_name="test-channel",
@@ -74,7 +73,6 @@ class TestHasBotReply:
             channel_name="test",
             agent_name="test",
         )
-        # Override the poll_thread_fn directly
         poller._poll_thread_fn = poll_fn
         return poller
 

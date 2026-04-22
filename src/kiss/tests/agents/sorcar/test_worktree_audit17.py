@@ -40,10 +40,6 @@ from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.server import VSCodeServer
 
-# ---------------------------------------------------------------------------
-# Helpers (mirror audit16 / audit15 test helpers)
-# ---------------------------------------------------------------------------
-
 
 def _make_repo(path: Path) -> Path:
     """Create a minimal git repo with one initial commit."""
@@ -96,11 +92,6 @@ class _RecordingPrinter:
         self.events.append(event)
 
 
-# ===========================================================================
-# BUG-71: _new_chat races with a running worktree task
-# ===========================================================================
-
-
 class TestBug71NewChatDuringRunningWorktreeTask:
     """``_new_chat`` must refuse while the tab's own worktree task is
     still running, otherwise ``tab.agent.new_chat()`` removes the
@@ -121,17 +112,12 @@ class TestBug71NewChatDuringRunningWorktreeTask:
         agent = cast(WorktreeSorcarAgent, tab.agent)
         wt = _create_wt(repo, "kiss/wt-bug71-1", agent)
 
-        # Simulate an in-flight task (``agent.run`` is between the
-        # start and end of the ``_run_task_inner`` for-loop body).
         tab.is_task_active = True
 
-        # Worktree directory must exist before the race.
         assert wt.wt_dir.exists(), "Pre-condition: wt_dir must exist"
 
         server._new_chat(tab_id)
 
-        # BUG-71 fix: server rejects with an error broadcast rather
-        # than calling ``tab.agent.new_chat()`` -> ``_release_worktree``.
         errors = [
             e for e in printer.events
             if e.get("type") == "error"
@@ -144,20 +130,16 @@ class TestBug71NewChatDuringRunningWorktreeTask:
             f"Events: {printer.events}"
         )
 
-        # The agent's worktree reference must NOT have been cleared.
         assert agent._wt is not None, (
             "BUG-71: agent._wt was cleared despite task still running."
         )
 
-        # The worktree directory must still exist — a running task is
-        # writing to it; removing it would corrupt the task's state.
         assert wt.wt_dir.exists(), (
             "BUG-71: wt_dir was removed while the task was still "
             "writing to it (tab.agent.new_chat -> _release_worktree "
             "-> _finalize_worktree -> GitWorktreeOps.remove)."
         )
 
-        # showWelcome (which resets the UI) must NOT have been sent.
         welcome = [
             e for e in printer.events if e.get("type") == "showWelcome"
         ]
@@ -185,8 +167,6 @@ class TestBug71NewChatDuringRunningWorktreeTask:
         tab.is_task_active = False
 
         agent = cast(WorktreeSorcarAgent, tab.agent)
-        # No pending worktree — simplest path: new_chat just resets
-        # chat state + broadcasts showWelcome.
         agent._wt = None
 
         server._new_chat(tab_id)
@@ -197,11 +177,6 @@ class TestBug71NewChatDuringRunningWorktreeTask:
             "Regression: showWelcome must be broadcast when no task "
             f"is active.  Events: {printer.events}"
         )
-
-
-# ===========================================================================
-# BUG-72: merge / discard during a running worktree task
-# ===========================================================================
 
 
 class TestBug72WorktreeActionDuringRunningTask:
@@ -238,7 +213,6 @@ class TestBug72WorktreeActionDuringRunningTask:
             f"task.  result={result}"
         )
 
-        # Side effects — ``agent.merge()`` must NOT have run.
         assert agent._wt is not None, (
             "BUG-72: agent.merge() executed and cleared the worktree "
             "reference despite the task still running."
@@ -285,11 +259,6 @@ class TestBug72WorktreeActionDuringRunningTask:
         assert wt.wt_dir.exists(), (
             "BUG-72: wt_dir was removed by agent.discard() mid-write."
         )
-
-
-# ===========================================================================
-# BUG-71 / BUG-72 enabler: _TabState must have an ``is_task_active`` flag
-# ===========================================================================
 
 
 class TestIsTaskActiveFlagExists:

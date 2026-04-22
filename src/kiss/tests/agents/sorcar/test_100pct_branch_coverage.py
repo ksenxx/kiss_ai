@@ -39,10 +39,6 @@ from kiss.agents.sorcar.worktree_sorcar_agent import _generate_commit_message
 from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 from kiss.agents.vscode.server import VSCodeServer
 
-# ---------------------------------------------------------------------------
-# Helpers for DB isolation
-# ---------------------------------------------------------------------------
-
 _SavedState = tuple[Path, "sqlite3.Connection | None", Path]
 
 
@@ -63,11 +59,6 @@ def _restore_db(saved: _SavedState) -> None:
     th._DB_PATH, th._db_conn, th._KISS_DIR = saved
 
 
-# ---------------------------------------------------------------------------
-# cli_helpers.py
-# ---------------------------------------------------------------------------
-
-
 class TestCliHelpers:
     """Cover uncovered branches in cli_helpers.py."""
 
@@ -79,11 +70,9 @@ class TestCliHelpers:
         try:
             _, chat_id = th._add_task("task one")
             th._save_task_result(result="result one", task="task one")
-            # Add a task with long text to hit truncation branches
             long_text = "X" * 300
             th._add_task(long_text, chat_id=chat_id)
             th._save_task_result(result="R" * 300, task=long_text)
-            # Add a task with empty result to cover 53->39 (if result_text: False)
             th._add_task("task no result", chat_id=chat_id)
             th._save_task_result(result="", task="task no result")
             _print_recent_chats()
@@ -125,11 +114,6 @@ class TestCliHelpers:
             assert kwargs["web_tools"] is True
 
 
-# ---------------------------------------------------------------------------
-# persistence.py — uncovered branches
-# ---------------------------------------------------------------------------
-
-
 class TestPersistenceUncoveredBranches:
     """Cover remaining persistence.py branches."""
 
@@ -140,26 +124,6 @@ class TestPersistenceUncoveredBranches:
     def teardown_method(self) -> None:
         _restore_db(self._saved)
         shutil.rmtree(self._tmpdir, ignore_errors=True)
-
-
-# ---------------------------------------------------------------------------
-# sorcar_agent.py — _resolve_task branches
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# stateful_sorcar_agent.py — run() exception branch
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# useful_tools.py — Read/Write error paths
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# worktree_sorcar_agent.py — _generate_commit_message branches
-# ---------------------------------------------------------------------------
 
 
 class TestWorktreeCommitMessageBranches:
@@ -193,11 +157,6 @@ class TestWorktreeCommitMessageBranches:
             assert isinstance(msg, str) and len(msg) > 0
         finally:
             _restore_db(saved)
-
-
-# ---------------------------------------------------------------------------
-# browser_ui.py — comprehensive branch coverage
-# ---------------------------------------------------------------------------
 
 
 class TestBrowserPrinterPrintBranches:
@@ -238,11 +197,6 @@ class TestFormatToolCallBranches:
         assert "extras" in ev
 
 
-# ---------------------------------------------------------------------------
-# server.py — uncovered branches
-# ---------------------------------------------------------------------------
-
-
 class TestVSCodeServerUncoveredBranches:
     """Cover remaining uncovered branches in VSCodeServer."""
 
@@ -278,24 +232,19 @@ class TestVSCodeServerUncoveredBranches:
             subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True)
             subprocess.run(["git", "commit", "-m", "init"], cwd=repo, capture_output=True)
 
-            # Create a branch that modifies f.txt
             subprocess.run(["git", "checkout", "-b", "test-branch"], cwd=repo, capture_output=True)
             (repo / "f.txt").write_text("branch content")
             subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True)
             subprocess.run(["git", "commit", "-m", "mod"], cwd=repo, capture_output=True)
             subprocess.run(["git", "checkout", "main"], cwd=repo, capture_output=True)
 
-            # Dirty the same file in the working tree
             (repo / "f.txt").write_text("dirty local change")
 
-            # Create an actual git worktree so wt_dir.exists() is True
             wt_dir = repo / ".kiss-worktrees" / "test-wt"
             subprocess.run(
                 ["git", "worktree", "add", "-b", "test-wt", str(wt_dir)],
                 cwd=repo, capture_output=True, check=True,
             )
-            # The worktree also has the original f.txt; modify it there
-            # so it shows up in the diff against main
             (wt_dir / "f.txt").write_text("worktree content")
             subprocess.run(["git", "add", "-A"], cwd=wt_dir, capture_output=True)
             subprocess.run(
@@ -312,7 +261,6 @@ class TestVSCodeServerUncoveredBranches:
             )
             server.work_dir = str(repo)
 
-            # Should detect overlap between dirty file and merge changeset
             assert server._check_merge_conflict("0") is True
         finally:
             _restore_db(saved)
@@ -352,9 +300,8 @@ class TestBrowserPrinterPeekRecording:
         p.broadcast({"type": "text_delta", "text": "hello"})
         events = p.peek_recording()
         assert len(events) == 1
-        # Recording still active
         p.broadcast({"type": "text_delta", "text": " world"})
         events2 = p.peek_recording()
-        assert len(events2) == 1  # coalesced
+        assert len(events2) == 1
         assert events2[0]["text"] == "hello world"
         p.stop_recording()

@@ -30,7 +30,7 @@ def _restore(saved: tuple) -> None:
 
 def _patch_super_run(agent: StatefulSorcarAgent, captured: dict[str, Any]) -> Any:
     """Monkey-patch RelentlessAgent.run to capture the prompt and return YAML."""
-    parent_class = cast(Any, SorcarAgent.__mro__[1])  # RelentlessAgent
+    parent_class = cast(Any, SorcarAgent.__mro__[1])
     original_run = parent_class.run
 
     def fake_run(self_agent: object, **kwargs: object) -> str:

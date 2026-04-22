@@ -89,7 +89,6 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         self._stash_pop_warning: str | None = None
         self._merge_conflict_warning: str | None = None
 
-    # -- Derived properties (preserve public API) --------------------------
 
     @property
     def _repo_root(self) -> Path | None:
@@ -121,7 +120,6 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         """SHA of the baseline commit (user's dirty state), or ``None``."""
         return self._wt.baseline_commit if self._wt else None
 
-    # -- State management --------------------------------------------------
 
     def _restore_from_git(self, repo: Path) -> None:
         """Restore pending-branch state from git (no sidecar files).
@@ -157,7 +155,6 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
             baseline_commit=baseline,
         )
 
-    # -- Auto-commit -------------------------------------------------------
 
     def _auto_commit_worktree(self) -> bool:
         """Commit any uncommitted changes in the worktree.
@@ -175,7 +172,6 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         msg = _generate_commit_message(self._wt.wt_dir)
         return GitWorktreeOps.commit_staged(self._wt.wt_dir, msg)
 
-    # -- Shared preamble ---------------------------------------------------
 
     def _finalize_worktree(self) -> bool:
         """Auto-commit, remove worktree, prune.
@@ -263,10 +259,6 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
                             wt.branch,
                         )
                 else:
-                    # BUG-49 fix: do NOT pop stash on CONFLICT or
-                    # MERGE_FAILED — the manual merge instructions
-                    # need a clean tree.  The stash is safe for the
-                    # user to pop after resolving the merge.
                     stash_warning = (
                         "Your uncommitted changes were saved before "
                         "the merge attempt and are safe in "
@@ -317,8 +309,6 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
             return None
 
         if not wt.original_branch:
-            # BUG-50 fix: warn the user so the branch is not silently
-            # orphaned with no notification.
             self._merge_conflict_warning = (
                 f"Could not auto-merge branch '{wt.branch}' because "
                 "the original branch is unknown (likely due to a crash "
@@ -390,7 +380,6 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         self._wt = None
         return released_branch
 
-    # -- Chat lifecycle ----------------------------------------------------
 
     def new_chat(self) -> None:
         """Reset to a new chat session, auto-merging any pending worktree.
@@ -402,7 +391,6 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         self._release_worktree()
         super().new_chat()
 
-    # -- Worktree setup ----------------------------------------------------
 
     def _try_setup_worktree(
         self,
@@ -450,7 +438,6 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         except Exception:  # pragma: no cover — filesystem permission error
             logger.warning("Failed to update git exclude", exc_info=True)
 
-        # Generate branch name with collision avoidance
         branch = f"kiss/wt-{self._chat_id}-{int(time.time())}"
         base_branch = branch
         suffix = 1
@@ -471,12 +458,6 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
             GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
             return None
 
-        # Copy the user's dirty state (staged, unstaged, untracked)
-        # into the worktree and create a baseline commit so that
-        # downstream operations (merge review, changed-file detection,
-        # squash-merge) can diff against it and see only agent changes.
-        # Uses --no-verify to bypass pre-commit hooks — this is an
-        # infrastructure commit, not user code (BUG-C fix).
         baseline_commit: str | None = None
         if GitWorktreeOps.copy_dirty_state(repo, wt_dir):
             GitWorktreeOps.stage_all(wt_dir)
@@ -505,7 +486,6 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         wt_work_dir.mkdir(parents=True, exist_ok=True)
         return wt_work_dir
 
-    # -- Warning flushing --------------------------------------------------
 
     def _flush_warnings(self, printer: Any) -> None:
         """Broadcast and clear any pending stash/merge warnings.
@@ -531,7 +511,6 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
             )
             self._merge_conflict_warning = None
 
-    # -- Main entry point --------------------------------------------------
 
     def run(  # type: ignore[override]
         self,
@@ -565,8 +544,6 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
             YAML string with 'success' and 'summary' keys.
         """
         if not kwargs.pop("use_worktree", True):
-            # BUG-64 fix: flush any pending warnings (e.g. set by the
-            # BUG-B handler in the server) before falling back.
             self._flush_warnings(kwargs.get("printer"))
             return super().run(prompt_template=prompt_template, **kwargs)
 
@@ -576,16 +553,9 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         repo = GitWorktreeOps.discover_repo(discovery_dir)
         if repo is None:
             logger.warning("Not a git repo, running task directly")
-            # BUG-64 fix: flush warnings on not-a-repo fallback.
             self._flush_warnings(kwargs.get("printer"))
             return super().run(prompt_template=prompt_template, **kwargs)
 
-        # Pre-allocate a chat_id so the worktree branch name is stable
-        # and _restore_from_git can search for the right prefix.
-        # Without this, _chat_id would still be "" here and
-        # _restore_from_git would search for "kiss/wt--*" (no match),
-        # while _add_task in super().run() would later assign a
-        # different id — orphaning the old branch.
         if self._chat_id == "":
             self._chat_id = _allocate_chat_id()
 
@@ -593,13 +563,9 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
 
         wt_work_dir = self._try_setup_worktree(repo, work_dir_str)
         if wt_work_dir is None:
-            # BUG-64 fix: flush any warnings that _release_worktree
-            # (called inside _try_setup_worktree) may have set before
-            # the subsequent setup failure.
             self._flush_warnings(kwargs.get("printer"))
             return super().run(prompt_template=prompt_template, **kwargs)
 
-        # Notify VS Code extension so the worktree appears in the SCM panel
         printer = kwargs.get("printer")
         self._flush_warnings(printer)
         if printer and hasattr(printer, "broadcast"):
@@ -627,7 +593,6 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
                 )
             )
 
-    # -- Merge / discard ---------------------------------------------------
 
     def merge(self) -> str:
         """Merge the task branch into the original branch.
@@ -658,8 +623,6 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
                 f"    git checkout <branch> && {merge_cmd}"
             )
 
-        # Only finalize (auto-commit + remove worktree) on the first call.
-        # On retry after a conflict the worktree dir is already gone.
         if wt.wt_dir.exists():
             if not self._finalize_worktree():
                 return (
@@ -688,8 +651,6 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
             self._wt = None
             return f"Successfully merged branch '{wt.branch}'." + stash_suffix
 
-        # BUG-49 fix: include stash pop step in failure instructions
-        # when user had uncommitted changes (stash was not popped).
         stash_step = ""
         if stash_warning:
             stash_step = "    git stash pop  # restore your uncommitted changes\n"
@@ -708,7 +669,6 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
                 "    agent.discard()" + stash_suffix
             )
 
-        # Conflict — state preserved so discard() still works
         return (
             "Merge conflict detected.  Resolve manually:\n"
             f"    cd {wt.repo_root}\n"
@@ -752,9 +712,6 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
                 if not ok:
                     checkout_warning = f"\n⚠️  Could not checkout '{wt.original_branch}': {err}"
             if not GitWorktreeOps.delete_branch(wt.repo_root, wt.branch):
-                # BUG-63 fix: git refused to delete (e.g. main repo is
-                # on that branch).  Tell the user instead of silently
-                # claiming success.
                 delete_warning = (
                     f"\n⚠️  Branch '{wt.branch}' could not be deleted "
                     "and still exists.  Switch to a different branch "
@@ -766,7 +723,6 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
             return f"Partially discarded branch '{wt.branch}'.{checkout_warning}{delete_warning}"
         return f"Discarded branch '{wt.branch}'.{checkout_warning}"
 
-    # -- Instructions ------------------------------------------------------
 
     def merge_instructions(self) -> str:
         """Return human-readable merge/discard instructions.
@@ -793,7 +749,6 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
             f"    git branch -d {wt.branch}"
         )
 
-    # -- Cleanup -----------------------------------------------------------
 
     @staticmethod
     def cleanup(repo_root: Path | str) -> str:

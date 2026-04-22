@@ -12,10 +12,6 @@ import unittest
 
 from kiss.agents.vscode.server import VSCodeServer, parse_task_tags
 
-# ---------------------------------------------------------------------------
-# parse_task_tags unit tests — 100 % branch coverage
-# ---------------------------------------------------------------------------
-
 
 class TestParseTaskTagsNoTags(unittest.TestCase):
     """When input has no <task> tags, return the original text."""
@@ -139,11 +135,6 @@ class TestParseTaskTagsEdgeCases(unittest.TestCase):
         assert "line" in result[0]
 
 
-# ---------------------------------------------------------------------------
-# Integration: verify _run_task_inner uses parse_task_tags
-# ---------------------------------------------------------------------------
-
-
 class TestMultiTaskIntegration(unittest.TestCase):
     """Verify _run_task_inner correctly loops over subtasks and defers
     merge/worktree to the last subtask only."""
@@ -179,15 +170,12 @@ class TestMultiTaskIntegration(unittest.TestCase):
 
     def test_interrupt_breaks_loop(self) -> None:
         """KeyboardInterrupt breaks out of the subtask loop."""
-        # Find the except KeyboardInterrupt block and verify break follows
         ki_idx = self._src.index("except KeyboardInterrupt:")
         after = self._src[ki_idx:ki_idx + 300]
         assert "break" in after
 
     def test_worktree_check_in_finally_block(self) -> None:
         """Worktree merge review is in the finally block, not the inner try."""
-        # The worktree merge check must be in the finally block so it
-        # runs on success, failure, and user-stop alike.
         assert "if tab.use_worktree and tab.agent._wt_pending:" in self._src
 
     def test_merge_view_only_runs_once(self) -> None:
@@ -196,11 +184,7 @@ class TestMultiTaskIntegration(unittest.TestCase):
         It runs once in the finally block (after all subtasks), not
         per-subtask.
         """
-        # The merge view code is in the finally block, outside the for loop
-        # Verify _prepare_merge_view is NOT between the for loop markers
         loop_start = self._src.index("for task_prompt in subtasks:")
-        # Find the break from the loop (KeyboardInterrupt handler)
-        # The for loop ends before the "except BaseException" outer handler
         outer_except = self._src.index("except BaseException:")
         loop_body = self._src[loop_start:outer_except]
         assert "_prepare_merge_view" not in loop_body
@@ -214,8 +198,6 @@ class TestMultiTaskIntegration(unittest.TestCase):
 
     def test_git_snapshot_before_loop(self) -> None:
         """Git snapshot is taken once before the subtask loop."""
-        # Snapshot logic is in _capture_pre_snapshot (called from
-        # _run_task_inner before the loop).
         snapshot_pos = self._src.index("_capture_pre_snapshot")
         loop_pos = self._src.index("for task_prompt in subtasks:")
         assert snapshot_pos < loop_pos
@@ -225,7 +207,6 @@ class TestMultiTaskIntegration(unittest.TestCase):
         start_pos = self._src.index("self.printer.start_recording()")
         loop_pos = self._src.index("for task_prompt in subtasks:")
         assert start_pos < loop_pos
-        # stop_recording is in the finally block, after the loop
         stop_pos = self._src.index("self.printer.stop_recording()")
         assert stop_pos > loop_pos
 

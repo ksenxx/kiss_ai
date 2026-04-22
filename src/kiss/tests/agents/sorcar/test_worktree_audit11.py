@@ -45,10 +45,6 @@ from kiss.agents.vscode.diff_merge import (
 )
 from kiss.agents.vscode.server import VSCodeServer
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 
 def _make_repo(tmp_path: Path, name: str = "repo") -> Path:
     """Create a bare-minimum git repo with one commit."""
@@ -109,11 +105,6 @@ def _cleanup(repo: Path, branch: str, wt_dir: Path) -> None:
         GitWorktreeOps.delete_branch(repo, branch)
 
 
-# ===================================================================
-# BUG-55: is_running_non_wt set AFTER _capture_pre_snapshot (TOCTOU)
-# ===================================================================
-
-
 class TestBug55NonWtFlagToctou:
     """BUG-55: ``is_running_non_wt`` is set AFTER the pre-task snapshot
     is captured.  During the gap, a concurrent worktree merge can modify
@@ -149,13 +140,8 @@ class TestBug55NonWtFlagToctou:
         The flag set + snapshot must be inside the try/finally that
         clears the flag, or have their own guard.
         """
-        # The flag clear must happen in the finally block which executes
-        # regardless of where in the try block the exception occurs.
-        # Verify the structure: the flag set and snapshot are inside
-        # the outer try block (whose finally clears the flag).
         source = inspect.getsource(VSCodeServer._run_task_inner)
 
-        # The flag set should be inside the try block, not before it
         lines = source.split("\n")
         flag_line = None
         finally_line = None
@@ -165,18 +151,12 @@ class TestBug55NonWtFlagToctou:
             if "is_running_non_wt = False" in line and finally_line is None:
                 finally_line = i
 
-        # The flag must be set within the try/finally scope
         assert flag_line is not None
         assert finally_line is not None
         assert finally_line > flag_line, (
             "BUG-55: is_running_non_wt = False must come after = True "
             "in the code to ensure cleanup on exception"
         )
-
-
-# ===================================================================
-# BUG-56: _check_merge_conflict doesn't validate baseline
-# ===================================================================
 
 
 class TestBug56ConflictCheckBaselineValidation:
@@ -203,12 +183,10 @@ class TestBug56ConflictCheckBaselineValidation:
         assert GitWorktreeOps.create(repo, branch, wt_dir)
         GitWorktreeOps.save_original_branch(repo, branch, "main")
 
-        # Agent edits init.txt on worktree branch
         (wt_dir / "init.txt").write_text("agent version\n")
         GitWorktreeOps.stage_all(wt_dir)
         GitWorktreeOps.commit_staged(wt_dir, "agent edit")
 
-        # User edits init.txt on main → conflict
         (repo / "init.txt").write_text("user version\n")
         subprocess.run(["git", "add", "."], cwd=repo, capture_output=True)
         subprocess.run(
@@ -216,7 +194,6 @@ class TestBug56ConflictCheckBaselineValidation:
             cwd=repo, capture_output=True,
         )
 
-        # Set an INVALID baseline
         bogus = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
         GitWorktreeOps.save_baseline_commit(repo, branch, bogus)
 
@@ -250,12 +227,10 @@ class TestBug56ConflictCheckBaselineValidation:
             repo, branch, dirty_file="dirty.txt",
         )
 
-        # Agent edits init.txt
         (wt_dir / "init.txt").write_text("agent version\n")
         GitWorktreeOps.stage_all(wt_dir)
         GitWorktreeOps.commit_staged(wt_dir, "agent edit")
 
-        # User edits init.txt on main → conflict
         (repo / "init.txt").write_text("user version\n")
         subprocess.run(["git", "add", "."], cwd=repo, capture_output=True)
         subprocess.run(
@@ -288,7 +263,6 @@ class TestBug56ConflictCheckBaselineValidation:
         branch = "kiss/wt-bug56c-1"
         wt_dir, baseline = _create_worktree_branch(repo, branch)
 
-        # Agent edits a different file
         _add_agent_commit(wt_dir, "agent.txt", "agent work\n")
 
         server = VSCodeServer()
@@ -309,11 +283,6 @@ class TestBug56ConflictCheckBaselineValidation:
         _cleanup(repo, branch, wt_dir)
 
 
-# ===================================================================
-# BUG-57: Deleted files invisible in non-worktree merge review
-# ===================================================================
-
-
 class TestBug57DeletedFilesInMergeView:
     """BUG-57: ``_file_changed`` returns ``False`` when ``read_bytes()``
     raises ``OSError`` on a deleted file, and ``current_path.is_file()``
@@ -332,7 +301,6 @@ class TestBug57DeletedFilesInMergeView:
         """A tracked file deleted by the agent must appear in the merge view."""
         repo = _make_repo(tmp_path)
 
-        # Add a second file to the repo
         (repo / "deleteme.txt").write_text("I will be deleted\nline2\n")
         subprocess.run(["git", "add", "."], cwd=repo, capture_output=True)
         subprocess.run(
@@ -343,19 +311,16 @@ class TestBug57DeletedFilesInMergeView:
         work_dir = str(repo)
         data_dir = str(tmp_path / "merge-data")
 
-        # Capture pre-task state
         pre_hunks = _parse_diff_hunks(work_dir)
         pre_untracked = _capture_untracked(work_dir)
         pre_hashes = _snapshot_files(
             work_dir, set(pre_hunks.keys()) | pre_untracked,
         )
-        # Include deleteme.txt in pre_hashes since it's tracked
         deleteme_path = repo / "deleteme.txt"
         pre_hashes["deleteme.txt"] = hashlib.md5(
             deleteme_path.read_bytes(),
         ).hexdigest()
 
-        # "Agent" deletes the file
         subprocess.run(
             ["git", "rm", "deleteme.txt"], cwd=repo, capture_output=True,
         )
@@ -364,7 +329,6 @@ class TestBug57DeletedFilesInMergeView:
             work_dir, data_dir, pre_hunks, pre_untracked, pre_hashes,
         )
 
-        # FIX: deleted file must appear in the merge view
         assert result.get("status") == "opened", (
             "BUG-57: deleted file not detected — merge view shows 'No changes'"
         )
@@ -375,18 +339,15 @@ class TestBug57DeletedFilesInMergeView:
             "BUG-57: deleted file 'deleteme.txt' missing from merge manifest"
         )
 
-        # The "current" file should exist (empty placeholder for deletion)
         for f in manifest["files"]:
             if f["name"] == "deleteme.txt":
                 current = Path(f["current"])
                 assert current.exists(), (
                     "BUG-57: current placeholder for deleted file must exist"
                 )
-                # Deleted file's current should be empty
                 assert current.read_text() == "", (
                     "BUG-57: deleted file's current placeholder should be empty"
                 )
-                # Base should have the original content
                 base = Path(f["base"])
                 assert "I will be deleted" in base.read_text(), (
                     "BUG-57: base copy should contain original content"
@@ -403,18 +364,14 @@ class TestBug57DeletedFilesInMergeView:
         work_dir = str(repo)
         data_dir = str(tmp_path / "merge-data")
 
-        # Create an untracked file
         (repo / "untracked.txt").write_text("untracked content\nline2\n")
 
-        # Capture pre-task state
         pre_hunks = _parse_diff_hunks(work_dir)
         pre_untracked = _capture_untracked(work_dir)
         assert "untracked.txt" in pre_untracked
         pre_hashes = _snapshot_files(
             work_dir, set(pre_hunks.keys()) | pre_untracked,
         )
-        # Save untracked base copies into the same data_dir that
-        # _prepare_merge_view will use (it derives ub_dir from data_dir)
         ub_dir = Path(data_dir) / "untracked-base"
         for fname in pre_untracked:
             src = Path(work_dir) / fname
@@ -423,14 +380,12 @@ class TestBug57DeletedFilesInMergeView:
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 _shutil.copy2(str(src), str(dst))
 
-        # "Agent" deletes the untracked file
         (repo / "untracked.txt").unlink()
 
         result = _prepare_merge_view(
             work_dir, data_dir, pre_hunks, pre_untracked, pre_hashes,
         )
 
-        # FIX: deleted untracked file must appear
         assert result.get("status") == "opened", (
             "BUG-57: deleted untracked file not detected"
         )
@@ -447,7 +402,6 @@ class TestBug57DeletedFilesInMergeView:
         work_dir = str(repo)
         data_dir = str(tmp_path / "merge-data")
 
-        # Capture pre-task state
         pre_hunks = _parse_diff_hunks(work_dir)
         pre_untracked = _capture_untracked(work_dir)
         pre_hashes = _snapshot_files(
@@ -457,7 +411,6 @@ class TestBug57DeletedFilesInMergeView:
             (repo / "init.txt").read_bytes(),
         ).hexdigest()
 
-        # "Agent" modifies the file (not deletes)
         (repo / "init.txt").write_text("modified by agent\n")
 
         result = _prepare_merge_view(
@@ -489,11 +442,6 @@ class TestBug57DeletedFilesInMergeView:
         assert result.get("error") == "No changes"
 
 
-# ===================================================================
-# BUG-58: cleanup_orphans deletes pending-merge branches
-# ===================================================================
-
-
 class TestBug58CleanupOrphansDeletesPending:
     """BUG-58: After ``_finalize_worktree`` removes the worktree
     directory, the branch no longer has an active worktree.
@@ -514,18 +462,13 @@ class TestBug58CleanupOrphansDeletesPending:
         GitWorktreeOps.save_original_branch(repo, branch, "main")
         _add_agent_commit(wt_dir, "agent.txt", "agent work\n")
 
-        # Simulate _finalize_worktree: remove worktree but keep branch
         GitWorktreeOps.remove(repo, wt_dir)
         GitWorktreeOps.prune(repo)
 
-        # Branch exists but has no active worktree — this is the
-        # state between finalize and merge
         assert GitWorktreeOps.branch_exists(repo, branch)
 
-        # Run cleanup — should NOT delete the branch
         result = GitWorktreeOps.cleanup_orphans(repo)
 
-        # FIX: branch must still exist
         assert GitWorktreeOps.branch_exists(repo, branch), (
             "BUG-58: cleanup_orphans deleted a branch with kiss-original "
             "config — pending merge work lost"
@@ -535,7 +478,6 @@ class TestBug58CleanupOrphansDeletesPending:
             "a pending-merge branch"
         )
 
-        # Cleanup
         _cleanup(repo, branch, wt_dir)
 
     def test_true_orphan_still_deleted(self, tmp_path: Path) -> None:
@@ -543,7 +485,6 @@ class TestBug58CleanupOrphansDeletesPending:
         repo = _make_repo(tmp_path)
         branch = "kiss/wt-bug58b-1"
 
-        # Create the branch directly (no worktree, no config)
         subprocess.run(
             ["git", "branch", branch],
             cwd=repo, capture_output=True,
@@ -564,7 +505,6 @@ class TestBug58CleanupOrphansDeletesPending:
         repo = _make_repo(tmp_path)
         branch = "kiss/wt-bug58c-1"
 
-        # Create branch with config pointing to non-existent target
         subprocess.run(
             ["git", "branch", branch],
             cwd=repo, capture_output=True,
@@ -576,18 +516,8 @@ class TestBug58CleanupOrphansDeletesPending:
 
         GitWorktreeOps.cleanup_orphans(repo)
 
-        # Branch with config pointing to a non-existent target branch
-        # could be either kept or deleted.  The safe approach: keep it
-        # (the user can always manually delete).  But since the target
-        # branch doesn't exist, merging would fail anyway.  The fix
-        # should check whether the target branch exists.
-        # For safety, we keep it (don't delete).
-        # Actually, the simplest safe fix: if kiss-original exists at all,
-        # skip the branch.  The user can always run cleanup again after
-        # resolving.
         assert GitWorktreeOps.branch_exists(repo, branch), (
             "Branch with any kiss-original config should be kept for safety"
         )
 
-        # Final cleanup
         _cleanup(repo, branch, repo / "nonexistent")

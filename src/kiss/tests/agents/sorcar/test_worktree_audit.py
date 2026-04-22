@@ -21,10 +21,6 @@ from kiss.agents.sorcar.git_worktree import (
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 
 def _redirect_db(tmpdir: str) -> tuple:
     old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
@@ -83,11 +79,6 @@ def _unpatch_super_run(original: Any) -> None:
     parent_class.run = original
 
 
-# ---------------------------------------------------------------------------
-# FIX-1: commit_all now checks git commit return code
-# ---------------------------------------------------------------------------
-
-
 class TestFix1CommitAllChecksReturnCode:
     """commit_all returns False when 'git commit' fails."""
 
@@ -114,10 +105,8 @@ class TestFix1CommitAllChecksReturnCode:
 
         result = GitWorktreeOps.commit_all(self.repo, "test commit")
 
-        # Fixed: returns False because git commit was rejected by the hook
         assert result is False
 
-        # Verify the commit was actually rejected
         log = _git("log", "--oneline", cwd=self.repo)
         commit_count = len(log.stdout.strip().splitlines())
         assert commit_count == 1
@@ -132,11 +121,6 @@ class TestFix1CommitAllChecksReturnCode:
         """commit_all returns False when there are no changes."""
         result = GitWorktreeOps.commit_all(self.repo, "test commit")
         assert result is False
-
-
-# ---------------------------------------------------------------------------
-# FIX-3: merge() conflict instructions now say 'git merge --squash'
-# ---------------------------------------------------------------------------
 
 
 class TestFix3MergeInstructionsUseSquash:
@@ -173,7 +157,6 @@ class TestFix3MergeInstructionsUseSquash:
 
         branch = agent._wt_branch
         assert branch is not None
-        # Fixed: instructions now use --squash to match agent behavior
         assert f"git merge --squash {branch}" in msg
 
         agent.discard()
@@ -193,7 +176,6 @@ class TestFix3MergeInstructionsUseSquash:
         agent = WorktreeSorcarAgent("test")
         agent.run(prompt_template="task1", work_dir=str(self.repo))
 
-        # Force original_branch to None
         from kiss.agents.sorcar.git_worktree import GitWorktree
         assert agent._wt is not None
         agent._wt = GitWorktree(
@@ -206,7 +188,6 @@ class TestFix3MergeInstructionsUseSquash:
         msg = agent.merge()
         assert "git merge --squash" in msg
 
-        # Restore for cleanup
         agent._wt = GitWorktree(
             repo_root=agent._wt.repo_root,
             branch=agent._wt.branch,
@@ -214,11 +195,6 @@ class TestFix3MergeInstructionsUseSquash:
             wt_dir=agent._wt.wt_dir,
         )
         agent.discard()
-
-
-# ---------------------------------------------------------------------------
-# FIX-INC1: _release_worktree calls _finalize_worktree
-# ---------------------------------------------------------------------------
 
 
 class TestFixInc1ReleaseCallsFinalize:
@@ -233,14 +209,8 @@ class TestFixInc1ReleaseCallsFinalize:
         )
         assert "_finalize_worktree" in release_src
 
-        # And doesn't duplicate the low-level operations
         assert "GitWorktreeOps.remove(" not in release_src
         assert "GitWorktreeOps.prune(" not in release_src
-
-
-# ---------------------------------------------------------------------------
-# FIX-4: merge() skips finalization on retry after conflict
-# ---------------------------------------------------------------------------
 
 
 class TestFix4MergeRetrySkipsFinalize:
@@ -280,7 +250,6 @@ class TestFix4MergeRetrySkipsFinalize:
         assert agent._wt_pending
         assert not wt_dir.exists()
 
-        # Retry is safe and gives the same result
         msg2 = agent.merge()
         assert "Merge conflict" in msg2
 
@@ -304,10 +273,8 @@ class TestFix4MergeRetrySkipsFinalize:
         msg1 = agent.merge()
         assert "Merge conflict" in msg1
 
-        # Simulate user resolving: reset main branch to match worktree content
         _git("reset", "--hard", "HEAD~1", cwd=self.repo)
 
-        # Retry now succeeds
         msg2 = agent.merge()
         assert "Successfully merged" in msg2
         assert not agent._wt_pending

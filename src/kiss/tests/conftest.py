@@ -14,13 +14,8 @@ _subprocess_rc = os.path.join(os.path.dirname(__file__), "..", "..", "..", ".cov
 if os.path.isfile(_subprocess_rc):
     os.environ.setdefault("COVERAGE_PROCESS_START", os.path.abspath(_subprocess_rc))
 
-# Prevent tests from opening the default browser and stealing focus.
-# The webbrowser module respects the BROWSER env var; "true" runs /usr/bin/true (no-op).
 os.environ["BROWSER"] = "true"
 
-# Redirect ALL tests to a temporary KISS_HOME so they never touch ~/.kiss/history.db.
-# Session-scoped: one temp dir shared across the entire test run.
-# The env var is also inherited by subprocesses (e.g. test_vscode_stop.py).
 _test_kiss_home = tempfile.mkdtemp(prefix="kiss_test_")
 os.environ["KISS_HOME"] = _test_kiss_home
 _th._db_conn = None

@@ -32,10 +32,6 @@ from kiss.agents.vscode.browser_ui import (
 )
 from kiss.agents.vscode.server import VSCodeServer
 
-# ---------------------------------------------------------------------------
-# browser_ui.py coverage
-# ---------------------------------------------------------------------------
-
 
 class TestBaseBrowserPrinterBranches:
     """Cover uncovered branches in BaseBrowserPrinter."""
@@ -58,9 +54,7 @@ class TestBaseBrowserPrinterBranches:
         """_check_stop uses thread_local stop_event."""
         p = BaseBrowserPrinter()
         p._thread_local.stop_event = threading.Event()
-        # Not set - no raise
         p._check_stop()
-        # Set - raises
         p._thread_local.stop_event.set()
         with pytest.raises(KeyboardInterrupt):
             p._check_stop()
@@ -90,16 +84,6 @@ class TestCoalesceEventsBranches:
         ]
         result = _coalesce_events(events)
         assert len(result) == 2
-
-
-# ---------------------------------------------------------------------------
-# helpers.py coverage
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# useful_tools.py coverage
-# ---------------------------------------------------------------------------
 
 
 class TestUsefulToolsBranches:
@@ -165,20 +149,6 @@ class TestUsefulToolsBranches:
         result = ut.Bash("sleep 100", "timeout test", timeout_seconds=0.5)
         assert "timeout" in result.lower()
 
-# ---------------------------------------------------------------------------
-# web_use_tool.py coverage
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# sorcar_agent.py coverage
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# persistence.py coverage
-# ---------------------------------------------------------------------------
-
 
 class TestTaskHistoryBranches:
     """Cover specific uncovered branches in persistence."""
@@ -203,13 +173,6 @@ class TestTaskHistoryBranches:
         assert th._load_chat_context("") == []
 
 
-
-
-# ---------------------------------------------------------------------------
-# vscode/server.py coverage
-# ---------------------------------------------------------------------------
-
-
 class TestVSCodeServerBranches:
     """Cover uncovered branches in VSCodeServer."""
 
@@ -223,7 +186,6 @@ class TestVSCodeServerBranches:
 
     def test_handle_command_run_already_running(self):
         server, events = self._make_server()
-        # Simulate a running thread on tab 0
         t = threading.Thread(target=lambda: time.sleep(5), daemon=True)
         t.start()
         server._get_tab("0").task_thread = t
@@ -233,9 +195,7 @@ class TestVSCodeServerBranches:
 
     def test_handle_command_stop_no_event(self):
         server, events = self._make_server()
-        # No tab has a stop event — stop is a no-op
         server._handle_command({"type": "stop"})
-        # No crash
 
     def test_handle_command_get_history_with_query(self):
         server, events = self._make_server()
@@ -246,19 +206,15 @@ class TestVSCodeServerBranches:
     def test_handle_command_record_file_usage_empty(self):
         server, events = self._make_server()
         server._handle_command({"type": "recordFileUsage", "path": ""})
-        # No crash, no action
-        # No crash
 
     def test_handle_command_resume_session(self):
         server, events = self._make_server()
         server._handle_command({"type": "resumeSession", "chatId": ""})
-        # Empty chatId - no action
 
     def test_ask_user_question(self):
         server, events = self._make_server()
         stop_event = threading.Event()
         server.printer._thread_local.stop_event = stop_event
-        # Set up per-tab queue for tab 1
         tab_id = "1"
         server.printer._thread_local.tab_id = tab_id
         user_q: queue.Queue[str] = queue.Queue(maxsize=1)
@@ -288,7 +244,7 @@ class TestVSCodeServerBranches:
         cmds = [
             json.dumps({"type": "getModels"}) + "\n",
             json.dumps({"type": "selectModel", "model": "claude-opus-4-6"}) + "\n",
-            "",  # blank line
+            "",
         ]
         old_stdin = os.sys.stdin  # type: ignore[attr-defined]
         os.sys.stdin = io.StringIO("".join(cmds))  # type: ignore[attr-defined]
@@ -316,15 +272,12 @@ class TestVSCodeServerBranches:
         subprocess.run(["git", "add", "."], cwd=str(repo), capture_output=True)
         subprocess.run(["git", "commit", "-m", "init"],
                        cwd=str(repo), capture_output=True)
-        # Create a branch matching the worktree agent's chat_id
         chat_id = tab.agent._chat_id
         branch = f"kiss/wt-{chat_id}-1234567890"
         subprocess.run(["git", "branch", branch],
                        cwd=str(repo), capture_output=True)
-        # Store the original branch in git config
         subprocess.run(["git", "config", f"branch.{branch}.kiss-original", "main"],
                        cwd=str(repo), capture_output=True)
-        # Make a change on the branch so diff shows something
         subprocess.run(["git", "checkout", branch],
                        cwd=str(repo), capture_output=True)
         (repo / "f.txt").write_text("changed")
@@ -371,11 +324,6 @@ class TestVSCodeServerBranches:
             assert len(commit_events) == 1
             assert commit_events[0]["message"] == ""
             assert "No staged changes" in commit_events[0]["error"]
-
-
-# ---------------------------------------------------------------------------
-# web_use_tool.py - more coverage via http server
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture(scope="module")
@@ -460,7 +408,6 @@ class TestWebUseToolIntegration:
 
     def test_type_text(self, http_server, browser_tool):
         browser_tool.go_to_url(http_server + "/")
-        # Find the textbox element
         result = browser_tool.type_text(2, "test input")
         assert isinstance(result, str)
 
@@ -540,9 +487,7 @@ class TestWebUseToolResolveLocatorBranches:
     def test_resolve_locator_refreshes_snapshot(self, http_server, browser_tool):
         """When elements list is empty, re-snapshot is attempted."""
         browser_tool.go_to_url(http_server + "/")
-        # Clear element cache
         browser_tool._elements = []
-        # Try to click - should re-snapshot
         result = browser_tool.click(1)
         assert isinstance(result, str)
 
@@ -563,7 +508,6 @@ class TestWebUseToolResolveLocatorBranches:
         """Screenshot to invalid path."""
         browser_tool.go_to_url("about:blank")
         result = browser_tool.screenshot("/dev/null/cant/write/here.png")
-        # This may or may not error depending on OS
         assert isinstance(result, str)
 
     def test_type_text_error_invalid_element(self, http_server, browser_tool):
@@ -579,18 +523,11 @@ class TestHandleMessageContentBlockNoIsError:
     def test_block_without_is_error(self):
         p = BaseBrowserPrinter()
         p.start_recording()
-        # Block without is_error and content attributes
         block = SimpleNamespace(some_other_attr="value")
         msg = SimpleNamespace(content=[block])
         p._handle_message(msg)
-        # Nothing should be recorded
         events = p.stop_recording()
         assert len(events) == 0
-
-
-# ---------------------------------------------------------------------------
-# Additional useful_tools.py branches
-# ---------------------------------------------------------------------------
 
 
 class TestUsefulToolsMoreBranches:
@@ -599,31 +536,14 @@ class TestUsefulToolsMoreBranches:
         """Edit on a directory should raise an error."""
         ut = UsefulTools()
         with tempfile.TemporaryDirectory() as d:
-            # Write a file, then make it read-only
             f = Path(d) / "readonly.txt"
             f.write_text("hello old world")
             f.chmod(0o444)
             try:
                 result = ut.Edit(str(f), "old", "new")
-                # On macOS, root can still write; non-root gets error
                 assert "Error" in result or "Successfully" in result
             finally:
                 f.chmod(0o644)
-
-
-# ---------------------------------------------------------------------------
-# Additional helpers.py branches
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Additional diff_merge.py branches
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Additional vscode/server.py branches
-# ---------------------------------------------------------------------------
 
 
 class TestVSCodeServerMoreBranches:
@@ -644,23 +564,18 @@ class TestVSCodeServerMoreBranches:
     def test_handle_command_refresh_files(self):
         server, events = self._make_server()
         server._handle_command({"type": "refreshFiles"})
-        # refreshFiles runs in a background thread; wait for it
         time.sleep(0.5)
         assert server._file_cache is None or isinstance(server._file_cache, list)
 
-        # May or may not have a suggestion depending on API availability
-        # But the test exercises the branch
 
     def test_run_task_with_attachments(self):
         """Test _run_task processes attachments."""
         import base64
 
         server, events = self._make_server()
-        # Create a 1x1 PNG
         png_data = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * 50).decode()
         pdf_data = base64.b64encode(b"%PDF-1.4 fake").decode()
 
-        # The actual run will fail (no API), but we can test attachment parsing
         with tempfile.TemporaryDirectory() as d:
             repo = os.path.join(d, "repo")
             os.makedirs(repo)
@@ -685,9 +600,5 @@ class TestVSCodeServerMoreBranches:
                     {"data": pdf_data, "mimeType": "application/pdf"},
                 ],
             })
-            # The run will fail because no API key, but we exercised the
-            # attachment parsing branch
             types = [e.get("type") for e in events]
-            assert "status" in types  # started
-            # It should have gone past attachments parsing into agent.run
-            # which would fail and trigger the except/finally path
+            assert "status" in types

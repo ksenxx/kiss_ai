@@ -79,20 +79,20 @@ def _create_minimal_pdf() -> bytes:
 def _create_silent_wav(duration_ms: int = 500, sample_rate: int = 16000) -> bytes:
     """Create a minimal valid WAV file with silence."""
     num_samples = sample_rate * duration_ms // 1000
-    data_size = num_samples * 2  # 16-bit mono
+    data_size = num_samples * 2
     header = struct.pack(
         "<4sI4s4sIHHIIHH4sI",
         b"RIFF",
         36 + data_size,
         b"WAVE",
         b"fmt ",
-        16,  # chunk size
-        1,  # PCM format
-        1,  # mono
+        16,
+        1,
+        1,
         sample_rate,
-        sample_rate * 2,  # byte rate
-        2,  # block align
-        16,  # bits per sample
+        sample_rate * 2,
+        2,
+        16,
         b"data",
         data_size,
     )
@@ -102,13 +102,11 @@ def _create_silent_wav(duration_ms: int = 500, sample_rate: int = 16000) -> byte
 class TestAttachment(unittest.TestCase):
 
     def test_supported_mime_types(self) -> None:
-        # Images and PDF
         assert "image/jpeg" in SUPPORTED_MIME_TYPES
         assert "image/png" in SUPPORTED_MIME_TYPES
         assert "image/gif" in SUPPORTED_MIME_TYPES
         assert "image/webp" in SUPPORTED_MIME_TYPES
         assert "application/pdf" in SUPPORTED_MIME_TYPES
-        # Audio
         assert "audio/mpeg" in SUPPORTED_MIME_TYPES
         assert "audio/wav" in SUPPORTED_MIME_TYPES
         assert "audio/x-wav" in SUPPORTED_MIME_TYPES
@@ -117,7 +115,6 @@ class TestAttachment(unittest.TestCase):
         assert "audio/flac" in SUPPORTED_MIME_TYPES
         assert "audio/aac" in SUPPORTED_MIME_TYPES
         assert "audio/mp4" in SUPPORTED_MIME_TYPES
-        # Video
         assert "video/mp4" in SUPPORTED_MIME_TYPES
         assert "video/webm" in SUPPORTED_MIME_TYPES
         assert "video/ogg" in SUPPORTED_MIME_TYPES
@@ -135,14 +132,12 @@ class TestAnthropicModelAudioVideoAttachments(unittest.TestCase):
         if not os.environ.get("OPENAI_API_KEY"):
             pytest.skip("OPENAI_API_KEY not set")
 
-        # Use a minimal but valid WAV so Whisper can process it
         wav_data = _create_silent_wav()
         m = AnthropicModel("claude-sonnet-4-20250514", api_key="test-key")
         audio_att = Attachment(data=wav_data, mime_type="audio/wav")
         m.initialize("Transcribe this audio", attachments=[audio_att])
         content = m.conversation[0]["content"]
         assert isinstance(content, list)
-        # Should have transcription text block + prompt text block
         assert len(content) == 2
         assert content[0]["type"] == "text"
         assert content[0]["text"].startswith("[Audio transcription]")
@@ -209,9 +204,8 @@ class TestOpenAICompatibleModelAudioVideoAttachments(unittest.TestCase):
         assert "image_url" in types
         assert "input_audio" in types
         assert "text" in types
-        # Video should be skipped
         assert types.count("text") == 1
-        assert len(content) == 3  # image + audio + text (video skipped)
+        assert len(content) == 3
 
 
 class TestAudioMimeToFormat(unittest.TestCase):
@@ -267,7 +261,6 @@ class TestGeminiMultimodal(unittest.TestCase):
                 ],
             )
         except Exception as e:
-            # Skip on transient API rate-limit failures (429 RESOURCE_EXHAUSTED)
             msg = str(e)
             if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
                 self.skipTest("Gemini API rate-limited (429)")

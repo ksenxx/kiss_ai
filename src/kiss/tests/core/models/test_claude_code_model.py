@@ -8,7 +8,6 @@ from kiss.core.kiss_error import KISSError
 from kiss.core.models.claude_code_model import ClaudeCodeModel, _find_claude_cli
 from kiss.core.models.model_info import MODEL_INFO, model
 
-# Skip entire module if 'claude' CLI is not on PATH
 _has_claude = shutil.which("claude") is not None
 requires_claude_cli = pytest.mark.skipif(not _has_claude, reason="claude CLI not installed")
 
@@ -100,5 +99,4 @@ class TestGenerateIntegration:
         m.initialize("Reply with exactly the word 'pong'. Nothing else.")
         content, response = m.generate()
         assert "pong" in content.lower()
-        # Streaming should have produced at least one token callback
         assert len(tokens) > 0

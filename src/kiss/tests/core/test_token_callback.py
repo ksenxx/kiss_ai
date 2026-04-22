@@ -61,9 +61,6 @@ class TestToolOutputStreaming:
             )
         except Exception as e:
             api_error = e
-        # Skip on transient API rate-limit failures (429 RESOURCE_EXHAUSTED)
-        # — the LLM never had a chance to call the tool so there is no
-        # tool output to stream.
         if api_error is not None:
             msg = str(api_error)
             if "429" in msg or "RESOURCE_EXHAUSTED" in msg:

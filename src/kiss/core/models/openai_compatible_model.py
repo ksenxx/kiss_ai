@@ -24,15 +24,7 @@ from kiss.core.models.model import (
 
 logger = logging.getLogger(__name__)
 
-# DeepSeek R1 reasoning models use <think>...</think> tags for chain-of-thought
-# These models need text-based tool calling instead of native function calling
-# API-level model names (without provider routing prefixes) that use
-# <think>…</think> reasoning tags and need text-based tool calling.
-# _is_deepseek_reasoning_model() checks _api_model_name (which strips
-# the "openrouter/" prefix) against this set, so entries here should
-# match the name sent to the provider API.
 DEEPSEEK_REASONING_MODELS = {
-    # OpenRouter / direct DeepSeek R1 models (API name after "openrouter/" strip)
     "deepseek/deepseek-r1",
     "deepseek/deepseek-r1-0528",
     "deepseek/deepseek-r1-turbo",
@@ -42,7 +34,6 @@ DEEPSEEK_REASONING_MODELS = {
     "deepseek/deepseek-r1-distill-qwen-14b",
     "deepseek/deepseek-r1-distill-qwen-32b",
     "deepseek/deepseek-r1-distill-llama-70b",
-    # Together AI DeepSeek R1 models (full model name = API name)
     "deepseek-ai/DeepSeek-R1",
     "deepseek-ai/DeepSeek-R1-0528-tput",
     "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
@@ -79,7 +70,6 @@ def _audio_mime_to_format(mime_type: str) -> str:
     """
     if mime_type in _AUDIO_MIME_TO_FORMAT:
         return _AUDIO_MIME_TO_FORMAT[mime_type]
-    # Fallback: use the subtype portion of "audio/<subtype>"
     return mime_type.split("/", 1)[1] if "/" in mime_type else mime_type
 
 
@@ -99,7 +89,6 @@ def _extract_deepseek_reasoning(content: str) -> tuple[str, str]:
     match = think_pattern.search(content)
     if match:
         reasoning = match.group(1).strip()
-        # Remove the think tags to get the final answer
         final_answer = think_pattern.sub("", content).strip()
         return reasoning, final_answer
     return "", content
@@ -133,7 +122,6 @@ class OpenAICompatibleModel(Model):
         super().__init__(model_name, model_config=model_config, token_callback=token_callback)
         self.base_url = base_url
         self.api_key = api_key
-        # For OpenRouter, strip the "openrouter/" prefix from model name for API calls
         self._api_model_name = (
             model_name[len("openrouter/") :] if model_name.startswith("openrouter/") else model_name
         )
@@ -183,7 +171,6 @@ class OpenAICompatibleModel(Model):
                         }
                     )
                 elif att.mime_type.startswith("audio/"):
-                    # OpenAI Chat Completions uses input_audio with a format hint.
                     fmt = _audio_mime_to_format(att.mime_type)
                     parts.append(
                         {
@@ -371,7 +358,6 @@ class OpenAICompatibleModel(Model):
 
         content, response = self._stream_text(kwargs)
 
-        # For DeepSeek R1 reasoning models, extract the final answer (strip <think> tags)
         if self._is_deepseek_reasoning_model():
             _, content = _extract_deepseek_reasoning(content)
 
@@ -394,11 +380,9 @@ class OpenAICompatibleModel(Model):
             of dictionaries containing tool call information, content is the text response,
             and response is the raw API response object.
         """
-        # Use text-based tool calling for DeepSeek R1 models
         if self._is_deepseek_reasoning_model():
             return self._generate_with_text_based_tools(function_map)
 
-        # Standard OpenAI-style native function calling
         tools = self._resolve_openai_tools_schema(function_map, tools_schema)
         kwargs = self.model_config.copy()
         kwargs.pop("system_instruction", None)
@@ -412,7 +396,6 @@ class OpenAICompatibleModel(Model):
         self._apply_cache_control_for_openrouter_anthropic(kwargs)
 
         if self.token_callback is not None:  # pragma: no cover – API streaming
-            # Streaming path: accumulate text and tool-call deltas.
             kwargs["stream"] = True
             kwargs["stream_options"] = {"include_usage": True}
             content = ""
@@ -453,7 +436,6 @@ class OpenAICompatibleModel(Model):
             response = self._finalize_stream_response(response, last_chunk)
             function_calls, raw_tool_calls = self._parse_tool_call_accum(tool_calls_accum)
         else:
-            # Non-streaming path.
             response = self.client.chat.completions.create(**kwargs)
             message = response.choices[0].message
             content = message.content or ""
@@ -483,19 +465,15 @@ class OpenAICompatibleModel(Model):
             of dictionaries containing parsed tool call information, content is the raw
             text response, and response is the raw API response object.
         """
-        # Build tools prompt and inject it into the system/user context
         tools_prompt = _build_text_based_tools_prompt(function_map)
 
-        # Create a modified conversation with tools prompt injected
         modified_conversation = list(self.conversation)
         if modified_conversation and modified_conversation[0]["role"] == "user":
-            # Append tools prompt to the first user message
             modified_conversation[0] = {
                 "role": "user",
                 "content": modified_conversation[0]["content"] + "\n" + tools_prompt,
             }
         else:
-            # Insert as system message
             modified_conversation.insert(0, {"role": "system", "content": tools_prompt})
 
         kwargs = self.model_config.copy()
@@ -510,10 +488,8 @@ class OpenAICompatibleModel(Model):
 
         content, response = self._stream_text(kwargs)
 
-        # For DeepSeek R1, extract reasoning and final answer
         _, content_clean = _extract_deepseek_reasoning(content)
 
-        # Parse tool calls from the text output
         function_calls = _parse_text_based_tool_calls(content_clean)
 
         if function_calls:

@@ -89,7 +89,6 @@ class ClaudeCodeModel(Model):
             token_callback=token_callback,
             thinking_callback=thinking_callback,
         )
-        # Strip the "cc/" prefix for the --model flag sent to claude CLI
         self._cli_model = model_name[3:] if model_name.startswith("cc/") else model_name
 
     def initialize(self, prompt: str, attachments: list[Attachment] | None = None) -> None:
@@ -229,18 +228,7 @@ class ClaudeCodeModel(Model):
         assistant_count = 0
         current_block_type = ""
         seen_assistant_id: str | None = None
-        # When --include-partial-messages is set, the CLI streams tokens via
-        # content_block_* events AND emits redundant ``assistant`` snapshots
-        # with the same accumulated content.  Once a content_block_* event
-        # has been observed, the content_block_* stream is the authoritative
-        # source — re-processing content from ``assistant`` snapshots would
-        # duplicate thinking_start/end boundaries, causing the UI to collapse
-        # the thoughts panel into a bare "Thinking (click to expand)" bar.
         saw_content_block = False
-        # Defer thinking_start until actual thinking content (thinking_delta)
-        # arrives.  Claude opus sends thinking blocks with only
-        # signature_delta events and no readable content — emitting
-        # thinking_start/end for those would show an empty "Thinking" bar.
         thinking_started = False
 
         for line in lines:
@@ -254,8 +242,6 @@ class ClaudeCodeModel(Model):
 
             event_type = event.get("type")
 
-            # Unwrap stream_event containers (CLI wraps content_block_*
-            # and message_* events inside {"type":"stream_event","event":{...}})
             if event_type == "stream_event":
                 event = event.get("event", {})
                 event_type = event.get("type")
@@ -263,17 +249,11 @@ class ClaudeCodeModel(Model):
             if event_type == "assistant":
                 msg = event.get("message", {})
                 msg_id = msg.get("id")
-                # --include-partial-messages sends multiple assistant events
-                # for the same message (same id); only count genuinely new
-                # messages.  Events without an id are always treated as new.
                 if msg_id is None or msg_id != seen_assistant_id:
                     assistant_count += 1
                     if assistant_count > 1:
                         break
                     seen_assistant_id = msg_id
-                # Skip content processing when the content_block_* stream
-                # has already (or will) carry the same tokens — avoids
-                # duplicate callbacks and premature thinking_end emission.
                 if saw_content_block:
                     continue
                 for block in msg.get("content", []):
@@ -293,8 +273,6 @@ class ClaudeCodeModel(Model):
                 saw_content_block = True
                 block = event.get("content_block", {})
                 current_block_type = block.get("type", "")
-                # Defer thinking_start — only emit when actual thinking
-                # content arrives (see thinking_delta handling below).
                 thinking_started = False
             elif event_type == "content_block_delta":
                 delta = event.get("delta", {})
@@ -343,7 +321,6 @@ class ClaudeCodeModel(Model):
         """
         tools_prompt = _build_text_based_tools_prompt(function_map)
 
-        # Use a local copy to avoid mutating shared model_config
         original_config = self.model_config
         config = dict(original_config)
         original_system = config.get("system_instruction", "")
@@ -352,11 +329,6 @@ class ClaudeCodeModel(Model):
         )
         self.model_config = config
 
-        # Buffer streamed *text* tokens so tool-call JSON can be stripped
-        # before it reaches the UI.  Thinking tokens are passed through to
-        # the original callback immediately (tool-call JSON never appears
-        # inside thinking blocks), so the thoughts panel receives them in
-        # real time.
         original_token_cb = self.token_callback
         original_thinking_cb = self.thinking_callback
         buffer: list[str] = []
@@ -385,11 +357,8 @@ class ClaudeCodeModel(Model):
             self.token_callback = original_token_cb
             self.thinking_callback = original_thinking_cb
 
-        # generate() appended a plain assistant message — replace it with
-        # one that includes tool_calls if any were found in the text.
         function_calls = _parse_text_based_tool_calls(content)
 
-        # Emit cleaned text (without tool-call JSON) to the UI
         if original_token_cb is not None:
             cleaned = _strip_text_based_tool_calls(content) if function_calls else content
             if cleaned:

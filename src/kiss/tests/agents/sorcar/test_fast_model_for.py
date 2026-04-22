@@ -22,7 +22,6 @@ class TestFastModelFor:
             "MINIMAX_API_KEY",
         ):
             monkeypatch.delenv(key, raising=False)
-        # Force Config to re-read env vars
         from kiss.core import config as _cfg
 
         monkeypatch.setattr(_cfg, "DEFAULT_CONFIG", _cfg.Config())

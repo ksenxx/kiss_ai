@@ -16,7 +16,6 @@ import pytest
 
 from kiss.channels._channel_agent_utils import BaseChannelAgent, channel_main
 
-# All agent (class_name, module_path) pairs
 ALL_AGENTS = [
     ("BlueBubblesAgent", "kiss.channels.bluebubbles_agent"),
     ("DiscordAgent", "kiss.channels.discord_agent"),
@@ -69,7 +68,6 @@ def test_all_agents_have_is_authenticated(
 ) -> None:
     """Every channel agent overrides _is_authenticated()."""
     cls = _get_agent_class(module_path, class_name)
-    # _is_authenticated should be defined on the agent class, not just inherited
     assert "_is_authenticated" in cls.__dict__
 
 
@@ -109,13 +107,11 @@ def test_channel_main_list_chats_exits(
             channel_main(FakeAgent, "kiss-test")
         assert exc_info.value.code == 0
         captured = capsys.readouterr()
-        # Either shows chats or "No chat sessions found."
-        assert captured.out  # something was printed
+        assert captured.out
     finally:
         sys.argv = original_argv
 
 
-# Modules that have _make_backend (support poll mode)
 _POLL_MODULES = [
     "kiss.channels.bluebubbles_agent",
     "kiss.channels.discord_agent",
@@ -136,7 +132,6 @@ _POLL_MODULES = [
     "kiss.channels.zalo_agent",
 ]
 
-# Modules without poll mode support
 _NO_POLL_MODULES = [
     "kiss.channels.gmail_agent",
     "kiss.channels.imessage_agent",

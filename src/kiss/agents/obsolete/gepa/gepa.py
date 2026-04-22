@@ -2,7 +2,6 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # Cursor AI (cursor@cursor.com) for vibe coding GEPA
-# add your name here
 
 """GEPA (Genetic-Pareto): Reflective Prompt Evolution for Compound AI Systems.
 
@@ -231,18 +230,15 @@ class GEPA:
         self.reflection_model = reflection_model
         self.dev_val_split = dev_val_split if dev_val_split is not None else 0.5
 
-        # Merge configuration
         self.use_merge = use_merge
         self.max_merge_invocations = max_merge_invocations
         self.merge_val_overlap_floor = merge_val_overlap_floor
         self._merge_invocations = 0
         self._attempted_merges: set[tuple[int, int]] = set()
 
-        # Progress callback
         self.progress_callback = progress_callback
         self._best_val_accuracy: float | None = None
 
-        # State
         self.candidates: list[PromptCandidate] = []
         self.pareto_frontier: list[PromptCandidate] = []
         self.best_per_val_instance: dict[int, PromptCandidate] = {}
@@ -250,15 +246,12 @@ class GEPA:
         self.val_examples: list[dict[str, str]] = []
         self._candidate_id = 0
 
-        # Ancestry tracking for structural merge
         self._historical_prompts: dict[int, str] = {}
         self._ancestry: dict[int, list[int]] = {}
 
-        # Valid placeholders from initial template
         self.initial_prompt_template = initial_prompt_template
         self.valid_placeholders = set(get_template_field_names(initial_prompt_template))
 
-        # Prompt template for reflection
         # fmt: off
         self.reflection_prompt = (
             "I provided an assistant with the following instructions to perform a task "
@@ -301,7 +294,6 @@ class GEPA:
         )
         # fmt: on
 
-        # Initialize with seed candidate
         self.candidates.append(self._new_candidate(initial_prompt_template))
 
     def _get_val_accuracy(self, candidate: PromptCandidate) -> float:
@@ -560,7 +552,6 @@ class GEPA:
             inputs_str = json.dumps(example, indent=2)
             score_details = ", ".join(f"{k}: {v:.2f}" for k, v in score.items())
 
-            # Format feedback based on average score ratio
             avg_score = sum(score.values()) / len(score) if score else 0.0
             if avg_score >= self.perfect_score:  # pragma: no branch
                 feedback = f"Good response. Scores: {score_details}"
@@ -577,7 +568,6 @@ class GEPA:
 
             truncated = result[:1000] + "..." if len(result) > 1000 else result
 
-            # Format trajectory if available
             trajectory_str = ""
             if trajectories and i < len(trajectories) and trajectories[i]:  # pragma: no branch
                 traj_parts = []
@@ -682,7 +672,6 @@ class GEPA:
                         c1_overlap_scores[key] = c1_overlap_scores.get(key, 0.0) + val
                     for key, val in c2.per_item_val_scores[idx].items():
                         c2_overlap_scores[key] = c2_overlap_scores.get(key, 0.0) + val
-            # Average the accumulated scores
             for key in c1_overlap_scores:
                 c1_overlap_scores[key] /= len(overlap_ids)
             for key in c2_overlap_scores:
@@ -749,7 +738,6 @@ class GEPA:
                 if self._find_common_ancestor(c1.id, c2.id) is None:  # pragma: no branch
                     continue
 
-                # Score by complementarity (different strengths) and coverage
                 union = c1.val_instance_wins | c2.val_instance_wins
                 if not union:  # pragma: no branch
                     continue
@@ -789,12 +777,10 @@ class GEPA:
         if ancestor_prompt is None:  # pragma: no branch
             return None
 
-        # 3-way merge: prefer changed prompts, resolve conflicts by score
         p1, p2 = c1.prompt_template, c2.prompt_template
         c1_changed, c2_changed = p1 != ancestor_prompt, p2 != ancestor_prompt
 
         if c1_changed and c2_changed and p1 != p2:  # pragma: no branch
-            # Conflict: pick by validation score, tie-break randomly
             s1 = sum(c1.val_scores.values()) if c1.val_scores else 0
             s2 = sum(c2.val_scores.values()) if c2.val_scores else 0
             merged_prompt = p1 if s1 > s2 else p2 if s2 > s1 else random.choice([p1, p2])
@@ -805,7 +791,6 @@ class GEPA:
         else:
             merged_prompt = ancestor_prompt
 
-        # Gate: Evaluate on overlap subset
         overlap_ids, c1_scores, c2_scores = self._compute_val_overlap(c1, c2)
         overlap_examples = [
             self.val_examples[idx] for idx in overlap_ids if idx < len(self.val_examples)
@@ -842,7 +827,6 @@ class GEPA:
         if not merge_pairs:  # pragma: no branch
             return None
 
-        # Try the best merge candidate
         c1, c2 = merge_pairs[0]
         return self._merge_structural(c1, c2)
 
@@ -859,13 +843,11 @@ class GEPA:
         Returns:
             None. Updates self.pareto_frontier and self.best_per_val_instance in place.
         """
-        # Track previous frontier IDs to detect new additions
         prev_frontier_ids = {c.id for c in self.pareto_frontier}
 
         candidate.val_instance_wins = set()
         candidate.evaluated_val_ids = set(range(len(candidate.per_item_val_scores)))
 
-        # Update best per validation instance
         for idx, scores in enumerate(candidate.per_item_val_scores):
             score = sum(scores.values())
             current_best = self.best_per_val_instance.get(idx)
@@ -882,12 +864,10 @@ class GEPA:
                 elif score == best_score:  # pragma: no branch
                     candidate.val_instance_wins.add(idx)
 
-        # Rebuild frontier from unique best candidates
         frontier_candidates = {c.id: c for c in self.best_per_val_instance.values()}
         if candidate.val_instance_wins:  # pragma: no branch
             frontier_candidates[candidate.id] = candidate
 
-        # Limit size by instance wins
         new_frontier = sorted(
             frontier_candidates.values(),
             key=lambda c: len(c.val_instance_wins),
@@ -895,7 +875,6 @@ class GEPA:
         )
         self.pareto_frontier = new_frontier[: self.pareto_size]
 
-        # Report if this candidate was added to the Pareto frontier
         new_frontier_ids = {c.id for c in self.pareto_frontier}
         if candidate.id in new_frontier_ids and candidate.id not in prev_frontier_ids:
             self._report_progress(
@@ -953,7 +932,6 @@ class GEPA:
         Returns:
             Best PromptCandidate found
         """
-        # Split into dev/val
         shuffled = train_examples.copy()
         random.shuffle(shuffled)
         split = max(1, int(len(shuffled) * self.dev_val_split))
@@ -962,19 +940,15 @@ class GEPA:
 
         batch_size = dev_minibatch_size or len(self.dev_examples)
 
-        # Reset best validation accuracy tracking
         self._best_val_accuracy = None
 
         for gen in range(self.max_generations):
-            # Evaluate candidates and store reflection data
-            # Type: dict[int, tuple[dev_batch, dev_results, dev_item_scores, trajectories]]
             candidate_reflection_data: dict[
                 int,
                 tuple[list[dict[str, str]], list[str], list[dict[str, float]], list[list]],
             ] = {}
 
             for idx, candidate in enumerate(self.candidates):
-                # Report dev evaluation progress
                 self._report_progress(
                     generation=gen,
                     phase=GEPAPhase.DEV_EVALUATION,
@@ -984,7 +958,6 @@ class GEPA:
                     message=f"Dev evaluation: candidate {candidate.id}",
                 )
 
-                # Dev evaluation for feedback (capture results for reflection)
                 dev_batch = (
                     self.dev_examples
                     if len(self.dev_examples) <= batch_size
@@ -1003,7 +976,6 @@ class GEPA:
                     generation=gen,
                     candidate_id=candidate.id,
                 )
-                # Store reflection data for this candidate (including trajectories)
                 candidate_reflection_data[candidate.id] = (
                     dev_batch,
                     dev_results,
@@ -1011,7 +983,6 @@ class GEPA:
                     dev_trajectories,
                 )
 
-                # Report val evaluation progress
                 self._report_progress(
                     generation=gen,
                     phase=GEPAPhase.VAL_EVALUATION,
@@ -1021,7 +992,6 @@ class GEPA:
                     message=f"Val evaluation: candidate {candidate.id}",
                 )
 
-                # Val evaluation for selection
                 candidate.val_scores, candidate.per_item_val_scores, _, _ = self._run_minibatch(
                     candidate.prompt_template,
                     self.val_examples,
@@ -1032,7 +1002,6 @@ class GEPA:
                 self._update_pareto(candidate, generation=gen)
                 self._update_best_val_accuracy(candidate)
 
-                # Report progress after val evaluation (now with updated scores)
                 val_scores_str = ", ".join(f"{k}={v:.4f}" for k, v in candidate.val_scores.items())
                 self._report_progress(
                     generation=gen,
@@ -1043,11 +1012,9 @@ class GEPA:
                     message=(f"Evaluated candidate {candidate.id}: {val_scores_str}"),
                 )
 
-            # Generate next generation (skip last)
             if gen < self.max_generations - 1:
                 new_candidates: list[PromptCandidate] = []
 
-                # Phase 1: Reflective mutation
                 while len(new_candidates) < self.population_size:
                     if random.random() < self.mutation_rate and self.pareto_frontier:
                         parent = self._weighted_choice(self.pareto_frontier)
@@ -1056,7 +1023,6 @@ class GEPA:
                             new_candidates.append(parent)
                             continue
 
-                        # Report reflection progress
                         self._report_progress(
                             generation=gen,
                             phase=GEPAPhase.REFLECTION,
@@ -1065,7 +1031,6 @@ class GEPA:
                             message=f"Reflecting on candidate {parent.id} to generate mutation",
                         )
 
-                        # Get or compute reflection data for parent
                         if parent.id in candidate_reflection_data:
                             dev_batch, dev_results, dev_item_scores, trajectories = (
                                 candidate_reflection_data[parent.id]
@@ -1092,7 +1057,6 @@ class GEPA:
                         )
                         child = self._new_candidate(new_prompt, parents=[parent.id])
 
-                        # Report mutation gating progress
                         self._report_progress(
                             generation=gen,
                             phase=GEPAPhase.MUTATION_GATING,
@@ -1115,9 +1079,7 @@ class GEPA:
                     elif self.candidates:  # pragma: no branch
                         new_candidates.append(random.choice(self.candidates))
 
-                # Phase 2: Merge from Pareto frontier
                 if self.use_merge and len(self.pareto_frontier) >= 2:
-                    # Report merge progress
                     self._report_progress(
                         generation=gen,
                         phase=GEPAPhase.MERGE,

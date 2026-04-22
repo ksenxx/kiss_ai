@@ -33,9 +33,7 @@ class TestToggleFocusExtensionTs:
 
     def test_toggle_does_not_use_visible(self) -> None:
         """toggleFocus no longer checks .visible for the toggle decision."""
-        # Extract the toggleFocus handler body
         start = self.src.index("kissSorcar.toggleFocus")
-        # Find the next two occurrences of "finally" to delimit the handler
         end = self.src.index("_focusToggling = false", start)
         handler = self.src[start:end]
         assert "sidebarView!.visible" not in handler
@@ -65,7 +63,6 @@ class TestToggleFocusSidebarView:
     def test_focus_changed_updates_flag(self) -> None:
         """webviewFocusChanged handler updates _webviewHasFocus."""
         start = self.src.index("'webviewFocusChanged'")
-        # Look at the next few lines after the case label
         snippet = self.src[start : start + 200]
         assert "_webviewHasFocus" in snippet
 

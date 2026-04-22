@@ -52,16 +52,9 @@ SOCK_PATH = KISS_DIR / "cron_manager.sock"
 PID_PATH = KISS_DIR / "cron_manager.pid"
 LOG_PATH = KISS_DIR / "cron_manager.log"
 
-# Maximum incoming message size: 1 MB
 _MAX_MSG = 1_048_576
 
-# Marker that tags KISS-owned crontab entries
 _MARKER = "# KISS-JOB"
-
-
-# ---------------------------------------------------------------------------
-# System crontab helpers
-# ---------------------------------------------------------------------------
 
 
 def _read_crontab(crontab_cmd: str) -> str:
@@ -218,11 +211,6 @@ def _validate_command(command: str) -> None:
         raise ValueError("Command must be a single line")
 
 
-# ---------------------------------------------------------------------------
-# Daemon
-# ---------------------------------------------------------------------------
-
-
 class CronDaemon:
     """Unix-domain-socket daemon proxying job commands to system ``crontab``.
 
@@ -251,7 +239,6 @@ class CronDaemon:
         self._stop_event = threading.Event()
         self._server_socket: socket.socket | None = None
 
-    # -- Job operations ------------------------------------------------------
 
     def _add_job(self, schedule: str, command: str) -> dict[str, Any]:
         """Add a new job to the system crontab and return a response dict."""
@@ -320,7 +307,6 @@ class CronDaemon:
             }
         return {"status": "ok", "pid": os.getpid(), "job_count": count}
 
-    # -- Command dispatch ----------------------------------------------------
 
     def _handle_command(self, data: dict[str, Any]) -> dict[str, Any]:
         """Dispatch a parsed JSON command and return the response payload."""
@@ -345,7 +331,6 @@ class CronDaemon:
             return {"status": "ok", "message": "Daemon stopping"}
         return {"status": "error", "message": f"Unknown action: {action!r}"}
 
-    # -- Connection handling -------------------------------------------------
 
     def _handle_client(self, conn: socket.socket) -> None:
         """Read one JSON request from ``conn``, dispatch, and send the reply."""
@@ -439,7 +424,7 @@ class CronDaemon:
             signal.signal(signal.SIGTERM, _signal_handler)
             signal.signal(signal.SIGINT, _signal_handler)
         except ValueError:
-            pass  # Not main thread — shutdown happens via stop command.
+            pass
 
         try:
             self._serve()
@@ -447,11 +432,6 @@ class CronDaemon:
             self._stop_event.set()
             self._cleanup()
             logger.info("Daemon stopped")
-
-
-# ---------------------------------------------------------------------------
-# Daemonize and process management
-# ---------------------------------------------------------------------------
 
 
 def _daemonize() -> None:
@@ -556,10 +536,6 @@ def stop_daemon(sock_path: Path = SOCK_PATH, pid_path: Path = PID_PATH) -> str:
         pid_path.unlink(missing_ok=True)
         return "Daemon not running (stale PID file cleaned)"
 
-    # The daemon removes its PID file in ``_cleanup`` before the process
-    # exits, so a missing PID file is a reliable "shutdown completed"
-    # signal even when the process briefly lingers as a zombie that
-    # hasn't yet been reaped by its parent.
     def _stopped() -> bool:
         return not pid_path.exists() or not _is_running(pid)
 
@@ -591,11 +567,6 @@ def daemon_status(
         return f"Daemon running (pid={pid}, jobs={resp.get('job_count', '?')})"
     except (ConnectionError, OSError):
         return f"Daemon running (pid={pid}) but socket not responding"
-
-
-# ---------------------------------------------------------------------------
-# Client
-# ---------------------------------------------------------------------------
 
 
 class CronClient:
@@ -696,11 +667,6 @@ class CronClient:
             self._send({"action": "stop"})
         except ConnectionError:
             pass
-
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
 
 
 def main() -> None:

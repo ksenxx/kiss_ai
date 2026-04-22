@@ -37,11 +37,6 @@ def _restore(saved: _SavedState) -> None:
     (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
 
 
-# ---------------------------------------------------------------------------
-# persistence.py — line 125→129: _get_db when DB file already exists
-# ---------------------------------------------------------------------------
-
-
 class TestGetDbWithExistingFile:
     """Cover the else branch of 'if not _DB_PATH.exists()' (line 125→129)."""
 
@@ -58,20 +53,12 @@ class TestGetDbWithExistingFile:
 
     def test_get_db_when_file_already_exists(self) -> None:
         """_get_db skips stale WAL cleanup when DB file already exists."""
-        # First call creates the DB file
         th._get_db()
         assert th._DB_PATH.exists()
-        # Close connection but leave file on disk
         th._db_conn.close()  # type: ignore[union-attr]
         th._db_conn = None
-        # Second call should skip the 'if not _DB_PATH.exists()' body → line 125→129
         db = th._get_db()
         assert db is not None
-
-
-# ---------------------------------------------------------------------------
-# persistence.py — _append_chat_event with nonexistent task
-# ---------------------------------------------------------------------------
 
 
 class TestAppendChatEventNoTask:
@@ -90,14 +77,7 @@ class TestAppendChatEventNoTask:
 
     def test_append_event_no_matching_task(self) -> None:
         """_append_chat_event returns early when task doesn't exist."""
-        # Don't add any task, so resolved_task_id will be None
         th._append_chat_event({"type": "test"}, task="nonexistent-task-xyz")
-        # No crash = success; the early return was taken
-
-
-# ---------------------------------------------------------------------------
-# helpers.py — lines 133→134 and 157→158: rank_file_suggestions with usage
-# ---------------------------------------------------------------------------
 
 
 class TestRankFileSuggestionsWithUsage:
@@ -109,13 +89,7 @@ class TestRankFileSuggestionsWithUsage:
         usage = {"src/main.py": 3, "lib/main.py": 1}
         result = rank_file_suggestions(files, "main", usage)
         frequent = [r for r in result if r["type"] == "frequent"]
-        # Both src/main.py and lib/main.py match "main" and have usage
         assert len(frequent) == 2
-
-
-# ---------------------------------------------------------------------------
-# server.py — line 466→467: _get_history with empty history
-# ---------------------------------------------------------------------------
 
 
 class TestGetHistoryBranches:
@@ -148,13 +122,12 @@ class TestGetHistoryBranches:
         """_get_history with populated DB enters the loop (line 466→467)."""
         server, events = self._make_server()
         th._add_task("short task")
-        th._add_task("a" * 60)  # long task for title truncation branch
+        th._add_task("a" * 60)
         server._get_history(None, offset=0, generation=0)
         hist = [e for e in events if e.get("type") == "history"]
         assert len(hist) == 1
         sessions = hist[0]["sessions"]
         assert len(sessions) == 2
-        # Verify truncation branch: long title gets "..."
         long_session = [s for s in sessions if len(s["preview"]) > 50][0]
         assert long_session["title"].endswith("...")
 
@@ -171,14 +144,7 @@ class TestGetHistoryBranches:
         assert sessions[0]["preview"] == "fix the bug"
 
 
-# ---------------------------------------------------------------------------
-# server.py — line 670→671: _complete with stale sequence number
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
 # server.py — line 622: remove # pragma: no branch
-# ---------------------------------------------------------------------------
 
 
 class TestCompleteFromActiveFileEqualSuffix:
@@ -191,11 +157,9 @@ class TestCompleteFromActiveFileEqualSuffix:
     def test_equal_length_suffixes(self) -> None:
         """Two equal-length candidates: second doesn't replace first."""
         server = VSCodeServer()
-        # Both "method_ab" and "method_cd" give suffix of length 2
         content = "method_ab method_cd"
         result = server._complete_from_active_file(
             "x method_", snapshot_content=content
         )
-        # One of them wins (whichever is iterated first), length is 2
         assert len(result) == 2
         assert result in ("ab", "cd")

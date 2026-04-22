@@ -81,11 +81,6 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
     recorded events.
     """
 
-    # -- Thread-local stream state properties ----------------------------
-    # Override the instance attributes set by ``StreamEventParser.__init__``
-    # with properties that delegate to ``self._thread_local``.  This makes
-    # ``parse_stream_event()`` and ``reset_stream_state()`` (inherited from
-    # ``StreamEventParser``) transparently per-thread.
 
     @property
     def _current_block_type(self) -> str:  # type: ignore[override]
@@ -154,7 +149,7 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
         if text:
             with self._bash_lock:
                 if self._bash_state.generation != gen:
-                    return  # stale — discard
+                    return
             self.broadcast({"type": "system_output", "text": text})
 
     def _recording_key(self) -> str:

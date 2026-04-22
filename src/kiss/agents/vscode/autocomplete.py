@@ -25,7 +25,6 @@ class _AutocompleteMixin:
     """Ghost-text + file-path autocomplete methods."""
 
     if TYPE_CHECKING:
-        # Provided by ``VSCodeServer`` at runtime.
         printer: VSCodePrinter
         work_dir: str
         _state_lock: threading.Lock
@@ -64,18 +63,14 @@ class _AutocompleteMixin:
             except OSError:
                 return ""
 
-        # If the query ends with a non-word character the user has moved past
-        # the identifier; don't complete a word that is no longer being typed.
         if query and not (query[-1].isalnum() or query[-1] == "_" or query[-1] == "."):
             return ""
-        # Extract the trailing token (may include dots for chains)
         m = re.search(r"([\w][\w.]*)$", query)
         if not m:
             return ""
         partial = m.group(1)
         if len(partial) < 2:
             return ""
-        # Extract single-word identifiers (length >= 3) and dot-chained identifiers
         words = set(re.findall(r"\b[A-Za-z_]\w{2,}\b", content))
         chains = set(re.findall(r"\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+\b", content))
         candidates = words | chains
@@ -94,7 +89,6 @@ class _AutocompleteMixin:
         q = self._complete_queue
         while True:
             item = q.get()
-            # Drain to latest request (skip stale ones)
             while not q.empty():
                 try:
                     item = q.get_nowait()
@@ -169,9 +163,6 @@ class _AutocompleteMixin:
         if not cache:
             from kiss.agents.vscode.diff_merge import _scan_files
             cache = _scan_files(self.work_dir)
-            # Double-check under lock: a concurrent _refresh_file_cache
-            # thread may have published a fresher cache while we were
-            # scanning — do not overwrite it with our (older) scan.
             with self._state_lock:
                 if self._file_cache is None:
                     self._file_cache = cache

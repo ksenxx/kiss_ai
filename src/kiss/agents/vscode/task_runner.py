@@ -45,7 +45,6 @@ class _TaskRunnerMixin:
     """Task-lifecycle methods (run, stop, user-question callback)."""
 
     if TYPE_CHECKING:
-        # Provided by ``VSCodeServer`` / sibling mixins at runtime.
         printer: VSCodePrinter
         work_dir: str
         _state_lock: threading.Lock
@@ -153,9 +152,6 @@ class _TaskRunnerMixin:
         tab_id = cmd.get("tabId", "")
         tab = self._get_tab(tab_id)
         model = cmd.get("model") or tab.selected_model
-        # RC-NEW-3: single lock block for is_merging check + state setup
-        # (no TOCTOU gap). stop_event and user_answer_queue are pre-created
-        # in _handle_command (RC-NEW-1 fix).
         with self._state_lock:
             if tab.is_merging:
                 self.printer.broadcast(
@@ -169,22 +165,15 @@ class _TaskRunnerMixin:
                 return
             tab.use_worktree = bool(cmd.get("useWorktree", False))
             tab.use_parallel = bool(cmd.get("useParallel", False))
-            # BUG-71/BUG-72 fix: mark the tab as actively running a task
-            # so concurrent ``_new_chat`` / ``_handle_worktree_action``
-            # calls refuse rather than racing with ``agent.run()``'s
-            # writes to ``wt_dir`` / the main tree.
             tab.is_task_active = True
             stop_event = tab.stop_event
         self.printer._thread_local.stop_event = stop_event
 
-        # Use tab_id as chat_id for new sessions
         if tab_id and tab.agent.chat_id == "":
             tab.agent._chat_id = tab_id
 
         self.printer.broadcast({"type": "clear", "chat_id": tab.agent.chat_id})
 
-        # Fix 4 (defense-in-depth): block a new non-worktree task while
-        # a worktree merge is in progress on the same repo.
         if not tab.use_worktree:
             with self._state_lock:
                 if any(
@@ -199,17 +188,11 @@ class _TaskRunnerMixin:
                     })
                     return
 
-        # Git snapshot captures pre-task state — only needed for
-        # non-worktree merge view (worktree mode uses baseline commits
-        # and its own diff; saving here would nuke another tab's data).
         pre_hunks: dict[str, list[tuple[int, int, int, int]]] = {}
         pre_untracked: set[str] = set()
         pre_file_hashes: dict[str, str] | None = None
         pre_head_sha: str | None = None
         if not tab.use_worktree:
-            # BUG-55 fix: set is_running_non_wt BEFORE capturing the
-            # snapshot so concurrent worktree merges are blocked during
-            # the entire snapshot + task window (closes TOCTOU gap).
             with self._state_lock:
                 tab.is_running_non_wt = True
             try:
@@ -223,9 +206,6 @@ class _TaskRunnerMixin:
                 raise
 
         # BUG-B fix: if this worktree tab has a pending branch from a
-        # prior run and a non-wt agent is writing to the main tree,
-        # clear the stale worktree reference (branch preserved in git)
-        # so _try_setup_worktree's _release_worktree is a no-op.
         if tab.use_worktree and tab.agent._wt_pending:
             with self._state_lock:
                 if self._any_non_wt_running():
@@ -237,7 +217,6 @@ class _TaskRunnerMixin:
                     )
                     tab.agent._wt = None
 
-        # start_recording inside try so stop_recording always runs (P14 fix)
         result_summary = "Agent Failed Abruptly"
         task_end_event: dict[str, Any] | None = None
         try:
@@ -272,31 +251,14 @@ class _TaskRunnerMixin:
                 finally:
                     tab.task_history_id = tab.agent._last_task_id
         except BaseException:  # pragma: no cover — async interrupt before inner try
-            # P14: interrupt before inner try — ensure stop_recording runs
             task_end_event = task_end_event or {"type": "task_stopped"}
         finally:
             _record_model_usage(model)
-            # Entire cleanup wrapped in try/except BaseException (P13 fix)
             try:
-                # BUG-71/BUG-72 fix: the agent's ``run()`` has returned,
-                # so it is no longer writing to ``wt_dir`` / the main
-                # tree.  Clear the flag BEFORE any ``worktree_done``
-                # broadcast (below) so merge/discard UI actions that
-                # arrive immediately after the task finishes are not
-                # spuriously refused.
                 with self._state_lock:
                     tab.is_task_active = False
                 self.printer._persist_agents.pop(tab_id, None)
                 self.printer.stop_recording()
-                # BUG-61 fix: prepare the non-worktree merge view
-                # BEFORE clearing is_running_non_wt.  The diff capture
-                # must happen while the flag blocks concurrent worktree
-                # merges — otherwise a merge can modify the working
-                # tree between flag-clear and diff, corrupting the view.
-                # The flag is cleared in the finally below (and in the
-                # outer except handler) so it never gets stuck True
-                # even if the merge view preparation raises (BUG-39
-                # safety preserved).
                 if not tab.use_worktree:
                     try:
                         self._prepare_and_start_merge(
@@ -353,11 +315,6 @@ class _TaskRunnerMixin:
                     )
                 tab.task_history_id = None
             except BaseException:  # pragma: no cover — cleanup interrupted
-                # BUG-39 fix: ensure flag is cleared even when cleanup
-                # itself is interrupted.
-                # BUG-71/BUG-72 safety: clear ``is_task_active`` too
-                # so the tab is not permanently locked against
-                # new-chat / merge / discard after an interrupt.
                 with self._state_lock:
                     tab.is_task_active = False
                     if not tab.use_worktree:
@@ -418,10 +375,8 @@ class _TaskRunnerMixin:
                     ctypes.py_object(KeyboardInterrupt),
                 )
                 if rc == 0:
-                    # Thread ID not found — thread already exited
                     return
                 if rc > 1:  # pragma: no cover — rare: exception set in multiple states
-                    # Undo: clear the exception in all affected thread states
                     ctypes.pythonapi.PyThreadState_SetAsyncExc(
                         ctypes.c_ulong(tid), None
                     )

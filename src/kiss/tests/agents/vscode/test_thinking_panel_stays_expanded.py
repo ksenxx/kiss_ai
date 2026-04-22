@@ -95,5 +95,4 @@ def test_thinking_start_handler_creates_expanded_panel() -> None:
     body = m.group(1)
     assert "thinkEl" in body
     assert "cnt" in body, "thinking_start must create the .cnt element"
-    # No 'hidden' class is added at creation — the panel is expanded.
     assert "add('hidden')" not in body

@@ -42,11 +42,6 @@ logger = logging.getLogger(__name__)
 _SLACK_DIR = Path.home() / ".kiss" / "channels" / "slack"
 
 
-# ---------------------------------------------------------------------------
-# Token persistence
-# ---------------------------------------------------------------------------
-
-
 def _token_path(workspace: str = "default") -> Path:
     """Return the path to the stored Slack bot token file for a workspace.
 
@@ -108,15 +103,6 @@ def _clear_token(workspace: str = "default") -> None:
     clear_json_config(_token_path(workspace))
 
 
-# ---------------------------------------------------------------------------
-# Slack API tool functions
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# SlackChannelBackend — used by ChannelRunner and SlackAgent tools
-# ---------------------------------------------------------------------------
-
 _REPLY_POLL_INTERVAL = 2.0
 
 
@@ -150,9 +136,6 @@ class SlackChannelBackend(ToolMethodBackend):
                 "Or manually save token to ~/.kiss/channels/slack/token.json"
             )
             return False
-        # Disable default ConnectionErrorRetryHandler: it retries ALL
-        # requests (including chat.postMessage) on connection errors,
-        # creating duplicate messages since POST is not idempotent.
         self._client = WebClient(token=token, retry_handlers=[])
         try:
             auth = self._client.auth_test()
@@ -225,7 +208,7 @@ class SlackChannelBackend(ToolMethodBackend):
         try:
             self._client.conversations_join(channel=channel_id)
         except SlackApiError:
-            pass  # Already a member or can't join
+            pass
 
     def poll_messages(
         self, channel_id: str, oldest: str, limit: int = 10
@@ -312,7 +295,6 @@ class SlackChannelBackend(ToolMethodBackend):
         else:
             raise last_err  # type: ignore[misc]
         messages: list[dict[str, Any]] = resp.get("messages", [])
-        # Exclude the parent message itself (always first in replies).
         messages = [m for m in messages if m.get("ts") != thread_ts]
         messages.sort(key=lambda m: float(m.get("ts", "0")))
         new_oldest = oldest
@@ -415,9 +397,6 @@ class SlackChannelBackend(ToolMethodBackend):
             return text.replace(f"<@{self._bot_user_id}>", "").strip()
         return text
 
-    # -------------------------------------------------------------------
-    # Slack API tool methods (return JSON strings for LLM agent use)
-    # -------------------------------------------------------------------
 
     def list_channels(
         self, types: str = "public_channel", limit: int = 200, cursor: str = ""
@@ -856,11 +835,6 @@ class SlackChannelBackend(ToolMethodBackend):
             )
         except SlackApiError as e:
             return json.dumps({"ok": False, "error": str(e)})
-
-
-# ---------------------------------------------------------------------------
-# SlackAgent
-# ---------------------------------------------------------------------------
 
 
 class SlackAgent(BaseChannelAgent, StatefulSorcarAgent):

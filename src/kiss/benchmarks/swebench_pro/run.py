@@ -48,14 +48,12 @@ def run_instance(instance: dict, model: str, budget: float) -> dict:
     dockerhub_tag = instance["dockerhub_tag"]
     image = f"jefzda/sweap-images:{dockerhub_tag}"
 
-    # Build sorcar command to run inside the container
     escaped_task = task.replace('"', '\\"')
     sorcar_cmd = (
         f'sorcar -t "{escaped_task}" -w /app -n '
         f"--model {model} --budget {budget}"
     )
 
-    # Run inside Docker, capture output
     docker_cmd = [
         "docker",
         "run",

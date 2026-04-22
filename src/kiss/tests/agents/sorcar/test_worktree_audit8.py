@@ -61,10 +61,6 @@ from kiss.agents.vscode.diff_merge import (
 )
 from kiss.agents.vscode.server import VSCodeServer
 
-# ---------------------------------------------------------------------------
-# Helpers (same pattern as prior audit test files)
-# ---------------------------------------------------------------------------
-
 
 def _redirect_db(tmpdir: str) -> tuple:
     old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
@@ -108,11 +104,6 @@ def _make_repo(path: Path) -> Path:
     return path
 
 
-# ===================================================================
-# BUG-34: Non-worktree snapshot without repo_lock
-# ===================================================================
-
-
 class TestBug34NonWorktreeSnapshotNoLock:
     """BUG-34: The non-worktree pre-task snapshot code runs git diff,
     git ls-files, file reads, and _save_untracked_base without acquiring
@@ -135,7 +126,6 @@ class TestBug34NonWorktreeSnapshotNoLock:
         source = inspect.getsource(VSCodeServer._run_task_inner)
         lines = source.splitlines()
 
-        # Find the non-worktree snapshot block: "if not tab.use_worktree:"
         snapshot_start = None
         for i, line in enumerate(lines):
             if "if not tab.use_worktree:" in line:
@@ -144,7 +134,6 @@ class TestBug34NonWorktreeSnapshotNoLock:
 
         assert snapshot_start is not None, "sanity: found non-worktree block"
 
-        # Find the end of this block (next line with equal or less indent)
         indent = len(lines[snapshot_start]) - len(lines[snapshot_start].lstrip())
         snapshot_end = snapshot_start + 1
         for i in range(snapshot_start + 1, len(lines)):
@@ -155,7 +144,6 @@ class TestBug34NonWorktreeSnapshotNoLock:
 
         snapshot_block = "\n".join(lines[snapshot_start:snapshot_end])
 
-        # The snapshot block should NOT contain repo_lock — confirming the bug
         assert "repo_lock" not in snapshot_block, (
             "Bug no longer present: repo_lock found in snapshot block"
         )
@@ -181,7 +169,6 @@ class TestBug34NonWorktreeSnapshotNoLock:
         """
         repo = _make_repo(Path(self._tmpdir) / "repo")
 
-        # Create a second branch with a different file
         subprocess.run(
             ["git", "-C", str(repo), "checkout", "-b", "feature"],
             capture_output=True,
@@ -202,52 +189,33 @@ class TestBug34NonWorktreeSnapshotNoLock:
             check=True,
         )
 
-        # Make a dirty file on main
         (repo / "README.md").write_text("# Modified\n")
 
-        # Step 1: Pre-task hunks against HEAD (main)
         pre_hunks = _parse_diff_hunks(str(repo))
         assert "README.md" in pre_hunks, "sanity: README.md has diff hunks"
 
-        # Step 2: Simulate concurrent worktree merge checking out feature
         subprocess.run(
             ["git", "-C", str(repo), "checkout", "feature"],
             capture_output=True,
             check=True,
         )
 
-        # Step 3: Take file hashes — now HEAD is on 'feature' branch
         all_files = set(pre_hunks.keys()) | _capture_untracked(str(repo))
-        _snapshot_files(str(repo), all_files)  # would be captured as pre_hashes
+        _snapshot_files(str(repo), all_files)
 
-        # The snapshot is now inconsistent:
-        # - pre_hunks was computed against main's HEAD
-        # - post_hashes were computed with feature as HEAD
-        # Verify the inconsistency: HEAD moved between steps
         current = GitWorktreeOps.current_branch(repo)
         assert current == "feature", "sanity: branch changed"
 
-        # The pre_hunks for README.md are meaningless now — they were
-        # against main's HEAD but the working tree is now on feature.
-        # This proves the snapshot is inconsistent.
         feature_hunks = _parse_diff_hunks(str(repo))
-        # README.md diff against feature's HEAD is different from main's HEAD
-        # because feature.txt exists on feature but not on main
         assert pre_hunks != feature_hunks or "feature.txt" not in pre_hunks, (
             "BUG-34 confirmed: snapshot is inconsistent across checkout"
         )
 
-        # Cleanup
         subprocess.run(
             ["git", "-C", str(repo), "checkout", "main"],
             capture_output=True,
             check=True,
         )
-
-
-# ===================================================================
-# BUG-35: Worktree merge stashes non-worktree agent's in-flight work
-# ===================================================================
 
 
 class TestBug35WorktreeMergeStashesAgentWork:
@@ -269,39 +237,26 @@ class TestBug35WorktreeMergeStashesAgentWork:
         agent's files.  After stash, the agent's files vanish."""
         repo = _make_repo(Path(self._tmpdir) / "repo")
 
-        # Simulate non-worktree agent writing a file
         agent_file = repo / "agent_work.py"
         agent_file.write_text("# Agent is working on this\nprint('hello')\n")
 
-        # Verify the file exists and is dirty
         status = _git("status", "--porcelain", cwd=repo)
         assert "agent_work.py" in status.stdout, "sanity: agent file is dirty"
         assert agent_file.exists(), "sanity: agent file exists"
 
-        # stash_if_dirty captures it
         did_stash = GitWorktreeOps.stash_if_dirty(repo)
         assert did_stash, "stash should capture the dirty state"
 
-        # Agent's file has vanished from the working tree!
         assert not agent_file.exists(), (
             "BUG-35 confirmed: agent's in-flight work was stashed away"
         )
 
-        # Even after stash_pop, if the agent wrote MORE in the interim,
-        # we'd get a conflict.  Simulate:
         agent_file.write_text("# Agent wrote something else meanwhile\n")
 
-        # stash pop will now fail because the file exists with different content
         pop_result = GitWorktreeOps.stash_pop(repo)
-        # The pop may succeed or fail depending on conflict — either way
-        # the agent's original write is lost or mangled
         if not pop_result:
-            # Conflict: the original "hello" content AND the new content
-            # are in a broken state
             assert True, "BUG-35 confirmed: stash pop conflict after agent write"
         else:
-            # Even if pop succeeded, the content is the OLD stashed
-            # version, not the agent's latest write
             content = agent_file.read_text()
             assert "hello" in content or "something else" in content, (
                 "BUG-35 confirmed: agent's work was disrupted by stash cycle"
@@ -310,7 +265,6 @@ class TestBug35WorktreeMergeStashesAgentWork:
     def test_release_worktree_stashes_via_do_merge(self) -> None:
         """BUG-35: _release_worktree delegates stashing to _do_merge."""
         source = inspect.getsource(WorktreeSorcarAgent._release_worktree)
-        # stash_if_dirty is now in _do_merge, called from _release_worktree
         assert "_do_merge" in source, "_release_worktree must use _do_merge"
         do_merge_source = inspect.getsource(WorktreeSorcarAgent._do_merge)
         assert "stash_if_dirty" in do_merge_source, (
@@ -326,7 +280,6 @@ class TestBug35WorktreeMergeStashesAgentWork:
         """BUG-35 functional: worktree merge stashes non-worktree agent's file."""
         repo = _make_repo(Path(self._tmpdir) / "repo")
 
-        # Set up a worktree agent with pending changes
         agent = WorktreeSorcarAgent("wt_agent")
         agent._chat_id = "wt_tab"
 
@@ -335,39 +288,23 @@ class TestBug35WorktreeMergeStashesAgentWork:
         wt = agent._wt
         assert wt is not None
 
-        # Agent makes changes in the worktree
         (wt.wt_dir / "wt_change.txt").write_text("worktree change\n")
         GitWorktreeOps.commit_all(wt.wt_dir, "wt commit")
 
-        # Simulate a non-worktree agent's file in the main repo
         non_wt_file = repo / "non_wt_agent_work.py"
         non_wt_file.write_text("# non-worktree agent is working\n")
         assert non_wt_file.exists(), "sanity: non-wt agent file exists"
 
-        # merge() will stash the non-worktree agent's file
         msg = agent.merge()
         assert "Successfully merged" in msg, f"merge should succeed: {msg}"
 
-        # The non-worktree agent's file WAS stashed and then popped.
-        # If stash_pop succeeded, the file is restored — but during the
-        # merge window the file was absent.  We can confirm the stash
-        # cycle happened by checking git stash list is empty (pop succeeded)
-        _git("stash", "list", cwd=repo)  # verify stash was consumed
-        # The file should be back (stash_pop succeeded) — but the window
-        # of absence is the bug
+        _git("stash", "list", cwd=repo)
         assert non_wt_file.exists(), "File should be back after stash pop"
 
-        # The real danger: during the stash window, the file was gone.
-        # stash_if_dirty is called inside _do_merge (delegated from merge)
         do_merge_source = inspect.getsource(WorktreeSorcarAgent._do_merge)
         assert "stash_if_dirty" in do_merge_source, (
             "_do_merge must call stash_if_dirty"
         )
-
-
-# ===================================================================
-# BUG-36: Post-task diff against wrong HEAD after worktree merge
-# ===================================================================
 
 
 class TestBug36PostTaskDiffWrongHead:
@@ -391,8 +328,6 @@ class TestBug36PostTaskDiffWrongHead:
         the merge view shows phantom or missing hunks."""
         repo = _make_repo(Path(self._tmpdir) / "repo")
 
-        # Initial state: README.md has "# Test"
-        # Non-worktree agent modifies app.py
         (repo / "app.py").write_text("# original\nprint('v1')\n")
         subprocess.run(
             ["git", "-C", str(repo), "add", "."], capture_output=True, check=True
@@ -403,9 +338,7 @@ class TestBug36PostTaskDiffWrongHead:
             check=True,
         )
 
-        # Pre-task snapshot (HEAD₁)
         head1 = _git("rev-parse", "HEAD", cwd=repo).stdout.strip()
-        # Agent makes a dirty edit
         (repo / "app.py").write_text("# original\nprint('v2')\n")
         pre_hunks = _parse_diff_hunks(str(repo))
         pre_untracked = _capture_untracked(str(repo))
@@ -413,8 +346,6 @@ class TestBug36PostTaskDiffWrongHead:
             str(repo), set(pre_hunks.keys()) | pre_untracked,
         )
 
-        # Simulate worktree squash-merge advancing HEAD
-        # (another commit added to main between pre and post snapshots)
         subprocess.run(
             ["git", "-C", str(repo), "stash"], capture_output=True, check=True
         )
@@ -436,7 +367,6 @@ class TestBug36PostTaskDiffWrongHead:
         head2 = _git("rev-parse", "HEAD", cwd=repo).stdout.strip()
         assert head1 != head2, "sanity: HEAD advanced"
 
-        # Post-task: _prepare_merge_view diffs against HEAD₂
         merge_dir = str(Path(self._tmpdir) / "merge_data")
         _prepare_merge_view(
             str(repo),
@@ -444,22 +374,9 @@ class TestBug36PostTaskDiffWrongHead:
             pre_hunks,
             pre_untracked,
             pre_hashes,
-            base_ref="HEAD",  # This is the default — diffs against new HEAD
+            base_ref="HEAD",
         )
 
-        # The merge view is computed against HEAD₂, but pre_hunks were
-        # against HEAD₁.  The subtraction (post_hunks - pre_hunks) is
-        # comparing hunks from different bases.
-        #
-        # Specifically: wt_merged.txt was committed to HEAD₂, so it
-        # does NOT appear in the post-task `git diff HEAD` output.
-        # The app.py edit DOES appear.  The pre_hunks had app.py hunks
-        # against HEAD₁ — but HEAD₁ and HEAD₂ have the same app.py
-        # content (only wt_merged.txt was added), so the subtraction
-        # happens to work for app.py in this case.
-        #
-        # But now let's check what happens if the worktree merge MODIFIED
-        # a file the agent also modified:
         assert head1 != head2, (
             "BUG-36 confirmed: HEAD moved between snapshot and merge view, "
             "making the two hunk sets incomparable"
@@ -470,21 +387,15 @@ class TestBug36PostTaskDiffWrongHead:
         mechanism to lock HEAD or record the pre-task HEAD SHA."""
         source = inspect.getsource(VSCodeServer._run_task_inner)
 
-        # Find the non-worktree _prepare_and_start_merge call
         lines = source.splitlines()
         found_call = False
         for line in lines:
             if "_prepare_and_start_merge" in line and "not tab.use_worktree" not in line:
                 found_call = True
-                # The call does NOT pass a pinned HEAD SHA
-                # It relies on the default base_ref="HEAD"
                 break
 
         assert found_call, "sanity: _prepare_and_start_merge call found"
 
-        # Check that the non-worktree path does NOT capture and pass
-        # the pre-task HEAD SHA to _prepare_and_start_merge
-        # Find the pre-task snapshot block
         in_non_wt_block = False
         captures_head_sha = False
         for line in lines:
@@ -495,7 +406,6 @@ class TestBug36PostTaskDiffWrongHead:
                 if "rev-parse" in line and "HEAD" in line:
                     captures_head_sha = True
                 if line.strip() and not line.strip().startswith("#"):
-                    # Check if we've left the block
                     stripped = line.lstrip()
                     if len(line) - len(stripped) <= len("            "):
                         if not line.strip().startswith(("pre_", "_save", "#")):
@@ -520,16 +430,14 @@ class TestBug36PostTaskDiffWrongHead:
             check=True,
         )
 
-        # Pre-task: agent modifies shared.py
         (repo / "shared.py").write_text("line1\nmodified_by_agent\nline3\n")
         pre_hunks = _parse_diff_hunks(str(repo))
         pre_untracked = _capture_untracked(str(repo))
         _snapshot_files(
             str(repo), set(pre_hunks.keys()) | pre_untracked,
-        )  # pre_hashes would be captured here
+        )
         assert "shared.py" in pre_hunks, "sanity: pre diff has shared.py"
 
-        # Worktree merge advances HEAD by modifying shared.py differently
         (repo / "shared.py").write_text("line1\nmodified_by_agent\nline3\n")
         subprocess.run(
             ["git", "-C", str(repo), "add", "shared.py"],
@@ -542,20 +450,13 @@ class TestBug36PostTaskDiffWrongHead:
             check=True,
         )
 
-        # Now the agent makes a FURTHER edit
         (repo / "shared.py").write_text(
             "line1\nmodified_by_agent\nline3\nextra_agent_line\n"
         )
 
-        # Post-task merge view: diffs against new HEAD
         post_hunks = _parse_diff_hunks(str(repo))
 
-        # pre_hunks had a hunk at line 2 (line2 → modified_by_agent) against old HEAD
-        # post_hunks has a hunk at line 4 (added extra_agent_line) against new HEAD
-        # The subtraction would NOT remove the correct pre-existing change
-        # because the bases are different
 
-        # Confirm: the hunk sets are from different bases
         pre_hunk_set = {
             (h[0], h[1], h[3]) for hunks in pre_hunks.values() for h in hunks
         }
@@ -563,17 +464,10 @@ class TestBug36PostTaskDiffWrongHead:
             (h[0], h[1], h[3]) for hunks in post_hunks.values() for h in hunks
         }
 
-        # The pre_hunks cannot be meaningfully subtracted from post_hunks
-        # because they refer to different base commits
         assert pre_hunk_set != post_hunk_set, (
             "BUG-36 confirmed: pre and post hunks are from different bases, "
             "subtraction is meaningless"
         )
-
-
-# ===================================================================
-# BUG-37: Non-worktree agent's dirty files cause false conflict detection
-# ===================================================================
 
 
 class TestBug37FalseConflictFromNonWorktreeAgent:
@@ -598,10 +492,8 @@ class TestBug37FalseConflictFromNonWorktreeAgent:
         user edits from non-worktree agent edits."""
         source = inspect.getsource(VSCodeServer._check_merge_conflict)
 
-        # Confirm it calls unstaged_files on the main repo
         assert "unstaged_files" in source, "sanity: uses unstaged_files"
 
-        # Confirm there's no filtering for "agent" vs "user" dirty files
         assert "non_worktree" not in source.lower(), (
             "Bug no longer present: _check_merge_conflict distinguishes agent dirty files"
         )
@@ -615,7 +507,6 @@ class TestBug37FalseConflictFromNonWorktreeAgent:
         """
         repo = _make_repo(Path(self._tmpdir) / "repo")
 
-        # Create a file that both agents will touch
         (repo / "shared.py").write_text("original content\n")
         subprocess.run(
             ["git", "-C", str(repo), "add", "."], capture_output=True, check=True
@@ -626,7 +517,6 @@ class TestBug37FalseConflictFromNonWorktreeAgent:
             check=True,
         )
 
-        # Set up a worktree agent
         server = VSCodeServer()
         server.work_dir = str(repo)
 
@@ -637,39 +527,25 @@ class TestBug37FalseConflictFromNonWorktreeAgent:
         wt = wt_agent._wt
         assert wt is not None
 
-        # Worktree agent modifies shared.py
         (wt.wt_dir / "shared.py").write_text("worktree modified content\n")
         GitWorktreeOps.commit_all(wt.wt_dir, "wt changes shared.py")
 
-        # Simulate non-worktree agent dirtying the same file in main repo
         (repo / "shared.py").write_text("non-wt agent modified content\n")
 
-        # Set up server state
         tab = server._get_tab("wt_tab")
         tab.agent = wt_agent
         tab.use_worktree = True
 
-        # _check_merge_conflict should report a conflict because
-        # shared.py is dirty in the main repo AND changed in the worktree
         has_conflict = server._check_merge_conflict("wt_tab")
 
-        # This is a FALSE POSITIVE — the "dirty" file is from the non-worktree
-        # agent, not the user.  The worktree merge would actually be safe
-        # if we could distinguish agent edits from user edits.
         assert has_conflict is True, (
             "BUG-37 confirmed: non-worktree agent's dirty file causes "
             "false conflict detection for worktree merge"
         )
 
-        # Cleanup
         GitWorktreeOps.remove(repo, wt.wt_dir)
         GitWorktreeOps.prune(repo)
         GitWorktreeOps.delete_branch(repo, wt.branch)
-
-
-# ===================================================================
-# BUG-38: Shared _merge_data_dir — concurrent merge views corrupt each other
-# ===================================================================
 
 
 class TestBug38SharedMergeDataDir:
@@ -702,7 +578,6 @@ class TestBug38SharedMergeDataDir:
         """
         repo = _make_repo(Path(self._tmpdir) / "repo")
 
-        # Create two files for two separate "tasks"
         (repo / "file_a.py").write_text("content a\n")
         subprocess.run(
             ["git", "-C", str(repo), "add", "."], capture_output=True, check=True
@@ -715,20 +590,17 @@ class TestBug38SharedMergeDataDir:
 
         merge_dir = str(Path(self._tmpdir) / "merge_data")
 
-        # First "tab" creates a merge view
         (repo / "file_a.py").write_text("modified by tab A\n")
         result_a = _prepare_merge_view(
             str(repo), merge_dir, {}, set(), None,
         )
         assert result_a.get("status") == "opened", f"Tab A merge view: {result_a}"
 
-        # Read Tab A's pending-merge.json
         pending = Path(merge_dir) / "pending-merge.json"
         tab_a_data = json.loads(pending.read_text())
         tab_a_files = [f["name"] for f in tab_a_data["files"]]
         assert "file_a.py" in tab_a_files, "sanity: Tab A has file_a.py"
 
-        # Reset file_a, make a different edit for "Tab B"
         subprocess.run(
             ["git", "-C", str(repo), "checkout", "--", "file_a.py"],
             capture_output=True,
@@ -736,13 +608,11 @@ class TestBug38SharedMergeDataDir:
         )
         (repo / "new_file_b.txt").write_text("created by tab B\n")
 
-        # Second "tab" creates its merge view — this overwrites Tab A's data
         result_b = _prepare_merge_view(
             str(repo), merge_dir, {}, set(), None,
         )
         assert result_b.get("status") == "opened", f"Tab B merge view: {result_b}"
 
-        # Tab A's data is GONE — replaced by Tab B's data
         tab_b_data = json.loads(pending.read_text())
         tab_b_files = [f["name"] for f in tab_b_data["files"]]
 
@@ -766,19 +636,16 @@ class TestBug38SharedMergeDataDir:
 
     def test_worktree_and_non_worktree_use_per_tab_merge_dir(self) -> None:
         """BUG-38 FIXED: Both paths now use per-tab _merge_data_dir(tab_id)."""
-        # Check _start_worktree_merge_review calls _prepare_and_start_merge
         wt_source = inspect.getsource(VSCodeServer._start_worktree_merge_review)
         assert "_prepare_and_start_merge" in wt_source, (
             "sanity: worktree review uses _prepare_and_start_merge"
         )
 
-        # Check _prepare_and_start_merge uses _merge_data_dir()
         prep_source = inspect.getsource(VSCodeServer._prepare_and_start_merge)
         assert "_merge_data_dir" in prep_source, (
             "sanity: _prepare_and_start_merge uses _merge_data_dir"
         )
 
-        # _prepare_and_start_merge now takes tab_id for per-tab isolation
         assert "tab_id" in inspect.signature(
             VSCodeServer._prepare_and_start_merge
         ).parameters, (

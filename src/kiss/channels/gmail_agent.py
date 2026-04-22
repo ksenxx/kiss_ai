@@ -41,11 +41,6 @@ _SCOPES = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# Token persistence
-# ---------------------------------------------------------------------------
-
-
 def _token_path() -> Path:
     """Return the path to the stored Gmail OAuth2 token file.
 
@@ -146,11 +141,6 @@ def _build_service(creds: Credentials) -> Any:
     return build("gmail", "v1", credentials=creds)
 
 
-# ---------------------------------------------------------------------------
-# Body extraction helpers
-# ---------------------------------------------------------------------------
-
-
 def _extract_body(payload: dict) -> str:  # type: ignore[type-arg]
     """Extract plain text body from a Gmail message payload.
 
@@ -221,11 +211,6 @@ def _extract_attachments(payload: dict) -> list[dict[str, Any]]:  # type: ignore
                     }
                 )
     return attachments
-
-
-# ---------------------------------------------------------------------------
-# GmailChannelBackend
-# ---------------------------------------------------------------------------
 
 
 class GmailChannelBackend(ToolMethodBackend):
@@ -416,9 +401,6 @@ class GmailChannelBackend(ToolMethodBackend):
             poll_interval=5.0,
         )
 
-    # -------------------------------------------------------------------
-    # Gmail API tool methods (return JSON strings for LLM agent use)
-    # -------------------------------------------------------------------
 
     def get_profile(self) -> str:
         """Get the current user's Gmail profile.
@@ -952,11 +934,6 @@ class GmailChannelBackend(ToolMethodBackend):
             )[:8000]
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
-
-
-# ---------------------------------------------------------------------------
-# GmailAgent
-# ---------------------------------------------------------------------------
 
 
 class GmailAgent(BaseChannelAgent, StatefulSorcarAgent):

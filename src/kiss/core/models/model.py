@@ -26,11 +26,8 @@ from typing import Any, Union, get_args, get_origin
 
 logger = logging.getLogger(__name__)
 
-# Type alias for the synchronous token streaming callback.
 TokenCallback = Callable[[str], None]
 
-# Type alias for the thinking-block boundary callback.
-# Called with ``True`` when a thinking block starts, ``False`` when it ends.
 ThinkingCallback = Callable[[bool], None]
 
 SUPPORTED_MIME_TYPES = {
@@ -121,7 +118,6 @@ class Attachment:
         return f"data:{self.mime_type};base64,{self.to_base64()}"
 
 
-# Mapping from audio MIME types to file extensions for the Whisper API.
 _AUDIO_MIME_TO_EXT: dict[str, str] = {
     "audio/mpeg": ".mp3",
     "audio/mp3": ".mp3",
@@ -312,12 +308,10 @@ class Model(ABC):
         """
         for msg in reversed(self.conversation):
             if msg.get("role") == "assistant":
-                # OpenAI-style: tool_calls list with function.name and id
                 if msg.get("tool_calls"):
                     return [
                         (tc["function"]["name"], tc["id"]) for tc in msg["tool_calls"]
                     ]
-                # Anthropic-style: content list with tool_use blocks
                 content = msg.get("content")
                 if isinstance(content, list):
                     ids = [
@@ -407,9 +401,6 @@ class Model(ABC):
         """
         self.usage_info_for_messages = usage_info
 
-    # =========================================================================
-    # Helper methods for building tool schemas (shared across implementations)
-    # =========================================================================
 
     def _resolve_openai_tools_schema(
         self,
@@ -459,10 +450,8 @@ class Model(ABC):
         sig = inspect.signature(func)
         doc = inspect.getdoc(func) or ""
 
-        # Parse docstring for parameter descriptions
         param_descriptions = self._parse_docstring_params(doc)
 
-        # Build parameters schema
         properties: dict[str, Any] = {}
         required: list[str] = []
 
@@ -470,17 +459,14 @@ class Model(ABC):
             param_type = param.annotation
             param_schema = self._python_type_to_json_schema(param_type)
 
-            # Add description from docstring if available
             if param_name in param_descriptions:
                 param_schema["description"] = param_descriptions[param_name]
 
             properties[param_name] = param_schema
 
-            # Check if parameter is required (no default value)
             if param.default is inspect.Parameter.empty:
                 required.append(param_name)
 
-        # Get first line of docstring as function description
         description = doc.split("\n")[0] if doc else f"Function {func.__name__}"
 
         return {
@@ -519,13 +505,10 @@ class Model(ABC):
                 continue
 
             if in_args_section and ":" in stripped:
-                # Parse "param_name: description" or "param_name (type): description"
                 parts = stripped.split(":", 1)
-                # split(":", 1) with ":" always gives 2 parts
                 if len(parts) == 2:  # pragma: no branch
                     param_part = parts[0].strip()
                     desc_part = parts[1].strip()
-                    # Handle "param_name (type)" format
                     if "(" in param_part:
                         param_name = param_part.split("(")[0].strip()
                     else:
@@ -549,16 +532,12 @@ class Model(ABC):
         origin = get_origin(python_type)
         args = get_args(python_type)
 
-        # Handle Union types (including Optional which is Union[X, None])
         if origin is Union or origin is types_module.UnionType:
-            # Filter out NoneType
             non_none_args = [a for a in args if a is not type(None)]
             if len(non_none_args) == 1:
                 return self._python_type_to_json_schema(non_none_args[0])
-            # Multiple types - use anyOf
             return {"anyOf": [self._python_type_to_json_schema(a) for a in non_none_args]}
 
-        # Handle list/List types
         if origin is list:
             if args:
                 return {
@@ -567,11 +546,9 @@ class Model(ABC):
                 }
             return {"type": "array"}
 
-        # Handle dict/Dict types
         if origin is dict:
             return {"type": "object"}
 
-        # Handle basic types
         type_mapping: dict[type, dict[str, str]] = {
             str: {"type": "string"},
             int: {"type": "integer"},
@@ -583,14 +560,7 @@ class Model(ABC):
         if python_type in type_mapping:
             return type_mapping[python_type]
 
-        # Default to string for unknown types
         return {"type": "string"}
-
-
-# =========================================================================
-# Text-based tool calling helpers (shared by OpenAICompatibleModel,
-# ClaudeCodeModel, and any future model without native function calling)
-# =========================================================================
 
 
 def _build_text_based_tools_prompt(function_map: dict[str, Callable[..., Any]]) -> str:
@@ -611,7 +581,6 @@ def _build_text_based_tools_prompt(function_map: dict[str, Callable[..., Any]]) 
         sig = inspect.signature(func)
         doc = inspect.getdoc(func) or f"Function {func_name}"
 
-        # Build parameter descriptions
         params = []
         for param_name, param in sig.parameters.items():
             param_type = param.annotation
@@ -658,12 +627,10 @@ def _parse_text_based_tool_calls(content: str) -> list[dict[str, Any]]:
     """
     function_calls: list[dict[str, Any]] = []
 
-    # Try to find JSON in the content - look for tool_calls pattern
-    # First try to find JSON code blocks
     json_patterns = [
-        r"```json\s*(\{.*?\})\s*```",  # JSON in code blocks
-        r"```\s*(\{.*?\})\s*```",  # JSON in generic code blocks
-        r"(\{[^{}]*\"tool_calls\"[^{}]*\[[^\]]*\][^{}]*\})",  # Inline JSON with tool_calls
+        r"```json\s*(\{.*?\})\s*```",
+        r"```\s*(\{.*?\})\s*```",
+        r"(\{[^{}]*\"tool_calls\"[^{}]*\[[^\]]*\][^{}]*\})",
     ]
 
     for pattern in json_patterns:
@@ -687,7 +654,6 @@ def _parse_text_based_tool_calls(content: str) -> list[dict[str, Any]]:
                 logger.debug("Exception caught", exc_info=True)
                 continue
 
-    # Also try to parse the entire content as JSON (in case model outputs clean JSON)
     try:
         data = json.loads(content.strip())
         if "tool_calls" in data and isinstance(data["tool_calls"], list):
@@ -707,11 +673,10 @@ def _parse_text_based_tool_calls(content: str) -> list[dict[str, Any]]:
     return function_calls
 
 
-# Patterns that match the FULL match (fenced or inline) for stripping
 _STRIP_PATTERNS = [
-    r"```json\s*\{[^`]*?\"tool_calls\"[^`]*?\}\s*```",  # fenced json
-    r"```\s*\{[^`]*?\"tool_calls\"[^`]*?\}\s*```",  # fenced generic
-    r"\{[^{}]*\"tool_calls\"\s*:\s*\[.*?\][^{}]*\}",  # inline
+    r"```json\s*\{[^`]*?\"tool_calls\"[^`]*?\}\s*```",
+    r"```\s*\{[^`]*?\"tool_calls\"[^`]*?\}\s*```",
+    r"\{[^{}]*\"tool_calls\"\s*:\s*\[.*?\][^{}]*\}",
 ]
 
 
@@ -731,7 +696,6 @@ def _strip_text_based_tool_calls(content: str) -> str:
         The text with tool_calls JSON removed, stripped of leading/trailing
         whitespace.
     """
-    # Whole-content JSON case
     try:
         data = json.loads(content.strip())
         if isinstance(data, dict) and "tool_calls" in data:

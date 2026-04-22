@@ -42,10 +42,6 @@ from kiss.agents.sorcar.git_worktree import (
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.server import VSCodeServer
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 
 def _make_repo(tmp_path: Path, name: str = "repo") -> Path:
     """Create a bare-minimum git repo with one commit."""
@@ -106,11 +102,6 @@ def _cleanup(repo: Path, branch: str, wt_dir: Path) -> None:
         GitWorktreeOps.delete_branch(repo, branch)
 
 
-# ===================================================================
-# BUG-59: squash_merge_from_baseline missing rev-list returncode check
-# ===================================================================
-
-
 class TestBug59RevListReturnCode:
     """BUG-59: ``squash_merge_from_baseline`` doesn't check the return
     code of ``git rev-list --count baseline..branch``.  When the
@@ -132,14 +123,11 @@ class TestBug59RevListReturnCode:
         wt_dir = repo / ".kiss-worktrees" / branch.replace("/", "_")
         assert GitWorktreeOps.create(repo, branch, wt_dir)
 
-        # Agent makes a commit
         _add_agent_commit(wt_dir, "agent.txt", "agent work\n")
 
-        # Remove worktree so we can merge on main
         GitWorktreeOps.remove(repo, wt_dir)
         GitWorktreeOps.prune(repo)
 
-        # Call with bogus baseline — should return CONFLICT, not crash
         bogus = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
         result = GitWorktreeOps.squash_merge_from_baseline(
             repo, branch, bogus,
@@ -149,7 +137,6 @@ class TestBug59RevListReturnCode:
             "for invalid baseline, not proceed to cherry-pick"
         )
 
-        # Verify repo is still clean (no partial cherry-pick state)
         status = subprocess.run(
             ["git", "status", "--porcelain"],
             cwd=repo, capture_output=True, text=True,
@@ -158,7 +145,6 @@ class TestBug59RevListReturnCode:
             "Repo should be clean after failed merge with invalid baseline"
         )
 
-        # Cleanup
         if GitWorktreeOps.branch_exists(repo, branch):
             GitWorktreeOps.delete_branch(repo, branch)
 
@@ -170,10 +156,8 @@ class TestBug59RevListReturnCode:
             repo, branch, dirty_file="dirty.txt",
         )
 
-        # Agent makes a real change
         _add_agent_commit(wt_dir, "agent.txt", "agent work\n")
 
-        # Remove worktree
         GitWorktreeOps.remove(repo, wt_dir)
         GitWorktreeOps.prune(repo)
 
@@ -185,10 +169,8 @@ class TestBug59RevListReturnCode:
             "Regression: valid baseline should merge successfully"
         )
 
-        # Verify agent file was merged
         assert (repo / "agent.txt").read_text() == "agent work\n"
 
-        # Cleanup
         if GitWorktreeOps.branch_exists(repo, branch):
             GitWorktreeOps.delete_branch(repo, branch)
 
@@ -202,7 +184,6 @@ class TestBug59RevListReturnCode:
             repo, branch, dirty_file="dirty.txt",
         )
 
-        # NO agent commits after baseline
 
         GitWorktreeOps.remove(repo, wt_dir)
         GitWorktreeOps.prune(repo)
@@ -215,11 +196,6 @@ class TestBug59RevListReturnCode:
 
         if GitWorktreeOps.branch_exists(repo, branch):
             GitWorktreeOps.delete_branch(repo, branch)
-
-
-# ===================================================================
-# BUG-60: _do_merge type-unsafe original_branch
-# ===================================================================
 
 
 class TestBug60DoMergeTypeGuard:
@@ -252,7 +228,7 @@ class TestBug60DoMergeTypeGuard:
         agent._wt = GitWorktree(
             repo_root=repo,
             branch=branch,
-            original_branch=None,  # <-- None
+            original_branch=None,
             wt_dir=wt_dir,
             baseline_commit=None,
         )
@@ -260,19 +236,16 @@ class TestBug60DoMergeTypeGuard:
         wt = agent._wt
         result, warning = agent._do_merge(wt)
 
-        # FIX: must return CHECKOUT_FAILED, not attempt to checkout "None"
         assert result == MergeResult.CHECKOUT_FAILED, (
             "BUG-60: _do_merge should return CHECKOUT_FAILED when "
             "original_branch is None, not attempt checkout"
         )
 
-        # Verify no branch called "None" was created or checked out
         current = GitWorktreeOps.current_branch(repo)
         assert current != "None", (
             "BUG-60: git should not have checked out a branch called 'None'"
         )
 
-        # Cleanup
         if GitWorktreeOps.branch_exists(repo, branch):
             GitWorktreeOps.delete_branch(repo, branch)
 
@@ -307,11 +280,6 @@ class TestBug60DoMergeTypeGuard:
         assert (repo / "agent.txt").read_text() == "agent work\n"
 
 
-# ===================================================================
-# BUG-61: Non-worktree merge view race condition
-# ===================================================================
-
-
 class TestBug61NonWtMergeViewRace:
     """BUG-61: ``is_running_non_wt`` is cleared BEFORE
     ``_prepare_and_start_merge`` in the finally block.  Between
@@ -334,7 +302,6 @@ class TestBug61NonWtMergeViewRace:
         source = inspect.getsource(VSCodeServer._run_task_inner)
         lines = source.split("\n")
 
-        # Find the finally block
         finally_start = None
         for i, line in enumerate(lines):
             if "finally:" in line and "# Entire cleanup" not in line:
@@ -345,9 +312,6 @@ class TestBug61NonWtMergeViewRace:
 
         assert finally_start is not None, "Could not find finally block"
 
-        # In the finally block, find the FIRST occurrences of:
-        # 1. _prepare_and_start_merge
-        # 2. is_running_non_wt = False
         merge_view_line = None
         flag_clear_line = None
 
@@ -382,7 +346,6 @@ class TestBug61NonWtMergeViewRace:
         """
         source = inspect.getsource(VSCodeServer._run_task_inner)
 
-        # Count how many times is_running_non_wt = False appears
         clear_count = source.count("is_running_non_wt = False")
         assert clear_count >= 2, (
             "There must be at least 2 flag-clear sites: one in the "

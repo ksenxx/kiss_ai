@@ -12,8 +12,6 @@ from typing import Any
 import pytest
 from pydantic import BaseModel
 
-# === core/utils.py partial branches ===
-
 
 class TestEscapeInvalidTemplateFieldNames:
     """Cover branches for conversion and format_spec in _escape_fragment."""
@@ -23,11 +21,7 @@ class TestEscapeInvalidTemplateFieldNames:
         from kiss.core.utils import escape_invalid_template_field_names
 
         result = escape_invalid_template_field_names("{bad!r:>10}", set())
-        # The invalid field should be double-braced (escaped)
         assert "{{bad!r:>10}}" in result
-
-
-# === core/config_builder.py partial branches ===
 
 
 class TestConfigBuilderBoolNoDash:
@@ -46,9 +40,6 @@ class TestConfigBuilderBoolNoDash:
         assert args.verbose is False
 
 
-# === core/models/__init__.py partial branches ===
-
-
 class TestLazyImportNotInMap:
     """Cover the else branch where name is NOT in _LAZY_IMPORTS."""
 
@@ -58,9 +49,6 @@ class TestLazyImportNotInMap:
 
         with pytest.raises(AttributeError, match="has no attribute"):
             getattr(models_mod, "NonExistentModel")
-
-
-# === channels/_backend_utils.py partial branches ===
 
 
 class TestDrainQueueMessages:
@@ -88,9 +76,6 @@ class TestDrainQueueMessages:
         assert len(result) == 3
 
 
-# === scripts/generate_api_docs.py partial branches ===
-
-
 class TestGenerateApiDocsBranches:
     """Cover partial branches in generate_api_docs.py."""
 
@@ -98,10 +83,7 @@ class TestGenerateApiDocsBranches:
         """Module path resolution for a package covers line 261 is_dir check."""
         from kiss.scripts.generate_api_docs import _module_to_path
 
-        # kiss.core is a package directory
         path = _module_to_path("kiss.core")
-        # The function resolves to __init__.py, but internal logic checks is_dir
         assert path.exists()
 
 
-# === scripts/redundancy_analyzer.py partial branches ===

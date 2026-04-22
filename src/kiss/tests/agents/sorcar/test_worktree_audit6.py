@@ -52,10 +52,6 @@ from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.server import VSCodeServer
 
-# ---------------------------------------------------------------------------
-# Helpers (same as prior audit test files)
-# ---------------------------------------------------------------------------
-
 
 def _redirect_db(tmpdir: str) -> tuple:
     old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
@@ -117,11 +113,6 @@ def _unpatch_super_run(original: Any) -> None:
     parent_class.run = original
 
 
-# ===================================================================
-# BUG-25: _release_worktree orphans branch when original_branch is None
-# ===================================================================
-
-
 class TestBug25ReleaseBranchOrphanedOnNoneOriginal:
     """BUG-25: When original_branch is None, _release_worktree:
       1. Calls _finalize_worktree which removes the worktree directory
@@ -156,32 +147,25 @@ class TestBug25ReleaseBranchOrphanedOnNoneOriginal:
         assert wt is not None
         branch_name = wt.branch
 
-        # Agent makes changes
         (wt.wt_dir / "work.txt").write_text("agent work\n")
         GitWorktreeOps.commit_all(wt.wt_dir, "agent changes")
 
-        # Simulate crash between creation and config write:
-        # original_branch is None
         agent._wt = GitWorktree(
             repo_root=wt.repo_root,
             branch=wt.branch,
-            original_branch=None,  # <-- simulates crash
+            original_branch=None,
             wt_dir=wt.wt_dir,
             baseline_commit=wt.baseline_commit,
         )
 
         result = agent._release_worktree()
 
-        # BUG-25: returns None (correct for failure) but...
         assert result is None
 
-        # BUG-25 / BUG-50 fix: branch is still preserved (for manual
-        # resolution) but a warning is now set so the user knows.
         assert GitWorktreeOps.branch_exists(repo, branch_name), (
             "Branch must be preserved for manual resolution"
         )
 
-        # BUG-50 fix: warning is now set so the user is notified
         assert agent._merge_conflict_warning is not None, (
             "BUG-50 fix: warning should be set on orphan branch"
         )
@@ -189,23 +173,16 @@ class TestBug25ReleaseBranchOrphanedOnNoneOriginal:
         assert "original branch is unknown" in agent._merge_conflict_warning
         assert agent._stash_pop_warning is None
 
-        # BUG-25: worktree dir was removed by _finalize_worktree
         assert not wt.wt_dir.exists(), (
             "Worktree dir should have been removed by _finalize_worktree"
         )
 
-        # BUG-25: _wt is None, so user can't call discard() either
         assert agent._wt is None, "_wt should be cleared"
 
     def test_source_shows_no_cleanup_on_none_original(self) -> None:
         """BUG-25: Confirm source code has no branch cleanup when
         original_branch is None."""
         source = inspect.getsource(WorktreeSorcarAgent._release_worktree)
-        # The `if wt.original_branch:` block contains all cleanup.
-        # When original_branch is None (falsy), the block is skipped
-        # entirely — no delete_branch, no warning.
-        #
-        # Check there's no else/fallback for original_branch being None:
         lines = source.splitlines()
         in_original_branch_block = False
         has_else_for_original = False
@@ -213,7 +190,6 @@ class TestBug25ReleaseBranchOrphanedOnNoneOriginal:
             if "if wt.original_branch:" in line:
                 in_original_branch_block = True
             if in_original_branch_block and line.strip().startswith("else:"):
-                # Check if this else is at the same indent as the if
                 if_indent = None
                 for l2 in lines:
                     if "if wt.original_branch:" in l2:
@@ -227,11 +203,6 @@ class TestBug25ReleaseBranchOrphanedOnNoneOriginal:
             "BUG-25 appears fixed: there's now an else branch for "
             "original_branch is None"
         )
-
-
-# ===================================================================
-# BUG-26: merge() puts delete_branch + self._wt=None outside repo_lock
-# ===================================================================
 
 
 class TestBug26MergeDeleteInsideLock:
@@ -277,11 +248,6 @@ class TestBug26MergeDeleteInsideLock:
             raise AssertionError("delete_branch not found in _do_merge")
 
 
-# ===================================================================
-# BUG-27: cleanup_orphans deletes conflict-preserved branches
-# ===================================================================
-
-
 class TestBug27CleanupDeletesConflictBranch:
     """BUG-27: After a merge conflict, _release_worktree keeps the
     branch for manual resolution but removes the worktree directory.
@@ -314,38 +280,29 @@ class TestBug27CleanupDeletesConflictBranch:
         assert wt is not None
         branch_name = wt.branch
 
-        # Agent makes a change to README.md (will conflict)
         (wt.wt_dir / "README.md").write_text("# Agent version\n")
         GitWorktreeOps.commit_all(wt.wt_dir, "agent changes README")
 
-        # Make a conflicting change on main
         (repo / "README.md").write_text("# User conflicting version\n")
         _git("add", ".", cwd=repo)
         _git("commit", "-m", "user conflicting change", cwd=repo)
 
-        # Release should hit a merge conflict
         result = agent._release_worktree()
 
-        # Verify conflict was detected and warning was set
         assert result is None, "Release should return None on conflict"
         assert agent._merge_conflict_warning is not None, (
             "Warning should be set on merge conflict"
         )
         assert branch_name in agent._merge_conflict_warning
 
-        # Branch should exist (preserved for manual resolution)
         assert GitWorktreeOps.branch_exists(repo, branch_name), (
             "Branch should be preserved after merge conflict"
         )
 
-        # Worktree dir should be gone (removed by _finalize_worktree)
         assert not wt.wt_dir.exists(), (
             "Worktree dir should be removed by _finalize_worktree"
         )
 
-        # BUG-58 fix: cleanup_orphans preserves branches that still
-        # have a ``kiss-original`` config entry (pending-merge) so the
-        # agent's work is not lost after a conflict.
         cleanup_output = GitWorktreeOps.cleanup_orphans(repo)
 
         assert GitWorktreeOps.branch_exists(repo, branch_name), (
@@ -360,8 +317,6 @@ class TestBug27CleanupDeletesConflictBranch:
     def test_cleanup_orphans_does_not_check_unmerged(self) -> None:
         """BUG-27: Confirm cleanup_orphans has no unmerged-commit check."""
         source = inspect.getsource(GitWorktreeOps.cleanup_orphans)
-        # A safe implementation would check if the branch has unmerged
-        # commits before deleting (e.g. `git branch --no-merged`)
         assert "--no-merged" not in source, (
             "BUG-27 appears fixed: cleanup_orphans now checks for "
             "unmerged commits"
@@ -369,11 +324,6 @@ class TestBug27CleanupDeletesConflictBranch:
         assert "merge-base" not in source, (
             "BUG-27 appears fixed: cleanup_orphans now checks merge status"
         )
-
-
-# ===================================================================
-# BUG-28: _start_merge_session reads tab_id from thread-local
-# ===================================================================
 
 
 class TestBug28StartMergeSessionThreadLocal:
@@ -404,17 +354,13 @@ class TestBug28StartMergeSessionThreadLocal:
             server = VSCodeServer()
             server.work_dir = str(repo)
 
-            # Create a tab and set it up
             tab_id = "t28"
             tab = server._get_tab(tab_id)
             tab.use_worktree = True
 
-            # Ensure thread-local tab_id is NOT set on this thread
-            # (simulating main thread / replay path)
             if hasattr(server.printer._thread_local, "tab_id"):
                 delattr(server.printer._thread_local, "tab_id")
 
-            # Create a fake merge JSON to pass to _start_merge_session
             merge_dir = Path(tmpdir) / "merge"
             merge_dir.mkdir(parents=True, exist_ok=True)
             merge_json = merge_dir / "pending-merge.json"
@@ -428,12 +374,9 @@ class TestBug28StartMergeSessionThreadLocal:
                 }],
             }))
 
-            # Call _start_merge_session — should set is_merging but won't
             started = server._start_merge_session(str(merge_json))
             assert started, "Merge session should start"
 
-            # BUG-28: is_merging was NOT set because thread-local tab_id
-            # was None, so the tab lookup returned None.
             assert tab.is_merging is False, (
                 "BUG-28 appears fixed: is_merging is now set without "
                 "thread-local tab_id"
@@ -446,18 +389,10 @@ class TestBug28StartMergeSessionThreadLocal:
     def test_start_worktree_merge_review_does_not_set_thread_local(self) -> None:
         """BUG-28: _start_worktree_merge_review doesn't set thread-local tab_id."""
         source = inspect.getsource(VSCodeServer._start_worktree_merge_review)
-        # The method receives tab_id as a parameter but never sets
-        # printer._thread_local.tab_id before calling
-        # _prepare_and_start_merge → _start_merge_session
         assert "_thread_local.tab_id" not in source, (
             "BUG-28 appears fixed: _start_worktree_merge_review now "
             "sets thread-local tab_id"
         )
-
-
-# ===================================================================
-# BUG-29: _release_worktree conflict instructions assume clean tree
-# ===================================================================
 
 
 class TestBug29ConflictInstructionsIgnoreDirtyState:
@@ -491,7 +426,6 @@ class TestBug29ConflictInstructionsIgnoreDirtyState:
         agent = WorktreeSorcarAgent("test")
         agent._chat_id = "test29"
 
-        # Create dirty state that will be stashed
         (repo / "user_file.txt").write_text("user dirty state\n")
 
         wt_work = agent._try_setup_worktree(repo, str(repo))
@@ -500,17 +434,13 @@ class TestBug29ConflictInstructionsIgnoreDirtyState:
         wt = agent._wt
         assert wt is not None
 
-        # Agent modifies README.md (will conflict with main)
         (wt.wt_dir / "README.md").write_text("# Agent\n")
         GitWorktreeOps.commit_all(wt.wt_dir, "agent change")
 
-        # Make conflicting change on main
         (repo / "README.md").write_text("# User conflict\n")
         _git("add", "README.md", cwd=repo)
         _git("commit", "-m", "user conflict", cwd=repo)
 
-        # Re-create user dirty state (simulating the user having dirty
-        # files when _release_worktree runs)
         (repo / "user_file.txt").write_text("user dirty state again\n")
 
         result = agent._release_worktree()
@@ -519,8 +449,6 @@ class TestBug29ConflictInstructionsIgnoreDirtyState:
         warning = agent._merge_conflict_warning
         assert warning is not None, "Warning should be set"
 
-        # BUG-29 FIXED (BUG-43): The warning now uses cherry-pick when
-        # baseline exists, matching the actual auto-merge behavior.
         if wt.baseline_commit:
             assert "cherry-pick" in warning, (
                 "Warning should contain cherry-pick instructions when "
@@ -538,7 +466,5 @@ class TestBug29ConflictInstructionsIgnoreDirtyState:
         changes, so they can restore them after resolving the conflict.
         """
         source = inspect.getsource(WorktreeSorcarAgent._release_worktree)
-        # The warning appends ``stash_suffix`` which contains the
-        # ``git stash pop`` instruction when a stash was created.
         assert "stash_suffix" in source
         assert "git stash pop" in source

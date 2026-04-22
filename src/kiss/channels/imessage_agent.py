@@ -67,7 +67,6 @@ class IMessageChannelBackend(ToolMethodBackend):
         self, channel_id: str, oldest: str, limit: int = 10
     ) -> tuple[list[dict[str, Any]], str]:
         """Poll iMessage via AppleScript (basic implementation)."""
-        # AppleScript polling is limited; basic implementation returns empty
         return [], oldest
 
     def send_message(self, channel_id: str, text: str, thread_ts: str = "") -> None:

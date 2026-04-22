@@ -43,7 +43,6 @@ from kiss.agents.vscode.tab_state import _TabState, parse_task_tags
 from kiss.agents.vscode.task_runner import _TaskRunnerMixin
 from kiss.core.models.model_info import MODEL_INFO, get_available_models, get_default_model
 
-# Re-exports kept for test/consumer backwards compatibility.
 __all__ = [
     "VSCodePrinter",
     "VSCodeServer",
@@ -73,16 +72,11 @@ class VSCodeServer(
             or os.environ.get("KISS_MODEL", "")
             or get_default_model()
         )
-        # Lock ordering: _state_lock < printer._lock < printer._stdout_lock < printer._bash_lock
         self._state_lock = threading.Lock()
-        # Autocomplete state — lazily initialized on first 'complete' command
-        # so task processes (which never receive 'complete') don't waste
-        # a daemon thread and queue.
         self._complete_seq: int = 0
         self._complete_seq_latest: int = -1
         self._complete_queue: queue.Queue[tuple[str, int, str, str]] | None = None
         self._complete_worker: threading.Thread | None = None
-        # File cache — lazily populated on first 'getFiles' or 'complete'
         self._file_cache: list[str] | None = None
         self._last_active_file: str = ""
         self._last_active_content: str = ""
@@ -153,7 +147,6 @@ class VSCodeServer(
                 event["tabId"] = tab_id
             self.printer.broadcast(event)
 
-    # -- Models / history / new chat / replay ----------------------------
 
     def _get_models(self) -> None:
         """Send available models list with usage counts and pricing."""
@@ -234,11 +227,6 @@ class VSCodeServer(
             tab_id: The frontend tab identifier.
         """
         tab = self._get_tab(tab_id)
-        # BUG-65 fix: refuse while a merge review is active — calling
-        # ``tab.agent.new_chat()`` would trigger ``_release_worktree``
-        # which auto-commits and squash-merges, destroying the user's
-        # hunk-picking intent and leaving the VS Code merge view
-        # stale.  Symmetric with the ``_run_task_inner`` guard.
         with self._state_lock:
             if tab.is_merging:
                 self.printer.broadcast({
@@ -248,12 +236,6 @@ class VSCodeServer(
                     "tabId": tab_id,
                 })
                 return
-            # BUG-71 fix: refuse while the tab's own agent task is
-            # actively writing to ``wt_dir`` — calling
-            # ``tab.agent.new_chat()`` would trigger
-            # ``_release_worktree -> _finalize_worktree`` which
-            # force-removes ``wt_dir`` mid-write and corrupts the
-            # agent's in-progress edits.
             if tab.is_task_active:
                 self.printer.broadcast({
                     "type": "error",
@@ -262,11 +244,6 @@ class VSCodeServer(
                     "tabId": tab_id,
                 })
                 return
-        # BUG-44 fix: check _wt_pending regardless of use_worktree —
-        # a tab may have switched modes but still have a pending
-        # worktree from the previous session.
-        # BUG-35 fix: if a non-worktree task is running on the main
-        # tree, skip auto-release to avoid stashing its work.
         if tab.agent._wt_pending:
             with self._state_lock:
                 if self._any_non_wt_running():
@@ -279,12 +256,10 @@ class VSCodeServer(
                         ),
                         "tabId": tab_id,
                     })
-                    # Reset chat state without releasing the worktree
                     super(type(tab.agent), tab.agent).new_chat()
                     self.printer.broadcast({"type": "showWelcome", "tabId": tab_id})
                     return
         tab.agent.new_chat()
-        # Surface warnings from auto-releasing a prior worktree
         if tab.agent._stash_pop_warning:
             self.printer.broadcast({
                 "type": "warning",
@@ -317,10 +292,6 @@ class VSCodeServer(
         tab = self._get_tab(tab_id) if tab_id else self._get_tab(str(chat_id))
         tab.agent.resume_chat_by_id(chat_id)
 
-        # Restore use_worktree from persisted extra data (BUG-10 fix).
-        # Without this, pending worktrees are invisible after restart
-        # because _emit_pending_worktree returns early when use_worktree
-        # is False.
         extra_str = str(result.get("extra", "") or "")
         if extra_str:
             try:
@@ -340,7 +311,6 @@ class VSCodeServer(
         })
         self._emit_pending_worktree(tab_id)
 
-    # -- Followup / result summary / adjacent task / commit message ------
 
     def _generate_followup_async(
         self,

@@ -24,9 +24,6 @@ class TestFastPathPlaywrightFailure(unittest.TestCase):
     def test_fast_path_checks_chromium_before_warning(self) -> None:
         """After fast-path playwright failure, chromium availability must be
         checked before showing a warning notification."""
-        # The .catch handler for the fast-path playwright install should
-        # verify chromium is actually missing before showing a warning.
-        # Look for a chromium availability check inside or near the catch block.
         catch_match = re.search(
             r"\.catch\(\s*(?:async\s*)?\(?(?:\w+)?\)?\s*=>\s*\{[^}]*Fast-path Playwright",
             INSTALLER_SOURCE,
@@ -36,15 +33,12 @@ class TestFastPathPlaywrightFailure(unittest.TestCase):
             "Expected a .catch handler with 'Fast-path Playwright' log message"
         )
 
-        # The catch block should contain a chromium check before showing warning
         catch_block_start = catch_match.start()
-        # Find the warning message after the catch
         warning_match = re.search(
             r"Chromium browser update failed in background",
             INSTALLER_SOURCE[catch_block_start:],
         )
         if warning_match:
-            # If the warning still exists, there should be a chromium check before it
             chromium_check = re.search(
                 r"isChromiumInstalled|chromiumAvailable|playwrightBrowsersPath|ms-playwright",
                 INSTALLER_SOURCE[catch_block_start : catch_block_start + warning_match.start()],
@@ -69,25 +63,15 @@ class TestCheckPythonVersionNotDestructive(unittest.TestCase):
     def test_version_check_distinguishes_old_from_error(self) -> None:
         """The .venv deletion logic should only trigger when Python is
         genuinely too old, not on transient errors like timeouts."""
-        # Look for the code that deletes .venv based on checkPythonVersion.
-        # It should use a more specific check than just "!checkPythonVersion()".
-        # The fix should either:
-        # a) Have checkPythonVersion return a more specific result (e.g. null for error)
-        # b) Separate the "too old" check from the "error" case
-        # c) Not delete .venv on error, only on confirmed "too old"
 
-        # Find the .venv deletion block
         deletion_match = re.search(
             r"checkPythonVersion.*\n.*rmSync.*\.venv",
             INSTALLER_SOURCE,
             re.DOTALL,
         )
         if deletion_match is None:
-            # If the deletion based on checkPythonVersion is gone, that's fine
             return
 
-        # If the deletion still exists, checkPythonVersion should return
-        # a type that distinguishes "too old" from "error"
         func_match = re.search(
             r"function checkPythonVersion\(.*?\):\s*(.+?)\s*\{",
             INSTALLER_SOURCE,
@@ -95,7 +79,6 @@ class TestCheckPythonVersionNotDestructive(unittest.TestCase):
         )
         assert func_match is not None, "checkPythonVersion function not found"
         return_type = func_match.group(1).strip()
-        # Should not be just 'boolean' - needs to distinguish error from too-old
         assert return_type != "boolean", (
             "checkPythonVersion should not return plain boolean when its result "
             "is used to delete .venv. It should distinguish 'too old' from "
@@ -113,10 +96,6 @@ class TestConcurrencyGuard(unittest.TestCase):
 
     def test_has_concurrency_guard(self) -> None:
         """ensureDependencies should have a re-entry guard."""
-        # Look for some form of concurrency protection:
-        # - a lock/mutex variable
-        # - a pending promise check
-        # - an early return if already running
         guard_patterns = [
             r"pendingDeps",
             r"depsInProgress",

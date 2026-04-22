@@ -32,9 +32,6 @@ def _make_server() -> tuple[VSCodeServer, list[dict]]:
     return server, events
 
 
-# ── userAnswer routing ───────────────────────────────────────────────
-
-
 class TestUserAnswerRouting(unittest.TestCase):
     """userAnswer commands are delivered to the correct tab's queue."""
 
@@ -60,13 +57,12 @@ class TestUserAnswerRouting(unittest.TestCase):
 
         self.server._handle_command({"type": "userAnswer", "answer": "hi"})
 
-        assert q1.empty()  # Not routed to any queue
+        assert q1.empty()
 
     def test_answer_for_unknown_tab_is_dropped(self) -> None:
         """Answer for a tab with no queue is dropped."""
         self.server._handle_command({"type": "userAnswer", "answer": "x", "tabId": "99"})
 
-        # No exception, answer is silently dropped
 
     def test_stale_answer_drained_before_new_one(self) -> None:
         """A stale answer in the queue is drained before the new answer is put."""
@@ -77,9 +73,6 @@ class TestUserAnswerRouting(unittest.TestCase):
         self.server._handle_command({"type": "userAnswer", "answer": "fresh", "tabId": "3"})
 
         assert q.get_nowait() == "fresh"
-
-
-# ── _await_user_response reads from per-tab queue ────────────────────
 
 
 class TestAwaitUserResponse(unittest.TestCase):
@@ -96,7 +89,6 @@ class TestAwaitUserResponse(unittest.TestCase):
         stop = threading.Event()
         self.server.printer._thread_local.stop_event = stop
 
-        # Feed an answer from another thread after a short delay
         def answer_later() -> None:
             time.sleep(0.1)
             q.put("the answer")
@@ -134,9 +126,6 @@ class TestAwaitUserResponse(unittest.TestCase):
         threading.Thread(target=set_stop_later, daemon=True).start()
         with self.assertRaises(KeyboardInterrupt):
             self.server._await_user_response()
-
-
-# ── tabId injection in broadcast ─────────────────────────────────────
 
 
 class TestTabIdInjection(unittest.TestCase):
@@ -185,10 +174,7 @@ class TestTabIdInjection(unittest.TestCase):
             sys.stdout = old_stdout
 
         event = json.loads(buf.getvalue().strip())
-        assert event["tabId"] == "3"  # Not overwritten to "7"
-
-
-# ── stop routing ─────────────────────────────────────────────────────
+        assert event["tabId"] == "3"
 
 
 class TestStopRouting(unittest.TestCase):
@@ -204,7 +190,6 @@ class TestStopRouting(unittest.TestCase):
         tab2 = self.server._get_tab("2")
         tab1.stop_event = ev1
         tab2.stop_event = ev2
-        # Create dummy threads that are "alive"
         t1 = threading.Thread(target=lambda: time.sleep(5), daemon=True)
         t2 = threading.Thread(target=lambda: time.sleep(5), daemon=True)
         t1.start()
@@ -239,9 +224,6 @@ class TestStopRouting(unittest.TestCase):
         assert ev2.is_set()
 
 
-# ── concurrent tasks on different tabs ───────────────────────────────
-
-
 class TestConcurrentTabs(unittest.TestCase):
     """Two tasks on different tabs run concurrently without interference."""
 
@@ -256,7 +238,7 @@ class TestConcurrentTabs(unittest.TestCase):
         def slow_run(cmd: dict) -> None:
             tab = cmd.get("tabId", "")
             idx = 0 if tab == "1" else 1
-            barrier.wait()  # Both tasks must reach this point
+            barrier.wait()
             done[idx] = True
 
         self.server._run_task_inner = slow_run  # type: ignore[assignment]
@@ -268,7 +250,6 @@ class TestConcurrentTabs(unittest.TestCase):
             "type": "run", "prompt": "task2", "model": "m", "tabId": "2",
         })
 
-        # Wait for both threads to finish
         time.sleep(2)
         threads = [
             t.task_thread for t in self.server._tab_states.values()
@@ -304,9 +285,6 @@ class TestConcurrentTabs(unittest.TestCase):
 
         release.set()
         time.sleep(0.5)
-
-
-# ── merge per-tab isolation ──────────────────────────────────────────
 
 
 class TestMergeTabIsolation(unittest.TestCase):
@@ -346,13 +324,8 @@ class TestMergeTabIsolation(unittest.TestCase):
     def test_merge_guard_blocks_only_merging_tab(self) -> None:
         """_run_task_inner rejects runs on merging tabs but allows others."""
         self.server._get_tab("1").is_merging = True
-        # Tab 1 is blocked
         assert self.server._get_tab("1").is_merging is True
-        # Tab 2 is NOT blocked
         assert self.server._get_tab("2").is_merging is False
-
-
-# ── _run_task always sends status:running:false ──────────────────────
 
 
 class TestRunTaskStatusBroadcast(unittest.TestCase):
@@ -364,7 +337,7 @@ class TestRunTaskStatusBroadcast(unittest.TestCase):
     def test_status_running_true_then_false(self) -> None:
         """_run_task broadcasts running=true then running=false."""
         def noop_inner(cmd: dict) -> None:
-            pass  # Do nothing — just test the wrapper
+            pass
 
         self.server._run_task_inner = noop_inner  # type: ignore[assignment]
 
@@ -382,7 +355,6 @@ class TestRunTaskStatusBroadcast(unittest.TestCase):
 
         self.server._run_task_inner = failing_inner  # type: ignore[assignment]
 
-        # Run via thread (same as _handle_command does) so exception is contained
         t = threading.Thread(
             target=self.server._run_task,
             args=({"tabId": "2", "prompt": "x", "model": "m"},),
@@ -408,9 +380,6 @@ class TestRunTaskStatusBroadcast(unittest.TestCase):
         assert tab.user_answer_queue is None
 
 
-# ── askUser question broadcast ───────────────────────────────────────
-
-
 class TestAskUserQuestion(unittest.TestCase):
     """_ask_user_question broadcasts askUser and blocks for answer."""
 
@@ -433,9 +402,6 @@ class TestAskUserQuestion(unittest.TestCase):
         assert result == "yes"
 
 
-# ── JS webview tabId routing (tested via source analysis) ────────────
-
-
 class TestMainJsTabIdRouting(unittest.TestCase):
     """Verify that main.js event handlers check tabId for routing."""
 
@@ -450,10 +416,7 @@ class TestMainJsTabIdRouting(unittest.TestCase):
 
     def test_error_handler_checks_tabid(self) -> None:
         """The error event handler filters by tabId."""
-        # The handler should contain a check like:
-        # if (ev.tabId !== undefined && ev.tabId !== activeTabId) break;
         assert "case 'error':" in self.js_src
-        # Find the error handler block
         idx = self.js_src.index("case 'error':")
         block = self.js_src[idx:idx + 200]
         assert "ev.tabId" in block
@@ -470,14 +433,12 @@ class TestMainJsTabIdRouting(unittest.TestCase):
     def test_user_answer_sends_tabid(self) -> None:
         """The userAnswer submission includes tabId."""
         assert "type: 'userAnswer'" in self.js_src or "type:'userAnswer'" in self.js_src
-        # The msg should include tabId from askUserTabId
         assert "msg.tabId" in self.js_src or "tabId: askUserTabId" in self.js_src
 
     def test_status_handler_checks_tabid(self) -> None:
         """The status event handler routes by tabId."""
         idx = self.js_src.index("case 'status':")
         block = self.js_src[idx:idx + 300]
-        # status events should check tabId
         assert "tabId" in block or "ev.tabId" in block
 
     def test_clear_handler_checks_tabid(self) -> None:
@@ -491,9 +452,6 @@ class TestMainJsTabIdRouting(unittest.TestCase):
         idx = self.js_src.index("case 'task_done':")
         block = self.js_src[idx:idx + 300]
         assert "tabId" in block or "ev.tabId" in block
-
-
-# ── followup async propagates tab_id ─────────────────────────────────
 
 
 class TestFollowupAsyncTabId(unittest.TestCase):
@@ -521,7 +479,6 @@ class TestFollowupAsyncTabId(unittest.TestCase):
         server = VSCodeServer()
         server.printer = printer
 
-        # Simulate being on tab 42's task thread
         printer._thread_local.tab_id = "42"
 
         buf = io.StringIO()
@@ -529,23 +486,14 @@ class TestFollowupAsyncTabId(unittest.TestCase):
         sys.stdout = buf
         try:
             server._generate_followup_async("task", "result", None)
-            # Wait for the background thread to finish
             time.sleep(2)
         finally:
             sys.stdout = old_stdout
 
-        # The followup thread may or may not call broadcast (requires LLM),
-        # but we can verify the thread-local was set by reading it from
-        # the printer's thread_local on the worker thread. Since
-        # generate_followup_text requires LLM, let's just verify the
-        # structure by checking the code sets tab_id.
         import inspect
         src = inspect.getsource(server._generate_followup_async)
         assert "owner_tab" in src
         assert "_thread_local.tab_id = owner_tab" in src or "tab_id" in src
-
-
-# ── timer-based bash flush propagates tab_id ─────────────────────────
 
 
 class TestBashFlushTimerTabId(unittest.TestCase):
@@ -562,17 +510,13 @@ class TestBashFlushTimerTabId(unittest.TestCase):
         printer = VSCodePrinter()
         printer._thread_local.tab_id = "99"
 
-        # Buffer content but force timer path (set last flush far in the past)
         buf = io.StringIO()
         old_stdout = sys.stdout
         sys.stdout = buf
         try:
             with printer._bash_lock:
-                printer._bash_state.last_flush = time.monotonic()  # prevent inline flush
-            # Call print with bash_stream — first call sets _bash_last_flush
-            # recent, so the second call (within 0.1s) should trigger the timer
+                printer._bash_state.last_flush = time.monotonic()
             printer.print("line1\n", type="bash_stream")
-            # Wait for timer to fire
             time.sleep(0.5)
         finally:
             sys.stdout = old_stdout
@@ -586,9 +530,6 @@ class TestBashFlushTimerTabId(unittest.TestCase):
                     assert event.get("tabId") == "99", (
                         f"Expected tabId='99', got {event.get('tabId')}"
                     )
-
-
-# ── recording isolation ──────────────────────────────────────────────
 
 
 class TestRecordingIsolation(unittest.TestCase):
@@ -638,9 +579,6 @@ if __name__ == "__main__":
     unittest.main()
 
 
-# ── per-tab agent isolation ──────────────────────────────────────────
-
-
 class TestPerTabAgentIsolation(unittest.TestCase):
     """Each tab gets its own agent instances — no cross-tab state leakage."""
 
@@ -650,7 +588,6 @@ class TestPerTabAgentIsolation(unittest.TestCase):
         tab1 = server._get_tab("1")
         tab2 = server._get_tab("2")
         assert tab1.agent is not tab2.agent
-        # Both start at "" (unassigned), but they are separate agent instances
         assert tab1.agent.chat_id == ""
         assert tab2.agent.chat_id == ""
 
@@ -693,7 +630,7 @@ class TestPerTabAgentIsolation(unittest.TestCase):
         assert "99" not in server._tab_states
         tab = server._get_tab("99")
         assert "99" in server._tab_states
-        assert tab is server._get_tab("99")  # same instance returned
+        assert tab is server._get_tab("99")
 
     def test_agent_is_always_worktree_sorcar_agent(self) -> None:
         """_TabState.agent is a single WorktreeSorcarAgent regardless of toggle."""
@@ -705,9 +642,6 @@ class TestPerTabAgentIsolation(unittest.TestCase):
         assert isinstance(original, WorktreeSorcarAgent)
         tab.use_worktree = True
         assert tab.agent is original
-
-
-# ── S7: selected_model per-tab isolation ─────────────────────────────
 
 
 class TestSelectedModelIsolation(unittest.TestCase):
@@ -736,7 +670,6 @@ class TestSelectedModelIsolation(unittest.TestCase):
             "model": "gpt-4o",
             "tabId": "1",
         })
-        # New tab inherits the latest default
         tab99 = server._get_tab("99")
         assert tab99.selected_model == "gpt-4o"
 
@@ -747,12 +680,8 @@ class TestSelectedModelIsolation(unittest.TestCase):
         from kiss.agents.vscode.server import VSCodeServer
 
         source = inspect.getsource(VSCodeServer._run_task_inner)
-        # Model comes from cmd or tab.selected_model, not self._selected_model
         assert "tab.selected_model" in source
         assert "self._selected_model" not in source
-
-
-# ── S11: per-tab bash buffering ──────────────────────────────────────
 
 
 class TestBashBufferIsolation(unittest.TestCase):
@@ -774,9 +703,6 @@ class TestBashBufferIsolation(unittest.TestCase):
         assert printer.tokens_offset == 0
         assert printer.budget_offset == 0.0
         assert printer.steps_offset == 0
-
-
-# ── clearChat dedup (double-new-tab bug) ─────────────────────────────
 
 
 class TestClearChatDedup(unittest.TestCase):

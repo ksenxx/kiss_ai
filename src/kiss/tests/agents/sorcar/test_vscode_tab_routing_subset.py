@@ -38,9 +38,6 @@ def _make_server() -> tuple[VSCodeServer, list[dict[str, Any]]]:
     return server, events
 
 
-# ── _handle_command unknown-command error ────────────────────────────
-
-
 class TestUnknownCommandErrorRouted(unittest.TestCase):
     def test_unknown_command_error_carries_tab_id(self) -> None:
         server, events = _make_server()
@@ -58,19 +55,14 @@ class TestUnknownCommandErrorRouted(unittest.TestCase):
         assert "tabId" not in err[0]
 
 
-# ── run() generic-exception error ────────────────────────────────────
-
-
 class TestRunGenericErrorRouted(unittest.TestCase):
     def test_generic_exception_carries_tab_id_from_cmd(self) -> None:
         """run() catches a handler exception and includes cmd.tabId on error."""
         server, events = _make_server()
 
-        # Register a handler that raises, then invoke run() with one line.
         def boom(self: VSCodeServer, cmd: dict[str, Any]) -> None:
             raise RuntimeError("boom-x")
 
-        # Patch the dispatch table just for this test.
         server._HANDLERS = {**VSCodeServer._HANDLERS, "kaboom": boom}  # type: ignore[assignment]
 
         import io
@@ -106,9 +98,6 @@ class TestRunGenericErrorRouted(unittest.TestCase):
         assert "Invalid JSON" in err[0]["text"]
 
 
-# ── _start_merge_session ─────────────────────────────────────────────
-
-
 class TestStartMergeSessionRouted(unittest.TestCase):
     def _write_merge_json(self, path: Path) -> None:
         payload = {
@@ -131,7 +120,6 @@ class TestStartMergeSessionRouted(unittest.TestCase):
 
     def test_no_tab_id_omits_field(self) -> None:
         server, events = _make_server()
-        # Make sure no thread-local is set.
         if hasattr(server.printer._thread_local, "tab_id"):
             delattr(server.printer._thread_local, "tab_id")
         with tempfile.TemporaryDirectory() as td:
@@ -146,13 +134,9 @@ class TestStartMergeSessionRouted(unittest.TestCase):
         assert len(ms) == 1 and "tabId" not in ms[0]
 
 
-# ── _broadcast_worktree_done ─────────────────────────────────────────
-
-
 class TestBroadcastWorktreeDoneRouted(unittest.TestCase):
     def test_worktree_done_carries_tab_id(self) -> None:
         server, events = _make_server()
-        # Ensure the tab exists; access creates default state.
         server._get_tab("t-11")
         server._broadcast_worktree_done(changed=[], tab_id="t-11")
 
@@ -162,7 +146,7 @@ class TestBroadcastWorktreeDoneRouted(unittest.TestCase):
 
     def test_worktree_done_without_tab_omits_field(self) -> None:
         server, events = _make_server()
-        server._get_tab("")  # default
+        server._get_tab("")
         server._broadcast_worktree_done(changed=[], tab_id="")
 
         wd = [e for e in events if e.get("type") == "worktree_done"]
@@ -170,16 +154,11 @@ class TestBroadcastWorktreeDoneRouted(unittest.TestCase):
         assert "tabId" not in wd[0]
 
 
-# ── _handle_worktree_action worktree_progress ────────────────────────
-
-
 class TestWorktreeProgressRouted(unittest.TestCase):
     def test_worktree_progress_carries_tab_id(self) -> None:
         server, events = _make_server()
         tab = server._get_tab("t-13")
         tab.use_worktree = True
-        # Make ``_wt_pending`` True by attaching a sentinel worktree so
-        # the code does not try to restore state from git.
         tab.agent._wt = object()  # type: ignore[assignment]
 
         def fake_merge() -> str:
@@ -195,14 +174,9 @@ class TestWorktreeProgressRouted(unittest.TestCase):
         assert wp[0].get("tabId") == "t-13"
 
 
-# ── _get_adjacent_task adjacent_task_events ──────────────────────────
-
-
 class TestAdjacentTaskRouted(unittest.TestCase):
     def test_adjacent_task_events_carries_tab_id(self) -> None:
         server, events = _make_server()
-        # chat_id that doesn't exist in DB -> result will be None, but the
-        # event is still emitted and should carry tabId.
         server._get_adjacent_task(
             chat_id="does-not-exist",
             task="",
@@ -216,8 +190,6 @@ class TestAdjacentTaskRouted(unittest.TestCase):
     def test_cmd_handler_propagates_tab_id(self) -> None:
         """`_cmd_get_adjacent_task` forwards cmd.tabId into the event."""
         server, events = _make_server()
-        # Give the tab an agent with empty chat_id so the code falls back
-        # to _load_history (which returns at most one entry or none).
         server._get_tab("t-19")
         server._cmd_get_adjacent_task({
             "type": "getAdjacentTask",

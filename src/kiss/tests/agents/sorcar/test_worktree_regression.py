@@ -24,10 +24,6 @@ from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.kiss_error import KISSError
 
-# ---------------------------------------------------------------------------
-# Helpers (same as main test file)
-# ---------------------------------------------------------------------------
-
 
 def _redirect_db(tmpdir: str) -> tuple:
     old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
@@ -86,11 +82,6 @@ def _unpatch_super_run(original: Any) -> None:
     parent_class.run = original
 
 
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
-
-
 class TestWorktreeRegression:
     """Regression tests for WorktreeSorcarAgent refactoring safety."""
 
@@ -111,65 +102,7 @@ class TestWorktreeRegression:
             agent.resume_chat_by_id(chat_id)
         return agent
 
-    # -----------------------------------------------------------------------
-    # 2. manual_merge auto-commits before merging (removed)
-    # -----------------------------------------------------------------------
 
-    # -----------------------------------------------------------------------
-    # 3. discard when worktree directory already removed
-    # -----------------------------------------------------------------------
-
-    # -----------------------------------------------------------------------
-    # 4. merge conflict: main worktree is clean after abort
-    # -----------------------------------------------------------------------
-
-    # -----------------------------------------------------------------------
-    # 5. Branch naming convention is preserved
-    # -----------------------------------------------------------------------
-
-    # -----------------------------------------------------------------------
-    # 6. Worktree directory naming convention
-    # -----------------------------------------------------------------------
-
-    # -----------------------------------------------------------------------
-    # 7. Git config key format for original branch
-    # -----------------------------------------------------------------------
-
-    # -----------------------------------------------------------------------
-    # 8. merge() uses --no-edit flag (no editor prompt)
-    # -----------------------------------------------------------------------
-
-    # -----------------------------------------------------------------------
-    # 9. manual_merge unstages changes (reset HEAD) on success
-    # -----------------------------------------------------------------------
-
-    # -----------------------------------------------------------------------
-    # 10. merge conflict preserves _wt_branch for discard
-    # -----------------------------------------------------------------------
-
-    # -----------------------------------------------------------------------
-    # 11. run() result format: task output + separator + merge instructions
-    # -----------------------------------------------------------------------
-
-    # -----------------------------------------------------------------------
-    # 12. _delete_branch fallback: -d fails → -D
-    # -----------------------------------------------------------------------
-
-    # -----------------------------------------------------------------------
-    # 13. Multiple cleanup calls with mixed orphans
-    # -----------------------------------------------------------------------
-
-    # -----------------------------------------------------------------------
-    # 14. Worktree prune is called during merge path
-    # -----------------------------------------------------------------------
-
-    # -----------------------------------------------------------------------
-    # 15. Worktree prune is called during discard path
-    # -----------------------------------------------------------------------
-
-    # -----------------------------------------------------------------------
-    # 16. run() with KISSError re-raises (not caught)
-    # -----------------------------------------------------------------------
     def test_run_kiss_error_reraises(self) -> None:
         """KISSError from super().run() is re-raised, not wrapped."""
         _unpatch_super_run(self.original_run)
@@ -184,56 +117,23 @@ class TestWorktreeRegression:
             agent = self._agent()
             with pytest.raises(KISSError, match="budget exceeded"):
                 agent.run(prompt_template="t", work_dir=str(self.repo))
-            # Worktree should still exist (cleanup is caller's job)
             assert agent._wt_pending
             agent.discard()
         finally:
             parent_class.run = orig
             self.original_run = _patch_super_run()
 
-    # -----------------------------------------------------------------------
-    # 17. _wt_pending property correctness
-    # -----------------------------------------------------------------------
 
-    # -----------------------------------------------------------------------
-    # 18. Restore picks latest branch when multiple exist
-    # -----------------------------------------------------------------------
-
-    # -----------------------------------------------------------------------
-    # 19. Merge unknown original → graceful error with manual instructions
-    # -----------------------------------------------------------------------
-
-    # -----------------------------------------------------------------------
-    # 20. manual_merge uses --no-commit --no-ff flags
-    # -----------------------------------------------------------------------
-
-    # -----------------------------------------------------------------------
-    # 21. manual_merge deletes branch on success (no conflict)
-    # -----------------------------------------------------------------------
-
-    # -----------------------------------------------------------------------
-    # 22. auto_commit creates a commit with all files staged
-    # -----------------------------------------------------------------------
-
-    # -----------------------------------------------------------------------
-    # 23. Worktree is a proper git branch off current HEAD
-    # -----------------------------------------------------------------------
-
-    # -----------------------------------------------------------------------
-    # 24. Full lifecycle: run → conflict merge → discard → run again
-    # -----------------------------------------------------------------------
     @pytest.mark.slow
     def test_full_lifecycle_conflict_then_new_task(self) -> None:
         """After merge conflict + discard, a new task can run in the same
         chat session."""
         agent = self._agent()
 
-        # Task 1
         agent.run(prompt_template="t1", work_dir=str(self.repo))
         wt_dir = agent._wt_dir
         assert wt_dir is not None
 
-        # Force conflict
         (wt_dir / "README.md").write_text("wt\n")
         (self.repo / "README.md").write_text("main\n")
         _git("add", "-A", cwd=self.repo)
@@ -245,12 +145,8 @@ class TestWorktreeRegression:
         agent.discard()
         assert not agent._wt_pending
 
-        # Task 2 should work
         result = agent.run(prompt_template="t2", work_dir=str(self.repo))
         assert "test done" in result
         assert agent._wt_pending
         agent.merge()
 
-    # -----------------------------------------------------------------------
-    # 25. cleanup deletes config section for orphaned branches
-    # -----------------------------------------------------------------------

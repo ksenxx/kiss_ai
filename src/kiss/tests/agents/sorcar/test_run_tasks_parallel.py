@@ -18,18 +18,13 @@ class TestRunTasksParallel:
 
     def test_accepts_list_of_strings(self) -> None:
         """Verify the function signature accepts list[str], not list[dict]."""
-        # Type-level check: this must not raise TypeError at call time.
-        # We don't actually run the tasks (would need LLM API), just
-        # verify max_workers=0 raises ValueError from ThreadPoolExecutor.
         try:
             run_tasks_parallel(["task one", "task two"], max_workers=0)
         except ValueError:
-            pass  # expected: ThreadPoolExecutor rejects max_workers=0
+            pass
 
     def test_accepts_model_and_work_dir(self) -> None:
         """Verify model and work_dir parameters are accepted."""
-        # max_workers=0 triggers ValueError before any agent runs,
-        # proving the parameters are accepted without needing LLM API.
         try:
             run_tasks_parallel(
                 ["task"],
@@ -38,7 +33,7 @@ class TestRunTasksParallel:
                 work_dir="/tmp",
             )
         except ValueError:
-            pass  # expected: ThreadPoolExecutor rejects max_workers=0
+            pass
 
     def test_run_parallel_tool_in_agent_tools_when_parallel(self) -> None:
         """The run_parallel tool is included when is_parallel is True."""

@@ -150,7 +150,6 @@ class SorcarWebArenaAgent:
         model_flag = f"-m {self.model}" if self.model else ""
         env = {k: v for k in _API_KEY_VARS if (v := os.environ.get(k, ""))}
 
-        # Write WebArena system prompt so sorcar picks it up.
         system_md = Path.cwd() / "SYSTEM.md"
         system_md.write_text(WEBARENA_SYSTEM_PROMPT)
 

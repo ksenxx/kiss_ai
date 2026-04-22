@@ -177,7 +177,6 @@ class TestPeriodicEventFlush(unittest.TestCase):
         self.saved = _redirect_db(self.tmpdir)
         _init_git_repo(self.tmpdir)
         self.server = VSCodeServer()
-        # Redirect stdout so VSCodePrinter.broadcast doesn't pollute test output
         import io
         import sys
         self._real_stdout = sys.stdout
@@ -211,9 +210,8 @@ class TestPeriodicEventFlush(unittest.TestCase):
                 "tabId": "0",
             })
             import time
-            time.sleep(3)  # wait for at least 1 flush cycle
+            time.sleep(3)
 
-            # Events should be in DB while task is still running
             entries = th._load_history()
             flush_entry = next(
                 (e for e in entries if e["task"] == "test periodic flush"),
@@ -229,7 +227,6 @@ class TestPeriodicEventFlush(unittest.TestCase):
             types = [e.get("type") for e in flush_events]
             assert "text_delta" in types, f"Expected text_delta in {types}"
 
-            # Result should still be "Agent Failed Abruptly" (not overwritten)
             entries = th._load_history()
             entry = next(
                 (e for e in entries if e["task"] == "test periodic flush"),
@@ -253,12 +250,10 @@ class TestTypescriptIsRunningFix(unittest.TestCase):
         """_runningTabs is updated by the status event handler."""
         with open("src/kiss/agents/vscode/src/SorcarSidebarView.ts") as f:
             source = f.read()
-        # The status handler manages _runningTabs
         idx = source.find("msg.type === 'status'")
         assert idx >= 0, "status handler not found"
         block = source[idx:idx + 300]
         assert "this._runningTabs" in block
-        # Python server always sends status:running:false after task end events
         with open("src/kiss/agents/vscode/task_runner.py") as f:
             py_source = f.read()
         assert '"type": "status", "running": False' in py_source

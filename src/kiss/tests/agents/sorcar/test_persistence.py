@@ -122,7 +122,6 @@ class TestChatEvents:
         assert len(events) == 2
         assert before <= events[0]["_timestamp"] <= after_first
         assert before_second <= events[1]["_timestamp"] <= after_second
-        # Second event timestamp is strictly after the first
         assert events[1]["_timestamp"] >= events[0]["_timestamp"]
 
     def test_adjacent_task_events_have_timestamps(self):
@@ -154,7 +153,6 @@ class TestChatEvents:
 
     def test_save_task_result_no_matching_task(self):
         th._save_task_result(result="result", task="nonexistent")
-        # Should not raise; just returns early
 
 
 class TestSaveTaskExtra:
@@ -200,7 +198,6 @@ class TestSaveTaskExtra:
         assert stored["model"] == "gpt-4o"
 
     def test_save_extra_no_matching_task(self):
-        # Should not raise; just returns early
         th._save_task_extra({"model": "x"}, task="nonexistent")
 
     def test_extra_default_empty(self):
@@ -282,9 +279,6 @@ class TestPrintRecentChats:
         from kiss.agents.sorcar.cli_helpers import _print_recent_chats
         _print_recent_chats()
         assert "No chat sessions found." in capsys.readouterr().out
-
-
-
 
 
 if __name__ == "__main__":

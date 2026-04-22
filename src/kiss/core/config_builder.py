@@ -76,14 +76,12 @@ def _flat_to_nested_dict(
     nested: dict[str, Any] = {}
 
     for field_name, field_info in model.model_fields.items():
-        # Build the key as stored in argparse namespace (dots -> double underscores)
         if prefix:
             arg_key = f"{prefix}__{field_name}"
         else:
             arg_key = field_name
         field_type = field_info.annotation
 
-        # Handle nested BaseModel
         if isinstance(field_type, type) and issubclass(field_type, BaseModel):
             nested_dict = _flat_to_nested_dict(flat, field_type, arg_key)
             if nested_dict:
@@ -104,17 +102,14 @@ def add_config(name: str, config_class: type[BaseModel]) -> None:
         name: Name of the config class.
         config_class: Class of the config.
     """
-    # Get existing config fields from current DEFAULT_CONFIG (if any custom fields exist)
     existing_fields: dict[str, Any] = {}
     current_config = config_module.DEFAULT_CONFIG
     if current_config is not None:  # pragma: no branch – DEFAULT_CONFIG always set at import
-        # Get all fields that are not part of the base Config class
         base_fields = set(Config.model_fields.keys())
         for field_name in type(current_config).model_fields.keys():
             if field_name not in base_fields:
                 field_info = type(current_config).model_fields[field_name]
                 field_type = field_info.annotation
-                # Get the current value as default
                 current_value = getattr(current_config, field_name, None)
                 if current_value is not None:
                     existing_fields[field_name] = (
@@ -126,19 +121,16 @@ def add_config(name: str, config_class: type[BaseModel]) -> None:
                         ),
                     )
                 else:  # pragma: no cover – all config fields have non-None defaults
-                    # For None values, create a lambda that calls the type constructor
                     existing_fields[field_name] = (
                         field_type,
                         Field(default_factory=lambda ft=field_type: ft()),  # type: ignore[misc]
                     )
 
-    # Add the new config field
     all_fields: dict[str, Any] = {
         **existing_fields,
         name: (config_class, Field(default_factory=config_class)),
     }
 
-    # Create BaseModel subclass dynamically using create_model
     config_with_name = create_model(  # type: ignore[call-overload]
         "ConfigWithName",
         __base__=Config,
@@ -151,19 +143,15 @@ def add_config(name: str, config_class: type[BaseModel]) -> None:
         {"model_config": SettingsConfigDict(extra="ignore")},
     )
 
-    # Parse command-line arguments (use parse_known_args to ignore unknown args like pytest's)
     parser = ArgumentParser(description="KISS Config Builder")
     _add_model_arguments(parser, dynamic_config)
     parsed_args, _ = parser.parse_known_args()
 
-    # Convert flat argparse namespace to nested dict and validate with BaseSettings
     overrides = _flat_to_nested_dict(vars(parsed_args), dynamic_config)
 
-    # BaseSettings.model_validate handles defaults - merge overrides with defaults
     if overrides:
         defaults = dynamic_config().model_dump()
 
-        # Recursive merge: override values take precedence, nested dicts are merged
         def merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
             result = base.copy()
             for k, v in override.items():

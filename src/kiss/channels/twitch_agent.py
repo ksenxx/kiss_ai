@@ -92,7 +92,6 @@ class TwitchChannelBackend(ToolMethodBackend):
 
     def send_message(self, channel_id: str, text: str, thread_ts: str = "") -> None:
         """Send a Twitch chat message."""
-        # Requires broadcaster_id and sender_id
         self._post("/chat/messages", {"broadcaster_id": channel_id, "message": text})
 
     def wait_for_reply(

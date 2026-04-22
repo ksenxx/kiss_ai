@@ -17,8 +17,6 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Stale singleton files left behind by a previously crashed/killed Chromium
-# prevent a new persistent-context launch from starting cleanly.
 _SINGLETON_FILES = ("SingletonLock", "SingletonCookie", "SingletonSocket")
 
 
@@ -183,9 +181,6 @@ class WebUseTool:
         """
         if self._is_alive():
             return
-        # Drop references to any crashed browser/context but keep the Playwright
-        # driver running — restarting sync_playwright inside the same process
-        # fails ("using Sync API inside the asyncio loop").
         self._close_browser_only()
         from playwright.sync_api import sync_playwright
 

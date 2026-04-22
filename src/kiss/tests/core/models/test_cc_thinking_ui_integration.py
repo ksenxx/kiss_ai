@@ -23,8 +23,6 @@ def test_cc_model_streams_thinking_tokens_to_browser_ui() -> None:
     printer = BaseBrowserPrinter()
     printer.start_recording()
 
-    # Wire the printer's callbacks to the model (exactly as the sorcar agent
-    # wires them in production).
     model = ClaudeCodeModel(
         "cc/haiku",
         token_callback=printer.token_callback,
@@ -32,9 +30,6 @@ def test_cc_model_streams_thinking_tokens_to_browser_ui() -> None:
     )
     model.initialize("test")
 
-    # Simulate the real Claude CLI output with --include-partial-messages:
-    # granular stream_event-wrapped content_block_* events followed by a
-    # redundant final ``assistant`` snapshot.
     events = [
         {"type": "stream_event", "event": {
             "type": "content_block_start",
@@ -53,8 +48,6 @@ def test_cc_model_streams_thinking_tokens_to_browser_ui() -> None:
             "type": "content_block_delta",
             "delta": {"type": "text_delta", "text": "Answer"}}},
         {"type": "stream_event", "event": {"type": "content_block_stop"}},
-        # Redundant final assistant snapshot (same content already streamed
-        # via content_block_* events).  Must NOT cause duplicate UI events.
         {"type": "assistant", "message": {
             "id": "msg_abc",
             "content": [
@@ -68,13 +61,9 @@ def test_cc_model_streams_thinking_tokens_to_browser_ui() -> None:
     recorded = printer.stop_recording()
     types = [e["type"] for e in recorded]
 
-    # Exactly one thinking_start / thinking_end pair — no second collapse.
     assert types.count("thinking_start") == 1, types
     assert types.count("thinking_end") == 1, types
 
-    # thinking_delta events carry the streamed thinking tokens (in order,
-    # before thinking_end).  Consecutive deltas are coalesced by the
-    # recording layer, so the concatenated text must match the full thought.
     start_idx = types.index("thinking_start")
     end_idx = types.index("thinking_end")
     thinking_deltas = [
@@ -85,11 +74,6 @@ def test_cc_model_streams_thinking_tokens_to_browser_ui() -> None:
     full_thought = "".join(d["text"] for d in thinking_deltas)
     assert full_thought == "Let me reason...", full_thought
 
-    # thinking_end must come BEFORE any second-pass snapshot would — i.e.,
-    # the only thinking_end is after the real stream, not a premature one.
-    # Verify by checking text_delta events (for "Answer") come AFTER
-    # thinking_end — this would fail if a duplicate start/end pair wrapped
-    # the text_delta.
     assert end_idx < types.index("text_delta")
 
 
@@ -107,8 +91,6 @@ def test_cc_model_no_thinking_end_before_thinking_deltas() -> None:
     )
     model.initialize("test")
 
-    # Partial assistant snapshots interleaved with content_block_delta —
-    # classic CLI output where snapshots arrive mid-stream.
     events = [
         {"type": "stream_event", "event": {
             "type": "content_block_start",
@@ -116,7 +98,6 @@ def test_cc_model_no_thinking_end_before_thinking_deltas() -> None:
         {"type": "stream_event", "event": {
             "type": "content_block_delta",
             "delta": {"type": "thinking_delta", "thinking": "one"}}},
-        # Mid-stream partial assistant (same msg_id): MUST NOT fire thinking_end.
         {"type": "assistant", "message": {
             "id": "m1",
             "content": [{"type": "thinking", "thinking": "one"}]}},
@@ -131,11 +112,9 @@ def test_cc_model_no_thinking_end_before_thinking_deltas() -> None:
     recorded = printer.stop_recording()
     types = [e["type"] for e in recorded]
 
-    # Exactly one pair.
     assert types.count("thinking_start") == 1, types
     assert types.count("thinking_end") == 1, types
 
-    # All thinking_delta events must appear between the single start and end.
     start_idx = types.index("thinking_start")
     end_idx = types.index("thinking_end")
     for i, t in enumerate(types):

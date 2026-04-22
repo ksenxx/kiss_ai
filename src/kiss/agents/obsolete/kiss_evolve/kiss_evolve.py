@@ -30,7 +30,7 @@ class CodeVariant:
     id: int = 0
     artifacts: dict[str, Any] = field(default_factory=dict)
     evaluation_error: str | None = None
-    offspring_count: int = 0  # Track number of offspring for novelty-based sampling
+    offspring_count: int = 0
 
 
 class KISSEvolve:
@@ -164,7 +164,6 @@ class KISSEvolve:
         self.code_agent_wrapper = code_agent_wrapper
         self.extra_coding_instructions = extra_coding_instructions
 
-        # Validate and normalize model probabilities
         self.model_names = self._validate_and_normalize_models(model_names)
 
         self.population_size = population_size
@@ -269,19 +268,15 @@ class KISSEvolve:
             novelty_rag_model: Optional model for novelty RAG. If None and novelty
                 rejection is enabled, uses the first model from model_names.
         """
-        # Population tracking
         self.population: list[CodeVariant] = []
         self.variant_counter = 0
         self.generation_history: list[list[CodeVariant]] = []
 
-        # Island-based evolution tracking
         self.islands: list[list[CodeVariant]] = []
         self.island_histories: list[list[list[CodeVariant]]] = []
 
-        # Code novelty rejection sampling using RAG
         self.novelty_rag: SimpleRAG | None = None
         if self.enable_novelty_rejection:
-            # Use provided model or first model from models list
             rag_model_name: str
             if novelty_rag_model is not None:
                 rag_model_name = novelty_rag_model.model_name
@@ -374,18 +369,14 @@ combine the best aspects of two code variants to create an improved version.
         if not self.enable_novelty_rejection or self.novelty_rag is None:
             return True
 
-        # If RAG is empty, all code is novel
         stats = self.novelty_rag.get_collection_stats()
         if stats["num_documents"] == 0:
             return True
 
-        # Query RAG for similar code
         results = self.novelty_rag.query(code, top_k=1)
         if not results:
             return True
 
-        # Check if highest similarity is below threshold
-        # For cosine similarity, higher score = more similar
         max_similarity = float(results[0]["score"])
         is_novel: bool = max_similarity < self.novelty_threshold
 
@@ -442,8 +433,7 @@ combine the best aspects of two code variants to create an improved version.
             + self.__pick_random_innovation_prompt()
         )
 
-        # Try generating novel code up to max_rejection_attempts times
-        result = variant.code  # Default to original code
+        result = variant.code
         for attempt in range(self.max_rejection_attempts):
             result = self.code_agent_wrapper(
                 model_name=model_name,
@@ -455,17 +445,14 @@ combine the best aspects of two code variants to create an improved version.
                 },
             )
 
-            # Check novelty if enabled
             if self._is_code_novel(result):
                 return result
 
-            # If not novel and not last attempt, try again
             if attempt < self.max_rejection_attempts - 1:
                 print(
                     f"  Retrying mutation (attempt {attempt + 2}/{self.max_rejection_attempts})..."
                 )
 
-        # If all attempts failed novelty check, return the last generated code anyway
         print(
             f"  Accepted code variant after {self.max_rejection_attempts} attempts "
             "(may not be novel)"
@@ -489,8 +476,7 @@ combine the best aspects of two code variants to create an improved version.
             + self.__pick_random_innovation_prompt()
         )
 
-        # Try generating novel code up to max_rejection_attempts times
-        result = variant1.code  # Default to first parent's code
+        result = variant1.code
         for attempt in range(self.max_rejection_attempts):
             result = self.code_agent_wrapper(
                 model_name=model_name,
@@ -503,17 +489,14 @@ combine the best aspects of two code variants to create an improved version.
                 },
             )
 
-            # Check novelty if enabled
             if self._is_code_novel(result):
                 return result
 
-            # If not novel and not last attempt, try again
             if attempt < self.max_rejection_attempts - 1:
                 print(
                     f"  Retrying crossover (attempt {attempt + 2}/{self.max_rejection_attempts})..."
                 )
 
-        # If all attempts failed novelty check, return the last generated code anyway
         print(
             f"  Accepted code variant after {self.max_rejection_attempts} attempts "
             "(may not be novel)"
@@ -534,9 +517,6 @@ combine the best aspects of two code variants to create an improved version.
             variant.artifacts = result.get("artifacts", {})
             variant.evaluation_error = result.get("error")
         except Exception as e:
-            # Catch all exceptions since evaluation_fn may execute arbitrary
-            # code that could raise any exception type. Set fitness to 0.0 to
-            # mark as failed.
             logger.debug("Exception caught", exc_info=True)
             variant.fitness = 0.0
             variant.evaluation_error = str(e)
@@ -557,7 +537,6 @@ combine the best aspects of two code variants to create an improved version.
         self.variant_counter += 1
         self._evaluate_variant(initial_variant)
         self.population = [initial_variant]
-        # Add initial code to RAG for novelty tracking
         self._add_code_to_rag(self.initial_code, initial_variant.id)
 
     def _initialize_islands(self) -> None:
@@ -569,7 +548,6 @@ combine the best aspects of two code variants to create an improved version.
         self.islands = []
         self.island_histories = []
 
-        # Create initial variant for each island
         for _ in range(self.num_islands):
             initial_variant = CodeVariant(
                 code=self.initial_code,
@@ -579,11 +557,9 @@ combine the best aspects of two code variants to create an improved version.
             self.variant_counter += 1
             self._evaluate_variant(initial_variant)
 
-            # Initialize island with initial variant
             island_population = [initial_variant]
             self.islands.append(island_population)
             self.island_histories.append([island_population.copy()])
-            # Add initial code to RAG for novelty tracking
             self._add_code_to_rag(self.initial_code, initial_variant.id)
 
     def _power_law_sample(self, population: list[CodeVariant], n: int = 1) -> list[CodeVariant]:
@@ -602,21 +578,15 @@ combine the best aspects of two code variants to create an improved version.
         if len(population) < n:
             return population.copy()
 
-        # Sort by fitness (descending) and assign ranks
         sorted_pop = sorted(population, key=lambda v: v.fitness, reverse=True)
         num_variants = len(sorted_pop)
 
-        # Calculate selection probabilities using power-law
-        # Rank 1 (best) has r=1, rank 2 has r=2, etc.
         ranks = list(range(1, num_variants + 1))
-        # Use rank^(-alpha) as weights
         weights = [r ** (-self.power_law_alpha) for r in ranks]
         total_weight = sum(weights)
 
-        # Normalize to probabilities
         probabilities = [w / total_weight for w in weights]
 
-        # Sample n parents (with replacement)
         selected = random.choices(sorted_pop, weights=probabilities, k=n)
         return selected
 
@@ -644,7 +614,6 @@ combine the best aspects of two code variants to create an improved version.
         if len(population) == 1:
             return population * n
 
-        # Calculate median fitness (α₀)
         fitnesses = [v.fitness for v in population]
         fitnesses_sorted = sorted(fitnesses)
         median_idx = len(fitnesses_sorted) // 2
@@ -653,32 +622,23 @@ combine the best aspects of two code variants to create an improved version.
         else:
             alpha_0 = fitnesses_sorted[median_idx]
 
-        # Calculate selection weights for each variant
         weights = []
         for variant in population:
-            # Performance component: sigmoid of (fitness - median)
-            # σ(x) = 1 / (1 + exp(-x))
             sigmoid_input = self.performance_novelty_lambda * (variant.fitness - alpha_0)
-            # Clamp to avoid overflow
             sigmoid_input = max(-500, min(500, sigmoid_input))
             performance_score = 1.0 / (1.0 + math.exp(-sigmoid_input))
 
-            # Novelty component: discount based on offspring count
             novelty_discount = 1.0 / (1.0 + variant.offspring_count)
 
-            # Combined weight
             weight = performance_score * novelty_discount
             weights.append(weight)
 
-        # Normalize weights to probabilities
         total_weight = sum(weights)
         if total_weight == 0:
-            # Fallback to uniform if all weights are zero
             probabilities = [1.0 / len(population)] * len(population)
         else:
             probabilities = [w / total_weight for w in weights]
 
-        # Sample n parents (with replacement)
         selected = random.choices(population, weights=probabilities, k=n)
         return selected
 
@@ -703,7 +663,6 @@ combine the best aspects of two code variants to create an improved version.
         elif self.parent_sampling_method == "performance_novelty":
             return self._performance_novelty_sample(pop, n)
         else:
-            # Default: tournament selection (also handles "tournament" and unknown methods)
             tournament_size = min(3, len(pop))
             selected = []
             for _ in range(n):
@@ -724,14 +683,11 @@ combine the best aspects of two code variants to create an improved version.
         Returns:
             The new population after evolution.
         """
-        # Sort population by fitness
         population.sort(key=lambda v: v.fitness, reverse=True)
 
-        # Keep elite variants
         elite = population[: self.elite_size].copy()
         new_population = []
 
-        # Create copies of elite variants
         for variant in elite:
             elite_copy = CodeVariant(
                 code=variant.code,
@@ -744,11 +700,9 @@ combine the best aspects of two code variants to create an improved version.
             self.variant_counter += 1
             new_population.append(elite_copy)
 
-        # Generate new variants through mutation and crossover
         while len(new_population) < self.population_size:
             should_mutate = random.random() < self.mutation_rate and len(population) > 0
             if should_mutate:
-                # Mutation: select a parent using the configured sampling method
                 parents = self._select_parents(1, population)
                 parent = parents[0] if parents else random.choice(population)
                 feedback = ""
@@ -765,14 +719,11 @@ combine the best aspects of two code variants to create an improved version.
                     id=self.variant_counter,
                 )
                 self.variant_counter += 1
-                # Increment parent's offspring count
                 parent.offspring_count += 1
                 self._evaluate_variant(new_variant)
-                # Add accepted variant to RAG for novelty tracking
                 self._add_code_to_rag(mutated_code, new_variant.id)
                 new_population.append(new_variant)
             else:
-                # Crossover: combine two parents
                 parents = self._select_parents(2, population)
                 if len(parents) >= 2:
                     combined_code = self._crossover_code(parents[0], parents[1])
@@ -783,15 +734,12 @@ combine the best aspects of two code variants to create an improved version.
                         id=self.variant_counter,
                     )
                     self.variant_counter += 1
-                    # Increment both parents' offspring counts
                     parents[0].offspring_count += 1
                     parents[1].offspring_count += 1
                     self._evaluate_variant(new_variant)
-                    # Add accepted variant to RAG for novelty tracking
                     self._add_code_to_rag(combined_code, new_variant.id)
                     new_population.append(new_variant)
                 else:
-                    # Fallback: just copy a variant
                     if population:
                         parent = random.choice(population)
                         new_variant = CodeVariant(
@@ -837,7 +785,6 @@ combine the best aspects of two code variants to create an improved version.
         print(f"Initializing KISSEvolve with population size {pop_size}")
         self._initialize_population()
 
-        # Sort population by fitness for reporting
         self.population.sort(key=lambda v: v.fitness, reverse=True)
         best_fitness = self.population[0].fitness
         print(f"Generation 0: Best fitness = {best_fitness:.4f}")
@@ -846,14 +793,12 @@ combine the best aspects of two code variants to create an improved version.
             print(f"\nEvolving generation {generation}...")
             self._evolve_generation(generation)
 
-            # Sort and report
             self.population.sort(key=lambda v: v.fitness, reverse=True)
             best = self.population[0]
             print(f"Generation {generation}: Best fitness = {best.fitness:.4f}")
             if best.metrics:
                 print(f"  Metrics: {best.metrics}")
 
-        # Return best variant
         self.population.sort(key=lambda v: v.fitness, reverse=True)
         return self.population[0]
 
@@ -874,7 +819,6 @@ combine the best aspects of two code variants to create an improved version.
         )
         self._initialize_islands()
 
-        # Report initial state
         all_variants = [v for island in self.islands for v in island]
         all_variants.sort(key=lambda v: v.fitness, reverse=True)
         best_fitness = all_variants[0].fitness
@@ -890,18 +834,15 @@ combine the best aspects of two code variants to create an improved version.
         for generation in range(1, self.max_generations + 1):
             print(f"\nEvolving generation {generation}...")
 
-            # Evolve each island
             for island_id in range(self.num_islands):
                 new_population = self._evolve_island_generation(island_id, generation)
                 self.islands[island_id] = new_population
                 self.island_histories[island_id].append(new_population.copy())
 
-            # Perform migration if it's time
             if generation % self.migration_frequency == 0:
                 print(f"  Performing migration at generation {generation}...")
                 self._migrate_between_islands()
 
-            # Sort and report
             all_variants = [v for island in self.islands for v in island]
             all_variants.sort(key=lambda v: v.fitness, reverse=True)
             best = all_variants[0]
@@ -909,7 +850,6 @@ combine the best aspects of two code variants to create an improved version.
             if best.metrics:
                 print(f"  Metrics: {best.metrics}")
 
-            # Report per-island statistics
             for island_id, island_pop in enumerate(self.islands):
                 if island_pop:
                     island_best = max(island_pop, key=lambda v: v.fitness)
@@ -919,7 +859,6 @@ combine the best aspects of two code variants to create an improved version.
                         f"Avg = {island_avg:.4f}, Size = {len(island_pop)}"
                     )
 
-        # Return best variant across all islands
         all_variants = [v for island in self.islands for v in island]
         all_variants.sort(key=lambda v: v.fitness, reverse=True)
         return all_variants[0]
@@ -933,7 +872,6 @@ combine the best aspects of two code variants to create an improved version.
             population exists.
         """
         if self.num_islands > 1 and self.islands:
-            # Get best from all islands
             all_variants = [v for island in self.islands for v in island]
             if all_variants:
                 return max(all_variants, key=lambda v: v.fitness)
@@ -951,7 +889,6 @@ combine the best aspects of two code variants to create an improved version.
                 - best_fitness: Maximum fitness value
                 - worst_fitness: Minimum fitness value
         """
-        # Handle island-based evolution
         if self.num_islands > 1 and self.islands:
             all_variants = [v for island in self.islands for v in island]
             if all_variants:
@@ -963,7 +900,6 @@ combine the best aspects of two code variants to create an improved version.
                     "worst_fitness": min(fitnesses),
                 }
 
-        # Handle single population evolution
         if not self.population:
             return {"size": 0, "avg_fitness": 0.0, "best_fitness": 0.0, "worst_fitness": 0.0}
 
@@ -988,13 +924,10 @@ combine the best aspects of two code variants to create an improved version.
                 - random: Returns a single randomly chosen other island
         """
         if self.migration_topology == "ring":
-            # Ring topology: each island migrates to the next one
             return [(island_id + 1) % self.num_islands]
         elif self.migration_topology == "fully_connected":
-            # Fully connected: migrate to all other islands
             return [i for i in range(self.num_islands) if i != island_id]
         elif self.migration_topology == "random":
-            # Random: migrate to a random other island
             other_islands = [i for i in range(self.num_islands) if i != island_id]
             if other_islands:
                 return [random.choice(other_islands)]
@@ -1012,7 +945,6 @@ combine the best aspects of two code variants to create an improved version.
         if self.num_islands <= 1:
             return
 
-        # Collect migrants from each island
         migrants_by_target: dict[int, list[CodeVariant]] = {i: [] for i in range(self.num_islands)}
 
         for island_id in range(self.num_islands):
@@ -1020,17 +952,13 @@ combine the best aspects of two code variants to create an improved version.
             if not island_pop:
                 continue
 
-            # Sort by fitness and select top individuals for migration
             sorted_pop = sorted(island_pop, key=lambda v: v.fitness, reverse=True)
             num_migrants = min(self.migration_size, len(sorted_pop))
             migrants = sorted_pop[:num_migrants]
 
-            # Determine target islands
             target_islands = self._get_migration_targets(island_id)
 
-            # Distribute migrants to target islands
             for target_id in target_islands:
-                # Create copies of migrants for the target island
                 for migrant in migrants:
                     migrant_copy = CodeVariant(
                         code=migrant.code,
@@ -1045,18 +973,14 @@ combine the best aspects of two code variants to create an improved version.
                     self.variant_counter += 1
                     migrants_by_target[target_id].append(migrant_copy)
 
-        # Add migrants to target islands
         for target_id, migrants in migrants_by_target.items():
             if migrants:
-                # Remove worst individuals to make room (if needed)
                 target_island = self.islands[target_id]
                 if len(target_island) + len(migrants) > self.population_size:
-                    # Sort and keep the best
                     target_island.sort(key=lambda v: v.fitness, reverse=True)
                     target_island = target_island[: self.population_size - len(migrants)]
                     self.islands[target_id] = target_island
 
-                # Add migrants
                 self.islands[target_id].extend(migrants)
                 print(f"  Migrated {len(migrants)} individuals to island {target_id}")
 

@@ -74,7 +74,7 @@ class IRCChannelBackend(ToolMethodBackend):
             self._connection_info = f"Connected to {cfg['server']} as {cfg['nick']}"
             self._reader_thread = threading.Thread(target=self._read_loop, daemon=True)
             self._reader_thread.start()
-            time.sleep(1.0)  # Wait for server greeting
+            time.sleep(1.0)
             return True
         except Exception as e:
             self._connection_info = f"IRC connection failed: {e}"
@@ -107,7 +107,6 @@ class IRCChannelBackend(ToolMethodBackend):
         if line.startswith("PING"):  # pragma: no branch
             self._send_raw(f"PONG {line[5:]}")
         elif "PRIVMSG" in line:  # pragma: no branch
-            # :nick!user@host PRIVMSG #channel :message
             parts = line.split(" ", 3)
             if len(parts) >= 4:  # pragma: no branch
                 prefix = parts[0].lstrip(":")

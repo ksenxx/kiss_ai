@@ -27,29 +27,15 @@ from harbor.models.agent.context import AgentContext
 
 from kiss._version import __version__
 
-# Phrases that uniquely identify tasks known to always timeout.
-# These tasks have failed 0/6 across multiple evaluation runs due to
-# fundamental constraints (compilation too slow, needs GUI, needs GPU,
-# expert time estimate measured in hours/days).
 _SKIP_PHRASES: tuple[str, ...] = (
-    # compile-compcert: CompCert build needs hours with 2 CPUs/4GB
     "CompCert C verified compiler",
-    # install-windows-3.11: requires VNC GUI interaction
     "Windows 3.11 for Workgroups",
-    # extract-moves-from-video: YouTube download + video OCR
     "video of someone playing zork",
-    # gpt2-codegolf: <5000 byte C for GPT-2 inference, expert ~40h
     "gpt-2 weights stored as a TF .ckpt",
-    # train-fasttext: model training too slow for timeout
     "train a fasttext model on the yelp data",
-    # caffe-cifar-10: Caffe source build + training, always times out
     "BVLC Caffe deep learning framework",
-    # make-doom-for-mips: MIPS cross-compilation, expert ~8h
     "build the doomgeneric_mips ELF",
-    # mteb-leaderboard: hardcoded expected answer from stale snapshot;
-    # leaderboard changes, agent always finds different top models
     "Scandinavian MTEB leaderboard",
-    # fix-ocaml-gc: OCaml GC debugging, consistently times out (1+ hour)
     "OCaml garbage collector",
 )
 
@@ -85,7 +71,6 @@ def _get_wheel() -> Path:
         return _wheel_path
 
 
-# API key environment variables to forward into the container.
 _API_KEY_VARS = (
     "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
@@ -149,7 +134,6 @@ class SorcarHarborAgent(BaseAgent):
         Args:
             environment: The harbor execution environment.
         """
-        # Step 1: Install system deps + uv
         if not await self._exec_check(
             environment,
             "apt-get update -qq && apt-get install -y -qq curl"
@@ -158,11 +142,6 @@ class SorcarHarborAgent(BaseAgent):
         ):
             return
 
-        # Step 2: Build a wheel from local source (avoids stale PyPI package),
-        # upload it to the container, and install it.  Pin to Python 3.13
-        # because transitive deps (e.g. pyiceberg) lack pre-built wheels for
-        # 3.14, and minimal Docker images don't have a C compiler for source
-        # builds.
         wheel = _get_wheel()
         container_wheel = f"/tmp/{wheel.name}"
         await environment.upload_file(wheel, container_wheel)
@@ -218,7 +197,6 @@ class SorcarHarborAgent(BaseAgent):
                 context.metadata = {"skipped": True, "reason": phrase}
                 return
 
-        # Verify sorcar is installed before attempting to run it.
         check = await environment.exec(
             'export PATH="/root/.local/bin:$PATH" && which sorcar',
             user="root",

@@ -65,10 +65,6 @@ from kiss.agents.sorcar.git_worktree import (
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.server import VSCodeServer
 
-# ---------------------------------------------------------------------------
-# Shared helpers (mirror audit16 / audit17 patterns)
-# ---------------------------------------------------------------------------
-
 
 def _make_repo(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
@@ -110,8 +106,6 @@ def _make_wt_with_commit(
     wt_dir = repo / ".kiss-worktrees" / slug
     assert GitWorktreeOps.create(repo, branch, wt_dir)
     GitWorktreeOps.save_original_branch(repo, branch, "main")
-    # Agent work: a committed change on the worktree branch so the
-    # subsequent merge has something to apply.
     (wt_dir / "agent.txt").write_text("agent produced this\n")
     subprocess.run(
         ["git", "-C", str(wt_dir), "add", "."],
@@ -156,11 +150,6 @@ def _server(repo: Path) -> VSCodeServer:
     return server
 
 
-# ===========================================================================
-# RACE-1: merge handler guard TOCTOU vs non-worktree task start
-# ===========================================================================
-
-
 class TestRaceMergeGuardTOCTOU:
     """``_handle_worktree_action("merge")`` guards ``_any_non_wt_running``
     under ``_state_lock`` but releases the lock before ``wt.merge()``
@@ -178,26 +167,18 @@ class TestRaceMergeGuardTOCTOU:
         repo = _make_repo(tmp_path / "repo")
         server = _server(repo)
 
-        # Tab A: pending worktree with agent work ready to merge.
         tab_a = server._get_tab("a")
         tab_a.use_worktree = True
-        tab_a.is_task_active = False  # worktree task has finished
+        tab_a.is_task_active = False
         agent_a = cast(WorktreeSorcarAgent, tab_a.agent)
         wt = _make_wt_with_commit(repo, "kiss/wt-race1-1", agent_a)
 
-        # Tab B: a placeholder for a second tab that will start a
-        # non-wt task "during" the merge.  Initially idle.
         tab_b = server._get_tab("b")
         tab_b.use_worktree = False
         tab_b.is_running_non_wt = False
 
-        # Pre-condition: the guard sees nothing, so merge will pass.
         assert not server._any_non_wt_running()
 
-        # Use the per-repo lock as a deterministic interleaving point.
-        # ``wt.merge()`` calls ``_finalize_worktree`` (no lock) and
-        # then ``_do_merge`` which acquires ``repo_lock`` — that is
-        # where the merge thread will block and wait for the test.
         lock = repo_lock(repo)
         lock.acquire()
 
@@ -211,53 +192,33 @@ class TestRaceMergeGuardTOCTOU:
         merge_thread = threading.Thread(target=run_merge, daemon=True)
         merge_thread.start()
 
-        # Give the merge thread time to clear _finalize_worktree and
-        # arrive at the ``with repo_lock(...)`` inside ``_do_merge``.
         deadline = time.time() + 5.0
         while time.time() < deadline:
             if not wt.wt_dir.exists():
-                break  # _finalize_worktree finished, thread is now blocked on lock
+                break
             time.sleep(0.02)
         assert not wt.wt_dir.exists(), (
             "merge thread did not reach _do_merge within 5s"
         )
 
-        # --- Simulate tab B's non-wt task arriving in the TOCTOU gap ---
         with server._state_lock:
             tab_b.is_running_non_wt = True
-        # Agent's in-flight write onto the main tree.
         dirty_file = repo / "tab_b_in_flight.txt"
         dirty_file.write_text("tab B is writing this\n")
 
-        # Release the lock so the merge proceeds with tab B's state
-        # change now visible.  ``stash_if_dirty`` will run next.
         lock.release()
         merge_thread.join(timeout=15)
         assert not merge_thread.is_alive(), "merge thread hung"
 
-        # ------------------------------------------------------------------
-        # Race confirmation: the merge did NOT detect the state change.
-        # ------------------------------------------------------------------
         assert result_holder, "merge handler returned nothing"
         result = result_holder[0]
 
-        # In a race-free design the server would have either
-        # (a) held ``_state_lock`` across the merge and rejected it, or
-        # (b) re-checked ``_any_non_wt_running`` inside ``_do_merge``
-        #     and aborted.  Neither happens — merge reports success.
         assert result.get("success") is True, (
             "RACE-1: merge returned a failure, which would indicate "
             "the race has been mitigated.  Current code is expected "
             f"to report success.  result={result}"
         )
 
-        # And the concrete evidence that the merge proceeded past
-        # the guard: the squash-merge commit was actually applied to
-        # ``main``.  ``agent.txt`` only exists on ``main`` if
-        # ``_do_merge`` ran to completion.  (``stash_if_dirty`` was
-        # invoked and then ``stash_pop`` succeeded, which wipes the
-        # ``refs/stash`` reflog, so checking the reflog is not a
-        # reliable probe.)
         agent_file = repo / "agent.txt"
         assert agent_file.exists(), (
             "RACE-1: expected squash-merge to have applied tab A's "
@@ -266,7 +227,6 @@ class TestRaceMergeGuardTOCTOU:
             "reported success but the file is missing — the merge "
             "did not actually run."
         )
-        # Sanity: main's HEAD advanced past the initial commit.
         main_log = subprocess.run(
             ["git", "-C", str(repo), "log", "--format=%H",
              "refs/heads/main"],
@@ -276,19 +236,10 @@ class TestRaceMergeGuardTOCTOU:
             "RACE-1: main should have 2+ commits (init + squash) "
             f"after the race.  log:\n{main_log.stdout!r}"
         )
-        # Follow-up: the merge silently shuffled tab B's in-flight
-        # write through ``git stash push --include-untracked`` and
-        # back via ``git stash pop``.  The file is restored — proof
-        # that the stash path was taken rather than refused.
         assert dirty_file.exists(), (
             "Follow-up: stash_pop should have restored tab B's file "
             f"after the merge completed.  existed={dirty_file.exists()}"
         )
-
-
-# ===========================================================================
-# RACE-2: new_chat guard TOCTOU vs non-worktree task start
-# ===========================================================================
 
 
 class TestRaceNewChatGuardTOCTOU:
@@ -304,16 +255,12 @@ class TestRaceNewChatGuardTOCTOU:
         repo = _make_repo(tmp_path / "repo")
         server = _server(repo)
 
-        # Tab A: pending worktree, no running task.  Clicking "new chat"
-        # goes through the guard and then calls agent.new_chat() →
-        # _release_worktree → _do_merge.
         tab_a = server._get_tab("a")
         tab_a.use_worktree = True
         tab_a.is_task_active = False
         tab_a.is_merging = False
         agent_a = cast(WorktreeSorcarAgent, tab_a.agent)
         wt = _make_wt_with_commit(repo, "kiss/wt-race2-1", agent_a)
-        # Required for the `_wt_pending` branch of `_new_chat` to run.
         agent_a._chat_id = "chat-race2"
 
         tab_b = server._get_tab("b")
@@ -333,9 +280,6 @@ class TestRaceNewChatGuardTOCTOU:
         )
         new_chat_thread.start()
 
-        # Wait for the new_chat thread to reach _do_merge's repo_lock.
-        # ``new_chat -> _release_worktree -> _finalize_worktree`` runs
-        # with no lock, then ``_do_merge`` acquires ``repo_lock``.
         deadline = time.time() + 5.0
         while time.time() < deadline:
             if not wt.wt_dir.exists():
@@ -345,7 +289,6 @@ class TestRaceNewChatGuardTOCTOU:
             "new_chat thread did not reach _do_merge within 5s"
         )
 
-        # Tab B now "arrives" with a non-wt task.
         with server._state_lock:
             tab_b.is_running_non_wt = True
         dirty_file = repo / "tab_b_newchat.txt"
@@ -357,11 +300,6 @@ class TestRaceNewChatGuardTOCTOU:
             "new_chat thread hung"
         )
 
-        # Confirm the auto-merge path ran despite tab B's concurrent
-        # non-wt task — the guard did not re-fire.  Evidence: the
-        # squash-merge applied tab A's commit to ``main``, creating
-        # ``agent.txt``.  (Checking ``refs/stash`` reflog is not
-        # reliable because a successful ``stash pop`` wipes it.)
         agent_file = repo / "agent.txt"
         assert agent_file.exists(), (
             "RACE-2: expected new_chat's auto-release to have "
@@ -379,17 +317,10 @@ class TestRaceNewChatGuardTOCTOU:
             "RACE-2: main should have 2+ commits (init + squash) "
             f"after the race.  log:\n{main_log.stdout!r}"
         )
-        # Tab B's in-flight file was stashed then restored — proof
-        # that the stash path was taken rather than skipped.
         assert dirty_file.exists(), (
             "Follow-up: stash_pop should have restored tab B's "
             f"in-flight file.  existed={dirty_file.exists()}"
         )
-
-
-# ===========================================================================
-# RACE-3: post-task _present_pending_worktree vs user-triggered action
-# ===========================================================================
 
 
 class TestRacePostTaskVsUserAction:
@@ -418,14 +349,9 @@ class TestRacePostTaskVsUserAction:
 
         tab = server._get_tab("a")
         tab.use_worktree = True
-        tab.is_task_active = False  # task has just finished
+        tab.is_task_active = False
         agent = cast(WorktreeSorcarAgent, tab.agent)
 
-        # Build a worktree whose branch contains NO agent commits
-        # beyond the initial create.  This makes
-        # ``_get_worktree_changed_files`` return [] and the post-task
-        # cleanup path will attempt an auto-discard
-        # (``tab.agent.discard()``).
         slug = "kiss_wt-race3-1"
         wt_dir = repo / ".kiss-worktrees" / slug
         assert GitWorktreeOps.create(repo, "kiss/wt-race3-1", wt_dir)
@@ -438,44 +364,19 @@ class TestRacePostTaskVsUserAction:
         )
         agent._wt = wt
 
-        # Simulate the race: user clicks "discard" first, which takes
-        # repo_lock, sets ``agent._wt = None`` after release.
-        # Meanwhile the task thread calls ``_present_pending_worktree``
-        # → sees _wt_pending True → proceeds to auto-discard path.
-        # To avoid non-determinism, we drive it manually here by
-        # calling ``agent.discard()`` (mirrors what the user's
-        # ``_handle_worktree_action("discard")`` does), then the task
-        # thread's ``_present_pending_worktree`` attempts its own
-        # discard on the already-cleared state.
 
-        # Step A: user's discard succeeds.
         msg = agent.discard()
         assert "Discarded" in msg or "Partially discarded" in msg
 
-        # Step B: task thread now runs the very same code path that
-        # ``_run_task_inner`` 's finally block would run.  Because the
-        # task thread previously snapshotted ``_wt_pending`` as True
-        # (before step A), it proceeds to call ``tab.agent.discard()``.
         raised: list[Exception] = []
         try:
-            # Inline replication of _present_pending_worktree 's
-            # auto-discard branch (changed=[] → discard()).  No mock:
-            # this is the literal production control flow.
-            if agent._wt_pending:  # would be False now — skip
+            if agent._wt_pending:
                 agent.discard()
             else:
-                # The real _present_pending_worktree would now
-                # short-circuit on the ``not tab.agent._wt_pending``
-                # check ... BUT only because the user's discard
-                # already mutated the field.  If the two threads
-                # had interleaved at a finer granularity (e.g. the
-                # task thread already read ``_wt_pending`` as True
-                # before the user's discard), the call below would
-                # raise.  Simulate that fine-grained interleaving:
-                agent._wt = wt  # pretend the reader saw _wt_pending=True
-                agent._wt = None  # the user just cleared it
+                agent._wt = wt
+                agent._wt = None
                 try:
-                    agent.discard()  # production call on now-stale view
+                    agent.discard()
                 except Exception as e:
                     raised.append(e)
         except Exception as e:  # pragma: no cover — defensive
@@ -515,15 +416,9 @@ class TestRacePostTaskVsUserAction:
             / "agents" / "vscode" / "task_runner.py"
         ).read_text()
 
-        # Confine to ``_run_task_inner`` body (between its def line
-        # and the next top-level def).
         start = src.index("def _run_task_inner")
         rest = src[start:]
-        # Find the ``tab.is_task_active = False`` clear inside the
-        # inner try block of the finally (the one described in the
-        # BUG-71/BUG-72 comment).
         clear_idx = rest.index("tab.is_task_active = False")
-        # Find the subsequent ``_present_pending_worktree`` call.
         present_idx = rest.index("_present_pending_worktree")
 
         assert clear_idx < present_idx, (
@@ -533,11 +428,6 @@ class TestRacePostTaskVsUserAction:
             "the ordering has been reversed (fix applied), update "
             "this test accordingly."
         )
-
-
-# ===========================================================================
-# RACE-4: ``_try_setup_worktree`` 's copy_dirty_state runs without repo_lock
-# ===========================================================================
 
 
 class TestRaceSetupCopyDirtyStateNoRepoLock:
@@ -571,9 +461,6 @@ class TestRaceSetupCopyDirtyStateNoRepoLock:
         end = src.index("\n    def ", start + 1)
         body = src[start:end]
 
-        # The only ``repo_lock`` usage in the body should be around
-        # ``current_branch`` — NOT around ``copy_dirty_state`` /
-        # ``create`` / ``commit_staged``.
         assert "repo_lock" in body, (
             "_try_setup_worktree must use repo_lock at least once "
             "(for the current_branch read)."
@@ -581,12 +468,6 @@ class TestRaceSetupCopyDirtyStateNoRepoLock:
         assert "copy_dirty_state" in body
         assert "commit_staged" in body
 
-        # Locate the repo_lock block and confirm it does NOT wrap
-        # copy_dirty_state / create / commit_staged.  The body of
-        # the ``with repo_lock(repo):`` block is the single line
-        # that follows it; once we re-encounter an 8-space-indented
-        # line (``original_branch`` / subsequent setup statements),
-        # we are back in the method body — OUTSIDE the lock.
         lock_idx = body.index("with repo_lock(repo):")
         copy_idx = body.index("copy_dirty_state")
         create_idx = body.index("GitWorktreeOps.create(")
@@ -596,20 +477,12 @@ class TestRaceSetupCopyDirtyStateNoRepoLock:
             "Setup ordering has changed — update this test."
         )
 
-        # Robust check: count the number of lines between the
-        # ``with repo_lock(repo):`` line and each call.  If more
-        # than one line is indented ≥ 12 spaces in a row starting
-        # at the first line AFTER ``with repo_lock``, the lock
-        # wraps more than just current_branch.
         def _lines_inside_with(start: int) -> list[str]:
-            # Consume lines with indent ≥ 12 that immediately follow.
             after = body[body.index("\n", start) + 1:]
             inside: list[str] = []
             for ln in after.splitlines():
                 if ln.strip() == "":
                     break
-                # Lines inside the with-block are indented ≥ 12
-                # (the method body is 8, the with-body is 12).
                 stripped = ln.lstrip(" ")
                 ind = len(ln) - len(stripped)
                 if ind >= 12:
@@ -624,17 +497,12 @@ class TestRaceSetupCopyDirtyStateNoRepoLock:
             "RACE-4: expected ``current_branch`` read to be inside "
             f"``with repo_lock(repo):`` block.  inside:\n{inside_text}"
         )
-        # None of the heavyweight setup ops should be in the lock
-        # body (otherwise the entire setup would be serialized on
-        # repo_lock — a different, broader contract that this test
-        # doesn't cover).
         for label in ("copy_dirty_state", "GitWorktreeOps.create(", "commit_staged("):
             assert label not in inside_text, (
                 f"RACE-4: ``{label}`` is now inside the repo_lock "
                 "block — the fix may have been broadened.  Update "
                 f"this test.  inside:\n{inside_text}"
             )
-        # Sanity on ordering: all three setup calls follow the lock.
         for idx, name in (
             (copy_idx, "copy_dirty_state"),
             (create_idx, "GitWorktreeOps.create"),
@@ -644,11 +512,6 @@ class TestRaceSetupCopyDirtyStateNoRepoLock:
                 f"RACE-4 ordering: {name} should appear after the "
                 "``with repo_lock(repo):`` line."
             )
-
-
-# ===========================================================================
-# RACE-5: ``_run_task_inner`` BUG-B clear is itself TOCTOU
-# ===========================================================================
 
 
 class TestRaceRunTaskInnerBUGBClearTOCTOU:
@@ -676,33 +539,16 @@ class TestRaceRunTaskInnerBUGBClearTOCTOU:
         ).read_text()
 
         start = src.index("def _run_task_inner")
-        body = src[start : start + 8000]  # window large enough
+        body = src[start : start + 8000]
 
-        # The BUG-B block pattern:
-        #     if tab.use_worktree and tab.agent._wt_pending:
-        #         with self._state_lock:
-        #             if self._any_non_wt_running():
-        #                 ...
-        #                 tab.agent._wt = None
         bugb = body.index("BUG-B fix")
         wt_clear = body.index("tab.agent._wt = None", bugb)
         assert wt_clear > bugb
 
-        # Locate the subsequent reference to ``_try_setup_worktree``
-        # or ``super().run(`` — either indicates the transition out
-        # of the BUG-B block into the (now unlocked) task body.
-        # In the current code, ``_run_task_inner`` calls
-        # ``tab.agent.run(...)`` which internally calls
-        # ``_try_setup_worktree``.  Either ``agent.run(`` or
-        # ``tab.agent.run(`` appears after the BUG-B block.
         after_bugb = body[wt_clear:]
-        # A straightforward proxy: the next ``with self._state_lock:``
-        # after the BUG-B block does not enclose the agent call.
         next_lock_idx = after_bugb.find("with self._state_lock")
         agent_call_idx = after_bugb.index("tab.agent.run(")
 
-        # The state lock is re-acquired only inside the finally
-        # block for flag clearing — never wrapping ``agent.run``.
         assert next_lock_idx == -1 or next_lock_idx > agent_call_idx, (
             "RACE-5: a ``with self._state_lock`` wraps or precedes "
             "the ``tab.agent.run(`` call after the BUG-B block — "
