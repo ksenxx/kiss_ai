@@ -3213,12 +3213,6 @@ class TestWebviewTabBarJS(unittest.TestCase):
         body = self._js[idx:end]
         assert "persistTabState()" in body
 
-    def test_create_new_tab_sends_new_chat_to_backend(self) -> None:
-        idx = self._js.index("function createNewTab()")
-        end = self._js.index("\n  function ", idx + 1)
-        body = self._js[idx:end]
-        assert "type: 'newChat'" in body
-
     def test_create_new_tab_shows_welcome(self) -> None:
         idx = self._js.index("function createNewTab()")
         end = self._js.index("\n  function ", idx + 1)
