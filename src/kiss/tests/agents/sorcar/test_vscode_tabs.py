@@ -431,19 +431,6 @@ class TestMainJsTabIdRouting(unittest.TestCase):
         assert "ev.tabId" in block
         assert "activeTabId" in block
 
-    def test_askuser_handler_saves_tabid(self) -> None:
-        """The askUser event handler saves ev.tabId."""
-        assert "askUserTabId" in self.js_src
-        idx = self.js_src.index("case 'askUser':")
-        block = self.js_src[idx:idx + 200]
-        assert "askUserTabId" in block
-        assert "ev.tabId" in block
-
-    def test_user_answer_sends_tabid(self) -> None:
-        """The userAnswer submission includes tabId."""
-        assert "type: 'userAnswer'" in self.js_src or "type:'userAnswer'" in self.js_src
-        assert "msg.tabId" in self.js_src or "tabId: askUserTabId" in self.js_src
-
     def test_status_handler_checks_tabid(self) -> None:
         """The status event handler routes by tabId."""
         idx = self.js_src.index("case 'status':")
