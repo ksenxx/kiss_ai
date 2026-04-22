@@ -37,10 +37,6 @@ def _ensure_kiss_dir() -> None:
 _HistoryEntry = dict[str, object]
 
 
-# ---------------------------------------------------------------------------
-# Database connection (singleton)
-# ---------------------------------------------------------------------------
-
 _db_conn: sqlite3.Connection | None = None
 _db_lock = threading.Lock()
 
@@ -65,7 +61,6 @@ _CLEAR_LAST_MODEL = "UPDATE model_usage SET is_last = 0 WHERE is_last = 1"
 
 def _init_tables(conn: sqlite3.Connection) -> None:
     """Create all tables and indexes."""
-    # Create tables
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS task_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -96,7 +91,6 @@ def _init_tables(conn: sqlite3.Connection) -> None:
             last_used REAL DEFAULT 0
         );
     """)
-    # Create indexes
     conn.executescript("""
         CREATE INDEX IF NOT EXISTS idx_th_timestamp
             ON task_history(timestamp);
@@ -138,10 +132,6 @@ def _get_db() -> sqlite3.Connection:
         return _db_conn
 
 
-# ---------------------------------------------------------------------------
-# Task history
-# ---------------------------------------------------------------------------
-
 def _most_recent_task_id(db: sqlite3.Connection, task: str | None) -> int | None:
     """Return the row id of the most recent run of *task*, or the latest row."""
     if task is not None:
@@ -178,7 +168,7 @@ def _add_task(task: str, chat_id: str = "") -> tuple[int, str]:
     db = _get_db()
     with _db_lock:
         if chat_id == "":
-            chat_id = uuid.uuid4().hex  # Generate 32-character UUID string
+            chat_id = uuid.uuid4().hex
         cursor = db.execute(
             "INSERT INTO task_history (timestamp, task, chat_id, result) VALUES (?, ?, ?, ?)",
             (time.time(), task, chat_id, "Agent Failed Abruptly"),
@@ -240,7 +230,6 @@ def _prefix_match_task(query: str) -> str:
     if not query:
         return ""
     db = _get_db()
-    # Escape GLOB special characters: *, ?, [
     escaped = query.replace("[", "[[]").replace("*", "[*]").replace("?", "[?]")
     row = db.execute(
         "SELECT task FROM task_history "
@@ -290,7 +279,6 @@ def _get_history_entry(idx: int) -> _HistoryEntry | None:
         (idx,),
     ).fetchone()
     return dict(row) if row else None
-
 
 
 def _resolve_task_id(
@@ -444,7 +432,6 @@ def _list_recent_chats(limit: int = 10) -> list[dict[str, object]]:
         (list of dicts with ``task``, ``result``, ``timestamp``).
     """
     db = _get_db()
-    # Get the most recent chat_ids by their latest task timestamp
     chat_rows = db.execute(
         "SELECT chat_id, MAX(timestamp) AS latest "
         "FROM task_history WHERE chat_id != '' "
@@ -468,7 +455,6 @@ def _list_recent_chats(limit: int = 10) -> list[dict[str, object]]:
             ],
         })
     return result
-
 
 
 def _load_latest_chat_events_by_chat_id(
@@ -534,7 +520,6 @@ def _get_adjacent_task_by_chat_id(
     if not chat_id or not current_task:
         return None
     db = _get_db()
-    # Find the timestamp of the current task within this chat
     row = db.execute(
         "SELECT id, timestamp FROM task_history "
         "WHERE chat_id = ? AND task = ? "
@@ -601,10 +586,6 @@ def _load_chat_context(chat_id: str) -> list[_HistoryEntry]:
     return [{"task": r["task"], "result": r["result"]} for r in rows]
 
 
-# ---------------------------------------------------------------------------
-# Model usage
-# ---------------------------------------------------------------------------
-
 def _load_model_usage() -> dict[str, int]:
     """Return model usage counts as ``{model_name: count}``."""
     db = _get_db()
@@ -653,10 +634,6 @@ def _record_model_usage(model: str) -> None:
         db.commit()
 
 
-# ---------------------------------------------------------------------------
-# File usage
-# ---------------------------------------------------------------------------
-
 def _load_file_usage() -> dict[str, int]:
     """Return file usage counts ordered oldest-first (by last_used).
 
@@ -688,6 +665,5 @@ def _record_file_usage(path: str) -> None:
                 (_MAX_FILE_USAGE_ENTRIES,),
             )
         db.commit()
-
 
 

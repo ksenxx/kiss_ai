@@ -18,7 +18,6 @@ from kiss.core import config as config_module
 logger = logging.getLogger(__name__)
 
 
-
 def _load_gitignore_dirs(work_dir: str) -> set[str]:
     """Load directory names and paths to skip from .gitignore.
 
@@ -39,9 +38,7 @@ def _load_gitignore_dirs(work_dir: str) -> set[str]:
             line = raw_line.strip()
             if not line or line.startswith("#") or line.startswith("!"):
                 continue
-            # Strip trailing slash (directory marker)
             name = line.rstrip("/")
-            # Only use names/paths — skip glob patterns
             if "*" in name or "?" in name:
                 continue
             skip.add(name)
@@ -431,10 +428,6 @@ def _prepare_merge_view(
         try:
             cur = hashlib.md5((Path(work_dir) / fname).read_bytes()).hexdigest()
         except OSError:
-            # BUG-57 fix: file existed in pre_file_hashes but can't be
-            # read now — it was deleted (or became unreadable).  That
-            # IS a change; return True so deleted files appear in the
-            # merge view.
             return True
         return cur != pre_file_hashes[fname]
 
@@ -449,7 +442,6 @@ def _prepare_merge_view(
         filtered = _file_as_new_hunks(Path(work_dir) / fname)
         if filtered:
             file_hunks[fname] = filtered
-    # Detect modified pre-existing untracked files
     if pre_file_hashes:
         for fname in pre_untracked:
             if fname in file_hunks or fname not in pre_file_hashes:
@@ -467,8 +459,6 @@ def _prepare_merge_view(
     manifest_files: list[dict[str, Any]] = []
     for fname, fh in file_hunks.items():
         current_path = Path(work_dir) / fname
-        # BUG-57 fix: handle deleted files by creating an empty
-        # placeholder so the merge view can display the deletion.
         if not current_path.is_file():
             deleted_dir = merge_dir / ".deleted"
             deleted_placeholder = deleted_dir / fname

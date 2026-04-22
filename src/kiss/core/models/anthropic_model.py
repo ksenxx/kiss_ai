@@ -178,7 +178,6 @@ class AnthropicModel(Model):
         enable_cache = kwargs.pop("enable_cache", True)
         system_instruction = kwargs.pop("system_instruction", None)
 
-        # Anthropic requires max_tokens; accept OpenAI-style "max_completion_tokens" too.
         max_tokens = kwargs.pop("max_tokens", None)
         if max_tokens is None:
             max_tokens = kwargs.pop("max_completion_tokens", None)
@@ -186,7 +185,6 @@ class AnthropicModel(Model):
         if max_tokens is None:
             max_tokens = 16384
 
-        # Map OpenAI-style stop -> Anthropic stop_sequences (best-effort).
         if "stop" in kwargs and "stop_sequences" not in kwargs:
             stop_val = kwargs.pop("stop")
             if isinstance(stop_val, str):
@@ -194,7 +192,6 @@ class AnthropicModel(Model):
             elif isinstance(stop_val, list):
                 kwargs["stop_sequences"] = stop_val
 
-        # Enable thinking by default for Claude 4.x+ models.
         if "thinking" not in kwargs and (
             self.model_name.startswith(("claude-opus-4", "claude-sonnet-4", "claude-haiku-4"))
         ):
@@ -218,10 +215,6 @@ class AnthropicModel(Model):
             kwargs["tools"] = tools
 
         if enable_cache:
-            # Use Anthropic's recommended automatic caching: a single top-level
-            # cache_control. The system applies the breakpoint to the last cacheable
-            # block and moves it forward as the conversation grows. No per-message
-            # stripping or manipulation needed.
             kwargs["cache_control"] = {"type": "ephemeral"}
 
         return kwargs
@@ -284,8 +277,6 @@ class AnthropicModel(Model):
         stop_reason = getattr(response, "stop_reason", None)
         blocks = self._normalize_content_blocks(getattr(response, "content", None))
 
-        # When max_tokens is hit, tool_use blocks may be truncated/incomplete.
-        # Strip them to avoid calling tools with missing arguments.
         if stop_reason == "max_tokens":
             blocks = [b for b in blocks if b.get("type") != "tool_use"]
 
@@ -324,7 +315,6 @@ class AnthropicModel(Model):
             if self.usage_info_for_messages:
                 result_content = f"{result_content}\n\n{self.usage_info_for_messages}"
 
-            # Use explicit tool_use_id if provided, otherwise match by position
             tool_use_id = result_dict.get("tool_use_id")
             if tool_use_id is None and i < len(tool_call_ids):
                 tool_use_id = tool_call_ids[i][1]

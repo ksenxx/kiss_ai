@@ -73,7 +73,7 @@ class SimpleRAG:
         self.metric = metric
         self.model_name = model_name
         self.embedding_model_name = embedding_model_name
-        self._model = model(model_name)  # Cache model instance
+        self._model = model(model_name)
         self.documents: list[dict[str, Any]] = []
         self.embeddings: np.ndarray | None = None
 
@@ -87,8 +87,6 @@ class SimpleRAG:
             NumPy array representing the embedding vector.
         """
         try:
-            # Use specific embedding model if provided, otherwise let provider decide
-            # or use model_name if provider requires it
             embedding = self._model.get_embedding(text, embedding_model=self.embedding_model_name)
             return np.array(embedding, dtype=np.float32)
         except Exception as e:
@@ -111,7 +109,6 @@ class SimpleRAG:
         if not documents:
             return
 
-        # Process documents in batches
         for i in range(0, len(documents), batch_size):
             batch = documents[i : i + batch_size]
             self._add_batch(batch)
@@ -135,15 +132,12 @@ class SimpleRAG:
             if "id" not in doc or "text" not in doc:
                 raise KISSError("Each document must have 'id' and 'text' fields.")
 
-            # Check for duplicate IDs
             if any(d["id"] == doc["id"] for d in self.documents):
                 raise KISSError(f"Document with id '{doc['id']}' already exists.")
 
-            # Generate embedding
             embedding = self._generate_embedding(doc["text"])
             batch_embeddings.append(embedding)
 
-            # Store document
             self.documents.append(
                 {
                     "id": str(doc["id"]),
@@ -152,7 +146,6 @@ class SimpleRAG:
                 }
             )
 
-        # Update embeddings matrix
         batch_embeddings_array = np.array(batch_embeddings, dtype=np.float32)
         if self.embeddings is None:
             self.embeddings = batch_embeddings_array
@@ -182,46 +175,35 @@ class SimpleRAG:
         if not self.documents or self.embeddings is None:
             return []
 
-        # Generate query embedding
         query_embedding = self._generate_embedding(query_text)
 
-        # Calculate similarities
         if self.metric == "cosine":
-            # Cosine similarity: normalize vectors and compute dot product
             query_norm = query_embedding / (np.linalg.norm(query_embedding) + 1e-10)
             doc_norms = self.embeddings / (
                 np.linalg.norm(self.embeddings, axis=1, keepdims=True) + 1e-10
             )
             similarities = np.dot(doc_norms, query_norm)
-            # Higher is better for cosine similarity
             scores = similarities
         elif self.metric == "l2":
-            # L2 distance: compute Euclidean distance
             distances = np.linalg.norm(self.embeddings - query_embedding, axis=1)
-            # Lower is better for L2 distance, so we negate for consistency
             scores = -distances
         else:
             raise KISSError(f"Unknown metric: {self.metric}. Use 'cosine' or 'l2'.")
 
-        # Get all indices sorted by score (descending)
         sorted_indices = np.argsort(scores)[::-1]
 
-        # Format results, applying filter and collecting up to top_k
         results: list[dict[str, Any]] = []
         for idx in sorted_indices:
             if len(results) >= top_k:
                 break
 
             doc = self.documents[idx]
-            # Apply filter if provided - filter BEFORE adding to results
             if filter_fn is not None and not filter_fn(doc):
                 continue
 
             score = float(scores[idx])
-            # For cosine, score is already similarity (0-1)
-            # For L2, we negated it, so we need to convert back for display
             if self.metric == "l2":
-                display_score = -score  # Convert back to distance
+                display_score = -score
             else:
                 display_score = score
 

@@ -46,8 +46,6 @@ class TestCCOpusLiveThinking:
 
         recorded = printer.stop_recording()
 
-        # Check: if thinking_start was emitted, there MUST be at least one
-        # thinking_delta with non-empty text before thinking_end
         thinking_depth = 0
         thinking_had_content = False
         for event in recorded:
@@ -65,12 +63,9 @@ class TestCCOpusLiveThinking:
                 )
                 thinking_depth -= 1
 
-        # Verify that if we're inside a thinking block, it must have ended
         assert thinking_depth == 0, "Unbalanced thinking blocks"
 
-        # Content should be non-empty
         assert content.strip(), f"Expected non-empty response, got: {content!r}"
 
-        # Text tokens must have been delivered
         text_deltas = [e for e in recorded if e["type"] == "text_delta"]
         assert text_deltas, "No text_delta events were recorded"

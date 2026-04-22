@@ -21,7 +21,6 @@ from kiss.core.models.model import (
 class TestStripTextBasedToolCalls(unittest.TestCase):
     """Unit tests for _strip_text_based_tool_calls."""
 
-    # --- Whole-content JSON ---
 
     def test_whole_content_json(self) -> None:
         content = '{"tool_calls": [{"name": "Bash", "arguments": {"command": "ls"}}]}'
@@ -31,7 +30,6 @@ class TestStripTextBasedToolCalls(unittest.TestCase):
         content = '  {"tool_calls": [{"name": "Bash", "arguments": {}}]}  '
         assert _strip_text_based_tool_calls(content) == ""
 
-    # --- Fenced JSON code blocks ---
 
     def test_fenced_json_block(self) -> None:
         content = (
@@ -51,7 +49,6 @@ class TestStripTextBasedToolCalls(unittest.TestCase):
         assert "tool_calls" not in result
         assert "Thinking..." in result
 
-    # --- Inline JSON ---
 
     def test_inline_json(self) -> None:
         content = (
@@ -62,7 +59,6 @@ class TestStripTextBasedToolCalls(unittest.TestCase):
         assert "tool_calls" not in result
         assert "Let me check." in result
 
-    # --- No tool calls ---
 
     def test_no_tool_calls_returns_original(self) -> None:
         content = "Just some plain text with no JSON."
@@ -75,7 +71,6 @@ class TestStripTextBasedToolCalls(unittest.TestCase):
         content = '{"result": "hello"}'
         assert _strip_text_based_tool_calls(content) == content.strip()
 
-    # --- Consistency with _parse_text_based_tool_calls ---
 
     def test_strip_removes_exactly_what_parse_finds(self) -> None:
         """If _parse finds tool calls, _strip should remove them."""
@@ -90,7 +85,6 @@ class TestStripTextBasedToolCalls(unittest.TestCase):
             stripped = _strip_text_based_tool_calls(content)
             assert "tool_calls" not in stripped, f"tool_calls still in stripped: {stripped}"
 
-    # --- Multiple tool calls ---
 
     def test_multiple_inline_tool_calls(self) -> None:
         tc1 = '{"tool_calls": [{"name": "Bash", "arguments": {"command": "ls"}}]}'
@@ -108,27 +102,21 @@ class TestCCModelTokenBuffering(unittest.TestCase):
     def test_source_has_buffer_and_strip(self) -> None:
         """generate_and_process_with_tools buffers tokens and strips tool calls."""
         src = inspect.getsource(ClaudeCodeModel.generate_and_process_with_tools)
-        # Buffers tokens instead of passing them directly
         assert "buffer" in src
         assert "buffer.append" in src
-        # Strips tool calls from content before emitting
         assert "_strip_text_based_tool_calls" in src
-        # Restores original callback
         assert "self.token_callback = original_token_cb" in src
 
     def test_no_callback_no_buffering(self) -> None:
         """When there's no token_callback, no buffering occurs."""
         m = ClaudeCodeModel("cc/opus")
         m.initialize("test")
-        # No callback set — should not raise
         assert m.token_callback is None
 
     def test_callback_buffered_during_generate(self) -> None:
         """The original callback is replaced with buffer.append during generate."""
         src = inspect.getsource(ClaudeCodeModel.generate_and_process_with_tools)
-        # original_callback is saved
         assert "original_token_cb = self.token_callback" in src
-        # conditional check before buffering
         assert "if original_token_cb is not None:" in src
 
     def test_cleaned_text_emitted_with_tool_calls(self) -> None:
@@ -139,13 +127,11 @@ class TestCCModelTokenBuffering(unittest.TestCase):
     def test_original_text_emitted_without_tool_calls(self) -> None:
         """When no tool calls, original content is emitted unchanged."""
         src = inspect.getsource(ClaudeCodeModel.generate_and_process_with_tools)
-        # The ternary emits content when no function_calls
         assert "if function_calls else content" in src
 
     def test_callback_restored_in_finally(self) -> None:
         """Original callback is restored even on exception."""
         src = inspect.getsource(ClaudeCodeModel.generate_and_process_with_tools)
-        # Check that callback restore is in the finally block
         finally_idx = src.index("finally:")
         restore_idx = src.index("self.token_callback = original_token_cb")
         assert restore_idx > finally_idx
@@ -184,7 +170,6 @@ class TestStripEdgeCases(unittest.TestCase):
         """
         content = '{"outer": {"tool_calls": [{"name": "x"}]}}'
         result = _strip_text_based_tool_calls(content)
-        # The inner {"tool_calls": ...} is stripped; outer shell remains
         assert "tool_calls" not in result
 
     def test_whitespace_only_after_strip(self) -> None:

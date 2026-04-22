@@ -10,7 +10,6 @@ KISS_SRC = Path(__file__).resolve().parent.parent
 PROJECT_ROOT = KISS_SRC.parent.parent
 OUTPUT = PROJECT_ROOT / "API.md"
 
-# Explicit allowlist of files to include in API docs.
 INCLUDE_FILES: set[Path] = {
     Path("core/kiss_agent.py"),
     Path("core/relentless_agent.py"),
@@ -19,7 +18,6 @@ INCLUDE_FILES: set[Path] = {
     Path("agents/sorcar/git_worktree.py"),
     Path("agents/sorcar/worktree_sorcar_agent.py"),
 }
-# Directories whose __init__.py and all .py files are included.
 INCLUDE_DIRS: set[Path] = {Path("channels")}
 
 

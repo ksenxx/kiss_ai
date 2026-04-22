@@ -51,7 +51,6 @@ class _MergeFlowMixin:
     """Merge-view, worktree-action, and autocommit methods."""
 
     if TYPE_CHECKING:
-        # Provided by ``VSCodeServer`` / sibling mixins at runtime.
         printer: VSCodePrinter
         work_dir: str
         _state_lock: threading.Lock
@@ -82,8 +81,6 @@ class _MergeFlowMixin:
             total_hunks = sum(len(f.get("hunks", [])) for f in files)
             if total_hunks == 0:
                 return False
-            # BUG-41 / RED-6 fix: use explicit tab_id parameter instead
-            # of reading from thread-local (which is None on replay path).
             resolved_tab_id = tab_id or getattr(
                 self.printer._thread_local, "tab_id", None,
             )
@@ -93,8 +90,6 @@ class _MergeFlowMixin:
                     resolved_tab = self._tab_states.get(resolved_tab_id)
                     if resolved_tab is not None:
                         resolved_tab.is_merging = True
-            # BUG-67 fix: if broadcast raises (e.g. BrokenPipeError),
-            # clear is_merging so the tab is not permanently locked.
             try:
                 merge_data_event: dict[str, Any] = {
                     "type": "merge_data",
@@ -179,9 +174,6 @@ class _MergeFlowMixin:
         wt_dir = tab.agent._wt_dir
         if wt_dir is None or not wt_dir.exists():
             return False
-        # Diff against the baseline commit when available so that
-        # committed agent changes are visible in the merge review,
-        # not just uncommitted ones (BUG-4 fix).
         base_ref = tab.agent._baseline_commit or "HEAD"
         try:
             return self._prepare_and_start_merge(
@@ -228,19 +220,14 @@ class _MergeFlowMixin:
         if tab_id is not None:
             event["tabId"] = tab_id
         self.printer.broadcast(event)
-        # Per-tab merge data cleanup — each tab has its own directory
         if tab_id is not None:
             _cleanup_merge_data(str(_merge_data_dir(tab_id)))
         else:
             _cleanup_merge_data(str(_merge_data_dir()))
 
-        # Emit deferred worktree_done after merge review completes
         if tab_id is not None:
             self._present_pending_worktree(tab_id, try_merge_review=False)
 
-        # After the user finishes the non-worktree merge review, prompt
-        # them to auto-commit any remaining dirty state on the main
-        # branch (accepted hunks, pre-existing edits, untracked files).
         if tab_id is not None:
             with self._state_lock:
                 tab = self._tab_states.get(tab_id)
@@ -274,7 +261,6 @@ class _MergeFlowMixin:
             if len(line) < 4:
                 continue
             path = line[3:]
-            # Renames are "A -> B"; report the new path.
             if " -> " in path:
                 path = path.split(" -> ", 1)[1]
             path = path.strip().strip('"')
@@ -395,7 +381,6 @@ class _MergeFlowMixin:
 
         return generate_commit_message_from_diff(diff_text)
 
-    # ---- Worktree lifecycle presentation -------------------------------
 
     def _broadcast_worktree_done(self, changed: list[str], tab_id: str = "") -> None:
         """Broadcast a ``worktree_done`` event with the current worktree state.
@@ -498,7 +483,6 @@ class _MergeFlowMixin:
                 return
         wt._restore_from_git(repo_root)
 
-    # ---- Conflict / change detection -----------------------------------
 
     def _check_merge_conflict(self, tab_id: str = "") -> bool:
         """Check if merging the worktree branch into original would conflict.
@@ -531,26 +515,12 @@ class _MergeFlowMixin:
         if not wt_dir.exists():
             return False
 
-        # Determine fork points for conflict detection.
-        # For the *original branch* diff we need the HEAD at worktree
-        # creation time (before the baseline dirty-state commit) so that
-        # the user's own dirty edits aren't reported as "original branch
-        # changes".  For the *worktree* diff we use the baseline itself
-        # so only agent changes are visible.
-        #
-        # BUG-56 fix: validate baseline with git cat-file -t before
-        # using it (consistent with _resolve_base_ref's BUG-51 fix).
-        # An invalid baseline would make both diff commands fail
-        # silently and return False (no conflict) even when there is
-        # one.
         baseline_valid = bool(
             wt.baseline_commit
             and _is_valid_baseline(str(wt_dir), wt.baseline_commit)
         )
         if baseline_valid:
-            assert wt.baseline_commit is not None  # guarded by baseline_valid
-            # baseline^ = the commit the worktree branched from (HEAD at
-            # creation).  baseline = HEAD + user dirty state.
+            assert wt.baseline_commit is not None
             orig_fork = f"{wt.baseline_commit}^"
             wt_fork: str = wt.baseline_commit
         else:
@@ -559,7 +529,6 @@ class _MergeFlowMixin:
                 return False
             orig_fork = wt_fork = mb.stdout.strip()
 
-        # Files changed on original branch since the fork
         orig_diff = _git(
             str(wt.repo_root), "diff", "--name-only",
             orig_fork, wt.original_branch,
@@ -569,7 +538,6 @@ class _MergeFlowMixin:
             if orig_diff.returncode == 0 else set()
         )
 
-        # Files changed in the worktree (committed + uncommitted) since fork
         wt_diff = _git(str(wt_dir), "diff", "--name-only", wt_fork)
         wt_files = (
             set(wt_diff.stdout.strip().splitlines())
@@ -577,26 +545,12 @@ class _MergeFlowMixin:
         )
         wt_files.update(_capture_untracked(str(wt_dir)))
 
-        # Check 1: both sides modified the same file → likely conflict
         if orig_files & wt_files:
             return True
 
-        # Check 2: dirty main working-tree files that overlap with
-        # worktree changes (git merge would refuse).
-        # Fix 3 (BUG-37): skip this check when a non-worktree agent is
-        # running — its in-flight writes would cause false-positive
-        # conflict reports since they're not user edits.
         with self._state_lock:
             if self._any_non_wt_running():
                 return False
-        # INC-6 fix: check both unstaged AND staged files — staged
-        # files that overlap with worktree changes would also cause
-        # git merge to refuse.
-        # BUG-70 fix: also check untracked files in main.  The auto-
-        # merge flow (``stash --include-untracked`` → squash-merge →
-        # ``stash pop``) fails at pop when the squash recreates an
-        # untracked file, because pop can't overwrite the now-
-        # existing file.
         dirty = set(GitWorktreeOps.unstaged_files(wt.repo_root))
         dirty.update(GitWorktreeOps.staged_files(wt.repo_root))
         dirty.update(_capture_untracked(str(wt.repo_root)))
@@ -665,9 +619,6 @@ class _MergeFlowMixin:
             if tracked.returncode == 0:
                 files = tracked.stdout.strip().splitlines()
             else:
-                # BUG-51 fix: git diff failed — fall back to
-                # git status to detect any changes rather than
-                # returning [] which would trigger auto-discard.
                 status = _git(str(wt_dir), "status", "--porcelain")
                 files = [
                     line[3:].strip()
@@ -676,7 +627,6 @@ class _MergeFlowMixin:
                 ]
             files.extend(_capture_untracked(str(wt_dir)))
             return sorted(set(files))
-        # Worktree already removed — fall back to branch diff
         if not wt._wt_branch:
             return []
         repo_root = str(wt._repo_root) if wt._repo_root else self.work_dir

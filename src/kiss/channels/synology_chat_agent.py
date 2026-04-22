@@ -82,7 +82,6 @@ class SynologyChatChannelBackend(ToolMethodBackend):
                 length = int(self.headers.get("Content-Length", 0))
                 body = self.rfile.read(length)
                 try:
-                    # Synology Chat sends URL-encoded payload
                     params = parse_qs(body.decode("utf-8"))
                     payload_str = params.get("payload", ["{}"])[0]
                     payload = json.loads(payload_str)

@@ -34,7 +34,7 @@ def __getattr__(name: str) -> type:
         try:
             module = importlib.import_module(module_path)
             cls: type = getattr(module, name)
-            globals()[name] = cls  # Cache for subsequent accesses
+            globals()[name] = cls
             return cls
         except ImportError:
             logging.getLogger(__name__).debug("Exception caught", exc_info=True)

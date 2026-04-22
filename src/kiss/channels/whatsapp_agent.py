@@ -47,11 +47,6 @@ _GRAPH_API_BASE = "https://graph.facebook.com/v21.0"
 _config = ChannelConfig(_WHATSAPP_DIR, ("access_token", "phone_number_id"))
 
 
-# ---------------------------------------------------------------------------
-# API helper
-# ---------------------------------------------------------------------------
-
-
 def _api_request(
     method: str,
     url: str,
@@ -86,11 +81,6 @@ def _api_request(
         return resp.json()  # type: ignore[no-any-return]
     except ValueError:  # pragma: no cover – Graph API always returns JSON
         return {"error": {"message": resp.text, "code": resp.status_code}}
-
-
-# ---------------------------------------------------------------------------
-# WhatsAppChannelBackend
-# ---------------------------------------------------------------------------
 
 
 class WhatsAppChannelBackend(ToolMethodBackend):
@@ -154,7 +144,6 @@ class WhatsAppChannelBackend(ToolMethodBackend):
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
-                # Handle webhook verification challenge
                 from urllib.parse import parse_qs, urlparse
 
                 parsed = urlparse(self.path)
@@ -180,7 +169,7 @@ class WhatsAppChannelBackend(ToolMethodBackend):
                 self.end_headers()
 
             def log_message(self, *args: Any) -> None:  # type: ignore[override]
-                pass  # Suppress access log
+                pass
 
         self.disconnect()
         try:
@@ -296,9 +285,6 @@ class WhatsAppChannelBackend(ToolMethodBackend):
             self._webhook_server, self._webhook_thread
         )
 
-    # -------------------------------------------------------------------
-    # WhatsApp API tool methods (return JSON strings for LLM agent use)
-    # -------------------------------------------------------------------
 
     def send_text_message(self, to: str, body: str, preview_url: bool = False) -> str:
         """Send a text message to a WhatsApp number.
@@ -798,11 +784,6 @@ class WhatsAppChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": True, "templates": templates}, indent=2)[:8000]
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
-
-
-# ---------------------------------------------------------------------------
-# WhatsAppAgent
-# ---------------------------------------------------------------------------
 
 
 class WhatsAppAgent(BaseChannelAgent, StatefulSorcarAgent):

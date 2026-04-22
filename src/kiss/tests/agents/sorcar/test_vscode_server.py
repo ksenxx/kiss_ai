@@ -72,13 +72,11 @@ class TestGetFiles(unittest.TestCase):
 
         self.server.printer.broadcast = capture_broadcast  # type: ignore[assignment]
 
-        # Create test files
         for name in ["src/main.py", "src/util.py", "README.md", "test/test_main.py"]:
             path = Path(self.tmpdir) / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(f"# {name}")
 
-        # Pre-populate file cache
         self.server._file_cache = [
             "src/main.py",
             "src/util.py",
@@ -161,7 +159,6 @@ class TestMainJsFilePicker(unittest.TestCase):
         assert "ArrowUp" in self.js
 
     def test_has_tab_accept(self) -> None:
-        # Tab should select the autocomplete item
         assert "'Tab'" in self.js
 
     def test_has_escape_dismiss(self) -> None:
@@ -220,7 +217,6 @@ class TestMainJsModelPicker(unittest.TestCase):
         assert "updateSel" in self.js
 
     def test_has_arrow_key_handling(self) -> None:
-        # Check model search keydown handler
         assert "ArrowDown" in self.js
         assert "ArrowUp" in self.js
 
@@ -329,7 +325,6 @@ class TestGenerateCommitMessage(unittest.TestCase):
         import inspect
 
         sig = inspect.signature(VSCodeServer._generate_commit_message)
-        # Only 'self' — no model parameter
         assert "model" not in sig.parameters
 
     def test_no_staged_changes(self) -> None:
@@ -431,9 +426,8 @@ class TestMainJsInfiniteScroll(unittest.TestCase):
             h = 5381
             for ch in chat_id:
                 h = ((h << 5) + h) + ord(ch)
-                h = ctypes.c_int32(h).value  # JS |= 0
+                h = ctypes.c_int32(h).value
             hue = abs(h) % 360
-            # HSL(hue, 55%, 75%) -> RGB
             r, g, b = colorsys.hls_to_rgb(hue / 360.0, 0.75, 0.55)
             return (round(r * 255), round(g * 255), round(b * 255))
 
@@ -476,8 +470,6 @@ class TestHistoryPanelSearchOnOpen(unittest.TestCase):
     def _get_history_btn_click_body(self) -> str:
         """Extract the historyBtn click handler body."""
         idx = self._js.index("historyBtn.addEventListener('click',")
-        # Find the matching closing of this handler — look for next top-level
-        # addEventListener on a different element
         end = self._js.index("sidebarClose.addEventListener(", idx)
         return self._js[idx:end]
 
@@ -497,7 +489,6 @@ class TestHistoryPanelSearchOnOpen(unittest.TestCase):
         """
         import re
 
-        # Find all lines that post a getHistory message
         pattern = re.compile(r"postMessage\(\{[^}]*type:\s*'getHistory'[^}]*\}")
         matches = pattern.findall(self._js)
         assert len(matches) >= 3, (
@@ -515,7 +506,6 @@ class TestHistoryPanelSearchOnOpen(unittest.TestCase):
         events: list[dict] = []
         server.printer.broadcast = lambda ev: events.append(ev)  # type: ignore[assignment]
 
-        # Call with a query — should not crash and should broadcast history
         server._get_history("some search text", offset=0, generation=1)
         assert len(events) == 1
         assert events[0]["type"] == "history"
@@ -590,7 +580,6 @@ class TestMainCssInfiniteScroll(unittest.TestCase):
         assert "bottom: 0" in block
 
     def test_sidebar_overflow_hidden(self) -> None:
-        # Sidebar should have overflow: hidden (not auto) so #history-list scrolls
         idx = self.css.index("#sidebar")
         block = self.css[idx : idx + 500]
         assert "overflow: hidden" in block or "overflow:hidden" in block
@@ -654,7 +643,6 @@ class TestGhostOverlayPaddingAlignment(unittest.TestCase):
         """Extract the padding value from a CSS rule block for an exact selector."""
         import re
 
-        # Find occurrences of the selector that are exact (followed by space or {)
         pattern = re.escape(selector) + r"\s*\{"
         for m_sel in re.finditer(pattern, css):
             brace_start = css.index("{", m_sel.start())
@@ -677,7 +665,6 @@ class TestGhostOverlayPaddingAlignment(unittest.TestCase):
     def test_task_input_has_explicit_padding(self) -> None:
         """#task-input must have explicit padding (not rely on browser defaults)."""
         padding = self._extract_padding(self.css, "#task-input")
-        # Should have all 4 sides specified (shorthand with at least 2 values)
         parts = padding.split()
         assert len(parts) >= 2, (
             f"#task-input padding should be explicit for all sides, got: '{padding}'"
@@ -718,7 +705,6 @@ class TestMainJsInputHistory(unittest.TestCase):
     def test_requests_input_history_on_tasks_updated(self) -> None:
         """tasks_updated handler should request getInputHistory."""
         idx = self._js.index("case 'tasks_updated':")
-        # Check within next 200 chars
         snippet = self._js[idx:idx + 300]
         assert "getInputHistory" in snippet
 
@@ -796,7 +782,6 @@ class TestSorcarTabWorktreeToggle(unittest.TestCase):
     def test_has_tree_svg_icon(self) -> None:
         """Button should have a git-branch-like tree SVG icon."""
         idx = self.html.index('id="worktree-toggle-btn"')
-        # Look at the next 500 chars for the SVG
         block = self.html[idx : idx + 500]
         assert "<svg" in block
         assert "viewBox" in block
@@ -848,7 +833,6 @@ class TestWorktreeServerIntegration(unittest.TestCase):
         result = self.server._handle_worktree_action("merge", "0")
         assert result["success"] is True
         assert "Successfully merged" in result["message"]
-        # Branch should be cleaned up
         assert self.server._get_tab("0").agent._wt_branch is None
 
     def test_handle_worktree_action_discard(self) -> None:
@@ -898,7 +882,6 @@ class TestWorktreeServerIntegration(unittest.TestCase):
         progress_events = [e for e in self.events if e["type"] == "worktree_progress"]
         assert len(progress_events) == 1
         assert "Generating commit message" in progress_events[0]["message"]
-        # Progress must come before result
         relevant = ("worktree_progress", "worktree_result")
         types = [e["type"] for e in self.events if e["type"] in relevant]
         assert types == ["worktree_progress", "worktree_result"]
@@ -951,10 +934,10 @@ class TestAgentToggle(unittest.TestCase):
         tab = server._get_tab("0")
         assert tab.use_worktree is False
         assert isinstance(tab.agent, WorktreeSorcarAgent)
-        assert isinstance(tab.agent, StatefulSorcarAgent)  # subclass
+        assert isinstance(tab.agent, StatefulSorcarAgent)
         original = tab.agent
         tab.use_worktree = True
-        assert tab.agent is original  # same instance after toggle
+        assert tab.agent is original
 
     def test_js_sends_use_worktree_in_submit(self) -> None:
         """main.js includes useWorktree in submit message."""
@@ -969,7 +952,6 @@ class TestAgentToggle(unittest.TestCase):
     def test_ts_start_task_includes_use_worktree(self) -> None:
         """_startTask accepts useWorktree and forwards it in sendCommand."""
         assert "useWorktree?: boolean" in self._ts
-        # Locate the _startTask method body and its sendCommand({...}) call.
         idx = self._ts.index("_startTask(")
         body = self._ts[idx : idx + 2000]
         send_idx = body.index("sendCommand({")
@@ -1021,13 +1003,11 @@ class TestWorktreeActionNotifications(unittest.TestCase):
 
     def test_progress_resolved_on_result(self) -> None:
         """The progress notification is resolved when worktree_result arrives."""
-        # Check that _worktreeActionResolves map is used and cleaned up
         assert "_worktreeActionResolves" in self._ts
         assert ".delete(" in self._ts
 
     def test_progress_title_varies_by_action(self) -> None:
         """Progress title differs for merge vs discard actions."""
-        # The code should branch on wtAction to pick the right message
         assert "wtAction === 'merge'" in self._ts
         assert "wtAction === 'discard'" in self._ts
 
@@ -1192,7 +1172,6 @@ class TestMergeSession(unittest.TestCase):
         import json as _json
 
         if files is None:
-            # Create a dummy base file and current file for a real merge
             base = self.merge_dir / "merge-temp" / "a.txt"
             base.parent.mkdir(parents=True, exist_ok=True)
             base.write_text("old line\n")
@@ -1216,10 +1195,7 @@ class TestMergeSession(unittest.TestCase):
         types = [e["type"] for e in self.events]
         assert "merge_data" in types
         assert "merge_started" in types
-        # merge_data must come before merge_started
         assert types.index("merge_data") < types.index("merge_started")
-        # Server is now in merging state (tab_id is None from main thread,
-        # so no tab's is_merging gets set by _start_merge_session)
 
     def test_start_merge_session_includes_hunk_count(self) -> None:
         """merge_data event includes correct hunk_count."""
@@ -1273,7 +1249,6 @@ class TestMergeSession(unittest.TestCase):
         """Non-'all-done' actions are no-ops on the Python side."""
         self.server._get_tab("0").is_merging = True
         self.server._handle_merge_action("accept")
-        # Still merging — only all-done finishes
         assert self.server._get_tab("0").is_merging is True
 
     def test_finish_merge_cleans_up_data_dir(self) -> None:
@@ -1298,7 +1273,6 @@ class TestMergeSession(unittest.TestCase):
     def test_merging_blocks_same_tab(self) -> None:
         """Cannot start a task on the same tab that has a merge in progress."""
         self.server._get_tab("5").is_merging = True
-        # Simulate _run_task_inner rejecting a task on the merging tab
         self.server._run_task_inner({"prompt": "test", "model": "m", "tabId": "5"})
         errors = [e for e in self.events if e["type"] == "error"]
         assert any("merge review" in e["text"] for e in errors)
@@ -1306,11 +1280,9 @@ class TestMergeSession(unittest.TestCase):
     def test_merging_does_not_block_other_tabs(self) -> None:
         """A merge on one tab does not block tasks on other tabs."""
         self.server._get_tab("5").is_merging = True
-        # _run_task_inner on a different tab should NOT hit the merge error
         self.events.clear()
         self.server._run_task_inner({"prompt": "test", "model": "m", "tabId": "99"})
         errors = [e for e in self.events if e["type"] == "error"]
-        # No "merge review" error for a different tab
         assert not any("merge review" in e.get("text", "") for e in errors)
 
     def test_restore_pending_merge_removed(self) -> None:
@@ -1352,7 +1324,6 @@ class TestMergeDiffViewColumn(unittest.TestCase):
 
     def _get_method_body(self, method: str) -> str:
         """Extract from method definition to the next top-level member."""
-        # Find method definition line (e.g. "  private async _doOpenMerge(")
         import re as _re
 
         escaped = _re.escape(method)
@@ -1363,7 +1334,6 @@ class TestMergeDiffViewColumn(unittest.TestCase):
         m = pat.search(self._ts)
         assert m, f"Method {method} not found"
         start = m.start()
-        # Find the next top-level member declaration
         for marker in ("\n  private ", "\n  public ", "\n  async ", "\n  dispose"):
             try:
                 end = self._ts.index(marker, m.end())
@@ -1405,8 +1375,6 @@ class TestMergeDiffViewColumn(unittest.TestCase):
         """_doOpenMerge no longer calls executeCommand to revert
         (which requires the document to be the active editor)."""
         body = self._get_method_body("_doOpenMerge")
-        # The old code used executeCommand('workbench.action.files.revert').
-        # The new code uses WorkspaceEdit to revert dirty documents.
         assert "executeCommand" not in body
 
     def test_do_open_merge_tracks_first_file_fp(self) -> None:
@@ -1436,7 +1404,6 @@ class TestSorcarTabOpensFilesInLeftSplit(unittest.TestCase):
         m = pat.search(self._ts)
         assert m, f"Case '{case_label}' not found"
         start = m.start()
-        # Find the next case or closing brace
         next_case = _re.search(r"\n\s+case\s+'", self._ts[m.end():])
         if next_case:
             return self._ts[start : m.end() + next_case.start()]
@@ -1473,7 +1440,6 @@ class TestFilePathDoesNotPopulateTaskPanel(unittest.TestCase):
         cls._js = (base / "vscode" / "media" / "main.js").read_text()
         cls._ts = (base / "vscode" / "src" / "SorcarSidebarView.ts").read_text()
 
-    # -- main.js: sendMessage must NOT touch task panel state ----------------
 
     def _get_send_message_body(self) -> str:
         start = self._js.index("function sendMessage()")
@@ -1500,7 +1466,6 @@ class TestFilePathDoesNotPopulateTaskPanel(unittest.TestCase):
         body = self._get_send_message_body()
         assert "welcome.style.display" not in body
 
-    # -- main.js: setTaskText event handler DOES manage task panel state -----
 
     def _get_set_task_text_handler(self) -> str:
         start = self._js.index("case 'setTaskText':")
@@ -1527,14 +1492,12 @@ class TestFilePathDoesNotPopulateTaskPanel(unittest.TestCase):
         body = self._get_set_task_text_handler()
         assert "setTaskText(ev.text" in body
 
-    # -- SorcarSidebarView.ts: file-open path returns before _startTask ------
 
     def test_ts_file_open_returns_before_start_task(self) -> None:
         """The submit handler opens the file and returns *before* _startTask."""
         submit_idx = self._ts.index("case 'submit':")
         submit_end = self._ts.index("break;", submit_idx)
         submit_body = self._ts[submit_idx:submit_end]
-        # The file-open block must contain 'return' before _startTask
         file_check_idx = submit_body.index("isFile()")
         return_idx = submit_body.index("return;", file_check_idx)
         start_task_idx = submit_body.index("this._startTask(")
@@ -1558,7 +1521,6 @@ class TestCollapsiblePanelsJS(unittest.TestCase):
         base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
         cls._js = (base / "vscode" / "media" / "main.js").read_text()
 
-    # -- addCollapse helper function --
 
     def test_has_add_collapse_function(self) -> None:
         assert "function addCollapse(panelEl, headerEl)" in self._js
@@ -1585,12 +1547,10 @@ class TestCollapsiblePanelsJS(unittest.TestCase):
         body = self._js[idx:end]
         assert "stopPropagation" in body
 
-    # -- LLM panel is collapsible --
 
     def test_llm_panel_has_header(self) -> None:
         """LLM panel gets a .llm-panel-hdr div with 'Thoughts' label."""
         assert "llm-panel-hdr" in self._js
-        # Verify it's created with 'Thoughts' text
         idx = self._js.index("llm-panel-hdr")
         block = self._js[idx : idx + 200]
         assert "Thoughts" in block
@@ -1608,19 +1568,16 @@ class TestCollapsiblePanelsJS(unittest.TestCase):
         block = self._js[idx:end]
         assert "addCollapse(rLlmPanel, lHdr)" in block
 
-    # -- Result card is collapsible --
 
     def test_result_card_never_collapsible(self) -> None:
         """Result card does NOT call addCollapse — it is always visible."""
         assert "addCollapse(rc, rc.querySelector('.rc-h'))" not in self._js
 
-    # -- System prompt / Prompt are collapsible --
 
     def test_prompt_calls_add_collapse(self) -> None:
         """System prompt and prompt panels call addCollapse."""
         assert "addCollapse(el, el.querySelector('.' + cls + '-h'))" in self._js
 
-    # -- Tool result is collapsible --
 
     def test_tool_result_has_tr_content_wrapper(self) -> None:
         """Tool result content is wrapped in .tr-content div."""
@@ -1630,18 +1587,15 @@ class TestCollapsiblePanelsJS(unittest.TestCase):
         """Tool result calls addCollapse with .rl as the header."""
         assert "addCollapse(r, r.querySelector('.rl'))" in self._js
 
-    # -- Usage info panels are hidden (not rendered in chat) --
 
     def test_usage_panels_not_rendered(self) -> None:
         """Usage info panels are not rendered in the chat output."""
         assert "usage-hdr" not in self._js
         assert "usage-content" not in self._js
 
-    # -- Error/stopped banners are collapsible --
 
     def test_error_banner_has_tr_content(self) -> None:
         """Error/stopped banners wrap content in .tr-content."""
-        # Find the task_error/task_stopped handler in handleEvent
         idx = self._js.index("case 'task_error':")
         block = self._js[idx : idx + 500]
         assert "tr-content" in block
@@ -1659,7 +1613,6 @@ class TestCollapsiblePanelsJS(unittest.TestCase):
         assert "tr-content" in block
         assert "addCollapse(banner" in block
 
-    # -- Merge info is collapsible --
 
     def test_merge_info_has_header_and_body(self) -> None:
         """Merge info uses .merge-info-hdr and .merge-info-body."""
@@ -1670,11 +1623,9 @@ class TestCollapsiblePanelsJS(unittest.TestCase):
         """Merge info calls addCollapse with the header."""
         assert "addCollapse(mc, mc.querySelector('.merge-info-hdr'))" in self._js
 
-    # -- Excluded panels are NOT collapsible --
 
     def test_followup_bar_not_collapsible(self) -> None:
         """Followup suggestion ('Suggested next') should NOT be collapsible."""
-        # Find the followup_suggestion handler
         idx = self._js.index("case 'followup_suggestion':")
         end = self._js.index("break;", idx) + len("break;")
         body = self._js[idx:end]
@@ -1700,7 +1651,6 @@ class TestAutoCollapseOlderPanelsJS(unittest.TestCase):
         base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
         cls._js = (base / "vscode" / "media" / "main.js").read_text()
 
-    # -- collapseOlderPanels function --
 
     def test_has_collapse_older_panels_function(self) -> None:
         assert "function collapseOlderPanels()" in self._js
@@ -1727,7 +1677,6 @@ class TestAutoCollapseOlderPanelsJS(unittest.TestCase):
         assert "panels.length - 1" in body
         assert "classList.add('collapsed')" in body
 
-    # -- addCollapse marks panels as collapsible --
 
     def test_add_collapse_adds_collapsible_class(self) -> None:
         """addCollapse adds 'collapsible' class to the panel element."""
@@ -1736,7 +1685,6 @@ class TestAutoCollapseOlderPanelsJS(unittest.TestCase):
         body = self._js[idx:end]
         assert "classList.add('collapsible')" in body
 
-    # -- collapseOlderPanels called in processOutputEvent --
 
     def test_called_after_llm_panel_appended(self) -> None:
         """collapseOlderPanels is called after O.appendChild(llmPanel)."""
@@ -1751,12 +1699,10 @@ class TestAutoCollapseOlderPanelsJS(unittest.TestCase):
         body = self._js[idx:end]
         assert "if (target === O) collapseOlderPanels();" in body
 
-    # -- collapseOlderPanels called in handleEvent --
 
     def test_called_after_merge_info_appended(self) -> None:
         """collapseOlderPanels is called after merge-info panel appended."""
         idx = self._js.index("case 'merge_data':")
-        # Skip past early-return break to find the case's closing break
         end = self._js.index("break;\n    }", idx) + len("break;\n    }")
         body = self._js[idx:end]
         assert "collapseOlderPanels()" in body
@@ -1764,12 +1710,10 @@ class TestAutoCollapseOlderPanelsJS(unittest.TestCase):
     def test_called_after_error_banner_appended(self) -> None:
         """collapseOlderPanels is called after error/stopped banner appended."""
         idx = self._js.index("case 'task_error':\n")
-        # Skip past early-return break to find the case's closing break
         end = self._js.index("break;\n    }", idx) + len("break;\n    }")
         body = self._js[idx:end]
         assert "collapseOlderPanels()" in body
 
-    # -- Not called during history replay --
 
     def test_not_called_in_render_adjacent_task(self) -> None:
         """collapseOlderPanels is NOT called in renderAdjacentTask."""
@@ -1847,7 +1791,6 @@ class TestCollapsiblePanelsCSS(unittest.TestCase):
 
     def test_bash_panel_no_max_height(self) -> None:
         """The .bash-panel wrapper itself should not have max-height."""
-        # Find the .bash-panel { ... } block (not .bash-panel-content or -hdr)
         import re
 
         m = re.search(r"\.bash-panel\s*\{([^}]+)\}", self._css)
@@ -1880,7 +1823,6 @@ class TestBashPanelCollapsibleJS(unittest.TestCase):
     def test_bash_panel_not_collapsible(self) -> None:
         """Bash panel does not call addCollapse."""
         block = self._tool_call_block()
-        # addCollapse is called on the tool call panel (c, hdr), not on bash panel
         assert "addCollapse(bp" not in block
 
     def test_bash_panel_has_content_div(self) -> None:
@@ -2072,7 +2014,6 @@ class TestDiffFilesDeletionAtStart(unittest.TestCase):
         current = self._write("current.txt", "C\n")
         hunks = _diff_files(base, current)
         dicts = [_hunk_to_dict(*h) for h in hunks]
-        # First hunk: deletion of A,B at start → cs=0
         assert dicts[0]["cs"] == 0
         assert dicts[0]["bc"] == 2
 
@@ -2152,12 +2093,11 @@ class TestWorktreeActionExceptionHandling(unittest.TestCase):
     def test_merge_exception_still_broadcasts_result(self) -> None:
         """worktree_result is broadcast even when merge raises RuntimeError."""
         self.server._get_tab("0").use_worktree = True
-        # Don't set up _wt — so wt.merge() raises RuntimeError
         self.server._handle_command({"type": "worktreeAction", "action": "merge", "tabId": "0"})
         results = [e for e in self.events if e["type"] == "worktree_result"]
         assert len(results) == 1
         assert results[0]["success"] is False
-        assert results[0]["message"]  # non-empty error message
+        assert results[0]["message"]
 
     def test_discard_exception_still_broadcasts_result(self) -> None:
         """worktree_result is broadcast even when discard raises RuntimeError."""
@@ -2225,7 +2165,6 @@ class TestRunningStateDisablesButtons(unittest.TestCase):
         cls.js = (base / "vscode" / "media" / "main.js").read_text()
         cls.css = (base / "vscode" / "media" / "main.css").read_text()
 
-    # --- JS: buttons disabled when running ---
 
     def test_upload_btn_disabled_when_running(self) -> None:
         assert "if (uploadBtn) uploadBtn.disabled = running" in self.js
@@ -2239,7 +2178,6 @@ class TestRunningStateDisablesButtons(unittest.TestCase):
     def test_run_prompt_btn_disabled_when_running(self) -> None:
         assert "if (runPromptBtn && running) runPromptBtn.disabled = true" in self.js
 
-    # --- JS: history and new-chat NOT disabled ---
 
     def test_history_btn_not_disabled_when_running(self) -> None:
         assert "historyBtn.disabled" not in self.js
@@ -2247,7 +2185,6 @@ class TestRunningStateDisablesButtons(unittest.TestCase):
     def test_clear_btn_not_disabled_when_running(self) -> None:
         assert "clearBtn.disabled" not in self.js
 
-    # --- CSS: disabled styles for correct buttons ---
 
     def test_css_upload_btn_disabled_style(self) -> None:
         assert "#upload-btn:disabled" in self.css
@@ -2284,11 +2221,6 @@ class TestExtractExtrasNoTruncation(unittest.TestCase):
             "file_path": "/a/b.py", "command": "ls", "extra": "val",
         })
         assert result == {"extra": "val"}
-
-
-# ---------------------------------------------------------------------------
-# Secondary sidebar chat view tests
-# ---------------------------------------------------------------------------
 
 
 class TestSecondarySidebarPackageJson(unittest.TestCase):
@@ -2417,8 +2349,6 @@ class TestSorcarSidebarViewTS(unittest.TestCase):
 
     def test_retains_context_when_hidden(self) -> None:
         """resolveWebviewView sets retainContextWhenHidden-equivalent options."""
-        # The provider is registered with retainContextWhenHidden in extension.ts
-        # but the webview options are set in resolveWebviewView
         assert "enableScripts: true" in self._ts
 
     def test_opens_files_in_view_column_one(self) -> None:
@@ -2705,7 +2635,6 @@ class TestSorcarSidebarViewMergeActions(unittest.TestCase):
 
     def test_merge_data_sets_merge_owner(self) -> None:
         """merge_data pushes merge owner tab id from the event to the queue."""
-        # Find merge_data handler
         idx = self._ts.index("msg.type === 'merge_data'")
         block = self._ts[idx : idx + 300]
         assert "_mergeOwnerTabIdQueue" in block
@@ -2830,7 +2759,6 @@ class TestSorcarSidebarViewPublicAPI(unittest.TestCase):
         end = self._ts.index("\n  }", idx) + 4
         body = self._ts[idx:end]
         assert "type: 'clearChat'" in body
-        # Should NOT stop any agent process (no interference with other tabs)
         assert ".stop()" not in body
 
     def test_has_generate_commit_message(self) -> None:
@@ -3163,7 +3091,6 @@ class TestWebviewTabBarJS(unittest.TestCase):
         base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
         cls._js = (base / "vscode" / "media" / "main.js").read_text()
 
-    # -- Tab data model --
 
     def test_make_tab_function_exists(self) -> None:
         assert "function makeTab(title)" in self._js
@@ -3192,7 +3119,6 @@ class TestWebviewTabBarJS(unittest.TestCase):
     def test_active_tab_id_exists(self) -> None:
         assert "let activeTabId = '';" in self._js
 
-    # -- Tab bar rendering --
 
     def test_render_tab_bar_function_exists(self) -> None:
         assert "function renderTabBar()" in self._js
@@ -3227,7 +3153,6 @@ class TestWebviewTabBarJS(unittest.TestCase):
         assert "createNewTab" in body
         assert "New chat" in body
 
-    # -- Creating a new tab --
 
     def test_create_new_tab_function_exists(self) -> None:
         assert "function createNewTab()" in self._js
@@ -3302,7 +3227,6 @@ class TestWebviewTabBarJS(unittest.TestCase):
         body = self._js[idx:end]
         assert "welcomeVisible = true" in body
 
-    # -- Switching tabs --
 
     def test_switch_to_tab_function_exists(self) -> None:
         assert "function switchToTab(tabId)" in self._js
@@ -3339,7 +3263,6 @@ class TestWebviewTabBarJS(unittest.TestCase):
         body = self._js[idx : idx + 100]
         assert "if (tabId === activeTabId) return;" in body
 
-    # -- Closing tabs --
 
     def test_close_tab_function_exists(self) -> None:
         assert "function closeTab(tabId)" in self._js
@@ -3364,7 +3287,6 @@ class TestWebviewTabBarJS(unittest.TestCase):
         body = self._js[idx:end]
         assert "renderTabBar()" in body
 
-    # -- Saving/restoring tab state --
 
     def test_save_current_tab_function_exists(self) -> None:
         assert "function saveCurrentTab()" in self._js
@@ -3396,7 +3318,6 @@ class TestWebviewTabBarJS(unittest.TestCase):
         body = self._js[idx:end]
         assert "tab.outputFragment" in body
 
-    # -- Tab title updates --
 
     def test_update_active_tab_title_function_exists(self) -> None:
         assert "function updateActiveTabTitle(title)" in self._js
@@ -3405,8 +3326,8 @@ class TestWebviewTabBarJS(unittest.TestCase):
         idx = self._js.index("function updateActiveTabTitle(title)")
         end = self._js.index("\n  function ", idx + 1)
         body = self._js[idx:end]
-        assert "30" in body  # max length
-        assert "\\u2026" in body  # ellipsis
+        assert "30" in body
+        assert "\\u2026" in body
 
     def test_update_active_tab_title_renders_tab_bar(self) -> None:
         idx = self._js.index("function updateActiveTabTitle(title)")
@@ -3414,7 +3335,6 @@ class TestWebviewTabBarJS(unittest.TestCase):
         body = self._js[idx:end]
         assert "renderTabBar()" in body
 
-    # -- Persistence --
 
     def test_persist_tab_state_function_exists(self) -> None:
         assert "function persistTabState()" in self._js
@@ -3432,14 +3352,12 @@ class TestWebviewTabBarJS(unittest.TestCase):
         assert "tabs:" in body
         assert "activeTabIndex:" in body
 
-    # -- Tab state restoration at startup --
 
     def test_tabs_restored_from_saved_state(self) -> None:
         """Tabs are restored from vscode.getState() on startup."""
         assert "vscode.getState()" in self._js
         assert "saved.tabs" in self._js
 
-    # -- New chat button creates a new tab --
 
     def test_new_chat_button_calls_create_new_tab(self) -> None:
         """The clearChat handler creates a new tab."""
@@ -3573,7 +3491,6 @@ class TestSorcarSidebarViewFilePathDoesNotPopulateTaskPanel(unittest.TestCase):
         submit_idx = self._ts.index("case 'submit':")
         submit_end = self._ts.index("break;", submit_idx)
         submit_body = self._ts[submit_idx:submit_end]
-        # The file-open block must contain 'return' before _startTask
         file_check_idx = submit_body.index("isFile()")
         return_idx = submit_body.index("return;", file_check_idx)
         start_task_idx = submit_body.index("this._startTask(")
@@ -3582,7 +3499,6 @@ class TestSorcarSidebarViewFilePathDoesNotPopulateTaskPanel(unittest.TestCase):
     def test_start_task_sends_set_task_text(self) -> None:
         """_startTask sends setTaskText to the webview (the only source)."""
         idx = self._ts.index("private _startTask(")
-        # Find next method
         end = self._ts.index("\n  private ", idx + 1)
         body = self._ts[idx:end]
         assert "setTaskText" in body
@@ -3595,7 +3511,6 @@ class TestSorcarSidebarViewFilePathDoesNotPopulateTaskPanel(unittest.TestCase):
         file_check_idx = submit_body.index("isFile()")
         return_idx = submit_body.index("return;", file_check_idx)
         block = submit_body[file_check_idx:return_idx]
-        # File open returns early — no _startTask call in this path
         assert "_startTask" not in block
 
     def test_submit_checks_per_tab_running_before_processing(self) -> None:

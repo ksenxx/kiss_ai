@@ -19,10 +19,6 @@ from typing import Any
 
 import pytest
 
-# ---------------------------------------------------------------------------
-# Agent metadata — drives parameterized tests
-# ---------------------------------------------------------------------------
-
 _AUTH_AGENTS: list[dict[str, Any]] = [
     {
         "module": "kiss.channels.slack_agent",
@@ -278,33 +274,13 @@ def _get_agent(info: dict[str, Any]) -> Any:
     mod = importlib.import_module(info["module"])
     cls = getattr(mod, info["class"])
     agent = cls()
-    agent.web_use_tool = None  # Disable browser for tests
+    agent.web_use_tool = None
     return agent
 
 
 def _get_tools(agent: Any) -> dict[str, Any]:
     """Return auth tools as a name→callable dict."""
     return {t.__name__: t for t in agent._get_auth_tools()}
-
-
-# ---------------------------------------------------------------------------
-# 1. Check prompt references the authenticate function name
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# 2. Check prompt contains expected URLs
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# 3. Check prompt contains expected keywords
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# 4. Empty required parameters are rejected
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("info", _AUTH_AGENTS, ids=_IDS)
@@ -322,11 +298,10 @@ def test_authenticate_rejects_empty_required_params(info: dict[str, Any]) -> Non
     for param_name in info["required_params"]:
         if param_name not in sig.parameters:
             continue
-        # Build kwargs with all params set to valid-looking values except the target
         kwargs: dict[str, Any] = {}
         for p_name, p in sig.parameters.items():
             if p_name == param_name:
-                kwargs[p_name] = ""  # empty — should be rejected
+                kwargs[p_name] = ""
             elif p.annotation in (int, "int"):
                 kwargs[p_name] = 1
             elif p.annotation in (bool, "bool"):
@@ -338,11 +313,6 @@ def test_authenticate_rejects_empty_required_params(info: dict[str, Any]) -> Non
         assert "empty" in lower or "required" in lower or "cannot be empty" in lower, (
             f"authenticate should reject empty '{param_name}', got: {result[:300]}"
         )
-
-
-# ---------------------------------------------------------------------------
-# 5. Empty string (whitespace only) is also rejected
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("info", _AUTH_AGENTS, ids=_IDS)
@@ -357,14 +327,13 @@ def test_authenticate_rejects_whitespace_params(info: dict[str, Any]) -> None:
     auth_fn = tools[info["auth"]]
     sig = inspect.signature(auth_fn)
 
-    # Test first required param with whitespace
     first_param = info["required_params"][0]
     if first_param not in sig.parameters:
         pytest.skip(f"Param {first_param} not in signature")
     kwargs: dict[str, Any] = {}
     for p_name, p in sig.parameters.items():
         if p_name == first_param:
-            kwargs[p_name] = "   "  # whitespace only
+            kwargs[p_name] = "   "
         elif p.annotation in (int, "int"):
             kwargs[p_name] = 1
         elif p.annotation in (bool, "bool"):
@@ -376,16 +345,6 @@ def test_authenticate_rejects_whitespace_params(info: dict[str, Any]) -> None:
     assert "empty" in lower or "required" in lower or "cannot be empty" in lower, (
         f"authenticate should reject whitespace '{first_param}', got: {result[:300]}"
     )
-
-
-# ---------------------------------------------------------------------------
-# 6. Clear → check cycle: clear resets to unauthenticated
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# 7. Auth tool function signatures have expected required params
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("info", _AUTH_AGENTS, ids=_IDS)
@@ -404,20 +363,6 @@ def test_auth_function_has_expected_params(info: dict[str, Any]) -> None:
         )
 
 
-# ---------------------------------------------------------------------------
-# 8. Auth tool docstrings are present and document Args
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# 9. Check and clear tool docstrings are present
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# 10. Browser auth tools return fallback when no browser
-# ---------------------------------------------------------------------------
-
 _BROWSER_AUTH_AGENTS = [a for a in _AUTH_AGENTS if "browser_auth" in a]
 _BROWSER_IDS = [a["class"] for a in _BROWSER_AUTH_AGENTS]
 
@@ -433,21 +378,6 @@ def test_browser_auth_fallback_no_browser(info: dict[str, Any]) -> None:
     assert "browser" in result.lower(), (
         f"Browser fallback should mention 'browser', got: {result[:300]}"
     )
-
-
-# ---------------------------------------------------------------------------
-# 11. Clear auth returns string containing 'cleared'
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# 12. Check auth returns str (not None or other type)
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# 13. Platform-specific agents handle non-darwin platform
-# ---------------------------------------------------------------------------
 
 
 class TestPlatformSpecificAuth:
@@ -496,6 +426,3 @@ class TestPlatformSpecificAuth:
         assert data.get("ok") is False
 
 
-# ---------------------------------------------------------------------------
-# 14. Full cycle: check (unauth) → clear → check (unauth)
-# ---------------------------------------------------------------------------

@@ -30,7 +30,6 @@ class _CommandsMixin:
     """Methods that implement frontend command handlers."""
 
     if TYPE_CHECKING:
-        # Provided by ``VSCodeServer`` / sibling mixins at runtime.
         printer: VSCodePrinter
         _state_lock: threading.Lock
         _tab_states: dict[str, _TabState]
@@ -68,7 +67,6 @@ class _CommandsMixin:
             self, action: str, tab_id: str = "",
         ) -> None: ...
 
-    # -- Command handlers (one per command type) -------------------------
 
     def _cmd_run(self, cmd: dict[str, Any]) -> None:
         """Start an agent task in a background thread."""
@@ -83,8 +81,6 @@ class _CommandsMixin:
                 })
                 self.printer.broadcast({"type": "status", "running": False, "tabId": tab_id})
                 return
-            # RC-NEW-1: create stop_event and queue before starting
-            # the thread so _stop_task always finds a valid event.
             tab.stop_event = threading.Event()
             tab.user_answer_queue = queue.Queue(maxsize=1)
             thread = threading.Thread(
@@ -108,7 +104,7 @@ class _CommandsMixin:
         model = cmd.get("model", tab.selected_model)
         tab.selected_model = model
         with self._state_lock:
-            self._default_model = model  # new tabs inherit latest selection
+            self._default_model = model
         _save_last_model(model)
 
     def _cmd_get_history(self, cmd: dict[str, Any]) -> None:
@@ -138,7 +134,6 @@ class _CommandsMixin:
         if q is None:
             logger.debug("userAnswer dropped: no queue for tabId=%s", ans_tab)
             return
-        # Drain any stale answer, then put the new one (P2/D3 fix)
         while not q.empty():
             try:
                 q.get_nowait()

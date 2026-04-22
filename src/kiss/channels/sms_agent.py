@@ -55,7 +55,6 @@ class SMSChannelBackend(ToolMethodBackend):
 
             self._client = Client(cfg["account_sid"], cfg["auth_token"])
             self._from_number = cfg.get("from_number", "")
-            # Verify credentials
             self._client.api.accounts(cfg["account_sid"]).fetch()
             self._connection_info = f"Authenticated with Twilio account {cfg['account_sid']}"
             return True

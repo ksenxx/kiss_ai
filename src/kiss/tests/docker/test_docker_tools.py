@@ -34,14 +34,8 @@ class TestDockerTools(unittest.TestCase):
     def tearDownClass(cls) -> None:
         cls.env.close()
 
-    # ── Write tests ──────────────────────────────────────────────
-
-    # ── Read tests ───────────────────────────────────────────────
-
-    # ── Edit tests ───────────────────────────────────────────────
 
     def test_write_error(self) -> None:
-        # /dev/null/subdir is guaranteed to fail (not a directory)
         result = self.tools.Write("/dev/null/impossible/test.txt", "fail")
         self.assertIn("exit code:", result)
 

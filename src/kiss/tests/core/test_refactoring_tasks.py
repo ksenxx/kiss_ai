@@ -24,10 +24,6 @@ from kiss.core.models.model import (
 )
 from kiss.core.models.model_info import model
 
-# =========================================================================
-# Task 4: ChannelConfig
-# =========================================================================
-
 
 class TestChannelConfig:
     """Integration tests for ChannelConfig: save, load, clear, missing keys, permissions."""
@@ -40,11 +36,6 @@ class TestChannelConfig:
         cfg.clear()
         assert cfg.load() is None
         assert not cfg.path.exists()
-
-
-# =========================================================================
-# Task 3: _find_tool_call_ids and add_function_results_to_conversation_and_return
-# =========================================================================
 
 
 class TestFindToolCallIds:
@@ -121,11 +112,6 @@ class TestAnthropicAddFunctionResults:
         assert result_msg["content"][1]["tool_use_id"] == "toolu_extra_1"
 
 
-# =========================================================================
-# Task 7: _build_text_based_tools_prompt and _parse_text_based_tool_calls
-# =========================================================================
-
-
 class TestBuildTextBasedToolsPrompt:
     """Tests for _build_text_based_tools_prompt."""
 
@@ -147,11 +133,6 @@ class TestParseTextBasedToolCalls:
         assert calls == []
 
 
-# =========================================================================
-# Task 8: _build_openai_tools_schema and _resolve_openai_tools_schema
-# =========================================================================
-
-
 class TestBuildOpenaiToolsSchema:
     """Tests for Model._build_openai_tools_schema."""
 
@@ -164,7 +145,6 @@ class TestBuildOpenaiToolsSchema:
             """Multi-type function."""
             return ""
 
-        # Manually set annotations to real types (avoids PEP 649/563 issues)
         multi.__annotations__ = {
             "a": int,
             "b": float,
@@ -195,11 +175,6 @@ class TestBuildOpenaiToolsSchema:
         assert props["x"]["type"] == "string"
 
 
-# =========================================================================
-# Task 14: _ArtifactDirProxy
-# =========================================================================
-
-
 class TestArtifactDirProxy:
     """Tests for _ArtifactDirProxy lazy directory creation and thread-safety."""
 
@@ -214,5 +189,4 @@ class TestArtifactDirProxy:
             new_dir = get_artifact_dir()
             assert str(tmp_path) in new_dir
         finally:
-            # Reset state - set back to a temp dir so other tests work
             set_artifact_base_dir(str(Path(original).parent))

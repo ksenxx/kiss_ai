@@ -12,10 +12,6 @@ import sys
 
 import pytest
 
-# ---------------------------------------------------------------------------
-# Channel agent metadata — each entry drives parameterized tests
-# ---------------------------------------------------------------------------
-
 _CHANNEL_AGENTS: list[dict[str, str | bool]] = [
     {
         "module": "kiss.channels.telegram_agent",
@@ -212,21 +208,6 @@ def _load(info: dict) -> tuple:
     return mod, agent_cls, backend_cls
 
 
-# ---------------------------------------------------------------------------
-# Test: Agent instantiation
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Test: Auth trio presence in _get_tools()
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Test: Check auth returns helpful message when unauthenticated
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize("info", _CHANNEL_AGENTS, ids=_CHANNEL_IDS)
 def test_check_auth_unauthenticated(info: dict) -> None:
     """check_*_auth() returns a helpful message when not configured."""
@@ -240,7 +221,6 @@ def test_check_auth_unauthenticated(info: dict) -> None:
     agent.web_use_tool = None
     tools = {t.__name__: t for t in agent._get_tools()}
     result = tools[info["auth_check"]]()
-    # The result should indicate not authenticated
     lower = result.lower()
     assert ("not authenticated" in lower
             or "not configured" in lower
@@ -248,11 +228,6 @@ def test_check_auth_unauthenticated(info: dict) -> None:
             or "authenticate" in lower), (
         f"Expected unauthenticated message, got: {result[:200]}"
     )
-
-
-# ---------------------------------------------------------------------------
-# Test: Clear auth works when not authenticated
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("info", _CHANNEL_AGENTS, ids=_CHANNEL_IDS)
@@ -271,21 +246,6 @@ def test_clear_auth_when_not_authenticated(info: dict) -> None:
     )
 
 
-# ---------------------------------------------------------------------------
-# Test: Backend instantiation and get_tool_methods
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Test: Backend protocol methods exist
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Test: Config persistence roundtrip
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize("info", _CHANNEL_AGENTS, ids=_CHANNEL_IDS)
 def test_config_roundtrip(info: dict) -> None:
     """Config save/load/clear works on real filesystem."""
@@ -296,48 +256,36 @@ def test_config_roundtrip(info: dict) -> None:
     if not config_path_fn or not load_fn or not clear_fn:
         pytest.skip(f"No standard config functions in {info['module']}")
 
-    # Backup existing config
     path = config_path_fn()
     backup = None
     if path.exists():
         backup = path.read_text()
 
     try:
-        # Clear and verify
         clear_fn()
         assert load_fn() is None
 
-        # Load from non-existent returns None
         if path.exists():
             path.unlink()
         assert load_fn() is None
 
-        # Load corrupt JSON returns None
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("{bad json!!")
         assert load_fn() is None
 
-        # Load non-dict JSON returns None
         path.write_text('"just a string"')
         assert load_fn() is None
 
-        # Clear works even when no file
         if path.exists():
             path.unlink()
-        clear_fn()  # Should not raise
+        clear_fn()
 
     finally:
-        # Restore original config
         if backup is not None:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(backup)
         elif path.exists():
             path.unlink()
-
-
-# ---------------------------------------------------------------------------
-# Test: CLI main exits with no args
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("info", _CHANNEL_AGENTS, ids=_CHANNEL_IDS)
@@ -354,7 +302,7 @@ def test_main_exits_with_no_args(info: dict) -> None:
         main_fn()
         pytest.fail("main() should have raised SystemExit")
     except SystemExit:
-        pass  # Expected
+        pass
     finally:
         sys.argv = original_argv
 

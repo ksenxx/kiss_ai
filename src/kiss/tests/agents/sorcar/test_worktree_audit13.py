@@ -31,10 +31,6 @@ from kiss.agents.sorcar.git_worktree import (
 )
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 
 def _make_repo(tmp_path: Path, name: str = "repo") -> Path:
     """Create a minimal git repo with one commit."""
@@ -59,11 +55,6 @@ def _make_repo(tmp_path: Path, name: str = "repo") -> Path:
         capture_output=True,
     )
     return repo
-
-
-# ===================================================================
-# BUG-63: discard() lies when delete_branch silently fails
-# ===================================================================
 
 
 class TestBug63DiscardLiesOnDeleteFailure:
@@ -97,9 +88,6 @@ class TestBug63DiscardLiesOnDeleteFailure:
         """
         repo = _make_repo(tmp_path)
 
-        # Simulate the setup: main repo is on the kiss/wt-* branch
-        # directly (no separate worktree).  Equivalent to a crash
-        # scenario where the main repo got switched to the branch.
         branch = "kiss/wt-bug63a-1"
         subprocess.run(
             ["git", "checkout", "-b", branch],
@@ -107,29 +95,23 @@ class TestBug63DiscardLiesOnDeleteFailure:
             capture_output=True,
         )
 
-        # Build agent state pointing at a non-existent worktree dir
-        # so `remove` is a no-op.
         agent = WorktreeSorcarAgent("test")
         agent._wt = GitWorktree(
             repo_root=repo,
             branch=branch,
-            original_branch=None,  # checkout skipped
+            original_branch=None,
             wt_dir=repo / ".kiss-worktrees" / "nonexistent",
             baseline_commit=None,
         )
 
         msg = agent.discard()
 
-        # BUG-63: the branch still exists because we are on it,
-        # yet the message claims discard success.
         branch_still_exists = GitWorktreeOps.branch_exists(repo, branch)
 
-        # With the fix, the message must WARN about the failure.
         assert branch_still_exists, (
             "Setup sanity check: branch should still exist because "
             "git cannot delete the currently checked-out branch"
         )
-        # FIX assertion: message must NOT claim straight success.
         lower = msg.lower()
         assert ("could not" in lower) or ("failed" in lower) or ("still exists" in lower), (
             "BUG-63: discard() claimed success but branch still "
@@ -147,13 +129,11 @@ class TestBug63DiscardLiesOnDeleteFailure:
         """
         repo = _make_repo(tmp_path)
         branch = "kiss/wt-bug63b-1"
-        # Set up: main is on the kiss branch (simulates post-crash state)
         subprocess.run(
             ["git", "checkout", "-b", branch],
             cwd=repo,
             capture_output=True,
         )
-        # original_branch references a nonexistent branch so checkout fails
         agent = WorktreeSorcarAgent("test")
         agent._wt = GitWorktree(
             repo_root=repo,
@@ -165,9 +145,7 @@ class TestBug63DiscardLiesOnDeleteFailure:
 
         msg = agent.discard()
 
-        # The branch should still exist (can't delete current)
         assert GitWorktreeOps.branch_exists(repo, branch)
-        # Message must mention that delete failed / branch kept
         lower = msg.lower()
         assert "could not" in lower or "failed" in lower or ("still exists" in lower), (
             f"BUG-63: message does not warn that branch remains.\n{msg}"
@@ -195,7 +173,6 @@ class TestBug63DiscardLiesOnDeleteFailure:
 
         msg = agent.discard()
         assert "Discarded branch" in msg
-        # No failure warnings in happy path
         lower = msg.lower()
         assert "could not" not in lower, (
             f"Regression: clean discard message contains failure warning.  Got:\n{msg}"
@@ -211,16 +188,9 @@ class TestBug63DiscardLiesOnDeleteFailure:
 
         sig = inspect.signature(GitWorktreeOps.delete_branch)
         ret = sig.return_annotation
-        # After the fix, return annotation should be ``bool`` (may
-        # be the class or the string "bool" under PEP 563).
         assert ret is bool or ret == "bool", (
             f"BUG-63 FIX: delete_branch must return bool, got {ret!r}"
         )
-
-
-# ===================================================================
-# RED-7: Dead-code removal
-# ===================================================================
 
 
 class TestRed7DeadCodeRemoved:

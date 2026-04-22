@@ -23,10 +23,6 @@ from pathlib import Path
 
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 
 def _make_repo(tmp_path: Path, name: str = "repo") -> Path:
     repo = tmp_path / name
@@ -59,11 +55,6 @@ def _registered_worktrees(repo: Path) -> set[str]:
         if line.startswith("worktree "):
             out.add(line.split(" ", 1)[1])
     return out
-
-
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
 
 
 class TestOrphanDirectoryRemoval:
@@ -101,7 +92,6 @@ class TestOrphanDirectoryRemoval:
             str(Path(p).resolve()) for p in _registered_worktrees(repo)
         }
 
-        # Clean up
         GitWorktreeOps.remove(repo, wt_dir)
         GitWorktreeOps.delete_branch(repo, branch)
 
@@ -115,14 +105,10 @@ class TestOrphanDirectoryRemoval:
         branch = "kiss/wt-stalepair-7"
         wt_dir = repo / ".kiss-worktrees" / "kiss_wt-stalepair-7"
 
-        # Create worktree, then drop its .git link + prune to simulate
-        # a hard crash: directory and branch remain; git no longer tracks
-        # the worktree.
         assert GitWorktreeOps.create(repo, branch, wt_dir)
-        (wt_dir / ".git").unlink()  # break the worktree registration link
-        GitWorktreeOps.prune(repo)  # git forgets the worktree
+        (wt_dir / ".git").unlink()
+        GitWorktreeOps.prune(repo)
 
-        # Verify pre-conditions
         assert wt_dir.exists()
         assert GitWorktreeOps.branch_exists(repo, branch)
         assert str(wt_dir.resolve()) not in {
@@ -161,6 +147,5 @@ class TestOrphanDirectoryRemoval:
         """If ``.kiss-worktrees/`` does not exist, cleanup is a no-op."""
         repo = _make_repo(tmp_path)
         assert not (repo / ".kiss-worktrees").exists()
-        # Should not raise
         result = GitWorktreeOps.cleanup_orphans(repo)
         assert "orphan" in result.lower() or "No orphans" in result

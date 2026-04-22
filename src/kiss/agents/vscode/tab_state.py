@@ -34,7 +34,6 @@ def parse_task_tags(text: str) -> list[str]:
     return tasks if tasks else [text]
 
 
-# Required once per process for ``_force_stop_thread`` in ``task_runner``.
 ctypes.pythonapi.PyThreadState_SetAsyncExc.argtypes = [
     ctypes.c_ulong,
     ctypes.py_object,
@@ -79,12 +78,4 @@ class _TabState:
         self.user_answer_queue: queue.Queue[str] | None = None
         self.is_merging: bool = False
         self.is_running_non_wt: bool = False
-        # BUG-71/BUG-72 fix: True while ``agent.run()`` is executing
-        # and writing to the worktree / working tree.  Cleared in
-        # ``_run_task_inner``'s finally block BEFORE any
-        # ``worktree_done`` broadcast so merge/discard actions that
-        # arrive after the task finishes are not spuriously refused.
-        # Checked by ``_new_chat`` and ``_handle_worktree_action`` to
-        # refuse destructive operations while the agent is still
-        # writing to ``wt_dir``.
         self.is_task_active: bool = False

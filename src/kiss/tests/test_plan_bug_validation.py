@@ -7,9 +7,6 @@ inspecting real code — no mocks, patches, fakes, or test doubles.
 import inspect
 
 
-# ---------------------------------------------------------------------------
-# §19: poller uses public resume_chat_by_id — not private _chat_id
-# ---------------------------------------------------------------------------
 class TestPollerSessionResume:
     def test_poller_uses_resume_chat_by_id(self) -> None:
         """_handle_message() uses resume_chat_by_id instead of mutating _chat_id."""
@@ -25,9 +22,6 @@ class TestPollerSessionResume:
         assert hasattr(StatefulSorcarAgent, "resume_chat_by_id")
 
 
-# ---------------------------------------------------------------------------
-# §22C: _is_current_task_generation removed (dead code — never called)
-# ---------------------------------------------------------------------------
 class TestVSCodeTaskGenerationSync:
     def test_is_current_task_generation_removed(self) -> None:
         """_is_current_task_generation was dead code and has been removed."""
@@ -36,9 +30,6 @@ class TestVSCodeTaskGenerationSync:
         assert not hasattr(VSCodeServer, "_is_current_task_generation")
 
 
-# ---------------------------------------------------------------------------
-# §23: wait_for_reply() has timeout and cancellation support
-# ---------------------------------------------------------------------------
 class TestWaitForReplyHasTimeout:
     def test_slack_wait_for_reply_has_timeout(self) -> None:
         """Slack wait_for_reply accepts timeout_seconds."""
@@ -62,9 +53,6 @@ class TestWaitForReplyHasTimeout:
         assert "timeout_seconds" in sig.parameters
 
 
-# ---------------------------------------------------------------------------
-# §24: IRC backend has disconnect/cleanup lifecycle
-# ---------------------------------------------------------------------------
 class TestIRCBackendLifecycle:
     def test_irc_has_disconnect_method(self) -> None:
         """IRCChannelBackend has a disconnect() method."""
@@ -80,9 +68,6 @@ class TestIRCBackendLifecycle:
         assert "settimeout" in source
 
 
-# ---------------------------------------------------------------------------
-# §25: WhatsApp webhook server has disconnect lifecycle
-# ---------------------------------------------------------------------------
 class TestWhatsAppWebhookLifecycle:
     def test_whatsapp_has_disconnect(self) -> None:
         """WhatsAppChannelBackend has disconnect() method."""
@@ -98,9 +83,6 @@ class TestWhatsAppWebhookLifecycle:
         assert "shutdown" in source or "stop_http_server" in source
 
 
-# ---------------------------------------------------------------------------
-# §26: Relentless agent temp file in project temp area
-# ---------------------------------------------------------------------------
 class TestRelentlessAgentTempFile:
     def test_no_tempfile_mkstemp(self) -> None:
         """RelentlessAgent no longer uses tempfile.mkstemp()."""
@@ -117,9 +99,6 @@ class TestRelentlessAgentTempFile:
         assert '"tmp"' in source or "'tmp'" in source
 
 
-# ---------------------------------------------------------------------------
-# §27: Docker Bash has timeout support
-# ---------------------------------------------------------------------------
 class TestDockerManagerTimeout:
     def test_bash_has_timeout_parameter(self) -> None:
         """DockerManager.Bash() accepts timeout_seconds."""
@@ -136,26 +115,16 @@ class TestDockerManagerTimeout:
         assert "timed out" in source or "timeout" in source
 
 
-# ---------------------------------------------------------------------------
-# §28: Docker output no unconditional newline separator
-# ---------------------------------------------------------------------------
 class TestDockerOutputFormatting:
     def test_no_unconditional_newline(self) -> None:
         """Output parts are joined only when non-empty."""
         from kiss.docker.docker_manager import DockerManager
 
         source = inspect.getsource(DockerManager.Bash)
-        # Should filter empty parts instead of unconditional concatenation
         assert 'stdout + "\\n" + stderr' not in source
         assert "output_parts" in source or "filter" in source or "if part" in source
 
 
-# ---------------------------------------------------------------------------
-# §29: _clean_env() no longer caches stale environment
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
-# §30: no os.chdir() in agent/channel CLIs
-# ---------------------------------------------------------------------------
 class TestNoChdirInEntryPoints:
     def test_sorcar_agent_no_os_chdir(self) -> None:
         """sorcar_agent.py does not use os.chdir()."""
@@ -185,9 +154,6 @@ class TestNoChdirInEntryPoints:
             assert "os.chdir(" not in source, f"{mod.__name__} should not use os.chdir"
 
 
-# ---------------------------------------------------------------------------
-# §31: Webhook backends fail fast on bind error
-# ---------------------------------------------------------------------------
 class TestWebhookBindFailurePropagated:
     def test_whatsapp_connect_fails_on_bind_error(self) -> None:
         """WhatsApp connect() fails if webhook server cannot bind."""
@@ -205,9 +171,6 @@ class TestWebhookBindFailurePropagated:
         assert "return False" in source
 
 
-# ---------------------------------------------------------------------------
-# §32: Webhook backends have distinct default ports
-# ---------------------------------------------------------------------------
 class TestWebhookDistinctPorts:
     def test_each_backend_has_unique_port(self) -> None:
         """Webhook backends use distinct default ports, not all 8080."""
@@ -231,9 +194,6 @@ class TestWebhookDistinctPorts:
         assert len(ports) == len(backends), "All ports should be distinct"
 
 
-# ---------------------------------------------------------------------------
-# §33: SORCAR.md anchored to _kiss_pkg_dir (package directory)
-# ---------------------------------------------------------------------------
 class TestSystemPromptAnchored:
     def test_sorcar_path_uses_pkg_dir(self) -> None:
         """SORCAR.md is resolved relative to _kiss_pkg_dir, not bare CWD."""
@@ -243,9 +203,6 @@ class TestSystemPromptAnchored:
         assert '_kiss_pkg_dir / "SYSTEM.md"' in source or "_kiss_pkg_dir / 'SYSTEM.md'" in source
 
 
-# ---------------------------------------------------------------------------
-# §34: artifact_dir uses lazy resolution, not import-time CWD
-# ---------------------------------------------------------------------------
 class TestArtifactDirLazy:
     def test_get_artifact_dir_function_exists(self) -> None:
         """config exposes get_artifact_dir() for lazy resolution."""
@@ -261,9 +218,6 @@ class TestArtifactDirLazy:
         assert hasattr(config_mod, "set_artifact_base_dir")
 
 
-# ---------------------------------------------------------------------------
-# §35: global_budget_used reads synchronized
-# ---------------------------------------------------------------------------
 class TestGlobalBudgetSynchronizedReads:
     def test_get_global_budget_used_under_lock(self) -> None:
         """Base.get_global_budget_used() reads under _class_lock."""
@@ -280,9 +234,6 @@ class TestGlobalBudgetSynchronizedReads:
         assert "get_global_budget_used()" in source
 
 
-# ---------------------------------------------------------------------------
-# §36: global_budget_used can be reset
-# ---------------------------------------------------------------------------
 class TestGlobalBudgetReset:
     def test_reset_method_exists(self) -> None:
         """Base.reset_global_budget() class method exists."""
@@ -299,9 +250,6 @@ class TestGlobalBudgetReset:
         assert "reset_global_budget" in source
 
 
-# ---------------------------------------------------------------------------
-# §38: typo "Abrubptly" is fixed
-# ---------------------------------------------------------------------------
 class TestPersistenceTypoFixed:
     def test_no_abrubptly_typo(self) -> None:
         """persistence.py no longer contains 'Abrubptly'."""
@@ -318,9 +266,6 @@ class TestPersistenceTypoFixed:
         assert "Abruptly" in source
 
 
-# ---------------------------------------------------------------------------
-# §39: _record_file_usage() is atomic under _db_lock
-# ---------------------------------------------------------------------------
 class TestRecordFileUsageAtomic:
     def test_entire_operation_under_db_lock(self) -> None:
         """INSERT, SELECT COUNT, DELETE, and commit are all inside _db_lock."""
@@ -338,7 +283,6 @@ class TestRecordFileUsageAtomic:
                 break
         assert lock_line is not None
 
-        # Everything after the with statement should be indented more
         for i, line in enumerate(lines):
             if i <= lock_line:
                 continue
@@ -347,18 +291,15 @@ class TestRecordFileUsageAtomic:
                 continue
             indent = len(line) - len(line.lstrip())
             if indent <= lock_indent:
-                break  # we've left the with block
+                break
             if "INSERT INTO file_usage" in stripped:
-                assert True  # inside lock
+                assert True
             if "SELECT COUNT(*)" in stripped:
-                assert True  # inside lock
+                assert True
             if "db.commit()" in stripped:
-                assert True  # inside lock
+                assert True
 
 
-# ---------------------------------------------------------------------------
-# §40: _save_task_result uses task_id, lookup+update atomic under _db_lock
-# ---------------------------------------------------------------------------
 class TestPersistenceTOCTOUFixed:
     def test_save_task_result_uses_lock(self) -> None:
         """_save_task_result() wraps everything under _db_lock."""
@@ -375,9 +316,6 @@ class TestPersistenceTOCTOUFixed:
         assert "task_id" in sig.parameters
 
 
-# ---------------------------------------------------------------------------
-# §41: _add_task returns row ID
-# ---------------------------------------------------------------------------
 class TestAddTaskReturnsRowId:
     def test_add_task_returns_int(self) -> None:
         """_add_task() returns the inserted row ID."""
@@ -387,9 +325,6 @@ class TestAddTaskReturnsRowId:
         assert "lastrowid" in source
         assert "return" in source
 
-# ---------------------------------------------------------------------------
-# §42: _force_stop_thread sets argtypes
-# ---------------------------------------------------------------------------
 class TestForceStopThreadArgtypes:
     def test_argtypes_set_at_module_level(self) -> None:
         """PyThreadState_SetAsyncExc.argtypes is set at module level."""
@@ -399,9 +334,6 @@ class TestForceStopThreadArgtypes:
         assert "PyThreadState_SetAsyncExc.argtypes" in source
 
 
-# ---------------------------------------------------------------------------
-# §43: _close_db() exists
-# ---------------------------------------------------------------------------
 class TestDbConnClosable:
     def test_close_db_exists(self) -> None:
         """persistence._close_db() function exists."""
@@ -410,9 +342,6 @@ class TestDbConnClosable:
         assert hasattr(persistence, "_close_db")
         assert callable(persistence._close_db)
 
-# ---------------------------------------------------------------------------
-# §44: WebUseTool _ensure_browser cleans up on failure
-# ---------------------------------------------------------------------------
 class TestWebUseToolCleanupOnFailure:
     def test_ensure_browser_has_cleanup_on_failure(self) -> None:
         """_ensure_browser calls self.close() in except block."""
@@ -420,7 +349,6 @@ class TestWebUseToolCleanupOnFailure:
 
         source = inspect.getsource(WebUseTool._ensure_browser)
         assert "self.close()" in source
-        # close() is in the except path
         except_idx = source.index("except Exception:")
         close_idx = source.index("self.close()")
         assert close_idx > except_idx

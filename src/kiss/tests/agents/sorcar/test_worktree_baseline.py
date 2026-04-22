@@ -18,10 +18,6 @@ from kiss.agents.sorcar.git_worktree import (
     _git,
 )
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 
 def _make_repo(path: Path) -> Path:
     """Create a git repo with one initial commit at *path*."""
@@ -57,11 +53,6 @@ def _create_worktree(repo: Path, branch: str) -> Path:
     return wt_dir
 
 
-# ---------------------------------------------------------------------------
-# GitWorktree dataclass
-# ---------------------------------------------------------------------------
-
-
 class TestGitWorktreeBaseline:
     """GitWorktree dataclass includes baseline_commit field."""
 
@@ -85,11 +76,6 @@ class TestGitWorktreeBaseline:
         assert wt.baseline_commit == "abc123"
 
 
-# ---------------------------------------------------------------------------
-# save / load baseline commit
-# ---------------------------------------------------------------------------
-
-
 class TestBaselineCommitConfig:
     """Save and load baseline commit SHA via git config."""
 
@@ -108,11 +94,6 @@ class TestBaselineCommitConfig:
             repo = _make_repo(Path(tmp) / "repo")
             result = GitWorktreeOps.load_baseline_commit(repo, "no/such-branch")
             assert result is None
-
-
-# ---------------------------------------------------------------------------
-# copy_dirty_state
-# ---------------------------------------------------------------------------
 
 
 class TestCopyDirtyState:
@@ -154,10 +135,8 @@ class TestCopyDirtyState:
             repo = _make_repo(Path(tmp) / "repo")
             (repo / "README.md").unlink()
             wt_dir = _create_worktree(repo, "kiss/wt-test-5")
-            # README.md exists in the worktree (clean checkout)
             assert (wt_dir / "README.md").exists()
             assert GitWorktreeOps.copy_dirty_state(repo, wt_dir)
-            # Now it should be deleted in the worktree too
             assert not (wt_dir / "README.md").exists()
 
     def test_new_file_in_subdirectory(self) -> None:
@@ -181,11 +160,6 @@ class TestCopyDirtyState:
             assert (wt_dir / "new.txt").read_text() == "new\n"
 
 
-# ---------------------------------------------------------------------------
-# head_sha
-# ---------------------------------------------------------------------------
-
-
 class TestHeadSha:
     """head_sha returns the current HEAD commit SHA."""
 
@@ -202,11 +176,6 @@ class TestHeadSha:
             assert sha is None
 
 
-# ---------------------------------------------------------------------------
-# squash_merge_from_baseline
-# ---------------------------------------------------------------------------
-
-
 class TestSquashMergeFromBaseline:
     """squash_merge_from_baseline merges only agent changes."""
 
@@ -219,7 +188,6 @@ class TestSquashMergeFromBaseline:
             baseline = GitWorktreeOps.head_sha(wt_dir)
             assert baseline is not None
 
-            # No changes after baseline
             _git("checkout", "main", cwd=repo)
             result = GitWorktreeOps.squash_merge_from_baseline(
                 repo, branch, baseline,
@@ -231,7 +199,6 @@ class TestSquashMergeFromBaseline:
         with tempfile.TemporaryDirectory() as tmp:
             repo = _make_repo(Path(tmp) / "repo")
 
-            # Simulate user's dirty state
             (repo / "README.md").write_text("# User edit\n")
             (repo / "user_file.txt").write_text("user content\n")
 
@@ -245,12 +212,10 @@ class TestSquashMergeFromBaseline:
             baseline = GitWorktreeOps.head_sha(wt_dir)
             assert baseline is not None
 
-            # Simulate agent work (after baseline)
             (wt_dir / "agent_file.py").write_text("# agent code\n")
             GitWorktreeOps.stage_all(wt_dir)
             GitWorktreeOps.commit_staged(wt_dir, "agent: add file")
 
-            # Remove worktree, checkout original, merge
             GitWorktreeOps.remove(repo, wt_dir)
             GitWorktreeOps.prune(repo)
             _git("checkout", "main", cwd=repo)
@@ -260,11 +225,7 @@ class TestSquashMergeFromBaseline:
             )
             assert result == MergeResult.SUCCESS
 
-            # Agent file IS committed on main
             assert (repo / "agent_file.py").read_text() == "# agent code\n"
-            # User's dirty files are NOT in the committed state
-            # (they were in baseline, not in the agent diff).
-            # Check the committed state via git show:
             committed_readme = _git(
                 "show", "HEAD:README.md", cwd=repo,
             )
@@ -272,8 +233,7 @@ class TestSquashMergeFromBaseline:
             committed_user = _git(
                 "show", "HEAD:user_file.txt", cwd=repo,
             )
-            assert committed_user.returncode != 0  # file doesn't exist in commit
-            # The working tree still has the user's dirty files (untouched)
+            assert committed_user.returncode != 0
             assert (repo / "README.md").read_text() == "# User edit\n"
             assert (repo / "user_file.txt").read_text() == "user content\n"
 
@@ -286,11 +246,9 @@ class TestSquashMergeFromBaseline:
             baseline = GitWorktreeOps.head_sha(wt_dir)
             assert baseline is not None
 
-            # Agent modifies README
             (wt_dir / "README.md").write_text("# Agent version\n")
             GitWorktreeOps.commit_all(wt_dir, "agent change")
 
-            # On main, also modify README to create conflict
             GitWorktreeOps.remove(repo, wt_dir)
             GitWorktreeOps.prune(repo)
             _git("checkout", "main", cwd=repo)
@@ -303,14 +261,8 @@ class TestSquashMergeFromBaseline:
             )
             assert result == MergeResult.CONFLICT
 
-            # Working tree is clean after reset
             status = _git("status", "--porcelain", cwd=repo)
             assert not status.stdout.strip()
-
-
-# ---------------------------------------------------------------------------
-# End-to-end: worktree with dirty state → baseline → merge
-# ---------------------------------------------------------------------------
 
 
 class TestEndToEndBaselineWorkflow:
@@ -321,24 +273,20 @@ class TestEndToEndBaselineWorkflow:
         with tempfile.TemporaryDirectory() as tmp:
             repo = _make_repo(Path(tmp) / "repo")
 
-            # Create a larger file so merge regions are separable
             original = "line1\nline2\nline3\nline4\nline5\nline6\n"
             (repo / "code.py").write_text(original)
             _git("add", ".", cwd=repo)
             _git("commit", "-m", "add code.py", cwd=repo)
 
-            # User has uncommitted work: dirty line1, new untracked file
             dirty = "line1-dirty\nline2\nline3\nline4\nline5\nline6\n"
             (repo / "code.py").write_text(dirty)
             (repo / "notes.txt").write_text("user notes\n")
 
-            # --- Create worktree ---
             branch = "kiss/wt-full-cycle"
             wt_dir = _create_worktree(repo, branch)
             original_branch = "main"
             GitWorktreeOps.save_original_branch(repo, branch, original_branch)
 
-            # --- Copy dirty state & create baseline ---
             assert GitWorktreeOps.copy_dirty_state(repo, wt_dir)
             GitWorktreeOps.stage_all(wt_dir)
             GitWorktreeOps.commit_staged(
@@ -348,24 +296,19 @@ class TestEndToEndBaselineWorkflow:
             assert baseline is not None
             GitWorktreeOps.save_baseline_commit(repo, branch, baseline)
 
-            # Verify worktree has user's dirty files
             assert (wt_dir / "code.py").read_text() == dirty
             assert (wt_dir / "notes.txt").read_text() == "user notes\n"
 
-            # --- Simulate agent work ---
-            # Agent adds a line at the END (far from user's line1 change)
             agent_version = dirty + "agent-added\n"
             (wt_dir / "code.py").write_text(agent_version)
             (wt_dir / "fix.py").write_text("def fix(): pass\n")
             GitWorktreeOps.stage_all(wt_dir)
             GitWorktreeOps.commit_staged(wt_dir, "agent: implement fix")
 
-            # --- Merge (mirrors the real merge() flow) ---
             GitWorktreeOps.remove(repo, wt_dir)
             GitWorktreeOps.prune(repo)
             _git("checkout", "main", cwd=repo)
 
-            # Stash user's dirty state first (as merge() does)
             did_stash = GitWorktreeOps.stash_if_dirty(repo)
             assert did_stash
 
@@ -374,25 +317,18 @@ class TestEndToEndBaselineWorkflow:
             )
             assert result == MergeResult.SUCCESS
 
-            # Restore user's dirty state
             assert GitWorktreeOps.stash_pop(repo)
 
-            # Agent's new file IS committed
             assert (repo / "fix.py").read_text() == "def fix(): pass\n"
 
-            # Committed code.py has agent's addition on original content
             committed = _git("show", "HEAD:code.py", cwd=repo)
             assert "agent-added" in committed.stdout
-            # User's dirty change (line1-dirty) is NOT in the commit
             assert "line1-dirty" not in committed.stdout
-            # Original line1 is preserved in the commit
             assert committed.stdout.startswith("line1\n")
 
-            # User's notes.txt is NOT in the committed state
             committed_notes = _git("show", "HEAD:notes.txt", cwd=repo)
             assert committed_notes.returncode != 0
 
-            # Working tree still has user's dirty files (restored from stash)
             assert (repo / "notes.txt").read_text() == "user notes\n"
             assert "line1-dirty" in (repo / "code.py").read_text()
 
@@ -403,7 +339,6 @@ class TestEndToEndBaselineWorkflow:
             branch = "kiss/wt-legacy"
             wt_dir = _create_worktree(repo, branch)
 
-            # Agent makes changes directly (no baseline)
             (wt_dir / "agent.py").write_text("# agent\n")
             GitWorktreeOps.commit_all(wt_dir, "agent work")
 
@@ -411,7 +346,6 @@ class TestEndToEndBaselineWorkflow:
             GitWorktreeOps.prune(repo)
             _git("checkout", "main", cwd=repo)
 
-            # No baseline → use regular squash merge
             result = GitWorktreeOps.squash_merge_branch(repo, branch)
             assert result == MergeResult.SUCCESS
             assert (repo / "agent.py").read_text() == "# agent\n"
@@ -433,19 +367,16 @@ class TestEndToEndBaselineWorkflow:
             baseline = GitWorktreeOps.head_sha(wt_dir)
             assert baseline is not None
 
-            # Agent adds one file
             (wt_dir / "agent.py").write_text("# a\n")
             GitWorktreeOps.stage_all(wt_dir)
             GitWorktreeOps.commit_staged(wt_dir, "agent work")
 
-            # Diff baseline..HEAD should show ONLY agent.py
             diff = _git(
                 "diff", "--name-only", baseline, "HEAD", cwd=wt_dir,
             )
             changed = diff.stdout.strip().splitlines()
             assert changed == ["agent.py"]
 
-            # NOT README.md or user.txt (those were in baseline)
 
     def test_uncommitted_agent_changes_visible(self) -> None:
         """Uncommitted agent changes visible via git diff against baseline."""
@@ -463,15 +394,12 @@ class TestEndToEndBaselineWorkflow:
             baseline = GitWorktreeOps.head_sha(wt_dir)
             assert baseline is not None
 
-            # Agent makes uncommitted change
             (wt_dir / "fix.py").write_text("# fix\n")
 
-            # git diff --name-only baseline (includes uncommitted)
             diff = _git(
                 "diff", "--name-only", baseline, cwd=wt_dir,
             )
             changed = diff.stdout.strip().splitlines()
-            # fix.py is untracked, not in diff. Use ls-files:
             untracked = _git(
                 "ls-files", "--others", "--exclude-standard", cwd=wt_dir,
             )
@@ -479,13 +407,7 @@ class TestEndToEndBaselineWorkflow:
                 untracked.stdout.strip().splitlines()
             )
             assert "fix.py" in all_changed
-            # README.md NOT in changed (it's in baseline, not modified after)
             assert "README.md" not in all_changed
-
-
-# ---------------------------------------------------------------------------
-# Restore from git with baseline
-# ---------------------------------------------------------------------------
 
 
 class TestRestoreFromGitWithBaseline:
@@ -554,7 +476,6 @@ class TestRestoreFromGitWithBaseline:
                 branch = "kiss/wt-legacychat-999"
                 _create_worktree(repo, branch)
                 GitWorktreeOps.save_original_branch(repo, branch, "main")
-                # No baseline saved
 
                 agent._restore_from_git(repo)
 

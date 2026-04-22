@@ -40,17 +40,17 @@ class TestStreamStateIsolation(unittest.TestCase):
         def wt_task() -> None:
             printer._thread_local.tab_id = "B"
             printer._current_block_type = "thinking"
-            barrier.wait()  # sync: both threads have set their state
-            barrier2.wait()  # wait for task A to call reset()
+            barrier.wait()
+            barrier2.wait()
             results["B_block_type"] = printer._current_block_type
 
         def non_wt_task() -> None:
             printer._thread_local.tab_id = "A"
             printer._current_block_type = "tool_use"
-            barrier.wait()  # sync
+            barrier.wait()
             printer.reset()
             results["A_block_type"] = printer._current_block_type
-            barrier2.wait()  # release task B
+            barrier2.wait()
 
         t_wt = threading.Thread(target=wt_task, daemon=True)
         t_nwt = threading.Thread(target=non_wt_task, daemon=True)
@@ -124,9 +124,8 @@ class TestRecordingIsolation(unittest.TestCase):
             printer.start_recording()
             with printer._lock:
                 printer._record_event({"type": "thinking_start", "tabId": "B"})
-            barrier.wait()  # sync
-            barrier2.wait()  # wait for task A to stop recording
-            # Record more events after task A has stopped
+            barrier.wait()
+            barrier2.wait()
             with printer._lock:
                 printer._record_event({"type": "thinking_delta", "text": "hi", "tabId": "B"})
             results["B_events"] = printer.stop_recording()
@@ -136,9 +135,9 @@ class TestRecordingIsolation(unittest.TestCase):
             printer.start_recording()
             with printer._lock:
                 printer._record_event({"type": "tool_call", "name": "Read", "tabId": "A"})
-            barrier.wait()  # sync
+            barrier.wait()
             results["A_events"] = printer.stop_recording()
-            barrier2.wait()  # release task B
+            barrier2.wait()
 
         t_wt = threading.Thread(target=wt_task, daemon=True)
         t_nwt = threading.Thread(target=non_wt_task, daemon=True)
@@ -147,10 +146,8 @@ class TestRecordingIsolation(unittest.TestCase):
         t_wt.join(timeout=5)
         t_nwt.join(timeout=5)
 
-        # Task A should only get its own events
         assert len(results["A_events"]) == 1
         assert results["A_events"][0]["type"] == "tool_call"
-        # Task B should get its own events, not destroyed by A's stop
         assert len(results["B_events"]) == 2
         assert results["B_events"][0]["type"] == "thinking_start"
         assert results["B_events"][1]["type"] == "thinking_delta"
@@ -167,16 +164,15 @@ class TestRecordingIsolation(unittest.TestCase):
             printer.start_recording()
             with printer._lock:
                 printer._record_event({"type": "tool_call", "name": "Bash", "tabId": "A"})
-            barrier.wait()  # wait for B to start recording
-            # A's events should still be there
+            barrier.wait()
             with printer._lock:
                 printer._record_event({"type": "tool_result", "content": "ok", "tabId": "A"})
             results["A_events"] = printer.stop_recording()
 
         def task_b() -> None:
             printer._thread_local.tab_id = "B"
-            barrier.wait()  # wait for A to record an event
-            printer.start_recording()  # must not clear A's recording
+            barrier.wait()
+            printer.start_recording()
             with printer._lock:
                 printer._record_event({"type": "text_delta", "text": "hi", "tabId": "B"})
             results["B_events"] = printer.stop_recording()
@@ -203,7 +199,6 @@ class TestRecordingIsolation(unittest.TestCase):
         events = printer.peek_recording()
         assert len(events) == 1
         assert events[0]["type"] == "tool_call"
-        # Recording is still active
         with printer._lock:
             printer._record_event({"type": "tool_result", "content": "ok", "tabId": "A"})
         events = printer.stop_recording()
@@ -230,12 +225,10 @@ class TestConcurrentStopScenario(unittest.TestCase):
         def wt_task() -> None:
             printer._thread_local.tab_id = "wt"
             printer.start_recording()
-            # Start a thinking block
             printer._current_block_type = "thinking"
             printer.broadcast({"type": "thinking_start", "tabId": "wt"})
-            barrier.wait()  # sync
-            barrier2.wait()  # wait for non-wt to finish cleanup
-            # Continue streaming — block type must still be "thinking"
+            barrier.wait()
+            barrier2.wait()
             delta_type = (
                 "thinking_delta"
                 if printer._current_block_type == "thinking"
@@ -250,11 +243,10 @@ class TestConcurrentStopScenario(unittest.TestCase):
             printer._thread_local.tab_id = "nwt"
             printer.start_recording()
             printer._current_block_type = "tool_use"
-            barrier.wait()  # sync
-            # Simulate stop cleanup
+            barrier.wait()
             printer.stop_recording()
             printer.reset()
-            barrier2.wait()  # release wt task
+            barrier2.wait()
 
         t_wt = threading.Thread(target=wt_task, daemon=True)
         t_nwt = threading.Thread(target=non_wt_task, daemon=True)
@@ -263,7 +255,6 @@ class TestConcurrentStopScenario(unittest.TestCase):
         t_wt.join(timeout=5)
         t_nwt.join(timeout=5)
 
-        # The wt task's events must use correct types
         types = [e["type"] for e in wt_events]
         assert types == ["thinking_start", "thinking_delta", "thinking_end"], (
             f"Expected thinking events, got {types}. "
@@ -291,17 +282,17 @@ class TestStopWtPreservesNonWtStreamState(unittest.TestCase):
         def non_wt_task() -> None:
             printer._thread_local.tab_id = "nwt"
             printer._current_block_type = "thinking"
-            barrier.wait()  # sync: both threads have set their state
-            barrier2.wait()  # wait for wt task to call reset()
+            barrier.wait()
+            barrier2.wait()
             results["nwt_block_type"] = printer._current_block_type
 
         def wt_task() -> None:
             printer._thread_local.tab_id = "wt"
             printer._current_block_type = "tool_use"
-            barrier.wait()  # sync
+            barrier.wait()
             printer.reset()
             results["wt_block_type"] = printer._current_block_type
-            barrier2.wait()  # release non-wt task
+            barrier2.wait()
 
         t_nwt = threading.Thread(target=non_wt_task, daemon=True)
         t_wt = threading.Thread(target=wt_task, daemon=True)
@@ -375,9 +366,8 @@ class TestStopWtPreservesNonWtRecording(unittest.TestCase):
             printer.start_recording()
             with printer._lock:
                 printer._record_event({"type": "thinking_start", "tabId": "nwt"})
-            barrier.wait()  # sync
-            barrier2.wait()  # wait for wt task to stop recording
-            # Record more events after wt task has stopped
+            barrier.wait()
+            barrier2.wait()
             with printer._lock:
                 printer._record_event(
                     {"type": "thinking_delta", "text": "analyzing...", "tabId": "nwt"}
@@ -393,9 +383,9 @@ class TestStopWtPreservesNonWtRecording(unittest.TestCase):
                 printer._record_event(
                     {"type": "tool_result", "content": "ok", "tabId": "wt"}
                 )
-            barrier.wait()  # sync
+            barrier.wait()
             results["wt_events"] = printer.stop_recording()
-            barrier2.wait()  # release non-wt task
+            barrier2.wait()
 
         t_nwt = threading.Thread(target=non_wt_task, daemon=True)
         t_wt = threading.Thread(target=wt_task, daemon=True)
@@ -404,11 +394,9 @@ class TestStopWtPreservesNonWtRecording(unittest.TestCase):
         t_nwt.join(timeout=5)
         t_wt.join(timeout=5)
 
-        # Wt task should get its own events
         assert len(results["wt_events"]) == 2
         assert results["wt_events"][0]["type"] == "tool_call"
         assert results["wt_events"][1]["type"] == "tool_result"
-        # Non-wt task should get all its own events, not destroyed by wt's stop
         assert len(results["nwt_events"]) == 3
         assert results["nwt_events"][0]["type"] == "thinking_start"
         assert results["nwt_events"][1]["type"] == "thinking_delta"
@@ -426,8 +414,7 @@ class TestStopWtPreservesNonWtRecording(unittest.TestCase):
             printer.start_recording()
             with printer._lock:
                 printer._record_event({"type": "tool_call", "name": "Read", "tabId": "nwt"})
-            barrier.wait()  # wait for wt to start recording
-            # Non-wt's events should still be there
+            barrier.wait()
             with printer._lock:
                 printer._record_event(
                     {"type": "tool_result", "content": "data", "tabId": "nwt"}
@@ -436,8 +423,8 @@ class TestStopWtPreservesNonWtRecording(unittest.TestCase):
 
         def wt_task() -> None:
             printer._thread_local.tab_id = "wt"
-            barrier.wait()  # wait for non-wt to record an event
-            printer.start_recording()  # must not clear non-wt's recording
+            barrier.wait()
+            printer.start_recording()
             with printer._lock:
                 printer._record_event({"type": "text_delta", "text": "hello", "tabId": "wt"})
             results["wt_events"] = printer.stop_recording()
@@ -475,12 +462,10 @@ class TestStopWtConcurrentScenario(unittest.TestCase):
         def non_wt_task() -> None:
             printer._thread_local.tab_id = "nwt"
             printer.start_recording()
-            # Start a thinking block
             printer._current_block_type = "thinking"
             printer.broadcast({"type": "thinking_start", "tabId": "nwt"})
-            barrier.wait()  # sync
-            barrier2.wait()  # wait for wt to finish cleanup
-            # Continue streaming — block type must still be "thinking"
+            barrier.wait()
+            barrier2.wait()
             delta_type = (
                 "thinking_delta"
                 if printer._current_block_type == "thinking"
@@ -495,11 +480,10 @@ class TestStopWtConcurrentScenario(unittest.TestCase):
             printer._thread_local.tab_id = "wt"
             printer.start_recording()
             printer._current_block_type = "tool_use"
-            barrier.wait()  # sync
-            # Simulate stop cleanup
+            barrier.wait()
             printer.stop_recording()
             printer.reset()
-            barrier2.wait()  # release non-wt task
+            barrier2.wait()
 
         t_nwt = threading.Thread(target=non_wt_task, daemon=True)
         t_wt = threading.Thread(target=wt_task, daemon=True)
@@ -508,7 +492,6 @@ class TestStopWtConcurrentScenario(unittest.TestCase):
         t_nwt.join(timeout=5)
         t_wt.join(timeout=5)
 
-        # The non-wt task's events must use correct types
         types = [e["type"] for e in nwt_events]
         assert types == ["thinking_start", "thinking_delta", "thinking_end"], (
             f"Expected thinking events, got {types}. "

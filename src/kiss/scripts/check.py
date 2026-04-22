@@ -104,7 +104,6 @@ def clean_build_artifacts() -> None:
     """
     project_root = Path(__file__).parent.parent.parent.parent
 
-    # Directories to remove from project root
     dirs_to_remove = [
         "dist",
         "build",
@@ -120,10 +119,8 @@ def clean_build_artifacts() -> None:
 
     removed_count = 0
 
-    # Remove specific directories from project root
     for pattern in dirs_to_remove:
         if "*" in pattern:
-            # Handle glob patterns
             for path in project_root.glob(pattern):
                 if path.is_dir():
                     print(f"  Removing: {path}")
@@ -136,14 +133,12 @@ def clean_build_artifacts() -> None:
                 shutil.rmtree(path)
                 removed_count += 1
 
-    # Remove __pycache__ directories recursively (skip .venv and similar)
     for pycache in project_root.rglob("__pycache__"):
         if pycache.is_dir() and not _should_skip_path(pycache):
             print(f"  Removing: {pycache}")
             shutil.rmtree(pycache)
             removed_count += 1
 
-    # Remove .pyc files recursively (skip .venv and similar)
     for pyc_file in project_root.rglob("*.pyc"):
         if not _should_skip_path(pyc_file):
             print(f"  Removing: {pyc_file}")
@@ -171,14 +166,12 @@ def _sync_extension_version() -> None:
     if not version_file.exists() or not package_json.exists():
         return
 
-    # Extract version from _version.py
     namespace: dict[str, str] = {}
     exec(version_file.read_text(), namespace)  # noqa: S102
     version = namespace.get("__version__", "")
     if not version:
         return
 
-    # Update package.json if needed
     data = json.loads(package_json.read_text())
     if data.get("version") != version:
         data["version"] = version
@@ -221,10 +214,8 @@ def main() -> int:
 
     project_root = Path(__file__).parent.parent.parent.parent
 
-    # Find all markdown files for linting
     md_files = find_markdown_files()
 
-    # Sync extension version from _version.py before running checks
     _sync_extension_version()
 
     checks = [
@@ -237,13 +228,11 @@ def main() -> int:
 
     if args.full:
         checks.append((["uv", "run", "pyright", "src/"], "Type check (pyright)"))
-        # VS Code extension checks (npm must be available, node_modules installed)
         vscode_dir = project_root / "src" / "kiss" / "agents" / "vscode"
         if (vscode_dir / "node_modules").is_dir() and shutil.which("npm"):
             cmd = ["npm", "--prefix", str(vscode_dir), "run", "check"]
             checks.append((cmd, "VS Code extension check (typecheck + lint)"))
 
-    # Add markdown lint check if there are markdown files
     if md_files:
         checks.append((["uv", "run", "mdformat", "--check", *md_files], "Lint markdown (mdformat)"))
 
@@ -253,7 +242,7 @@ def main() -> int:
     for cmd, description in checks:
         if not run_command(cmd, description):
             all_passed = False
-            break  # Stop on first failure
+            break
 
     if all_passed:
         print("\n" + "=" * 60)

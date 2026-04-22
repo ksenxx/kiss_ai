@@ -78,12 +78,10 @@ class TestWorkspaceTokenPaths:
     """Tests for workspace-keyed token storage and legacy migration."""
 
     def setup_method(self) -> None:
-        # Back up both default and any workspace tokens
         self._default_backup = _backup_and_clear()
         self._created_dirs: list[Path] = []
 
     def teardown_method(self) -> None:
-        # Clean up workspace dirs we created
         for d in self._created_dirs:
             shutil.rmtree(d, ignore_errors=True)
         _restore(self._default_backup)
@@ -98,7 +96,6 @@ class TestWorkspaceTokenPaths:
             assert not legacy.exists()
             assert _load_token() == "xoxb-legacy"
         finally:
-            # Clean up in case of failure
             if legacy.exists():
                 legacy.unlink()
 
@@ -162,7 +159,6 @@ class TestListWorkspaces:
 
     def test_no_slack_dir(self, capsys: pytest.CaptureFixture[str]) -> None:
         """_list_workspaces() prints 'No workspaces found.' when _SLACK_DIR missing."""
-        # Temporarily rename _SLACK_DIR if it exists
         import kiss.channels.slack_agent as mod
 
         original = mod._SLACK_DIR
@@ -345,11 +341,6 @@ class TestSlackAgent:
         assert _load_token() is None
 
 
-# ---------------------------------------------------------------------------
-# Helpers for chat persistence tests (redirect DB to temp dir)
-# ---------------------------------------------------------------------------
-
-
 def _redirect_db(tmpdir: str) -> tuple:
     """Redirect persistence DB to a temp dir and reset singleton connection."""
     old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
@@ -370,7 +361,7 @@ def _intercept_run(agent: SlackAgent, captured: dict[str, Any]) -> Any:
 
     Returns the original method so it can be restored.
     """
-    parent_class = cast(Any, SorcarAgent.__mro__[1])  # RelentlessAgent
+    parent_class = cast(Any, SorcarAgent.__mro__[1])
     original = parent_class.run
 
     def intercepted_run(self_agent: object, **kwargs: object) -> str:
@@ -419,7 +410,6 @@ class TestSlackAgentChatPersistence:
             agent.run(prompt_template="pre-existing task")
         finally:
             parent_class.run = original
-        # Now run main() with -n -t "new task"
         captured2: dict[str, Any] = {}
         original2 = _intercept_run(agent, captured2)
         original_argv = sys.argv
@@ -430,7 +420,6 @@ class TestSlackAgentChatPersistence:
             parent_class.run = original2
             sys.argv = original_argv
 
-        # The prompt should NOT contain previous task history (fresh session)
         prompt = str(captured2.get("prompt_template", ""))
         assert "# Task\nnew task" in prompt
         assert "pre-existing task" not in prompt
@@ -447,7 +436,6 @@ class TestSlackAgentChatPersistence:
         finally:
             parent_class.run = original
 
-        # Run main() without -n, with same task description
         captured2: dict[str, Any] = {}
         original2 = _intercept_run(agent, captured2)
         original_argv = sys.argv
@@ -458,7 +446,6 @@ class TestSlackAgentChatPersistence:
             parent_class.run = original2
             sys.argv = original_argv
 
-        # The prompt should include previous context
         prompt = str(captured2.get("prompt_template", ""))
         assert "## Previous tasks and results" in prompt
         assert "### Task 1\nresumable task" in prompt

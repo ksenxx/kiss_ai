@@ -40,10 +40,6 @@ from kiss.agents.sorcar.git_worktree import (
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.server import VSCodeServer
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 
 def _make_repo(path: Path) -> Path:
     """Create a minimal git repo with one commit."""
@@ -86,11 +82,6 @@ class _RecordingPrinter:
         self.events.append(event)
 
 
-# ===========================================================================
-# BUG-66: _emit_pending_worktree doesn't auto-discard empty worktrees
-# ===========================================================================
-
-
 class TestBug66EmitPendingNoAutoDiscard:
     """``_emit_pending_worktree`` must auto-discard pending worktrees
     with no changed files, consistent with ``_run_task_inner`` and
@@ -122,22 +113,18 @@ class TestBug66EmitPendingNoAutoDiscard:
             original_branch="main",
             wt_dir=wt_dir,
         )
-        # Worktree has no changes → changed files will be empty
 
         printer = _RecordingPrinter()
         server.printer = cast(Any, printer)
         server._emit_pending_worktree(tab_id)
 
-        # The worktree should have been auto-discarded
         assert agent._wt is None, (
             "BUG-66: _emit_pending_worktree did not auto-discard the "
             "empty-change worktree.  The branch should have been cleaned up."
         )
-        # The branch should be deleted
         assert not GitWorktreeOps.branch_exists(repo, branch), (
             "BUG-66: branch still exists after auto-discard."
         )
-        # No worktree_done event should have been broadcast
         wt_done = [e for e in printer.events if e.get("type") == "worktree_done"]
         assert not wt_done, (
             "BUG-66: worktree_done was broadcast for an empty worktree "
@@ -169,25 +156,21 @@ class TestBug66EmitPendingNoAutoDiscard:
             original_branch="main",
             wt_dir=wt_dir,
         )
-        # Create a real change in the worktree
         (wt_dir / "new_file.txt").write_text("agent work\n")
 
         printer = _RecordingPrinter()
         server.printer = cast(Any, printer)
         server._emit_pending_worktree(tab_id)
 
-        # The worktree should NOT be discarded — it has changes
         assert agent._wt is not None, (
             "Regression: pending worktree WITH changes was auto-discarded."
         )
-        # Either merge_started or worktree_done should be broadcast
         types = {e.get("type") for e in printer.events}
         assert types & {"merge_started", "worktree_done"}, (
             "Regression: neither merge_started nor worktree_done broadcast "
             f"for changed worktree.  Events: {printer.events}"
         )
 
-        # Cleanup
         GitWorktreeOps.remove(repo, wt_dir)
         GitWorktreeOps.delete_branch(repo, branch)
 
@@ -202,7 +185,6 @@ class TestBug66EmitPendingNoAutoDiscard:
         server = VSCodeServer()
         server.work_dir = str(repo)
 
-        # Set up a "running" non-wt tab
         other_tab = server._get_tab("other")
         other_tab.is_running_non_wt = True
 
@@ -226,25 +208,17 @@ class TestBug66EmitPendingNoAutoDiscard:
         server.printer = cast(Any, printer)
         server._emit_pending_worktree(tab_id)
 
-        # Should NOT auto-discard because non-wt task is running
         assert agent._wt is not None, (
             "Auto-discard should be skipped when non-wt task is running."
         )
-        # Should broadcast worktree_done as fallback
         wt_done = [e for e in printer.events if e.get("type") == "worktree_done"]
         assert wt_done, (
             "worktree_done should be broadcast when non-wt blocks discard."
         )
 
-        # Cleanup
         other_tab.is_running_non_wt = False
         GitWorktreeOps.remove(repo, wt_dir)
         GitWorktreeOps.delete_branch(repo, branch)
-
-
-# ===========================================================================
-# BUG-67: _start_merge_session is_merging stuck on broadcast failure
-# ===========================================================================
 
 
 class TestBug67IsMergingStuckOnBroadcastFailure:
@@ -283,17 +257,14 @@ class TestBug67IsMergingStuckOnBroadcastFailure:
         tab_id = "tab-bug67"
         tab = server._get_tab(tab_id)
 
-        # Use a printer that raises on merge_data broadcast
         printer = _RecordingPrinter(raise_on="merge_data")
         server.printer = cast(Any, printer)
 
         merge_json = self._write_merge_json(tmp_path / "merge")
-        # _start_merge_session should handle the broadcast failure
-        # gracefully — is_merging must not be stuck True
         try:
             server._start_merge_session(merge_json, tab_id=tab_id)
         except BrokenPipeError:
-            pass  # It's OK if the exception propagates
+            pass
 
         assert not tab.is_merging, (
             "BUG-67: is_merging is stuck True after broadcast failure.  "
@@ -331,7 +302,6 @@ class TestBug67IsMergingStuckOnBroadcastFailure:
         tab_id = "tab-bug67-second"
         tab = server._get_tab(tab_id)
 
-        # Raise on the second broadcast (merge_started)
         printer = _RecordingPrinter(raise_on="merge_started")
         server.printer = cast(Any, printer)
 
@@ -347,11 +317,6 @@ class TestBug67IsMergingStuckOnBroadcastFailure:
         )
 
 
-# ===========================================================================
-# RED-9: _restore_pending_merge is dead code
-# ===========================================================================
-
-
 class TestRed9RestorePendingMergeDeadCode:
     """``_restore_pending_merge`` is not called by any production module."""
 
@@ -362,13 +327,10 @@ class TestRed9RestorePendingMergeDeadCode:
         src_root = Path(__file__).resolve().parents[4] / "agents"
         offenders: list[str] = []
         for py in src_root.rglob("*.py"):
-            # Skip test files and the defining file's definition line
             if "test" in py.name.lower():
                 continue
             text = py.read_text()
-            # Find calls (not the definition itself)
             for match in re.finditer(r"\b_restore_pending_merge\b", text):
-                # Check it's not the def line
                 line_start = text.rfind("\n", 0, match.start()) + 1
                 line = text[line_start : text.find("\n", match.end())]
                 if "def _restore_pending_merge" in line:

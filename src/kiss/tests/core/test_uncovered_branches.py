@@ -224,33 +224,27 @@ class TestGetAvailableModels:
         ]
         saved = {k: os.environ.get(k) for k in env_keys}
         try:
-            # Clear all keys
             for k in env_keys:
                 os.environ.pop(k, None)
             config_module.DEFAULT_CONFIG = config_module.Config()
-            assert get_default_model() == "claude-opus-4-6"  # fallback
+            assert get_default_model() == "claude-opus-4-6"
 
-            # Together only
             os.environ["TOGETHER_API_KEY"] = "t"
             config_module.DEFAULT_CONFIG = config_module.Config()
             assert get_default_model() == "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8"
 
-            # OpenAI beats Together
             os.environ["OPENAI_API_KEY"] = "t"
             config_module.DEFAULT_CONFIG = config_module.Config()
             assert get_default_model() == "gpt-5.4"
 
-            # Gemini beats OpenAI
             os.environ["GEMINI_API_KEY"] = "t"
             config_module.DEFAULT_CONFIG = config_module.Config()
             assert get_default_model() == "gemini-3.1-pro-preview"
 
-            # OpenRouter beats Gemini
             os.environ["OPENROUTER_API_KEY"] = "t"
             config_module.DEFAULT_CONFIG = config_module.Config()
             assert get_default_model() == "openrouter/anthropic/claude-opus-4.6"
 
-            # Anthropic beats all
             os.environ["ANTHROPIC_API_KEY"] = "t"
             config_module.DEFAULT_CONFIG = config_module.Config()
             assert get_default_model() == "claude-opus-4-6"

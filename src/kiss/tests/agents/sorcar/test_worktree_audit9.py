@@ -51,10 +51,6 @@ from kiss.agents.sorcar.worktree_sorcar_agent import (
 )
 from kiss.agents.vscode.server import VSCodeServer
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 
 def _make_repo(tmp_path: Path, name: str = "repo") -> Path:
     """Create a bare-minimum git repo with one commit."""
@@ -78,11 +74,6 @@ def _make_repo(tmp_path: Path, name: str = "repo") -> Path:
     return repo
 
 
-# ===================================================================
-# BUG-39 FIX: is_running_non_wt cleared early + in except handler
-# ===================================================================
-
-
 class TestBug39Fix:
     """BUG-39 FIX: Verify `is_running_non_wt = False` is guaranteed
     to run (via try/finally or except handler) AND is also present in
@@ -99,17 +90,14 @@ class TestBug39Fix:
         merge view preparation, guaranteeing it always runs.
         (BUG-61 fix supersedes original BUG-39 ordering.)"""
         src = inspect.getsource(VSCodeServer._run_task_inner)
-        # Use the outer finally (contains _record_model_usage)
         outer_finally = src.find("_record_model_usage")
         assert outer_finally > 0
         finally_block = src[outer_finally:]
 
-        # The flag clear must be present in the finally block
         assert "is_running_non_wt = False" in finally_block, (
             "BUG-39: flag clear must be in the finally block"
         )
 
-        # The merge view must appear BEFORE the flag clear (BUG-61)
         merge_pos = finally_block.find("_prepare_and_start_merge")
         flag_pos = finally_block.find("is_running_non_wt = False")
         assert merge_pos > 0 and flag_pos > 0, (
@@ -122,7 +110,6 @@ class TestBug39Fix:
     def test_flag_cleared_in_except_handler(self):
         """The except BaseException handler also clears the flag."""
         src = inspect.getsource(VSCodeServer._run_task_inner)
-        # Find the LAST except BaseException (cleanup handler)
         except_positions = [
             i for i in range(len(src))
             if src[i:].startswith("except BaseException:")
@@ -156,11 +143,6 @@ class TestBug39Fix:
                 )
 
 
-# ===================================================================
-# BUG-40 / INC-4 FIX: Clean return semantics in _do_merge
-# ===================================================================
-
-
 class TestBug40Inc4Fix:
     """BUG-40/INC-4 FIX: _do_merge returns MergeResult.CHECKOUT_FAILED
     instead of (None, err), and _release_worktree never misattributes
@@ -172,7 +154,6 @@ class TestBug40Inc4Fix:
         assert "MergeResult.CHECKOUT_FAILED" in src, (
             "Expected CHECKOUT_FAILED in _do_merge"
         )
-        # Should NOT return (None, err) anymore
         assert "return (None," not in src, (
             "Should not return None as result anymore"
         )
@@ -215,24 +196,16 @@ class TestBug40Inc4Fix:
 
         agent._release_worktree()
 
-        # FIX: _stash_pop_warning should NOT be set on checkout failure
         assert agent._stash_pop_warning is None, (
             "Checkout error must NOT be stored in _stash_pop_warning"
         )
-        # _merge_conflict_warning should be set
         assert agent._merge_conflict_warning is not None
         assert "checkout" in agent._merge_conflict_warning.lower()
 
-        # Cleanup
         GitWorktreeOps.remove(repo, wt_dir)
         GitWorktreeOps.prune(repo)
         if GitWorktreeOps.branch_exists(repo, branch):
             GitWorktreeOps.delete_branch(repo, branch)
-
-
-# ===================================================================
-# BUG-41 / RED-6 FIX: _start_merge_session accepts tab_id
-# ===================================================================
 
 
 class TestBug41Red6Fix:
@@ -266,7 +239,6 @@ class TestBug41Red6Fix:
         tab = server._get_tab("replay-tab")
         assert not tab.is_merging
 
-        # Create a minimal merge JSON file
         merge_dir = tmp_path / "merge"
         merge_dir.mkdir()
         merge_json = merge_dir / "pending-merge.json"
@@ -277,7 +249,6 @@ class TestBug41Red6Fix:
             }],
         }))
 
-        # Call with explicit tab_id (thread-local is NOT set)
         result = server._start_merge_session(
             str(merge_json), tab_id="replay-tab",
         )
@@ -285,11 +256,6 @@ class TestBug41Red6Fix:
         assert tab.is_merging, (
             "is_merging must be True when tab_id is passed explicitly"
         )
-
-
-# ===================================================================
-# BUG-42 / INC-5 FIX: Auto-discard guarded by _any_non_wt_running
-# ===================================================================
 
 
 class TestBug42Inc5Fix:
@@ -304,14 +270,12 @@ class TestBug42Inc5Fix:
         to it, so the guard must be present in the helper.
         """
         helper_src = inspect.getsource(VSCodeServer._present_pending_worktree)
-        # The guard must appear before the discard call in the helper.
         discard_pos = helper_src.find("tab.agent.discard()")
         assert discard_pos > 0
         context = helper_src[max(0, discard_pos - 500):discard_pos]
         assert "_any_non_wt_running" in context, (
             "Auto-discard in the shared helper must check _any_non_wt_running"
         )
-        # _run_task_inner must delegate to the shared helper.
         runner_src = inspect.getsource(VSCodeServer._run_task_inner)
         assert "_present_pending_worktree" in runner_src, (
             "_run_task_inner must delegate pending-worktree handling "
@@ -341,8 +305,6 @@ class TestBug42Inc5Fix:
         ``_any_non_wt_running``.  The helper is therefore the point
         where the guard is enforced; the caller just invokes it.
         """
-        # _check_worktree_busy is the shared guard helper used by
-        # _handle_worktree_action for both merge and discard paths.
         busy_src = inspect.getsource(VSCodeServer._check_worktree_busy)
         assert "_any_non_wt_running" in busy_src, (
             "_check_worktree_busy must consult _any_non_wt_running"
@@ -353,8 +315,6 @@ class TestBug42Inc5Fix:
         ):
             src = inspect.getsource(getattr(VSCodeServer, name))
             if "tab.agent.discard()" in src or "wt.discard()" in src:
-                # Either the method checks _any_non_wt_running directly,
-                # or it delegates to _check_worktree_busy (which does).
                 assert (
                     "_any_non_wt_running" in src
                     or "_check_worktree_busy" in src
@@ -362,11 +322,6 @@ class TestBug42Inc5Fix:
                     f"{name} must guard discard with _any_non_wt_running "
                     "(directly or via _check_worktree_busy)"
                 )
-
-
-# ===================================================================
-# BUG-43 FIX: Correct manual merge instructions with baseline
-# ===================================================================
 
 
 class TestBug43Fix:
@@ -401,7 +356,6 @@ class TestBug43Fix:
     def test_release_worktree_uses_correct_instructions(self):
         """_release_worktree uses _manual_merge_cmd for instructions."""
         src = inspect.getsource(WorktreeSorcarAgent._release_worktree)
-        # Should reference merge_cmd not hardcoded merge --squash
         assert "merge_cmd" in src
         assert "git merge --squash" not in src, (
             "Should not hardcode 'git merge --squash' in instructions"
@@ -411,8 +365,6 @@ class TestBug43Fix:
         """merge() uses _manual_merge_cmd for instructions."""
         src = inspect.getsource(WorktreeSorcarAgent.merge)
         assert "merge_cmd" in src
-        # merge --squash should not appear in the conflict/failure messages
-        # (only _manual_merge_cmd generates the correct command)
         lines_with_merge_squash = [
             line for line in src.splitlines()
             if "git merge --squash" in line and "#" not in line.split("git merge")[0]
@@ -435,7 +387,6 @@ class TestBug43Fix:
         wt_dir = repo / ".kiss-worktrees" / "wt-bug43"
         GitWorktreeOps.create(repo, branch, wt_dir)
 
-        # Simulate dirty state baseline
         (wt_dir / "dirty.txt").write_text("user dirty content")
         subprocess.run(["git", "add", "-A"], cwd=wt_dir, capture_output=True)
         subprocess.run(
@@ -447,7 +398,6 @@ class TestBug43Fix:
             cwd=wt_dir, capture_output=True, text=True,
         ).stdout.strip()
 
-        # Agent work
         (wt_dir / "agent.txt").write_text("agent work")
         subprocess.run(["git", "add", "-A"], cwd=wt_dir, capture_output=True)
         subprocess.run(
@@ -464,10 +414,8 @@ class TestBug43Fix:
         )
         cmd = _manual_merge_cmd(wt)
 
-        # The command should be cherry-pick
         assert "cherry-pick" in cmd
 
-        # Execute the command and verify only agent changes applied
         result = subprocess.run(
             cmd.split(), cwd=repo, capture_output=True, text=True,
         )
@@ -482,17 +430,11 @@ class TestBug43Fix:
             "Cherry-pick should NOT include baseline dirty state"
         )
 
-        # Cleanup
         subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=repo, capture_output=True)
         GitWorktreeOps.remove(repo, wt_dir)
         GitWorktreeOps.prune(repo)
         if GitWorktreeOps.branch_exists(repo, branch):
             GitWorktreeOps.delete_branch(repo, branch)
-
-
-# ===================================================================
-# BUG-44 FIX: _new_chat guard checks _wt_pending regardless of mode
-# ===================================================================
 
 
 class TestBug44Fix:
@@ -502,7 +444,6 @@ class TestBug44Fix:
     def test_guard_does_not_require_use_worktree(self):
         """The guard condition does NOT require tab.use_worktree."""
         src = inspect.getsource(VSCodeServer._new_chat)
-        # Should check _wt_pending without requiring use_worktree
         assert "tab.agent._wt_pending" in src
         assert "tab.use_worktree and tab.agent._wt_pending" not in src, (
             "Guard should NOT require use_worktree"
@@ -529,20 +470,13 @@ class TestBug44Fix:
         tab.use_worktree = False
 
         assert tab.agent._wt_pending
-        # The guard condition now fires even with use_worktree=False
         assert tab.agent._wt_pending, "Guard should check _wt_pending alone"
 
-        # Cleanup
         GitWorktreeOps.remove(repo, wt_dir)
         GitWorktreeOps.prune(repo)
         if GitWorktreeOps.branch_exists(repo, branch):
             GitWorktreeOps.delete_branch(repo, branch)
         tab.agent._wt = None
-
-
-# ===================================================================
-# INC-6 FIX: _check_merge_conflict includes staged files
-# ===================================================================
 
 
 class TestInc6Fix:
@@ -565,7 +499,6 @@ class TestInc6Fix:
         GitWorktreeOps.create(repo, branch, wt_dir)
         GitWorktreeOps.save_original_branch(repo, branch, "main")
 
-        # Agent modifies init.txt in the worktree
         (wt_dir / "init.txt").write_text("agent changes")
         subprocess.run(["git", "add", "-A"], cwd=wt_dir, capture_output=True)
         subprocess.run(
@@ -573,7 +506,6 @@ class TestInc6Fix:
             cwd=wt_dir, capture_output=True,
         )
 
-        # User stages a conflicting change to init.txt in main repo
         (repo / "init.txt").write_text("user staged change")
         subprocess.run(["git", "add", "init.txt"], cwd=repo, capture_output=True)
 
@@ -593,7 +525,6 @@ class TestInc6Fix:
             "INC-6 fix: staged file overlap must be detected"
         )
 
-        # Cleanup
         subprocess.run(["git", "reset", "HEAD", "init.txt"], cwd=repo, capture_output=True)
         subprocess.run(["git", "checkout", "--", "init.txt"], cwd=repo, capture_output=True)
         GitWorktreeOps.remove(repo, wt_dir)
@@ -606,11 +537,6 @@ class TestInc6Fix:
         assert hasattr(GitWorktreeOps, "staged_files")
         sig = inspect.signature(GitWorktreeOps.staged_files)
         assert "repo" in sig.parameters
-
-
-# ===================================================================
-# RED-5 FIX: Single if-not-worktree block in finally
-# ===================================================================
 
 
 class TestRed5Fix:
@@ -636,8 +562,6 @@ class TestRed5Fix:
             positions.append(pos)
             start = pos + 1
 
-        # Check that no two occurrences are close together (< 100 chars)
-        # which would indicate redundant adjacent blocks.
         for i in range(len(positions) - 1):
             gap = positions[i + 1] - positions[i]
             assert gap > 100, (
@@ -651,7 +575,6 @@ class TestRed5Fix:
         is True, then the flag is cleared in a ``finally`` block.
         """
         src = inspect.getsource(VSCodeServer._run_task_inner)
-        # Use the outer finally (contains _record_model_usage)
         outer_finally = src.find("_record_model_usage")
         assert outer_finally > 0
         finally_block = src[outer_finally:]
@@ -659,15 +582,9 @@ class TestRed5Fix:
         flag_pos = finally_block.find("tab.is_running_non_wt = False")
         merge_pos = finally_block.find("_prepare_and_start_merge")
         assert flag_pos > 0 and merge_pos > 0
-        # BUG-61: merge view BEFORE flag clear
         assert merge_pos < flag_pos, (
             "BUG-61: merge view must be before flag clear"
         )
-
-
-# ===================================================================
-# RED-6 FIX: See BUG-41 tests above
-# ===================================================================
 
 
 class TestRed6Fix:
@@ -676,7 +593,6 @@ class TestRed6Fix:
     def test_uses_explicit_tab_id_with_fallback(self):
         """Uses explicit tab_id, falling back to thread-local only when empty."""
         src = inspect.getsource(VSCodeServer._start_merge_session)
-        # Should use the parameter first, then fall back
         assert "resolved_tab_id = tab_id or" in src or "tab_id or getattr" in src, (
             "Should use explicit tab_id with thread-local fallback"
         )

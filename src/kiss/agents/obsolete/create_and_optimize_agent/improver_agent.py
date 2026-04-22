@@ -20,7 +20,7 @@ from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 
 logger = logging.getLogger(__name__)
 
-KISS_PKG_DIR = Path(__file__).parent.parent.parent  # .../kiss/
+KISS_PKG_DIR = Path(__file__).parent.parent.parent
 
 AGENT_EVOLVER_PROMPT_PART1 = """
 You have to optimize an AI agent for long-running complex tasks.
@@ -388,12 +388,10 @@ class ImproverAgent:
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)
             print(f"Error during improvement: {e}")
-            # Clean up partially failed target folder
             if Path(work_dir).exists():
                 shutil.rmtree(work_dir)
             return False, None
 
-        # Create improvement report
         new_report = ImprovementReport(
             metrics={
                 "tokens_used": agent.total_tokens_used,
@@ -440,7 +438,6 @@ class ImproverAgent:
         p_report = self._load_report(primary_report_path)
         s_report = self._load_report(secondary_report_path)
 
-        # Combine ideas from both reports
         merged_report = ImprovementReport(
             metrics={},
             implemented_ideas=(
@@ -458,7 +455,6 @@ class ImproverAgent:
             summary="Crossover of two variants",
         )
 
-        # Save merged report temporarily
         temp_report_path = str(Path(work_dir).parent / "temp_crossover_report.json")
         merged_report.save(temp_report_path)
 

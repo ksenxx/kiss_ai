@@ -109,7 +109,6 @@ class MSTeamsChannelBackend(ToolMethodBackend):
         self, channel_id: str, oldest: str, limit: int = 10
     ) -> tuple[list[dict[str, Any]], str]:
         """Poll MS Teams channel for new messages."""
-        # channel_id format: "team_id:channel_id"
         if not channel_id or ":" not in channel_id:  # pragma: no branch
             return [], oldest
         team_id, chan_id = channel_id.split(":", 1)

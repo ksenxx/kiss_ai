@@ -38,10 +38,6 @@ from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.diff_merge import _merge_data_dir
 from kiss.agents.vscode.server import VSCodeServer
 
-# ---------------------------------------------------------------------------
-# Helpers (same as prior audit test files)
-# ---------------------------------------------------------------------------
-
 
 def _redirect_db(tmpdir: str) -> tuple:
     old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
@@ -103,11 +99,6 @@ def _unpatch_super_run(original: Any) -> None:
     parent_class.run = original
 
 
-# ===================================================================
-# BUG-30 FIX: _try_setup_worktree reads current_branch inside repo_lock
-# ===================================================================
-
-
 class TestBug30Fix:
     """BUG-30 FIX: current_branch is now read inside repo_lock when
     released_branch is None, preventing races with concurrent checkouts.
@@ -126,7 +117,6 @@ class TestBug30Fix:
         source = inspect.getsource(WorktreeSorcarAgent._try_setup_worktree)
         lines = source.splitlines()
 
-        # Find the current_branch call
         current_branch_line = None
         for i, line in enumerate(lines):
             if "current_branch(" in line:
@@ -137,7 +127,6 @@ class TestBug30Fix:
             "sanity: current_branch call found in _try_setup_worktree"
         )
 
-        # Search backwards for an enclosing repo_lock context
         has_enclosing_lock = False
         for i in range(current_branch_line - 1, -1, -1):
             if "with repo_lock(" in lines[i]:
@@ -166,7 +155,6 @@ class TestBug30Fix:
         assert wt is not None
         assert wt.original_branch == "main"
 
-        # Cleanup
         GitWorktreeOps.remove(repo, wt.wt_dir)
         GitWorktreeOps.prune(repo)
         GitWorktreeOps.delete_branch(repo, wt.branch)
@@ -177,11 +165,6 @@ class TestBug30Fix:
         agent._chat_id = "no_prior"
         result = agent._release_worktree()
         assert result is None
-
-
-# ===================================================================
-# BUG-31 FIX: merge() and _release_worktree distinguish MERGE_FAILED
-# ===================================================================
 
 
 class TestBug31Fix:
@@ -224,34 +207,27 @@ class TestBug31Fix:
         wt = agent._wt
         assert wt is not None
 
-        # Agent makes a non-conflicting change
         (wt.wt_dir / "agent_file.txt").write_text("agent work\n")
         GitWorktreeOps.commit_all(wt.wt_dir, "agent changes")
 
-        # Install a pre-commit hook on the MAIN repo that rejects all commits
         hooks_dir = repo / ".git" / "hooks"
         hooks_dir.mkdir(parents=True, exist_ok=True)
         hook = hooks_dir / "pre-commit"
         hook.write_text("#!/bin/sh\nexit 1\n")
         hook.chmod(0o755)
 
-        # Call merge()
         result = agent.merge()
 
-        # Should NOT say "conflict" — it's a commit failure
         assert "conflict" not in result.lower(), (
             f"BUG-31 NOT fixed: merge result says 'conflict': {result}"
         )
-        # Should mention commit failure
         assert "commit failed" in result.lower(), (
             f"BUG-31 NOT fixed: merge result doesn't mention commit failure: {result}"
         )
-        # Should suggest --no-verify
         assert "--no-verify" in result, (
             f"BUG-31 NOT fixed: no --no-verify suggestion: {result}"
         )
 
-        # Cleanup
         hook.unlink()
         GitWorktreeOps.remove(repo, wt.wt_dir)
         GitWorktreeOps.prune(repo)
@@ -271,11 +247,9 @@ class TestBug31Fix:
         wt = agent._wt
         assert wt is not None
 
-        # Agent makes a non-conflicting change
         (wt.wt_dir / "agent_file.txt").write_text("agent work\n")
         GitWorktreeOps.commit_all(wt.wt_dir, "agent changes")
 
-        # Install pre-commit hook that rejects commits
         hooks_dir = repo / ".git" / "hooks"
         hooks_dir.mkdir(parents=True, exist_ok=True)
         hook = hooks_dir / "pre-commit"
@@ -288,28 +262,19 @@ class TestBug31Fix:
         warning = agent._merge_conflict_warning
         assert warning is not None, "Warning should be set"
 
-        # Should NOT say "had conflicts" — it's a commit failure
         assert "had conflicts" not in warning, (
             f"BUG-31 NOT fixed: warning says 'had conflicts': {warning}"
         )
-        # Should mention commit failure
         assert "commit failed" in warning.lower(), (
             f"BUG-31 NOT fixed: warning doesn't mention commit failure: {warning}"
         )
-        # Should suggest --no-verify
         assert "--no-verify" in warning, (
             f"BUG-31 NOT fixed: no --no-verify suggestion: {warning}"
         )
 
-        # Cleanup
         hook.unlink()
         if GitWorktreeOps.branch_exists(repo, wt.branch):
             GitWorktreeOps.delete_branch(repo, wt.branch)
-
-
-# ===================================================================
-# BUG-32 FIX: _finish_merge only cleans up when no tab is merging
-# ===================================================================
 
 
 class TestBug32Fix:
@@ -330,7 +295,6 @@ class TestBug32Fix:
         merge_dir = _merge_data_dir()
         merge_dir.mkdir(parents=True, exist_ok=True)
 
-        # Create merge data
         pending = merge_dir / "pending-merge.json"
         pending.write_text(json.dumps({
             "branch": "HEAD",
@@ -343,17 +307,14 @@ class TestBug32Fix:
 
         server = VSCodeServer()
 
-        # Set up two tabs, both merging
         tab_a = server._get_tab("tab_a")
         tab_b = server._get_tab("tab_b")
         with server._state_lock:
             tab_a.is_merging = True
             tab_b.is_merging = True
 
-        # Tab B finishes — but Tab A is still merging
         server._finish_merge("tab_b")
 
-        # Merge data should survive because tab_a is still merging
         assert pending.exists(), (
             "BUG-32 NOT fixed: merge data was deleted while another tab is merging"
         )
@@ -361,13 +322,11 @@ class TestBug32Fix:
             "BUG-32 NOT fixed: merge-temp was deleted while another tab is merging"
         )
 
-        # Cleanup
         if merge_dir.exists():
             shutil.rmtree(merge_dir)
 
     def test_cleanup_runs_when_no_tab_merging(self) -> None:
         """BUG-32 FIX: Merge data is cleaned when no tab is merging."""
-        # Use per-tab merge dir (BUG-38 fix)
         merge_dir = _merge_data_dir("tab_a")
         merge_dir.mkdir(parents=True, exist_ok=True)
 
@@ -379,15 +338,12 @@ class TestBug32Fix:
 
         server = VSCodeServer()
 
-        # Only one tab, merging
         tab_a = server._get_tab("tab_a")
         with server._state_lock:
             tab_a.is_merging = True
 
-        # Tab A finishes — no other tab merging
         server._finish_merge("tab_a")
 
-        # Merge data should be cleaned up
         assert not pending.exists(), (
             "BUG-32 NOT fixed: merge data not cleaned when no tab is merging"
         )
@@ -422,22 +378,14 @@ class TestBug32Fix:
 
         assert pending.exists()
 
-        # Tab B finishes — Tab A still merging
         server._finish_merge("tab_b")
 
-        # Tab A's merge data should survive
         assert pending.exists(), (
             "BUG-32 NOT fixed: merge data destroyed by other tab's finish"
         )
 
-        # Cleanup
         if md.exists():
             shutil.rmtree(md)
-
-
-# ===================================================================
-# BUG-33 FIX: copy_dirty_state correctly unquotes git-quoted filenames
-# ===================================================================
 
 
 class TestBug33Fix:
@@ -460,7 +408,6 @@ class TestBug33Fix:
 
     def test_unquote_quoted_non_ascii(self) -> None:
         """Quoted non-ASCII path is correctly decoded."""
-        # "café.txt" in UTF-8 is: caf\303\251.txt
         quoted = '"caf\\303\\251.txt"'
         assert _unquote_git_path(quoted) == "café.txt"
 
@@ -473,7 +420,6 @@ class TestBug33Fix:
 
     def test_unquote_multiple_octals(self) -> None:
         """Multiple octal sequences are decoded."""
-        # "日" in UTF-8 is \346\227\245
         quoted = '"\\346\\227\\245.txt"'
         assert _unquote_git_path(quoted) == "日.txt"
 
@@ -488,24 +434,19 @@ class TestBug33Fix:
         """BUG-33 FIX: File with non-ASCII name IS copied to worktree."""
         repo = _make_repo(Path(self._tmpdir) / "repo")
 
-        # Ensure git quotes non-ASCII paths
         _git("config", "core.quotePath", "true", cwd=repo)
 
-        # Create a file with a non-ASCII character
         non_ascii_name = "café.txt"
         non_ascii_file = repo / non_ascii_name
         non_ascii_file.write_text("content of café\n")
 
-        # Verify git status shows it
         status = _git("status", "--porcelain", "-uall", cwd=repo)
         assert status.stdout.strip(), "sanity: git status shows the new file"
 
-        # Create worktree
         wt_dir = Path(self._tmpdir) / "wt"
         wt_dir.mkdir()
         _git("worktree", "add", "-b", "test-wt", str(wt_dir), cwd=repo)
 
-        # Call copy_dirty_state
         result = GitWorktreeOps.copy_dirty_state(repo, wt_dir)
         assert result is True, "Should return True (dirty state was copied)"
 
@@ -515,18 +456,15 @@ class TestBug33Fix:
         )
         assert wt_file.read_text() == "content of café\n"
 
-        # Cleanup
         _git("worktree", "remove", str(wt_dir), "--force", cwd=repo)
         _git("worktree", "prune", cwd=repo)
         _git("branch", "-D", "test-wt", cwd=repo)
 
     def test_quoted_filename_parse_correct(self) -> None:
         """BUG-33 FIX: The parsing logic now correctly handles quoted names."""
-        # Simulate what copy_dirty_state does with a quoted porcelain line
         quoted_line = '?? "caf\\303\\251.txt"'
-        raw_fname = quoted_line[3:]  # '"caf\\303\\251.txt"'
+        raw_fname = quoted_line[3:]
 
-        # After _unquote_git_path, the filename is correct
         fname = _unquote_git_path(raw_fname)
         assert fname == "café.txt", (
             f"BUG-33 NOT fixed: unquoted name is {fname!r}, expected 'café.txt'"

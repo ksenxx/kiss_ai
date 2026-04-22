@@ -102,11 +102,7 @@ class TestContinuation(unittest.TestCase):
                     verbose=False,
                 )
             except KISSError:
-                return  # expected path — test passes
-            # Non-error return path: the sub-session loop converted a
-            # non-KISS exception into an error payload.  If that was a
-            # transient rate-limit, skip; otherwise the test has
-            # uncovered a genuine regression.
+                return
             parsed = yaml.safe_load(result)
             summary = (parsed or {}).get("summary", "")
             if "429" in summary or "RESOURCE_EXHAUSTED" in summary:
@@ -218,7 +214,6 @@ class TestDetectStall(unittest.TestCase):
         summaries = [f"Attempt.\n{error_line}"] * 5
         result = _detect_stall(summaries, threshold=5)
         self.assertTrue(len(result) > 0)
-        # Below threshold returns empty
         result = _detect_stall(summaries[:4], threshold=5)
         self.assertEqual(result, set())
 
@@ -261,7 +256,6 @@ class TestStallDetectionIntegration(unittest.TestCase):
                 verbose=False,
             )
         parsed = yaml.safe_load(result)
-        # Skip on transient API rate-limit failures (429 RESOURCE_EXHAUSTED)
         summary = parsed.get("summary", "")
         if "429" in summary or "RESOURCE_EXHAUSTED" in summary:
             self.skipTest("Gemini API rate-limited (429)")
@@ -288,11 +282,10 @@ class TestStallDetectionIntegration(unittest.TestCase):
                     work_dir=td,
                     verbose=False,
                 )
-                # Agent may have reacted to stall warning and stopped
                 parsed = yaml.safe_load(result)
                 self.assertFalse(parsed["success"])
             except KISSError:
-                pass  # Expected if all sub-sessions exhausted
+                pass
 
 
 class TestNonRetryableModelErrors(unittest.TestCase):

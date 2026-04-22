@@ -32,10 +32,6 @@ def _git(tmpdir: str, *args: str) -> None:
     """Run a git command in tmpdir, suppressing output."""
     subprocess.run(["git", *args], cwd=tmpdir, capture_output=True, check=True)
 
-# ---------------------------------------------------------------------------
-# persistence.py — uncovered branches
-# ---------------------------------------------------------------------------
-
 
 class TestPersistenceBranches:
     """Cover remaining branches in persistence.py."""
@@ -59,7 +55,6 @@ class TestPersistenceBranches:
     def test_load_latest_chat_events_bad_json(self) -> None:
         """_load_latest_chat_events_by_chat_id handles corrupt event_json gracefully."""
         db = th._get_db()
-        # Insert a task with chat_id and then corrupt event data
         task_id, _ = th._add_task("corrupt-event-test", chat_id="corrupt_test")
         import time as _time
         now = _time.time()
@@ -76,16 +71,8 @@ class TestPersistenceBranches:
         assert result is not None
         events = result["events"]
         assert isinstance(events, list)
-        # The bad JSON is skipped, the valid one is returned
         assert len(events) == 1
         assert events[0]["type"] == "ok"
-
-
-
-
-# ---------------------------------------------------------------------------
-# useful_tools.py — uncovered branches
-# ---------------------------------------------------------------------------
 
 
 class TestUsefulToolsBranches:
@@ -95,31 +82,22 @@ class TestUsefulToolsBranches:
         """_truncate_output when max_chars exactly equals worst_msg length, tail=0 (line 33)."""
         output = "A" * 200
         worst_msg = f"\n\n... [truncated {len(output)} chars] ...\n\n"
-        # Set max_chars == len(worst_msg) so remaining=0, head=0, tail=0
         max_chars = len(worst_msg)
         result = _truncate_output(output, max_chars)
         assert "truncated" in result
-        # tail is 0 so no suffix is appended
         assert not result.endswith("A")
 
     def test_stop_monitor_exits_when_done(self) -> None:
         """_stop_monitor exits cleanly when done is set (line 207 exit branch)."""
         stop = threading.Event()
         done = threading.Event()
-        # Create a real process that finishes quickly
         process = subprocess.Popen(["true"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         process.wait()
         done.set()
-        # Should exit immediately since done is set
         t = threading.Thread(target=_stop_monitor, args=(stop, process, done))
         t.start()
         t.join(timeout=5)
         assert not t.is_alive()
-
-
-# ---------------------------------------------------------------------------
-# helpers.py — uncovered branches
-# ---------------------------------------------------------------------------
 
 
 class TestHelpersBranches:
@@ -133,14 +111,8 @@ class TestHelpersBranches:
     def test_generate_followup_text_failure(self) -> None:
         """generate_followup_text returns empty string on LLM failure (lines 104-106)."""
         from kiss.agents.vscode.helpers import generate_followup_text
-        # Use an invalid model to trigger an exception
         result = generate_followup_text("task", "result", "nonexistent-model-xyz")
         assert result == ""
-
-
-# ---------------------------------------------------------------------------
-# server.py — uncovered branches
-# ---------------------------------------------------------------------------
 
 
 class TestVSCodeServerBranches:
@@ -174,7 +146,6 @@ class TestVSCodeServerBranches:
             orig_broadcast(ev)
         server.printer.broadcast = capture  # type: ignore[assignment]
 
-        # Feed stdin with empty line, invalid JSON, then EOF
         fake_stdin = io.StringIO("\n\nnot-json\n")
         old_stdin = sys.stdin
         sys.stdin = fake_stdin
@@ -257,7 +228,6 @@ class TestVSCodeServerBranches:
         def cap(ev: dict) -> None:  # type: ignore[type-arg]
             events.append(ev)
         server.printer.broadcast = cap  # type: ignore[assignment]
-        # Add a task to history
         th._add_task("integrate all the modules together")
         server._complete("integrate all the module")
         ghost = [e for e in events if e.get("type") == "ghost"]
@@ -307,10 +277,6 @@ class TestVSCodeServerBranches:
         assert tasks[0] == "repeated-task"
         assert "middle-task-000" in tasks
 
-# ---------------------------------------------------------------------------
-# sorcar_agent.py — uncovered branches
-# ---------------------------------------------------------------------------
-
 
 class TestSorcarAgentBranches:
     """Cover remaining branches in sorcar_agent.py."""
@@ -321,18 +287,11 @@ class TestSorcarAgentBranches:
         agent.printer = None
         tools = agent._get_tools()
         assert len(tools) > 0
-        # Actually invoke the Bash tool with a command to trigger _stream
-        # The first tool is Bash — it uses the _stream callback
         bash_tool = tools[0]
         result = bash_tool(command="echo test_no_printer", description="test", timeout_seconds=5)
         assert "test_no_printer" in result
         if agent.web_use_tool:
             agent.web_use_tool.close()
-
-
-# ---------------------------------------------------------------------------
-# stateful_sorcar_agent.py — uncovered branches
-# ---------------------------------------------------------------------------
 
 
 class TestStatefulSorcarAgentBranches:
@@ -358,7 +317,6 @@ class TestStatefulSorcarAgentBranches:
         """build_chat_prompt skips result when entry has no result (line 84->82)."""
         from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
         agent = StatefulSorcarAgent("test")
-        # Add a task with empty result to the agent's chat
         task_id, chat_id = th._add_task("task with no result", chat_id="test_no_result")
         agent._chat_id = chat_id
         th._save_task_result("", task_id)
@@ -366,11 +324,6 @@ class TestStatefulSorcarAgentBranches:
         assert "### Task 1" in prompt
         assert "### Result 1" not in prompt
         assert "new task" in prompt
-
-
-# ---------------------------------------------------------------------------
-# browser_ui.py — uncovered branches
-# ---------------------------------------------------------------------------
 
 
 class TestBrowserUIBranches:
@@ -384,7 +337,6 @@ class TestBrowserUIBranches:
         """
         p = BaseBrowserPrinter()
         p._thread_local.tab_id = "0"
-        # Set up bash state with old last_flush and a pending timer
         with p._bash_lock:
             bs = p._bash_state
             bs.last_flush = time.monotonic() - 1.0
@@ -392,9 +344,7 @@ class TestBrowserUIBranches:
             bs.timer.daemon = True
             bs.timer.start()
         p.start_recording()
-        # Now call bash_stream — should enter main flush branch, cancel timer
         p.print("line1\n", type="bash_stream")
-        # Timer should be cancelled and set to None
         with p._bash_lock:
             assert p._bash_state.timer is None
         events = p.stop_recording()
@@ -405,17 +355,10 @@ class TestBrowserUIBranches:
         """Non-core tool result is hidden unless is_error (line 273->281)."""
         p = BaseBrowserPrinter()
         p.start_recording()
-        # Simulate tool_result for a non-core tool
         p.print("some result", type="tool_result", tool_name="custom_tool", is_error=False)
-        # No tool_result event should be broadcast for non-core, non-error
         events = p.stop_recording()
         tool_results = [e for e in events if e.get("type") == "tool_result"]
         assert len(tool_results) == 0
-
-
-# ---------------------------------------------------------------------------
-# web_use_tool.py — uncovered branches (basic non-browser tests)
-# ---------------------------------------------------------------------------
 
 
 class TestWebUseToolBranches:
@@ -425,7 +368,7 @@ class TestWebUseToolBranches:
         """_check_for_new_tab returns immediately when no context."""
         tool = WebUseTool(headless=True)
         tool._context = None
-        tool._check_for_new_tab()  # should not raise
+        tool._check_for_new_tab()
 
 
 class TestServerCompleteEmptyQuery:
@@ -435,7 +378,6 @@ class TestServerCompleteEmptyQuery:
         """Sending complete command with empty query doesn't start thread."""
         server = VSCodeServer()
         server._handle_command({"type": "complete", "query": ""})
-        # No thread started - seq just incremented
         assert server._complete_seq_latest >= 0
 
 
@@ -452,9 +394,7 @@ class TestSorcarAgentDockerBranch:
 
         agent.docker_manager = FakeDockerManager()
         tools = agent._get_tools()
-        # First tool should be _docker_bash (the bound method)
         assert callable(tools[0])
-        # Should have docker tools (Read, Edit, Write) from DockerTools
         tool_names = [getattr(t, "__name__", getattr(t, "__func__", t).__name__) for t in tools]
         assert "Read" in tool_names
         assert "Edit" in tool_names
@@ -468,14 +408,12 @@ class TestWebUseToolTruncation:
 
     def test_ax_tree_truncated(self, tmp_path: Path) -> None:
         """Large accessibility tree gets truncated."""
-        # Create HTML with many interactive elements
         buttons = "\n".join(f'<button>Button{i}</button>' for i in range(200))
         html_file = tmp_path / "big.html"
         html_file.write_text(f"<html><body>{buttons}</body></html>")
         tool = WebUseTool(headless=True)
         try:
             tool.go_to_url(f"file://{html_file}")
-            # Call with small max_chars to trigger truncation
             result = tool._get_ax_tree(max_chars=100)
             assert "[truncated]" in result
         finally:
@@ -494,7 +432,6 @@ class TestWebUseToolNewTab:
         tool = WebUseTool(headless=True)
         try:
             tool.go_to_url(f"file://{html_file}")
-            # Find the link element
             link_id = None
             for i, el in enumerate(tool._elements):
                 if el["role"] == "link":
@@ -502,7 +439,6 @@ class TestWebUseToolNewTab:
                     break
             if link_id:
                 result = tool.click(link_id)
-                # Should have switched to new tab or at least not errored
                 assert "Error" not in result or "Page:" in result
         finally:
             tool.close()
@@ -518,10 +454,8 @@ class TestWebUseToolEmptyNameLocator:
         tool = WebUseTool(headless=True)
         try:
             tool.go_to_url(f"file://{html_file}")
-            # Check if there's a button with empty name
             for i, el in enumerate(tool._elements):
                 if el["role"] == "button" and el["name"] == "":
-                    # Click it to trigger the empty-name locator path
                     result = tool.click(i + 1)
                     assert "Error" not in result or "Page:" in result
                     break
@@ -569,7 +503,6 @@ class TestWebUseToolResolveLocatorInvisible:
         tool = WebUseTool(headless=True)
         try:
             tool.go_to_url(f"file://{html_file}")
-            # Both buttons should be in the accessibility snapshot
             btn_id = None
             for i, el in enumerate(tool._elements):
                 if el["role"] == "button" and el["name"] == "Submit":

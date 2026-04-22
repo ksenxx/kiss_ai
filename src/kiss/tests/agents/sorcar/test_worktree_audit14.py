@@ -49,10 +49,6 @@ from kiss.agents.sorcar.git_worktree import (
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 
 class _RecordingPrinter:
     """Minimal concrete printer that records every broadcast event.
@@ -112,11 +108,6 @@ def _unpatch_super_run(original: Any) -> None:
     parent_class.run = original
 
 
-# ===========================================================================
-# BUG-64: warnings dropped on run() fallbacks
-# ===========================================================================
-
-
 class TestBug64WarningsDroppedOnFallback:
     """``WorktreeSorcarAgent.run()`` must flush pending warnings to
     the printer on *every* fallback path, not only the success path.
@@ -156,7 +147,6 @@ class TestBug64WarningsDroppedOnFallback:
             "BUG-64: warning not broadcast on use_worktree=False "
             f"fallback.  Events were: {printer.events}"
         )
-        # And the agent's state is cleared so it isn't rebroadcast
         assert agent._merge_conflict_warning is None
 
     def test_warning_flushed_when_not_a_git_repo(
@@ -164,7 +154,6 @@ class TestBug64WarningsDroppedOnFallback:
     ) -> None:
         """Fallback B: ``discover_repo`` returns None — warning
         must still be broadcast."""
-        # tmp_path is NOT a git repo
         agent = WorktreeSorcarAgent("t")
         agent._stash_pop_warning = "Stash pop failed — run git stash pop."
         printer = _RecordingPrinter()
@@ -188,7 +177,6 @@ class TestBug64WarningsDroppedOnFallback:
         """Fallback C: ``_try_setup_worktree`` returns None
         (detached HEAD) — warning must still be broadcast."""
         repo = _make_repo(tmp_path / "repo")
-        # Detach HEAD so `_try_setup_worktree` returns None
         head_sha = subprocess.run(
             ["git", "-C", str(repo), "rev-parse", "HEAD"],
             capture_output=True, text=True, check=True,
@@ -234,7 +222,6 @@ class TestBug64WarningsDroppedOnFallback:
                 printer=printer,
             )
         finally:
-            # Clean up any pending worktree the agent may have created
             if agent._wt is not None:
                 agent.discard()
 
@@ -243,11 +230,6 @@ class TestBug64WarningsDroppedOnFallback:
             "success-path warning" in e.get("message", "")
             for e in warnings
         ), f"Regression: success-path warning lost.  Events: {printer.events}"
-
-
-# ===========================================================================
-# BUG-65: _new_chat during active merge review destroys the review
-# ===========================================================================
 
 
 class TestBug65NewChatDuringMerge:
@@ -261,13 +243,11 @@ class TestBug65NewChatDuringMerge:
         from kiss.agents.vscode.server import VSCodeServer
 
         repo = _make_repo(tmp_path / "repo")
-        # Create a pending worktree
         server = VSCodeServer()
         server.work_dir = str(repo)
         tab_id = "tab1"
         tab = server._get_tab(tab_id)
         tab.use_worktree = True
-        # Set up a real pending worktree state on the agent
         agent = cast(WorktreeSorcarAgent, tab.agent)
         branch = "kiss/wt-bug65-1"
         wt_dir = repo / ".kiss-worktrees" / "kiss_wt-bug65-1"
@@ -280,14 +260,11 @@ class TestBug65NewChatDuringMerge:
             wt_dir=wt_dir,
             baseline_commit=None,
         )
-        # Simulate active merge review
         tab.is_merging = True
 
         server.printer = cast(Any, _RecordingPrinter())
         server._new_chat(tab_id)
 
-        # The worktree must NOT have been released (branch still exists,
-        # agent._wt still set) because a merge review is active.
         assert GitWorktreeOps.branch_exists(repo, branch), (
             "BUG-65: _new_chat destroyed the worktree branch while a "
             "merge review was active.  User's hunk-picking intent lost."
@@ -296,10 +273,8 @@ class TestBug65NewChatDuringMerge:
             "BUG-65: _new_chat cleared the agent's worktree reference "
             "during an active merge review."
         )
-        # Tab should still be in merging state.
         assert tab.is_merging, "BUG-65: is_merging was cleared."
 
-        # An error/warning must be broadcast.
         events = cast(_RecordingPrinter, server.printer).events
         assert any(
             e.get("type") in ("error", "warning") for e in events
@@ -307,14 +282,8 @@ class TestBug65NewChatDuringMerge:
             f"BUG-65: no error/warning broadcast.  Events: {events}"
         )
 
-        # Cleanup
         GitWorktreeOps.remove(repo, wt_dir)
         GitWorktreeOps.delete_branch(repo, branch)
-
-
-# ===========================================================================
-# RED-8: manual_merge_branch / ManualMergeResult are dead code
-# ===========================================================================
 
 
 class TestRed8ManualMergeBranchDeadCode:
@@ -327,7 +296,6 @@ class TestRed8ManualMergeBranchDeadCode:
         import re
 
         src = Path(__file__).resolve().parents[4] / "agents"
-        # Exclude the defining file
         offenders: list[str] = []
         for py in src.rglob("*.py"):
             if py.name == "git_worktree.py":

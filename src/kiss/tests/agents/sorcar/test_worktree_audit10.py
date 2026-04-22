@@ -24,10 +24,6 @@ from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps, MergeRe
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.server import VSCodeServer
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 
 def _make_repo(tmp_path: Path, name: str = "repo") -> Path:
     """Create a bare-minimum git repo with one commit."""
@@ -64,7 +60,6 @@ def _create_worktree_branch(
 
     baseline: str | None = None
     if dirty_file:
-        # Simulate copy_dirty_state + baseline commit
         (wt_dir / dirty_file).write_text("dirty content")
         GitWorktreeOps.stage_all(wt_dir)
         GitWorktreeOps.commit_staged(
@@ -92,11 +87,6 @@ def _cleanup(repo: Path, branch: str, wt_dir: Path) -> None:
         GitWorktreeOps.delete_branch(repo, branch)
 
 
-# ===================================================================
-# BUG-49: _do_merge pops stash on CONFLICT/MERGE_FAILED
-# ===================================================================
-
-
 class TestBug49StashPopOnMergeFailure:
     """BUG-49: _do_merge pops stash even when the merge fails (CONFLICT
     or MERGE_FAILED), leaving the working tree dirty.  The manual merge
@@ -115,12 +105,10 @@ class TestBug49StashPopOnMergeFailure:
         branch = "kiss/wt-bug49a-1"
         wt_dir, baseline = _create_worktree_branch(repo, branch)
 
-        # Agent edits init.txt on the worktree branch
         _add_agent_commit(wt_dir, "init.txt", "agent version")
         GitWorktreeOps.remove(repo, wt_dir)
         GitWorktreeOps.prune(repo)
 
-        # Create a conflicting change on main
         (repo / "init.txt").write_text("main conflicting version")
         subprocess.run(["git", "add", "."], cwd=repo, capture_output=True)
         subprocess.run(
@@ -128,7 +116,6 @@ class TestBug49StashPopOnMergeFailure:
             cwd=repo, capture_output=True,
         )
 
-        # User has uncommitted dirty state
         (repo / "user_file.txt").write_text("user wip")
 
         agent = WorktreeSorcarAgent("test")
@@ -145,9 +132,6 @@ class TestBug49StashPopOnMergeFailure:
         result, stash_warning = agent._do_merge(wt)
         assert result == MergeResult.CONFLICT
 
-        # FIX verification: stash must NOT have been popped.
-        # The tree should be clean (no dirty user_file.txt) and
-        # the stash list should contain an entry.
         status = subprocess.run(
             ["git", "status", "--porcelain"],
             cwd=repo, capture_output=True, text=True,
@@ -165,13 +149,11 @@ class TestBug49StashPopOnMergeFailure:
             "Stash should contain the user's saved changes"
         )
 
-        # stash_warning should tell the user about their stashed changes
         assert stash_warning, (
             "BUG-49: stash_warning should be non-empty when stash was "
             "not popped due to merge failure"
         )
 
-        # Cleanup
         subprocess.run(["git", "stash", "drop"], cwd=repo, capture_output=True)
         _cleanup(repo, branch, wt_dir)
 
@@ -181,23 +163,19 @@ class TestBug49StashPopOnMergeFailure:
         branch = "kiss/wt-bug49b-1"
         wt_dir = repo / ".kiss-worktrees" / branch.replace("/", "_")
 
-        # Create worktree with NO baseline (so squash_merge_branch is used)
         assert GitWorktreeOps.create(repo, branch, wt_dir)
         GitWorktreeOps.save_original_branch(repo, branch, "main")
 
-        # Agent edits a file
         _add_agent_commit(wt_dir, "agent.txt", "agent work")
         GitWorktreeOps.remove(repo, wt_dir)
         GitWorktreeOps.prune(repo)
 
-        # Create a pre-commit hook that rejects commits — forces MERGE_FAILED
         hooks_dir = repo / ".git" / "hooks"
         hooks_dir.mkdir(parents=True, exist_ok=True)
         hook = hooks_dir / "pre-commit"
         hook.write_text("#!/bin/sh\nexit 1\n")
         hook.chmod(0o755)
 
-        # User has dirty state
         (repo / "user_dirty.txt").write_text("user wip")
 
         agent = WorktreeSorcarAgent("test")
@@ -213,7 +191,6 @@ class TestBug49StashPopOnMergeFailure:
         result, stash_warning = agent._do_merge(wt)
         assert result == MergeResult.MERGE_FAILED
 
-        # FIX: tree should be clean (stash NOT popped)
         status = subprocess.run(
             ["git", "status", "--porcelain"],
             cwd=repo, capture_output=True, text=True,
@@ -227,7 +204,6 @@ class TestBug49StashPopOnMergeFailure:
             "due to merge failure"
         )
 
-        # Cleanup
         hook.unlink()
         subprocess.run(["git", "stash", "drop"], cwd=repo, capture_output=True)
         _cleanup(repo, branch, wt_dir)
@@ -238,12 +214,10 @@ class TestBug49StashPopOnMergeFailure:
         branch = "kiss/wt-bug49c-1"
         wt_dir, baseline = _create_worktree_branch(repo, branch)
 
-        # Agent edits a non-conflicting file
         _add_agent_commit(wt_dir, "agent.txt", "agent work")
         GitWorktreeOps.remove(repo, wt_dir)
         GitWorktreeOps.prune(repo)
 
-        # User has dirty state on a different file
         (repo / "user_file.txt").write_text("user wip")
 
         agent = WorktreeSorcarAgent("test")
@@ -260,7 +234,6 @@ class TestBug49StashPopOnMergeFailure:
         result, stash_warning = agent._do_merge(wt)
         assert result == MergeResult.SUCCESS
 
-        # On success, stash MUST be popped — user changes restored
         status = subprocess.run(
             ["git", "status", "--porcelain"],
             cwd=repo, capture_output=True, text=True,
@@ -283,14 +256,12 @@ class TestBug49StashPopOnMergeFailure:
         GitWorktreeOps.remove(repo, wt_dir)
         GitWorktreeOps.prune(repo)
 
-        # Conflict on main
         (repo / "init.txt").write_text("main conflict")
         subprocess.run(["git", "add", "."], cwd=repo, capture_output=True)
         subprocess.run(
             ["git", "commit", "-m", "conflict"], cwd=repo, capture_output=True,
         )
 
-        # Dirty state — triggers stash
         (repo / "user.txt").write_text("wip")
 
         agent = WorktreeSorcarAgent("test")
@@ -304,14 +275,12 @@ class TestBug49StashPopOnMergeFailure:
         assert released is None
         assert agent._merge_conflict_warning is not None
 
-        # FIX: instructions should mention stash pop
         warning = agent._merge_conflict_warning
         assert "stash" in warning.lower(), (
             "BUG-49: CONFLICT instructions must mention 'git stash pop' "
             "because user's uncommitted changes are in the stash"
         )
 
-        # Cleanup
         subprocess.run(["git", "stash", "drop"], cwd=repo, capture_output=True)
         _cleanup(repo, branch, wt_dir)
 
@@ -327,13 +296,11 @@ class TestBug49StashPopOnMergeFailure:
         GitWorktreeOps.remove(repo, wt_dir)
         GitWorktreeOps.prune(repo)
 
-        # Conflict on main
         (repo / "init.txt").write_text("main conflict")
         subprocess.run(["git", "add", "."], cwd=repo, capture_output=True)
         subprocess.run(
             ["git", "commit", "-m", "conflict"], cwd=repo, capture_output=True,
         )
-        # Dirty state
         (repo / "user.txt").write_text("wip")
 
         agent = WorktreeSorcarAgent("test")
@@ -348,14 +315,8 @@ class TestBug49StashPopOnMergeFailure:
             "BUG-49: merge() CONFLICT message must mention 'git stash pop'"
         )
 
-        # Cleanup
         subprocess.run(["git", "stash", "drop"], cwd=repo, capture_output=True)
         _cleanup(repo, branch, wt_dir)
-
-
-# ===================================================================
-# BUG-50: _release_worktree silently orphans branch (original_branch=None)
-# ===================================================================
 
 
 class TestBug50ReleaseOrphansBranch:
@@ -387,7 +348,7 @@ class TestBug50ReleaseOrphansBranch:
         agent._wt = GitWorktree(
             repo_root=repo,
             branch=branch,
-            original_branch=None,  # <-- the crash-recovery scenario
+            original_branch=None,
             wt_dir=wt_dir,
         )
 
@@ -395,7 +356,6 @@ class TestBug50ReleaseOrphansBranch:
         assert released is None
         assert agent._wt is None
 
-        # FIX: _merge_conflict_warning must be set
         assert agent._merge_conflict_warning is not None, (
             "BUG-50: _release_worktree must set _merge_conflict_warning "
             "when original_branch is None — branch silently orphaned"
@@ -404,12 +364,10 @@ class TestBug50ReleaseOrphansBranch:
             "Warning must mention the orphaned branch name"
         )
 
-        # Branch should still exist for manual recovery
         assert GitWorktreeOps.branch_exists(repo, branch), (
             "Branch should be preserved for manual recovery"
         )
 
-        # Cleanup
         _cleanup(repo, branch, wt_dir)
 
     def test_no_warning_when_original_branch_set_and_success(
@@ -438,11 +396,6 @@ class TestBug50ReleaseOrphansBranch:
         _cleanup(repo, branch, wt_dir)
 
 
-# ===================================================================
-# BUG-51: _get_worktree_changed_files returns [] on git diff failure
-# ===================================================================
-
-
 class TestBug51DiffFailureSilentDiscard:
     """BUG-51: When `git diff --name-only base_ref` fails inside
     `_get_worktree_changed_files` (e.g. invalid base_ref, corrupt repo),
@@ -462,16 +415,13 @@ class TestBug51DiffFailureSilentDiscard:
         assert GitWorktreeOps.create(repo, branch, wt_dir)
         GitWorktreeOps.save_original_branch(repo, branch, "main")
 
-        # Save a bogus baseline commit that doesn't exist
         bogus_baseline = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
         GitWorktreeOps.save_baseline_commit(repo, branch, bogus_baseline)
 
-        # Agent makes real changes (uncommitted)
         (wt_dir / "agent_work.txt").write_text("real agent work")
         GitWorktreeOps.stage_all(wt_dir)
         GitWorktreeOps.commit_staged(wt_dir, "agent commit")
 
-        # Also add an uncommitted file
         (wt_dir / "uncommitted.txt").write_text("wip")
 
         server = VSCodeServer()
@@ -488,8 +438,6 @@ class TestBug51DiffFailureSilentDiscard:
 
         changed = server._get_worktree_changed_files("bug51a-tab")
 
-        # FIX: even though git diff against bogus baseline fails,
-        # the function must detect changes via fallback
         assert len(changed) > 0, (
             "BUG-51: _get_worktree_changed_files returned [] on diff "
             "failure — agent work would be silently discarded"
@@ -524,7 +472,6 @@ class TestBug51DiffFailureSilentDiscard:
         branch = "kiss/wt-bug51c-1"
         wt_dir, baseline = _create_worktree_branch(repo, branch)
 
-        # No agent changes — baseline only (or no baseline, clean worktree)
         server = VSCodeServer()
         server.work_dir = str(repo)
         tab = server._get_tab("bug51c-tab")
@@ -552,10 +499,8 @@ class TestBug51DiffFailureSilentDiscard:
         assert GitWorktreeOps.create(repo, branch, wt_dir)
         GitWorktreeOps.save_original_branch(repo, branch, "main")
 
-        # Agent commits a change
         _add_agent_commit(wt_dir, "agent.txt", "work")
 
-        # Remove worktree but keep branch
         GitWorktreeOps.remove(repo, wt_dir)
         GitWorktreeOps.prune(repo)
 
@@ -571,14 +516,6 @@ class TestBug51DiffFailureSilentDiscard:
         )
 
         changed = server._get_worktree_changed_files("bug51d-tab")
-        # Even with bad baseline, should fall back to diffing against
-        # original_branch or return non-empty if branch has commits
-        # The key assertion: must not silently return [] when work exists
-        # With the fallback, _resolve_base_ref should fall back to
-        # merge-base or original_branch when baseline is invalid
-        # Note: if _resolve_base_ref returns the bogus SHA and diff
-        # fails, the function returns []. That's the bug.
-        # After fix: should detect changes.
         assert len(changed) > 0, (
             "BUG-51: branch diff with bad baseline returned [] — "
             "agent work would be lost"

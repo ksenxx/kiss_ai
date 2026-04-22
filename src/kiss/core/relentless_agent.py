@@ -257,9 +257,6 @@ class RelentlessAgent(Base):
                 )
             except Exception as exc:
                 logger.debug("Exception caught", exc_info=True)
-                # Non-retryable errors: return immediately if the error has a
-                # chained cause, isn't a KISSError, or the executor never
-                # started (no steps executed means a setup/config failure).
                 if (
                     exc.__cause__ is not None
                     or not isinstance(exc, KISSError)
@@ -273,7 +270,6 @@ class RelentlessAgent(Base):
                         sort_keys=False,
                     )
                     return error_result
-                # For step/budget limit errors, try to summarize and continue
                 trajectory_path: Path | None = None
                 try:
                     tmp_dir = Path(self.work_dir) / "tmp"
@@ -336,7 +332,6 @@ class RelentlessAgent(Base):
             if summary:  # pragma: no branch
                 continuation_summaries.append(summary)
 
-                # Detect stall: same error phrases across recent continuations
                 stall_errors = _detect_stall(continuation_summaries)
                 if stall_errors:
                     stall_summary = (
@@ -352,7 +347,6 @@ class RelentlessAgent(Base):
                     )
                     return stall_result
 
-                # Build continuation prompt with full history
                 all_summaries = "\n\n---\n\n".join(
                     f"### Attempt {i + 1}\n{s}"
                     for i, s in enumerate(continuation_summaries)
@@ -362,7 +356,6 @@ class RelentlessAgent(Base):
                     continuation_number=session + 1,
                 )
 
-                # Add stall warning after threshold continuations
                 if len(continuation_summaries) >= STALL_THRESHOLD:
                     progress_section += STALL_WARNING.format(
                         continuation_number=len(continuation_summaries),

@@ -78,11 +78,9 @@ class TestFinishMergeEmitsAutocommitPrompt(_ServerHarness):
 
     def test_prompt_with_unstaged_modification(self) -> None:
         """Modifying a tracked file fires autocommit_prompt with the file."""
-        # Tab is in non-worktree merge mode.
         tab = self.server._get_tab("t1")
         tab.use_worktree = False
         tab.is_merging = True
-        # Dirty state on main: modify tracked file.
         Path(self.tmpdir, "seed.txt").write_text("modified\n")
         self.server._finish_merge("t1")
 
@@ -117,7 +115,6 @@ class TestFinishMergeEmitsAutocommitPrompt(_ServerHarness):
         tab = self.server._get_tab("t4")
         tab.use_worktree = True
         tab.is_merging = True
-        # Dirty state on main tree too.
         Path(self.tmpdir, "seed.txt").write_text("x\n")
         self.server._finish_merge("t4")
 
@@ -169,7 +166,6 @@ class TestAutocommitActionSkip(_ServerHarness):
 
         self.server._handle_autocommit_action("skip", "t1")
 
-        # Files still dirty / untracked.
         status = _run_git(self.tmpdir, "status", "--porcelain").stdout
         assert "seed.txt" in status
         assert "new.txt" in status
@@ -196,9 +192,6 @@ class TestAutocommitActionCommit(_ServerHarness):
 
     def setUp(self) -> None:
         super().setUp()
-        # Replace the LLM-backed commit message generator with a
-        # deterministic override.  This is the seam built into the
-        # feature for testability — not a mock of an internal API.
         self._messages: list[str] = []
 
         def fake_compose(diff_text: str) -> str:
@@ -216,21 +209,16 @@ class TestAutocommitActionCommit(_ServerHarness):
         self.server._handle_autocommit_action("commit", "t1")
         after = _run_git(self.tmpdir, "rev-parse", "HEAD").stdout.strip()
 
-        # New commit created.
         assert before != after
-        # Working tree is clean.
         status = _run_git(self.tmpdir, "status", "--porcelain").stdout.strip()
         assert status == ""
-        # Commit message body matches our override.
         log = _run_git(self.tmpdir, "log", "-1", "--pretty=%s").stdout.strip()
         assert log == "feat: deterministic test commit"
-        # Both files are part of the new commit.
         show = _run_git(
             self.tmpdir, "show", "--name-only", "--pretty=", "HEAD",
         ).stdout
         assert "seed.txt" in show
         assert "new.txt" in show
-        # LLM was called exactly once with a non-empty diff.
         assert len(self._messages) == 1
         assert "seed.txt" in self._messages[0] or "new.txt" in self._messages[0]
 
@@ -265,11 +253,10 @@ class TestAutocommitActionCommit(_ServerHarness):
         self.server._handle_autocommit_action("commit", "t1")
 
         after = _run_git(self.tmpdir, "rev-parse", "HEAD").stdout.strip()
-        assert before == after  # No new commit.
+        assert before == after
         evt = self._event("autocommit_done")
         assert evt["success"] is True
         assert evt["committed"] is False
-        # LLM was never consulted because diff was empty.
         assert self._messages == []
 
     def test_commit_in_non_git_dir_reports_failure(self) -> None:
@@ -342,12 +329,10 @@ class TestAutocommitPromptRoundtrip(_ServerHarness):
         Path(self.tmpdir, "seed.txt").write_text("delta\n")
         Path(self.tmpdir, "extra.txt").write_text("extra\n")
 
-        # 1. Merge review is done.
         self.server._finish_merge("t1")
         prompt = self._event("autocommit_prompt")
         assert set(prompt["changedFiles"]) >= {"seed.txt", "extra.txt"}
 
-        # 2. User clicks "Auto commit".
         def fake_compose(_diff: str) -> str:
             return "chore: auto"
 
@@ -359,7 +344,6 @@ class TestAutocommitPromptRoundtrip(_ServerHarness):
         assert done["success"] is True
         assert done["committed"] is True
 
-        # 3. Working tree clean and new commit on current branch.
         assert _run_git(
             self.tmpdir, "status", "--porcelain",
         ).stdout.strip() == ""
@@ -380,7 +364,6 @@ class TestAutocommitPromptRoundtrip(_ServerHarness):
 
         after = _run_git(self.tmpdir, "rev-parse", "HEAD").stdout.strip()
         assert before == after
-        # File is still dirty.
         assert "seed.txt" in _run_git(
             self.tmpdir, "status", "--porcelain",
         ).stdout
@@ -432,7 +415,6 @@ class TestMainJsRendersAutocommitButtons(unittest.TestCase):
 
     def test_sends_autocommit_action_commit(self) -> None:
         assert "autocommitAction" in self.js
-        # Must send at least commit + skip actions from JS.
         assert "'commit'" in self.js or '"commit"' in self.js
         assert "'skip'" in self.js or '"skip"' in self.js
 

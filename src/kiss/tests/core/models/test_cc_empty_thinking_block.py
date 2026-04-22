@@ -34,7 +34,6 @@ class TestEmptyThinkingBlockSuppressed:
         )
         model.initialize("test")
 
-        # Real Claude opus output: thinking block with only signature_delta
         events = [
             {"type": "stream_event", "event": {
                 "type": "content_block_start",
@@ -61,7 +60,6 @@ class TestEmptyThinkingBlockSuppressed:
         recorded = printer.stop_recording()
         types = [e["type"] for e in recorded]
 
-        # No thinking events at all — the block had no readable content
         assert "thinking_start" not in types, (
             f"Empty thinking block should not emit thinking_start: {types}"
         )
@@ -72,7 +70,6 @@ class TestEmptyThinkingBlockSuppressed:
             f"Empty thinking block should not emit thinking_end: {types}"
         )
 
-        # Text content should still be delivered
         assert content == "The answer is 42"
         text_deltas = [e for e in recorded if e["type"] == "text_delta"]
         assert text_deltas
@@ -199,7 +196,6 @@ class TestRealThinkingBlockStillWorks:
         events = [
             {"type": "content_block_start",
              "content_block": {"type": "thinking"}},
-            # First real thinking content:
             {"type": "content_block_delta",
              "delta": {"type": "thinking_delta", "thinking": "Step 1"}},
             {"type": "content_block_delta",
@@ -256,7 +252,7 @@ class TestToolModeWithEmptyThinking:
 
         def token_cb(token: str) -> None:
             if in_thinking:
-                pass  # thinking tokens
+                pass
             else:
                 text_tokens.append(token)
 
@@ -332,7 +328,6 @@ class TestToolModeWithEmptyThinking:
         finally:
             subprocess.Popen = original_popen  # type: ignore[assignment,misc]
 
-        # No thinking events for signature-only block
         assert thinking_events == [], (
             f"Expected no thinking events, got {thinking_events}"
         )

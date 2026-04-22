@@ -22,10 +22,6 @@ from kiss.agents.sorcar.git_worktree import (
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 
 def _redirect_db(tmpdir: str) -> tuple:
     old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
@@ -87,11 +83,6 @@ def _unpatch_super_run(original: Any) -> None:
     parent_class.run = original
 
 
-# ---------------------------------------------------------------------------
-# BUG-5: use_worktree not restored after server restart
-# ---------------------------------------------------------------------------
-
-
 class TestBug5UseWorktreeNotRestored:
     """After server restart, _emit_pending_worktree returns early because
     tab.use_worktree defaults to False and is never restored from the
@@ -119,7 +110,6 @@ class TestBug5UseWorktreeNotRestored:
         agent.run(prompt_template="task1", work_dir=str(self.repo))
         assert agent._wt_pending
 
-        # Persist task with is_worktree=True in the extra data
         chat_id = agent.chat_id
         task_id = agent._last_task_id
         assert task_id is not None
@@ -128,32 +118,21 @@ class TestBug5UseWorktreeNotRestored:
             task_id=task_id,
         )
 
-        # Simulate server restart: create fresh server + tab state
         server = VSCodeServer()
 
         tab = server._get_tab("test-tab")
 
-        # BUG: use_worktree is False after restart — never restored
         assert tab.use_worktree is False
 
-        # Even though the persisted extra says is_worktree=True
         entry = th._load_latest_chat_events_by_chat_id(chat_id)
         assert entry is not None
         extra = json.loads(entry["extra"])  # type: ignore[arg-type]
         assert extra["is_worktree"] is True
 
-        # _emit_pending_worktree returns immediately (doesn't detect pending wt)
         tab.agent.resume_chat_by_id(chat_id)
-        # use_worktree is still False, so _emit_pending_worktree skips everything
         assert tab.use_worktree is False
 
-        # Clean up worktree
         agent.discard()
-
-
-# ---------------------------------------------------------------------------
-# BUG-6: _finalize_worktree ignores auto-commit failure
-# ---------------------------------------------------------------------------
 
 
 class TestBug6FinalizeIgnoresCommitFailure:
@@ -183,38 +162,27 @@ class TestBug6FinalizeIgnoresCommitFailure:
         wt_dir = agent._wt_dir
         assert wt_dir is not None and wt_dir.exists()
 
-        # Worktrees share hooks with the main repo
         main_hooks = self.repo / ".git" / "hooks"
         main_hooks.mkdir(exist_ok=True)
         hook = main_hooks / "pre-commit"
         hook.write_text("#!/bin/sh\nexit 1\n")
         hook.chmod(0o755)
 
-        # Create a file that the agent "worked on"
         (wt_dir / "agent_work.txt").write_text("important work\n")
 
-        # Verify the commit would fail
         assert GitWorktreeOps.commit_all(wt_dir, "test") is False
 
-        # FIX: _finalize_worktree returns False and preserves worktree
         result = agent._finalize_worktree()
         assert result is False
 
-        # FIX: worktree is preserved — agent's work is NOT lost
         assert wt_dir.exists()
         assert (wt_dir / "agent_work.txt").read_text() == "important work\n"
 
-        # Clean up
         hook.unlink()
         branch = agent._wt_branch
         assert branch is not None
         GitWorktreeOps.remove(self.repo, wt_dir)
         GitWorktreeOps.delete_branch(self.repo, branch)
-
-
-# ---------------------------------------------------------------------------
-# BUG-7: squash_merge_branch doesn't check commit return code
-# ---------------------------------------------------------------------------
 
 
 class TestBug7SquashMergeDoesntCheckCommit:
@@ -251,7 +219,6 @@ class TestBug7SquashMergeDoesntCheckCommit:
 
         result = GitWorktreeOps.squash_merge_branch(self.repo, "feature")
 
-        # FIX: returns MERGE_FAILED, not SUCCESS
         assert result == MergeResult.MERGE_FAILED
 
     def test_full_merge_flow_deletes_branch_despite_commit_failure(self) -> None:
@@ -281,10 +248,8 @@ class TestBug7SquashMergeDoesntCheckCommit:
 
             msg = agent.merge()
 
-            # FIX: merge does NOT report success
             assert "Successfully merged" not in msg
 
-            # FIX: branch is preserved
             assert GitWorktreeOps.branch_exists(self.repo, branch)
         finally:
             hook_path = self.repo / ".git" / "hooks" / "pre-commit"
@@ -293,11 +258,6 @@ class TestBug7SquashMergeDoesntCheckCommit:
             _unpatch_super_run(original_run)
             _restore_db(db_saved)
             shutil.rmtree(tmpdir2, ignore_errors=True)
-
-
-# ---------------------------------------------------------------------------
-# INC-2: Redundant stage_all in _auto_commit_worktree
-# ---------------------------------------------------------------------------
 
 
 class TestInc2RedundantStageAllFixed:
@@ -310,9 +270,7 @@ class TestInc2RedundantStageAllFixed:
         import inspect
 
         src = inspect.getsource(WorktreeSorcarAgent._auto_commit_worktree)
-        # Uses stage_all to stage once
         assert "stage_all" in src
-        # Uses commit_staged (not commit_all) so no redundant git add -A
         assert "commit_staged" in src
         assert "commit_all" not in src
 

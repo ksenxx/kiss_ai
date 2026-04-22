@@ -58,7 +58,6 @@ class VSCodePrinter(BaseBrowserPrinter):
             with self._stdout_lock:
                 sys.stdout.write(json.dumps(event) + "\n")
                 sys.stdout.flush()
-        # Persist display events to the database as they are created
         if event.get("type") in _DISPLAY_EVENT_TYPES:
             evt_tab = event.get("tabId")
             if evt_tab is not None:

@@ -34,10 +34,6 @@ from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.server import VSCodeServer
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 
 def _redirect_db(tmpdir: str) -> tuple:
     old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
@@ -99,11 +95,6 @@ def _unpatch_super_run(original: Any) -> None:
     parent_class.run = original
 
 
-# ---------------------------------------------------------------------------
-# BUG-12 FIX: squash_merge_from_baseline checks commit return code
-# ---------------------------------------------------------------------------
-
-
 class TestBug12SquashMergeFromBaselineChecksCommit:
     """squash_merge_from_baseline returns MERGE_FAILED when git commit fails."""
 
@@ -112,7 +103,6 @@ class TestBug12SquashMergeFromBaselineChecksCommit:
         self.repo = _make_repo(Path(self.tmpdir) / "repo")
 
     def teardown_method(self) -> None:
-        # Clean up hook in case test failed before removing it
         hook = self.repo / ".git" / "hooks" / "pre-commit"
         if hook.exists():
             hook.unlink()
@@ -127,21 +117,17 @@ class TestBug12SquashMergeFromBaselineChecksCommit:
         wt_dir = repo / ".kiss-worktrees" / "test_wt"
         assert GitWorktreeOps.create(repo, "kiss/wt-test", wt_dir)
 
-        # Create baseline commit
         (wt_dir / "dirty.txt").write_text("dirty")
         GitWorktreeOps.commit_all(wt_dir, "baseline")
         baseline = GitWorktreeOps.head_sha(wt_dir)
         assert baseline is not None
 
-        # Create agent work commit
         (wt_dir / "agent.txt").write_text("agent work")
         GitWorktreeOps.commit_all(wt_dir, "agent work")
 
-        # Remove worktree so we can merge in main repo
         GitWorktreeOps.remove(repo, wt_dir)
         GitWorktreeOps.prune(repo)
 
-        # Install a pre-commit hook that rejects all commits
         hooks_dir = repo / ".git" / "hooks"
         hooks_dir.mkdir(parents=True, exist_ok=True)
         hook = hooks_dir / "pre-commit"
@@ -154,7 +140,6 @@ class TestBug12SquashMergeFromBaselineChecksCommit:
 
         hook.unlink()
 
-        # FIX: Returns MERGE_FAILED, not SUCCESS
         assert result == MergeResult.MERGE_FAILED, (
             "squash_merge_from_baseline should return MERGE_FAILED "
             "when commit is rejected by pre-commit hook"
@@ -175,14 +160,12 @@ class TestBug12SquashMergeFromBaselineChecksCommit:
             assert GitWorktreeOps.create(repo, "kiss/wt-test12", wt_dir)
             GitWorktreeOps.save_original_branch(repo, "kiss/wt-test12", "main")
 
-            # Create baseline
             (wt_dir / "dirty.txt").write_text("dirty")
             GitWorktreeOps.commit_all(wt_dir, "baseline")
             baseline = GitWorktreeOps.head_sha(wt_dir)
             assert baseline is not None
             GitWorktreeOps.save_baseline_commit(repo, "kiss/wt-test12", baseline)
 
-            # Create agent work
             (wt_dir / "work.txt").write_text("important work")
             GitWorktreeOps.commit_all(wt_dir, "important agent work")
 
@@ -194,7 +177,6 @@ class TestBug12SquashMergeFromBaselineChecksCommit:
                 baseline_commit=baseline,
             )
 
-            # Install hook that rejects commits
             hooks_dir = repo / ".git" / "hooks"
             hooks_dir.mkdir(parents=True, exist_ok=True)
             hook = hooks_dir / "pre-commit"
@@ -204,14 +186,9 @@ class TestBug12SquashMergeFromBaselineChecksCommit:
             msg = agent.merge()
             hook.unlink()
 
-            # FIX: merge() reports failure (not success) and does NOT
-            # delete the branch — agent work is preserved
             assert "Successfully merged" not in msg, (
                 "merge() should NOT report success when commit fails"
             )
-            # Note: merge() may report auto-commit failure (BUG-16 fix)
-            # or merge conflict, depending on which check triggers first.
-            # Either way, the branch should still exist:
             assert GitWorktreeOps.branch_exists(repo, "kiss/wt-test12"), (
                 "branch must be preserved when commit fails"
             )
@@ -221,11 +198,6 @@ class TestBug12SquashMergeFromBaselineChecksCommit:
                 hook_path.unlink()
             _unpatch_super_run(orig)
             _restore_db(saved)
-
-
-# ---------------------------------------------------------------------------
-# BUG-13 FIX: _release_worktree warns on merge conflict
-# ---------------------------------------------------------------------------
 
 
 class TestBug13ReleaseWorktreeWarnsOnConflict:
@@ -260,11 +232,9 @@ class TestBug13ReleaseWorktreeWarnsOnConflict:
         assert GitWorktreeOps.create(repo, "kiss/wt-test13", wt_dir)
         GitWorktreeOps.save_original_branch(repo, "kiss/wt-test13", "main")
 
-        # Agent modifies README.md in worktree
         (wt_dir / "README.md").write_text("agent version\n")
         GitWorktreeOps.commit_all(wt_dir, "agent edits README")
 
-        # Meanwhile, someone modifies README.md on main
         (repo / "README.md").write_text("conflicting version\n")
         _git("add", ".", cwd=repo)
         _git("commit", "-m", "main edits README", cwd=repo)
@@ -279,28 +249,19 @@ class TestBug13ReleaseWorktreeWarnsOnConflict:
 
         released = agent._release_worktree()
 
-        # FIX: Returns None to signal incomplete release
         assert released is None, (
             "_release_worktree should return None on merge conflict"
         )
 
-        # FIX: _merge_conflict_warning is set with useful info
         assert agent._merge_conflict_warning is not None, (
             "_merge_conflict_warning should be set on merge conflict"
         )
         assert "kiss/wt-test13" in agent._merge_conflict_warning
         assert "conflict" in agent._merge_conflict_warning.lower()
 
-        # _wt is cleared so the agent can accept new tasks
         assert agent._wt is None
 
-        # Branch is still preserved for manual resolution
         assert GitWorktreeOps.branch_exists(repo, "kiss/wt-test13")
-
-
-# ---------------------------------------------------------------------------
-# BUG-14 FIX: _new_chat surfaces warnings
-# ---------------------------------------------------------------------------
 
 
 class TestBug14NewChatSurfacesWarnings:
@@ -387,11 +348,6 @@ class TestBug14NewChatSurfacesWarnings:
         assert len(warning_events) == 2
 
 
-# ---------------------------------------------------------------------------
-# BUG-15 FIX: per-repo locking for concurrent tab releases
-# ---------------------------------------------------------------------------
-
-
 class TestBug15ConcurrentReleaseUsesLocking:
     """Concurrent _release_worktree calls are serialized by repo_lock."""
 
@@ -414,12 +370,10 @@ class TestBug15ConcurrentReleaseUsesLocking:
         lock1 = repo_lock(repo)
         lock2 = repo_lock(repo)
 
-        # Same repo → same lock object
         assert lock1 is lock2, (
             "repo_lock must return the same lock for the same repo"
         )
 
-        # Different repos → different locks
         other = Path(self.tmpdir) / "other"
         other.mkdir()
         lock3 = repo_lock(other)
@@ -427,7 +381,6 @@ class TestBug15ConcurrentReleaseUsesLocking:
             "repo_lock must return different locks for different repos"
         )
 
-        # Lock is a threading.Lock
         assert isinstance(lock1, type(threading.Lock()))
 
     def test_concurrent_releases_are_serialized(self) -> None:
@@ -494,17 +447,10 @@ class TestBug15ConcurrentReleaseUsesLocking:
         assert not errors, f"Concurrent releases should not error: {errors}"
         assert "a" in results and "b" in results
 
-        # At least one should succeed (the other may conflict due to
-        # non-ff merge after the first one's squash merge)
         successes = [k for k, v in results.items() if v == "main"]
         assert len(successes) >= 1, (
             "At least one concurrent release should succeed"
         )
-
-
-# ---------------------------------------------------------------------------
-# BUG-16 FIX: _finalize_worktree preserves worktree on commit failure
-# ---------------------------------------------------------------------------
 
 
 class TestBug16FinalizePreservesWorktreeOnCommitFailure:
@@ -539,10 +485,8 @@ class TestBug16FinalizePreservesWorktreeOnCommitFailure:
         assert GitWorktreeOps.create(repo, "kiss/wt-test16", wt_dir)
         GitWorktreeOps.save_original_branch(repo, "kiss/wt-test16", "main")
 
-        # Agent creates important work (uncommitted)
         (wt_dir / "important.txt").write_text("critical work product")
 
-        # Install pre-commit hook that rejects all commits
         hooks_dir = repo / ".git" / "hooks"
         hooks_dir.mkdir(parents=True, exist_ok=True)
         hook = hooks_dir / "pre-commit"
@@ -559,7 +503,6 @@ class TestBug16FinalizePreservesWorktreeOnCommitFailure:
 
         assert (wt_dir / "important.txt").exists()
 
-        # _finalize_worktree returns False when auto-commit is rejected
         result = agent._finalize_worktree()
         hook.unlink()
 
@@ -567,12 +510,10 @@ class TestBug16FinalizePreservesWorktreeOnCommitFailure:
             "_finalize_worktree should return False when auto-commit fails"
         )
 
-        # FIX: worktree directory is PRESERVED
         assert wt_dir.exists(), (
             "Worktree directory must be preserved when auto-commit fails"
         )
 
-        # FIX: the important file is still accessible
         assert (wt_dir / "important.txt").exists(), (
             "Agent work must not be lost"
         )
@@ -645,11 +586,6 @@ class TestBug16FinalizePreservesWorktreeOnCommitFailure:
         )
 
 
-# ---------------------------------------------------------------------------
-# BUG-17 FIX: _save_untracked_base skipped in worktree mode
-# ---------------------------------------------------------------------------
-
-
 class TestBug17UntrackedBaseNotNukedInWorktreeMode:
     """_run_task_inner skips _save_untracked_base when use_worktree=True."""
 
@@ -664,21 +600,12 @@ class TestBug17UntrackedBaseNotNukedInWorktreeMode:
 
         tmpdir = tempfile.mkdtemp()
         try:
-            # Simulate tab A's merge review data
             ub_dir = _untracked_base_dir()
             ub_dir.mkdir(parents=True, exist_ok=True)
             (ub_dir / "tab_a_file.txt").write_text("tab A's base copy")
             assert (ub_dir / "tab_a_file.txt").exists()
 
-            # Verify that _save_untracked_base with EMPTY set does not
-            # nuke existing data (this is the behavior we get when the
-            # call is skipped in worktree mode)
-            # Note: we're testing the server.py logic of SKIPPING the call,
-            # not _save_untracked_base itself.
 
-            # The fix is in server.py: when tab.use_worktree is True,
-            # _save_untracked_base is not called at all.
-            # We verify the guard exists by checking the source code:
             import inspect
 
             from kiss.agents.vscode.server import VSCodeServer
@@ -688,13 +615,10 @@ class TestBug17UntrackedBaseNotNukedInWorktreeMode:
                 "_run_task_inner should guard pre-task snapshot "
                 "with 'if not tab.use_worktree:'"
             )
-            # _save_untracked_base is in _capture_pre_snapshot (called
-            # from _run_task_inner inside the non-worktree guard)
             assert "_capture_pre_snapshot" in source
             snap_source = inspect.getsource(VSCodeServer._capture_pre_snapshot)
             assert "_save_untracked_base" in snap_source
 
-            # Also verify that tab A's data survives when the guard fires
             assert (ub_dir / "tab_a_file.txt").exists(), (
                 "Tab A's base copy should survive when worktree mode "
                 "skips _save_untracked_base"
@@ -704,11 +628,6 @@ class TestBug17UntrackedBaseNotNukedInWorktreeMode:
             ub_dir = _untracked_base_dir()
             if ub_dir.exists():
                 shutil.rmtree(ub_dir, ignore_errors=True)
-
-
-# ---------------------------------------------------------------------------
-# BUG-18 FIX: _release_worktree returns None on merge conflict
-# ---------------------------------------------------------------------------
 
 
 class TestBug18ReleaseReturnsNoneOnConflict:
@@ -740,7 +659,6 @@ class TestBug18ReleaseReturnsNoneOnConflict:
         (wt_dir / "README.md").write_text("agent version\n")
         GitWorktreeOps.commit_all(wt_dir, "agent edits")
 
-        # Create conflict on main
         (repo / "README.md").write_text("main version\n")
         _git("add", ".", cwd=repo)
         _git("commit", "-m", "main edits", cwd=repo)
@@ -755,18 +673,14 @@ class TestBug18ReleaseReturnsNoneOnConflict:
 
         result = agent._release_worktree()
 
-        # FIX: Returns None, not "main"
         assert result is None, (
             "_release_worktree should return None on merge conflict"
         )
 
-        # _wt is cleared so agent can accept new tasks
         assert agent._wt is None
 
-        # Warning is set for user notification
         assert agent._merge_conflict_warning is not None
 
-        # Branch is preserved
         assert GitWorktreeOps.branch_exists(repo, "kiss/wt-test18")
 
     def test_returns_branch_on_success(self) -> None:

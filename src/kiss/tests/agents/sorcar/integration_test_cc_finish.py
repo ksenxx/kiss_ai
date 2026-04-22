@@ -33,24 +33,19 @@ class TestCCModelFinishIntegration:
             {"finish": finish}
         )
 
-        # Model must have produced at least one tool call to finish
         finish_calls = [c for c in calls if c["name"] == "finish"]
         assert finish_calls, f"Expected a finish() call, got: {calls}"
 
-        # Execute finish() with the arguments the model provided
         args = finish_calls[0]["arguments"]
         result = finish(**args)
 
-        # Result must be valid YAML
         parsed = yaml.safe_load(result)
         assert isinstance(parsed, dict), f"Expected dict, got: {type(parsed)}"
 
-        # All three keys must be present
         assert "success" in parsed, f"Missing 'success' key in: {parsed}"
         assert "is_continue" in parsed, f"Missing 'is_continue' key in: {parsed}"
         assert "summary" in parsed, f"Missing 'summary' key in: {parsed}"
 
-        # Verify types
         assert isinstance(parsed["success"], bool)
         assert isinstance(parsed["is_continue"], bool)
         assert isinstance(parsed["summary"], str)
@@ -72,8 +67,6 @@ class TestCCModelFinishIntegration:
         assert finish_calls, f"Expected a finish() call, got: {calls}"
 
         args = finish_calls[0]["arguments"]
-        # Regardless of whether the model included is_continue,
-        # calling finish() must not raise and must produce valid YAML.
         result = finish(**args)
         parsed = yaml.safe_load(result)
         assert isinstance(parsed, dict)

@@ -16,10 +16,6 @@ import kiss.core.utils as utils
 from kiss.core.kiss_agent import KISSAgent
 from kiss.docker.docker_manager import DockerManager
 
-####################################################################################
-# Prompt Refiner Agent
-####################################################################################
-
 prompt_template_refiner = """
 ## Role ##
 You are a neutral evaluator. Your sole task is to refine an agent's prompt template based on
@@ -93,10 +89,6 @@ def prompt_refiner_agent(
     return result
 
 
-####################################################################################
-# General Bash Agent
-####################################################################################
-
 prompt_template_for_general_bash_agent = """
 You are a helpful assistant that can solve problems using bash command
 on the latest image of ubuntu.
@@ -129,11 +121,6 @@ def run_bash_task_in_sandboxed_ubuntu_latest(task: str, model_name: str) -> str:
             tools=[env.Bash],
         )
         return result
-
-
-####################################################################################
-# Simple Coding Agent
-####################################################################################
 
 
 def get_run_simple_coding_agent(test_fn: Callable[[str], bool]) -> Callable[..., str]:

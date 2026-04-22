@@ -38,10 +38,6 @@ from kiss.channels.cron_manager_daemon import (
     stop_daemon,
 )
 
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
 _counter = 0
 
 
@@ -88,7 +84,6 @@ def crontab_env(tmp_path: Path) -> dict[str, Path]:
     return {
         "crontab": script,
         "tab": tab,
-        # macOS AF_UNIX path limit is ~104 chars; put sockets under /tmp
         "sock": Path(f"/tmp/_kiss_cron_test_{tag}.sock"),
         "pid": tmp_path / "cron.pid",
     }
@@ -131,11 +126,6 @@ def client(
     return CronClient(sock_path=crontab_env["sock"])
 
 
-# ---------------------------------------------------------------------------
-# Parse / mutate helpers
-# ---------------------------------------------------------------------------
-
-
 class TestParseKissJobs:
     def test_empty(self) -> None:
         assert _parse_kiss_jobs("") == []
@@ -173,17 +163,14 @@ class TestParseKissJobs:
         assert jobs[0].command == "echo kiss"
 
     def test_orphan_marker_skipped(self) -> None:
-        # Marker at EOF without schedule line below.
         content = "# KISS-JOB orphan 2025-01-01T00:00:00\n"
         assert _parse_kiss_jobs(content) == []
 
     def test_malformed_marker_skipped(self) -> None:
-        # Marker with only 3 fields (no created_at) — skipped.
         content = "# KISS-JOB\n* * * * * echo x\n"
         assert _parse_kiss_jobs(content) == []
 
     def test_malformed_schedule_skipped(self) -> None:
-        # Schedule line has only 4 fields + command — not 5 fields.
         content = "# KISS-JOB id1 ts\n* * * * \n"
         assert _parse_kiss_jobs(content) == []
 
@@ -233,7 +220,6 @@ class TestRemoveKissBlock:
         assert new == ""
 
     def test_malformed_marker_not_treated_as_block(self) -> None:
-        # Marker without created_at must not swallow the next line.
         content = "# KISS-JOB\nregular line\n"
         new, removed = _remove_kiss_block(content, "anything")
         assert not removed
@@ -268,16 +254,10 @@ class TestValidators:
             _validate_command("echo hi\rrm")
 
 
-# ---------------------------------------------------------------------------
-# Low-level crontab read/write
-# ---------------------------------------------------------------------------
-
-
 class TestReadWriteCrontab:
     def test_read_empty_returns_blank(
         self, crontab_env: dict[str, Path]
     ) -> None:
-        # tab file starts empty → fake returns rc=1 with "no crontab"
         assert _read_crontab(str(crontab_env["crontab"])) == ""
 
     def test_write_then_read(self, crontab_env: dict[str, Path]) -> None:
@@ -321,11 +301,6 @@ class TestReadWriteCrontab:
             _write_crontab("bad\n", str(broken))
 
 
-# ---------------------------------------------------------------------------
-# PID helpers
-# ---------------------------------------------------------------------------
-
-
 class TestPidHelpers:
     def test_read_missing(self, tmp_path: Path) -> None:
         assert _read_pid(tmp_path / "nope.pid") is None
@@ -345,11 +320,6 @@ class TestPidHelpers:
 
     def test_is_running_dead(self) -> None:
         assert not _is_running(99999999)
-
-
-# ---------------------------------------------------------------------------
-# Daemon command handling (in-process unit tests)
-# ---------------------------------------------------------------------------
 
 
 class TestDaemonCommands:
@@ -381,7 +351,6 @@ class TestDaemonCommands:
         assert "5 fields" in resp["message"]
 
     def test_add_empty_command_validator(self, daemon: CronDaemon) -> None:
-        # Daemon rejects missing command at the dispatch layer first.
         resp = daemon._handle_command(
             {"action": "add", "schedule": "* * * * *", "command": ""}
         )
@@ -459,7 +428,6 @@ class TestDaemonCommands:
         tab = crontab_env["tab"].read_text()
         assert "SHELL=/bin/bash" in tab
         assert "0 9 * * * user_job" in tab
-        # list only returns KISS-owned
         resp = daemon._handle_command({"action": "list"})
         assert len(resp["jobs"]) == 1
 
@@ -481,7 +449,6 @@ class TestDaemonCommands:
 
     def test_add_surfaces_write_error(self, tmp_path: Path) -> None:
         broken = tmp_path / "crontab"
-        # Reads empty (rc=1 + "no crontab"), but rejects writes.
         broken.write_text(
             f'#!{sys.executable}\n'
             'import sys\n'
@@ -557,11 +524,6 @@ class TestDaemonCommands:
         assert "warning" in resp
 
 
-# ---------------------------------------------------------------------------
-# Client–daemon integration (socket)
-# ---------------------------------------------------------------------------
-
-
 class TestClientDaemonIntegration:
     def test_add_list_remove(self, client: CronClient) -> None:
         job_id = client.add_job("*/5 * * * *", "echo integration")
@@ -622,18 +584,12 @@ class TestClientDaemonIntegration:
         assert not errors, f"Errors: {errors}"
         assert len(set(results)) == 10
         jobs = client.list_jobs()
-        # All 10 concurrent adds must land in the crontab (mutex correctness).
         assert len(jobs) == 10
 
     def test_client_unreachable(self, tmp_path: Path) -> None:
         c = CronClient(sock_path=tmp_path / "no_such.sock")
         with pytest.raises(ConnectionError):
             c.list_jobs()
-
-
-# ---------------------------------------------------------------------------
-# Daemon lifecycle
-# ---------------------------------------------------------------------------
 
 
 class TestDaemonStopViaClient:
@@ -756,11 +712,6 @@ class TestProcessKillRestart:
             crontab_env["sock"].unlink(missing_ok=True)
 
 
-# ---------------------------------------------------------------------------
-# Client edge cases
-# ---------------------------------------------------------------------------
-
-
 class TestClientEdgeCases:
     def test_invalid_json(
         self, crontab_env: dict[str, Path], running_daemon: CronDaemon
@@ -798,7 +749,6 @@ class TestClientEdgeCases:
         try:
             s.settimeout(10.0)
             s.connect(str(crontab_env["sock"]))
-            # > 1 MB of garbage
             s.sendall(b"x" * (1_048_576 + 10))
             s.shutdown(socket.SHUT_WR)
             data = b""
@@ -814,13 +764,7 @@ class TestClientEdgeCases:
             s.close()
 
     def test_stop_daemon_when_gone(self, tmp_path: Path) -> None:
-        # Should silently swallow ConnectionError.
         CronClient(sock_path=tmp_path / "gone.sock").stop_daemon()
-
-
-# ---------------------------------------------------------------------------
-# Top-level process-management helpers
-# ---------------------------------------------------------------------------
 
 
 class TestLifecycleHelpers:
@@ -832,7 +776,7 @@ class TestLifecycleHelpers:
 
     def test_stop_daemon_stale_pid(self, tmp_path: Path) -> None:
         pid_path = tmp_path / "p.pid"
-        pid_path.write_text("99999999")  # dead PID
+        pid_path.write_text("99999999")
         msg = stop_daemon(
             sock_path=tmp_path / "s.sock", pid_path=pid_path
         )
@@ -854,7 +798,6 @@ class TestLifecycleHelpers:
     def test_daemon_status_running(
         self, crontab_env: dict[str, Path], running_daemon: CronDaemon
     ) -> None:
-        # PID file is written by the running daemon.
         msg = daemon_status(
             pid_path=crontab_env["pid"], sock_path=crontab_env["sock"]
         )
@@ -864,7 +807,7 @@ class TestLifecycleHelpers:
 
     def test_daemon_status_socket_unreachable(self, tmp_path: Path) -> None:
         pid_path = tmp_path / "p.pid"
-        pid_path.write_text(str(os.getpid()))  # this process is alive
+        pid_path.write_text(str(os.getpid()))
         msg = daemon_status(
             pid_path=pid_path, sock_path=tmp_path / "no_such.sock"
         )
@@ -879,11 +822,6 @@ class TestLifecycleHelpers:
             foreground=True,
         )
         assert "already running" in msg
-
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
 
 
 class TestCLI:
@@ -925,8 +863,6 @@ class TestCLI:
 
     def test_start_foreground_then_stop(self) -> None:
         """Launch the real daemon in the foreground, then stop it cleanly."""
-        # macOS AF_UNIX paths are capped at ~104 chars, so rooting HOME under
-        # pytest's tmp_path overflows. Use a short /tmp directory instead.
         short_home = Path(f"/tmp/_kiss_cli_{os.getpid()}_{time.monotonic_ns()}")
         short_home.mkdir()
         env = os.environ.copy()

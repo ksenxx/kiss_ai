@@ -19,7 +19,6 @@ class TestScanFilesPerformance:
         """Large number of files and subdirectories together."""
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            # 200 subdirs with 25 files each = 5000 files + 200 dir entries
             for i in range(200):
                 sub = root / f"dir{i:03d}"
                 sub.mkdir()
@@ -30,7 +29,6 @@ class TestScanFilesPerformance:
             elapsed = time.monotonic() - start
             assert len(result) == 5000
             assert elapsed < 2.0, f"Took {elapsed:.2f}s, expected < 2s"
-            # Verify both files and directories are in results
             files = [p for p in result if not p.endswith("/")]
             dirs = [p for p in result if p.endswith("/")]
             assert len(files) > 0

@@ -29,11 +29,9 @@ class TestFindKissProjectSearchOrder(unittest.TestCase):
         """KISS_PROJECT_PATH must be checked before the embedded kiss_project/."""
         source = (VSCODE_SRC / "AgentProcess.ts").read_text()
 
-        # Find the position of the KISS_PROJECT_PATH env-var check
         env_match = re.search(r"process\.env\.KISS_PROJECT_PATH", source)
         assert env_match is not None, "KISS_PROJECT_PATH check not found in AgentProcess.ts"
 
-        # Find the embedded path check (the actual path.join call, not comments)
         embedded_match = re.search(r"path\.join\(__dirname.*kiss_project", source)
         assert embedded_match is not None, "embedded kiss_project check not found"
 
@@ -50,7 +48,6 @@ class TestFindKissProjectSearchOrder(unittest.TestCase):
         config_match = re.search(r"kissProjectPath", source)
         assert config_match is not None
 
-        # Find the embedded path check (the actual path.join call, not the comment)
         embedded_match = re.search(r"path\.join\(__dirname.*kiss_project", source)
         assert embedded_match is not None
 

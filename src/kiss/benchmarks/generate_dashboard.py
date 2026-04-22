@@ -46,7 +46,6 @@ def _compute_swebench_stats(data: dict | list[dict]) -> dict:
     if isinstance(data, dict):
         results = data.get("results", data)
         if isinstance(results, dict):
-            # Flat dict: instance_id -> pass/fail
             items = [
                 {"instance_id": k, "passed": v} for k, v in results.items()
             ]
@@ -132,7 +131,6 @@ def generate_dashboard(
     swebench_section = ""
     tbench_section = ""
 
-    # SWE-bench Pro
     if swebench_results_path:
         data = _load_json(swebench_results_path)
         if data:
@@ -151,7 +149,6 @@ def generate_dashboard(
                 + "</div>\n"
             )
 
-    # Terminal-Bench
     if tbench_results_path:
         data = _load_json(tbench_results_path)
         if data and isinstance(data, list):

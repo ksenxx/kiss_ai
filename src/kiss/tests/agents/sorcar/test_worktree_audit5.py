@@ -30,10 +30,6 @@ from kiss.agents.sorcar.git_worktree import (
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.server import VSCodeServer
 
-# ---------------------------------------------------------------------------
-# Helpers (same as prior audit test files)
-# ---------------------------------------------------------------------------
-
 
 def _redirect_db(tmpdir: str) -> tuple:
     old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
@@ -77,11 +73,6 @@ def _make_repo(path: Path) -> Path:
     return path
 
 
-# ===================================================================
-# BUG-19 FIX: discard() now acquires repo_lock
-# ===================================================================
-
-
 class TestBug19DiscardRepoLock:
     """BUG-19 FIX: discard() acquires repo_lock so checkout is serialized."""
 
@@ -118,24 +109,17 @@ class TestBug19DiscardRepoLock:
 
                 t = threading.Thread(target=try_discard)
                 t.start()
-                # discard should block — wait briefly to confirm
                 t.join(timeout=0.5)
                 assert not completed.is_set(), (
                     "discard() should block while repo_lock is held"
                 )
             finally:
                 lock.release()
-                # Now it should complete
                 completed.wait(timeout=5.0)
                 assert completed.is_set()
         finally:
             _restore_db(saved)
             shutil.rmtree(tmpdir, ignore_errors=True)
-
-
-# ===================================================================
-# BUG-20 FIX: _release_worktree sets warning on checkout failure
-# ===================================================================
 
 
 class TestBug20ReleaseCheckoutWarning:
@@ -168,7 +152,6 @@ class TestBug20ReleaseCheckoutWarning:
             (wt.wt_dir / "file.txt").write_text("work\n")
             GitWorktreeOps.commit_all(wt.wt_dir, "agent work")
 
-            # Switch main repo to "feature" and create dirty state
             _git("checkout", "feature", cwd=repo)
             (repo / "README.md").write_text("dirty local change\n")
 
@@ -189,11 +172,6 @@ class TestBug20ReleaseCheckoutWarning:
         finally:
             _restore_db(saved)
             shutil.rmtree(tmpdir, ignore_errors=True)
-
-
-# ===================================================================
-# BUG-21 FIX: checkout_error() removed, checkout() returns (bool, str)
-# ===================================================================
 
 
 class TestBug21CheckoutReturnsTuple:
@@ -220,17 +198,11 @@ class TestBug21CheckoutReturnsTuple:
             assert ok is True
             assert err == ""
 
-            # Test failure case
             ok2, err2 = GitWorktreeOps.checkout(repo, "nonexistent")
             assert ok2 is False
             assert err2 != ""
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
-
-
-# ===================================================================
-# BUG-22: _check_merge_conflict misses staged files — KNOWN LIMITATION
-# ===================================================================
 
 
 class TestBug22ConflictMissesStaged:
@@ -272,18 +244,12 @@ class TestBug22ConflictMissesStaged:
         tab.use_worktree = True
 
         has_conflict = server._check_merge_conflict("t22")
-        # Fixed (INC-6): staged overlap is now detected
         assert has_conflict is True
 
     def test_unstaged_files_only_returns_unstaged(self) -> None:
         """unstaged_files() uses git diff --name-only (no --cached)."""
         source = inspect.getsource(GitWorktreeOps.unstaged_files)
         assert "--cached" not in source
-
-
-# ===================================================================
-# BUG-23 FIX: baseline commit uses --no-verify and checks return
-# ===================================================================
 
 
 class TestBug23BaselineCommitFixed:
@@ -299,7 +265,6 @@ class TestBug23BaselineCommitFixed:
             repo = _make_repo(Path(tmpdir) / "repo")
             (repo / "dirty.txt").write_text("user dirty state\n")
 
-            # Install a pre-commit hook that always rejects
             hooks_dir = repo / ".git" / "hooks"
             hooks_dir.mkdir(parents=True, exist_ok=True)
             hook = hooks_dir / "pre-commit"
@@ -316,13 +281,10 @@ class TestBug23BaselineCommitFixed:
             assert wt is not None
             assert (wt.wt_dir / "dirty.txt").exists()
 
-            # With --no-verify, the baseline commit should succeed
-            # despite the pre-commit hook
             assert wt.baseline_commit is not None, (
                 "baseline_commit should be set (--no-verify bypasses hooks)"
             )
 
-            # Verify it's a real commit with the dirty state
             original_head = _git("rev-parse", "HEAD", cwd=repo).stdout.strip()
             assert wt.baseline_commit != original_head, (
                 "baseline should be a NEW commit (not the original HEAD)"
@@ -336,7 +298,6 @@ class TestBug23BaselineCommitFixed:
         """_try_setup_worktree checks commit_staged return value."""
         source = inspect.getsource(WorktreeSorcarAgent._try_setup_worktree)
         assert "commit_staged(" in source
-        # The return value should be checked with an if statement
         lines = source.splitlines()
         for line in lines:
             if "commit_staged(" in line:
@@ -352,11 +313,6 @@ class TestBug23BaselineCommitFixed:
         """commit_staged accepts no_verify kwarg."""
         sig = inspect.signature(GitWorktreeOps.commit_staged)
         assert "no_verify" in sig.parameters
-
-
-# ===================================================================
-# BUG-24: silent discard on transient git-diff failure — KNOWN
-# ===================================================================
 
 
 class TestBug24SilentDiscardOnGitFailure:
@@ -394,7 +350,6 @@ class TestBug24SilentDiscardOnGitFailure:
             tab.agent = agent
             tab.use_worktree = True
 
-            # Set a bad baseline to force git diff failure
             agent._wt = GitWorktree(
                 repo_root=wt.repo_root,
                 branch=wt.branch,
@@ -404,9 +359,6 @@ class TestBug24SilentDiscardOnGitFailure:
             )
 
             changed_after = server._get_worktree_changed_files("t24")
-            # BUG-51 fix: the agent's committed change is still
-            # reported via the ``git status`` fallback so the
-            # auto-discard path does not silently lose work.
             assert "important.txt" in changed_after
 
         finally:
@@ -426,6 +378,5 @@ class TestBug24SilentDiscardOnGitFailure:
         assert "discard()" in present_source
         assert "_any_non_wt_running" in present_source
 
-        # _run_task_inner delegates to _present_pending_worktree
         runner_source = inspect.getsource(VSCodeServer._run_task_inner)
         assert "_present_pending_worktree" in runner_source

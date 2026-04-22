@@ -34,11 +34,6 @@ _API_BASE = "https://discord.com/api/v10"
 _config = ChannelConfig(_DISCORD_DIR, ("bot_token",))
 
 
-# ---------------------------------------------------------------------------
-# DiscordChannelBackend
-# ---------------------------------------------------------------------------
-
-
 class DiscordChannelBackend(ToolMethodBackend):
     """Channel backend for Discord REST API v10."""
 
@@ -108,7 +103,6 @@ class DiscordChannelBackend(ToolMethodBackend):
         """
         if not name:
             return None
-        # If already a numeric ID, return as-is
         if name.isdigit():
             return name
         try:
@@ -137,7 +131,6 @@ class DiscordChannelBackend(ToolMethodBackend):
             if oldest:  # pragma: no branch
                 params["after"] = oldest
             else:
-                # Snowflake for "1 second ago"
                 params["after"] = str((int((time.time() - 1) * 1000) - 1420070400000) << 22)
             result = self._get(f"/channels/{channel_id}/messages", params=params)
             if not isinstance(result, list):  # pragma: no branch
@@ -191,9 +184,6 @@ class DiscordChannelBackend(ToolMethodBackend):
         """Release Discord backend state before stop or reconnect."""
         self._last_message_id = ""
 
-    # -------------------------------------------------------------------
-    # Discord API tool methods
-    # -------------------------------------------------------------------
 
     def list_guilds(self, limit: int = 100) -> str:
         """List guilds (servers) the bot is a member of.
@@ -473,11 +463,6 @@ class DiscordChannelBackend(ToolMethodBackend):
             )
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
-
-
-# ---------------------------------------------------------------------------
-# DiscordAgent
-# ---------------------------------------------------------------------------
 
 
 class DiscordAgent(BaseChannelAgent, StatefulSorcarAgent):

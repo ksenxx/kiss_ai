@@ -30,11 +30,6 @@ _TELEGRAM_DIR = Path.home() / ".kiss" / "channels" / "telegram"
 _config = ChannelConfig(_TELEGRAM_DIR, ("bot_token",))
 
 
-# ---------------------------------------------------------------------------
-# TelegramChannelBackend
-# ---------------------------------------------------------------------------
-
-
 class TelegramChannelBackend(ToolMethodBackend):
     """Channel backend for Telegram Bot API.
 
@@ -118,9 +113,6 @@ class TelegramChannelBackend(ToolMethodBackend):
             poll_interval=2.0,
         )
 
-    # -------------------------------------------------------------------
-    # Telegram API tool methods
-    # -------------------------------------------------------------------
 
     def send_text(self, chat_id: str, text: str, reply_to_message_id: str = "") -> str:
         """Send a text message to a Telegram chat.
@@ -462,11 +454,6 @@ class TelegramChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": True, "message_id": msg.message_id})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
-
-
-# ---------------------------------------------------------------------------
-# TelegramAgent
-# ---------------------------------------------------------------------------
 
 
 class TelegramAgent(BaseChannelAgent, StatefulSorcarAgent):

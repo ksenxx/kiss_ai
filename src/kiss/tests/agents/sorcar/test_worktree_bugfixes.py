@@ -19,10 +19,6 @@ from kiss.agents.sorcar.git_worktree import (
     _git,
 )
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 
 def _make_repo(path: Path) -> Path:
     """Create a git repo with one initial commit at *path*."""
@@ -69,11 +65,6 @@ def _setup_baseline(repo: Path, wt_dir: Path, branch: str) -> str:
     return sha
 
 
-# ===========================================================================
-# BUG 2: copy_dirty_state doesn't delete old file on rename
-# ===========================================================================
-
-
 class TestBug2RenameDeletesOldFile:
     """copy_dirty_state must remove the old path on renames."""
 
@@ -81,18 +72,15 @@ class TestBug2RenameDeletesOldFile:
         """When user has a staged rename, old file is deleted from worktree."""
         with tempfile.TemporaryDirectory() as tmp:
             repo = _make_repo(Path(tmp) / "repo")
-            # Stage a rename: README.md -> DOCS.md
             _git("mv", "README.md", "DOCS.md", cwd=repo)
 
             wt_dir = _create_worktree(repo, "kiss/wt-rename-1")
 
-            # Before copy: worktree has README.md (clean checkout)
             assert (wt_dir / "README.md").exists()
             assert not (wt_dir / "DOCS.md").exists()
 
             assert GitWorktreeOps.copy_dirty_state(repo, wt_dir)
 
-            # After copy: old file gone, new file present
             assert not (wt_dir / "README.md").exists()
             assert (wt_dir / "DOCS.md").exists()
             assert (wt_dir / "DOCS.md").read_text() == "# Test\n"
@@ -125,11 +113,6 @@ class TestBug2RenameDeletesOldFile:
             assert (wt_dir / "docs" / "README.md").exists()
 
 
-# ===========================================================================
-# BUG 3: stash pop failure surfaces warning
-# ===========================================================================
-
-
 class TestBug3StashPopWarning:
     """merge() includes stash-pop warning in return message."""
 
@@ -141,16 +124,13 @@ class TestBug3StashPopWarning:
             wt_dir = _create_worktree(repo, branch)
             GitWorktreeOps.save_original_branch(repo, branch, "main")
 
-            # Agent modifies README
             (wt_dir / "README.md").write_text("# Agent version\n")
             GitWorktreeOps.commit_all(wt_dir, "agent change")
 
-            # Remove worktree
             GitWorktreeOps.remove(repo, wt_dir)
             GitWorktreeOps.prune(repo)
             _git("checkout", "main", cwd=repo)
 
-            # Create a dirty state that will conflict with agent's change
             (repo / "README.md").write_text("<<<conflict-marker>>>\n")
 
             import kiss.agents.sorcar.persistence as th
@@ -174,16 +154,11 @@ class TestBug3StashPopWarning:
                 )
 
                 result = agent.merge()
-                # The merge may succeed (squash merge) but stash pop
-                # should fail because of conflicting README.md
                 if "stash pop" in result.lower() or "stash" in result.lower():
                     assert "git stash pop" in result
-                # If merge itself conflicted, that's also expected
                 elif "conflict" in result.lower():
                     pass
                 else:
-                    # Merge succeeded without stash issues — this is fine
-                    # if git managed to auto-resolve
                     assert "Successfully merged" in result
             finally:
                 if th._db_conn is not None:
@@ -199,16 +174,13 @@ class TestBug3StashPopWarning:
             wt_dir = _create_worktree(repo, branch)
             GitWorktreeOps.save_original_branch(repo, branch, "main")
 
-            # Agent modifies README
             (wt_dir / "README.md").write_text("# Agent version\n")
             GitWorktreeOps.commit_all(wt_dir, "agent change")
 
-            # Remove worktree, go back to main
             GitWorktreeOps.remove(repo, wt_dir)
             GitWorktreeOps.prune(repo)
             _git("checkout", "main", cwd=repo)
 
-            # Create dirty state that will conflict on stash pop
             (repo / "README.md").write_text("<<<conflict-marker>>>\n")
 
             import kiss.agents.sorcar.persistence as th
@@ -232,7 +204,6 @@ class TestBug3StashPopWarning:
                 )
 
                 agent._release_worktree()
-                # If the stash pop failed, the warning should be set
                 if agent._stash_pop_warning:
                     assert "git stash pop" in agent._stash_pop_warning
             finally:
@@ -249,7 +220,6 @@ class TestBug3StashPopWarning:
             wt_dir = _create_worktree(repo, branch)
             GitWorktreeOps.save_original_branch(repo, branch, "main")
 
-            # Agent adds a NEW file (no conflict with user's dirty state)
             (wt_dir / "agent.py").write_text("# agent\n")
             GitWorktreeOps.commit_all(wt_dir, "agent work")
 
@@ -257,7 +227,6 @@ class TestBug3StashPopWarning:
             GitWorktreeOps.prune(repo)
             _git("checkout", "main", cwd=repo)
 
-            # User has dirty state on a DIFFERENT file
             (repo / "user.txt").write_text("user notes\n")
 
             import kiss.agents.sorcar.persistence as th
@@ -290,11 +259,6 @@ class TestBug3StashPopWarning:
                 th._DB_PATH, th._db_conn, th._KISS_DIR = old_db
 
 
-# ===========================================================================
-# BUG 5: _release_worktree returns None on checkout failure
-# ===========================================================================
-
-
 class TestBug5ReleaseWorktreeCheckoutFailure:
     """_release_worktree returns None when checkout fails."""
 
@@ -304,7 +268,6 @@ class TestBug5ReleaseWorktreeCheckoutFailure:
             repo = _make_repo(Path(tmp) / "repo")
             branch = "kiss/wt-co-fail"
             wt_dir = _create_worktree(repo, branch)
-            # Point original_branch to a non-existent branch
             GitWorktreeOps.save_original_branch(repo, branch, "nonexistent")
 
             import kiss.agents.sorcar.persistence as th
@@ -328,7 +291,6 @@ class TestBug5ReleaseWorktreeCheckoutFailure:
                 )
 
                 result = agent._release_worktree()
-                # Must return None, NOT "nonexistent"
                 assert result is None
                 assert agent._wt is None
             finally:
@@ -342,7 +304,6 @@ class TestBug5ReleaseWorktreeCheckoutFailure:
         with tempfile.TemporaryDirectory() as tmp:
             repo = _make_repo(Path(tmp) / "repo")
 
-            # Create an old worktree pointing to nonexistent original branch
             old_branch = "kiss/wt-old-fail"
             old_wt_dir = _create_worktree(repo, old_branch)
             GitWorktreeOps.save_original_branch(repo, old_branch, "nonexistent")
@@ -368,11 +329,8 @@ class TestBug5ReleaseWorktreeCheckoutFailure:
                     wt_dir=old_wt_dir,
                 )
 
-                # _try_setup_worktree should recover and use the actual
-                # current branch (main), not the failed "nonexistent"
                 wt_work_dir = agent._try_setup_worktree(repo, str(repo))
                 if wt_work_dir is not None:
-                    # New worktree's original_branch should be "main"
                     assert agent._wt is not None
                     assert agent._wt.original_branch == "main"
             finally:
@@ -380,11 +338,6 @@ class TestBug5ReleaseWorktreeCheckoutFailure:
                     th._db_conn.close()
                     th._db_conn = None
                 th._DB_PATH, th._db_conn, th._KISS_DIR = old_db
-
-
-# ===========================================================================
-# BUG 1: _check_merge_conflict false positives with baseline
-# ===========================================================================
 
 
 class TestBug1ConflictDetectionBaseline:
@@ -401,7 +354,6 @@ class TestBug1ConflictDetectionBaseline:
         with tempfile.TemporaryDirectory() as tmp:
             repo = _make_repo(Path(tmp) / "repo")
 
-            # User has dirty README.md
             (repo / "README.md").write_text("# Dirty user edit\n")
 
             branch = "kiss/wt-conflict-1"
@@ -409,27 +361,21 @@ class TestBug1ConflictDetectionBaseline:
             GitWorktreeOps.save_original_branch(repo, branch, "main")
             baseline = _setup_baseline(repo, wt_dir, branch)
 
-            # Agent modifies a DIFFERENT file (not README.md)
             (wt_dir / "agent.py").write_text("# agent\n")
             GitWorktreeOps.stage_all(wt_dir)
             GitWorktreeOps.commit_staged(wt_dir, "agent work")
 
-            # Verify: using baseline^ for orig_diff means README.md
-            # does NOT appear as an original-branch change
             orig_fork = f"{baseline}^"
             orig_diff = _git(
                 "diff", "--name-only", orig_fork, "main", cwd=repo,
             )
             orig_files = set(orig_diff.stdout.strip().splitlines())
-            # Main hasn't moved, so NO files changed on original
             assert not orig_files
 
-            # Agent changes (vs baseline)
             wt_diff = _git("diff", "--name-only", baseline, cwd=wt_dir)
             wt_files = set(wt_diff.stdout.strip().splitlines())
             assert "agent.py" in wt_files
 
-            # No overlap → no conflict
             assert not (orig_files & wt_files)
 
     def test_real_conflict_still_detected(self) -> None:
@@ -437,12 +383,10 @@ class TestBug1ConflictDetectionBaseline:
         with tempfile.TemporaryDirectory() as tmp:
             repo = _make_repo(Path(tmp) / "repo")
 
-            # Need a second commit so baseline^ is valid (not root)
             (repo / "extra.txt").write_text("extra\n")
             _git("add", ".", cwd=repo)
             _git("commit", "-m", "second commit", cwd=repo)
 
-            # User has dirty state so baseline commit is created
             (repo / "user.txt").write_text("user notes\n")
 
             branch = "kiss/wt-conflict-2"
@@ -450,24 +394,20 @@ class TestBug1ConflictDetectionBaseline:
             GitWorktreeOps.save_original_branch(repo, branch, "main")
             baseline = _setup_baseline(repo, wt_dir, branch)
 
-            # Verify baseline is a new commit (not the branch-point)
             head_at_creation = _git(
                 "rev-parse", f"{baseline}^", cwd=wt_dir,
             )
             assert head_at_creation.returncode == 0
 
-            # Agent modifies README in worktree
             (wt_dir / "README.md").write_text("# Agent edit\n")
             GitWorktreeOps.stage_all(wt_dir)
             GitWorktreeOps.commit_staged(wt_dir, "agent work")
 
-            # ALSO advance main with a conflicting change to README
             _git("checkout", "main", cwd=repo)
             (repo / "README.md").write_text("# Main edit\n")
             _git("add", "README.md", cwd=repo)
             _git("commit", "-m", "main advance", cwd=repo)
 
-            # Check conflict: baseline^ = HEAD at creation time
             orig_fork = f"{baseline}^"
             orig_diff = _git(
                 "diff", "--name-only", orig_fork, "main", cwd=repo,
@@ -479,13 +419,7 @@ class TestBug1ConflictDetectionBaseline:
             wt_files = set(wt_diff.stdout.strip().splitlines())
             assert "README.md" in wt_files
 
-            # Overlap → conflict detected
             assert orig_files & wt_files
-
-
-# ===========================================================================
-# BUG 4: _parse_diff_hunks base_ref parameter
-# ===========================================================================
 
 
 class TestBug4ParseDiffHunksBaseRef:
@@ -498,13 +432,11 @@ class TestBug4ParseDiffHunksBaseRef:
             branch = "kiss/wt-diff-1"
             wt_dir = _create_worktree(repo, branch)
 
-            # Agent commits a change
             (wt_dir / "agent.py").write_text("# agent code\n")
             GitWorktreeOps.commit_all(wt_dir, "agent work")
 
             from kiss.agents.vscode.diff_merge import _parse_diff_hunks
 
-            # Default base_ref=HEAD: committed change is invisible
             hunks = _parse_diff_hunks(str(wt_dir))
             assert "agent.py" not in hunks
 
@@ -513,23 +445,19 @@ class TestBug4ParseDiffHunksBaseRef:
         with tempfile.TemporaryDirectory() as tmp:
             repo = _make_repo(Path(tmp) / "repo")
 
-            # User has dirty state
             (repo / "README.md").write_text("# Dirty\n")
 
             branch = "kiss/wt-diff-2"
             wt_dir = _create_worktree(repo, branch)
             baseline = _setup_baseline(repo, wt_dir, branch)
 
-            # Agent commits a change AFTER baseline
             (wt_dir / "agent.py").write_text("# agent code\n")
             GitWorktreeOps.commit_all(wt_dir, "agent work")
 
             from kiss.agents.vscode.diff_merge import _parse_diff_hunks
 
-            # With baseline as base_ref: committed change IS visible
             hunks = _parse_diff_hunks(str(wt_dir), base_ref=baseline)
             assert "agent.py" in hunks
-            # But user's dirty README.md (which is in baseline) is NOT shown
             assert "README.md" not in hunks
 
     def test_baseline_ref_includes_uncommitted_changes(self) -> None:
@@ -541,7 +469,6 @@ class TestBug4ParseDiffHunksBaseRef:
             baseline = GitWorktreeOps.head_sha(wt_dir)
             assert baseline is not None
 
-            # Agent commits one change, leaves another uncommitted
             (wt_dir / "committed.py").write_text("# committed\n")
             GitWorktreeOps.commit_all(wt_dir, "committed work")
 
@@ -550,7 +477,6 @@ class TestBug4ParseDiffHunksBaseRef:
             from kiss.agents.vscode.diff_merge import _parse_diff_hunks
 
             hunks = _parse_diff_hunks(str(wt_dir), base_ref=baseline)
-            # Both committed and uncommitted changes visible
             assert "committed.py" in hunks
             assert "README.md" in hunks
 
@@ -563,7 +489,6 @@ class TestBug4ParseDiffHunksBaseRef:
             baseline = GitWorktreeOps.head_sha(wt_dir)
             assert baseline is not None
 
-            # Agent commits a change
             (wt_dir / "README.md").write_text("# Agent version\n")
             GitWorktreeOps.commit_all(wt_dir, "agent: update readme")
 
@@ -572,13 +497,11 @@ class TestBug4ParseDiffHunksBaseRef:
             data_dir = str(Path(tmp) / "merge-data")
             Path(data_dir).mkdir()
 
-            # With default HEAD: nothing to show (committed change invisible)
             result_default = _prepare_merge_view(
                 str(wt_dir), data_dir, {}, set(),
             )
             assert result_default.get("error") == "No changes"
 
-            # With baseline: committed change IS visible
             result_baseline = _prepare_merge_view(
                 str(wt_dir), data_dir, {}, set(), base_ref=baseline,
             )

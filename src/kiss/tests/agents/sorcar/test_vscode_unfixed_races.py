@@ -20,21 +20,6 @@ import unittest
 from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 from kiss.agents.vscode.server import VSCodeServer
 
-# ---------------------------------------------------------------------------
-# RACE 1: _complete_seq / _complete_seq_latest unsynchronised counter access
-# ---------------------------------------------------------------------------
-# Main thread writes _complete_seq and _complete_seq_latest with no lock.
-# Worker thread reads _complete_seq_latest in _complete().
-# On non-GIL Python (free-threaded 3.13t, or any future runtime without GIL)
-# this is undefined behaviour.  Even under CPython-GIL, the absence of a
-# happens-before edge means the worker may observe a stale counter value and
-# incorrectly skip a completion request that is actually still the latest.
-#
-# This test forces the race by running two "complete" commands concurrently.
-# Without synchronisation on the counters the worker may see a stale
-# _complete_seq_latest value and broadcast a completion for request that
-# was already superseded.
-# ---------------------------------------------------------------------------
 
 class TestCompleteSeqCounterRace(unittest.TestCase):
     """_complete_seq and _complete_seq_latest have no synchronisation."""
@@ -61,10 +46,8 @@ class TestCompleteSeqCounterRace(unittest.TestCase):
                 events.append(ev)
 
         server.printer.broadcast = capture  # type: ignore[assignment]
-        server._file_cache = ["some/file.py"]  # avoid real scan
+        server._file_cache = ["some/file.py"]
 
-        # Directly manipulate the counters to demonstrate the race
-        # without needing stdin/stdout plumbing.
         barrier = threading.Barrier(2)
 
         observed_latest: list[int] = []
@@ -77,14 +60,11 @@ class TestCompleteSeqCounterRace(unittest.TestCase):
             snapshot_file: str = "",
             snapshot_content: str = "",
         ) -> None:
-            # Record what the worker saw as _complete_seq_latest
             observed_latest.append(server._complete_seq_latest)
             original_complete(query, seq, snapshot_file, snapshot_content)
 
         server._complete = slow_complete  # type: ignore[method-assign]
 
-        # Simulate two rapid-fire complete commands
-        # Write seq=1, then immediately seq=2 (no lock)
         server._complete_seq = 0
 
         def t1() -> None:
@@ -94,7 +74,6 @@ class TestCompleteSeqCounterRace(unittest.TestCase):
 
         def t2() -> None:
             barrier.wait(timeout=2)
-            # Immediately overwrite
             server._complete_seq += 1
             server._complete_seq_latest = server._complete_seq
 
@@ -105,13 +84,6 @@ class TestCompleteSeqCounterRace(unittest.TestCase):
         th1.join(timeout=2)
         th2.join(timeout=2)
 
-        # The race: _complete_seq was incremented twice non-atomically.
-        # Under GIL this happens to work, but _complete_seq += 1 is
-        # NOT atomic (it is LOAD, ADD, STORE) and without a lock,
-        # both threads can load the same value, add 1, and store —
-        # producing seq=1 instead of seq=2.
-        #
-        # Demonstrate: run 1000 iterations to catch the lost-update
         server._complete_seq = 0
         lost_updates = 0
         for _ in range(500):
@@ -135,15 +107,9 @@ class TestCompleteSeqCounterRace(unittest.TestCase):
             if server._complete_seq != 2:
                 lost_updates += 1
 
-        # Under CPython-GIL, lost updates are extremely rare for int +=
-        # but the code has NO lock, so it is a latent race.
-        # We assert the structural defect exists (no lock protects the counter).
         import inspect
 
-        # After the dispatch-table refactor, the "complete" command is
-        # handled by _cmd_complete (not inline in _handle_command).
         src = inspect.getsource(type(server)._cmd_complete)
-        # Verify RACE 1 is FIXED: counter writes are INSIDE _state_lock.
         self.assertIn("self._complete_seq += 1", src)
         self.assertIn("self._complete_seq_latest = seq", src)
         lock_start = src.index("with self._state_lock:")
@@ -152,19 +118,9 @@ class TestCompleteSeqCounterRace(unittest.TestCase):
             seq_write, lock_start,
             "_complete_seq should be inside _state_lock block — race fixed",
         )
-        # Also verify the reader (_complete) now reads under lock
         complete_src = inspect.getsource(type(server)._complete)
         self.assertIn("with self._state_lock:", complete_src)
 
-
-# ---------------------------------------------------------------------------
-# RACE 2: Stale bash broadcast after reset()
-# ---------------------------------------------------------------------------
-# A Timer thread captures buffered text inside _bash_lock, then broadcasts
-# OUTSIDE the lock.  If reset() runs between the lock release and the
-# broadcast, the stale system_output arrives after the printer has been
-# reset for a new turn, contaminating the next turn's event stream.
-# ---------------------------------------------------------------------------
 
 class TestStaleBashBroadcastAfterReset(unittest.TestCase):
     """Timer-flushed bash output can arrive after reset()."""
@@ -179,31 +135,17 @@ class TestStaleBashBroadcastAfterReset(unittest.TestCase):
         """
         printer = BaseBrowserPrinter()
 
-        # Stuff the buffer with content from the OLD turn
         with printer._bash_lock:
             printer._bash_state.buffer.append("stale output")
 
-        # We simulate the exact interleaving by controlling scheduling:
-        # 1. Timer thread: acquires _bash_lock, drains buffer + captures gen
-        # 2. Timer thread: releases _bash_lock
-        # 3. Main thread: reset() (increments generation) + start_recording()
-        # 4. Timer thread: re-checks generation → mismatch → discards text
-        #
-        # Since we can't inject code between the two lock acquisitions in
-        # _flush_bash, we use a real interleaving: stuff the buffer, start
-        # a flush on a thread, and have reset() race with it.  Run many
-        # iterations to exercise the window.
 
-        # Direct test: manually replicate the fixed _flush_bash logic
-        # to prove the generation check works.
         reset_between = threading.Event()
         flush_captured = threading.Event()
 
         def timer_thread_logic() -> None:
-            # Phase 1: drain under lock (same as production _flush_bash)
             with printer._bash_lock:
                 bs = printer._bash_state
-                gen = bs.generation  # capture generation (the fix)
+                gen = bs.generation
                 if bs.timer is not None:
                     bs.timer.cancel()
                     bs.timer = None
@@ -212,28 +154,23 @@ class TestStaleBashBroadcastAfterReset(unittest.TestCase):
                 bs.last_flush = time.monotonic()
             flush_captured.set()
             reset_between.wait(timeout=5)
-            # Phase 2: re-check generation then broadcast (the fix)
             if text:
                 with printer._bash_lock:
                     if printer._bash_state.generation != gen:
-                        return  # stale — discard
+                        return
                 printer.broadcast({"type": "system_output", "text": text})
 
         timer_thread = threading.Thread(target=timer_thread_logic, daemon=True)
         timer_thread.start()
 
-        # Wait for drain phase to complete
         flush_captured.wait(timeout=5)
 
-        # Now reset + start new recording (simulates new turn)
         printer.reset()
         printer.start_recording()
 
-        # Release timer — it should now discard the stale text
         reset_between.set()
         timer_thread.join(timeout=5)
 
-        # The stale event should NOT be in the new recording
         recorded = printer.stop_recording()
         stale_recorded = [e for e in recorded if e.get("type") == "system_output"]
         self.assertEqual(
@@ -246,22 +183,9 @@ class TestStaleBashBroadcastAfterReset(unittest.TestCase):
         import inspect
 
         src = inspect.getsource(BaseBrowserPrinter._flush_bash)
-        # The fix captures generation inside the lock
         self.assertIn("gen = bs.generation", src)
-        # Re-checks after releasing the first lock
         self.assertIn("self._bash_state.generation != gen", src)
 
-
-# ---------------------------------------------------------------------------
-# RACE 3: _default_model written without lock
-# ---------------------------------------------------------------------------
-# selectModel writes self._default_model in the main thread without
-# _state_lock.  _get_tab() (called from any thread) reads it inside
-# _TabState.__init__.  If a task thread calls _get_tab for a new tab
-# while the main thread is in selectModel, the new tab could see a
-# partially-written (torn) string reference on non-GIL runtimes, or
-# simply read a stale value even under CPython.
-# ---------------------------------------------------------------------------
 
 class TestDefaultModelNoLock(unittest.TestCase):
     """_default_model write is now protected by _state_lock (fixed)."""
@@ -270,10 +194,7 @@ class TestDefaultModelNoLock(unittest.TestCase):
         """Structural test: selectModel changes _default_model inside lock."""
         import inspect
 
-        # After the dispatch-table refactor, selectModel is handled by
-        # _cmd_select_model (not inline in _handle_command).
         src = inspect.getsource(VSCodeServer._cmd_select_model)
-        # The _default_model write should come AFTER _state_lock
         lock_idx = src.index("self._state_lock")
         model_idx = src.index("self._default_model = model")
         self.assertGreater(
@@ -310,19 +231,8 @@ class TestDefaultModelNoLock(unittest.TestCase):
         t1.join(timeout=2)
         t2.join(timeout=2)
 
-        # With the lock, the tab sees either "old-model" or "new-model"
-        # — both valid, but now with a happens-before guarantee.
         self.assertIn(results[0], ("old-model", "new-model"))
 
-
-# ---------------------------------------------------------------------------
-# RACE 4: userAnswer reads queue reference without lock
-# ---------------------------------------------------------------------------
-# The main thread reads tab.user_answer_queue without _state_lock.
-# The task thread's finally block sets it to None under _state_lock.
-# If the task finishes between the main thread's read and put(),
-# the answer goes to an abandoned queue nobody reads.
-# ---------------------------------------------------------------------------
 
 class TestUserAnswerQueueStaleReference(unittest.TestCase):
     """userAnswer handler reads queue without _state_lock."""
@@ -342,36 +252,26 @@ class TestUserAnswerQueueStaleReference(unittest.TestCase):
         tab_id = "answer-race"
         tab = server._get_tab(tab_id)
 
-        # Simulate step 1: task creates a queue
         answer_queue: queue.Queue[str] = queue.Queue(maxsize=1)
         tab.user_answer_queue = answer_queue
 
-        # Step 3: main thread reads the queue ref (no lock in production code)
-        q_ref = tab.user_answer_queue  # stale ref captured
+        q_ref = tab.user_answer_queue
 
-        # Step 4: task thread's finally clears the queue (under lock)
         with server._state_lock:
             tab.user_answer_queue = None
 
-        # Step 5: main thread puts answer on the stale ref
         q_ref.put("user's answer")
 
-        # Step 6: the answer is on q_ref, but tab.user_answer_queue is None
         self.assertIsNone(tab.user_answer_queue)
         self.assertEqual(q_ref.get_nowait(), "user's answer")
-        # The answer was lost — nobody will read it from q_ref
 
     def test_structural_lock_on_queue_read(self) -> None:
         """Verify the userAnswer handler reads queue under _state_lock (fixed)."""
         import inspect
 
-        # After the dispatch-table refactor, userAnswer is handled by
-        # _cmd_user_answer (not inline in _handle_command).
         src = inspect.getsource(VSCodeServer._cmd_user_answer)
-        # The queue is accessed via ans_state.user_answer_queue
         self.assertIn("ans_state.user_answer_queue", src)
         self.assertIn("self._tab_states.get(ans_tab)", src)
-        # Verify _state_lock appears before the _tab_states.get
         lines = src.split("\n")
         found_lock = False
         for line in lines:
@@ -385,16 +285,6 @@ class TestUserAnswerQueueStaleReference(unittest.TestCase):
             "userAnswer should read _tab_states under _state_lock — race fixed",
         )
 
-
-# ---------------------------------------------------------------------------
-# RACE 6: _ensure_complete_worker double-init
-# ---------------------------------------------------------------------------
-# _ensure_complete_worker checks _complete_worker is not None then creates
-# the queue and thread.  If called from two threads simultaneously, two
-# workers could be created.  Currently only called from the single main
-# thread, but the method has no internal synchronisation — any future
-# caller from a different thread would trigger the race.
-# ---------------------------------------------------------------------------
 
 class TestEnsureCompleteWorkerDoubleInit(unittest.TestCase):
     """_ensure_complete_worker is not thread-safe (check-then-act)."""
@@ -425,19 +315,8 @@ class TestEnsureCompleteWorkerDoubleInit(unittest.TestCase):
         t1.join(timeout=2)
         t2.join(timeout=2)
 
-        # Both threads saw _complete_worker as None and created queues.
-        # The second write overwrites the first, orphaning one queue+worker.
-        # We can't reliably force both to see None under GIL, but we
-        # verify the code structure allows it.
         self.assertEqual(len(queues), 2)
 
-
-# ---------------------------------------------------------------------------
-# RACE 7: _refresh_file_cache + _get_files — scan interleaving
-# ---------------------------------------------------------------------------
-# Already tested in test_vscode_races.py (TestFileCacheOverwriteRace).
-# Including a structural assertion here for completeness.
-# ---------------------------------------------------------------------------
 
 class TestRefreshFileCacheRaceStructural(unittest.TestCase):
     """_refresh_file_cache and _get_files share _file_cache across threads."""
@@ -451,7 +330,6 @@ class TestRefreshFileCacheRaceStructural(unittest.TestCase):
         import inspect
 
         src = inspect.getsource(VSCodeServer._get_files)
-        # _get_files does a scan outside lock, then double-checks
         self.assertIn("_scan_files", src)
         self.assertIn("self._file_cache is None", src)
 
@@ -459,14 +337,6 @@ class TestRefreshFileCacheRaceStructural(unittest.TestCase):
         self.assertIn("Thread", src_refresh)
         self.assertIn("self._file_cache = result", src_refresh)
 
-
-# ---------------------------------------------------------------------------
-# RACE 8: broadcast stdout-write vs recording order (FIXED)
-# ---------------------------------------------------------------------------
-# This race is already tested in test_vscode_races.py and was FIXED
-# (broadcast holds _lock around both _record_event and _stdout_lock).
-# We verify the fix is in place.
-# ---------------------------------------------------------------------------
 
 class TestBroadcastOrderingFixed(unittest.TestCase):
     """VSCodePrinter.broadcast nests locks correctly (fixed race)."""
@@ -478,7 +348,6 @@ class TestBroadcastOrderingFixed(unittest.TestCase):
         from kiss.agents.vscode.server import VSCodePrinter
 
         src = inspect.getsource(VSCodePrinter.broadcast)
-        # The fix nests _stdout_lock inside _lock
         lock_idx = src.index("self._lock")
         stdout_idx = src.index("self._stdout_lock")
         self.assertLess(lock_idx, stdout_idx)

@@ -22,7 +22,6 @@ _MAIN_JS = (
     / "main.js"
 )
 
-# Minimal JS preamble that stubs DOM/vscode and replicates main.js tab state.
 _JS_PREAMBLE = r"""
 // --- Minimal DOM stubs ---
 var _elements = {};
@@ -443,7 +442,6 @@ class TestTaskErrorStoppedGuard(unittest.TestCase):
         """setReady is outside the guard — it always runs to reset runningTabId."""
         idx = self.js.index("case 'task_error':")
         block = self.js[idx : idx + 800]
-        # setReady is after the if block, always reached
         assert "setReady(" in block
 
     def test_error_banner_skipped_on_wrong_tab(self) -> None:
@@ -750,9 +748,7 @@ class TestCreateNewTabDuringRunningTask(unittest.TestCase):
         touch runningTabId."""
         idx = self.js.index("function createNewTab()")
         block = self.js[idx : idx + 1000]
-        # createNewTab sets running state to false for itself
         assert "setRunningState(false)" in block
-        # It should NOT reset runningTabId
         assert "runningTabId" not in block
 
     def test_new_tab_scenario_via_node(self) -> None:
@@ -994,7 +990,7 @@ class TestPerTabSelectedModel(unittest.TestCase):
         end = self.js.index("\n  function ", idx + 1)
         body = self.js[idx:end]
         assert "selectedModel = tab.selectedModel" in body
-        assert "modelName" in body  # updates the model name display
+        assert "modelName" in body
 
     def test_make_tab_inherits_selected_model(self) -> None:
         idx = self.js.index("function makeTab(title)")
@@ -1089,7 +1085,6 @@ class TestPerTabIsMerging(unittest.TestCase):
         idx = self.js.index("case 'merge_started':")
         block = self.js[idx : idx + 400]
         assert "ev.tabId !== undefined && ev.tabId !== activeTabId" in block
-        # Background tab merges no longer auto-switch; they update saved state
         assert "bgMergeTab" in block
 
     def test_merge_ended_guard(self) -> None:
@@ -1237,7 +1232,7 @@ class TestPerTabOutputFragment(unittest.TestCase):
         end = self.js.index("\n  function ", idx + 1)
         body = self.js[idx:end]
         assert "document.createDocumentFragment()" in body
-        assert "O.firstChild" in body  # moves children to fragment
+        assert "O.firstChild" in body
 
     def test_restore_uses_fragment(self) -> None:
         idx = self.js.index("function restoreTab(tab)")
@@ -1273,14 +1268,12 @@ class TestInputContainerVisibility(unittest.TestCase):
         end = self.js.index("\n  function ", idx + 1)
         body = self.js[idx:end]
         assert "inputContainer" in body
-        # After save, inputContainer should be visible again
         assert "inputContainer.style.display = ''" in body
 
     def test_restore_hides_input_when_bar_present(self) -> None:
         idx = self.js.index("function restoreTab(tab)")
         end = self.js.index("\n  function ", idx + 1)
         body = self.js[idx:end]
-        # Should check both worktreeBar and merge-toolbar
         assert "worktreeBar || document.getElementById('merge-toolbar')" in body
         assert "inputContainer.style.display = 'none'" in body
         assert "inputContainer.style.display = ''" in body

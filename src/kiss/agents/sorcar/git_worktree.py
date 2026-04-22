@@ -17,8 +17,6 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Per-repo locks for serializing multi-step git operations
-# (checkout → stash → merge → pop) across concurrent tabs.
 _repo_locks: dict[str, threading.Lock] = {}
 _repo_locks_guard = threading.Lock()
 
@@ -360,7 +358,6 @@ class GitWorktreeOps:
         Returns:
             True if a stash entry was created, False if the tree was clean.
         """
-        # Check working tree + index
         status = _git("status", "--porcelain", cwd=repo)
         if not status.stdout.strip():
             return False
@@ -481,7 +478,6 @@ class GitWorktreeOps:
         if force.returncode == 0:
             _git("config", "--remove-section", f"branch.{branch}", cwd=repo)
             return True
-        # BUG-63 fix: surface deletion failure so callers can warn the user.
         if GitWorktreeOps.branch_exists(repo, branch):
             logger.warning(
                 "Failed to delete branch '%s': %s",
@@ -489,7 +485,6 @@ class GitWorktreeOps:
                 force.stderr.strip(),
             )
             return False
-        # Branch is already gone (race); treat as success.
         _git("config", "--remove-section", f"branch.{branch}", cwd=repo)
         return True
 
@@ -668,7 +663,6 @@ class GitWorktreeOps:
             if len(line) < 4:
                 continue
             fname = _unquote_git_path(line[3:])
-            # Handle renames: "R  old -> new"
             old_name: str | None = None
             if " -> " in fname:
                 old_name, fname = fname.split(" -> ", 1)
@@ -679,23 +673,17 @@ class GitWorktreeOps:
             dst = wt_dir / fname
 
             if src.is_file():
-                # File exists in working tree — copy it regardless
-                # of index status (handles DM: staged delete + re-add).
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(str(src), str(dst))
                 copied = True
-                # Remove the old path in the worktree on renames so the
-                # agent doesn't see a ghost of the pre-rename file.
                 if old_name is not None:
                     old_dst = wt_dir / old_name
                     if old_dst.exists():
                         old_dst.unlink()
             elif dst.exists():
-                # File gone from working tree — delete from worktree
                 dst.unlink()
                 copied = True
             elif src.is_dir():
-                # Submodule or directory entry — skip
                 continue
 
         return copied
@@ -740,10 +728,6 @@ class GitWorktreeOps:
         Returns:
             :attr:`MergeResult.SUCCESS` or :attr:`MergeResult.CONFLICT`.
         """
-        # Check if there are any commits after baseline.
-        # BUG-59 fix: check returncode — if rev-list fails (invalid
-        # baseline SHA), return CONFLICT so the caller can fall back
-        # to squash_merge_branch.
         log_result = _git(
             "rev-list",
             "--count",
@@ -760,7 +744,7 @@ class GitWorktreeOps:
             return MergeResult.CONFLICT
         count = log_result.stdout.strip()
         if count == "0":
-            return MergeResult.SUCCESS  # no agent changes
+            return MergeResult.SUCCESS
 
         result = _git(
             "cherry-pick",
@@ -776,7 +760,6 @@ class GitWorktreeOps:
             _git("cherry-pick", "--abort", cwd=repo)
             return MergeResult.CONFLICT
 
-        # Commit the squashed cherry-pick result
         diff_check = _git("diff", "--cached", "--quiet", cwd=repo)
         if diff_check.returncode != 0:
             log_msgs = _git(
@@ -852,9 +835,6 @@ class GitWorktreeOps:
             elif line.startswith("worktree "):
                 registered_dirs.add(Path(line.split(" ", 1)[1]).resolve())
 
-        # BUG-58 fix: branches with a kiss-original config entry are
-        # pending merge (worktree removed but merge not yet done).
-        # Do NOT delete them — the user's agent work would be lost.
         orphan_branches: list[str] = []
         pending_branches: list[str] = []
         for b in branches:
@@ -884,10 +864,6 @@ class GitWorktreeOps:
         _git("worktree", "prune", cwd=repo)
         lines.append("Ran git worktree prune.")
 
-        # Scan .kiss-worktrees/ for orphan directories (not registered
-        # as a git worktree).  This catches leftover directories from
-        # crashed agent sessions, manual .git unlinks, or pre-BUG-58
-        # cleanups that removed the branch but not the directory.
         wt_root = repo / ".kiss-worktrees"
         orphan_dirs: list[str] = []
         if wt_root.is_dir():

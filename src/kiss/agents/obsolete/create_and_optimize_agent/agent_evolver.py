@@ -248,12 +248,10 @@ class AgentVariant:
             Combined weighted score as a float. Lower values indicate better variants.
         """
         if weights is None:  # pragma: no branch
-            # Default weights: prioritize success (maximize), then minimize tokens and time
-            # success is 0 or 1, tokens_used count, execution_time in seconds
             weights = {
-                "success": 1000000,  # Minimize success (0 is best)
-                "tokens_used": 1,  # Minimize token usage
-                "execution_time": 1000,  # Minimize execution time
+                "success": 1000000,
+                "tokens_used": 1,
+                "execution_time": 1000,
             }
 
         score = 0.0
@@ -424,7 +422,6 @@ class AgentEvolver:
         """
         work_dir, report_path = self._get_variant_paths(variant_id)
 
-        # Create initial agent using ImproverAgent
         success, initial_report = self.improver.create_initial(
             task_description=self.task_description,
             work_dir=work_dir,
@@ -432,7 +429,6 @@ class AgentEvolver:
         )
 
         if not success or initial_report is None:  # pragma: no branch
-            # Create a default report if creation failed
             initial_report = ImprovementReport(
                 metrics={},
                 implemented_ideas=[{"idea": "Initial implementation", "source": "initial"}],
@@ -537,18 +533,14 @@ class AgentEvolver:
             True if the variant was added to the frontier, False if it was
             dominated and rejected.
         """
-        # Check if new variant is dominated by any in frontier
         for existing in self.pareto_frontier:  # pragma: no branch
             if existing.dominates(new_variant):  # pragma: no branch
                 return False
 
-        # Remove variants dominated by new variant
         self.pareto_frontier = [v for v in self.pareto_frontier if not new_variant.dominates(v)]
 
-        # Add new variant to frontier
         self.pareto_frontier.append(new_variant)
 
-        # Trim frontier if too large (keep most diverse)
         if len(self.pareto_frontier) > self.max_frontier_size:  # pragma: no branch
             self._trim_frontier()
 
@@ -569,12 +561,10 @@ class AgentEvolver:
 
         n = len(self.pareto_frontier)
 
-        # Collect all metric names across all variants
         all_metrics: set[str] = set()
         for v in self.pareto_frontier:  # pragma: no branch
             all_metrics.update(v.metrics.keys())
 
-        # Calculate crowding distance
         crowding = [0.0] * n
 
         for metric in all_metrics:  # pragma: no branch
@@ -589,7 +579,6 @@ class AgentEvolver:
                 diff = values[sorted_indices[i + 1]] - values[sorted_indices[i - 1]]
                 crowding[idx] += diff / value_range
 
-        # Keep most diverse (highest crowding distance)
         sorted_indices = sorted(range(n), key=lambda i: crowding[i], reverse=True)
         kept_indices = sorted_indices[: self.max_frontier_size]
         self.pareto_frontier = [self.pareto_frontier[i] for i in kept_indices]
@@ -817,13 +806,11 @@ class AgentEvolver:
 
             self._copy_best_to_optimal(initial)
 
-        # Evolution loop
         for gen in range(1, self.max_generations + 1):  # pragma: no branch
             self._generation = gen
             print(f"\n=== Generation {gen}/{self.max_generations} ===")
             print(f"Pareto frontier size: {len(self.pareto_frontier)}")
 
-            # Mutation or crossover
             if (  # pragma: no branch
                 random.random() < self.mutation_probability or len(self.pareto_frontier) < 2
             ):
@@ -933,7 +920,6 @@ class AgentEvolver:
         """
         self.optimal_dir.parent.mkdir(parents=True, exist_ok=True)
 
-        # Copy to a temporary location first (same parent ensures same filesystem)
         temp_dir = self.optimal_dir.parent / f"{self.optimal_dir.name}_{os.getpid()}_temp"
         if temp_dir.exists():  # pragma: no branch
             shutil.rmtree(temp_dir)
@@ -995,7 +981,6 @@ class AgentEvolver:
         print(f"State saved to {path}")
 
 
-# Very long task description for testing
 LONG_RUNNING_TASK = """
  **Task:** Create a robust database engine using only Bash scripts.
 
@@ -1044,7 +1029,6 @@ def main() -> None:
     print(f"Metrics: {best.metrics}")
     print(f"Generation: {best.generation}")
 
-    # Save state to the optimal directory (work_dir is cleaned up after evolve)
     state_path = str(evolver.optimal_dir / "evolver_state.json")
     evolver.save_state(state_path)
 

@@ -213,10 +213,7 @@ class SorcarAgent(RelentlessAgent):
         self._ask_user_question_callback = ask_user_question_callback
         self._use_web_tools = web_tools
         self._is_parallel = is_parallel
-        # Lazy-initialized when web tools are first accessed via _get_tools()
         self.web_use_tool = None
-        # Extract the per-thread stop event from the printer so UsefulTools
-        # can monitor it and kill child processes when the agent is stopped.
         tl = getattr(printer, "_thread_local", None) if printer else None
         self._stop_event = getattr(tl, "stop_event", None) if tl else None
 
@@ -373,6 +370,5 @@ def cli_ask_user_question(question: str) -> str:
     """
     print(f"\n>>> Agent asks: {question}")
     return input("Your answer: ")
-
 
 

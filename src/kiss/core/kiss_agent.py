@@ -75,7 +75,6 @@ class KISSAgent(Base):
         token_callback = self.printer.token_callback if self.printer else None
         thinking_callback = self.printer.thinking_callback if self.printer else None
 
-        # Reuse existing model client if model name and config haven't changed
         existing = getattr(self, "model", None)
         if (  # pragma: no branch
             existing is not None
@@ -197,11 +196,9 @@ class KISSAgent(Base):
                 self.printer.print(system_prompt, type="system_prompt")
             self._set_prompt(prompt_template, arguments, attachments=attachments)
 
-            # Non-agentic mode: single generation, no tool loop
             if not self.is_agentic:
                 return self._run_non_agentic()
 
-            # Agentic mode: ReAct loop
             return self._run_agentic_loop()
 
         finally:

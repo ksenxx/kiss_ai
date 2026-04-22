@@ -93,8 +93,6 @@ class TestBroadcastOrderingRace(unittest.TestCase):
                 printer.broadcast({"type": "system_prompt", "text": "first"})
 
             def t2_run() -> None:
-                # Wait until T1 has finished its _lock critical section
-                # and is suspended inside the _stdout_lock wrapper.
                 ordering.first_blocked.wait(timeout=5)
                 printer.broadcast({"type": "system_prompt", "text": "second"})
 
@@ -102,10 +100,6 @@ class TestBroadcastOrderingRace(unittest.TestCase):
             t2 = threading.Thread(target=t2_run)
             t1.start()
             t2.start()
-            # Give T1 a head start to reach and block inside the
-            # wrapper, and T2 a chance to progress as far as it can
-            # (all the way through broadcast pre-fix; blocked on
-            # ``_lock`` post-fix).  Then release T1.
             ordering.first_blocked.wait(timeout=5)
             time.sleep(0.1)
             ordering.allow_first.set()
@@ -116,9 +110,6 @@ class TestBroadcastOrderingRace(unittest.TestCase):
             printer._stdout_lock = inner_lock
 
         recorded = printer.stop_recording()
-        # With split-lock broadcast: recorded = [first, second] but
-        # stdout captured = [second, first] — race confirmed.
-        # With a single-lock (fixed) broadcast: both orders match.
         self.assertEqual(len(recorded), 2)
         self.assertEqual(len(captured), 2)
         self.assertEqual(
@@ -162,11 +153,6 @@ class TestFileCacheOverwriteRace(unittest.TestCase):
         t = threading.Thread(target=bg_refresh, daemon=True)
         t.start()
 
-        # Install a module-level ``_scan_files`` whose only difference
-        # from the real one is that it blocks on events so the
-        # interleaving is deterministic.  It is a real function (not
-        # a mock of scanning behaviour) that returns a deterministic
-        # value after the synchronisation completes.
         from kiss.agents.vscode import diff_merge
 
         original_scan = diff_merge._scan_files

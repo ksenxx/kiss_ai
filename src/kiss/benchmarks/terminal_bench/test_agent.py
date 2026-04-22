@@ -144,18 +144,15 @@ class TestRunSkipsImpossibleTasks:
         asyncio.run(
             agent.run("Fix the bug in /app/main.py", env, ctx),  # type: ignore[arg-type]
         )
-        # 1: which sorcar, 2: sorcar -t ...
         assert len(env.exec_calls) == 2
         assert "which sorcar" in env.exec_calls[0]
         assert "sorcar -t" in env.exec_calls[1]
-        # No verifier peek: agent must not touch test.sh or /tests during run.
         for call in env.exec_calls:
             assert "test.sh" not in call
             assert "/tests" not in call
         assert ctx.metadata is not None
         assert "skipped" not in ctx.metadata
         assert ctx.metadata["return_code"] == 0
-        # Removed metadata fields (no longer populated by the agent).
         assert "tests_passed" not in ctx.metadata
         assert "tests_total" not in ctx.metadata
         assert "partial_score" not in ctx.metadata
@@ -170,14 +167,12 @@ class TestSetup:
         asyncio.run(agent.setup(env))  # type: ignore[arg-type]
         assert len(env.exec_calls) == 2
         assert "curl" in env.exec_calls[0]
-        # Step 2: installs from uploaded local wheel, not PyPI
         assert "uv tool install --python 3.13" in env.exec_calls[1]
         assert "/tmp/kiss_agent_framework-" in env.exec_calls[1]
         assert len(env.uploaded_files) == 1
         src, dst = env.uploaded_files[0]
         assert src.endswith(".whl")
         assert dst.startswith("/tmp/kiss_agent_framework-")
-        # No SYSTEM.md or extra prompt is written into the container.
         for call in env.exec_calls:
             assert "SYSTEM.md" not in call
 
@@ -185,7 +180,6 @@ class TestSetup:
         agent = _make_agent()
         env = FakeEnvironment(fail_commands={"curl"})
         asyncio.run(agent.setup(env))  # type: ignore[arg-type]
-        # Only the first step should have been attempted
         assert len(env.exec_calls) == 1
         assert len(env.uploaded_files) == 0
 
@@ -193,9 +187,7 @@ class TestSetup:
         agent = _make_agent()
         env = FakeEnvironment(fail_commands={"uv tool install"})
         asyncio.run(agent.setup(env))  # type: ignore[arg-type]
-        # First step succeeds, second fails; no further steps.
         assert len(env.exec_calls) == 2
-        # Wheel was uploaded before the install command ran
         assert len(env.uploaded_files) == 1
 
 
@@ -209,6 +201,6 @@ class TestRunSorcarNotFound:
         asyncio.run(
             agent.run("Fix the bug in /app/main.py", env, ctx),  # type: ignore[arg-type]
         )
-        assert len(env.exec_calls) == 1  # only the which-check
+        assert len(env.exec_calls) == 1
         assert ctx.metadata is not None
         assert ctx.metadata["error"] == "sorcar not installed"

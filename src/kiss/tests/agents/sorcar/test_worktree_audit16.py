@@ -46,10 +46,6 @@ from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.server import VSCodeServer
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 
 def _make_repo(path: Path) -> Path:
     """Create a minimal git repo with one initial commit."""
@@ -104,11 +100,6 @@ class _RecordingPrinter:
         self.events.append(event)
 
 
-# ===========================================================================
-# BUG-68: post-task cleanup silent when non-wt blocks auto-discard
-# ===========================================================================
-
-
 class TestBug68FinishMergeNoBroadcastOnEmptyNonWtBusy:
     """``_finish_merge`` with no worktree changes and a concurrent
     non-wt task must broadcast ``worktree_done`` so the user is
@@ -125,30 +116,22 @@ class TestBug68FinishMergeNoBroadcastOnEmptyNonWtBusy:
         tab_id = "tab-bug68a"
         tab = server._get_tab(tab_id)
         tab.use_worktree = True
-        tab.is_merging = True  # in merge review
+        tab.is_merging = True
 
         agent = cast(WorktreeSorcarAgent, tab.agent)
         _create_wt(repo, "kiss/wt-bug68a-1", agent)
-        # Worktree has no agent-changes — merge review was on baseline only
 
-        # A non-wt task is running on another tab
         other = server._get_tab("other-bug68a")
         other.is_running_non_wt = True
 
-        # Simulate the frontend sending all-done
         server._finish_merge(tab_id)
 
-        # BUG-68: currently `_finish_merge` silently leaves the tab
-        # with no broadcast when auto-discard is blocked.  The user
-        # has no merge/discard UI for a pending branch.
         wt_done = [e for e in printer.events if e.get("type") == "worktree_done"]
         assert wt_done, (
             "BUG-68: _finish_merge did not broadcast worktree_done "
             "when auto-discard was blocked by a non-wt task.  The "
             f"user is left unaware of the pending branch.  Events: {printer.events}"
         )
-        # Worktree reference must be preserved (NOT discarded) since
-        # non-wt is busy — the user has to act later.
         assert agent._wt is not None, (
             "BUG-68: worktree was discarded despite non-wt being busy."
         )
@@ -174,18 +157,12 @@ class TestBug68FinishMergeNoBroadcastOnEmptyNonWtBusy:
         agent = cast(WorktreeSorcarAgent, tab.agent)
         _create_wt(repo, "kiss/wt-bug68b-1", agent)
 
-        # No concurrent non-wt task → auto-discard should happen
         server._finish_merge(tab_id)
 
         assert agent._wt is None, (
             "Regression: empty worktree was not auto-discarded when "
             "no non-wt task was running."
         )
-
-
-# ===========================================================================
-# BUG-70: _check_merge_conflict misses untracked files in main
-# ===========================================================================
 
 
 class TestBug70UntrackedFileConflict:
@@ -219,10 +196,8 @@ class TestBug70UntrackedFileConflict:
         branch = "kiss/wt-bug70-1"
         wt = _create_wt(repo, branch, agent)
 
-        # Agent creates a new file in the worktree.
         agent_file = wt.wt_dir / "foo.py"
         agent_file.write_text("agent content\n")
-        # Commit so it's tracked on the branch and shows in diff.
         subprocess.run(
             ["git", "-C", str(wt.wt_dir), "add", "foo.py"],
             capture_output=True, check=True,
@@ -232,19 +207,13 @@ class TestBug70UntrackedFileConflict:
             capture_output=True, check=True,
         )
 
-        # Main repo has an untracked file at the same path with
-        # different content.
         (repo / "foo.py").write_text("user untracked content\n")
 
-        # Sanity: _get_worktree_changed_files sees foo.py on branch.
         changed = server._get_worktree_changed_files(tab_id)
         assert "foo.py" in changed, (
             f"Precondition failed: worktree change not detected: {changed}"
         )
 
-        # BUG-70: _check_merge_conflict currently only checks
-        # unstaged + staged files in main; it ignores untracked,
-        # so the conflict is missed.
         has_conflict = server._check_merge_conflict(tab_id)
         assert has_conflict, (
             "BUG-70: _check_merge_conflict returned False when an "
@@ -272,7 +241,6 @@ class TestBug70UntrackedFileConflict:
         agent = cast(WorktreeSorcarAgent, tab.agent)
         wt = _create_wt(repo, "kiss/wt-bug70-2", agent)
 
-        # Agent creates foo.py in worktree.
         (wt.wt_dir / "foo.py").write_text("agent content\n")
         subprocess.run(
             ["git", "-C", str(wt.wt_dir), "add", "foo.py"],
@@ -283,18 +251,12 @@ class TestBug70UntrackedFileConflict:
             capture_output=True, check=True,
         )
 
-        # Main has an unrelated untracked file
         (repo / "bar.py").write_text("unrelated\n")
 
         assert not server._check_merge_conflict(tab_id), (
             "Regression: non-overlapping untracked file in main "
             "triggered a false-positive conflict."
         )
-
-
-# ===========================================================================
-# RED-10: post-task pending-worktree handling is duplicated
-# ===========================================================================
 
 
 class TestRed10PostTaskPendingWtDuplication:
@@ -305,8 +267,6 @@ class TestRed10PostTaskPendingWtDuplication:
         """After the fix, a single helper handles the post-task
         pending-worktree logic.  The helper must exist so future
         changes don't drift between the three sites."""
-        # The fix introduces `_present_pending_worktree` (or similar)
-        # as a single source of truth.
         assert hasattr(VSCodeServer, "_present_pending_worktree"), (
             "RED-10: the post-task pending-worktree logic is still "
             "duplicated across _run_task_inner, _finish_merge, and "

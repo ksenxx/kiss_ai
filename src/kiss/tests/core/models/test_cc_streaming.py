@@ -33,7 +33,6 @@ class TestAlwaysStreaming:
         m = ClaudeCodeModel("cc/haiku")
         m.initialize("test")
         assert m.token_callback is None
-        # The model should not have a _generate_blocking method anymore
         assert not hasattr(m, "_generate_blocking")
 
 
@@ -106,7 +105,6 @@ class TestStopAtSecondAssistant:
         ]
 
         content, result_json = m._parse_stream_events(iter(json.dumps(e) for e in events))
-        # result event overwrites content when there's only one assistant message
         assert content == "Hi there"
 
     def test_malformed_json_lines_skipped(self) -> None:
@@ -198,7 +196,6 @@ class TestThinkingBlocks:
         content, _ = m._parse_stream_events(iter(json.dumps(e) for e in events))
         assert content == "Result"
         assert tokens == ["Step 1...", "Step 2...", "Result"]
-        # thinking_start, thinking_end
         assert thinking_events == [True, False]
 
     def test_no_thinking_callback_does_not_crash(self) -> None:
@@ -218,7 +215,6 @@ class TestThinkingBlocks:
 
         content, _ = m._parse_stream_events(iter(json.dumps(e) for e in events))
         assert content == "Done"
-        # Thinking tokens still streamed through token_callback
         assert tokens == ["Hmm...", "Done"]
 
     def test_empty_thinking_block_no_callback(self) -> None:
@@ -243,7 +239,6 @@ class TestThinkingBlocks:
         content, _ = m._parse_stream_events(iter(json.dumps(e) for e in events))
         assert content == "Hello"
         assert tokens == ["Hello"]
-        # Empty thinking block should not trigger start/end
         assert thinking_events == []
 
     def test_thinking_only_no_text(self) -> None:
@@ -325,7 +320,7 @@ class TestInterleavedPartialAndAssistant:
 
     def test_interleaved_partial_and_final_assistant_no_duplicates(self) -> None:
         """Thinking callbacks must fire exactly once when both event kinds appear."""
-        tokens: list[tuple[str, str]] = []  # (block_type, text)
+        tokens: list[tuple[str, str]] = []
         thinking_events: list[bool] = []
         in_thinking = False
 
@@ -344,9 +339,6 @@ class TestInterleavedPartialAndAssistant:
         )
         m.initialize("test")
 
-        # Simulate real CLI output:
-        # 1) streamed content_block_* events (wrapped in stream_event),
-        # 2) a final assistant event with the full accumulated content.
         events = [
             {"type": "stream_event", "event": {
                 "type": "content_block_start",
@@ -365,7 +357,6 @@ class TestInterleavedPartialAndAssistant:
                 "type": "content_block_delta",
                 "delta": {"type": "text_delta", "text": "Hi"}}},
             {"type": "stream_event", "event": {"type": "content_block_stop"}},
-            # Final assistant event (redundant snapshot with same msg_id):
             {"type": "assistant", "message": {
                 "id": "msg_abc",
                 "content": [
@@ -377,17 +368,13 @@ class TestInterleavedPartialAndAssistant:
 
         content, _ = m._parse_stream_events(iter(json.dumps(e) for e in events))
 
-        # thinking_start and thinking_end must fire EXACTLY once each —
-        # no duplicate emission from the redundant assistant snapshot.
         assert thinking_events == [True, False], (
             f"Duplicate thinking boundaries: {thinking_events}"
         )
-        # Thinking tokens delivered exactly once, in streamed chunks.
         thinking_tokens = [t for bt, t in tokens if bt == "thinking"]
         assert thinking_tokens == ["Let me ", "think..."], (
             f"Thinking tokens wrong or duplicated: {thinking_tokens}"
         )
-        # Text streamed exactly once.
         text_tokens = [t for bt, t in tokens if bt == "text"]
         assert text_tokens == ["Hi"], f"Text tokens duplicated: {text_tokens}"
         assert content == "Hi"
@@ -414,8 +401,6 @@ class TestInterleavedPartialAndAssistant:
         )
         m.initialize("test")
 
-        # Intermediate "assistant" snapshots (same msg_id) interleaved with
-        # content_block_* events — classic CLI output with partial messages.
         events = [
             {"type": "stream_event", "event": {
                 "type": "content_block_start",
@@ -423,14 +408,12 @@ class TestInterleavedPartialAndAssistant:
             {"type": "stream_event", "event": {
                 "type": "content_block_delta",
                 "delta": {"type": "thinking_delta", "thinking": "abc"}}},
-            # Partial assistant snapshot (same msg_id):
             {"type": "assistant", "message": {
                 "id": "msg_X",
                 "content": [{"type": "thinking", "thinking": "abc"}]}},
             {"type": "stream_event", "event": {
                 "type": "content_block_delta",
                 "delta": {"type": "thinking_delta", "thinking": "def"}}},
-            # Another partial snapshot (same msg_id, accumulated):
             {"type": "assistant", "message": {
                 "id": "msg_X",
                 "content": [{"type": "thinking", "thinking": "abcdef"}]}},
@@ -459,7 +442,6 @@ class TestThinkingInToolMode:
         thinking_tokens: list[str] = []
         thinking_events: list[bool] = []
 
-        # Track thinking vs text separately based on thinking state
         in_thinking = False
 
         def token_cb(token: str) -> None:
@@ -480,7 +462,6 @@ class TestThinkingInToolMode:
         )
         m.initialize("test")
 
-        # Build events with thinking + text content
         events = [
             {"type": "content_block_start", "content_block": {"type": "thinking"}},
             {"type": "content_block_delta", "delta": {
@@ -495,7 +476,6 @@ class TestThinkingInToolMode:
 
         stream_data = "\n".join(json.dumps(e) for e in events) + "\n"
 
-        # Monkey-patch subprocess.Popen so generate() reads our fake stream
         original_popen = subprocess.Popen
 
         class FakePopen:
@@ -535,21 +515,18 @@ class TestThinkingInToolMode:
 
         subprocess.Popen = FakePopen  # type: ignore[assignment,misc]
         try:
-            # Use a trivial function_map so tools prompt is injected
             function_calls, content, _ = m.generate_and_process_with_tools(
                 {"dummy_tool": lambda: "ok"}
             )
         finally:
             subprocess.Popen = original_popen  # type: ignore[assignment,misc]
 
-        # Thinking tokens MUST have been delivered to the original callback
         assert thinking_events == [True, False], (
             f"Expected [True, False], got {thinking_events}"
         )
         assert thinking_tokens == ["Let me think..."], (
             f"Thinking tokens not delivered: {thinking_tokens}"
         )
-        # Text content should also be delivered
         assert "42" in "".join(text_tokens)
 
     def test_thinking_callback_restored_after_tool_generation(self) -> None:
@@ -578,6 +555,5 @@ class TestThinkingInToolMode:
         finally:
             subprocess.Popen = original_popen  # type: ignore[assignment,misc]
 
-        # Callbacks must be restored
         assert m.token_callback is not None
         assert m.thinking_callback == original_thinking_cb
