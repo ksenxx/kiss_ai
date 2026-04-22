@@ -41,7 +41,7 @@ class _CommandsMixin:
 
         def _get_tab(self, tab_id: str) -> _TabState: ...
         def _run_task(self, cmd: dict[str, Any]) -> None: ...
-        def _stop_task(self, tab_id: str | None = None) -> None: ...
+        def _stop_task(self, tab_id: str = "") -> None: ...
         def _get_models(self) -> None: ...
         def _get_history(
             self, query: str | None, offset: int = 0, generation: int = 0
@@ -50,7 +50,7 @@ class _CommandsMixin:
         def _refresh_file_cache(self) -> None: ...
         def _replay_session(self, chat_id: str, tab_id: str = "") -> None: ...
         def _handle_merge_action(
-            self, action: str, tab_id: str | None = None
+            self, action: str, tab_id: str = ""
         ) -> None: ...
         def _new_chat(self, tab_id: str) -> None: ...
         def _close_tab(self, tab_id: str) -> None: ...
@@ -91,7 +91,7 @@ class _CommandsMixin:
 
     def _cmd_stop(self, cmd: dict[str, Any]) -> None:
         """Stop a running task."""
-        self._stop_task(cmd.get("tabId"))
+        self._stop_task(cmd.get("tabId", ""))
 
     def _cmd_get_models(self, cmd: dict[str, Any]) -> None:
         """Send available models list."""
@@ -150,7 +150,7 @@ class _CommandsMixin:
 
     def _cmd_merge_action(self, cmd: dict[str, Any]) -> None:
         """Handle merge accept/reject from the extension."""
-        self._handle_merge_action(cmd.get("action", ""), cmd.get("tabId"))
+        self._handle_merge_action(cmd.get("action", ""), cmd.get("tabId", ""))
 
     def _cmd_close_tab(self, cmd: dict[str, Any]) -> None:
         """Clean up backend state for a closed frontend tab."""

@@ -31,7 +31,11 @@ from kiss.agents.sorcar.persistence import (
 )
 from kiss.agents.vscode.autocomplete import _AutocompleteMixin
 from kiss.agents.vscode.commands import _CommandsMixin
-from kiss.agents.vscode.diff_merge import _git, _merge_data_dir  # noqa: F401 (re-export for tests)
+from kiss.agents.vscode.diff_merge import (  # noqa: F401 (re-export for tests)
+    _cleanup_merge_data,
+    _git,
+    _merge_data_dir,
+)
 from kiss.agents.vscode.helpers import (
     fast_model_for,
     generate_followup_text,
@@ -246,6 +250,7 @@ class VSCodeServer(
                 logger.debug("Worktree release on tab close failed", exc_info=True)
         self.printer.cleanup_tab(tab_id)
         self.printer._persist_agents.pop(tab_id, None)
+        _cleanup_merge_data(str(_merge_data_dir(tab_id)))
 
     def _new_chat(self, tab_id: str) -> None:
         """Start a new chat session for the given tab.

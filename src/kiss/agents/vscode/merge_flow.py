@@ -183,7 +183,7 @@ class _MergeFlowMixin:
             logger.debug("Worktree merge review error", exc_info=True)
             return False
 
-    def _handle_merge_action(self, action: str, tab_id: str | None = None) -> None:
+    def _handle_merge_action(self, action: str, tab_id: str = "") -> None:
         """Handle merge accept/reject actions from the extension.
 
         Only ``all-done`` triggers cleanup. Individual ``accept``/``reject``
@@ -197,7 +197,7 @@ class _MergeFlowMixin:
         if action == "all-done":
             self._finish_merge(tab_id)
 
-    def _finish_merge(self, tab_id: str | None = None) -> None:
+    def _finish_merge(self, tab_id: str = "") -> None:
         """End the merge session for a specific tab.
 
         When a worktree task is pending, emits ``worktree_done`` so the
@@ -206,14 +206,12 @@ class _MergeFlowMixin:
 
         Args:
             tab_id: The tab whose merge session is finished.  When
-                *None*, the call is a no-op — the previous behavior of
-                clearing every tab's ``is_merging`` flag and emitting an
-                untagged ``merge_ended`` event violated per-tab state
-                isolation (B8 fix).  A missing ``tabId`` at this layer
-                indicates a frontend bug that should not silently tear
-                down every tab's merge state.
+                falsy (*None* or empty string), the call is a no-op — a
+                missing ``tabId`` at this layer indicates a frontend bug
+                that should not silently tear down every tab's merge
+                state.
         """
-        if tab_id is None:
+        if not tab_id:
             logger.debug("_finish_merge called without tab_id; ignoring")
             return
         with self._state_lock:
@@ -391,9 +389,8 @@ class _MergeFlowMixin:
             "originalBranch": wt._original_branch,
             "changedFiles": changed,
             "hasConflict": self._check_merge_conflict(tab_id) if changed else False,
+            "tabId": tab_id,
         }
-        if tab_id:
-            event["tabId"] = tab_id
         self.printer.broadcast(event)
 
     def _emit_pending_worktree(self, tab_id: str = "") -> None:
