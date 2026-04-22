@@ -171,9 +171,7 @@ export function buildChatHtml(
     <div id="ask-user-modal" style="display:none;">
       <div class="modal-content">
         <div class="modal-title">Agent needs your input</div>
-        <div id="ask-user-question"></div>
-        <textarea id="ask-user-input" placeholder="Your answer..."></textarea>
-        <button id="ask-user-submit" data-tooltip="Submit answer">Submit</button>
+        <div id="ask-user-slot"></div>
       </div>
     </div>
   </div>

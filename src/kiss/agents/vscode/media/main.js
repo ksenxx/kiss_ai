@@ -31,8 +31,10 @@
   let ghostTimer = null;
   let currentGhost = '';
 
-  // Track which tab asked a user question so the answer routes correctly
-  let askUserTabId = null;
+  // Per-tab ask-user modal routing: each tab owns its own askQueue and
+  // askQuestionEl / askInputEl / askSubmitEl DOM nodes (see makeTab).  The
+  // shared #ask-user-slot hosts the active tab's triplet; switching tabs
+  // detaches and re-attaches so each tab's half-typed answer is preserved.
 
   // Infinite scroll state for history sidebar
   let historyOffset = 0;
@@ -99,6 +101,12 @@
       streamPendingPanel: false,
       lastTaskFailed: false,
       hasRunTask: false,
+      // Ask-user modal: per-tab queue of pending questions (FIFO; head is
+      // currently displayed when this tab is active) and per-tab DOM nodes.
+      askQueue: [],
+      askQuestionEl: null,
+      askInputEl: null,
+      askSubmitEl: null,
     };
   }
 
@@ -253,6 +261,7 @@
     }
     updateInputDisabled();
     resetAdjacentState();
+    syncAskModalToActiveTab();
   }
 
   function renderTabBar() {
@@ -584,9 +593,7 @@
   const historyList = document.getElementById('history-list');
   const autocomplete = document.getElementById('autocomplete');
   const askUserModal = document.getElementById('ask-user-modal');
-  const askUserQuestion = document.getElementById('ask-user-question');
-  const askUserInput = document.getElementById('ask-user-input');
-  const askUserSubmit = document.getElementById('ask-user-submit');
+  const askUserSlot = document.getElementById('ask-user-slot');
   const waitSpinner = document.getElementById('wait-spinner');
   const ghostOverlay = document.getElementById('ghost-overlay');
   const inputContainer = document.getElementById('input-container');
@@ -1575,10 +1582,17 @@
       case 'files':
         renderAutocomplete(ev.files || []);
         break;
-      case 'askUser':
-        askUserTabId = ev.tabId !== undefined ? ev.tabId : activeTabId;
-        showAskUserModal(ev.question);
+      case 'askUser': {
+        const askTabId = ev.tabId !== undefined ? ev.tabId : activeTabId;
+        const askTab = tabs.find(t => {
+          return t.id === askTabId;
+        });
+        if (!askTab) break;
+        const wasEmpty = askTab.askQueue.length === 0;
+        askTab.askQueue.push(ev.question || '');
+        if (wasEmpty) showNextAskForTab(askTab);
         break;
+      }
       case 'error':
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) break;
         addError(ev.text);
@@ -2658,21 +2672,8 @@
         }
       }
     });
-    askUserSubmit.addEventListener('click', () => {
-      const answer = askUserInput.value;
-      const msg = {type: 'userAnswer', answer: answer};
-      if (askUserTabId !== null) msg.tabId = askUserTabId;
-      vscode.postMessage(msg);
-      askUserModal.style.display = 'none';
-      askUserInput.value = '';
-      askUserTabId = null;
-    });
-    askUserInput.addEventListener('keydown', e => {
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        askUserSubmit.click();
-      }
-    });
+    // Per-tab ask-user submit/keydown listeners are wired in
+    // ensureAskElementsForTab() so each tab gets its own input/submit.
 
     // Paste images/PDFs
     inp.addEventListener('paste', e => {
@@ -2787,17 +2788,107 @@
     if (inputClearBtn) inputClearBtn.style.display = 'none';
   }
 
-  function showAskUserModal(question) {
-    const text = question || '';
+  /**
+   * Create the per-tab ask-user DOM nodes (question div, answer textarea,
+   * submit button) and wire them to the per-tab submit handler.  Idempotent.
+   */
+  function ensureAskElementsForTab(tab) {
+    if (tab.askQuestionEl) return;
+    const q = document.createElement('div');
+    q.className = 'ask-user-question';
+    const i = document.createElement('textarea');
+    i.className = 'ask-user-input';
+    i.placeholder = 'Your answer...';
+    const s = document.createElement('button');
+    s.className = 'ask-user-submit';
+    s.setAttribute('data-tooltip', 'Submit answer');
+    s.textContent = 'Submit';
+    s.addEventListener('click', () => {
+      submitAskForTab(tab);
+    });
+    i.addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        submitAskForTab(tab);
+      }
+    });
+    tab.askQuestionEl = q;
+    tab.askInputEl = i;
+    tab.askSubmitEl = s;
+  }
+
+  /** Render the given question text into the tab's question element. */
+  function setAskQuestionTextForTab(tab, text) {
+    const t = text || '';
     if (typeof marked !== 'undefined') {
-      askUserQuestion.innerHTML = marked.parse(text);
-      askUserQuestion.classList.add('md-body');
-      hlBlock(askUserQuestion);
+      tab.askQuestionEl.innerHTML = marked.parse(t);
+      tab.askQuestionEl.classList.add('md-body');
+      hlBlock(tab.askQuestionEl);
     } else {
-      askUserQuestion.textContent = text;
+      tab.askQuestionEl.textContent = t;
     }
+  }
+
+  /** Detach any ask elements currently in the shared slot (hide modal). */
+  function clearAskSlot() {
+    if (!askUserSlot) return;
+    while (askUserSlot.firstChild)
+      askUserSlot.removeChild(askUserSlot.firstChild);
+    if (askUserModal) askUserModal.style.display = 'none';
+  }
+
+  /** Mount the tab's current ask-user elements into the slot and focus input. */
+  function mountAskForTab(tab) {
+    if (!askUserSlot) return;
+    while (askUserSlot.firstChild)
+      askUserSlot.removeChild(askUserSlot.firstChild);
+    askUserSlot.appendChild(tab.askQuestionEl);
+    askUserSlot.appendChild(tab.askInputEl);
+    askUserSlot.appendChild(tab.askSubmitEl);
     askUserModal.style.display = 'flex';
-    askUserInput.focus();
+    setTimeout(() => {
+      if (tab.id === activeTabId && tab.askInputEl) tab.askInputEl.focus();
+    }, 0);
+  }
+
+  /**
+   * Advance the tab's ask queue: if non-empty, render the head question;
+   * when the tab is active, show the modal.  If empty and the tab is active,
+   * hide the modal.
+   */
+  function showNextAskForTab(tab) {
+    if (tab.askQueue.length === 0) {
+      if (tab.id === activeTabId) clearAskSlot();
+      return;
+    }
+    ensureAskElementsForTab(tab);
+    setAskQuestionTextForTab(tab, tab.askQueue[0]);
+    tab.askInputEl.value = '';
+    if (tab.id === activeTabId) mountAskForTab(tab);
+  }
+
+  /** Submit the current answer for the given tab; pop queue and advance. */
+  function submitAskForTab(tab) {
+    const answer = tab.askInputEl ? tab.askInputEl.value : '';
+    vscode.postMessage({type: 'userAnswer', answer: answer, tabId: tab.id});
+    tab.askQueue.shift();
+    if (tab.askInputEl) tab.askInputEl.value = '';
+    showNextAskForTab(tab);
+  }
+
+  /**
+   * Synchronise the shared modal slot with the active tab after a tab
+   * switch: detach previous contents and mount the active tab's ask UI if
+   * it has a pending question.
+   */
+  function syncAskModalToActiveTab() {
+    clearAskSlot();
+    const tab = tabs.find(t => {
+      return t.id === activeTabId;
+    });
+    if (!tab || tab.askQueue.length === 0) return;
+    ensureAskElementsForTab(tab);
+    mountAskForTab(tab);
   }
 
   function handleFileSelect(e) {

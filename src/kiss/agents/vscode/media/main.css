@@ -912,20 +912,20 @@ body {
   border-radius: 12px; padding: 20px; width: 90%; max-width: 400px;
 }
 .modal-title { font-size: var(--fs-xl); font-weight: 600; color: var(--fg); margin-bottom: 12px; }
-#ask-user-question { font-size: var(--fs-lg); color: color-mix(in srgb, var(--fg) 83%, transparent); margin-bottom: 12px; line-height: 1.5; }
+.ask-user-question { font-size: var(--fs-lg); color: color-mix(in srgb, var(--fg) 83%, transparent); margin-bottom: 12px; line-height: 1.5; }
 
-#ask-user-input {
+.ask-user-input {
   width: 100%; background: color-mix(in srgb, var(--fg) 5%, transparent); border: 1px solid var(--border);
   border-radius: 6px; color: var(--fg); font-size: var(--fs-lg); padding: 10px;
   resize: none; outline: none; min-height: 80px; margin-bottom: 12px;
 }
-#ask-user-input:focus { border-color: var(--accent); }
+.ask-user-input:focus { border-color: var(--accent); }
 
-#ask-user-submit {
+.ask-user-submit {
   background: var(--accent); border: none; border-radius: 6px; color: var(--vscode-button-foreground);
   font-size: var(--fs-lg); font-weight: 500; padding: 8px 16px; cursor: pointer; transition: opacity 0.15s;
 }
-#ask-user-submit:hover { opacity: 0.9; }
+.ask-user-submit:hover { opacity: 0.9; }
 
 /* ── Markdown content rendering (shared via .md-body on system-prompt-body, prompt-body, rc-body) ── */
 .md-body p { margin: 4px 0; }
