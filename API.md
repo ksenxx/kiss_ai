@@ -585,10 +585,9 @@ ______________________________________________________________________
 
 **Constructor:** `CronClient(sock_path: Path = SOCK_PATH) -> None`
 
-- **add_job** — Add a cron job and return its identifier.<br/>`add_job(schedule: str, command: str) -> str`
+- **add_job** — Add a cron job and return its identifier. The caller supplies the exact crontab line — no parsing is performed by the client or the daemon.<br/>`add_job(entry: str) -> str`
 
-  - `schedule`: Five-field cron expression, e.g. `"*/5 * * * *"`.
-  - `command`: Shell command to run on schedule (single line).
+  - `entry`: Full crontab line, e.g. `"*/5 * * * * echo hello"`.
   - **Returns:** The 12-character job identifier.
 
 - **remove_job** — Remove the cron job with identifier `job_id`.<br/>`remove_job(job_id: str) -> None`
@@ -616,11 +615,11 @@ ______________________________________________________________________
 
 **`daemon_status`** — Return a human-readable description of the daemon's running state.<br/>`def daemon_status(pid_path: Path = PID_PATH, sock_path: Path = SOCK_PATH) -> str`
 
-**`run_cron_job_lifecycle`** — Parse a cron job string, add it, list jobs, remove it, and stop the daemon. The `cron_job` string must contain a five-field cron schedule followed by the shell command, e.g. `"*/5 * * * * echo hello"`. Lifecycle steps executed in order: 1. Create a :class:`CronClient`. 2. Add the job via :meth:`CronClient.add_job`. 3. List all jobs via :meth:`CronClient.list_jobs`. 4. Remove the job via :meth:`CronClient.remove_job`. 5. Stop the daemon via :meth:`CronClient.stop_daemon`.<br/>`def run_cron_job_lifecycle(cron_job: str, sock_path: Path | None = None) -> dict[str, Any]`
+**`run_cron_job_lifecycle`** — Add a cron job, list jobs, remove it, and stop the daemon. The `cron_job` string is the exact crontab entry to install — it is sent to the daemon verbatim with no client-side parsing. Lifecycle steps executed in order: 1. Create a :class:`CronClient`. 2. Add the job via :meth:`CronClient.add_job`. 3. List all jobs via :meth:`CronClient.list_jobs`. 4. Remove the job via :meth:`CronClient.remove_job`. 5. Stop the daemon via :meth:`CronClient.stop_daemon`.<br/>`def run_cron_job_lifecycle(cron_job: str, sock_path: Path | None = None) -> dict[str, Any]`
 
-- `cron_job`: A single-line string with five cron schedule fields followed by the command, e.g. `"*/5 * * * * echo hello"`.
+- `cron_job`: A single-line crontab entry, e.g. `"*/5 * * * * echo hello"`.
 - `sock_path`: Optional path to the daemon's Unix domain socket. Defaults to `~/.kiss/cron_manager.sock`.
-- **Returns:** A dict with keys `job_id` (str), `jobs` (list of dicts as returned by :meth:`CronClient.list_jobs` after adding), and `schedule` / `command` (the parsed components).
+- **Returns:** A dict with keys `job_id` (str) and `jobs` (list of dicts as returned by :meth:`CronClient.list_jobs` after adding).
 
 ______________________________________________________________________
 

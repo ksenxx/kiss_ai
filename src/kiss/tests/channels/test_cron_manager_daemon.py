@@ -30,8 +30,7 @@ from kiss.channels.cron_manager_daemon import (
     _read_crontab,
     _read_pid,
     _remove_kiss_block,
-    _validate_command,
-    _validate_schedule,
+    _validate_entry,
     _write_crontab,
     daemon_status,
     run_cron_job_lifecycle,
@@ -228,31 +227,24 @@ class TestRemoveKissBlock:
 
 
 class TestValidators:
-    def test_schedule_ok(self) -> None:
-        _validate_schedule("*/5 * * * *")
+    def test_entry_ok(self) -> None:
+        _validate_entry("*/5 * * * * echo hello")
 
-    def test_schedule_wrong_count(self) -> None:
-        with pytest.raises(ValueError, match="5 fields"):
-            _validate_schedule("* * *")
-
-    def test_schedule_empty(self) -> None:
-        with pytest.raises(ValueError, match="5 fields"):
-            _validate_schedule("")
-
-    def test_command_ok(self) -> None:
-        _validate_command("echo hi")
-
-    def test_command_empty(self) -> None:
+    def test_entry_empty(self) -> None:
         with pytest.raises(ValueError, match="empty"):
-            _validate_command("   ")
+            _validate_entry("")
 
-    def test_command_multiline(self) -> None:
-        with pytest.raises(ValueError, match="single line"):
-            _validate_command("echo hi\nrm -rf /")
+    def test_entry_blank(self) -> None:
+        with pytest.raises(ValueError, match="empty"):
+            _validate_entry("   ")
 
-    def test_command_carriage_return(self) -> None:
+    def test_entry_multiline(self) -> None:
         with pytest.raises(ValueError, match="single line"):
-            _validate_command("echo hi\rrm")
+            _validate_entry("*/5 * * * * echo hi\nrm -rf /")
+
+    def test_entry_carriage_return(self) -> None:
+        with pytest.raises(ValueError, match="single line"):
+            _validate_entry("*/5 * * * * echo hi\rrm")
 
 
 class TestReadWriteCrontab:
@@ -328,7 +320,7 @@ class TestDaemonCommands:
         self, daemon: CronDaemon, crontab_env: dict[str, Path]
     ) -> None:
         resp = daemon._handle_command(
-            {"action": "add", "schedule": "* * * * *", "command": "echo x"}
+            {"action": "add", "entry": "* * * * * echo x"}
         )
         assert resp["status"] == "ok"
         job_id = resp["job_id"]
@@ -344,40 +336,26 @@ class TestDaemonCommands:
         assert resp["jobs"][0]["id"] == job_id
         assert resp["jobs"][0]["command"] == "echo x"
 
-    def test_add_invalid_schedule(self, daemon: CronDaemon) -> None:
-        resp = daemon._handle_command(
-            {"action": "add", "schedule": "bad", "command": "echo x"}
-        )
-        assert resp["status"] == "error"
-        assert "5 fields" in resp["message"]
-
-    def test_add_empty_command_validator(self, daemon: CronDaemon) -> None:
-        resp = daemon._handle_command(
-            {"action": "add", "schedule": "* * * * *", "command": ""}
-        )
+    def test_add_empty_entry(self, daemon: CronDaemon) -> None:
+        resp = daemon._handle_command({"action": "add", "entry": ""})
         assert resp["status"] == "error"
         assert "Missing" in resp["message"]
 
-    def test_add_newline_command_rejected(self, daemon: CronDaemon) -> None:
+    def test_add_missing_entry(self, daemon: CronDaemon) -> None:
+        resp = daemon._handle_command({"action": "add"})
+        assert resp["status"] == "error"
+        assert "Missing" in resp["message"]
+
+    def test_add_multiline_entry_rejected(self, daemon: CronDaemon) -> None:
         resp = daemon._handle_command(
-            {
-                "action": "add",
-                "schedule": "* * * * *",
-                "command": "echo a\nrm -rf /",
-            }
+            {"action": "add", "entry": "* * * * * echo a\nrm -rf /"}
         )
         assert resp["status"] == "error"
         assert "single line" in resp["message"]
 
-    def test_add_missing_schedule(self, daemon: CronDaemon) -> None:
-        resp = daemon._handle_command(
-            {"action": "add", "schedule": "", "command": "echo x"}
-        )
-        assert resp["status"] == "error"
-
     def test_remove(self, daemon: CronDaemon) -> None:
         resp = daemon._handle_command(
-            {"action": "add", "schedule": "* * * * *", "command": "echo x"}
+            {"action": "add", "entry": "* * * * * echo x"}
         )
         job_id = resp["job_id"]
         resp = daemon._handle_command({"action": "remove", "job_id": job_id})
@@ -402,10 +380,10 @@ class TestDaemonCommands:
 
     def test_status_counts_jobs(self, daemon: CronDaemon) -> None:
         daemon._handle_command(
-            {"action": "add", "schedule": "* * * * *", "command": "echo a"}
+            {"action": "add", "entry": "* * * * * echo a"}
         )
         daemon._handle_command(
-            {"action": "add", "schedule": "0 0 * * *", "command": "echo b"}
+            {"action": "add", "entry": "0 0 * * * echo b"}
         )
         resp = daemon._handle_command({"action": "status"})
         assert resp["job_count"] == 2
@@ -424,7 +402,7 @@ class TestDaemonCommands:
     ) -> None:
         crontab_env["tab"].write_text("SHELL=/bin/bash\n0 9 * * * user_job\n")
         daemon._handle_command(
-            {"action": "add", "schedule": "* * * * *", "command": "echo kiss"}
+            {"action": "add", "entry": "* * * * * echo kiss"}
         )
         tab = crontab_env["tab"].read_text()
         assert "SHELL=/bin/bash" in tab
@@ -465,7 +443,7 @@ class TestDaemonCommands:
             crontab_cmd=str(broken),
         )
         resp = d._handle_command(
-            {"action": "add", "schedule": "* * * * *", "command": "echo x"}
+            {"action": "add", "entry": "* * * * * echo x"}
         )
         assert resp["status"] == "error"
         assert "failed" in resp["message"]
@@ -476,7 +454,7 @@ class TestDaemonCommands:
         """Existing crontab content without trailing newline is normalized."""
         crontab_env["tab"].write_text("EXISTING_LINE_NO_NEWLINE")
         resp = daemon._handle_command(
-            {"action": "add", "schedule": "* * * * *", "command": "echo x"}
+            {"action": "add", "entry": "* * * * * echo x"}
         )
         assert resp["status"] == "ok"
         tab = crontab_env["tab"].read_text()
@@ -527,7 +505,7 @@ class TestDaemonCommands:
 
 class TestClientDaemonIntegration:
     def test_add_list_remove(self, client: CronClient) -> None:
-        job_id = client.add_job("*/5 * * * *", "echo integration")
+        job_id = client.add_job("*/5 * * * * echo integration")
         assert isinstance(job_id, str)
         assert len(job_id) == 12
 
@@ -546,16 +524,16 @@ class TestClientDaemonIntegration:
         assert resp["pid"] == os.getpid()
         assert resp["job_count"] == 0
 
-    def test_add_invalid_schedule_raises(self, client: CronClient) -> None:
-        with pytest.raises(RuntimeError, match="5 fields"):
-            client.add_job("bad", "echo x")
+    def test_add_multiline_raises(self, client: CronClient) -> None:
+        with pytest.raises(RuntimeError, match="single line"):
+            client.add_job("* * * * * echo a\nrm -rf /")
 
     def test_remove_unknown_raises(self, client: CronClient) -> None:
         with pytest.raises(RuntimeError, match="not found"):
             client.remove_job("nosuch123456")
 
     def test_multiple_jobs_unique_ids(self, client: CronClient) -> None:
-        ids = [client.add_job(f"0 {h} * * *", f"echo j{h}") for h in range(5)]
+        ids = [client.add_job(f"0 {h} * * * echo j{h}") for h in range(5)]
         assert len(set(ids)) == 5
         jobs = client.list_jobs()
         assert len(jobs) == 5
@@ -572,7 +550,7 @@ class TestClientDaemonIntegration:
         def worker(i: int) -> None:
             try:
                 c = CronClient(sock_path=crontab_env["sock"])
-                results.append(c.add_job("* * * * *", f"echo c-{i}"))
+                results.append(c.add_job(f"* * * * * echo c-{i}"))
             except Exception as e:  # noqa: BLE001
                 errors.append(e)
 
@@ -635,7 +613,7 @@ class TestDaemonRestart:
 
         _, t1 = boot()
         c1 = CronClient(sock_path=crontab_env["sock"])
-        job_id = c1.add_job("0 12 * * *", "echo survive")
+        job_id = c1.add_job("0 12 * * * echo survive")
         c1.stop_daemon()
         t1.join(timeout=5)
 
@@ -685,7 +663,7 @@ class TestProcessKillRestart:
         proc = launch()
         try:
             c = CronClient(sock_path=crontab_env["sock"])
-            job_id = c.add_job("30 2 * * *", "echo killed")
+            job_id = c.add_job("30 2 * * * echo killed")
             assert len(c.list_jobs()) == 1
 
             proc.kill()
@@ -698,7 +676,7 @@ class TestProcessKillRestart:
                 jobs = c2.list_jobs()
                 assert len(jobs) == 1
                 assert jobs[0]["id"] == job_id
-                c2.add_job("0 0 * * *", "echo new")
+                c2.add_job("0 0 * * * echo new")
                 assert len(c2.list_jobs()) == 2
                 c2.stop_daemon()
                 proc2.wait(timeout=5)
@@ -944,12 +922,11 @@ class TestRunCronJobLifecycle:
             "*/5 * * * * echo hello", sock_path=crontab_env["sock"]
         )
 
-        assert result["schedule"] == "*/5 * * * *"
-        assert result["command"] == "echo hello"
         assert len(result["job_id"]) == 12
         # jobs list was captured AFTER add but BEFORE remove
         assert len(result["jobs"]) == 1
         assert result["jobs"][0]["id"] == result["job_id"]
+        assert result["jobs"][0]["schedule"] == "*/5 * * * *"
         assert result["jobs"][0]["command"] == "echo hello"
 
         t.join(timeout=5)
@@ -976,22 +953,18 @@ class TestRunCronJobLifecycle:
             sock_path=crontab_env["sock"],
         )
 
-        assert result["schedule"] == "0 9 * * 1"
-        assert result["command"] == "/bin/sh -c 'echo monday morning'"
+        assert len(result["job_id"]) == 12
+        assert result["jobs"][0]["schedule"] == "0 9 * * 1"
+        assert result["jobs"][0]["command"] == "/bin/sh -c 'echo monday morning'"
         t.join(timeout=5)
 
-    def test_too_few_fields_raises(self) -> None:
-        """A string with fewer than 6 tokens raises ValueError."""
-        with pytest.raises(ValueError, match="5 schedule fields"):
-            run_cron_job_lifecycle("* * * * *")
-
     def test_empty_string_raises(self) -> None:
-        with pytest.raises(ValueError, match="5 schedule fields"):
+        with pytest.raises(ValueError, match="empty"):
             run_cron_job_lifecycle("")
 
-    def test_five_fields_no_command_raises(self) -> None:
-        with pytest.raises(ValueError, match="5 schedule fields"):
-            run_cron_job_lifecycle("1 2 3 4 5")
+    def test_whitespace_only_raises(self) -> None:
+        with pytest.raises(ValueError, match="empty"):
+            run_cron_job_lifecycle("   ")
 
     def test_no_daemon_raises_connection_error(self, tmp_path: Path) -> None:
         """When no daemon is running, ConnectionError is raised."""

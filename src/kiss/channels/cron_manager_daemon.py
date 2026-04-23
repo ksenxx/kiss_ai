@@ -22,7 +22,7 @@ Client usage from any KISS agent::
     from kiss.channels.cron_manager_daemon import CronClient
 
     client = CronClient()
-    job_id = client.add_job("*/5 * * * *", "echo hello")
+    job_id = client.add_job("*/5 * * * * echo hello")
     jobs = client.list_jobs()
     client.remove_job(job_id)
     client.stop_daemon()
@@ -194,21 +194,19 @@ def _remove_kiss_block(content: str, job_id: str) -> tuple[str, bool]:
     return new_content, True
 
 
-def _validate_schedule(schedule: str) -> None:
-    """Raise :class:`ValueError` unless ``schedule`` has five whitespace fields."""
-    fields = schedule.strip().split()
-    if len(fields) != 5:
-        raise ValueError(
-            f"Cron schedule must have 5 fields, got {len(fields)}: {schedule!r}"
-        )
+def _validate_entry(entry: str) -> None:
+    """Raise :class:`ValueError` unless ``entry`` is a non-empty single line.
 
+    Args:
+        entry: A full crontab line, e.g. ``"*/5 * * * * echo hello"``.
 
-def _validate_command(command: str) -> None:
-    """Raise :class:`ValueError` unless ``command`` is non-empty and single-line."""
-    if not command.strip():
-        raise ValueError("Command must not be empty")
-    if "\n" in command or "\r" in command:
-        raise ValueError("Command must be a single line")
+    Raises:
+        ValueError: If the entry is blank or contains newlines.
+    """
+    if not entry.strip():
+        raise ValueError("Crontab entry must not be empty")
+    if "\n" in entry or "\r" in entry:
+        raise ValueError("Crontab entry must be a single line")
 
 
 class CronDaemon:
@@ -240,16 +238,20 @@ class CronDaemon:
         self._server_socket: socket.socket | None = None
 
 
-    def _add_job(self, schedule: str, command: str) -> dict[str, Any]:
-        """Add a new job to the system crontab and return a response dict."""
+    def _add_job(self, entry: str) -> dict[str, Any]:
+        """Add a new job to the system crontab and return a response dict.
+
+        Args:
+            entry: The exact crontab line to install,
+                e.g. ``"*/5 * * * * echo hello"``.
+        """
         try:
-            _validate_schedule(schedule)
-            _validate_command(command)
+            _validate_entry(entry)
         except ValueError as e:
             return {"status": "error", "message": str(e)}
         job_id = uuid.uuid4().hex[:12]
         created_at = datetime.now().isoformat()
-        block = f"{_MARKER} {job_id} {created_at}\n{schedule} {command}\n"
+        block = f"{_MARKER} {job_id} {created_at}\n{entry}\n"
         with self._lock:
             try:
                 current = _read_crontab(self.crontab_cmd)
@@ -258,7 +260,7 @@ class CronDaemon:
                 _write_crontab(current + block, self.crontab_cmd)
             except RuntimeError as e:
                 return {"status": "error", "message": str(e)}
-        logger.info("Added job %s: %s -> %s", job_id, schedule, command)
+        logger.info("Added job %s: %s", job_id, entry)
         return {"status": "ok", "job_id": job_id}
 
     def _remove_job(self, job_id: str) -> dict[str, Any]:
@@ -312,11 +314,10 @@ class CronDaemon:
         """Dispatch a parsed JSON command and return the response payload."""
         action = data.get("action")
         if action == "add":
-            schedule = data.get("schedule", "")
-            command = data.get("command", "")
-            if not schedule or not command:
-                return {"status": "error", "message": "Missing 'schedule' or 'command'"}
-            return self._add_job(schedule, command)
+            entry = data.get("entry", "")
+            if not entry:
+                return {"status": "error", "message": "Missing 'entry'"}
+            return self._add_job(entry)
         if action == "remove":
             job_id = data.get("job_id", "")
             if not job_id:
@@ -612,12 +613,14 @@ class CronClient:
         finally:
             sock.close()
 
-    def add_job(self, schedule: str, command: str) -> str:
+    def add_job(self, entry: str) -> str:
         """Add a cron job and return its identifier.
 
+        The caller supplies the exact crontab line — no parsing is
+        performed by the client or the daemon.
+
         Args:
-            schedule: Five-field cron expression, e.g. ``"*/5 * * * *"``.
-            command: Shell command to run on schedule (single line).
+            entry: Full crontab line, e.g. ``"*/5 * * * * echo hello"``.
 
         Returns:
             The 12-character job identifier.
@@ -626,7 +629,7 @@ class CronClient:
             ConnectionError: If the daemon is not reachable.
             RuntimeError: If the daemon rejects the request.
         """
-        resp = self._send({"action": "add", "schedule": schedule, "command": command})
+        resp = self._send({"action": "add", "entry": entry})
         if resp.get("status") != "ok":
             raise RuntimeError(resp.get("message", "Unknown error"))
         job_id: str = resp["job_id"]
@@ -672,10 +675,10 @@ class CronClient:
 def run_cron_job_lifecycle(
     cron_job: str, sock_path: Path | None = None
 ) -> dict[str, Any]:
-    """Parse a cron job string, add it, list jobs, remove it, and stop the daemon.
+    """Add a cron job, list jobs, remove it, and stop the daemon.
 
-    The ``cron_job`` string must contain a five-field cron schedule followed
-    by the shell command, e.g. ``"*/5 * * * * echo hello"``.
+    The ``cron_job`` string is the exact crontab entry to install — it is
+    sent to the daemon verbatim with no client-side parsing.
 
     Lifecycle steps executed in order:
 
@@ -686,33 +689,26 @@ def run_cron_job_lifecycle(
     5. Stop the daemon via :meth:`CronClient.stop_daemon`.
 
     Args:
-        cron_job: A single-line string with five cron schedule fields
-            followed by the command, e.g. ``"*/5 * * * * echo hello"``.
+        cron_job: A single-line crontab entry, e.g.
+            ``"*/5 * * * * echo hello"``.
         sock_path: Optional path to the daemon's Unix domain socket.
             Defaults to ``~/.kiss/cron_manager.sock``.
 
     Returns:
-        A dict with keys ``job_id`` (str), ``jobs`` (list of dicts as
-        returned by :meth:`CronClient.list_jobs` after adding), and
-        ``schedule`` / ``command`` (the parsed components).
+        A dict with keys ``job_id`` (str) and ``jobs`` (list of dicts as
+        returned by :meth:`CronClient.list_jobs` after adding).
 
     Raises:
-        ValueError: If ``cron_job`` does not contain at least six
-            whitespace-separated tokens (5 schedule fields + command).
+        ValueError: If ``cron_job`` is empty.
         ConnectionError: If the daemon is not reachable.
         RuntimeError: If the daemon rejects the add or remove request.
     """
-    parts = cron_job.strip().split(None, 5)
-    if len(parts) < 6:
-        raise ValueError(
-            f"Cron job string must have 5 schedule fields + command, "
-            f"got {len(parts)} token(s): {cron_job!r}"
-        )
-    schedule = " ".join(parts[:5])
-    command = parts[5]
+    entry = cron_job.strip()
+    if not entry:
+        raise ValueError(f"Cron job entry must not be empty: {cron_job!r}")
 
     client = CronClient(sock_path=sock_path or SOCK_PATH)
-    job_id = client.add_job(schedule, command)
+    job_id = client.add_job(entry)
     jobs = client.list_jobs()
     client.remove_job(job_id)
     client.stop_daemon()
@@ -720,8 +716,6 @@ def run_cron_job_lifecycle(
     return {
         "job_id": job_id,
         "jobs": jobs,
-        "schedule": schedule,
-        "command": command,
     }
 
 
