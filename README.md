@@ -37,8 +37,8 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 
 # Introduction to KISS Sorcar
 
-![KISS Sorcar](assets/KISSSorcar.png)
-**KISS Sorcar** (named after the [famous Bengali magician P.C. Sorcar](https://en.wikipedia.org/wiki/P._C._Sorcar)) is a free alternative to Cursor IDE and **a general-purpose agent with web browsing and native desktop app execution capabilities**. It runs **locally** as a VS Code extension. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours to days**. It is **implemented as a Visual Studio Code extension**. It has **full browser** support and **multimodal** support. The good part is that KISS Sorcar is **completely free** and **open-source**; you bring your API key and give it to KISS Sorcar.
+![KISS Sorcar](assets/KISS-Sorcar-UI.png)
+**KISS Sorcar** (named after the [famous Bengali magician P.C. Sorcar](https://en.wikipedia.org/wiki/P._C._Sorcar)) is *a general-purpose agent with web browsing and native desktop app execution capabilities**. It runs **locally** as a VS Code extension. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours to days**. It is **implemented as a Visual Studio Code extension**. It has **full browser** support and **multimodal** support. The good part is that KISS Sorcar is **completely free** and **open-source**; you bring your API key and give it to KISS Sorcar.
 
 ```
 git clone https://github.com/ksenxx/kiss_ai.git
@@ -130,7 +130,7 @@ Each model in `MODEL_INFO` includes capability flags:
 
 ## 🤗 Contributing
 
-Contributions in the form of issues are welcome! KISS Sorcar will take care of it.
+Contributions in the form of issues are welcome! KISS Sorcar should be able to take care of them.
 
 ## 📄 License
 
