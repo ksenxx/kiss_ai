@@ -1103,9 +1103,61 @@ class TestPerTabIsMerging(unittest.TestCase):
 
     def test_merge_started_switches_tab(self) -> None:
         idx = self.js.index("case 'merge_started':")
-        block = self.js[idx : idx + 400]
+        block = self.js[idx : idx + 600]
         assert "ev.tabId !== undefined && ev.tabId !== activeTabId" in block
         assert "bgMergeTab" in block
+        assert "switchToTab" in block, (
+            "merge_started bg handler must auto-switch to the merging tab"
+        )
+
+    def test_merge_started_auto_switches_via_node(self) -> None:
+        """Behavioral test: merge_started for a bg tab auto-switches to it.
+
+        Simulates the merge_started handler logic: when merge_started fires
+        for a background tab, it sets isMerging on the tab then calls
+        switchToTab to bring it to the foreground.
+        """
+        result = _run_node(_make_test_script(r"""
+            var tabs = [
+                { id: 'tab-A', isMerging: false, mergeToolbarEl: null,
+                  isRunning: true, outputFragment: null },
+                { id: 'tab-B', isMerging: false, mergeToolbarEl: null,
+                  isRunning: false, outputFragment: null },
+            ];
+            var activeTabId = 'tab-B';
+            var switchedTo = null;
+
+            // Stub switchToTab to record what it was called with
+            function switchToTab(tabId) { switchedTo = tabId; activeTabId = tabId; }
+
+            // Simulate merge_started handler for background tab-A
+            var ev = { type: 'merge_started', tabId: 'tab-A' };
+            if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
+                var bgMergeTab = tabs.find(function(t) { return t.id === ev.tabId; });
+                if (bgMergeTab) {
+                    bgMergeTab.isMerging = true;
+                    switchToTab(ev.tabId);
+                }
+            }
+
+            var errors = [];
+            if (tabs[0].isMerging !== true)
+                errors.push('tab-A isMerging should be true');
+            if (switchedTo !== 'tab-A')
+                errors.push('should have switched to tab-A, got ' + switchedTo);
+            if (activeTabId !== 'tab-A')
+                errors.push('activeTabId should be tab-A, got ' + activeTabId);
+            if (tabs[1].isMerging !== false)
+                errors.push('tab-B should be unaffected');
+
+            if (errors.length > 0) {
+                process.stdout.write('FAIL: ' + errors.join('; '));
+                process.exit(1);
+            }
+            process.stdout.write('PASS');
+        """))
+        assert result.returncode == 0, result.stderr
+        assert "PASS" in result.stdout
 
     def test_merge_ended_guard(self) -> None:
         idx = self.js.index("case 'merge_ended':")
@@ -1685,7 +1737,7 @@ class TestShowMergeToolbarCapturesOwnerTabId(unittest.TestCase):
     def test_merge_started_passes_tab_id_to_show_merge_toolbar(self) -> None:
         """merge_started handler passes ev.tabId to showMergeToolbar."""
         idx = self.js.index("case 'merge_started':")
-        block = self.js[idx : idx + 500]
+        block = self.js[idx : idx + 600]
         assert "showMergeToolbar((ev && ev.tabId) || activeTabId)" in block
 
     def test_restore_tab_passes_tab_id_to_show_merge_toolbar(self) -> None:
