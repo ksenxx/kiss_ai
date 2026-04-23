@@ -4,7 +4,7 @@ Targets remaining uncovered branches in:
   cli_helpers.py: lines 23, 53->39, 106-119, 137-142, 153-155, 172-180, 200-203
   persistence.py: lines 263, 426
   sorcar_agent.py: lines 251-252
-  stateful_sorcar_agent.py: lines 130->134, 132-133
+  chat_sorcar_agent.py: lines 130->134, 132-133
   useful_tools.py: lines 184, 204
   worktree_sorcar_agent.py: lines 187, 209-211, 313-314, 351
   browser_ui.py: lines 205-215, 248, 254, 259-260, 281-285, 294, 302-310,
@@ -34,7 +34,7 @@ from kiss.agents.sorcar.cli_helpers import (
     _print_recent_chats,
 )
 from kiss.agents.sorcar.git_worktree import GitWorktree
-from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.worktree_sorcar_agent import _generate_commit_message
 from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 from kiss.agents.vscode.server import VSCodeServer
@@ -85,7 +85,7 @@ class TestCliHelpers:
         """_apply_chat_args with --chat-id resumes that session."""
         saved = _redirect_db(str(tmp_path))
         try:
-            agent = StatefulSorcarAgent("test")
+            agent = ChatSorcarAgent("test")
             args = argparse.Namespace(new=False, chat_id=1000)
             _apply_chat_args(agent, args)
             assert agent.chat_id == 1000
@@ -96,7 +96,7 @@ class TestCliHelpers:
         """_apply_chat_args with neither new nor chat_id and no task is a no-op."""
         saved = _redirect_db(str(tmp_path))
         try:
-            agent = StatefulSorcarAgent("test")
+            agent = ChatSorcarAgent("test")
             args = argparse.Namespace(new=False, chat_id=None)
             _apply_chat_args(agent, args, task="")
         finally:

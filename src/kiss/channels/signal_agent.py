@@ -1,4 +1,4 @@
-"""Signal Agent — StatefulSorcarAgent extension with Signal CLI tools.
+"""Signal Agent — ChatSorcarAgent extension with Signal CLI tools.
 
 Uses signal-cli subprocess to send/receive Signal messages. Stores
 configuration in ``~/.kiss/channels/signal/config.json``.
@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.channels._backend_utils import wait_for_matching_message
 from kiss.channels._channel_agent_utils import (
     BaseChannelAgent,
@@ -200,8 +200,8 @@ class SignalChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class SignalAgent(BaseChannelAgent, StatefulSorcarAgent):
-    """StatefulSorcarAgent extended with Signal CLI tools."""
+class SignalAgent(BaseChannelAgent, ChatSorcarAgent):
+    """ChatSorcarAgent extended with Signal CLI tools."""
 
     def __init__(self) -> None:
         super().__init__("Signal Agent")

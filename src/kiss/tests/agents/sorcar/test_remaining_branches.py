@@ -294,8 +294,8 @@ class TestSorcarAgentBranches:
             agent.web_use_tool.close()
 
 
-class TestStatefulSorcarAgentBranches:
-    """Cover remaining branches in stateful_sorcar_agent.py."""
+class TestChatSorcarAgentBranches:
+    """Cover remaining branches in chat_sorcar_agent.py."""
 
     def setup_method(self) -> None:
         self._tmpdir = tempfile.mkdtemp()
@@ -315,8 +315,8 @@ class TestStatefulSorcarAgentBranches:
 
     def test_build_chat_prompt_entry_without_result(self) -> None:
         """build_chat_prompt skips result when entry has no result (line 84->82)."""
-        from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
-        agent = StatefulSorcarAgent("test")
+        from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+        agent = ChatSorcarAgent("test")
         task_id, chat_id = th._add_task("task with no result", chat_id="test_no_result")
         agent._chat_id = chat_id
         th._save_task_result("", task_id)

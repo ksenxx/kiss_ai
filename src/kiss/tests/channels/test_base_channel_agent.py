@@ -95,9 +95,9 @@ def test_channel_main_list_chats_exits(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """channel_main() with -l prints recent chats and exits."""
-    from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
+    from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
-    class FakeAgent(BaseChannelAgent, StatefulSorcarAgent):
+    class FakeAgent(BaseChannelAgent, ChatSorcarAgent):
         pass
 
     original_argv = sys.argv[:]

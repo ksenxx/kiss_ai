@@ -1,4 +1,4 @@
-"""iMessage Agent — StatefulSorcarAgent extension with iMessage tools via AppleScript.
+"""iMessage Agent — ChatSorcarAgent extension with iMessage tools via AppleScript.
 
 macOS only. Uses osascript to send/receive iMessages via the Messages app.
 Stores config in ``~/.kiss/channels/imessage/config.json``.
@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.channels._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -194,8 +194,8 @@ end tell"""
         )
 
 
-class IMessageAgent(BaseChannelAgent, StatefulSorcarAgent):
-    """StatefulSorcarAgent extended with iMessage tools (macOS only)."""
+class IMessageAgent(BaseChannelAgent, ChatSorcarAgent):
+    """ChatSorcarAgent extended with iMessage tools (macOS only)."""
 
     def __init__(self) -> None:
         super().__init__("iMessage Agent")

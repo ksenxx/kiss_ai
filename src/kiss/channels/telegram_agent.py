@@ -1,4 +1,4 @@
-"""Telegram Agent — StatefulSorcarAgent extension with Telegram Bot API tools.
+"""Telegram Agent — ChatSorcarAgent extension with Telegram Bot API tools.
 
 Provides authenticated access to Telegram via a bot token from @BotFather.
 Stores the token securely in ``~/.kiss/channels/telegram/config.json`` and
@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.channels._backend_utils import wait_for_matching_message
 from kiss.channels._channel_agent_utils import (
     BaseChannelAgent,
@@ -456,8 +456,8 @@ class TelegramChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class TelegramAgent(BaseChannelAgent, StatefulSorcarAgent):
-    """StatefulSorcarAgent extended with Telegram Bot API tools.
+class TelegramAgent(BaseChannelAgent, ChatSorcarAgent):
+    """ChatSorcarAgent extended with Telegram Bot API tools.
 
     Example::
 

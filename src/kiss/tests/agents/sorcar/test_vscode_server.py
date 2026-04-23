@@ -926,19 +926,19 @@ class TestAgentToggle(unittest.TestCase):
     def test_server_agent_is_worktree_sorcar_agent(self) -> None:
         """Server agent is a single WorktreeSorcarAgent regardless of toggle.
 
-        ``WorktreeSorcarAgent`` subclasses ``StatefulSorcarAgent`` and
+        ``WorktreeSorcarAgent`` subclasses ``ChatSorcarAgent`` and
         internally falls back to the stateful code path when
         ``use_worktree=False`` is passed to ``run()``.  One instance
         per tab is therefore sufficient.
         """
-        from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
+        from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
         from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
         server = VSCodeServer()
         tab = server._get_tab("0")
         assert tab.use_worktree is False
         assert isinstance(tab.agent, WorktreeSorcarAgent)
-        assert isinstance(tab.agent, StatefulSorcarAgent)
+        assert isinstance(tab.agent, ChatSorcarAgent)
         original = tab.agent
         tab.use_worktree = True
         assert tab.agent is original

@@ -21,7 +21,7 @@ from kiss.agents.sorcar.persistence import (
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 
 
-class StatefulSorcarAgent(SorcarAgent):
+class ChatSorcarAgent(SorcarAgent):
     """SorcarAgent with chat-session state management.
 
     Maintains a ``chat_id`` and automatically loads prior chat context,

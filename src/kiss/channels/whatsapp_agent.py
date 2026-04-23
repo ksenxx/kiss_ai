@@ -1,4 +1,4 @@
-"""WhatsApp Agent — StatefulSorcarAgent extension with WhatsApp Business Cloud API tools.
+"""WhatsApp Agent — ChatSorcarAgent extension with WhatsApp Business Cloud API tools.
 
 Provides authenticated access to WhatsApp via the Meta Graph API.
 Handles authentication (reading config from disk or prompting the user
@@ -25,7 +25,7 @@ from typing import Any
 
 import requests
 
-from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.channels._backend_utils import (
     ThreadedHTTPServer,
     stop_http_server,
@@ -786,8 +786,8 @@ class WhatsAppChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class WhatsAppAgent(BaseChannelAgent, StatefulSorcarAgent):
-    """StatefulSorcarAgent extended with WhatsApp Business Cloud API tools.
+class WhatsAppAgent(BaseChannelAgent, ChatSorcarAgent):
+    """ChatSorcarAgent extended with WhatsApp Business Cloud API tools.
 
     Inherits all standard SorcarAgent capabilities (bash, file editing,
     browser automation) and adds authenticated WhatsApp API tools for

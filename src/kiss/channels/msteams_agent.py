@@ -1,4 +1,4 @@
-"""Microsoft Teams Agent — StatefulSorcarAgent extension with MS Teams Graph API tools.
+"""Microsoft Teams Agent — ChatSorcarAgent extension with MS Teams Graph API tools.
 
 Provides authenticated access to Microsoft Teams via Azure AD client credentials.
 Stores config in ``~/.kiss/channels/msteams/config.json``.
@@ -19,7 +19,7 @@ from typing import Any
 
 import requests
 
-from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.channels._backend_utils import wait_for_matching_message
 from kiss.channels._channel_agent_utils import (
     BaseChannelAgent,
@@ -375,8 +375,8 @@ class MSTeamsChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class MSTeamsAgent(BaseChannelAgent, StatefulSorcarAgent):
-    """StatefulSorcarAgent extended with Microsoft Teams Graph API tools."""
+class MSTeamsAgent(BaseChannelAgent, ChatSorcarAgent):
+    """ChatSorcarAgent extended with Microsoft Teams Graph API tools."""
 
     def __init__(self) -> None:
         super().__init__("MS Teams Agent")

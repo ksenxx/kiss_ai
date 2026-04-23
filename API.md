@@ -8,7 +8,7 @@
 - [`kiss.core.kiss_agent`](#kisscorekiss_agent)
 - [`kiss.core.relentless_agent`](#kisscorerelentless_agent)
   - [`kiss.agents.sorcar.sorcar_agent`](#kissagentssorcarsorcar_agent)
-  - [`kiss.agents.sorcar.stateful_sorcar_agent`](#kissagentssorcarstateful_sorcar_agent)
+  - [`kiss.agents.sorcar.chat_sorcar_agent`](#kissagentssorcarchat_sorcar_agent)
   - [`kiss.agents.sorcar.git_worktree`](#kissagentssorcargit_worktree)
   - [`kiss.agents.sorcar.worktree_sorcar_agent`](#kissagentssorcarworktree_sorcar_agent)
 ```
@@ -158,11 +158,11 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.agents.sorcar.stateful_sorcar_agent` — *Stateful Sorcar agent with chat-session persistence.*
+#### `kiss.agents.sorcar.chat_sorcar_agent` — *Stateful Sorcar agent with chat-session persistence.*
 
-##### `class StatefulSorcarAgent(SorcarAgent)` — SorcarAgent with chat-session state management.
+##### `class ChatSorcarAgent(SorcarAgent)` — SorcarAgent with chat-session state management.
 
-**Constructor:** `StatefulSorcarAgent(name: str) -> None`
+**Constructor:** `ChatSorcarAgent(name: str) -> None`
 
 - **chat_id** — Return the current chat session ID ("" means new session).<br/>`chat_id() -> str` *(property)*
 
@@ -368,16 +368,16 @@ ______________________________________________________________________
 
 #### `kiss.agents.sorcar.worktree_sorcar_agent` — *Worktree-based agent that runs each task on an isolated git branch.*
 
-##### `class WorktreeSorcarAgent(StatefulSorcarAgent)` — SorcarAgent that isolates every task in a git worktree.
+##### `class WorktreeSorcarAgent(ChatSorcarAgent)` — SorcarAgent that isolates every task in a git worktree.
 
 **Constructor:** `WorktreeSorcarAgent(name: str) -> None`
 
 - **new_chat** — Reset to a new chat session, auto-merging any pending worktree. If a worktree task is pending from the previous session, it is auto-committed with a detailed LLM message and squash-merged into the original branch before the chat state is reset.<br/>`new_chat() -> None`
 
-- **run** — Run a task on an isolated git worktree branch. Creates a new worktree and branch, redirects `work_dir` into the worktree, and delegates to `StatefulSorcarAgent.run()`. Each call starts a fresh worktree; any previously pending branch from an earlier run is left as-is in git for the user to merge or discard later. Falls back to direct execution (no worktree) when: - `use_worktree` kwarg is explicitly `False` - `work_dir` is not inside a git repo - The repo has no commits - HEAD is detached (no merge target) - Any git command fails during setup<br/>`run(prompt_template: str = '', **kwargs: Any) -> str`
+- **run** — Run a task on an isolated git worktree branch. Creates a new worktree and branch, redirects `work_dir` into the worktree, and delegates to `ChatSorcarAgent.run()`. Each call starts a fresh worktree; any previously pending branch from an earlier run is left as-is in git for the user to merge or discard later. Falls back to direct execution (no worktree) when: - `use_worktree` kwarg is explicitly `False` - `work_dir` is not inside a git repo - The repo has no commits - HEAD is detached (no merge target) - Any git command fails during setup<br/>`run(prompt_template: str = '', **kwargs: Any) -> str`
 
   - `prompt_template`: The task prompt.
-  - `**kwargs`: All other arguments forwarded to `StatefulSorcarAgent.run()`. The optional `use_worktree` kwarg (default `True`) gates the worktree behavior — when `False` the call is equivalent to `StatefulSorcarAgent.run()`.
+  - `**kwargs`: All other arguments forwarded to `ChatSorcarAgent.run()`. The optional `use_worktree` kwarg (default `True`) gates the worktree behavior — when `False` the call is equivalent to `ChatSorcarAgent.run()`.
   - **Returns:** YAML string with 'success' and 'summary' keys.
 
 - **merge** — Merge the task branch into the original branch. Every step is idempotent — safe to re-run after a crash. Auto-commits any uncommitted changes in the worktree before merging. If the main working tree has uncommitted changes, they are stashed before the merge and restored afterward so user edits don't block the merge.<br/>`merge() -> str`
@@ -489,7 +489,7 @@ ______________________________________________________________________
 
 **Constructor:** `ChannelRunner(backend: Any, channel_name: str, agent_name: str, extra_tools: list | None = None, model_name: str = '', max_budget: float = 5.0, work_dir: str = '', allow_users: list[str] | None = None) -> None`
 
-- **run_once** — Check for pending messages, process them, and exit. Connects to the backend, joins the configured channel, retrieves recent messages, filters to allowed users, skips messages the bot has already replied to, and runs a StatefulSorcarAgent for each pending message. Each message is processed synchronously.<br/>`run_once() -> int`
+- **run_once** — Check for pending messages, process them, and exit. Connects to the backend, joins the configured channel, retrieves recent messages, filters to allowed users, skips messages the bot has already replied to, and runs a ChatSorcarAgent for each pending message. Each message is processed synchronously.<br/>`run_once() -> int`
   - **Returns:** Number of messages processed.
 
 **`load_json_config`** — Load a JSON config file containing string values.<br/>`def load_json_config(path: Path, required_keys: tuple[str, ...]) -> dict[str, str] | None`
@@ -517,7 +517,7 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.channels.bluebubbles_agent` — *BlueBubbles Agent — StatefulSorcarAgent extension with BlueBubbles REST API tools.*
+#### `kiss.channels.bluebubbles_agent` — *BlueBubbles Agent — ChatSorcarAgent extension with BlueBubbles REST API tools.*
 
 ##### `class BlueBubblesChannelBackend(ToolMethodBackend)` — Channel backend for BlueBubbles REST API.
 
@@ -565,7 +565,7 @@ ______________________________________________________________________
   - `chat_guid`: Chat GUID to mark as read.
   - **Returns:** JSON string with ok status.
 
-##### `class BlueBubblesAgent(BaseChannelAgent, StatefulSorcarAgent)` — StatefulSorcarAgent extended with BlueBubbles REST API tools (macOS only).
+##### `class BlueBubblesAgent(BaseChannelAgent, ChatSorcarAgent)` — ChatSorcarAgent extended with BlueBubbles REST API tools (macOS only).
 
 **Constructor:** `BlueBubblesAgent() -> None`
 
@@ -623,7 +623,7 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.channels.discord_agent` — *Discord Agent — StatefulSorcarAgent extension with Discord REST API tools.*
+#### `kiss.channels.discord_agent` — *Discord Agent — ChatSorcarAgent extension with Discord REST API tools.*
 
 ##### `class DiscordChannelBackend(ToolMethodBackend)` — Channel backend for Discord REST API v10.
 
@@ -718,7 +718,7 @@ ______________________________________________________________________
   - `max_uses`: Maximum uses (0 = unlimited). Default: 0.
   - **Returns:** JSON string with invite code and URL.
 
-##### `class DiscordAgent(BaseChannelAgent, StatefulSorcarAgent)` — StatefulSorcarAgent extended with Discord REST API tools.
+##### `class DiscordAgent(BaseChannelAgent, ChatSorcarAgent)` — ChatSorcarAgent extended with Discord REST API tools.
 
 **Constructor:** `DiscordAgent() -> None`
 
@@ -726,7 +726,7 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.channels.feishu_agent` — *Feishu/Lark Agent — StatefulSorcarAgent extension with Feishu Open Platform tools.*
+#### `kiss.channels.feishu_agent` — *Feishu/Lark Agent — ChatSorcarAgent extension with Feishu Open Platform tools.*
 
 ##### `class FeishuChannelBackend(ToolMethodBackend)` — Channel backend for Feishu/Lark Open Platform.
 
@@ -783,13 +783,13 @@ ______________________________________________________________________
   - `user_id_type`: ID type ("open_id", "user_id", "union_id"). Default: "open_id".
   - **Returns:** JSON string with user info.
 
-##### `class FeishuAgent(BaseChannelAgent, StatefulSorcarAgent)` — StatefulSorcarAgent extended with Feishu/Lark Open Platform tools.
+##### `class FeishuAgent(BaseChannelAgent, ChatSorcarAgent)` — ChatSorcarAgent extended with Feishu/Lark Open Platform tools.
 
 **Constructor:** `FeishuAgent() -> None`
 
 ______________________________________________________________________
 
-#### `kiss.channels.gmail_agent` — *Gmail Agent — StatefulSorcarAgent extension with Gmail API tools.*
+#### `kiss.channels.gmail_agent` — *Gmail Agent — ChatSorcarAgent extension with Gmail API tools.*
 
 ##### `class GmailChannelBackend(ToolMethodBackend)` — Channel backend for Gmail.
 
@@ -914,7 +914,7 @@ ______________________________________________________________________
   - `thread_id`: Thread ID (from list_messages or get_message).
   - **Returns:** JSON string with all messages in the thread.
 
-##### `class GmailAgent(BaseChannelAgent, StatefulSorcarAgent)` — StatefulSorcarAgent extended with Gmail API tools.
+##### `class GmailAgent(BaseChannelAgent, ChatSorcarAgent)` — ChatSorcarAgent extended with Gmail API tools.
 
 **Constructor:** `GmailAgent() -> None`
 
@@ -922,7 +922,7 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.channels.googlechat_agent` — *Google Chat Agent — StatefulSorcarAgent extension with Google Chat API tools.*
+#### `kiss.channels.googlechat_agent` — *Google Chat Agent — ChatSorcarAgent extension with Google Chat API tools.*
 
 ##### `class GoogleChatChannelBackend(ToolMethodBackend)` — Channel backend for Google Chat API.
 
@@ -993,13 +993,13 @@ ______________________________________________________________________
   - `space_type`: Space type ("SPACE" or "GROUP_CHAT"). Default: "SPACE".
   - **Returns:** JSON string with space name and display name.
 
-##### `class GoogleChatAgent(BaseChannelAgent, StatefulSorcarAgent)` — StatefulSorcarAgent extended with Google Chat API tools.
+##### `class GoogleChatAgent(BaseChannelAgent, ChatSorcarAgent)` — ChatSorcarAgent extended with Google Chat API tools.
 
 **Constructor:** `GoogleChatAgent() -> None`
 
 ______________________________________________________________________
 
-#### `kiss.channels.imessage_agent` — *iMessage Agent — StatefulSorcarAgent extension with iMessage tools via AppleScript.*
+#### `kiss.channels.imessage_agent` — *iMessage Agent — ChatSorcarAgent extension with iMessage tools via AppleScript.*
 
 ##### `class IMessageChannelBackend(ToolMethodBackend)` — Channel backend for iMessage via AppleScript.
 
@@ -1037,13 +1037,13 @@ ______________________________________________________________________
   - `limit`: Maximum messages to return. Default: 20.
   - **Returns:** JSON string with message list (basic).
 
-##### `class IMessageAgent(BaseChannelAgent, StatefulSorcarAgent)` — StatefulSorcarAgent extended with iMessage tools (macOS only).
+##### `class IMessageAgent(BaseChannelAgent, ChatSorcarAgent)` — ChatSorcarAgent extended with iMessage tools (macOS only).
 
 **Constructor:** `IMessageAgent() -> None`
 
 ______________________________________________________________________
 
-#### `kiss.channels.irc_agent` — *IRC Agent — StatefulSorcarAgent extension with IRC tools.*
+#### `kiss.channels.irc_agent` — *IRC Agent — ChatSorcarAgent extension with IRC tools.*
 
 ##### `class IRCChannelBackend(ToolMethodBackend)` — Channel backend for IRC via raw socket.
 
@@ -1126,13 +1126,13 @@ ______________________________________________________________________
   - `password`: NickServ password.
   - **Returns:** JSON string with ok status.
 
-##### `class IRCAgent(BaseChannelAgent, StatefulSorcarAgent)` — StatefulSorcarAgent extended with IRC tools.
+##### `class IRCAgent(BaseChannelAgent, ChatSorcarAgent)` — ChatSorcarAgent extended with IRC tools.
 
 **Constructor:** `IRCAgent() -> None`
 
 ______________________________________________________________________
 
-#### `kiss.channels.line_agent` — *LINE Agent — StatefulSorcarAgent extension with LINE Messaging API tools.*
+#### `kiss.channels.line_agent` — *LINE Agent — ChatSorcarAgent extension with LINE Messaging API tools.*
 
 ##### `class LineChannelBackend(ToolMethodBackend)` — Channel backend for LINE Messaging API.
 
@@ -1181,13 +1181,13 @@ ______________________________________________________________________
   - `preview_url`: URL of the preview image.
   - **Returns:** JSON string with ok status.
 
-##### `class LineAgent(BaseChannelAgent, StatefulSorcarAgent)` — StatefulSorcarAgent extended with LINE Messaging API tools.
+##### `class LineAgent(BaseChannelAgent, ChatSorcarAgent)` — ChatSorcarAgent extended with LINE Messaging API tools.
 
 **Constructor:** `LineAgent() -> None`
 
 ______________________________________________________________________
 
-#### `kiss.channels.matrix_agent` — *Matrix Agent — StatefulSorcarAgent extension with Matrix protocol tools.*
+#### `kiss.channels.matrix_agent` — *Matrix Agent — ChatSorcarAgent extension with Matrix protocol tools.*
 
 ##### `class MatrixChannelBackend(ToolMethodBackend)` — Channel backend for Matrix via matrix-nio.
 
@@ -1262,13 +1262,13 @@ ______________________________________________________________________
   - `user_id`: User ID (@user:server.org).
   - **Returns:** JSON string with display name and avatar.
 
-##### `class MatrixAgent(BaseChannelAgent, StatefulSorcarAgent)` — StatefulSorcarAgent extended with Matrix protocol tools.
+##### `class MatrixAgent(BaseChannelAgent, ChatSorcarAgent)` — ChatSorcarAgent extended with Matrix protocol tools.
 
 **Constructor:** `MatrixAgent() -> None`
 
 ______________________________________________________________________
 
-#### `kiss.channels.mattermost_agent` — *Mattermost Agent — StatefulSorcarAgent extension with Mattermost REST API tools.*
+#### `kiss.channels.mattermost_agent` — *Mattermost Agent — ChatSorcarAgent extension with Mattermost REST API tools.*
 
 ##### `class MattermostChannelBackend(ToolMethodBackend)` — Channel backend for Mattermost REST API.
 
@@ -1344,13 +1344,13 @@ ______________________________________________________________________
   - `emoji_name`: Emoji name (without colons, e.g. "thumbsup").
   - **Returns:** JSON string with ok status.
 
-##### `class MattermostAgent(BaseChannelAgent, StatefulSorcarAgent)` — StatefulSorcarAgent extended with Mattermost REST API tools.
+##### `class MattermostAgent(BaseChannelAgent, ChatSorcarAgent)` — ChatSorcarAgent extended with Mattermost REST API tools.
 
 **Constructor:** `MattermostAgent() -> None`
 
 ______________________________________________________________________
 
-#### `kiss.channels.msteams_agent` — *Microsoft Teams Agent — StatefulSorcarAgent extension with MS Teams Graph API tools.*
+#### `kiss.channels.msteams_agent` — *Microsoft Teams Agent — ChatSorcarAgent extension with MS Teams Graph API tools.*
 
 ##### `class MSTeamsChannelBackend(ToolMethodBackend)` — Channel backend for Microsoft Teams via Graph API.
 
@@ -1422,13 +1422,13 @@ ______________________________________________________________________
   - `top`: Maximum members to return. Default: 50.
   - **Returns:** JSON string with member list.
 
-##### `class MSTeamsAgent(BaseChannelAgent, StatefulSorcarAgent)` — StatefulSorcarAgent extended with Microsoft Teams Graph API tools.
+##### `class MSTeamsAgent(BaseChannelAgent, ChatSorcarAgent)` — ChatSorcarAgent extended with Microsoft Teams Graph API tools.
 
 **Constructor:** `MSTeamsAgent() -> None`
 
 ______________________________________________________________________
 
-#### `kiss.channels.nextcloud_talk_agent` — *Nextcloud Talk Agent — StatefulSorcarAgent extension with Nextcloud Talk API tools.*
+#### `kiss.channels.nextcloud_talk_agent` — *Nextcloud Talk Agent — ChatSorcarAgent extension with Nextcloud Talk API tools.*
 
 ##### `class NextcloudTalkChannelBackend(ToolMethodBackend)` — Channel backend for Nextcloud Talk REST API.
 
@@ -1494,13 +1494,13 @@ ______________________________________________________________________
   - `message_id`: Message ID to delete.
   - **Returns:** JSON string with ok status.
 
-##### `class NextcloudTalkAgent(BaseChannelAgent, StatefulSorcarAgent)` — StatefulSorcarAgent extended with Nextcloud Talk API tools.
+##### `class NextcloudTalkAgent(BaseChannelAgent, ChatSorcarAgent)` — ChatSorcarAgent extended with Nextcloud Talk API tools.
 
 **Constructor:** `NextcloudTalkAgent() -> None`
 
 ______________________________________________________________________
 
-#### `kiss.channels.nostr_agent` — *Nostr Agent — StatefulSorcarAgent extension with Nostr protocol tools.*
+#### `kiss.channels.nostr_agent` — *Nostr Agent — ChatSorcarAgent extension with Nostr protocol tools.*
 
 ##### `class NostrChannelBackend(ToolMethodBackend)` — Channel backend for Nostr protocol via pynostr.
 
@@ -1559,13 +1559,13 @@ ______________________________________________________________________
   - `relay_url`: Relay URL to remove.
   - **Returns:** JSON string with ok status.
 
-##### `class NostrAgent(BaseChannelAgent, StatefulSorcarAgent)` — StatefulSorcarAgent extended with Nostr protocol tools.
+##### `class NostrAgent(BaseChannelAgent, ChatSorcarAgent)` — ChatSorcarAgent extended with Nostr protocol tools.
 
 **Constructor:** `NostrAgent() -> None`
 
 ______________________________________________________________________
 
-#### `kiss.channels.phone_control_agent` — *Phone Control Agent — StatefulSorcarAgent extension with Android phone control tools.*
+#### `kiss.channels.phone_control_agent` — *Phone Control Agent — ChatSorcarAgent extension with Android phone control tools.*
 
 ##### `class PhoneControlChannelBackend(ToolMethodBackend)` — Channel backend for Android phone control via REST API.
 
@@ -1629,13 +1629,13 @@ ______________________________________________________________________
   - `text`: Reply text.
   - **Returns:** JSON string with ok status.
 
-##### `class PhoneControlAgent(BaseChannelAgent, StatefulSorcarAgent)` — StatefulSorcarAgent extended with Android phone control tools.
+##### `class PhoneControlAgent(BaseChannelAgent, ChatSorcarAgent)` — ChatSorcarAgent extended with Android phone control tools.
 
 **Constructor:** `PhoneControlAgent() -> None`
 
 ______________________________________________________________________
 
-#### `kiss.channels.signal_agent` — *Signal Agent — StatefulSorcarAgent extension with Signal CLI tools.*
+#### `kiss.channels.signal_agent` — *Signal Agent — ChatSorcarAgent extension with Signal CLI tools.*
 
 ##### `class SignalChannelBackend(ToolMethodBackend)` — Channel backend for Signal via signal-cli.
 
@@ -1677,13 +1677,13 @@ ______________________________________________________________________
 
   - **Returns:** JSON string with group list.
 
-##### `class SignalAgent(BaseChannelAgent, StatefulSorcarAgent)` — StatefulSorcarAgent extended with Signal CLI tools.
+##### `class SignalAgent(BaseChannelAgent, ChatSorcarAgent)` — ChatSorcarAgent extended with Signal CLI tools.
 
 **Constructor:** `SignalAgent() -> None`
 
 ______________________________________________________________________
 
-#### `kiss.channels.slack_agent` — *Slack Agent — StatefulSorcarAgent extension with Slack API tools.*
+#### `kiss.channels.slack_agent` — *Slack Agent — ChatSorcarAgent extension with Slack API tools.*
 
 ##### `class SlackChannelBackend(ToolMethodBackend)` — Slack channel backend.
 
@@ -1849,7 +1849,7 @@ ______________________________________________________________________
   - `channel`: Channel ID (e.g. "C01234567").
   - **Returns:** JSON string with channel details (name, topic, purpose, num_members, created, creator).
 
-##### `class SlackAgent(BaseChannelAgent, StatefulSorcarAgent)` — StatefulSorcarAgent extended with Slack workspace tools.
+##### `class SlackAgent(BaseChannelAgent, ChatSorcarAgent)` — ChatSorcarAgent extended with Slack workspace tools.
 
 **Constructor:** `SlackAgent(workspace: str = 'default') -> None`
 
@@ -1857,7 +1857,7 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.channels.sms_agent` — *SMS Agent — StatefulSorcarAgent extension with Twilio SMS tools.*
+#### `kiss.channels.sms_agent` — *SMS Agent — ChatSorcarAgent extension with Twilio SMS tools.*
 
 ##### `class SMSChannelBackend(ToolMethodBackend)` — Channel backend for Twilio SMS.
 
@@ -1938,13 +1938,13 @@ ______________________________________________________________________
   - `message_sid`: Message SID to cancel.
   - **Returns:** JSON string with ok status.
 
-##### `class SMSAgent(BaseChannelAgent, StatefulSorcarAgent)` — StatefulSorcarAgent extended with Twilio SMS tools.
+##### `class SMSAgent(BaseChannelAgent, ChatSorcarAgent)` — ChatSorcarAgent extended with Twilio SMS tools.
 
 **Constructor:** `SMSAgent() -> None`
 
 ______________________________________________________________________
 
-#### `kiss.channels.synology_chat_agent` — *Synology Chat Agent — StatefulSorcarAgent extension with Synology Chat webhook API.*
+#### `kiss.channels.synology_chat_agent` — *Synology Chat Agent — ChatSorcarAgent extension with Synology Chat webhook API.*
 
 ##### `class SynologyChatChannelBackend(ToolMethodBackend)` — Channel backend for Synology Chat webhooks.
 
@@ -1972,13 +1972,13 @@ ______________________________________________________________________
   - `file_url`: URL of the file to attach.
   - **Returns:** JSON string with ok status.
 
-##### `class SynologyChatAgent(BaseChannelAgent, StatefulSorcarAgent)` — StatefulSorcarAgent extended with Synology Chat webhook tools.
+##### `class SynologyChatAgent(BaseChannelAgent, ChatSorcarAgent)` — ChatSorcarAgent extended with Synology Chat webhook tools.
 
 **Constructor:** `SynologyChatAgent() -> None`
 
 ______________________________________________________________________
 
-#### `kiss.channels.telegram_agent` — *Telegram Agent — StatefulSorcarAgent extension with Telegram Bot API tools.*
+#### `kiss.channels.telegram_agent` — *Telegram Agent — ChatSorcarAgent extension with Telegram Bot API tools.*
 
 ##### `class TelegramChannelBackend(ToolMethodBackend)` — Channel backend for Telegram Bot API.
 
@@ -2087,13 +2087,13 @@ ______________________________________________________________________
   - `message_id`: ID of the message to forward.
   - **Returns:** JSON string with ok status and message_id.
 
-##### `class TelegramAgent(BaseChannelAgent, StatefulSorcarAgent)` — StatefulSorcarAgent extended with Telegram Bot API tools.
+##### `class TelegramAgent(BaseChannelAgent, ChatSorcarAgent)` — ChatSorcarAgent extended with Telegram Bot API tools.
 
 **Constructor:** `TelegramAgent() -> None`
 
 ______________________________________________________________________
 
-#### `kiss.channels.tlon_agent` — *Tlon/Urbit Agent — StatefulSorcarAgent extension with Tlon/Urbit Eyre HTTP tools.*
+#### `kiss.channels.tlon_agent` — *Tlon/Urbit Agent — ChatSorcarAgent extension with Tlon/Urbit Eyre HTTP tools.*
 
 ##### `class TlonChannelBackend(ToolMethodBackend)` — Channel backend for Tlon/Urbit Eyre HTTP.
 
@@ -2147,13 +2147,13 @@ ______________________________________________________________________
   - `path`: Scry path (starting with /).
   - **Returns:** JSON string with scry result.
 
-##### `class TlonAgent(BaseChannelAgent, StatefulSorcarAgent)` — StatefulSorcarAgent extended with Tlon/Urbit Eyre HTTP tools.
+##### `class TlonAgent(BaseChannelAgent, ChatSorcarAgent)` — ChatSorcarAgent extended with Tlon/Urbit Eyre HTTP tools.
 
 **Constructor:** `TlonAgent() -> None`
 
 ______________________________________________________________________
 
-#### `kiss.channels.twitch_agent` — *Twitch Agent — StatefulSorcarAgent extension with Twitch Helix API + Chat tools.*
+#### `kiss.channels.twitch_agent` — *Twitch Agent — ChatSorcarAgent extension with Twitch Helix API + Chat tools.*
 
 ##### `class TwitchChannelBackend(ToolMethodBackend)` — Channel backend for Twitch Helix API.
 
@@ -2222,13 +2222,13 @@ ______________________________________________________________________
   - `has_delay`: Whether to add a 5-second delay. Default: False.
   - **Returns:** JSON string with clip edit URL.
 
-##### `class TwitchAgent(BaseChannelAgent, StatefulSorcarAgent)` — StatefulSorcarAgent extended with Twitch Helix API tools.
+##### `class TwitchAgent(BaseChannelAgent, ChatSorcarAgent)` — ChatSorcarAgent extended with Twitch Helix API tools.
 
 **Constructor:** `TwitchAgent() -> None`
 
 ______________________________________________________________________
 
-#### `kiss.channels.whatsapp_agent` — *WhatsApp Agent — StatefulSorcarAgent extension with WhatsApp Business Cloud API tools.*
+#### `kiss.channels.whatsapp_agent` — *WhatsApp Agent — ChatSorcarAgent extension with WhatsApp Business Cloud API tools.*
 
 ##### `class WhatsAppChannelBackend(ToolMethodBackend)` — Channel backend for WhatsApp Business Cloud API.
 
@@ -2354,13 +2354,13 @@ ______________________________________________________________________
   - `status`: Filter by status ("APPROVED", "PENDING", "REJECTED"). If empty, returns all statuses.
   - **Returns:** JSON string with template list (name, status, category, language).
 
-##### `class WhatsAppAgent(BaseChannelAgent, StatefulSorcarAgent)` — StatefulSorcarAgent extended with WhatsApp Business Cloud API tools.
+##### `class WhatsAppAgent(BaseChannelAgent, ChatSorcarAgent)` — ChatSorcarAgent extended with WhatsApp Business Cloud API tools.
 
 **Constructor:** `WhatsAppAgent() -> None`
 
 ______________________________________________________________________
 
-#### `kiss.channels.zalo_agent` — *Zalo Agent — StatefulSorcarAgent extension with Zalo Official Account API tools.*
+#### `kiss.channels.zalo_agent` — *Zalo Agent — ChatSorcarAgent extension with Zalo Official Account API tools.*
 
 ##### `class ZaloChannelBackend(ToolMethodBackend)` — Channel backend for Zalo OA API.
 
@@ -2422,7 +2422,7 @@ ______________________________________________________________________
   - `file_path`: Local path to the image file.
   - **Returns:** JSON string with ok status and attachment_id.
 
-##### `class ZaloAgent(BaseChannelAgent, StatefulSorcarAgent)` — StatefulSorcarAgent extended with Zalo OA API tools.
+##### `class ZaloAgent(BaseChannelAgent, ChatSorcarAgent)` — ChatSorcarAgent extended with Zalo OA API tools.
 
 **Constructor:** `ZaloAgent() -> None`
 

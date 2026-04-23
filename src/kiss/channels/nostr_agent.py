@@ -1,4 +1,4 @@
-"""Nostr Agent — StatefulSorcarAgent extension with Nostr protocol tools.
+"""Nostr Agent — ChatSorcarAgent extension with Nostr protocol tools.
 
 Provides access to the Nostr decentralized protocol via pynostr.
 Stores config in ``~/.kiss/channels/nostr/config.json``.
@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.channels._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -272,8 +272,8 @@ class NostrChannelBackend(ToolMethodBackend):
         return json.dumps({"ok": True, "relays": self._relays})
 
 
-class NostrAgent(BaseChannelAgent, StatefulSorcarAgent):
-    """StatefulSorcarAgent extended with Nostr protocol tools."""
+class NostrAgent(BaseChannelAgent, ChatSorcarAgent):
+    """ChatSorcarAgent extended with Nostr protocol tools."""
 
     def __init__(self) -> None:
         super().__init__("Nostr Agent")

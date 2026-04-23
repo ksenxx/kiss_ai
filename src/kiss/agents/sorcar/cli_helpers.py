@@ -18,7 +18,7 @@ from kiss.agents.sorcar.sorcar_agent import (
 )
 
 if TYPE_CHECKING:
-    from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
+    from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
 
 def _print_recent_chats() -> None:
@@ -105,7 +105,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 
 def _apply_chat_args(
-    agent: StatefulSorcarAgent,
+    agent: ChatSorcarAgent,
     args: argparse.Namespace,
     task: str = "",
 ) -> None:
@@ -141,7 +141,7 @@ def _build_run_kwargs(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
-def _print_run_stats(agent: StatefulSorcarAgent, elapsed: float) -> None:
+def _print_run_stats(agent: ChatSorcarAgent, elapsed: float) -> None:
     """Print post-run statistics (chat ID, time, cost, tokens)."""
     print(f"\nChat ID: {agent.chat_id}")
     print(f"Time: {elapsed:.1f}s")

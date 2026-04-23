@@ -385,7 +385,7 @@ class TestCliAgentSelection:
             __import__("kiss.agents.sorcar.worktree_sorcar_agent", fromlist=["main"]).main
         )
         assert 'elif args.use_chat:' in src
-        assert 'StatefulSorcarAgent(' in src
+        assert 'ChatSorcarAgent(' in src
 
     def test_main_source_defaults_to_sorcar_agent(self) -> None:
         import inspect

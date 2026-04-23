@@ -29,7 +29,7 @@ from kiss.agents.sorcar.git_worktree import (
     repo_lock,
 )
 from kiss.agents.sorcar.persistence import _allocate_chat_id
-from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.core.kiss_error import KISSError
 
 logger = logging.getLogger(__name__)
@@ -72,7 +72,7 @@ def _manual_merge_cmd(wt: GitWorktree) -> str:
     return f"git merge --squash {wt.branch}"
 
 
-class WorktreeSorcarAgent(StatefulSorcarAgent):
+class WorktreeSorcarAgent(ChatSorcarAgent):
     """SorcarAgent that isolates every task in a git worktree.
 
     State is stored entirely in git (branches and config) — no sidecar
@@ -525,7 +525,7 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         """Run a task on an isolated git worktree branch.
 
         Creates a new worktree and branch, redirects ``work_dir`` into
-        the worktree, and delegates to ``StatefulSorcarAgent.run()``.
+        the worktree, and delegates to ``ChatSorcarAgent.run()``.
         Each call starts a fresh worktree; any previously pending
         branch from an earlier run is left as-is in git for the user
         to merge or discard later.
@@ -540,10 +540,10 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
         Args:
             prompt_template: The task prompt.
             **kwargs: All other arguments forwarded to
-                ``StatefulSorcarAgent.run()``.  The optional
+                ``ChatSorcarAgent.run()``.  The optional
                 ``use_worktree`` kwarg (default ``True``) gates the
                 worktree behavior — when ``False`` the call is
-                equivalent to ``StatefulSorcarAgent.run()``.
+                equivalent to ``ChatSorcarAgent.run()``.
 
         Returns:
             YAML string with 'success' and 'summary' keys.
@@ -769,7 +769,7 @@ class WorktreeSorcarAgent(StatefulSorcarAgent):
 
 
 def main() -> None:  # pragma: no cover – CLI entry point requires API
-    """Run SorcarAgent, StatefulSorcarAgent, or WorktreeSorcarAgent from the CLI.
+    """Run SorcarAgent, ChatSorcarAgent, or WorktreeSorcarAgent from the CLI.
 
     Uses ``--use-chat`` or ``--use-worktree`` to select the agent
     type.  Defaults to base SorcarAgent when neither flag is given.
@@ -798,12 +798,12 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
     if args.use_worktree:
         agent: SorcarAgent = WorktreeSorcarAgent("Worktree Sorcar Agent")
     elif args.use_chat:
-        agent = StatefulSorcarAgent("Stateful Sorcar Agent")
+        agent = ChatSorcarAgent("Stateful Sorcar Agent")
     else:
         agent = SorcarAgent("Sorcar Agent")
 
     run_kwargs = _build_run_kwargs(args)
-    if isinstance(agent, StatefulSorcarAgent):
+    if isinstance(agent, ChatSorcarAgent):
         _apply_chat_args(agent, args, task=run_kwargs.get("prompt_template", ""))
 
     start_time = time_mod.time()
@@ -811,7 +811,7 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
     elapsed = time_mod.time() - start_time
 
     print(result)
-    if isinstance(agent, StatefulSorcarAgent):
+    if isinstance(agent, ChatSorcarAgent):
         _print_run_stats(agent, elapsed)
     else:
         print(f"\nTime: {elapsed:.1f}s")

@@ -1,4 +1,4 @@
-"""Nextcloud Talk Agent — StatefulSorcarAgent extension with Nextcloud Talk API tools.
+"""Nextcloud Talk Agent — ChatSorcarAgent extension with Nextcloud Talk API tools.
 
 Provides authenticated access to Nextcloud Talk via username/password.
 Stores config in ``~/.kiss/channels/nextcloud/config.json``.
@@ -18,7 +18,7 @@ from typing import Any
 
 import requests
 
-from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.channels._backend_utils import wait_for_matching_message
 from kiss.channels._channel_agent_utils import (
     BaseChannelAgent,
@@ -332,8 +332,8 @@ class NextcloudTalkChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class NextcloudTalkAgent(BaseChannelAgent, StatefulSorcarAgent):
-    """StatefulSorcarAgent extended with Nextcloud Talk API tools."""
+class NextcloudTalkAgent(BaseChannelAgent, ChatSorcarAgent):
+    """ChatSorcarAgent extended with Nextcloud Talk API tools."""
 
     def __init__(self) -> None:
         super().__init__("Nextcloud Talk Agent")

@@ -217,9 +217,9 @@ class BaseChannelAgent:
     Subclasses must set ``self._backend`` (a ``ToolMethodBackend`` instance)
     and override :meth:`_is_authenticated` and :meth:`_get_auth_tools`.
 
-    Use this mixin **before** ``StatefulSorcarAgent`` in the MRO::
+    Use this mixin **before** ``ChatSorcarAgent`` in the MRO::
 
-        class SlackAgent(BaseChannelAgent, StatefulSorcarAgent): ...
+        class SlackAgent(BaseChannelAgent, ChatSorcarAgent): ...
     """
 
     _backend: Any
@@ -256,7 +256,7 @@ class ChannelRunner:
 
     Connects to a backend, retrieves recent messages, filters to
     allowed users, skips messages the bot has already replied to, and
-    runs a StatefulSorcarAgent for each pending message.
+    runs a ChatSorcarAgent for each pending message.
     """
 
     def __init__(
@@ -285,7 +285,7 @@ class ChannelRunner:
 
         Connects to the backend, joins the configured channel, retrieves
         recent messages, filters to allowed users, skips messages the bot
-        has already replied to, and runs a StatefulSorcarAgent for each
+        has already replied to, and runs a ChatSorcarAgent for each
         pending message.  Each message is processed synchronously.
 
         Returns:
@@ -357,13 +357,13 @@ class ChannelRunner:
 
     def _handle_message(self, channel_id: str, msg: dict[str, Any]) -> None:
         """Run one agent task for an inbound message."""
-        from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
+        from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
         text = self._backend.strip_bot_mention(msg.get("text", ""))
         thread_ts = msg.get("thread_ts", msg.get("ts", ""))
         session_key = f"{channel_id}:{msg.get('ts', '')}"
 
-        agent = StatefulSorcarAgent(self._agent_name)
+        agent = ChatSorcarAgent(self._agent_name)
         agent.new_chat()
 
         tools = list(self._extra_tools)

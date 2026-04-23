@@ -1,4 +1,4 @@
-"""Tlon/Urbit Agent — StatefulSorcarAgent extension with Tlon/Urbit Eyre HTTP tools.
+"""Tlon/Urbit Agent — ChatSorcarAgent extension with Tlon/Urbit Eyre HTTP tools.
 
 Provides access to Urbit/Tlon via the Eyre HTTP server. Stores config
 in ``~/.kiss/channels/tlon/config.json``.
@@ -20,7 +20,7 @@ from typing import Any
 
 import requests
 
-from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.channels._backend_utils import wait_for_matching_message
 from kiss.channels._channel_agent_utils import (
     BaseChannelAgent,
@@ -239,8 +239,8 @@ class TlonChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class TlonAgent(BaseChannelAgent, StatefulSorcarAgent):
-    """StatefulSorcarAgent extended with Tlon/Urbit Eyre HTTP tools."""
+class TlonAgent(BaseChannelAgent, ChatSorcarAgent):
+    """ChatSorcarAgent extended with Tlon/Urbit Eyre HTTP tools."""
 
     def __init__(self) -> None:
         super().__init__("Tlon Agent")

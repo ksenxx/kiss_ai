@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar import persistence as th
-from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.vscode.server import VSCodeServer
 
 
@@ -46,7 +46,7 @@ class TestResumeChatNoMatch:
 
     def test_resume_chat_by_id_empty(self) -> None:
         """resume_chat_by_id("") should be a no-op."""
-        agent = StatefulSorcarAgent("test")
+        agent = ChatSorcarAgent("test")
         original_chat_id = agent.chat_id
         agent.resume_chat_by_id("")
         assert agent.chat_id == original_chat_id

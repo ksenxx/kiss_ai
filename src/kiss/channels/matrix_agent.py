@@ -1,4 +1,4 @@
-"""Matrix Agent — StatefulSorcarAgent extension with Matrix protocol tools.
+"""Matrix Agent — ChatSorcarAgent extension with Matrix protocol tools.
 
 Provides authenticated access to Matrix via matrix-nio. Stores credentials
 in ``~/.kiss/channels/matrix/config.json``.
@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.channels._backend_utils import wait_for_matching_message
 from kiss.channels._channel_agent_utils import (
     BaseChannelAgent,
@@ -386,8 +386,8 @@ class MatrixChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class MatrixAgent(BaseChannelAgent, StatefulSorcarAgent):
-    """StatefulSorcarAgent extended with Matrix protocol tools."""
+class MatrixAgent(BaseChannelAgent, ChatSorcarAgent):
+    """ChatSorcarAgent extended with Matrix protocol tools."""
 
     def __init__(self) -> None:
         super().__init__("Matrix Agent")

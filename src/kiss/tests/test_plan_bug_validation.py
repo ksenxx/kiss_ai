@@ -16,10 +16,10 @@ class TestPollerSessionResume:
         assert "agent._chat_id" not in source
 
     def test_stateful_agent_has_resume_by_id(self) -> None:
-        """StatefulSorcarAgent exposes resume_chat_by_id."""
-        from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
+        """ChatSorcarAgent exposes resume_chat_by_id."""
+        from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
-        assert hasattr(StatefulSorcarAgent, "resume_chat_by_id")
+        assert hasattr(ChatSorcarAgent, "resume_chat_by_id")
 
 
 class TestVSCodeTaskGenerationSync:
@@ -134,10 +134,10 @@ class TestNoChdirInEntryPoints:
         assert "os.chdir(" not in source
 
     def test_stateful_agent_no_os_chdir(self) -> None:
-        """stateful_sorcar_agent.py does not use os.chdir()."""
-        from kiss.agents.sorcar import stateful_sorcar_agent
+        """chat_sorcar_agent.py does not use os.chdir()."""
+        from kiss.agents.sorcar import chat_sorcar_agent
 
-        source = inspect.getsource(stateful_sorcar_agent)
+        source = inspect.getsource(chat_sorcar_agent)
         assert "os.chdir(" not in source
 
     def test_channel_agents_no_os_chdir(self) -> None:
