@@ -6,21 +6,17 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import {SorcarSidebarView} from './SorcarSidebarView';
-import {MergeManager} from './MergeManager';
+
 import {ensureDependencies, ensureLocalBinInPath} from './DependencyInstaller';
 
 let sidebarView: SorcarSidebarView | undefined;
-let mergeManager: MergeManager | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
   ensureLocalBinInPath();
   console.log('KISS Sorcar extension activating...');
 
-  mergeManager = new MergeManager();
-  context.subscriptions.push({dispose: () => mergeManager?.dispose()});
-
   // --- Secondary sidebar chat view ---
-  sidebarView = new SorcarSidebarView(context.extensionUri, mergeManager);
+  sidebarView = new SorcarSidebarView(context.extensionUri);
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(
       'kissSorcar.chatViewSecondary',
@@ -209,7 +205,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   }
 
-  // Merge commands
+  // Merge commands — route to the active tab's MergeManager
   for (const cmd of [
     'acceptChange',
     'rejectChange',
@@ -222,7 +218,7 @@ export function activate(context: vscode.ExtensionContext): void {
   ] as const) {
     context.subscriptions.push(
       vscode.commands.registerCommand(`kissSorcar.${cmd}`, () => {
-        void mergeManager![cmd]();
+        sidebarView!.handleMergeCommand(cmd);
       }),
     );
   }
@@ -273,7 +269,5 @@ export function activate(context: vscode.ExtensionContext): void {
 export function deactivate(): void {
   sidebarView?.dispose();
   sidebarView = undefined;
-  mergeManager?.dispose();
-  mergeManager = undefined;
   console.log('KISS Sorcar extension deactivated');
 }

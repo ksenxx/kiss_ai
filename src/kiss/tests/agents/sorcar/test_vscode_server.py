@@ -2586,7 +2586,13 @@ class TestSorcarSidebarViewMergeActions(unittest.TestCase):
         m = re.search(r"case\s+'mergeAction':", self._ts)
         assert m
         start = m.start()
-        end = self._ts.index("break;", start) + len("break;")
+        # Find the closing brace of the case block (matches "      }")
+        # by finding the next "case " or default at the same indent level
+        next_case = re.search(r"\n      case ", self._ts[start + 1 :])
+        if next_case:
+            end = start + 1 + next_case.start()
+        else:
+            end = start + 1500
         return self._ts[start:end]
 
     def test_dispatches_accept(self) -> None:
@@ -2636,14 +2642,14 @@ class TestSorcarSidebarViewMergeActions(unittest.TestCase):
         assert "sendMergeAllDone" in block
 
     def test_merge_data_opens_merge(self) -> None:
-        """merge_data from agent opens merge via MergeManager."""
-        assert "this._mergeManager.openMerge(" in self._ts
+        """merge_data from agent opens merge via per-tab MergeManager."""
+        assert "mgr.openMerge(" in self._ts
 
-    def test_merge_data_sets_merge_owner(self) -> None:
-        """merge_data sets the active merge tab id from the event."""
+    def test_merge_data_creates_per_tab_manager(self) -> None:
+        """merge_data creates a per-tab MergeManager via _getOrCreateMergeManager."""
         idx = self._ts.index("msg.type === 'merge_data'")
         block = self._ts[idx : idx + 500]
-        assert "_activeMergeTabId" in block
+        assert "_getOrCreateMergeManager" in block
 
 
 class TestSorcarSidebarViewStartTask(unittest.TestCase):
@@ -3598,14 +3604,14 @@ class TestSidebarViewBehavior(unittest.TestCase):
     def test_has_worktree_progress_field(self) -> None:
         assert "_worktreeProgress" in self._sidebar_ts
 
-    def test_has_merge_manager(self) -> None:
-        assert "_mergeManager" in self._sidebar_ts
+    def test_has_merge_managers(self) -> None:
+        assert "_mergeManagers" in self._sidebar_ts
 
     def test_handles_all_done_from_merge_manager(self) -> None:
-        assert "this._mergeManager.on('allDone'" in self._sidebar_ts
+        assert "'allDone'" in self._sidebar_ts
 
     def test_opens_merge_on_merge_data(self) -> None:
-        assert "this._mergeManager.openMerge(" in self._sidebar_ts
+        assert "mgr.openMerge(" in self._sidebar_ts
 
     def test_has_generate_commit_message(self) -> None:
         assert "generateCommitMessage(" in self._sidebar_ts
