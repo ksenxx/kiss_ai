@@ -74,10 +74,18 @@ get_version() {
 
 bump_version() {
     local current_version="$1"
-    local major minor patch
-    IFS='.' read -r major minor patch <<< "$current_version"
-    patch=$((patch + 1))
-    echo "${major}.${minor}.${patch}"
+    local cur_year cur_month cur_minor
+    IFS='.' read -r cur_year cur_month cur_minor <<< "$current_version"
+
+    local now_year now_month
+    now_year=$(date +%Y)
+    now_month=$(date +%-m)  # no leading zero
+
+    if [[ "$cur_year" == "$now_year" && "$cur_month" == "$now_month" ]]; then
+        echo "${now_year}.${now_month}.$(( cur_minor + 1 ))"
+    else
+        echo "${now_year}.${now_month}.0"
+    fi
 }
 
 update_version_file() {
