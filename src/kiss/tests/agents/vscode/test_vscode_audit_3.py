@@ -213,51 +213,52 @@ class TestScanFilesDepthOffByOne(unittest.TestCase):
     def test_source_has_minus_one_adjustment(self) -> None:
         """Structural: the depth check contains ``- 1``."""
         src = inspect.getsource(_scan_files)
-        assert "parts) - 1 > 3" in src or "parts) - 1> 3" in src, (
+        assert "parts) - 1 > 9" in src or "parts) - 1> 9" in src, (
             "N3: _scan_files should have the off-by-one adjustment"
         )
 
-    def test_depth_4_files_are_included(self) -> None:
-        """Behavioral: files at depth 4 are included when the
-        intended limit was depth 3.
+    def test_depth_10_files_are_included(self) -> None:
+        """Behavioral: files at depth 10 are included when the
+        intended limit was depth 9.
 
         Creates a directory tree:
-          root/a/b/c/d/deep.txt   (depth 4)
-          root/a/b/c/shallow.txt  (depth 3)
+          root/a/b/c/d/e/f/g/h/i/shallow.txt  (depth 9)
+          root/a/b/c/d/e/f/g/h/i/j/deep.txt   (depth 10)
+          root/a/b/c/d/e/f/g/h/i/j/k/very_deep.txt  (depth 11)
 
-        With the off-by-one, both are included.  Without it, only
-        shallow.txt should be included.
+        With the off-by-one, depth 10 is included.  Without it, only
+        depth 9 should be included.
         """
         td = tempfile.mkdtemp()
         try:
-            # Create depth-3 file
-            d3 = os.path.join(td, "a", "b", "c")
-            os.makedirs(d3)
-            Path(d3, "shallow.txt").write_text("ok")
+            # Create depth-9 file
+            d9 = os.path.join(td, "a", "b", "c", "d", "e", "f", "g", "h", "i")
+            os.makedirs(d9)
+            Path(d9, "shallow.txt").write_text("ok")
 
-            # Create depth-4 file
-            d4 = os.path.join(td, "a", "b", "c", "d")
-            os.makedirs(d4)
-            Path(d4, "deep.txt").write_text("too deep?")
+            # Create depth-10 file
+            d10 = os.path.join(td, "a", "b", "c", "d", "e", "f", "g", "h", "i", "j")
+            os.makedirs(d10)
+            Path(d10, "deep.txt").write_text("too deep?")
 
-            # Create depth-5 file (should definitely be excluded)
-            d5 = os.path.join(td, "a", "b", "c", "d", "e")
-            os.makedirs(d5)
-            Path(d5, "very_deep.txt").write_text("way too deep")
+            # Create depth-11 file (should definitely be excluded)
+            d11 = os.path.join(td, "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k")
+            os.makedirs(d11)
+            Path(d11, "very_deep.txt").write_text("way too deep")
 
             result = _scan_files(td)
             file_results = [p for p in result if not p.endswith("/")]
 
-            assert "a/b/c/shallow.txt" in file_results, (
-                "depth-3 files should always be included"
+            assert "a/b/c/d/e/f/g/h/i/shallow.txt" in file_results, (
+                "depth-9 files should always be included"
             )
-            # N3 bug: depth-4 files ARE included due to off-by-one
-            assert "a/b/c/d/deep.txt" in file_results, (
-                "N3: depth-4 files are included due to the off-by-one bug"
+            # N3 bug: depth-10 files ARE included due to off-by-one
+            assert "a/b/c/d/e/f/g/h/i/j/deep.txt" in file_results, (
+                "N3: depth-10 files are included due to the off-by-one bug"
             )
-            # depth-5 is always excluded
-            assert "a/b/c/d/e/very_deep.txt" not in file_results, (
-                "depth-5 files should be excluded"
+            # depth-11 is always excluded
+            assert "a/b/c/d/e/f/g/h/i/j/k/very_deep.txt" not in file_results, (
+                "depth-11 files should be excluded"
             )
         finally:
             shutil.rmtree(td)
@@ -266,28 +267,26 @@ class TestScanFilesDepthOffByOne(unittest.TestCase):
         """Behavioral: verify the formula at each depth level.
 
         The formula ``len(rel_root.parts) - 1`` gives:
-          root:   len(()) - 1 = -1
-          depth1: len(('a',)) - 1 = 0
-          depth2: len(('a','b')) - 1 = 1
-          depth3: len(('a','b','c')) - 1 = 2
-          depth4: len(('a','b','c','d')) - 1 = 3  → 3 > 3 is False (BUG)
-          depth5: len(('a','b','c','d','e')) - 1 = 4  → 4 > 3 is True
+          root:    len(()) - 1 = -1
+          depth9:  len(('a','b','c','d','e','f','g','h','i')) - 1 = 8
+          depth10: len(('a','b','c','d','e','f','g','h','i','j')) - 1 = 9  → 9 > 9 is False (BUG)
+          depth11: len(('a','b','c','d','e','f','g','h','i','j','k')) - 1 = 10  → 10 > 9 is True
         """
         # Root
         assert len(PurePath(".").parts) - 1 == -1
 
-        # Depth 4 — the bug: formula returns 3, which is NOT > 3
-        depth4 = PurePath("a/b/c/d")
-        formula_val = len(depth4.parts) - 1
-        assert formula_val == 3, f"depth4 formula should be 3, got {formula_val}"
-        assert not (formula_val > 3), (
-            "N3: depth 4 passes the check (3 > 3 is False) — off-by-one"
+        # Depth 10 — the bug: formula returns 9, which is NOT > 9
+        depth10 = PurePath("a/b/c/d/e/f/g/h/i/j")
+        formula_val = len(depth10.parts) - 1
+        assert formula_val == 9, f"depth10 formula should be 9, got {formula_val}"
+        assert not (formula_val > 9), (
+            "N3: depth 10 passes the check (9 > 9 is False) — off-by-one"
         )
 
-        # Depth 3 — correct: formula returns 2
-        depth3 = PurePath("a/b/c")
-        assert len(depth3.parts) - 1 == 2
-        assert not (2 > 3), "depth 3 correctly passes"
+        # Depth 9 — correct: formula returns 8
+        depth9 = PurePath("a/b/c/d/e/f/g/h/i")
+        assert len(depth9.parts) - 1 == 8
+        assert not (8 > 9), "depth 9 correctly passes"
 
 
 # ===================================================================

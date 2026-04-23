@@ -62,7 +62,7 @@ def _scan_files(work_dir: str) -> list[str]:
     try:
         for root, dirs, files in wd.walk():
             rel_root = root.relative_to(wd)
-            if len(rel_root.parts) - 1 > 3:
+            if len(rel_root.parts) - 1 > 9:
                 dirs.clear()
                 continue
             dirs[:] = sorted(
