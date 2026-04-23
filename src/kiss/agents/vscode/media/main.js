@@ -2111,7 +2111,7 @@
           const after = inp.value.substring(pos);
           const insert = ev.paths
             .map(p => {
-              return '$PWD/' + p;
+              return 'PWD/' + p;
             })
             .join(' ');
           const needSpace = before.length > 0 && !/\s$/.test(before);
@@ -3500,7 +3500,7 @@
       const before = inp.value.substring(0, atCtx.start);
       const after = inp.value.substring(inp.selectionStart || inp.value.length);
       const sep = /^\s/.test(after) ? '' : ' ';
-      const mention = '$PWD/' + file;
+      const mention = 'PWD/' + file;
       inp.value = before + mention + sep + after;
       syncClearBtn();
       const np = before.length + mention.length + sep.length;

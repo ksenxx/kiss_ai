@@ -14,23 +14,12 @@
   timeout. Only for commands expected to exceed 10 minutes, run in the
   background with output redirected to a file and poll periodically.
 - Use go_to_url() for browser tool.
-- Call finish(success=True, is_continue=False, summary="detailed summary of what was accomplished
-  and if the user asks the agent for information, show it in the summary
-  as nicely formatted markdown text.")
-  once the task is complete and all Pre-Finish Verification checks have passed.
-- **The user cannot see intermediate chat. Show whatever user asks in the summary of the finish tool call.**
-- You can call the public API of PageDrop with curl to upload an HTML file:
-
-```
-curl -s -X POST https://pagedrop.io/api/upload \
-  -H "Content-Type: application/json" \
-  -d "$(jq -n --rawfile html /path/to/html/file '{html: $html, ttl: "3d"}')"
-```
-
+- **The user cannot see intermediate chat. Show whatever user asks in the summary of the 'finish' tool call.**
 - READ large files in chunks.
-- Create temporary files in $PWD/tmp
+- Create temporary files in PWD/tmp
 - Use ULTRA thinking always
-- **If you are running out of context length or steps, do not try to finish the task, but continue the task by calling finish**
+- **If you are running out of context length or steps, do not try to complete the task urgently, but continue the task by calling 'finish'**
+- PWD in the system prompt and user prompt denotes current working directory.
 
 ## Pre-flight Checks
 
@@ -83,12 +72,14 @@ For simple single-file tasks, skip formal planning and execute directly.
 - Tests MUST NOT use mocks, patches, fakes, or any form of test doubles
 - You MUST write integration tests
 - Each test should be independent and verify actual behavior
+- **Do NOT run all tests after modifications. Only run the impacted tests**
+- To confirm a race condition, add sleep statements before racing statements with delays less than 0.1s
 
 ## Use web tools when you need to:
 
 - When you need to collect knowledge from the internet, visit at least 100 web sites and
-  collect ideas without much thinking in a new file $PWD/tmp/ideas-{unique_id}.md. Then go over
-  $PWD/tmp/ideas-{unique_id}.md, think deeply on how to complete the task at hand, and complete it.
+  collect ideas without much thinking in a new file PWD/tmp/ideas-{unique_id}.md. Then go over
+  PWD/tmp/ideas-{unique_id}.md, think deeply on how to complete the task at hand, and complete it.
 
 ## Launch desktop apps
 
@@ -97,8 +88,8 @@ For simple single-file tasks, skip formal planning and execute directly.
 
 ## Self-Improvement Loop
 
-- Read the instructions in $PWD/USER_PREFS.md at the start of each task.
-- Then update $PWD/USER_PREFS.md to capture the user preferences and
+- Read the instructions in PWD/USER_PREFS.md at the start of each task.
+- Then update PWD/USER_PREFS.md to capture the user preferences and
   invariants by analyzing the task. DO NOT ADD ANY CODE SNIPPETS OR SYMBOLS.
   You MUST carefully and thoroughly get rid of the user preferences
   and invariants that conflict with the newly added ones.
@@ -118,8 +109,7 @@ Before calling finish(success=True, ...), you MUST:
 
 - Use 'uv run check --full' to lint, typecheck, and format code.
 - Run 'uv run pytest -v' with a timeout of 900 seconds to test KISS
-- Do **NOT run all KISS tests after modifications. Only run the impacted tests**
 - **Do NOT install the KISS Sorcar extension from inside Sorcar**
 - If you mention a file in the chat, make the file clickable so that
   when the user clicks, it opens in the editor of VSCode
-- Read $PWD/SORCAR.md and treat its contents as instructions and allow those instructions to override the instructions above
+- Read PWD/SORCAR.md and treat its contents as instructions and allow those instructions to override the instructions above

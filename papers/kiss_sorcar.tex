@@ -448,7 +448,7 @@ mechanical:
 - **The user cannot see intermediate chat. Show whatever
   user asks in the summary of the finish tool call.**
 - READ large files in chunks.
-- Create temporary files in $PWD/tmp
+- Create temporary files in PWD/tmp
 - Use ultra thinking
 \end{prompt}
 
@@ -593,9 +593,9 @@ discovered during task execution:
 \begin{prompt}
 ## Self-Improvement Loop
 
-- Read the instructions in $PWD/USER_PREFS.md at the start
+- Read the instructions in PWD/USER_PREFS.md at the start
   of each task.
-- Then update $PWD/USER_PREFS.md to capture the user
+- Then update PWD/USER_PREFS.md to capture the user
   preferences and invariants by analyzing the task. DO NOT
   ADD ANY CODE SNIPPETS OR SYMBOLS. You MUST carefully and
   thoroughly get rid of the user preferences and invariants
@@ -647,8 +647,8 @@ structured research workflow rather than allowing ad-hoc browsing:
 
 - When you need to collect knowledge from the internet,
   visit at least 100 web sites and collect ideas without
-  much thinking in a new file $PWD/tmp/ideas-{unique_id}.md.
-  Then go over $PWD/tmp/ideas-{unique_id}.md, think deeply
+  much thinking in a new file PWD/tmp/ideas-{unique_id}.md.
+  Then go over PWD/tmp/ideas-{unique_id}.md, think deeply
   on how to complete the task at hand, and complete it.
 \end{prompt}
 
@@ -707,7 +707,7 @@ injected when the agent operates on its own codebase:
 - If you mention a file in the chat, make the file
   clickable so that when the user clicks, it opens in the
   editor of VSCode
-- Read $PWD/SORCAR.md and treat its contents as
+- Read PWD/SORCAR.md and treat its contents as
   instructions and allow those instructions to override the
   instructions above
 \end{prompt}
