@@ -883,7 +883,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           if (closeProc) {
             closeProc.sendCommand({type: 'closeTab', tabId: closeTabId});
           } else {
-            this._getServiceProcess().sendCommand({type: 'closeTab', tabId: closeTabId});
+            this._getServiceProcess().sendCommand({
+              type: 'closeTab',
+              tabId: closeTabId,
+            });
           }
         }
         break;

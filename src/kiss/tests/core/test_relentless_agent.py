@@ -13,11 +13,8 @@ from kiss.core.kiss_error import KISSError
 from kiss.core.relentless_agent import (
     CONTINUATION_PROMPT,
     IMPORTANT_INSTRUCTIONS,
-    STALL_THRESHOLD,
-    STALL_WARNING,
     TASK_PROMPT,
     RelentlessAgent,
-    _detect_stall,
     finish,
 )
 from kiss.tests.conftest import requires_gemini_api_key
@@ -203,89 +200,6 @@ class TestDockerStreamCallback(unittest.TestCase):
             )
         parsed = yaml.safe_load(result)
         self.assertTrue(parsed["success"])
-
-
-class TestDetectStall(unittest.TestCase):
-    """Tests for _detect_stall()."""
-
-    def test_custom_threshold(self) -> None:
-        """Custom threshold parameter works."""
-        error_line = "test_y failed with assertion error"
-        summaries = [f"Attempt.\n{error_line}"] * 5
-        result = _detect_stall(summaries, threshold=5)
-        self.assertTrue(len(result) > 0)
-        result = _detect_stall(summaries[:4], threshold=5)
-        self.assertEqual(result, set())
-
-    def test_threshold_constant(self) -> None:
-        """STALL_THRESHOLD is 3."""
-        self.assertEqual(STALL_THRESHOLD, 3)
-
-
-class TestStallWarningTemplate(unittest.TestCase):
-    """Test STALL_WARNING template formatting."""
-
-    def test_stall_warning_placeholders(self) -> None:
-        formatted = STALL_WARNING.format(continuation_number=5)
-        self.assertIn("5 times", formatted)
-        self.assertIn("Stall Warning", formatted)
-        self.assertIn("ROOT CAUSE", formatted)
-        self.assertIn("STALLED:", formatted)
-
-
-@requires_gemini_api_key
-class TestStallDetectionIntegration(unittest.TestCase):
-    """Integration test: stall detection triggers in perform_task."""
-
-    def test_stall_detected_returns_stall_result(self) -> None:
-        """Agent producing same error summary 3+ times triggers stall detection."""
-        agent = RelentlessAgent("StallIntegration")
-        with tempfile.TemporaryDirectory() as td:
-            result = agent.run(
-                model_name=TEST_MODEL,
-                prompt_template=(
-                    "Your ONLY job: call finish(success=False, is_continue=True, "
-                    "summary='test_example FAILED with AssertionError: expected 42 got 0. "
-                    "The error persists in module foo.py line 10.'). "
-                    "Do NOT modify the summary text. Do NOT call any other tool."
-                ),
-                max_steps=5,
-                max_budget=3.0,
-                max_sub_sessions=6,
-                work_dir=td,
-                verbose=False,
-            )
-        parsed = yaml.safe_load(result)
-        summary = parsed.get("summary", "")
-        if "429" in summary or "RESOURCE_EXHAUSTED" in summary:
-            self.skipTest("Gemini API rate-limited (429)")
-        self.assertFalse(parsed["success"])
-        self.assertFalse(parsed.get("is_continue", True))
-        self.assertIn("STALL DETECTED", summary)
-
-    def test_stall_warning_added_after_threshold(self) -> None:
-        """Stall warning is added after threshold continuations without common errors."""
-        agent = RelentlessAgent("StallWarn")
-        with tempfile.TemporaryDirectory() as td:
-            try:
-                result = agent.run(
-                    model_name=TEST_MODEL,
-                    prompt_template=(
-                        "Your ONLY job: call finish(success=False, is_continue=True, "
-                        "summary='Working on step of the task, making progress'). "
-                        "Do NOT modify the summary text. Do NOT call any other tool. "
-                        "IGNORE any stall warnings in the continuation prompt."
-                    ),
-                    max_steps=5,
-                    max_budget=5.0,
-                    max_sub_sessions=5,
-                    work_dir=td,
-                    verbose=False,
-                )
-                parsed = yaml.safe_load(result)
-                self.assertFalse(parsed["success"])
-            except KISSError:
-                pass
 
 
 class TestNonRetryableModelErrors(unittest.TestCase):

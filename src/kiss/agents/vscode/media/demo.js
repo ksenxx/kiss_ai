@@ -17,7 +17,7 @@
   let cancelRequested = false;
 
   function sleep(ms) {
-    return new Promise(function (resolve) {
+    return new Promise(resolve => {
       setTimeout(resolve, ms);
     });
   }
@@ -36,7 +36,7 @@
    * task_events message arrives (main.js routes it here in demo mode).
    */
   function requestEvents(api, sessionId) {
-    return new Promise(function (resolve) {
+    return new Promise(resolve => {
       api.resolveEvents = function (events) {
         api.resolveEvents = null;
         resolve(events);
@@ -60,25 +60,25 @@
    * Stream the result panel content word-by-word.
    */
   async function streamResultEvent(api, ev) {
-    var O = document.getElementById('output');
+    const O = document.getElementById('output');
     if (!O) return;
 
-    var rc = document.createElement('div');
+    const rc = document.createElement('div');
     rc.className = 'ev rc';
 
     // Header
-    var header = document.createElement('div');
+    const header = document.createElement('div');
     header.className = 'rc-h';
-    var h3 = document.createElement('h3');
+    const h3 = document.createElement('h3');
     h3.textContent = 'Result';
     header.appendChild(h3);
 
-    var rs = document.createElement('div');
+    const rs = document.createElement('div');
     rs.className = 'rs';
-    var tokSpan = document.createElement('span');
+    const tokSpan = document.createElement('span');
     tokSpan.innerHTML = 'Tokens <b>' + fmtN(ev.total_tokens || 0) + '</b>';
     rs.appendChild(tokSpan);
-    var costSpan = document.createElement('span');
+    const costSpan = document.createElement('span');
     costSpan.innerHTML = 'Cost <b>' + esc(ev.cost || 'N/A') + '</b>';
     rs.appendChild(costSpan);
     header.appendChild(rs);
@@ -86,7 +86,7 @@
 
     // Failure banner
     if (ev.success === false) {
-      var failDiv = document.createElement('div');
+      const failDiv = document.createElement('div');
       failDiv.style.cssText =
         'color:var(--red);font-weight:700;font-size:var(--fs-xl);margin-bottom:10px';
       failDiv.textContent = 'Status: FAILED';
@@ -94,22 +94,22 @@
     }
 
     // Body
-    var body = document.createElement('div');
+    const body = document.createElement('div');
     body.className = 'rc-body md-body';
     rc.appendChild(body);
     O.appendChild(rc);
     api.scrollToBottom();
 
     // Stream content word by word
-    var text = (ev.summary || ev.text || '(no result)')
+    const text = (ev.summary || ev.text || '(no result)')
       .replace(/\n{3,}/g, '\n\n')
       .trim();
-    var words = text.split(/(\s+)/);
-    var accumulated = '';
-    var WORDS_PER_TICK = 3;
-    var TICK_MS = 50;
+    const words = text.split(/(\s+)/);
+    let accumulated = '';
+    const WORDS_PER_TICK = 3;
+    const TICK_MS = 50;
 
-    for (var i = 0; i < words.length; i++) {
+    for (let i = 0; i < words.length; i++) {
       if (cancelRequested) break;
       accumulated += words[i];
       if (i % WORDS_PER_TICK === WORDS_PER_TICK - 1 || i === words.length - 1) {
@@ -125,7 +125,7 @@
 
     // Highlight code blocks
     if (typeof hljs !== 'undefined') {
-      body.querySelectorAll('pre code').forEach(function (bl) {
+      body.querySelectorAll('pre code').forEach(bl => {
         hljs.highlightElement(bl);
       });
     }
@@ -135,13 +135,13 @@
    * Escape HTML entities.
    */
   function esc(t) {
-    var d = document.createElement('div');
+    const d = document.createElement('div');
     d.textContent = t;
     return d.innerHTML;
   }
 
   /** Lifecycle event types to skip during replay. */
-  var SKIP_TYPES = {
+  const SKIP_TYPES = {
     task_done: 1,
     task_error: 1,
     task_stopped: 1,
@@ -163,13 +163,13 @@
    * @returns {Array<Array>} - Array of event groups.
    */
   function groupEventsIntoPanels(events) {
-    var panels = [];
-    var current = [];
-    var afterToolResult = true; // start true so first thought gets a panel
+    const panels = [];
+    let current = [];
+    let afterToolResult = true; // start true so first thought gets a panel
 
-    for (var i = 0; i < events.length; i++) {
-      var ev = events[i];
-      var t = ev.type;
+    for (let i = 0; i < events.length; i++) {
+      const ev = events[i];
+      const t = ev.type;
 
       if (SKIP_TYPES[t]) continue;
 
@@ -223,23 +223,23 @@
    * @param {Array} sessions - All history sessions (newest first from server).
    */
   window._startDemoReplay = async function (sessions) {
-    var api = getApi();
+    const api = getApi();
     if (!api || api.active) return;
     api.active = true;
     cancelRequested = false;
 
     // Filter sessions that have stored events, reverse to oldest-first
-    var items = sessions
-      .filter(function (s) {
+    const items = sessions
+      .filter(s => {
         return s.has_events && s.id;
       })
       .slice()
       .reverse();
 
-    for (var i = 0; i < items.length; i++) {
+    for (let i = 0; i < items.length; i++) {
       if (cancelRequested) break;
-      var session = items[i];
-      var taskText = session.preview || session.title || 'Untitled';
+      const session = items[i];
+      const taskText = session.preview || session.title || 'Untitled';
 
       // Create a new tab for each task after the first
       if (i > 0) api.createNewTab();
@@ -257,15 +257,15 @@
       api.hideWelcome();
 
       // Step 3: Request events from backend
-      var events = await requestEvents(api, session.id);
+      const events = await requestEvents(api, session.id);
       if (cancelRequested) break;
 
       // Step 4: Group events into panels and replay panel-by-panel
-      var panelGroups = groupEventsIntoPanels(events);
+      const panelGroups = groupEventsIntoPanels(events);
 
-      for (var j = 0; j < panelGroups.length; j++) {
+      for (let j = 0; j < panelGroups.length; j++) {
         if (cancelRequested) break;
-        var group = panelGroups[j];
+        const group = panelGroups[j];
 
         // Check if this group is a result panel
         if (group.length === 1 && group[0].type === 'result') {
@@ -274,7 +274,7 @@
         }
 
         // Process all events in this panel group at once
-        for (var k = 0; k < group.length; k++) {
+        for (let k = 0; k < group.length; k++) {
           api.processEvent(group[k]);
         }
         api.scrollToBottom();
@@ -301,7 +301,7 @@
    */
   window._cancelDemoReplay = function () {
     cancelRequested = true;
-    var api = getApi();
+    const api = getApi();
     if (api) api.active = false;
   };
 
@@ -309,7 +309,7 @@
    * Check whether a demo replay is currently running.
    */
   window._isDemoActive = function () {
-    var api = getApi();
+    const api = getApi();
     return api ? api.active : false;
   };
 })();

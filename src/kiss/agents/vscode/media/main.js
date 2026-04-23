@@ -286,7 +286,11 @@
       showMergeToolbar(tab.id);
     }
     // Set inputContainer visibility based on active bars
-    if (worktreeBar || autocommitBar || document.getElementById('merge-toolbar')) {
+    if (
+      worktreeBar ||
+      autocommitBar ||
+      document.getElementById('merge-toolbar')
+    ) {
       if (inputContainer) inputContainer.style.display = 'none';
     } else {
       if (inputContainer) inputContainer.style.display = '';
@@ -817,9 +821,7 @@
     container.dataset.metricBudget = statusBudget
       ? statusBudget.textContent
       : '';
-    container.dataset.metricSteps = statusSteps
-      ? statusSteps.textContent
-      : '';
+    container.dataset.metricSteps = statusSteps ? statusSteps.textContent : '';
     if (statusTokens) statusTokens.textContent = savedTokens;
     if (statusBudget) statusBudget.textContent = savedBudget;
     if (statusSteps) statusSteps.textContent = savedSteps;
@@ -1450,7 +1452,8 @@
   function processOutputEventForBgTab(ev, tab) {
     const t = ev.type;
 
-    if (!tab.outputFragment) tab.outputFragment = document.createDocumentFragment();
+    if (!tab.outputFragment)
+      tab.outputFragment = document.createDocumentFragment();
 
     // Load the tab's streaming state into locals
     let bgLastToolName = tab.streamLastToolName || '';
@@ -1458,7 +1461,7 @@
     let bgLlmPanelState = tab.streamLlmPanelState || mkS();
     let bgPendingPanel = tab.streamPendingPanel || false;
     let bgStepCount = tab.streamStepCount || 0;
-    let bgState = tab.streamState || mkS();
+    const bgState = tab.streamState || mkS();
 
     // Advance the streaming state machine
     if (t === 'tool_call') {
@@ -1655,12 +1658,9 @@
         statusSteps.textContent = visibleContainer.dataset.metricSteps || '';
     } else {
       // Back on the current (main) task — restore its metrics
-      if (statusTokens)
-        statusTokens.textContent = currentTaskMetrics.tokens;
-      if (statusBudget)
-        statusBudget.textContent = currentTaskMetrics.budget;
-      if (statusSteps)
-        statusSteps.textContent = currentTaskMetrics.steps;
+      if (statusTokens) statusTokens.textContent = currentTaskMetrics.tokens;
+      if (statusBudget) statusBudget.textContent = currentTaskMetrics.budget;
+      if (statusSteps) statusSteps.textContent = currentTaskMetrics.steps;
     }
   }
 
@@ -3513,21 +3513,43 @@
 
   // Expose minimal API for demo.js
   window._demoApi = {
-    get active() { return _demoActive; },
-    set active(v) { _demoActive = !!v; },
+    get active() {
+      return _demoActive;
+    },
+    set active(v) {
+      _demoActive = !!v;
+    },
     resolveEvents: null,
     createNewTab: createNewTab,
-    setInput: function(text) { inp.value = text; syncClearBtn(); },
-    clearInput: function() { inp.value = ''; syncClearBtn(); },
-    clearForReplay: function() { clearOutput(); resetOutputState(); clearUsageMetrics(); },
+    setInput: function (text) {
+      inp.value = text;
+      syncClearBtn();
+    },
+    clearInput: function () {
+      inp.value = '';
+      syncClearBtn();
+    },
+    clearForReplay: function () {
+      clearOutput();
+      resetOutputState();
+      clearUsageMetrics();
+    },
     processEvent: processOutputEvent,
     setTaskText: setTaskText,
     updateTabTitle: updateActiveTabTitle,
-    hideWelcome: function() { if (welcome) welcome.style.display = 'none'; },
+    hideWelcome: function () {
+      if (welcome) welcome.style.display = 'none';
+    },
     scrollToBottom: sb,
-    getActiveTabId: function() { return activeTabId; },
-    sendMessage: function(msg) { vscode.postMessage(msg); },
-    collapsePanels: function() { collapseAllExceptResult(O); },
+    getActiveTabId: function () {
+      return activeTabId;
+    },
+    sendMessage: function (msg) {
+      vscode.postMessage(msg);
+    },
+    collapsePanels: function () {
+      collapseAllExceptResult(O);
+    },
   };
 
   // Start

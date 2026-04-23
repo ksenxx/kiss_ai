@@ -43,7 +43,7 @@ class TestAdjacentScrollMetrics(unittest.TestCase):
     # 1. currentTaskMetrics variable exists
     # ------------------------------------------------------------------
 
-    def test_currentTaskMetrics_declared(self) -> None:
+    def test_current_task_metrics_declared(self) -> None:
         """A ``currentTaskMetrics`` variable must be declared to hold the
         main task's tokens/budget/steps for adjacent-scroll restoration."""
         self.assertRegex(
@@ -56,7 +56,7 @@ class TestAdjacentScrollMetrics(unittest.TestCase):
     # 2. renderAdjacentTask saves/restores statusSteps
     # ------------------------------------------------------------------
 
-    def test_renderAdjacentTask_saves_statusSteps(self) -> None:
+    def test_render_adjacent_task_saves_status_steps(self) -> None:
         """renderAdjacentTask must save statusSteps before replay and
         restore it after, so the adjacent task doesn't clobber the
         current task's step count."""
@@ -95,7 +95,7 @@ class TestAdjacentScrollMetrics(unittest.TestCase):
     # 3. renderAdjacentTask stores per-task metrics on container dataset
     # ------------------------------------------------------------------
 
-    def test_renderAdjacentTask_stores_dataset_metrics(self) -> None:
+    def test_render_adjacent_task_stores_dataset_metrics(self) -> None:
         """The adjacent-task container must have dataset.metricTokens,
         dataset.metricBudget, and dataset.metricSteps set from the
         replayed events."""
@@ -118,7 +118,7 @@ class TestAdjacentScrollMetrics(unittest.TestCase):
     # 4. updateVisibleTask updates header metrics
     # ------------------------------------------------------------------
 
-    def test_updateVisibleTask_updates_metrics(self) -> None:
+    def test_update_visible_task_updates_metrics(self) -> None:
         """updateVisibleTask must update statusTokens, statusBudget, and
         statusSteps from the visible adjacent container's dataset."""
         m = re.search(
@@ -147,7 +147,7 @@ class TestAdjacentScrollMetrics(unittest.TestCase):
     # 5. updateVisibleTask tracks the visible container
     # ------------------------------------------------------------------
 
-    def test_updateVisibleTask_captures_visible_container(self) -> None:
+    def test_update_visible_task_captures_visible_container(self) -> None:
         """updateVisibleTask must capture a reference to the visible
         adjacent-task container (not just the task name) so it can
         read per-task dataset attributes."""
@@ -169,7 +169,7 @@ class TestAdjacentScrollMetrics(unittest.TestCase):
     # 6. replayTaskEvents snapshots currentTaskMetrics
     # ------------------------------------------------------------------
 
-    def test_replayTaskEvents_snapshots_metrics(self) -> None:
+    def test_replay_task_events_snapshots_metrics(self) -> None:
         """replayTaskEvents must store the replayed task's metrics
         into currentTaskMetrics after replaying events."""
         m = re.search(
@@ -190,7 +190,7 @@ class TestAdjacentScrollMetrics(unittest.TestCase):
     # 7. processOutputEvent updates currentTaskMetrics on result/usage
     # ------------------------------------------------------------------
 
-    def test_processOutputEvent_updates_metrics_on_result(self) -> None:
+    def test_process_output_event_updates_metrics_on_result(self) -> None:
         """processOutputEvent must snapshot currentTaskMetrics after
         a result or usage_info event so live-streaming metrics are
         available for adjacent-scroll restoration."""
@@ -212,7 +212,7 @@ class TestAdjacentScrollMetrics(unittest.TestCase):
     # 8. clearUsageMetrics resets currentTaskMetrics
     # ------------------------------------------------------------------
 
-    def test_clearUsageMetrics_resets_currentTaskMetrics(self) -> None:
+    def test_clear_usage_metrics_resets_current_task_metrics(self) -> None:
         """clearUsageMetrics must reset currentTaskMetrics so stale
         metrics from a previous task are not shown after a new task
         starts."""

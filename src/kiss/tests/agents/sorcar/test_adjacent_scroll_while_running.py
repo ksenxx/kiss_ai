@@ -34,7 +34,7 @@ class TestAdjacentScrollWhileRunning(unittest.TestCase):
     # Structural: the overscroll guard must NOT block on isRunning
     # ------------------------------------------------------------------
 
-    def test_overscroll_guard_does_not_check_isRunning(self) -> None:
+    def test_overscroll_guard_does_not_check_is_running(self) -> None:
         """The ``if (…)`` that gates adjacent-task loading must not
         include ``!isRunning`` or ``isRunning`` as a conjunct."""
         # Find the line that contains the adjacent-loading guard.

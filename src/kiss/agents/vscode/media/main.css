@@ -707,6 +707,7 @@ body {
   display: flex; align-items: center;
 }
 #demo-toggle-btn:hover { color: color-mix(in srgb, var(--fg) 66%, transparent); }
+
 #demo-toggle-btn.active {
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 12%, transparent);

@@ -231,13 +231,13 @@ class TestDemoReplayUsesPanel(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.src = _DEMO_JS.read_text()
 
-    def test_calls_groupEventsIntoPanels(self) -> None:
+    def test_calls_group_events_into_panels(self) -> None:
         assert "groupEventsIntoPanels(events)" in self.src
 
     def test_uses_500ms_delay(self) -> None:
         assert "await sleep(500)" in self.src
 
-    def test_calls_collapsePanels(self) -> None:
+    def test_calls_collapse_panels(self) -> None:
         assert "api.collapsePanels()" in self.src
 
     def test_no_1s_per_event_delay(self) -> None:
@@ -269,11 +269,11 @@ class TestMainJsCollapsePanelsBridge(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.src = _MAIN_JS.read_text()
 
-    def test_collapsePanels_in_demoApi(self) -> None:
+    def test_collapse_panels_in_demo_api(self) -> None:
         assert "collapsePanels:" in self.src
         assert "collapseAllExceptResult(O)" in self.src
 
-    def test_collapsePanels_function_reference(self) -> None:
+    def test_collapse_panels_function_reference(self) -> None:
         idx = self.src.index("window._demoApi = {")
         bridge = self.src[idx : idx + 1000]
         assert "collapsePanels" in bridge

@@ -59,76 +59,6 @@ The trajectory of the agent is stored in the file: {trajectory_file}
   with the reason for doing that along with relevant code snippets
 """
 
-STALL_THRESHOLD = 3
-
-STALL_WARNING = """
-# ⚠️ Stall Warning
-
-You have attempted this task {continuation_number} times without success. \
-Review ALL previous attempt summaries above carefully.
-
-If the same failures keep recurring:
-1. Do NOT retry the same approach — it has already failed multiple times.
-2. Identify the ROOT CAUSE of the persistent failure.
-3. Try a fundamentally different strategy.
-4. If no alternative approach exists, call \
-finish(success=False, is_continue=False, \
-summary="STALLED: <describe what keeps failing and why>") \
-to escalate instead of retrying.
-"""
-
-_ERROR_KEYWORDS = ("fail", "error", "assert", "broken", "traceback", "exception")
-
-
-def _extract_error_phrases(text: str) -> set[str]:
-    """Extract normalized error/failure phrases from text for stall detection.
-
-    Scans each line of *text* for common error indicators and returns matching
-    lines as normalized strings for comparison across summaries.
-
-    Args:
-        text: Summary text to scan for error phrases.
-
-    Returns:
-        Set of normalized error phrase strings found in the text.
-    """
-    phrases: set[str] = set()
-    for line in text.splitlines():
-        normalized = " ".join(line.lower().split())
-        if len(normalized) < 10:
-            continue
-        if any(kw in normalized for kw in _ERROR_KEYWORDS):
-            phrases.add(normalized)
-    return phrases
-
-
-def _detect_stall(summaries: list[str], threshold: int = STALL_THRESHOLD) -> set[str]:
-    """Detect if recent summaries contain the same persistent failures.
-
-    Compares error phrases extracted from the most recent summaries. If there
-    are error phrases common to ALL of the last *threshold* summaries,
-    returns those phrases (indicating a stall).
-
-    Args:
-        summaries: List of continuation summary strings, in chronological order.
-        threshold: Minimum number of recent summaries to compare. Defaults to 3.
-
-    Returns:
-        Set of error phrases common across the last *threshold* summaries,
-        or empty set if no stall is detected.
-    """
-    if len(summaries) < threshold:
-        return set()
-    recent = summaries[-threshold:]
-    error_sets = [_extract_error_phrases(s) for s in recent]
-    if not all(error_sets):
-        return set()
-    common = error_sets[0]
-    for es in error_sets[1:]:
-        common = common & es
-    return common
-
-
 def _str_to_bool(value: str | bool) -> bool:
     """Coerce a string or bool to a Python bool.
 
@@ -225,7 +155,7 @@ class RelentlessAgent(Base):
 
         progress_section = ""
         summary = ""
-        continuation_summaries: list[str] = []
+        summaries: list[str] = []
         current_pid = str(os.getpid())
         important_instructions = IMPORTANT_INSTRUCTIONS.format(
             step_threshold=str(self.max_steps - 2),
@@ -330,36 +260,16 @@ class RelentlessAgent(Base):
 
             summary = payload.get("summary", "")
             if summary:  # pragma: no branch
-                continuation_summaries.append(summary)
-
-                stall_errors = _detect_stall(continuation_summaries)
-                if stall_errors:
-                    stall_summary = (
-                        f"STALL DETECTED after {len(continuation_summaries)} "
-                        f"continuations. The same failures persisted across "
-                        f"the last {STALL_THRESHOLD} attempts:\n"
-                        + "\n".join(f"- {phrase}" for phrase in sorted(stall_errors))
-                        + f"\n\nLast attempt summary:\n{continuation_summaries[-1]}"
-                    )
-                    stall_result: str = yaml.dump(
-                        {"success": False, "is_continue": False, "summary": stall_summary},
-                        sort_keys=False,
-                    )
-                    return stall_result
+                summaries.append(summary)
 
                 all_summaries = "\n\n---\n\n".join(
                     f"### Attempt {i + 1}\n{s}"
-                    for i, s in enumerate(continuation_summaries)
+                    for i, s in enumerate(summaries)
                 )
                 progress_section = CONTINUATION_PROMPT.format(
                     progress_text=all_summaries,
                     continuation_number=session + 1,
                 )
-
-                if len(continuation_summaries) >= STALL_THRESHOLD:
-                    progress_section += STALL_WARNING.format(
-                        continuation_number=len(continuation_summaries),
-                    )
         raise KISSError(f"Task failed after {self.max_sub_sessions} sub-sessions")
 
     def run(

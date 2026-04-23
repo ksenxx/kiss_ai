@@ -268,8 +268,8 @@ class TestScanFilesDepthOffByOne(unittest.TestCase):
 
         The formula ``len(rel_root.parts)`` gives:
           root:    len(()) = 0
-          depth10: len(('a','b','c','d','e','f','g','h','i','j')) = 10  → 10 > 10 is False (included)
-          depth11: len(('a','b','c','d','e','f','g','h','i','j','k')) = 11  → 11 > 10 is True (excluded)
+          depth10: len(('a',..,'j')) = 10  → 10 > 10 is False (included)
+          depth11: len(('a',..,'k')) = 11  → 11 > 10 is True (excluded)
         """
         # Root
         assert len(PurePath(".").parts) == 0
