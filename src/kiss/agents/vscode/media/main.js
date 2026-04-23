@@ -2061,11 +2061,15 @@
       }
       case 'merge_started':
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
-          // Background tab's merge: update its saved state without switching
+          // Background tab's merge: mark it and auto-switch so the user
+          // sees the merge/diff interface immediately.
           const bgMergeTab = tabs.find(t => {
             return t.id === ev.tabId;
           });
-          if (bgMergeTab) bgMergeTab.isMerging = true;
+          if (bgMergeTab) {
+            bgMergeTab.isMerging = true;
+            switchToTab(ev.tabId);
+          }
           break;
         }
         isMerging = true;
