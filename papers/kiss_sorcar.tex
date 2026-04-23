@@ -384,8 +384,52 @@ The prompt opens with a directive that sets the tone:
 # CHECK FACTS. NO AI SLOP.
 \end{prompt}
 
-\noindent This framing discourages the model from hedging, apologizing, or producing
-filler text, and encourages decisive, verification-oriented behavior.
+\noindent Each directive addresses a specific failure mode observed in
+LLM-based agents:
+
+\begin{itemize}[nosep]
+\item \textbf{``FOCUS ON THE GIVEN TASK. ITS COMPLETION IS YOUR SOLE
+  GOAL.''} LLMs have a tendency to drift: they comment on the
+  difficulty of a problem, explore tangential concerns, or ask
+  clarifying questions that the user has already answered.  This
+  directive anchors the model on the task at hand and discourages
+  meta-commentary that consumes tokens without making progress.
+
+\item \textbf{``BE RELENTLESS.''} When an agent encounters an
+  error---a failing test, a lint violation, a command that returns
+  unexpected output---the default LLM behavior is to apologize,
+  summarize the failure, and ask the user what to do next.  This
+  directive instructs the model to treat errors as obstacles to
+  overcome, not as reasons to stop.
+
+\item \textbf{``BE CALM.''} The complement of relentlessness.  An
+  overly aggressive agent that panics on encountering an error may
+  thrash between approaches without deliberation.  This directive
+  encourages the model to analyze errors methodically before reacting.
+
+\item \textbf{``BE RIGOROUS.''} This instructs the model to follow
+  the verification and testing disciplines encoded later in the
+  prompt, rather than taking shortcuts when a solution \emph{looks}
+  right.
+
+\item \textbf{``BE ACCURATE.''} LLMs frequently generate
+  plausible-but-wrong code, file paths, or command-line flags.  This
+  directive raises the model's threshold for asserting facts,
+  encouraging it to verify claims against the actual file system or
+  documentation rather than relying on parametric memory.
+
+\item \textbf{``CHECK FACTS.''} A more specific version of ``be
+  accurate'': when the model is about to state a fact (e.g., ``this
+  function takes three arguments''), it should read the source rather
+  than relying on its training data, which may be outdated or wrong.
+
+\item \textbf{``NO AI SLOP.''} ``AI slop'' refers to the low-quality,
+  generic, hedging text that LLMs produce when they lack confidence:
+  filler phrases like ``certainly!'', unnecessary caveats, and
+  boilerplate explanations that the user did not ask for.  This
+  directive discourages such output and encourages the model to be
+  concise and substantive.
+\end{itemize}
 
 %......................................................................
 \subsection{Identity and Tool Rules}
@@ -422,11 +466,100 @@ mechanical:
   user asks in the summary of the finish tool call.**
 - READ large files in chunks.
 - Create temporary files in PWD/tmp
-- Use ultra thinking
+- Use ULTRA thinking always
+- **If you are running out of context length or steps, do
+  not try to complete the task urgently, but continue the
+  task by calling 'finish'**
+- PWD in the system prompt and user prompt denotes current
+  working directory.
 \end{prompt}
 
-\noindent These rules eliminate ambiguity about which tool to use in which
-situation.  A separate rule about the \texttt{PageDrop} API allows the
+\noindent The identity block gives the agent a concrete name, developer,
+and repository URL rather than a vague persona such as ``you are a
+helpful assistant.''  This anchors the model's self-representation,
+reducing the likelihood of confused or contradictory self-references,
+and it provides a URL the model can share when asked about its source
+code.
+
+Each tool rule addresses a specific failure mode:
+
+\begin{itemize}[nosep]
+\item \textbf{``Write() for new files.\ Edit() for small changes.''}
+  Without this distinction, the model may use \texttt{Write()} to
+  overwrite an existing file with a slightly modified version, losing
+  content it forgot to include.  By reserving \texttt{Write()} for new
+  files and requiring \texttt{Edit()} for modifications, the
+  instruction ensures that changes are surgical and that unchanged
+  portions of a file are never at risk.
+
+\item \textbf{Bash timeout guidance.}  LLMs frequently launch shell
+  commands without considering their runtime.  A compilation or test
+  suite that takes five minutes will time out at the default
+  30-second shell timeout in most agent frameworks, causing spurious
+  failures.  The instruction to use 300~seconds as the default, retry
+  with higher timeouts on timeout, and run long commands in the
+  background with output redirected to a file provides a mechanical
+  protocol that handles the common cases without requiring the model
+  to estimate runtime from first principles.
+
+\item \textbf{``Use go\_to\_url() for browser tool.''}  The agent has
+  access to multiple tools that could plausibly interact with the web
+  (shell-based \texttt{curl}, the browser tool, etc.).  This
+  instruction eliminates ambiguity by specifying which tool to use for
+  browser-based interactions.
+
+\item \textbf{``The user cannot see intermediate chat.''}  In the
+  VS~Code extension, the user sees only the final summary returned by
+  the \texttt{finish} tool, not the intermediate chain-of-thought or
+  tool calls.  Without this instruction, the model may ``tell'' the
+  user something in an intermediate message and then assume the user
+  has seen it, leading to confusion when the user asks for information
+  the model believes it already provided.  The instruction forces the
+  model to put all user-facing information into the \texttt{finish}
+  summary.
+
+\item \textbf{``READ large files in chunks.''}  Reading a
+  10,000-line file in a single tool call consumes a large fraction of
+  the context window.  By instructing the model to read files in
+  chunks, the prompt prevents context-window exhaustion on a single
+  file read, preserving capacity for the rest of the task.
+
+\item \textbf{``Create temporary files in PWD/tmp.''}  Without this
+  instruction, the model creates temporary files in unpredictable
+  locations (the system \texttt{/tmp}, the home directory, or
+  scattered throughout the project).  Centralizing temporary files in
+  a known directory makes cleanup predictable and prevents polluting
+  the project tree with artifacts.
+
+\item \textbf{``Use ULTRA thinking always.''}  This instruction
+  activates the model's extended reasoning mode (also known as
+  ``thinking'' or ``chain-of-thought'' mode), in which the model
+  performs additional internal deliberation before producing a
+  response.  Extended reasoning is particularly valuable for complex
+  multi-step tasks where the model must plan before acting.
+
+\item \textbf{``If you are running out of context length or steps, do
+  not try to complete the task urgently, but continue the task by
+  calling finish.''}  When the context window is nearly full, LLMs
+  exhibit a ``rush to finish'' behavior: they skip verification
+  steps, make hasty edits, and call \texttt{finish} with an
+  incomplete result.  This instruction redirects that urgency into
+  the continuation protocol (Section~\ref{sec:relentless-agent}),
+  ensuring that a clean handoff to a new sub-session produces better
+  results than a frantic attempt to squeeze everything into the
+  remaining tokens.
+
+\item \textbf{``PWD in the system prompt and user prompt denotes
+  current working directory.''}  The acronym ``PWD'' appears
+  throughout the prompt and in user task descriptions (e.g.,
+  ``edit PWD/src/main.py'').  Without this definition, the model
+  might interpret PWD as the Unix environment variable
+  \texttt{\$PWD} and attempt to expand it, or misinterpret it as a
+  literal directory name.  The explicit definition ensures consistent
+  interpretation.
+\end{itemize}
+
+\noindent A separate rule about the \texttt{PageDrop} API allows the
 agent to upload HTML files and share them via a public URL, enabling it
 to create and share rich reports, visualizations, or documentation.
 
@@ -448,9 +581,45 @@ Before modifying any file, the agent is instructed to read it first:
   confirm them. Then fix them.**
 \end{prompt}
 
-\noindent These pre-flight checks prevent a common failure mode in which the
-agent modifies a file based on an incorrect assumption about its
-contents, introducing subtle bugs that are difficult to diagnose.
+\noindent Each pre-flight check targets a specific category of avoidable
+error:
+
+\begin{itemize}[nosep]
+\item \textbf{``Read every file you will modify before changing it.''}
+  The most common source of agent-introduced bugs is modifying a file
+  based on an incorrect assumption about its current contents.  The
+  model may ``remember'' an older version of the file from its
+  training data, or it may extrapolate from a partial reading.  By
+  requiring a fresh read immediately before any edit, the instruction
+  ensures that the model operates on the actual current state of the
+  file, not a stale mental model.
+
+\item \textbf{``If the task depends on existing architecture or
+  behavior, read the relevant source files first.''}  This extends the
+  previous rule from individual files to architectural context.  A
+  task like ``add a caching layer to the database module'' requires
+  understanding not just the file to be modified, but also how callers
+  interact with it, what interfaces exist, and what invariants are
+  assumed.  The instruction prevents the model from jumping straight
+  to code generation without understanding the broader context.
+
+\item \textbf{``If the task references files, commands, or config that
+  do not exist, stop and ask or report instead of guessing.''}  LLMs
+  have a strong tendency to confabulate: when asked to modify a file
+  that does not exist, the model will often proceed as if it does,
+  producing edits against phantom content.  This instruction converts
+  a silent failure (wrong edits applied to a nonexistent file,
+  silently creating it) into an explicit clarification request.
+
+\item \textbf{``When fixing a bug, an issue, or a race, write tests
+  to confirm them.\ Then fix them.''}  This instruction mandates a
+  test-first discipline for bug fixes.  The motivation is two-fold:
+  first, a test that reproduces the bug provides concrete verification
+  that the fix is correct (the test should pass after the fix and fail
+  before it).  Second, writing the test forces the model to understand
+  the bug precisely before attempting a fix, reducing the risk of an
+  ad~hoc patch that addresses a symptom rather than the root cause.
+\end{itemize}
 
 %......................................................................
 \subsection{Code Style Guidelines}
@@ -477,19 +646,80 @@ The prompt encodes a minimalist code philosophy:
   unless the task specifically requires it.
 \end{prompt}
 
-\noindent The final metacognitive instruction asks the agent to pause before
-writing code and consider whether the planned code is simple, elegant,
-general, and minimal.  This encourages the model to spend more
-inference-time compute on design before committing to an
-implementation.
+\noindent Each guideline addresses a specific anti-pattern commonly
+exhibited by LLM-generated code:
+
+\begin{itemize}[nosep]
+\item \textbf{``Write simple, clean, and readable code with minimal
+  indirection.''}  LLMs tend to over-engineer solutions, introducing
+  unnecessary abstractions, helper classes, and levels of indirection.
+  Simple code is easier to review, test, and maintain.
+
+\item \textbf{``Avoid unnecessary object attributes, local variables,
+  and config variables.''}  LLMs frequently introduce intermediate
+  variables that serve no purpose---for example, assigning a return
+  value to a local variable only to immediately return it on the next
+  line, or storing a constant in a configuration file when it is used
+  in exactly one place.  Each unnecessary variable adds a name the
+  reader must track and a site where the value could be accidentally
+  mutated.
+
+\item \textbf{``Avoid tight coupling among files and modules.''}
+  When the model adds a feature that touches multiple files, it may
+  introduce imports, shared global state, or cross-module function
+  calls that create tight coupling.  This instruction encourages
+  modular design where each module has a clear, narrow interface.
+
+\item \textbf{``Avoid object/struct attribute redirections.''}  An
+  attribute redirection occurs when an object stores a reference to
+  another object solely to forward method calls to it---for example,
+  \texttt{self.x = other.x} at construction time, creating two paths
+  to the same value.  LLMs commonly introduce such redirections when
+  adapting code from one context to another.  They make it harder to
+  reason about ownership and lifetime.
+
+\item \textbf{``No redundant abstractions or duplicate code.''}  LLMs
+  sometimes create a new utility function or class that duplicates
+  functionality already present in the codebase, because they did not
+  read the existing code thoroughly.  This instruction reminds the
+  model to check for existing implementations before creating new
+  ones, and to factor out duplication when it encounters it.
+
+\item \textbf{``Public methods MUST have full documentation.''}  While
+  the prompt generally discourages unnecessary documentation (see the
+  last item), public methods are the API surface that other developers
+  and modules depend on.  Documentation on public methods is not
+  optional---it specifies the contract.
+
+\item \textbf{``Understand the root cause of an issue or bug, and
+  patch the root cause instead of an ad hoc superficial fix.''}  LLMs
+  frequently apply symptom-level fixes: adding a null check where the
+  real problem is that a variable should never be null, or catching an
+  exception where the real problem is that the caller passes invalid
+  arguments.  This instruction forces the model to trace the causal
+  chain to the root and fix it there.
+
+\item \textbf{``Before you write code, wait and think if the code is
+  simple, elegant, general, and minimal.''}  This is a metacognitive
+  instruction that asks the model to pause and evaluate its plan
+  before committing to an implementation.  By explicitly requesting
+  this pause, the prompt encourages the model to spend more
+  inference-time compute on design, reducing the likelihood of
+  producing a first-draft solution that works but is unnecessarily
+  complex.
+
+\item \textbf{``Once you finish the task, DO NOT write documentations
+  unless the task specifically requires it.''}  Without this
+  instruction, the model frequently concludes a task by writing README
+  updates, docstrings, and inline comments that the user did not ask
+  for.  This busywork wastes tokens, creates maintenance burden, and
+  may introduce inaccuracies in documentation that is not
+  automatically validated.
+\end{itemize}
 
 %......................................................................
 \subsection{Deep Work Rules}
 %......................................................................
-
-The deep work rules address a failure mode where the model interprets an
-instruction loosely and makes changes that are directionally correct
-but concretely wrong:
 
 \begin{prompt}
 ## Deep Work Rules
@@ -507,11 +737,51 @@ but concretely wrong:
   verification method (test, grep, CLI command).
 \end{prompt}
 
+\noindent The deep work rules address a failure mode where the model
+interprets an instruction loosely and makes changes that are
+directionally correct but concretely wrong:
+
+\begin{itemize}[nosep]
+\item \textbf{``When the task says `align', `match', or `make
+  consistent', read the target to determine the exact target state
+  before editing.''}  When a user says ``make file~A consistent with
+  file~B,'' the model often reads file~A, infers what file~B probably
+  contains, and edits A based on that inference---without ever reading
+  B\@.  This instruction mandates reading the target first, ensuring
+  that the alignment is based on concrete facts rather than
+  assumptions.
+
+\item \textbf{``Use concrete values, not indirections.''}  A related
+  failure mode occurs when the model's plan says ``update X to match
+  Y'' but the model never resolves what Y actually is.  The
+  instruction requires the model to first read~Y, extract the
+  specific values, and then write those values into~X\@.  This
+  eliminates a class of errors where the model's mental model of~Y
+  differs from reality.
+
+\item \textbf{``For multi-part work, list the concrete planned changes
+  before executing them.''}  When a task requires changes to multiple
+  files, executing them one at a time without a plan leads to
+  inconsistencies: the model may change a function signature in one
+  file but forget to update a caller in another.  Listing all planned
+  changes before executing any of them forces the model to consider
+  the full scope of the change and identify dependencies.
+
+\item \textbf{``Every meaningful change should have a concrete
+  verification method.''}  A change without a verification method is a
+  change that cannot be confirmed to work.  This instruction requires
+  the model to pair each change with a specific check---a test, a grep
+  for the expected pattern, a CLI command that exercises the changed
+  behavior---ensuring that the change can be validated
+  programmatically rather than by visual inspection of a diff.
+\end{itemize}
+
 %......................................................................
 \subsection{Planning for Complex Tasks}
 %......................................................................
 
-The planning instructions use a complexity threshold to decide when
+The planning instructions use a complexity threshold---three or more
+files, cross-module changes, or architectural work---to decide when
 formal planning is required:
 
 \begin{prompt}
@@ -529,8 +799,43 @@ For simple single-file tasks, skip formal planning and
 execute directly.
 \end{prompt}
 
-\noindent This adaptive rule avoids both the overhead of planning trivial
-changes and the risk of ad-hoc execution on complex changes.
+\noindent Each planning step targets a specific failure mode:
+
+\begin{itemize}[nosep]
+\item \textbf{``List the files that need to change and why.''}  This
+  forces the model to enumerate the full blast radius of a change
+  before touching any file.  Without this step, the model often
+  discovers mid-task that additional files need changes, leading to
+  incomplete or inconsistent modifications.
+
+\item \textbf{``State the exact intended change in each file.''}
+  Listing files alone is insufficient; the model must also articulate
+  \emph{what} will change in each file.  This converts a vague plan
+  (``update the database module'') into a concrete specification
+  (``add a \texttt{cache\_ttl} parameter to
+  \texttt{DatabaseClient.\_\_init\_\_}, modify the query method to
+  check the cache before hitting the database, add a cache
+  invalidation method'').
+
+\item \textbf{``Identify dependencies and execution order.''}  Some
+  changes must precede others: a new utility function must be written
+  before callers can import it, a migration must run before code that
+  depends on the new schema.  Identifying these dependencies prevents
+  the model from executing changes in an order that produces
+  intermediate states where the code does not compile or tests do not
+  pass.
+
+\item \textbf{``State how each change will be verified.''}  The
+  verification requirement from the Deep Work Rules is reinforced here
+  at the planning stage, ensuring that verification is planned
+  alongside the changes rather than treated as an afterthought.
+\end{itemize}
+
+\noindent The escape clause---``for simple single-file tasks, skip
+formal planning and execute directly''---avoids the overhead of
+planning trivial changes.  Requiring a formal plan for a one-line typo
+fix would waste tokens and slow down the agent without any
+compensating benefit.
 
 %......................................................................
 \subsection{Testing Instructions}
@@ -548,13 +853,72 @@ The testing section is perhaps the most opinionated:
   test doubles
 - You MUST write integration tests
 - Each test should be independent and verify actual behavior
+- **Do NOT run all tests after modifications. Only run the
+  impacted tests**
+- To confirm a race condition, add sleep statements before
+  racing statements with delays less than 0.1s
 \end{prompt}
 
-\noindent The prohibition on mocks is a deliberate design choice.  Mocks test
-that code calls certain methods in a certain order --- they test the
-implementation, not the behavior.  Integration tests verify that the
-system actually works, which is what matters for a tool that modifies
-real codebases.
+\noindent Each testing instruction addresses a specific concern:
+
+\begin{itemize}[nosep]
+\item \textbf{``Run lint and typecheckers and fix any lint and
+  typecheck errors.''}  Before committing any change, the agent must
+  ensure it does not introduce lint violations or type errors.  This
+  catches a broad class of issues---unused imports, type mismatches,
+  style violations---that would otherwise accumulate across tasks.
+
+\item \textbf{``You MUST achieve 100\% branch coverage.''}  Full
+  branch coverage ensures that every conditional path in the code
+  under test has been exercised.  LLMs tend to write happy-path tests
+  that cover the main code path but ignore error handling, edge cases,
+  and early-return branches.  The 100\% target forces the model to
+  write tests for every branch, including error paths and boundary
+  conditions.
+
+\item \textbf{``Tests MUST NOT use mocks, patches, fakes, or any form
+  of test doubles.''}  This is the most opinionated rule.  Mocks test
+  that code calls certain methods in a certain order---they test the
+  implementation, not the behavior.  A test suite built on mocks can
+  pass with flying colors while the system is fundamentally broken,
+  because the mocks hide the real dependencies.  Integration tests
+  that exercise actual behavior are more expensive to run but provide
+  genuine confidence that the system works.
+
+\item \textbf{``You MUST write integration tests.''}  This reinforces
+  the no-mocks rule by explicitly requiring integration tests rather
+  than unit tests.  The distinction matters: a unit test in isolation
+  may verify that a function produces the right output for a given
+  input, but an integration test verifies that the function works
+  correctly within the larger system---with real file I/O, real
+  database connections, and real inter-module interactions.
+
+\item \textbf{``Each test should be independent and verify actual
+  behavior.''}  Test independence means that running tests in any
+  order produces the same results.  Tests that depend on shared state
+  or execution order are brittle and difficult to debug when they
+  fail.  ``Verify actual behavior'' reiterates that tests should
+  assert on observable outcomes (return values, side effects, system
+  state) rather than implementation details.
+
+\item \textbf{``Do NOT run all tests after modifications.\ Only run
+  the impacted tests.''}  Running the full test suite after every
+  small change is wasteful when only a few modules are affected.  For
+  a large project, a full test run may take minutes, and doing it
+  after every edit adds up to significant wasted time and compute.
+  This instruction directs the model to identify which tests are
+  affected by its changes and run only those, improving iteration
+  speed.
+
+\item \textbf{``To confirm a race condition, add sleep statements
+  before racing statements with delays less than 0.1s.''}  Race
+  conditions are notoriously difficult to reproduce because they
+  depend on precise timing.  By inserting small sleep delays at
+  strategic points, the model can widen the race window and make the
+  bug manifest deterministically in a test.  The 0.1-second upper
+  bound keeps the test fast while still being sufficient to expose
+  most races.
+\end{itemize}
 
 %......................................................................
 \subsection{Self-Improvement Loop}
@@ -575,9 +939,43 @@ discovered during task execution:
   that conflict with the newly added ones.
 \end{prompt}
 
-\noindent This mechanism allows the agent to learn persistent user preferences
-(e.g., preferred code style, testing conventions, project-specific
-invariants) without requiring the user to repeat them in every prompt.
+\noindent Each instruction in this section serves the goal of
+cross-session learning:
+
+\begin{itemize}[nosep]
+\item \textbf{``Read the instructions in PWD/USER\_PREFS.md at the
+  start of each task.''}  The preferences file contains invariants
+  learned from previous tasks---coding conventions, project-specific
+  rules, architectural decisions.  Reading it at the start of each
+  task ensures that the agent's behavior is consistent across
+  sessions, even though each session starts with a fresh context
+  window.
+
+\item \textbf{``Then update PWD/USER\_PREFS.md to capture the user
+  preferences and invariants by analyzing the task.''}  After
+  completing a task, the agent may have learned new information about
+  the user's preferences: a preferred naming convention, a disliked
+  pattern, a project-specific invariant.  Writing these to the
+  preferences file makes them available to future sessions.  This
+  mechanism allows the agent to accumulate project knowledge over time
+  without requiring the user to repeat themselves.
+
+\item \textbf{``DO NOT ADD ANY CODE SNIPPETS OR SYMBOLS.''}  Code
+  snippets in the preferences file are fragile: they become stale as
+  the codebase evolves, and they consume tokens that would be better
+  spent on natural-language descriptions of invariants.  This
+  instruction keeps the file compact and robust to code changes.
+
+\item \textbf{``You MUST carefully and thoroughly get rid of the user
+  preferences and invariants that conflict with the newly added
+  ones.''}  Over time, preferences may become contradictory---for
+  example, an early preference might say ``use camelCase for test
+  methods'' while a later correction says ``use snake\_case.''
+  Without explicit conflict resolution, the file would accumulate
+  contradictions that confuse the agent.  This instruction mandates
+  that the agent actively resolve conflicts when updating the file,
+  keeping it internally consistent.
+\end{itemize}
 
 %......................................................................
 \subsection{Pre-Finish Verification}
@@ -604,8 +1002,47 @@ Before calling finish(success=True, ...), you MUST:
    and try a different strategy.
 \end{prompt}
 
-\noindent This verification protocol prevents the agent from
-declaring premature success and forces it to confront failures.
+\noindent Each step in this checklist addresses a specific way agents
+declare premature success:
+
+\begin{itemize}[nosep]
+\item \textbf{``Re-read every file you modified and verify the changes
+  are correct.''}  This is the analog of a code review performed by
+  the agent on its own work.  The model may have introduced a typo,
+  forgotten to close a bracket, or made an edit that looked correct in
+  the diff but is wrong in the full file context.  Re-reading the file
+  after all edits are complete catches these errors.
+
+\item \textbf{``Run the required checks (lint, typecheck, tests) and
+  fix any failures.''}  This converts the subjective assessment ``I
+  think my changes are correct'' into an objective, automated
+  verification.  If the lint, typecheck, or test suite fails, the
+  agent must fix the failure before declaring success.
+
+\item \textbf{``Explicitly check each user requirement against what
+  was delivered.''}  The model may have completed a task that it
+  \emph{thinks} satisfies the user's request but actually misses a
+  requirement.  This instruction forces a systematic comparison
+  between the original task description and the delivered result,
+  catching gaps and misinterpretations.
+
+\item \textbf{``If any check fails, continue working instead of
+  finishing.''}  Without this instruction, the model may call
+  \texttt{finish(success=True)} even when it knows a check has failed,
+  rationalizing that the failure is ``minor'' or ``unrelated.''  The
+  instruction makes the rule absolute: no finishing until all checks
+  pass.
+
+\item \textbf{``If you have retried the same fix 3 times without
+  progress, step back, rethink the approach from scratch, and try a
+  different strategy.''}  LLMs can enter repetitive loops where they
+  apply the same incorrect fix repeatedly, each time hoping for a
+  different result.  The three-retry threshold forces the model to
+  break out of such loops by abandoning the current approach and
+  reconsidering the problem from first principles.  This is analogous
+  to the debugging heuristic ``if you've been staring at the same code
+  for twenty minutes, you're looking in the wrong place.''
+\end{itemize}
 
 %......................................................................
 \subsection{Web Research Protocol}
