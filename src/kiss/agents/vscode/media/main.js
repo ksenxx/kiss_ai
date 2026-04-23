@@ -1407,6 +1407,114 @@
     if (tab && !tab.panelsExpanded) applyChevronState(false);
   }
 
+  /**
+   * Process a streaming output event for a background (non-active) tab.
+   * Mirrors processOutputEvent but operates on the tab's saved outputFragment
+   * and streaming state so panels are built even when the tab is not visible.
+   */
+  function processOutputEventForBgTab(ev, tab) {
+    const t = ev.type;
+
+    if (!tab.outputFragment) tab.outputFragment = document.createDocumentFragment();
+
+    // Load the tab's streaming state into locals
+    let bgLastToolName = tab.streamLastToolName || '';
+    let bgLlmPanel = tab.streamLlmPanel || null;
+    let bgLlmPanelState = tab.streamLlmPanelState || mkS();
+    let bgPendingPanel = tab.streamPendingPanel || false;
+    let bgStepCount = tab.streamStepCount || 0;
+    let bgState = tab.streamState || mkS();
+
+    // Advance the streaming state machine
+    if (t === 'tool_call') {
+      bgLastToolName = ev.name || '';
+      bgLlmPanel = null;
+      bgLlmPanelState = mkS();
+      bgPendingPanel = false;
+    }
+    if (t === 'tool_result' && bgLastToolName !== 'finish') {
+      bgPendingPanel = true;
+    }
+
+    // Create a new llm-panel when needed
+    if (
+      (bgPendingPanel || bgStepCount === 0) &&
+      (t === 'thinking_start' || t === 'text_delta')
+    ) {
+      bgStepCount++;
+      tab.statusStepsText = 'Steps: ' + bgStepCount;
+      bgLlmPanel = mkEl('div', 'llm-panel');
+      const lHdr = mkEl('div', 'llm-panel-hdr');
+      lHdr.textContent = 'Thoughts';
+      addCollapse(bgLlmPanel, lHdr);
+      bgLlmPanel.appendChild(lHdr);
+      tab.outputFragment.appendChild(bgLlmPanel);
+      bgLlmPanelState = mkS();
+      bgPendingPanel = false;
+    }
+
+    // Handle usage_info: save to tab state without touching DOM
+    if (t === 'usage_info') {
+      if (ev.total_tokens != null && ev.cost != null) {
+        tab.statusTokensText = 'Tokens: ' + fmtN(ev.total_tokens);
+        if (ev.cost !== 'N/A') tab.statusBudgetText = 'Cost: ' + ev.cost;
+        if (ev.total_steps != null)
+          tab.statusStepsText = 'Steps: ' + ev.total_steps;
+      }
+    } else {
+      let target = tab.outputFragment;
+      let tState = bgState;
+      if (
+        bgLlmPanel &&
+        (t === 'thinking_start' ||
+          t === 'thinking_delta' ||
+          t === 'thinking_end' ||
+          t === 'text_delta' ||
+          t === 'text_end')
+      ) {
+        target = bgLlmPanel;
+        tState = bgLlmPanelState;
+      }
+
+      // Protect active-tab globals from side effects in handleOutputEvent
+      // (result events update statusTokens/statusBudget/stepCount via DOM)
+      const prevStepCount = stepCount;
+      const prevTokensText = statusTokens ? statusTokens.textContent : '';
+      const prevBudgetText = statusBudget ? statusBudget.textContent : '';
+      const prevStepsText = statusSteps ? statusSteps.textContent : '';
+
+      handleOutputEvent(ev, target, tState);
+
+      // Restore active-tab globals
+      stepCount = prevStepCount;
+      if (statusTokens) statusTokens.textContent = prevTokensText;
+      if (statusBudget) statusBudget.textContent = prevBudgetText;
+      if (statusSteps) statusSteps.textContent = prevStepsText;
+
+      if (t === 'result') {
+        if (ev.step_count) {
+          bgStepCount = ev.step_count;
+          tab.statusStepsText = 'Steps: ' + ev.step_count;
+        }
+        if (ev.total_tokens)
+          tab.statusTokensText = 'Tokens: ' + fmtN(ev.total_tokens);
+        if (ev.cost && ev.cost !== 'N/A')
+          tab.statusBudgetText = 'Cost: ' + ev.cost;
+        collapseAllExceptResult(tab.outputFragment);
+        if (ev.success === false) tab.lastTaskFailed = true;
+      }
+    }
+
+    // Save streaming state back to the tab
+    tab.streamState = bgState;
+    tab.streamLlmPanel = bgLlmPanel;
+    tab.streamLlmPanelState = bgLlmPanelState;
+    tab.streamLastToolName = bgLastToolName;
+    tab.streamPendingPanel = bgPendingPanel;
+    tab.streamStepCount = bgStepCount;
+    tab.welcomeVisible = false;
+  }
+
   // --- Scrolling ---
 
   function sb() {
@@ -2051,7 +2159,11 @@
         break;
       }
       default:
-        if (ev.tabId !== undefined && ev.tabId !== activeTabId) break;
+        if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
+          const bgTab = findTabByEvt(ev);
+          if (bgTab) processOutputEventForBgTab(ev, bgTab);
+          break;
+        }
         processOutputEvent(ev);
         if (isActiveTabRunning()) showSpinner();
         sb();
