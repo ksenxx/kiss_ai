@@ -15,6 +15,7 @@ from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.agents.sorcar.web_use_tool import WebUseTool
 from kiss.core.base import SYSTEM_PROMPT
 from kiss.core.models.model import Attachment
+from kiss.core.models.model_info import get_default_model
 from kiss.core.printer import Printer
 from kiss.core.relentless_agent import RelentlessAgent
 
@@ -149,7 +150,7 @@ class SorcarAgent(RelentlessAgent):
         printer: Printer | None = None,
         verbose: bool | None = None,
     ) -> None:
-        resolved_model = model_name or _load_last_model() or "claude-opus-4-6"
+        resolved_model = model_name or _load_last_model() or get_default_model()
         _save_last_model(resolved_model)
         super()._reset(
             model_name=resolved_model,
