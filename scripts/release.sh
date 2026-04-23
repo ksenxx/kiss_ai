@@ -7,7 +7,7 @@
 # Workflow:
 # 1. Stash any uncommitted changes
 # 2. Check if origin is ahead of kiss_ai repo
-# 3. If ahead, bump version in _version.py, README.md, SYSTEM.md, package.json
+# 3. If ahead, bump version in _version.py, README.md, SYSTEM.md, package.json, package-lock.json
 # 4. Build VS Code extension (.vsix) so it's included in the commit
 # 5. Commit changes with "Version bumped" (includes vsix)
 # 6. Push to origin
@@ -145,6 +145,20 @@ update_vscode_package_version() {
     sed -i.bak "s/\"version\": \"[^\"]*\"/\"version\": \"${version}\"/" "$pkg_json"
     rm -f "${pkg_json}.bak"
     print_info "Updated $pkg_json to version $version"
+}
+
+update_vscode_package_lock_version() {
+    local version="$1"
+    local lock_json="${VSCODE_EXT_DIR}/package-lock.json"
+    if [[ ! -f "$lock_json" ]]; then
+        print_warn "VS Code package-lock.json not found: $lock_json - skipping"
+        return
+    fi
+    # Only the first 15 lines contain the project's own version (lines 3 and 9);
+    # dependency versions deeper in the file must not be touched.
+    sed -i.bak "1,15s/\"version\": \"[^\"]*\"/\"version\": \"${version}\"/" "$lock_json"
+    rm -f "${lock_json}.bak"
+    print_info "Updated $lock_json to version $version"
 }
 
 ensure_remote() {
@@ -340,6 +354,7 @@ main() {
     update_readme_version "$VERSION"
     update_system_md_version "$VERSION"
     update_vscode_package_version "$VERSION"
+    update_vscode_package_lock_version "$VERSION"
 
     # Step 3: Build VS Code extension (before commit so vsix is included)
     build_vscode_extension

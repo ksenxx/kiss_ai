@@ -59,3 +59,4 @@
 - When a default model name is hardcoded as a fallback, use the get_default_model function from model_info instead of a string literal so the default stays consistent with the centralized model selection logic.
 - When moving a package directory, update all import paths, entry points in pyproject.toml, pyrightconfig.json paths, and run ruff --fix to re-sort imports after the rename. Also move the corresponding test directory to mirror the new source layout.
 - Version numbers follow the calendar format yyyy.mm.minor_number (e.g. 2026.4.0). The bump_version function uses the current year and month, incrementing the minor number if the year and month match the existing version, or resetting to 0 if they differ.
+- When bumping version numbers in the release script, update ALL files that embed the version: _version.py, README.md, SYSTEM.md, package.json, and package-lock.json. For lockfiles, only update the project's own version entries (not dependency versions).
