@@ -26,9 +26,8 @@ from typing import Any, cast
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.channels._backend_utils import wait_for_matching_message
-from kiss.channels._channel_agent_utils import (
+from kiss.agents.channels._backend_utils import wait_for_matching_message
+from kiss.agents.channels._channel_agent_utils import (
     BaseChannelAgent,
     ToolMethodBackend,
     channel_main,
@@ -36,6 +35,7 @@ from kiss.channels._channel_agent_utils import (
     load_json_config,
     save_json_config,
 )
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +132,7 @@ class SlackChannelBackend(ToolMethodBackend):
         if not token:
             self._connection_info = (
                 "No Slack token found. Please store a bot token first.\n"
-                "Run: uv run python -m kiss.channels.slack_agent --task 'check auth'\n"
+                "Run: uv run python -m kiss.agents.channels.slack_agent --task 'check auth'\n"
                 "Or manually save token to ~/.kiss/channels/slack/token.json"
             )
             return False

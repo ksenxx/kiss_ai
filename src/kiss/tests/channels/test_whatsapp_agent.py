@@ -14,7 +14,7 @@ import tempfile
 
 import pytest
 
-from kiss.channels.whatsapp_agent import (
+from kiss.agents.channels.whatsapp_agent import (
     WhatsAppAgent,
     WhatsAppChannelBackend,
     _config,

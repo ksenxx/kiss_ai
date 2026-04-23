@@ -16,13 +16,13 @@ import time
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.channels._channel_agent_utils import (
+from kiss.agents.channels._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
     ToolMethodBackend,
     channel_main,
 )
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
 _NOSTR_DIR = Path.home() / ".kiss" / "channels" / "nostr"
 _config = ChannelConfig(_NOSTR_DIR, ("private_key",))

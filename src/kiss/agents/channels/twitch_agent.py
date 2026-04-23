@@ -18,13 +18,13 @@ from typing import Any
 
 import requests
 
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.channels._channel_agent_utils import (
+from kiss.agents.channels._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
     ToolMethodBackend,
     channel_main,
 )
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
 _TWITCH_DIR = Path.home() / ".kiss" / "channels" / "twitch"
 _HELIX_BASE = "https://api.twitch.tv/helix"

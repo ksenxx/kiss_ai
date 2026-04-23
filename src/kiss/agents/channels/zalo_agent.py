@@ -23,18 +23,18 @@ from typing import Any
 
 import requests
 
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.channels._backend_utils import (
+from kiss.agents.channels._backend_utils import (
     ThreadedHTTPServer,
     stop_http_server,
     wait_for_matching_message,
 )
-from kiss.channels._channel_agent_utils import (
+from kiss.agents.channels._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
     ToolMethodBackend,
     channel_main,
 )
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
 logger = logging.getLogger(__name__)
 
