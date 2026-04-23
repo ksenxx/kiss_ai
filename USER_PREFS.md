@@ -46,5 +46,6 @@
 - When replaying events into an auxiliary container (e.g. adjacent-task), save AND restore ALL header metrics (tokens, budget, steps) around the replay, and capture the replayed metrics on the container so scroll-based visibility switching can update the header from them.
 - When a benchmark or evaluation runner invokes tools as subprocesses, build the package from local source before launching the subprocess and pass the pre-built artifact path via an environment variable so the subprocess can skip redundant rebuilds.
 - When adding new webview features, implement them in separate JS files and expose a minimal API from main.js via a window global object, keeping changes to main.js minimal.
+- When replaying events in demo mode, group events into logical panels and replay each panel as a unit with a brief pause and collapse, rather than replaying events one-by-one with individual delays.
 - When adding related work or citations to a LaTeX paper, validate every citation by checking that the arXiv ID returns HTTP 200 or the URL resolves before inserting it into the bibliography. Compile twice with pdflatex and verify no undefined citation warnings remain.
 - When asked to cite recent papers, read the abstracts to judge relevance and verify publication dates before adding to the paper. Prioritize papers with high citation counts and direct topical relevance.

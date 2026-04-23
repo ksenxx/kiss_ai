@@ -3527,6 +3527,7 @@
     scrollToBottom: sb,
     getActiveTabId: function() { return activeTabId; },
     sendMessage: function(msg) { vscode.postMessage(msg); },
+    collapsePanels: function() { collapseAllExceptResult(O); },
   };
 
   // Start

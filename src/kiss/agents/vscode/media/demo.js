@@ -5,7 +5,8 @@
  * When demo mode is on and a user clicks a task in the history sidebar,
  * all tasks in the history are replayed sequentially:
  *   1. Task text appears in the input box (2-second pause)
- *   2. Each event streams with a 1-second delay
+ *   2. Events are grouped into logical panels and each panel is loaded
+ *      in 0.5s then collapsed before moving to the next
  *   3. The result panel streams word-by-word
  *
  * Communicates with main.js via window._demoApi (set by main.js).
@@ -139,6 +140,82 @@
     return d.innerHTML;
   }
 
+  /** Lifecycle event types to skip during replay. */
+  var SKIP_TYPES = {
+    task_done: 1,
+    task_error: 1,
+    task_stopped: 1,
+    followup_suggestion: 1,
+  };
+
+  /**
+   * Group a flat list of events into logical panel groups.
+   *
+   * Each group corresponds to one visual panel in the output:
+   *   - LLM panel: starts at thinking_start/text_delta after a tool_result
+   *     (or at step 0), includes all thinking/text events until the next
+   *     tool_call or result.
+   *   - Tool call panel: starts at tool_call, includes system_output and
+   *     tool_result events.
+   *   - Result panel: a single result event.
+   *
+   * @param {Array} events - Flat list of task events.
+   * @returns {Array<Array>} - Array of event groups.
+   */
+  function groupEventsIntoPanels(events) {
+    var panels = [];
+    var current = [];
+    var afterToolResult = true; // start true so first thought gets a panel
+
+    for (var i = 0; i < events.length; i++) {
+      var ev = events[i];
+      var t = ev.type;
+
+      if (SKIP_TYPES[t]) continue;
+
+      // tool_call starts a new tool-call panel group
+      if (t === 'tool_call') {
+        if (current.length > 0) panels.push(current);
+        current = [ev];
+        afterToolResult = false;
+        continue;
+      }
+
+      // thinking_start or text_delta after a tool_result starts a new llm-panel
+      if ((t === 'thinking_start' || t === 'text_delta') && afterToolResult) {
+        if (current.length > 0) panels.push(current);
+        current = [ev];
+        afterToolResult = false;
+        continue;
+      }
+
+      // result is always its own group
+      if (t === 'result') {
+        if (current.length > 0) panels.push(current);
+        panels.push([ev]);
+        current = [];
+        afterToolResult = false;
+        continue;
+      }
+
+      // tool_result marks the end of a tool-call group
+      if (t === 'tool_result') {
+        current.push(ev);
+        afterToolResult = true;
+        continue;
+      }
+
+      // Everything else (deltas, system_output, usage_info) stays in current group
+      current.push(ev);
+    }
+
+    if (current.length > 0) panels.push(current);
+    return panels;
+  }
+
+  // Expose for testing
+  window._groupEventsIntoPanels = groupEventsIntoPanels;
+
   /**
    * Start the demo replay for all sessions in the history.
    * Called from main.js when a history item is clicked in demo mode.
@@ -183,28 +260,30 @@
       var events = await requestEvents(api, session.id);
       if (cancelRequested) break;
 
-      // Step 4: Stream each event with a delay
-      for (var j = 0; j < events.length; j++) {
-        if (cancelRequested) break;
-        var ev = events[j];
+      // Step 4: Group events into panels and replay panel-by-panel
+      var panelGroups = groupEventsIntoPanels(events);
 
-        // Skip lifecycle meta-events
-        if (
-          ev.type === 'task_done' ||
-          ev.type === 'task_error' ||
-          ev.type === 'task_stopped' ||
-          ev.type === 'followup_suggestion'
-        ) {
+      for (var j = 0; j < panelGroups.length; j++) {
+        if (cancelRequested) break;
+        var group = panelGroups[j];
+
+        // Check if this group is a result panel
+        if (group.length === 1 && group[0].type === 'result') {
+          await streamResultEvent(api, group[0]);
           continue;
         }
 
-        if (ev.type === 'result') {
-          // Stream the result panel word-by-word
-          await streamResultEvent(api, ev);
-        } else {
-          api.processEvent(ev);
+        // Process all events in this panel group at once
+        for (var k = 0; k < group.length; k++) {
+          api.processEvent(group[k]);
+        }
+        api.scrollToBottom();
+
+        // Brief pause to show the panel, then collapse it
+        await sleep(500);
+        if (!cancelRequested) {
+          api.collapsePanels();
           api.scrollToBottom();
-          await sleep(1000);
         }
       }
 
