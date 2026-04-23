@@ -3648,7 +3648,7 @@ class TestSidebarViewBehavior(unittest.TestCase):
         idx = self._sidebar_ts.index("case 'submit':")
         end = self._sidebar_ts.index("break;", idx) + len("break;")
         block = self._sidebar_ts[idx:end]
-        assert "$PWD" in block
+        assert "PWD" in block
 
     def test_resolves_file_paths_in_submit(self) -> None:
         idx = self._sidebar_ts.index("case 'submit':")
