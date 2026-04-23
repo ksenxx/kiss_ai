@@ -479,7 +479,7 @@ class TestTaskErrorStoppedGuard(unittest.TestCase):
 
 
 class TestDefaultStreamingGuard(unittest.TestCase):
-    """Default handler (streaming output): skipped on wrong tab."""
+    """Default handler (streaming output): routes bg tab events to processOutputEventForBgTab."""
 
     js: str
 
@@ -489,8 +489,9 @@ class TestDefaultStreamingGuard(unittest.TestCase):
 
     def test_default_guard_in_source(self) -> None:
         idx = self.js.index("default:")
-        block = self.js[idx : idx + 200]
+        block = self.js[idx : idx + 300]
         assert "ev.tabId !== undefined && ev.tabId !== activeTabId" in block
+        assert "processOutputEventForBgTab" in block
 
 
 class TestFullTabSwitchScenario(unittest.TestCase):
@@ -1311,6 +1312,239 @@ class TestInputContainerVisibility(unittest.TestCase):
         )
         assert "inputContainer.style.display = 'none'" in body
         assert "inputContainer.style.display = ''" in body
+
+
+class TestBgTabPanelCreation(unittest.TestCase):
+    """Background tabs must get panels created for streaming events via
+    processOutputEventForBgTab instead of silently dropping them."""
+
+    js: str
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.js = _MAIN_JS.read_text()
+
+    def test_processOutputEventForBgTab_exists(self) -> None:
+        """The function processOutputEventForBgTab must exist in main.js."""
+        assert "function processOutputEventForBgTab(ev, tab)" in self.js
+
+    def test_default_handler_routes_bg_events(self) -> None:
+        """The default case calls processOutputEventForBgTab for bg tabs."""
+        idx = self.js.index("default:")
+        block = self.js[idx : idx + 300]
+        assert "processOutputEventForBgTab" in block
+        assert "findTabByEvt" in block
+
+    def test_bg_tab_panel_creation_via_node(self) -> None:
+        """Simulate the processOutputEventForBgTab logic in Node.js:
+        streaming events for a bg tab create panels in outputFragment."""
+        result = _run_node(
+            _make_test_script(
+                r"""
+            // Minimal replica of processOutputEventForBgTab logic from main.js
+            function mkS() {
+                return { thinkEl: null, txtEl: null, txtBuf: '', bashPanel: null,
+                         bashBuf: '', bashRaf: 0, lastToolCallEl: null };
+            }
+            function mkEl(tag, cls) {
+                var el = _makeEl(tag);
+                el.className = cls || '';
+                return el;
+            }
+            function addCollapse(p, h) {
+                p.classList.add('collapsible');
+            }
+
+            function processOutputEventForBgTab(ev, tab) {
+                var t = ev.type;
+                if (!tab.outputFragment)
+                    tab.outputFragment = document.createDocumentFragment();
+                var bgLastToolName = tab.streamLastToolName || '';
+                var bgLlmPanel = tab.streamLlmPanel || null;
+                var bgLlmPanelState = tab.streamLlmPanelState || mkS();
+                var bgPendingPanel = tab.streamPendingPanel || false;
+                var bgStepCount = tab.streamStepCount || 0;
+                var bgState = tab.streamState || mkS();
+
+                if (t === 'tool_call') {
+                    bgLastToolName = ev.name || '';
+                    bgLlmPanel = null; bgLlmPanelState = mkS();
+                    bgPendingPanel = false;
+                }
+                if (t === 'tool_result' && bgLastToolName !== 'finish') {
+                    bgPendingPanel = true;
+                }
+                if ((bgPendingPanel || bgStepCount === 0) &&
+                    (t === 'thinking_start' || t === 'text_delta')) {
+                    bgStepCount++;
+                    bgLlmPanel = mkEl('div', 'llm-panel');
+                    var lHdr = mkEl('div', 'llm-panel-hdr');
+                    lHdr.textContent = 'Thoughts';
+                    addCollapse(bgLlmPanel, lHdr);
+                    bgLlmPanel.appendChild(lHdr);
+                    tab.outputFragment.appendChild(bgLlmPanel);
+                    bgLlmPanelState = mkS();
+                    bgPendingPanel = false;
+                }
+                if (t === 'usage_info') {
+                    if (ev.total_tokens != null && ev.cost != null) {
+                        tab.statusTokensText = 'Tokens: ' + ev.total_tokens;
+                        if (ev.cost !== 'N/A') tab.statusBudgetText = 'Cost: ' + ev.cost;
+                    }
+                }
+                if (t === 'result') {
+                    if (ev.step_count) {
+                        bgStepCount = ev.step_count;
+                        tab.statusStepsText = 'Steps: ' + ev.step_count;
+                    }
+                    if (ev.total_tokens)
+                        tab.statusTokensText = 'Tokens: ' + ev.total_tokens;
+                    if (ev.cost && ev.cost !== 'N/A')
+                        tab.statusBudgetText = 'Cost: ' + ev.cost;
+                    if (ev.success === false) tab.lastTaskFailed = true;
+                    // Create result card in fragment
+                    var rc = mkEl('div', 'ev rc');
+                    rc.textContent = ev.text || '';
+                    tab.outputFragment.appendChild(rc);
+                }
+                tab.streamState = bgState;
+                tab.streamLlmPanel = bgLlmPanel;
+                tab.streamLlmPanelState = bgLlmPanelState;
+                tab.streamLastToolName = bgLastToolName;
+                tab.streamPendingPanel = bgPendingPanel;
+                tab.streamStepCount = bgStepCount;
+                tab.welcomeVisible = false;
+            }
+
+            // --- Test scenario ---
+            var tab1 = {
+                id: 'tab-1', isRunning: true, outputFragment: null,
+                streamState: null, streamLlmPanel: null,
+                streamLlmPanelState: null, streamLastToolName: '',
+                streamPendingPanel: false, streamStepCount: 0,
+                statusTokensText: '', statusBudgetText: '',
+                statusStepsText: '', lastTaskFailed: false,
+                welcomeVisible: true,
+            };
+
+            var errors = [];
+
+            // 1. Send tool_result then thinking_start → should create panel
+            processOutputEventForBgTab({type: 'tool_result', content: 'ok'}, tab1);
+            processOutputEventForBgTab({type: 'thinking_start'}, tab1);
+            processOutputEventForBgTab({type: 'thinking_end'}, tab1);
+
+            var frag = tab1.outputFragment;
+            if (!frag || frag.children.length === 0)
+                errors.push('no panel after thinking_start');
+            else if (frag.children[0].className.indexOf('llm-panel') < 0)
+                errors.push('first child not llm-panel: ' + frag.children[0].className);
+            if (tab1.streamStepCount !== 1)
+                errors.push('stepCount not 1: ' + tab1.streamStepCount);
+
+            // 2. Send usage_info → saved on tab, not DOM
+            processOutputEventForBgTab(
+                {type: 'usage_info', total_tokens: 5000, cost: '$1.23'}, tab1);
+            if (tab1.statusTokensText.indexOf('5000') < 0)
+                errors.push('usage tokens not saved: ' + tab1.statusTokensText);
+
+            // 3. Send result → creates rc, saves step_count
+            processOutputEventForBgTab(
+                {type: 'result', text: 'Done', success: true,
+                 total_tokens: 9000, cost: '$2.50', step_count: 5}, tab1);
+            if (tab1.streamStepCount !== 5)
+                errors.push('stepCount not 5: ' + tab1.streamStepCount);
+            var hasRc = false;
+            (tab1.outputFragment.children || []).forEach(function(c) {
+                if (c.className && c.className.indexOf('rc') >= 0) hasRc = true;
+            });
+            if (!hasRc) errors.push('no rc element after result');
+            if (tab1.statusTokensText.indexOf('9000') < 0)
+                errors.push('result tokens not saved: ' + tab1.statusTokensText);
+
+            // 4. welcomeVisible should be false
+            if (tab1.welcomeVisible !== false)
+                errors.push('welcomeVisible not false');
+
+            if (errors.length > 0) {
+                process.stdout.write('FAIL: ' + errors.join('; '));
+                process.exit(1);
+            }
+            process.stdout.write('PASS');
+        """
+            )
+        )
+        assert result.returncode == 0, f"Node test failed:\n{result.stdout}\n{result.stderr}"
+        assert "PASS" in result.stdout, result.stdout
+
+    def test_bg_tab_first_thought_gets_panel(self) -> None:
+        """stepCount === 0 should trigger a panel even without tool_result."""
+        result = _run_node(
+            _make_test_script(
+                r"""
+            function mkS() {
+                return { thinkEl: null, txtEl: null, txtBuf: '', bashPanel: null,
+                         bashBuf: '', bashRaf: 0, lastToolCallEl: null };
+            }
+            function mkEl(tag, cls) {
+                var el = _makeEl(tag); el.className = cls || ''; return el;
+            }
+            function addCollapse(p, h) { p.classList.add('collapsible'); }
+
+            function processOutputEventForBgTab(ev, tab) {
+                var t = ev.type;
+                if (!tab.outputFragment)
+                    tab.outputFragment = document.createDocumentFragment();
+                var bgStepCount = tab.streamStepCount || 0;
+                var bgPendingPanel = tab.streamPendingPanel || false;
+                var bgLlmPanel = tab.streamLlmPanel || null;
+                var bgLlmPanelState = tab.streamLlmPanelState || mkS();
+                var bgLastToolName = tab.streamLastToolName || '';
+                var bgState = tab.streamState || mkS();
+
+                if (t === 'tool_call') {
+                    bgLastToolName = ev.name || '';
+                    bgLlmPanel = null; bgLlmPanelState = mkS();
+                    bgPendingPanel = false;
+                }
+                if (t === 'tool_result' && bgLastToolName !== 'finish')
+                    bgPendingPanel = true;
+                if ((bgPendingPanel || bgStepCount === 0) &&
+                    (t === 'thinking_start' || t === 'text_delta')) {
+                    bgStepCount++;
+                    bgLlmPanel = mkEl('div', 'llm-panel');
+                    tab.outputFragment.appendChild(bgLlmPanel);
+                    bgPendingPanel = false;
+                }
+                tab.streamStepCount = bgStepCount;
+                tab.streamPendingPanel = bgPendingPanel;
+                tab.streamLlmPanel = bgLlmPanel;
+                tab.streamLastToolName = bgLastToolName;
+            }
+
+            var tab = {
+                id: 't1', outputFragment: null, streamStepCount: 0,
+                streamPendingPanel: false, streamLlmPanel: null,
+                streamLlmPanelState: null, streamLastToolName: '',
+                streamState: null,
+            };
+
+            // First thinking_start with stepCount=0 should create a panel
+            processOutputEventForBgTab({type: 'thinking_start'}, tab);
+            if (!tab.outputFragment || tab.outputFragment.children.length === 0) {
+                process.stdout.write('FAIL: no panel for first thought');
+                process.exit(1);
+            }
+            if (tab.streamStepCount !== 1) {
+                process.stdout.write('FAIL: stepCount not 1');
+                process.exit(1);
+            }
+            process.stdout.write('PASS');
+        """
+            )
+        )
+        assert result.returncode == 0, f"Node test failed:\n{result.stdout}\n{result.stderr}"
+        assert "PASS" in result.stdout, result.stdout
 
 
 if __name__ == "__main__":
