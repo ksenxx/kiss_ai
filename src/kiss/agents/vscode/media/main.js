@@ -529,6 +529,11 @@
     // isRunning and leave inp / sendBtn disabled.  Mirrors switchToTab
     // and closeTab.
     setRunningState(tab.isRunning);
+    if (!tab.isRunning) {
+      t0 = null;
+      stopTimer();
+      removeSpinner();
+    }
     vscode.postMessage({type: 'getWelcomeSuggestions'});
     focusInputWithRetry();
   }
