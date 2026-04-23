@@ -145,6 +145,40 @@
           "when": "scmProvider == git",
           "group": "navigation"
         }
+      ],
+      "commandPalette": [
+        {
+          "command": "kissSorcar.acceptChange",
+          "when": "false"
+        },
+        {
+          "command": "kissSorcar.rejectChange",
+          "when": "false"
+        },
+        {
+          "command": "kissSorcar.prevChange",
+          "when": "false"
+        },
+        {
+          "command": "kissSorcar.nextChange",
+          "when": "false"
+        },
+        {
+          "command": "kissSorcar.acceptAll",
+          "when": "false"
+        },
+        {
+          "command": "kissSorcar.rejectAll",
+          "when": "false"
+        },
+        {
+          "command": "kissSorcar.acceptFile",
+          "when": "false"
+        },
+        {
+          "command": "kissSorcar.rejectFile",
+          "when": "false"
+        }
       ]
     },
     "keybindings": [
