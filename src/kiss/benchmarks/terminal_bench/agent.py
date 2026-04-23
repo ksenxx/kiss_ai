@@ -47,15 +47,28 @@ _wheel_path: Path | None = None
 
 
 def _get_wheel() -> Path:
-    """Build a wheel from local source, cached for the process lifetime.
+    """Return the kiss-agent-framework wheel, using a pre-built one if available.
+
+    When ``KISS_WHEEL_PATH`` is set (by :func:`run.build_package`),
+    the pre-built wheel is used directly, avoiding a redundant rebuild
+    inside the harbor subprocess.  Falls back to building from source
+    when the environment variable is not set.
 
     Returns:
-        Path to the built .whl file.
+        Path to the ``.whl`` file.
     """
     global _wheel_path
     with _wheel_lock:
         if _wheel_path is not None and _wheel_path.exists():
             return _wheel_path
+
+        env_wheel = os.environ.get("KISS_WHEEL_PATH")
+        if env_wheel:
+            p = Path(env_wheel)
+            if p.exists():
+                _wheel_path = p
+                return _wheel_path
+
         import kiss
 
         project_root = Path(kiss.__file__).resolve().parent.parent.parent

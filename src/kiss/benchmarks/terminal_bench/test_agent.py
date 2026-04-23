@@ -5,13 +5,19 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+import os
+import tempfile
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from kiss._version import __version__
 from kiss.benchmarks.terminal_bench.agent import (
     _SKIP_PHRASES,
     SorcarHarborAgent,
+    _get_wheel,
 )
+from kiss.benchmarks.terminal_bench.run import build_package
 
 
 @dataclass
@@ -204,3 +210,87 @@ class TestRunSorcarNotFound:
         assert len(env.exec_calls) == 1
         assert ctx.metadata is not None
         assert ctx.metadata["error"] == "sorcar not installed"
+
+
+class TestBuildPackage:
+    """Verify build_package() produces a fresh wheel."""
+
+    def test_build_package_returns_wheel(self) -> None:
+        wheel = build_package()
+        assert wheel.exists()
+        assert wheel.suffix == ".whl"
+        assert "kiss_agent_framework" in wheel.name
+
+    def test_build_package_cleans_old_wheels(self) -> None:
+        """build_package removes stale wheels before building."""
+        project_root = Path(__file__).resolve().parent.parent.parent.parent.parent
+        dist = project_root / "dist"
+        dist.mkdir(exist_ok=True)
+        stale = dist / "kiss_agent_framework-0.0.0-py3-none-any.whl"
+        stale.write_bytes(b"stale")
+        wheel = build_package()
+        assert not stale.exists(), "stale wheel should have been removed"
+        assert wheel.exists()
+
+
+class TestGetWheelRespectsEnvVar:
+    """Verify _get_wheel() uses KISS_WHEEL_PATH when set."""
+
+    def test_get_wheel_uses_env_var(self) -> None:
+        import kiss.benchmarks.terminal_bench.agent as agent_mod
+
+        with tempfile.NamedTemporaryFile(suffix=".whl", delete=False) as f:
+            f.write(b"dummy wheel")
+            tmp_wheel = Path(f.name)
+        try:
+            old = agent_mod._wheel_path
+            agent_mod._wheel_path = None
+            old_env = os.environ.get("KISS_WHEEL_PATH")
+            os.environ["KISS_WHEEL_PATH"] = str(tmp_wheel)
+            try:
+                result = _get_wheel()
+                assert result == tmp_wheel
+            finally:
+                agent_mod._wheel_path = old
+                if old_env is None:
+                    os.environ.pop("KISS_WHEEL_PATH", None)
+                else:
+                    os.environ["KISS_WHEEL_PATH"] = old_env
+        finally:
+            tmp_wheel.unlink(missing_ok=True)
+
+    def test_get_wheel_falls_back_to_build(self) -> None:
+        """Without KISS_WHEEL_PATH, _get_wheel builds from source."""
+        import kiss.benchmarks.terminal_bench.agent as agent_mod
+
+        old = agent_mod._wheel_path
+        agent_mod._wheel_path = None
+        old_env = os.environ.pop("KISS_WHEEL_PATH", None)
+        try:
+            result = _get_wheel()
+            assert result.exists()
+            assert "kiss_agent_framework" in result.name
+        finally:
+            agent_mod._wheel_path = old
+            if old_env is not None:
+                os.environ["KISS_WHEEL_PATH"] = old_env
+
+
+class TestRunTerminalBenchBuildsFirst:
+    """Verify run_terminal_bench() builds the package before harbor."""
+
+    def test_run_terminal_bench_calls_build_package(self) -> None:
+        """Structural: run_terminal_bench source contains build_package call."""
+        from kiss.benchmarks.terminal_bench.run import run_terminal_bench
+
+        src = inspect.getsource(run_terminal_bench)
+        assert "build_package()" in src
+        assert 'KISS_WHEEL_PATH' in src
+
+    def test_build_package_source_structure(self) -> None:
+        """Structural: build_package cleans old wheels and builds fresh."""
+        src = inspect.getsource(build_package)
+        assert "uv" in src
+        assert "build" in src
+        assert "unlink" in src
+        assert "kiss_agent_framework" in src

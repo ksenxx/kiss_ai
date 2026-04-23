@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import subprocess
 import sys
 import time
@@ -23,6 +24,39 @@ from pathlib import Path
 from typing import Any
 
 AGENT_IMPORT_PATH = "kiss.benchmarks.terminal_bench.agent:SorcarHarborAgent"
+
+
+def build_package() -> Path:
+    """Build the kiss-agent-framework wheel from local source.
+
+    Removes any stale wheels from ``dist/`` before building so the
+    freshly-built wheel is the only one present.  The resulting path
+    is returned and should be passed to the harbor subprocess via the
+    ``KISS_WHEEL_PATH`` environment variable so that
+    :func:`kiss.benchmarks.terminal_bench.agent._get_wheel` can pick
+    it up without rebuilding.
+
+    Returns:
+        Path to the newly built ``.whl`` file.
+    """
+    project_root = Path(__file__).resolve().parent.parent.parent.parent.parent
+    dist = project_root / "dist"
+    dist.mkdir(exist_ok=True)
+    for old in dist.glob("kiss_agent_framework-*.whl"):
+        old.unlink()
+    print("Building kiss-agent-framework from source...")
+    subprocess.run(
+        ["uv", "build", "--wheel", "--out-dir", str(dist)],
+        cwd=project_root,
+        check=True,
+    )
+    wheels = sorted(dist.glob("kiss_agent_framework-*.whl"))
+    if not wheels:
+        print("ERROR: No wheel found after build", file=sys.stderr)
+        sys.exit(1)
+    wheel = wheels[-1]
+    print(f"Built {wheel.name}")
+    return wheel
 
 
 def is_docker_hub_authenticated() -> bool:
@@ -168,6 +202,8 @@ def run_terminal_bench(
         trials: Number of attempts per task (-k flag). Use 5 for leaderboard.
         skip_pre_pull: If True, skip the image pre-pull step.
     """
+    wheel = build_package()
+
     if not is_docker_hub_authenticated():  # pragma: no branch
         print(
             "WARNING: Not authenticated to Docker Hub.\n"
@@ -196,8 +232,11 @@ def run_terminal_bench(
 
     print(f"Running: {' '.join(cmd)}")
 
+    env = os.environ.copy()
+    env["KISS_WHEEL_PATH"] = str(wheel)
+
     try:
-        subprocess.run(cmd, check=True)
+        subprocess.run(cmd, check=True, env=env)
     except FileNotFoundError:
         print(
             "ERROR: 'harbor' CLI not found. Install with: uv pip install harbor",
