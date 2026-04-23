@@ -10,10 +10,10 @@ clicks "Do nothing", the server leaves the working tree untouched.
 
 These tests drive :class:`VSCodeServer` with real ``git`` state — no
 mocks, no test doubles.  The LLM call for commit-message generation is
-replaced with a deterministic override of the
-``_compose_commit_message`` method (a seam introduced by the feature
-itself for testability), since this is a module-level extension point,
-not a mock / patch of dependency internals.
+replaced with a deterministic override of the module-level
+``generate_commit_message_from_diff`` function in ``merge_flow``,
+since this is a module-level extension point, not a mock / patch of
+dependency internals.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import kiss.agents.vscode.merge_flow as _merge_flow_module
 from kiss.agents.vscode.server import VSCodeServer
 
 
@@ -53,6 +54,7 @@ class _ServerHarness(unittest.TestCase):
         self.server = VSCodeServer()
         self.server.work_dir = self.tmpdir
         self.events: list[dict] = []
+        self._orig_gen = _merge_flow_module.generate_commit_message_from_diff
 
         def capture(event: dict) -> None:
             self.events.append(event)
@@ -60,6 +62,7 @@ class _ServerHarness(unittest.TestCase):
         self.server.printer.broadcast = capture  # type: ignore[assignment]
 
     def tearDown(self) -> None:
+        _merge_flow_module.generate_commit_message_from_diff = self._orig_gen
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _types(self) -> list[str]:
@@ -198,7 +201,7 @@ class TestAutocommitActionCommit(_ServerHarness):
             self._messages.append(diff_text)
             return "feat: deterministic test commit"
 
-        self.server._compose_commit_message = fake_compose  # type: ignore[assignment]
+        _merge_flow_module.generate_commit_message_from_diff = fake_compose  # type: ignore[assignment]
 
     def test_commit_stages_and_commits_tracked_and_untracked(self) -> None:
         Path(self.tmpdir, "seed.txt").write_text("updated seed\n")
@@ -301,7 +304,7 @@ class TestAutocommitCommandRouting(_ServerHarness):
         def fake_compose(diff_text: str) -> str:
             return "chore: test"
 
-        self.server._compose_commit_message = fake_compose  # type: ignore[assignment]
+        _merge_flow_module.generate_commit_message_from_diff = fake_compose  # type: ignore[assignment]
         self.server._handle_command(
             {"type": "autocommitAction", "action": "commit", "tabId": "t1"},
         )
@@ -336,7 +339,7 @@ class TestAutocommitPromptRoundtrip(_ServerHarness):
         def fake_compose(_diff: str) -> str:
             return "chore: auto"
 
-        self.server._compose_commit_message = fake_compose  # type: ignore[assignment]
+        _merge_flow_module.generate_commit_message_from_diff = fake_compose  # type: ignore[assignment]
         self.server._handle_command(
             {"type": "autocommitAction", "action": "commit", "tabId": "t1"},
         )

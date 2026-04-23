@@ -25,6 +25,7 @@ from kiss.agents.vscode.diff_merge import (
     _merge_data_dir,
     _prepare_merge_view,
 )
+from kiss.agents.vscode.helpers import generate_commit_message_from_diff
 from kiss.agents.vscode.tab_state import _TabState
 
 if TYPE_CHECKING:
@@ -154,49 +155,6 @@ class _MergeFlowMixin:
         merge_json = os.path.join(merge_dir, "pending-merge.json")
         return self._start_merge_session(merge_json, tab_id=tab_id)
 
-    def _start_worktree_merge_review(self, tab_id: str) -> bool:
-        """Prepare and start a merge review for worktree changes.
-
-        Builds a merge view from the worktree directory so the user can
-        accept/reject individual hunks before the worktree is committed
-        and merged.  When a baseline commit exists (user had dirty
-        state), diffs against the baseline so that both committed and
-        uncommitted agent changes are included in the review while the
-        user's pre-existing dirty state is excluded.
-
-        Args:
-            tab_id: The tab whose worktree to review.
-
-        Returns:
-            True if a merge session was started, False otherwise.
-        """
-        tab = self._get_tab(tab_id)
-        wt_dir = tab.agent._wt_dir
-        if wt_dir is None or not wt_dir.exists():
-            return False
-        base_ref = tab.agent._baseline_commit or "HEAD"
-        try:
-            return self._prepare_and_start_merge(
-                str(wt_dir), base_ref=base_ref, tab_id=tab_id,
-            )
-        except BaseException:
-            logger.debug("Worktree merge review error", exc_info=True)
-            return False
-
-    def _handle_merge_action(self, action: str, tab_id: str = "") -> None:
-        """Handle merge accept/reject actions from the extension.
-
-        Only ``all-done`` triggers cleanup. Individual ``accept``/``reject``
-        actions are tracked on the TypeScript side; the Python server
-        only needs to know when the entire merge session is finished.
-
-        Args:
-            action: The merge action string (e.g. ``"all-done"``).
-            tab_id: The tab whose merge session is being finished.
-        """
-        if action == "all-done":
-            self._finish_merge(tab_id)
-
     def _finish_merge(self, tab_id: str = "") -> None:
         """End the merge session for a specific tab.
 
@@ -322,7 +280,7 @@ class _MergeFlowMixin:
                     "message": "Generating commit message…",
                     "tabId": tab_id,
                 })
-                msg = self._compose_commit_message(diff.stdout) or "Auto-commit"
+                msg = generate_commit_message_from_diff(diff.stdout) or "Auto-commit"
                 self.printer.broadcast({
                     "type": "autocommit_progress",
                     "message": "Committing…",
@@ -356,42 +314,6 @@ class _MergeFlowMixin:
                 "message": str(e),
                 "tabId": tab_id,
             })
-
-    def _compose_commit_message(self, diff_text: str) -> str:  # pragma: no cover
-        """Generate a git commit message for *diff_text* via an LLM.
-
-        Exposed as a method so tests can substitute a deterministic
-        replacement without mocking the underlying LLM stack.
-
-        Args:
-            diff_text: Output of ``git diff --cached``.
-
-        Returns:
-            The cleaned commit-message string.
-        """
-        from kiss.agents.vscode.helpers import generate_commit_message_from_diff
-
-        return generate_commit_message_from_diff(diff_text)
-
-
-    def _broadcast_worktree_done(self, changed: list[str], tab_id: str = "") -> None:
-        """Broadcast a ``worktree_done`` event with the current worktree state.
-
-        Args:
-            changed: List of file paths changed in the worktree.
-            tab_id: The tab that owns the worktree.
-        """
-        wt = self._get_tab(tab_id).agent
-        event: dict[str, Any] = {
-            "type": "worktree_done",
-            "branch": wt._wt_branch,
-            "worktreeDir": str(wt._wt_dir),
-            "originalBranch": wt._original_branch,
-            "changedFiles": changed,
-            "hasConflict": self._check_merge_conflict(tab_id) if changed else False,
-            "tabId": tab_id,
-        }
-        self.printer.broadcast(event)
 
     def _emit_pending_worktree(self, tab_id: str = "") -> None:
         """Emit merge review or ``worktree_done`` for a pending worktree branch.
@@ -442,15 +364,34 @@ class _MergeFlowMixin:
         if not tab.use_worktree or not tab.agent._wt_pending:
             return
         changed = self._get_worktree_changed_files(tab_id)
-        if changed and try_merge_review and self._start_worktree_merge_review(tab_id):
-            return
+        if changed and try_merge_review:
+            wt_dir = tab.agent._wt_dir
+            if wt_dir is not None and wt_dir.exists():
+                base_ref = tab.agent._baseline_commit or "HEAD"
+                try:
+                    if self._prepare_and_start_merge(
+                        str(wt_dir), base_ref=base_ref, tab_id=tab_id,
+                    ):
+                        return
+                except BaseException:
+                    logger.debug("Worktree merge review error", exc_info=True)
         if not changed:
             with self._state_lock:
                 non_wt_busy = self._any_non_wt_running()
             if not non_wt_busy:
                 tab.agent.discard()
                 return
-        self._broadcast_worktree_done(changed, tab_id)
+        wt = tab.agent
+        event: dict[str, Any] = {
+            "type": "worktree_done",
+            "branch": wt._wt_branch,
+            "worktreeDir": str(wt._wt_dir),
+            "originalBranch": wt._original_branch,
+            "changedFiles": changed,
+            "hasConflict": self._check_merge_conflict(tab_id) if changed else False,
+            "tabId": tab_id,
+        }
+        self.printer.broadcast(event)
 
     def _ensure_worktree_state(self, tab_id: str = "") -> None:
         """Restore agent worktree state from git if not already set.

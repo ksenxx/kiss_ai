@@ -38,6 +38,7 @@ from kiss.agents.vscode.diff_merge import (  # noqa: F401 (re-export for tests)
 )
 from kiss.agents.vscode.helpers import (
     fast_model_for,
+    generate_commit_message_from_diff,
     generate_followup_text,
     model_vendor,
 )
@@ -392,7 +393,8 @@ class VSCodeServer(
                     "error": "No staged changes found. Stage files with 'git add' first.",
                 })
                 return
-            self._generate_commit_message_llm(diff_text)  # pragma: no cover
+            msg = generate_commit_message_from_diff(diff_text)  # pragma: no cover
+            self.printer.broadcast({"type": "commitMessage", "message": msg})  # pragma: no cover
         except Exception:  # pragma: no cover — LLM API error handler
             logger.debug("Commit message generation failed", exc_info=True)
             self.printer.broadcast({
@@ -400,11 +402,6 @@ class VSCodeServer(
                 "message": "",
                 "error": "Failed to generate",
             })
-
-    def _generate_commit_message_llm(self, diff_text: str) -> None:  # pragma: no cover
-        """Call LLM to generate commit message from diff text and broadcast it."""
-        msg = self._compose_commit_message(diff_text)
-        self.printer.broadcast({"type": "commitMessage", "message": msg})
 
 
 def main() -> None:  # pragma: no cover — CLI entry point

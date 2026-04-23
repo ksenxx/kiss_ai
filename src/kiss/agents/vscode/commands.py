@@ -17,10 +17,10 @@ from kiss.agents.sorcar.persistence import (
     _record_file_usage,
     _save_last_model,
 )
+from kiss.agents.vscode.tab_state import _TabState
 
 if TYPE_CHECKING:
     from kiss.agents.vscode.printer import VSCodePrinter
-    from kiss.agents.vscode.tab_state import _TabState
 
 logger = logging.getLogger(__name__)
 
@@ -49,9 +49,7 @@ class _CommandsMixin:
         def _get_files(self, prefix: str) -> None: ...
         def _refresh_file_cache(self) -> None: ...
         def _replay_session(self, chat_id: str, tab_id: str = "") -> None: ...
-        def _handle_merge_action(
-            self, action: str, tab_id: str = ""
-        ) -> None: ...
+        def _finish_merge(self, tab_id: str = "") -> None: ...
         def _new_chat(self, tab_id: str) -> None: ...
         def _close_tab(self, tab_id: str) -> None: ...
         def _ensure_complete_worker(self) -> None: ...
@@ -74,8 +72,6 @@ class _CommandsMixin:
         with self._state_lock:
             tab = self._tab_states.get(tab_id)
             if tab is None:
-                from kiss.agents.vscode.tab_state import _TabState
-
                 tab = _TabState(tab_id, self._default_model)
                 self._tab_states[tab_id] = tab
             if tab.task_thread is not None and tab.task_thread.is_alive():
@@ -154,8 +150,14 @@ class _CommandsMixin:
             self._replay_session(chat_id, cmd.get("tabId", ""))
 
     def _cmd_merge_action(self, cmd: dict[str, Any]) -> None:
-        """Handle merge accept/reject from the extension."""
-        self._handle_merge_action(cmd.get("action", ""), cmd.get("tabId", ""))
+        """Handle merge accept/reject from the extension.
+
+        Only ``all-done`` triggers cleanup. Individual ``accept``/``reject``
+        actions are tracked on the TypeScript side; the Python server
+        only needs to know when the entire merge session is finished.
+        """
+        if cmd.get("action", "") == "all-done":
+            self._finish_merge(cmd.get("tabId", ""))
 
     def _cmd_close_tab(self, cmd: dict[str, Any]) -> None:
         """Clean up backend state for a closed frontend tab."""

@@ -386,11 +386,12 @@ class TestBug28StartMergeSessionThreadLocal:
             _restore_db(saved)
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-    def test_start_worktree_merge_review_does_not_set_thread_local(self) -> None:
-        """BUG-28: _start_worktree_merge_review doesn't set thread-local tab_id."""
-        source = inspect.getsource(VSCodeServer._start_worktree_merge_review)
+    def test_present_pending_worktree_does_not_set_thread_local(self) -> None:
+        """BUG-28: _present_pending_worktree (which now includes the
+        worktree merge review logic) doesn't set thread-local tab_id."""
+        source = inspect.getsource(VSCodeServer._present_pending_worktree)
         assert "_thread_local.tab_id" not in source, (
-            "BUG-28 appears fixed: _start_worktree_merge_review now "
+            "BUG-28 appears fixed: _present_pending_worktree now "
             "sets thread-local tab_id"
         )
 

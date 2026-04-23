@@ -214,8 +214,8 @@ class TestBug9Fix:
 
         tab.agent.discard()
 
-    def test_broadcast_worktree_done_does_not_commit(self) -> None:
-        """_broadcast_worktree_done must not auto-commit via conflict check."""
+    def test_present_pending_worktree_does_not_commit(self) -> None:
+        """_present_pending_worktree must not auto-commit via conflict check."""
 
         server, events = _make_server(self.repo)
         tab = server._get_tab("0")
@@ -229,7 +229,7 @@ class TestBug9Fix:
 
         (wt_dir / "agent_output.txt").write_text("work\n")
 
-        server._broadcast_worktree_done(["agent_output.txt"], "0")
+        server._present_pending_worktree("0", try_merge_review=False)
 
         r = subprocess.run(
             ["git", "-C", str(self.repo), "rev-list", "--count",
@@ -237,7 +237,7 @@ class TestBug9Fix:
             capture_output=True, text=True,
         )
         assert r.stdout.strip() == "0", (
-            "BUG-9 FIX: _broadcast_worktree_done must not auto-commit"
+            "BUG-9 FIX: _present_pending_worktree must not auto-commit"
         )
 
         tab.agent.discard()

@@ -1,6 +1,7 @@
 - When user asks about code, provide detailed analysis referencing the actual source.
 - When simplifying code, focus on eliminating real duplication across files, not just cosmetic changes. Verify with tests before and after.
-- When removing redundancies in a module, first grep for structural-assertion tests (e.g. inspect.getsource + literal string checks) and for monkeypatches via module attribute access; preserve those hooks (keep function-local imports, update the test to accept both the old literal and a new constant name via `or`) rather than mechanically hoisting imports or renaming.
+- When removing redundancies in a module, first grep for structural-assertion tests (e.g. inspect.getsource + literal string checks) and for monkeypatches via module attribute access; update those tests to reference the new code location (e.g. the method the code was inlined into, or the module-level function the monkeypatch now targets).
+- When inlining a method into its single caller, update all tests that called the removed method directly: structural tests should inspect the caller's source, behavioral tests should exercise the caller with appropriate preconditions, and monkeypatches should target the module-level function that the caller now imports directly.
 - When adding tests to an existing test file, follow the existing patterns and naming conventions in that file.
 - Concurrent state isolation tests should cover both directions of the interleaving, not just one.
 - When fixing bugs involving state flags, check whether the flag represents current state or desired-future state, and guard on the appropriate one.

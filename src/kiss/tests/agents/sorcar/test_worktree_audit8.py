@@ -636,9 +636,10 @@ class TestBug38SharedMergeDataDir:
 
     def test_worktree_and_non_worktree_use_per_tab_merge_dir(self) -> None:
         """BUG-38 FIXED: Both paths now use per-tab _merge_data_dir(tab_id)."""
-        wt_source = inspect.getsource(VSCodeServer._start_worktree_merge_review)
+        wt_source = inspect.getsource(VSCodeServer._present_pending_worktree)
         assert "_prepare_and_start_merge" in wt_source, (
-            "sanity: worktree review uses _prepare_and_start_merge"
+            "sanity: worktree review (inlined in "
+            "_present_pending_worktree) uses _prepare_and_start_merge"
         )
 
         prep_source = inspect.getsource(VSCodeServer._prepare_and_start_merge)

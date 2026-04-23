@@ -375,10 +375,8 @@ class TestTabIdTypeConsistency(unittest.TestCase):
         methods_with_defaults: dict[str, typing.Any] = {}
         for name, method in [
             ("_finish_merge", _MergeFlowMixin._finish_merge),
-            ("_handle_merge_action", _MergeFlowMixin._handle_merge_action),
             ("_handle_worktree_action", _MergeFlowMixin._handle_worktree_action),
             ("_handle_autocommit_action", _MergeFlowMixin._handle_autocommit_action),
-            ("_broadcast_worktree_done", _MergeFlowMixin._broadcast_worktree_done),
             ("_stop_task", _TaskRunnerMixin._stop_task),
         ]:
             sig = inspect.signature(method)  # type: ignore[arg-type]
@@ -397,7 +395,6 @@ class TestTabIdTypeConsistency(unittest.TestCase):
         annotations: dict[str, str] = {}
         for name, method in [
             ("_finish_merge", _MergeFlowMixin._finish_merge),
-            ("_handle_merge_action", _MergeFlowMixin._handle_merge_action),
             ("_stop_task", _TaskRunnerMixin._stop_task),
         ]:
             sig = inspect.signature(method)  # type: ignore[arg-type]
@@ -418,16 +415,15 @@ class TestTabIdTypeConsistency(unittest.TestCase):
 
 
 class TestBroadcastWorktreeDoneAlwaysHasTabId(unittest.TestCase):
-    """I3 fix: ``_broadcast_worktree_done`` now always includes
-    ``tabId`` in the event dict, even when ``tab_id`` is empty.
+    """I3 fix: ``worktree_done`` broadcast (now inlined in
+    ``_present_pending_worktree``) always includes ``tabId``.
     """
 
     def test_source_confirms_unconditional_tab_id(self) -> None:
-        """Structural: ``tabId`` is set directly in the event dict."""
-        src = inspect.getsource(_MergeFlowMixin._broadcast_worktree_done)
-        # Should NOT have the conditional guard anymore
-        assert 'if tab_id:' not in src, (
-            "I3 fix: should not have conditional tabId inclusion"
+        """Structural: ``tabId`` is set directly in the worktree_done event."""
+        src = inspect.getsource(_MergeFlowMixin._present_pending_worktree)
+        assert '"worktree_done"' in src, (
+            "I3: worktree_done event should be inlined in _present_pending_worktree"
         )
         assert '"tabId"' in src, (
             "I3 fix: tabId should be in the event dict"

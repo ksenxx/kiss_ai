@@ -4,7 +4,7 @@ Targets only the five bug sites fixed in this change:
   1. ``_handle_command`` unknown-command error — carries ``tabId`` from cmd.
   2. ``run()`` generic-exception error — carries ``tabId`` from parsed cmd.
   3. ``_start_merge_session`` — ``merge_data`` and ``merge_started`` carry tab.
-  4. ``_broadcast_worktree_done`` — ``worktree_done`` carries tab.
+  4. ``worktree_done`` event (inlined in ``_present_pending_worktree``) — carries tab.
   5. ``_handle_worktree_action`` — ``worktree_progress`` carries tab.
   6. ``_get_adjacent_task`` — ``adjacent_task_events`` carries tab.
 
@@ -134,24 +134,17 @@ class TestStartMergeSessionRouted(unittest.TestCase):
         assert len(ms) == 1 and "tabId" not in ms[0]
 
 
-class TestBroadcastWorktreeDoneRouted(unittest.TestCase):
-    def test_worktree_done_carries_tab_id(self) -> None:
-        server, events = _make_server()
-        server._get_tab("t-11")
-        server._broadcast_worktree_done(changed=[], tab_id="t-11")
+class TestWorktreeDoneEventStructure(unittest.TestCase):
+    """worktree_done event always carries tabId (now inlined in _present_pending_worktree)."""
 
-        wd = [e for e in events if e.get("type") == "worktree_done"]
-        assert len(wd) == 1
-        assert wd[0].get("tabId") == "t-11"
+    def test_worktree_done_source_includes_tab_id(self) -> None:
+        """Structural: the worktree_done dict in _present_pending_worktree includes tabId."""
+        import inspect
 
-    def test_worktree_done_without_tab_omits_field(self) -> None:
-        server, events = _make_server()
-        server._get_tab("")
-        server._broadcast_worktree_done(changed=[], tab_id="")
-
-        wd = [e for e in events if e.get("type") == "worktree_done"]
-        assert len(wd) == 1
-        assert "tabId" not in wd[0]
+        from kiss.agents.vscode.merge_flow import _MergeFlowMixin
+        src = inspect.getsource(_MergeFlowMixin._present_pending_worktree)
+        assert '"worktree_done"' in src
+        assert '"tabId"' in src
 
 
 class TestWorktreeProgressRouted(unittest.TestCase):

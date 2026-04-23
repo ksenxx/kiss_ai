@@ -1152,7 +1152,7 @@ class TestServerParallelToggle(unittest.TestCase):
 
 
 class TestMergeSession(unittest.TestCase):
-    """Tests for _start_merge_session, _handle_merge_action, _finish_merge,
+    """Tests for _start_merge_session, _finish_merge,
     and _restore_pending_merge."""
 
     def setUp(self) -> None:
@@ -1239,20 +1239,20 @@ class TestMergeSession(unittest.TestCase):
         result = self.server._start_merge_session(str(bad))
         assert result is False
 
-    def test_handle_merge_action_all_done_finishes_merge(self) -> None:
-        """mergeAction all-done calls _finish_merge and resets state."""
+    def test_merge_action_all_done_finishes_merge(self) -> None:
+        """mergeAction all-done routed via _cmd_merge_action calls _finish_merge."""
         path = self._write_merge_json()
         self.server._start_merge_session(path, tab_id="m-tab")
         self.events.clear()
 
-        self.server._handle_merge_action("all-done", tab_id="m-tab")
+        self.server._handle_command({"type": "mergeAction", "action": "all-done", "tabId": "m-tab"})
         types = [e["type"] for e in self.events]
         assert "merge_ended" in types
 
-    def test_handle_merge_action_unknown_is_noop(self) -> None:
+    def test_merge_action_unknown_is_noop(self) -> None:
         """Non-'all-done' actions are no-ops on the Python side."""
         self.server._get_tab("0").is_merging = True
-        self.server._handle_merge_action("accept")
+        self.server._handle_command({"type": "mergeAction", "action": "accept", "tabId": "0"})
         assert self.server._get_tab("0").is_merging is True
 
     def test_finish_merge_cleans_up_data_dir(self) -> None:
