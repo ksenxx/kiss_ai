@@ -210,11 +210,11 @@ class TestScanFilesDepthOffByOne(unittest.TestCase):
             f"N3: PurePath('.').parts should be (), got {PurePath('.').parts}"
         )
 
-    def test_source_has_minus_one_adjustment(self) -> None:
-        """Structural: the depth check contains ``- 1``."""
+    def test_source_has_depth_check(self) -> None:
+        """Structural: the depth check uses ``len(rel_root.parts) > 10``."""
         src = inspect.getsource(_scan_files)
-        assert "parts) - 1 > 9" in src or "parts) - 1> 9" in src, (
-            "N3: _scan_files should have the off-by-one adjustment"
+        assert "parts) > 10" in src, (
+            "N3: _scan_files should have the depth check 'parts) > 10'"
         )
 
     def test_depth_10_files_are_included(self) -> None:
@@ -266,27 +266,27 @@ class TestScanFilesDepthOffByOne(unittest.TestCase):
     def test_depth_formula_values(self) -> None:
         """Behavioral: verify the formula at each depth level.
 
-        The formula ``len(rel_root.parts) - 1`` gives:
-          root:    len(()) - 1 = -1
-          depth9:  len(('a','b','c','d','e','f','g','h','i')) - 1 = 8
-          depth10: len(('a','b','c','d','e','f','g','h','i','j')) - 1 = 9  → 9 > 9 is False (BUG)
-          depth11: len(('a','b','c','d','e','f','g','h','i','j','k')) - 1 = 10  → 10 > 9 is True
+        The formula ``len(rel_root.parts)`` gives:
+          root:    len(()) = 0
+          depth10: len(('a','b','c','d','e','f','g','h','i','j')) = 10  → 10 > 10 is False (included)
+          depth11: len(('a','b','c','d','e','f','g','h','i','j','k')) = 11  → 11 > 10 is True (excluded)
         """
         # Root
-        assert len(PurePath(".").parts) - 1 == -1
+        assert len(PurePath(".").parts) == 0
 
-        # Depth 10 — the bug: formula returns 9, which is NOT > 9
+        # Depth 10 — included: 10 > 10 is False
         depth10 = PurePath("a/b/c/d/e/f/g/h/i/j")
-        formula_val = len(depth10.parts) - 1
-        assert formula_val == 9, f"depth10 formula should be 9, got {formula_val}"
-        assert not (formula_val > 9), (
-            "N3: depth 10 passes the check (9 > 9 is False) — off-by-one"
+        assert len(depth10.parts) == 10
+        assert not (len(depth10.parts) > 10), (
+            "depth 10 passes the check (10 > 10 is False) — included"
         )
 
-        # Depth 9 — correct: formula returns 8
-        depth9 = PurePath("a/b/c/d/e/f/g/h/i")
-        assert len(depth9.parts) - 1 == 8
-        assert not (8 > 9), "depth 9 correctly passes"
+        # Depth 11 — excluded: 11 > 10 is True
+        depth11 = PurePath("a/b/c/d/e/f/g/h/i/j/k")
+        assert len(depth11.parts) == 11
+        assert len(depth11.parts) > 10, (
+            "depth 11 fails the check (11 > 10 is True) — excluded"
+        )
 
 
 # ===================================================================
