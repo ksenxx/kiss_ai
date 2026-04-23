@@ -1541,7 +1541,7 @@
     if (isRunning && e.deltaY < 0) _scrollLock = true;
 
     // Adjacent task loading via overscroll detection
-    if (!isRunning && !adjacentLoading && activeTabId && currentTaskName) {
+    if (!adjacentLoading && activeTabId && currentTaskName) {
       const atTop = O.scrollTop <= 0;
       const atBottom = O.scrollTop + O.clientHeight >= O.scrollHeight - 2;
 
