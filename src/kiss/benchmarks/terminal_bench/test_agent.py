@@ -172,7 +172,14 @@ class TestSetup:
         env = FakeEnvironment()
         asyncio.run(agent.setup(env))  # type: ignore[arg-type]
         assert len(env.exec_calls) == 2
+        # Step 1: download install script to file, run it, verify binary
         assert "curl" in env.exec_calls[0]
+        assert "-o /tmp/install-uv.sh" in env.exec_calls[0]
+        assert "sh /tmp/install-uv.sh" in env.exec_calls[0]
+        assert "test -x /root/.local/bin/uv" in env.exec_calls[0]
+        # Must NOT pipe curl into sh (silent failure on curl error)
+        assert "| sh" not in env.exec_calls[0]
+        # Step 2: install the wheel
         assert "uv tool install --python 3.13" in env.exec_calls[1]
         assert "/tmp/kiss_agent_framework-" in env.exec_calls[1]
         assert len(env.uploaded_files) == 1
