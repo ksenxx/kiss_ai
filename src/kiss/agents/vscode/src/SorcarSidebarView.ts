@@ -57,6 +57,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   > = new Map();
   private _disposed: boolean = false;
   private _preMergeOpenFiles: Map<string, Set<string>> = new Map();
+  private _restoreChain: Promise<void> = Promise.resolve();
 
   /** Resolve all pending worktree/autocommit action promises and clear maps. */
   private _resolveAllWorktreeActions(): void {
@@ -81,7 +82,9 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         this.sendMergeAllDone(tabId);
       }
       if (tabId !== undefined) {
-        void this._restorePreMergeEditors(tabId);
+        this._restoreChain = this._restoreChain
+          .then(() => this._restorePreMergeEditors(tabId))
+          .catch(() => {});
       }
     });
   }
@@ -155,10 +158,20 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         if (mergeTabId !== undefined) {
           this._mergeOwnerTabIdQueue.push(mergeTabId);
         }
-        if (mergeTabId !== undefined && !this._preMergeOpenFiles.has(mergeTabId)) {
-          this._preMergeOpenFiles.set(mergeTabId, this._getOpenEditorFiles());
-        }
-        void this._mergeManager.openMerge(msg.data);
+        this._restoreChain = this._restoreChain
+          .then(async () => {
+            if (
+              mergeTabId !== undefined &&
+              !this._preMergeOpenFiles.has(mergeTabId)
+            ) {
+              this._preMergeOpenFiles.set(
+                mergeTabId,
+                this._getOpenEditorFiles(),
+              );
+            }
+            await this._mergeManager.openMerge(msg.data);
+          })
+          .catch(() => {});
       }
       if (msg.type === 'worktree_created' || msg.type === 'worktree_done') {
         const dir = msg.worktreeDir;
