@@ -56,7 +56,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     vscode.Progress<{message?: string}>
   > = new Map();
   private _disposed: boolean = false;
-  private _preMergeOpenFiles: Set<string> | null = null;
+  private _preMergeOpenFiles: Map<string, Set<string>> = new Map();
 
   /** Resolve all pending worktree/autocommit action promises and clear maps. */
   private _resolveAllWorktreeActions(): void {
@@ -80,7 +80,9 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       if (tabId !== undefined) {
         this.sendMergeAllDone(tabId);
       }
-      void this._restorePreMergeEditors();
+      if (tabId !== undefined) {
+        void this._restorePreMergeEditors(tabId);
+      }
     });
   }
 
@@ -153,8 +155,8 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         if (mergeTabId !== undefined) {
           this._mergeOwnerTabIdQueue.push(mergeTabId);
         }
-        if (!this._preMergeOpenFiles) {
-          this._preMergeOpenFiles = this._getOpenEditorFiles();
+        if (mergeTabId !== undefined && !this._preMergeOpenFiles.has(mergeTabId)) {
+          this._preMergeOpenFiles.set(mergeTabId, this._getOpenEditorFiles());
         }
         void this._mergeManager.openMerge(msg.data);
       }
@@ -330,9 +332,9 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
    * against the currently open tabs, closes extras, and clears
    * the snapshot.
    */
-  private async _restorePreMergeEditors(): Promise<void> {
-    const snapshot = this._preMergeOpenFiles;
-    this._preMergeOpenFiles = null;
+  private async _restorePreMergeEditors(tabId: string): Promise<void> {
+    const snapshot = this._preMergeOpenFiles.get(tabId);
+    this._preMergeOpenFiles.delete(tabId);
     if (!snapshot) return;
     const tabsToClose: vscode.Tab[] = [];
     for (const group of vscode.window.tabGroups.all) {
