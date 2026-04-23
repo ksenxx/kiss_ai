@@ -38,6 +38,11 @@
   // is preserved.  Because the modal blocks the tab's agent, at most one
   // ask-user request is pending per tab at any time — no queue is needed.
 
+  // Demo mode state
+  let demoMode = false;
+  let _demoActive = false;
+  let allHistSessions = [];
+
   // Infinite scroll state for history sidebar
   let historyOffset = 0;
   let historyLoading = false;
@@ -638,6 +643,7 @@
   const inputClearBtn = document.getElementById('input-clear-btn');
   const worktreeToggleBtn = document.getElementById('worktree-toggle-btn');
   const parallelToggleBtn = document.getElementById('parallel-toggle-btn');
+  const demoToggleBtn = document.getElementById('demo-toggle-btn');
   const taskPanel = document.getElementById('task-panel');
   const taskPanelText = document.getElementById('task-panel-text');
   const taskPanelChevron = document.getElementById('task-panel-chevron');
@@ -1968,7 +1974,11 @@
             /* ignore malformed extra */
           }
         }
-        replayTaskEvents(ev.events || []);
+        if (_demoActive && window._demoApi && window._demoApi.resolveEvents) {
+          window._demoApi.resolveEvents(ev.events || []);
+        } else {
+          replayTaskEvents(ev.events || []);
+        }
         break;
       }
       case 'adjacent_task_events':
@@ -2252,6 +2262,7 @@
     if (autocommitBtn) autocommitBtn.disabled = running;
     if (worktreeToggleBtn) worktreeToggleBtn.disabled = running;
     if (parallelToggleBtn) parallelToggleBtn.disabled = running;
+    if (demoToggleBtn) demoToggleBtn.disabled = running;
     if (runPromptBtn && running) runPromptBtn.disabled = true;
     if (modelBtn) {
       modelBtn.disabled = running;
@@ -2813,6 +2824,22 @@
       });
     }
 
+    if (demoToggleBtn) {
+      demoToggleBtn.addEventListener('click', () => {
+        if (_demoActive) {
+          // Cancel running demo
+          if (typeof window._cancelDemoReplay === 'function')
+            window._cancelDemoReplay();
+          demoMode = false;
+          _demoActive = false;
+          demoToggleBtn.classList.remove('active');
+          return;
+        }
+        demoMode = !demoMode;
+        demoToggleBtn.classList.toggle('active', demoMode);
+      });
+    }
+
     if (autocommitBtn) {
       autocommitBtn.addEventListener('click', () => {
         vscode.postMessage({
@@ -3294,6 +3321,7 @@
     if (loader) loader.remove();
 
     if (offset === 0) {
+      allHistSessions = [];
       if (sessions.length === 0) {
         historyList.innerHTML =
           '<div class="sidebar-empty">No conversations yet</div>';
@@ -3302,6 +3330,7 @@
       }
       historyList.innerHTML = '';
     }
+    allHistSessions = allHistSessions.concat(sessions);
 
     sessions.forEach(s => {
       const div = document.createElement('div');
@@ -3312,6 +3341,12 @@
       div.style.backgroundColor = chatIdBgColor(String(s.id));
       div.style.color = '#1a1a1a';
       div.addEventListener('click', () => {
+        if (demoMode && typeof window._startDemoReplay === 'function') {
+          closeSidebar();
+          createNewTab();
+          window._startDemoReplay(allHistSessions);
+          return;
+        }
         createNewTab();
         if (s.has_events && s.id) {
           setTaskText(s.preview || s.title || '');
@@ -3475,6 +3510,24 @@
     hideAC();
     inp.focus();
   }
+
+  // Expose minimal API for demo.js
+  window._demoApi = {
+    get active() { return _demoActive; },
+    set active(v) { _demoActive = !!v; },
+    resolveEvents: null,
+    createNewTab: createNewTab,
+    setInput: function(text) { inp.value = text; syncClearBtn(); },
+    clearInput: function() { inp.value = ''; syncClearBtn(); },
+    clearForReplay: function() { clearOutput(); resetOutputState(); clearUsageMetrics(); },
+    processEvent: processOutputEvent,
+    setTaskText: setTaskText,
+    updateTabTitle: updateActiveTabTitle,
+    hideWelcome: function() { if (welcome) welcome.style.display = 'none'; },
+    scrollToBottom: sb,
+    getActiveTabId: function() { return activeTabId; },
+    sendMessage: function(msg) { vscode.postMessage(msg); },
+  };
 
   // Start
   init();
