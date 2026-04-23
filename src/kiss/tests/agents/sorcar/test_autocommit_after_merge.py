@@ -123,7 +123,7 @@ class TestFinishMergeEmitsAutocommitPrompt(_ServerHarness):
     def test_no_prompt_when_tab_id_none(self) -> None:
         """When tab_id is None (global clear), no per-tab prompt is sent."""
         Path(self.tmpdir, "x.txt").write_text("x\n")
-        self.server._finish_merge(None)
+        self.server._finish_merge(None)  # type: ignore[arg-type]
 
         assert "autocommit_prompt" not in self._types()
 
