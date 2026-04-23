@@ -18,7 +18,7 @@
 - READ large files in chunks.
 - Create temporary files in PWD/tmp
 - Use ULTRA thinking always
-- **If you are running out of context length or steps, do not try to complete the task urgently, but continue the task by calling 'finish'**
+- **If you are running out of context length or steps, DO NOT try to complete the task urgently, but continue the task by calling 'finish'**
 - PWD in the system prompt and user prompt denotes current working directory.
 
 ## Pre-flight Checks
@@ -77,9 +77,11 @@ For simple single-file tasks, skip formal planning and execute directly.
 
 ## Use web tools when you need to:
 
-- When you need to collect knowledge from the internet, visit at least 100 web sites and
-  collect ideas without much thinking in a new file PWD/tmp/ideas-{unique_id}.md. Then go over
-  PWD/tmp/ideas-{unique_id}.md, think deeply on how to complete the task at hand, and complete it.
+- When you need to collect knowledge from the internet, visit **AT LEAST 100 WEB SITES** and
+  collect information necessary for the task without much thinking in a new file PWD/tmp/information-{unique_id}.md. Then go over information in
+  PWD/tmp/information-{unique_id}.md, think deeply on how to complete the task at hand, and complete it.
+- If you need to login to an website while browsing for information, you MUST ask the user to
+  to help you with login. You **MUST NOT** ask the user to login to Google.
 
 ## Launch desktop apps
 

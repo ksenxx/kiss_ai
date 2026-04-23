@@ -27,6 +27,7 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar import persistence as th
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.cli_helpers import (
     _apply_chat_args,
     _build_arg_parser,
@@ -34,7 +35,6 @@ from kiss.agents.sorcar.cli_helpers import (
     _print_recent_chats,
 )
 from kiss.agents.sorcar.git_worktree import GitWorktree
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.worktree_sorcar_agent import _generate_commit_message
 from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 from kiss.agents.vscode.server import VSCodeServer

@@ -8,9 +8,9 @@ from pathlib import Path
 from typing import Any, cast
 
 import kiss.agents.sorcar.persistence as th
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import _load_last_chat_id
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
 
 def _redirect(tmpdir: str) -> tuple:

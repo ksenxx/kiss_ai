@@ -15,6 +15,7 @@ from typing import Any
 
 import yaml
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.cli_helpers import (
     _apply_chat_args,
     _build_arg_parser,
@@ -29,7 +30,6 @@ from kiss.agents.sorcar.git_worktree import (
     repo_lock,
 )
 from kiss.agents.sorcar.persistence import _allocate_chat_id
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.core.kiss_error import KISSError
 
 logger = logging.getLogger(__name__)
