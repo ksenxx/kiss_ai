@@ -2640,10 +2640,10 @@ class TestSorcarSidebarViewMergeActions(unittest.TestCase):
         assert "this._mergeManager.openMerge(" in self._ts
 
     def test_merge_data_sets_merge_owner(self) -> None:
-        """merge_data pushes merge owner tab id from the event to the queue."""
+        """merge_data sets the active merge tab id from the event."""
         idx = self._ts.index("msg.type === 'merge_data'")
-        block = self._ts[idx : idx + 300]
-        assert "_mergeOwnerTabIdQueue" in block
+        block = self._ts[idx : idx + 500]
+        assert "_activeMergeTabId" in block
 
 
 class TestSorcarSidebarViewStartTask(unittest.TestCase):

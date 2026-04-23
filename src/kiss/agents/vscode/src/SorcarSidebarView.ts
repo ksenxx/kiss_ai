@@ -8,7 +8,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import {AgentProcess} from './AgentProcess';
-import {MergeManager} from './MergeManager';
+import {MergeManager, MergeData} from './MergeManager';
 import {getDefaultModel} from './DependencyInstaller';
 import {buildChatHtml} from './SorcarTab';
 import {
@@ -37,7 +37,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _webviewHasFocus: boolean = false;
 
   private _mergeManager: MergeManager;
-  private _mergeOwnerTabIdQueue: string[] = [];
+  /** Tab that currently owns the active merge review (undefined = no merge active). */
+  private _activeMergeTabId: string | undefined;
+  /** Merge data waiting to be shown when the current merge finishes. */
+  private _pendingMergeData: Map<string, MergeData> = new Map();
   private _onCommitMessage = new vscode.EventEmitter<{
     message: string;
     error?: string;
@@ -77,15 +80,16 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         .getConfiguration('kissSorcar')
         .get<string>('defaultModel') || getDefaultModel();
     this._mergeManager.on('allDone', () => {
-      const tabId = this._mergeOwnerTabIdQueue.shift();
+      const tabId = this._activeMergeTabId;
+      this._activeMergeTabId = undefined;
       if (tabId !== undefined) {
         this.sendMergeAllDone(tabId);
-      }
-      if (tabId !== undefined) {
         this._restoreChain = this._restoreChain
           .then(() => this._restorePreMergeEditors(tabId))
           .catch(() => {});
       }
+      // Start the next pending merge if any tab is waiting.
+      this._startNextPendingMerge();
     });
   }
 
@@ -155,23 +159,34 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       }
       if (msg.type === 'merge_data') {
         const mergeTabId = msg.tabId;
-        if (mergeTabId !== undefined) {
-          this._mergeOwnerTabIdQueue.push(mergeTabId);
+        if (
+          this._activeMergeTabId !== undefined &&
+          this._activeMergeTabId !== mergeTabId
+        ) {
+          // Another tab's merge is in progress — defer this one.
+          if (mergeTabId !== undefined) {
+            this._pendingMergeData.set(mergeTabId, msg.data);
+          }
+        } else {
+          // No active merge (or same tab re-sending) — start immediately.
+          if (mergeTabId !== undefined) {
+            this._activeMergeTabId = mergeTabId;
+          }
+          this._restoreChain = this._restoreChain
+            .then(async () => {
+              if (
+                mergeTabId !== undefined &&
+                !this._preMergeOpenFiles.has(mergeTabId)
+              ) {
+                this._preMergeOpenFiles.set(
+                  mergeTabId,
+                  this._getOpenEditorFiles(),
+                );
+              }
+              await this._mergeManager.openMerge(msg.data);
+            })
+            .catch(() => {});
         }
-        this._restoreChain = this._restoreChain
-          .then(async () => {
-            if (
-              mergeTabId !== undefined &&
-              !this._preMergeOpenFiles.has(mergeTabId)
-            ) {
-              this._preMergeOpenFiles.set(
-                mergeTabId,
-                this._getOpenEditorFiles(),
-              );
-            }
-            await this._mergeManager.openMerge(msg.data);
-          })
-          .catch(() => {});
       }
       if (msg.type === 'worktree_created' || msg.type === 'worktree_done') {
         const dir = msg.worktreeDir;
@@ -362,6 +377,34 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     if (tabsToClose.length > 0) {
       await vscode.window.tabGroups.close(tabsToClose);
     }
+  }
+
+  /**
+   * Start the next deferred merge from ``_pendingMergeData``, if any.
+   *
+   * Called after the current merge finishes (``allDone`` fires) so that
+   * the second tab's merge review starts only after the first one is
+   * fully resolved.
+   */
+  private _startNextPendingMerge(): void {
+    if (this._pendingMergeData.size === 0) return;
+    const [nextTabId, nextData] = this._pendingMergeData.entries().next()
+      .value as [string, MergeData];
+    this._pendingMergeData.delete(nextTabId);
+    this._activeMergeTabId = nextTabId;
+    this._restoreChain = this._restoreChain
+      .then(async () => {
+        if (!this._preMergeOpenFiles.has(nextTabId)) {
+          this._preMergeOpenFiles.set(nextTabId, this._getOpenEditorFiles());
+        }
+        await this._mergeManager.openMerge(nextData);
+      })
+      .catch(() => {});
+    // Notify the webview so the correct tab shows the merge toolbar.
+    this._sendToWebview({
+      type: 'merge_started',
+      tabId: nextTabId,
+    } as ToWebviewMessage);
   }
 
   private _getWorkDir(): string {
@@ -715,7 +758,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         const handler = mergeDispatch[mAction];
         if (handler) handler();
         else if (mAction === 'all-done') {
-          this.sendMergeAllDone(this._mergeOwnerTabIdQueue[0]);
+          this.sendMergeAllDone(this._activeMergeTabId);
         }
         break;
       }
