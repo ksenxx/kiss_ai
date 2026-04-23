@@ -233,17 +233,17 @@ class TestReplaySessionUseWorktreeNoLock(unittest.TestCase):
     """
 
     def test_source_confirms_lock_around_use_worktree(self) -> None:
-        """Structural: ``tab.use_worktree = True`` is now inside a
+        """Structural: ``tab.use_worktree = bool(...)`` is now inside a
         ``with self._state_lock`` block."""
         src = inspect.getsource(VSCodeServer._replay_session)
         lines = src.splitlines()
         wt_line_idx = None
         for i, line in enumerate(lines):
-            if "tab.use_worktree = True" in line:
+            if "tab.use_worktree" in line and "bool(" in line:
                 wt_line_idx = i
                 break
         assert wt_line_idx is not None, (
-            "Could not find tab.use_worktree = True in _replay_session"
+            "Could not find tab.use_worktree = bool(...) in _replay_session"
         )
         preceding = "\n".join(lines[max(0, wt_line_idx - 8): wt_line_idx])
         assert "_state_lock" in preceding, (

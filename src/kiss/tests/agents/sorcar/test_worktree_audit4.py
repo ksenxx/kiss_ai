@@ -526,9 +526,9 @@ class TestBug17UntrackedBaseNotNukedInWorktreeMode:
             from kiss.agents.vscode.server import VSCodeServer
 
             source = inspect.getsource(VSCodeServer._run_task_inner)
-            assert "if not tab.use_worktree:" in source, (
+            assert "if not use_worktree:" in source, (
                 "_run_task_inner should guard pre-task snapshot "
-                "with 'if not tab.use_worktree:'"
+                "with 'if not use_worktree:'"
             )
             assert "_capture_pre_snapshot" in source
             snap_source = inspect.getsource(VSCodeServer._capture_pre_snapshot)

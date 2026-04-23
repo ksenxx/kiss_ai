@@ -128,7 +128,7 @@ class TestBug34NonWorktreeSnapshotNoLock:
 
         snapshot_start = None
         for i, line in enumerate(lines):
-            if "if not tab.use_worktree:" in line:
+            if "if not use_worktree:" in line:
                 snapshot_start = i
                 break
 
@@ -399,7 +399,7 @@ class TestBug36PostTaskDiffWrongHead:
         in_non_wt_block = False
         captures_head_sha = False
         for line in lines:
-            if "if not tab.use_worktree:" in line:
+            if "if not use_worktree:" in line:
                 in_non_wt_block = True
                 continue
             if in_non_wt_block:

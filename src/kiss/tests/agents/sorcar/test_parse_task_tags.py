@@ -176,7 +176,7 @@ class TestMultiTaskIntegration(unittest.TestCase):
 
     def test_worktree_check_in_finally_block(self) -> None:
         """Worktree merge review is in the finally block, not the inner try."""
-        assert "if tab.use_worktree and tab.agent._wt_pending:" in self._src
+        assert "if use_worktree and tab.agent._wt_pending:" in self._src
 
     def test_merge_view_only_runs_once(self) -> None:
         """_prepare_merge_view is NOT inside the subtask loop.

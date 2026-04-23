@@ -1627,7 +1627,7 @@ class TestCollapsiblePanelsJS(unittest.TestCase):
 
     def test_merge_info_calls_add_collapse(self) -> None:
         """Merge info calls addCollapse with the header."""
-        assert "addCollapse(mc, mc.querySelector('.merge-info-hdr'))" in self._js
+        assert "addCollapse(mdEl, mdEl.querySelector('.merge-info-hdr'))" in self._js
 
 
     def test_followup_bar_not_collapsible(self) -> None:
