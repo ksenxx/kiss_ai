@@ -56,6 +56,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     vscode.Progress<{message?: string}>
   > = new Map();
   private _disposed: boolean = false;
+  private _preMergeOpenFiles: Set<string> | null = null;
 
   /** Resolve all pending worktree/autocommit action promises and clear maps. */
   private _resolveAllWorktreeActions(): void {
@@ -79,6 +80,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       if (tabId !== undefined) {
         this.sendMergeAllDone(tabId);
       }
+      void this._restorePreMergeEditors();
     });
   }
 
@@ -150,6 +152,9 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         const mergeTabId = msg.tabId;
         if (mergeTabId !== undefined) {
           this._mergeOwnerTabIdQueue.push(mergeTabId);
+        }
+        if (!this._preMergeOpenFiles) {
+          this._preMergeOpenFiles = this._getOpenEditorFiles();
         }
         void this._mergeManager.openMerge(msg.data);
       }
@@ -298,6 +303,50 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   /** Whether the webview currently has input focus. */
   get hasFocus(): boolean {
     return this._webviewHasFocus;
+  }
+
+  /**
+   * Snapshot the file paths of all currently open editor tabs.
+   *
+   * Used before the merge UI opens so we can later close any
+   * tabs that were only opened for the merge review.
+   */
+  private _getOpenEditorFiles(): Set<string> {
+    const files = new Set<string>();
+    for (const group of vscode.window.tabGroups.all) {
+      for (const tab of group.tabs) {
+        if (tab.input instanceof vscode.TabInputText) {
+          files.add(tab.input.uri.fsPath);
+        }
+      }
+    }
+    return files;
+  }
+
+  /**
+   * Close editor tabs that were not open before the merge started.
+   *
+   * Reads the snapshot from ``_preMergeOpenFiles``, compares it
+   * against the currently open tabs, closes extras, and clears
+   * the snapshot.
+   */
+  private async _restorePreMergeEditors(): Promise<void> {
+    const snapshot = this._preMergeOpenFiles;
+    this._preMergeOpenFiles = null;
+    if (!snapshot) return;
+    const tabsToClose: vscode.Tab[] = [];
+    for (const group of vscode.window.tabGroups.all) {
+      for (const tab of group.tabs) {
+        if (tab.input instanceof vscode.TabInputText) {
+          if (!snapshot.has(tab.input.uri.fsPath)) {
+            tabsToClose.push(tab);
+          }
+        }
+      }
+    }
+    if (tabsToClose.length > 0) {
+      await vscode.window.tabGroups.close(tabsToClose);
+    }
   }
 
   private _getWorkDir(): string {
