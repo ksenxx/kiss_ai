@@ -34,6 +34,7 @@ from kiss.channels.cron_manager_daemon import (
     _validate_schedule,
     _write_crontab,
     daemon_status,
+    run_cron_job_lifecycle,
     start_daemon,
     stop_daemon,
 )
@@ -918,3 +919,84 @@ class TestCLI:
             import shutil
 
             shutil.rmtree(short_home, ignore_errors=True)
+
+
+class TestRunCronJobLifecycle:
+    """Tests for the top-level ``run_cron_job_lifecycle`` function."""
+
+    def test_parses_and_runs_full_lifecycle(
+        self, crontab_env: dict[str, Path]
+    ) -> None:
+        """End-to-end: add → list → remove → stop against a real daemon."""
+        d = CronDaemon(
+            sock_path=crontab_env["sock"],
+            pid_path=crontab_env["pid"],
+            crontab_cmd=str(crontab_env["crontab"]),
+        )
+        t = threading.Thread(target=d.run, daemon=True)
+        t.start()
+        for _ in range(100):
+            if crontab_env["sock"].exists():
+                break
+            time.sleep(0.05)
+
+        result = run_cron_job_lifecycle(
+            "*/5 * * * * echo hello", sock_path=crontab_env["sock"]
+        )
+
+        assert result["schedule"] == "*/5 * * * *"
+        assert result["command"] == "echo hello"
+        assert len(result["job_id"]) == 12
+        # jobs list was captured AFTER add but BEFORE remove
+        assert len(result["jobs"]) == 1
+        assert result["jobs"][0]["id"] == result["job_id"]
+        assert result["jobs"][0]["command"] == "echo hello"
+
+        t.join(timeout=5)
+        assert not t.is_alive()
+
+    def test_complex_command(
+        self, crontab_env: dict[str, Path]
+    ) -> None:
+        """Command part can contain spaces and special chars."""
+        d = CronDaemon(
+            sock_path=crontab_env["sock"],
+            pid_path=crontab_env["pid"],
+            crontab_cmd=str(crontab_env["crontab"]),
+        )
+        t = threading.Thread(target=d.run, daemon=True)
+        t.start()
+        for _ in range(100):
+            if crontab_env["sock"].exists():
+                break
+            time.sleep(0.05)
+
+        result = run_cron_job_lifecycle(
+            "0 9 * * 1 /bin/sh -c 'echo monday morning'",
+            sock_path=crontab_env["sock"],
+        )
+
+        assert result["schedule"] == "0 9 * * 1"
+        assert result["command"] == "/bin/sh -c 'echo monday morning'"
+        t.join(timeout=5)
+
+    def test_too_few_fields_raises(self) -> None:
+        """A string with fewer than 6 tokens raises ValueError."""
+        with pytest.raises(ValueError, match="5 schedule fields"):
+            run_cron_job_lifecycle("* * * * *")
+
+    def test_empty_string_raises(self) -> None:
+        with pytest.raises(ValueError, match="5 schedule fields"):
+            run_cron_job_lifecycle("")
+
+    def test_five_fields_no_command_raises(self) -> None:
+        with pytest.raises(ValueError, match="5 schedule fields"):
+            run_cron_job_lifecycle("1 2 3 4 5")
+
+    def test_no_daemon_raises_connection_error(self, tmp_path: Path) -> None:
+        """When no daemon is running, ConnectionError is raised."""
+        with pytest.raises(ConnectionError):
+            run_cron_job_lifecycle(
+                "* * * * * echo hi",
+                sock_path=tmp_path / "no_such.sock",
+            )
