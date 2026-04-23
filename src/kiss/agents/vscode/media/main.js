@@ -621,6 +621,7 @@
   const autocomplete = document.getElementById('autocomplete');
   const askUserModal = document.getElementById('ask-user-modal');
   const askUserSlot = document.getElementById('ask-user-slot');
+  const autocommitBtn = document.getElementById('autocommit-btn');
   const waitSpinner = document.getElementById('wait-spinner');
   const ghostOverlay = document.getElementById('ghost-overlay');
   const inputContainer = document.getElementById('input-container');
@@ -2195,6 +2196,7 @@
     stopBtn.style.display = running ? 'flex' : 'none';
 
     if (uploadBtn) uploadBtn.disabled = running;
+    if (autocommitBtn) autocommitBtn.disabled = running;
     if (worktreeToggleBtn) worktreeToggleBtn.disabled = running;
     if (parallelToggleBtn) parallelToggleBtn.disabled = running;
     if (runPromptBtn && running) runPromptBtn.disabled = true;
@@ -2751,6 +2753,16 @@
     if (parallelToggleBtn) {
       parallelToggleBtn.addEventListener('click', () => {
         parallelToggleBtn.classList.toggle('active');
+      });
+    }
+
+    if (autocommitBtn) {
+      autocommitBtn.addEventListener('click', () => {
+        vscode.postMessage({
+          type: 'autocommitAction',
+          action: 'commit',
+          tabId: activeTabId,
+        });
       });
     }
 
