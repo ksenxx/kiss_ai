@@ -28,6 +28,7 @@
 - When a refactor introduces a superseding test file, the new file's docstring often names the superseded tests by location — trust the docstring as a lead but verify each referenced test still exists and still contradicts current source before removing it.
 - When auditing a module for bugs, read every source file before forming hypotheses, then confirm each bug with both a structural source assertion (inspect.getsource) and a behavioral integration test using real objects.
 - When auditing for bugs, also check for inconsistent locking disciplines (e.g. a field written under a lock but read without one in the same class), TOCTOU gaps between lock acquisitions, and one-way flag setting (only True, never reset to False).
+- When fixing audited bugs, update ALL audit tests that assert the old buggy behavior to assert the new fixed behavior, not just the tests in the current audit round.
 - When a "close" or "cleanup" operation guards on state flags, also check whether an active thread exists (task_thread.is_alive) to avoid racing with threads that have started but not yet set their state flags.
 - When fixing audited bugs, update the corresponding audit tests from asserting-the-bug to asserting-the-fix so the test suite validates the corrected behavior going forward.
 - When standardizing sentinel values across methods (e.g. tab_id defaults), also update callers that pass the old sentinel (e.g. cmd.get returning None) to pass the new one (e.g. cmd.get with a default).

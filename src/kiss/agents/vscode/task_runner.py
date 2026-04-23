@@ -88,7 +88,7 @@ class _TaskRunnerMixin:
                     tab.task_thread = None
                     tab.stop_event = None
                     tab.user_answer_queue = None
-            self.printer.broadcast({"type": "status", "running": False})
+                self.printer.broadcast({"type": "status", "running": False})
 
     @staticmethod
     def _capture_pre_snapshot(
@@ -167,6 +167,7 @@ class _TaskRunnerMixin:
             tab.use_parallel = bool(cmd.get("useParallel", False))
             tab.is_task_active = True
             stop_event = tab.stop_event
+            use_worktree = tab.use_worktree
         self.printer._thread_local.stop_event = stop_event
 
         if tab_id and tab.agent.chat_id == "":
@@ -174,7 +175,7 @@ class _TaskRunnerMixin:
 
         self.printer.broadcast({"type": "clear", "chat_id": tab.agent.chat_id})
 
-        if not tab.use_worktree:
+        if not use_worktree:
             with self._state_lock:
                 if any(
                     t.is_merging and t.use_worktree
@@ -193,7 +194,7 @@ class _TaskRunnerMixin:
         pre_untracked: set[str] = set()
         pre_file_hashes: dict[str, str] | None = None
         pre_head_sha: str | None = None
-        if not tab.use_worktree:
+        if not use_worktree:
             with self._state_lock:
                 tab.is_running_non_wt = True
             try:
@@ -207,7 +208,7 @@ class _TaskRunnerMixin:
                 raise
 
         # BUG-B fix: if this worktree tab has a pending branch from a
-        if tab.use_worktree and tab.agent._wt_pending:
+        if use_worktree and tab.agent._wt_pending:
             with self._state_lock:
                 if self._any_non_wt_running():
                     tab.agent._merge_conflict_warning = (
@@ -236,7 +237,7 @@ class _TaskRunnerMixin:
                         attachments=attachments,
                         ask_user_question_callback=self._ask_user_question,
                         is_parallel=tab.use_parallel,
-                        use_worktree=tab.use_worktree,
+                        use_worktree=use_worktree,
                         _skip_persistence=True,
                     )
                     result_summary = self._extract_result_summary() or "No summary available"
@@ -260,7 +261,7 @@ class _TaskRunnerMixin:
                     tab.is_task_active = False
                 self.printer._persist_agents.pop(tab_id, None)
                 self.printer.stop_recording()
-                if not tab.use_worktree:
+                if not use_worktree:
                     try:
                         self._prepare_and_start_merge(
                             work_dir, pre_hunks, pre_untracked, pre_file_hashes,
@@ -293,13 +294,13 @@ class _TaskRunnerMixin:
                         "tokens": tab.agent.total_tokens_used,
                         "cost": round(tab.agent.budget_used, 6),
                         "is_parallel": tab.use_parallel,
-                        "is_worktree": tab.use_worktree,
+                        "is_worktree": use_worktree,
                     },
                     task_id=tab.task_history_id,
                 )
                 self.printer.broadcast({"type": "tasks_updated"})
                 self.printer.reset()
-                if tab.use_worktree and tab.agent._wt_pending:
+                if use_worktree and tab.agent._wt_pending:
                     try:
                         self._present_pending_worktree(
                             tab_id, try_merge_review=True,
@@ -318,7 +319,7 @@ class _TaskRunnerMixin:
             except BaseException:  # pragma: no cover — cleanup interrupted
                 with self._state_lock:
                     tab.is_task_active = False
-                    if not tab.use_worktree:
+                    if not use_worktree:
                         tab.is_running_non_wt = False
                 logger.debug("Cleanup interrupted", exc_info=True)
                 if task_end_event:

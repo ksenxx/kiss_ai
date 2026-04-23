@@ -13,8 +13,8 @@ B6: ``model_vendor`` now correctly classifies ``openai/``-prefixed
 B7: ``_finish_merge`` now guards against both ``None`` and empty string
     via ``if not tab_id:``, preventing ``_merge_data_dir("")`` from
     returning the parent directory and nuking all tabs' merge data.
-B8: ``_run_task`` now broadcasts ``status: running: False`` OUTSIDE
-    the ``_state_lock`` critical section.
+B8: ``_run_task`` now broadcasts ``status: running: False`` INSIDE
+    the ``_state_lock`` critical section (A2 fix).
 
 Bugs acknowledged (not fixed — intentional)
 --------------------------------------------
@@ -282,18 +282,18 @@ class TestFinishMergeEmptyTabIdGuard(unittest.TestCase):
 # ===================================================================
 
 
-class TestRunTaskStatusBroadcastOutsideLock(unittest.TestCase):
-    """B8 fix: ``_run_task``'s finally block broadcasts
-    ``status: running: False`` OUTSIDE the ``_state_lock`` block.
+class TestRunTaskStatusBroadcastInsideLock(unittest.TestCase):
+    """B8 / A2 fix: ``_run_task``'s finally block broadcasts
+    ``status: running: False`` INSIDE the ``_state_lock`` block to
+    prevent a race where a new ``_cmd_run`` broadcasts ``status: True``
+    before the stale ``status: False``.
     """
 
-    def test_source_confirms_broadcast_outside_state_lock(self) -> None:
-        """Structural: broadcast call is at the same indent as the with block."""
+    def test_source_confirms_broadcast_inside_state_lock(self) -> None:
+        """Structural: broadcast call is deeper than the with line."""
         src = inspect.getsource(_TaskRunnerMixin._run_task)
         lines = src.splitlines()
 
-        # Find the finally block's `with self._state_lock:` and the
-        # broadcast call
         finally_idx = None
         lock_idx = None
         broadcast_idx = None
@@ -315,16 +315,16 @@ class TestRunTaskStatusBroadcastOutsideLock(unittest.TestCase):
         assert lock_idx is not None, "Found _state_lock in finally block"
         assert broadcast_idx is not None, "Found status broadcast"
         assert broadcast_idx > lock_idx, (
-            "broadcast is after the lock block"
+            "broadcast is after the lock line"
         )
 
-        # B8 fix: the broadcast should be at the same indentation as
-        # the `with` statement, NOT deeper
+        # A2 fix: the broadcast should be DEEPER than the `with`
+        # statement, meaning it's inside the critical section
         indent_lock = len(lines[lock_idx]) - len(lines[lock_idx].lstrip())
         indent_bc = len(lines[broadcast_idx]) - len(lines[broadcast_idx].lstrip())
-        assert indent_bc == indent_lock, (
-            f"B8 fix: broadcast indent ({indent_bc}) should equal lock indent "
-            f"({indent_lock}), meaning it's outside the critical section"
+        assert indent_bc > indent_lock, (
+            f"A2 fix: broadcast indent ({indent_bc}) > lock indent "
+            f"({indent_lock}), confirming it's inside the critical section"
         )
 
 

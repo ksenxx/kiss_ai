@@ -297,9 +297,8 @@ class VSCodeServer(
         if extra_str:
             try:
                 extra = json.loads(extra_str)
-                if extra.get("is_worktree"):
-                    with self._state_lock:
-                        tab.use_worktree = True
+                with self._state_lock:
+                    tab.use_worktree = bool(extra.get("is_worktree"))
             except (json.JSONDecodeError, TypeError):
                 pass
 
