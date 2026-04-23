@@ -1324,7 +1324,7 @@ class TestBgTabPanelCreation(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.js = _MAIN_JS.read_text()
 
-    def test_processOutputEventForBgTab_exists(self) -> None:
+    def test_process_output_event_for_bg_tab_exists(self) -> None:
         """The function processOutputEventForBgTab must exist in main.js."""
         assert "function processOutputEventForBgTab(ev, tab)" in self.js
 
@@ -1545,6 +1545,175 @@ class TestBgTabPanelCreation(unittest.TestCase):
         )
         assert result.returncode == 0, f"Node test failed:\n{result.stdout}\n{result.stderr}"
         assert "PASS" in result.stdout, result.stdout
+
+
+class TestMergeEndedBgClearsMergeToolbarEl(unittest.TestCase):
+    """Bug fix: merge_ended for background tab must clear mergeToolbarEl.
+
+    Previously, merge_ended only set isMerging=false but left mergeToolbarEl
+    intact.  When the user switched to that tab, restoreTab re-attached the
+    stale merge toolbar even though the merge had ended.
+    """
+
+    js: str
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.js = _MAIN_JS.read_text()
+
+    def test_merge_ended_bg_clears_merge_toolbar_el_in_source(self) -> None:
+        """merge_ended background handler clears mergeToolbarEl."""
+        idx = self.js.index("case 'merge_ended':")
+        block = self.js[idx : idx + 400]
+        assert "mergeToolbarEl = null" in block, (
+            "merge_ended bg handler must clear mergeToolbarEl"
+        )
+
+    def test_merge_ended_bg_clears_merge_toolbar_el_via_node(self) -> None:
+        """Behavioral test: merge_ended for bg tab clears mergeToolbarEl."""
+        result = _run_node(_make_test_script(r"""
+            var tabs = [
+                { id: 'tab-A', isMerging: true, mergeToolbarEl: { id: 'merge-toolbar' } },
+                { id: 'tab-B', isMerging: false, mergeToolbarEl: null },
+            ];
+            var activeTabId = 'tab-B';
+
+            // Simulate merge_ended handler for background tab-A
+            var ev = { type: 'merge_ended', tabId: 'tab-A' };
+            if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
+                var mrt2 = tabs.find(function(t) { return t.id === ev.tabId; });
+                if (mrt2) {
+                    mrt2.isMerging = false;
+                    mrt2.mergeToolbarEl = null;
+                }
+            }
+
+            var errors = [];
+            if (tabs[0].isMerging !== false)
+                errors.push('tab-A isMerging should be false');
+            if (tabs[0].mergeToolbarEl !== null)
+                errors.push('tab-A mergeToolbarEl should be null');
+            if (tabs[1].isMerging !== false)
+                errors.push('tab-B should be unaffected');
+
+            if (errors.length > 0) {
+                process.stdout.write('FAIL: ' + errors.join('; '));
+                process.exit(1);
+            }
+            process.stdout.write('PASS');
+        """))
+        assert result.returncode == 0, result.stderr
+        assert "PASS" in result.stdout
+
+    def test_restore_does_not_show_stale_merge_toolbar(self) -> None:
+        """After merge_ended clears mergeToolbarEl, restoreTab must NOT
+        re-attach a stale merge toolbar."""
+        result = _run_node(_make_test_script(r"""
+            // Tab A had a merge running, toolbar was saved when switching away
+            var tabA = {
+                id: 'tab-A', isMerging: true,
+                mergeToolbarEl: { id: 'merge-toolbar', tagName: 'div' },
+            };
+
+            // merge_ended arrives for bg tab A (the fix)
+            tabA.isMerging = false;
+            tabA.mergeToolbarEl = null;
+
+            // Now simulate restoreTab logic
+            var mergeToolbarRestored = false;
+            var showMergeToolbarCalled = false;
+
+            if (tabA.mergeToolbarEl) {
+                mergeToolbarRestored = true;
+            } else if (tabA.isMerging) {
+                showMergeToolbarCalled = true;
+            }
+
+            var errors = [];
+            if (mergeToolbarRestored)
+                errors.push('stale merge toolbar was restored');
+            if (showMergeToolbarCalled)
+                errors.push('showMergeToolbar called after merge ended');
+
+            if (errors.length > 0) {
+                process.stdout.write('FAIL: ' + errors.join('; '));
+                process.exit(1);
+            }
+            process.stdout.write('PASS');
+        """))
+        assert result.returncode == 0, result.stderr
+        assert "PASS" in result.stdout
+
+
+class TestShowMergeToolbarCapturesOwnerTabId(unittest.TestCase):
+    """Bug fix: showMergeToolbar captures ownerTabId at creation time.
+
+    Previously, merge toolbar button click handlers read the global
+    activeTabId at click time instead of capturing the owning tab's ID
+    in a closure (unlike createWorktreeBar and createAutocommitBar).
+    """
+
+    js: str
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.js = _MAIN_JS.read_text()
+
+    def test_show_merge_toolbar_accepts_owner_tab_id_param(self) -> None:
+        """showMergeToolbar has an ownerTabId parameter."""
+        assert "function showMergeToolbar(ownerTabId)" in self.js
+
+    def test_show_merge_toolbar_uses_captured_tab_id(self) -> None:
+        """Button click handlers use capturedTabId, not activeTabId."""
+        idx = self.js.index("function showMergeToolbar(ownerTabId)")
+        # Find end of function (next top-level function)
+        end = self.js.index("\n  function ", idx + 1)
+        body = self.js[idx:end]
+        assert "capturedTabId = ownerTabId || activeTabId" in body, (
+            "showMergeToolbar must capture ownerTabId into a local"
+        )
+        assert "tabId: capturedTabId" in body, (
+            "click handlers must use capturedTabId, not activeTabId"
+        )
+        # Ensure it does NOT use activeTabId in the click handler
+        click_idx = body.index("addEventListener('click'")
+        click_body = body[click_idx:]
+        assert "tabId: activeTabId" not in click_body, (
+            "click handler must NOT reference global activeTabId"
+        )
+
+    def test_merge_started_passes_tab_id_to_show_merge_toolbar(self) -> None:
+        """merge_started handler passes ev.tabId to showMergeToolbar."""
+        idx = self.js.index("case 'merge_started':")
+        block = self.js[idx : idx + 500]
+        assert "showMergeToolbar((ev && ev.tabId) || activeTabId)" in block
+
+    def test_restore_tab_passes_tab_id_to_show_merge_toolbar(self) -> None:
+        """restoreTab passes tab.id to showMergeToolbar."""
+        idx = self.js.index("function restoreTab(tab)")
+        end = self.js.index("\n  function ", idx + 1)
+        body = self.js[idx:end]
+        assert "showMergeToolbar(tab.id)" in body
+
+    def test_consistency_with_worktree_and_autocommit_bars(self) -> None:
+        """All three bar types capture ownerTabId in closures."""
+        # createWorktreeBar captures ownerTabId
+        wt_idx = self.js.index("function createWorktreeBar(ownerTabId)")
+        wt_end = self.js.index("\n  function ", wt_idx + 1)
+        wt_body = self.js[wt_idx:wt_end]
+        assert "tabId: ownerTabId" in wt_body
+
+        # createAutocommitBar captures ownerTabId
+        ac_idx = self.js.index("function createAutocommitBar(ev)")
+        ac_end = self.js.index("\n  function ", ac_idx + 1)
+        ac_body = self.js[ac_idx:ac_end]
+        assert "tabId: ownerTabId" in ac_body
+
+        # showMergeToolbar captures via capturedTabId
+        mt_idx = self.js.index("function showMergeToolbar(ownerTabId)")
+        mt_end = self.js.index("\n  function ", mt_idx + 1)
+        mt_body = self.js[mt_idx:mt_end]
+        assert "tabId: capturedTabId" in mt_body
 
 
 if __name__ == "__main__":

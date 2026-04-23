@@ -273,7 +273,7 @@
       document.getElementById('input-area').appendChild(tab.mergeToolbarEl);
       tab.mergeToolbarEl = null;
     } else if (isMerging) {
-      showMergeToolbar();
+      showMergeToolbar(tab.id);
     }
     // Set inputContainer visibility based on active bars
     if (worktreeBar || autocommitBar || document.getElementById('merge-toolbar')) {
@@ -2019,7 +2019,7 @@
           break;
         }
         isMerging = true;
-        showMergeToolbar();
+        showMergeToolbar((ev && ev.tabId) || activeTabId);
         updateInputDisabled();
         sb();
         break;
@@ -2028,7 +2028,10 @@
           const mrt2 = tabs.find(t => {
             return t.id === ev.tabId;
           });
-          if (mrt2) mrt2.isMerging = false;
+          if (mrt2) {
+            mrt2.isMerging = false;
+            mrt2.mergeToolbarEl = null;
+          }
           break;
         }
         isMerging = false;
@@ -2550,8 +2553,9 @@
   }
 
   // --- Merge toolbar (shown in input area, replacing textarea) ---
-  function showMergeToolbar() {
+  function showMergeToolbar(ownerTabId) {
     if (document.getElementById('merge-toolbar')) return;
+    const capturedTabId = ownerTabId || activeTabId;
     inputContainer.style.display = 'none';
     const bar = mkEl('div', 'merge-toolbar-card');
     bar.id = 'merge-toolbar';
@@ -2590,7 +2594,7 @@
         vscode.postMessage({
           type: 'mergeAction',
           action: mergeActions[id],
-          tabId: activeTabId,
+          tabId: capturedTabId,
         });
       });
     });
