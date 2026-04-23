@@ -56,6 +56,11 @@
   let overscrollDir = '';
   let overscrollTimer = null;
   const OVERSCROLL_THRESHOLD = 150; // pixels of accumulated overscroll to trigger load
+  // Per-task metrics for adjacent scrolling: when the user scrolls between
+  // the current task and adjacent tasks, the header tokens/cost/steps should
+  // reflect the currently visible task.  currentTaskMetrics stores the main
+  // task's metrics; adjacent containers store theirs in dataset attributes.
+  let currentTaskMetrics = {tokens: '', budget: '', steps: ''};
 
   // --- Chat tabs state ---
   /** Generate a UUID v4 string for tab identification. */
@@ -797,9 +802,21 @@
     // adjacent-task replay doesn't overwrite the current task's values)
     const savedTokens = statusTokens ? statusTokens.textContent : '';
     const savedBudget = statusBudget ? statusBudget.textContent : '';
+    const savedSteps = statusSteps ? statusSteps.textContent : '';
     replayEventsInto(container, events);
+    // Capture the adjacent task's metrics before restoring the current ones
+    container.dataset.metricTokens = statusTokens
+      ? statusTokens.textContent
+      : '';
+    container.dataset.metricBudget = statusBudget
+      ? statusBudget.textContent
+      : '';
+    container.dataset.metricSteps = statusSteps
+      ? statusSteps.textContent
+      : '';
     if (statusTokens) statusTokens.textContent = savedTokens;
     if (statusBudget) statusBudget.textContent = savedBudget;
+    if (statusSteps) statusSteps.textContent = savedSteps;
 
     if (direction === 'prev') {
       // Save scroll position, prepend, then restore
@@ -1396,6 +1413,12 @@
     }
     handleOutputEvent(ev, target, tState);
     if (target === O) collapseOlderPanels();
+    if (t === 'result' || t === 'usage_info') {
+      // Snapshot current task metrics so adjacent-scroll can restore them
+      currentTaskMetrics.tokens = statusTokens ? statusTokens.textContent : '';
+      currentTaskMetrics.budget = statusBudget ? statusBudget.textContent : '';
+      currentTaskMetrics.steps = statusSteps ? statusSteps.textContent : '';
+    }
     if (t === 'result') {
       collapseAllExceptResult(O);
       if (ev.success === false) {
@@ -1605,14 +1628,34 @@
     const outputRect = O.getBoundingClientRect();
     const checkY = outputRect.top + outputRect.height * 0.3;
     let visibleTask = currentTaskName;
+    let visibleContainer = null;
     for (let i = 0; i < adjacentTasks.length; i++) {
       const rect = adjacentTasks[i].getBoundingClientRect();
       if (rect.top <= checkY && rect.bottom > checkY) {
         visibleTask = adjacentTasks[i].dataset.task;
+        visibleContainer = adjacentTasks[i];
         break;
       }
     }
     setTaskText(visibleTask);
+    // Update header metrics to match the visible task
+    if (visibleContainer) {
+      // Scrolled to an adjacent task — show its metrics
+      if (statusTokens)
+        statusTokens.textContent = visibleContainer.dataset.metricTokens || '';
+      if (statusBudget)
+        statusBudget.textContent = visibleContainer.dataset.metricBudget || '';
+      if (statusSteps)
+        statusSteps.textContent = visibleContainer.dataset.metricSteps || '';
+    } else {
+      // Back on the current (main) task — restore its metrics
+      if (statusTokens)
+        statusTokens.textContent = currentTaskMetrics.tokens;
+      if (statusBudget)
+        statusBudget.textContent = currentTaskMetrics.budget;
+      if (statusSteps)
+        statusSteps.textContent = currentTaskMetrics.steps;
+    }
   }
 
   O.addEventListener('scroll', () => {
@@ -1662,6 +1705,7 @@
     if (statusBudget) statusBudget.textContent = '';
     if (statusSteps) statusSteps.textContent = '';
     stepCount = 0;
+    currentTaskMetrics = {tokens: '', budget: '', steps: ''};
   }
 
   function focusInputWithRetry() {
@@ -2388,6 +2432,10 @@
       if (t === 'result' && ev.step_count) rSteps = ev.step_count;
     });
     if (rSteps > 0) updateStepCount(rSteps);
+    // Snapshot the current task's metrics for adjacent-scroll restoration
+    currentTaskMetrics.tokens = statusTokens ? statusTokens.textContent : '';
+    currentTaskMetrics.budget = statusBudget ? statusBudget.textContent : '';
+    currentTaskMetrics.steps = statusSteps ? statusSteps.textContent : '';
     const tab = tabs.find(x => {
       return x.id === activeTabId;
     });
