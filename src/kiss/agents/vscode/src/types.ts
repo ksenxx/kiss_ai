@@ -49,7 +49,7 @@ export type FromWebviewMessage =
   | {type: 'resumeSession'; id: number; tabId?: string}
   | {type: 'getWelcomeSuggestions'}
   | {type: 'complete'; query: string}
-  | {type: 'mergeAction'; action: string}
+  | {type: 'mergeAction'; action: string; tabId?: string}
   | {type: 'newChat'; tabId?: string}
   | {type: 'generateCommitMessage'}
   | {type: 'runPrompt'}
