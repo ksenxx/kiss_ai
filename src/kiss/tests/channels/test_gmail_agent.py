@@ -12,7 +12,7 @@ import stat
 
 import pytest
 
-from kiss.channels.gmail_agent import (
+from kiss.agents.channels.gmail_agent import (
     GmailAgent,
     GmailChannelBackend,
     _build_service,

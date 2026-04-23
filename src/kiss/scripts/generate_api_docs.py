@@ -394,7 +394,7 @@ def _sort_modules(modules: list[ModuleDoc]) -> list[ModuleDoc]:
         "kiss.agents.sorcar.chat_sorcar_agent",
         "kiss.agents.sorcar.git_worktree",
         "kiss.agents.sorcar.worktree_sorcar_agent",
-        "kiss.channels",
+        "kiss.agents.channels",
     ]
     rank = {name: i for i, name in enumerate(order)}
 

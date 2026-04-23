@@ -21,7 +21,7 @@ import pytest
 
 _AUTH_AGENTS: list[dict[str, Any]] = [
     {
-        "module": "kiss.channels.slack_agent",
+        "module": "kiss.agents.channels.slack_agent",
         "class": "SlackAgent",
         "check": "check_slack_auth",
         "auth": "authenticate_slack",
@@ -32,7 +32,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "prompt_keywords": ["xoxb-", "Slack"],
     },
     {
-        "module": "kiss.channels.telegram_agent",
+        "module": "kiss.agents.channels.telegram_agent",
         "class": "TelegramAgent",
         "check": "check_telegram_auth",
         "auth": "authenticate_telegram",
@@ -42,7 +42,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "prompt_keywords": ["@BotFather", "/newbot"],
     },
     {
-        "module": "kiss.channels.discord_agent",
+        "module": "kiss.agents.channels.discord_agent",
         "class": "DiscordAgent",
         "check": "check_discord_auth",
         "auth": "authenticate_discord",
@@ -53,7 +53,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "prompt_keywords": ["Discord"],
     },
     {
-        "module": "kiss.channels.googlechat_agent",
+        "module": "kiss.agents.channels.googlechat_agent",
         "class": "GoogleChatAgent",
         "check": "check_googlechat_auth",
         "auth": "authenticate_googlechat",
@@ -66,7 +66,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "prompt_keywords": ["Google Chat"],
     },
     {
-        "module": "kiss.channels.signal_agent",
+        "module": "kiss.agents.channels.signal_agent",
         "class": "SignalAgent",
         "check": "check_signal_auth",
         "auth": "authenticate_signal",
@@ -76,7 +76,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "prompt_keywords": ["signal-cli"],
     },
     {
-        "module": "kiss.channels.msteams_agent",
+        "module": "kiss.agents.channels.msteams_agent",
         "class": "MSTeamsAgent",
         "check": "check_msteams_auth",
         "auth": "authenticate_msteams",
@@ -86,7 +86,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "prompt_keywords": ["App registrations"],
     },
     {
-        "module": "kiss.channels.matrix_agent",
+        "module": "kiss.agents.channels.matrix_agent",
         "class": "MatrixAgent",
         "check": "check_matrix_auth",
         "auth": "authenticate_matrix",
@@ -96,7 +96,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "prompt_keywords": ["Element", "Access Token"],
     },
     {
-        "module": "kiss.channels.feishu_agent",
+        "module": "kiss.agents.channels.feishu_agent",
         "class": "FeishuAgent",
         "check": "check_feishu_auth",
         "auth": "authenticate_feishu",
@@ -109,7 +109,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "prompt_keywords": ["Feishu", "Lark"],
     },
     {
-        "module": "kiss.channels.line_agent",
+        "module": "kiss.agents.channels.line_agent",
         "class": "LineAgent",
         "check": "check_line_auth",
         "auth": "authenticate_line",
@@ -119,7 +119,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "prompt_keywords": ["LINE", "Messaging API"],
     },
     {
-        "module": "kiss.channels.mattermost_agent",
+        "module": "kiss.agents.channels.mattermost_agent",
         "class": "MattermostAgent",
         "check": "check_mattermost_auth",
         "auth": "authenticate_mattermost",
@@ -129,7 +129,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "prompt_keywords": ["Personal Access Tokens"],
     },
     {
-        "module": "kiss.channels.irc_agent",
+        "module": "kiss.agents.channels.irc_agent",
         "class": "IRCAgent",
         "check": "check_irc_auth",
         "auth": "authenticate_irc",
@@ -139,7 +139,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "prompt_keywords": ["irc.libera.chat"],
     },
     {
-        "module": "kiss.channels.bluebubbles_agent",
+        "module": "kiss.agents.channels.bluebubbles_agent",
         "class": "BlueBubblesAgent",
         "check": "check_bluebubbles_auth",
         "auth": "authenticate_bluebubbles",
@@ -150,7 +150,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "macos_only": True,
     },
     {
-        "module": "kiss.channels.imessage_agent",
+        "module": "kiss.agents.channels.imessage_agent",
         "class": "IMessageAgent",
         "check": "check_imessage_auth",
         "auth": "authenticate_imessage",
@@ -161,7 +161,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "macos_only": True,
     },
     {
-        "module": "kiss.channels.nextcloud_talk_agent",
+        "module": "kiss.agents.channels.nextcloud_talk_agent",
         "class": "NextcloudTalkAgent",
         "check": "check_nextcloud_auth",
         "auth": "authenticate_nextcloud",
@@ -171,7 +171,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "prompt_keywords": ["Nextcloud", "Devices & sessions"],
     },
     {
-        "module": "kiss.channels.nostr_agent",
+        "module": "kiss.agents.channels.nostr_agent",
         "class": "NostrAgent",
         "check": "check_nostr_auth",
         "auth": "authenticate_nostr",
@@ -181,7 +181,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "prompt_keywords": ["nsec", "Nostr"],
     },
     {
-        "module": "kiss.channels.synology_chat_agent",
+        "module": "kiss.agents.channels.synology_chat_agent",
         "class": "SynologyChatAgent",
         "check": "check_synology_auth",
         "auth": "authenticate_synology",
@@ -191,7 +191,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "prompt_keywords": ["Synology Chat", "Incoming Webhooks"],
     },
     {
-        "module": "kiss.channels.tlon_agent",
+        "module": "kiss.agents.channels.tlon_agent",
         "class": "TlonAgent",
         "check": "check_tlon_auth",
         "auth": "authenticate_tlon",
@@ -201,7 +201,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "prompt_keywords": ["Tlon", "Urbit", "dojo"],
     },
     {
-        "module": "kiss.channels.twitch_agent",
+        "module": "kiss.agents.channels.twitch_agent",
         "class": "TwitchAgent",
         "check": "check_twitch_auth",
         "auth": "authenticate_twitch",
@@ -214,7 +214,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "prompt_keywords": ["Twitch"],
     },
     {
-        "module": "kiss.channels.whatsapp_agent",
+        "module": "kiss.agents.channels.whatsapp_agent",
         "class": "WhatsAppAgent",
         "check": "check_whatsapp_auth",
         "auth": "authenticate_whatsapp",
@@ -224,7 +224,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "prompt_keywords": ["WhatsApp", "Phone number ID"],
     },
     {
-        "module": "kiss.channels.zalo_agent",
+        "module": "kiss.agents.channels.zalo_agent",
         "class": "ZaloAgent",
         "check": "check_zalo_auth",
         "auth": "authenticate_zalo",
@@ -234,7 +234,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "prompt_keywords": ["Zalo"],
     },
     {
-        "module": "kiss.channels.phone_control_agent",
+        "module": "kiss.agents.channels.phone_control_agent",
         "class": "PhoneControlAgent",
         "check": "check_phone_auth",
         "auth": "authenticate_phone",
@@ -244,7 +244,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "prompt_keywords": ["companion", "REST"],
     },
     {
-        "module": "kiss.channels.sms_agent",
+        "module": "kiss.agents.channels.sms_agent",
         "class": "SMSAgent",
         "check": "check_sms_auth",
         "auth": "authenticate_sms",
@@ -254,7 +254,7 @@ _AUTH_AGENTS: list[dict[str, Any]] = [
         "prompt_keywords": ["Twilio"],
     },
     {
-        "module": "kiss.channels.gmail_agent",
+        "module": "kiss.agents.channels.gmail_agent",
         "class": "GmailAgent",
         "check": "check_gmail_auth",
         "auth": "authenticate_gmail",
@@ -388,7 +388,7 @@ class TestPlatformSpecificAuth:
         if sys.platform == "darwin":
             pytest.skip("Running on macOS — platform check passes")
         agent = _get_agent(
-            {"module": "kiss.channels.imessage_agent", "class": "IMessageAgent"}
+            {"module": "kiss.agents.channels.imessage_agent", "class": "IMessageAgent"}
         )
         tools = _get_tools(agent)
         result = tools["check_imessage_auth"]()
@@ -401,7 +401,7 @@ class TestPlatformSpecificAuth:
         if sys.platform == "darwin":
             pytest.skip("Running on macOS — platform check passes")
         agent = _get_agent(
-            {"module": "kiss.channels.imessage_agent", "class": "IMessageAgent"}
+            {"module": "kiss.agents.channels.imessage_agent", "class": "IMessageAgent"}
         )
         tools = _get_tools(agent)
         result = tools["authenticate_imessage"]()
@@ -414,7 +414,7 @@ class TestPlatformSpecificAuth:
             pytest.skip("Running on macOS — platform check passes")
         agent = _get_agent(
             {
-                "module": "kiss.channels.bluebubbles_agent",
+                "module": "kiss.agents.channels.bluebubbles_agent",
                 "class": "BlueBubblesAgent",
             }
         )

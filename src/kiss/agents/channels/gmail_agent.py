@@ -27,13 +27,13 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.channels._backend_utils import is_headless_environment, wait_for_matching_message
-from kiss.channels._channel_agent_utils import (
+from kiss.agents.channels._backend_utils import is_headless_environment, wait_for_matching_message
+from kiss.agents.channels._channel_agent_utils import (
     BaseChannelAgent,
     ToolMethodBackend,
     channel_main,
 )
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
 _GMAIL_DIR = Path.home() / ".kiss" / "channels" / "gmail"
 _SCOPES = [

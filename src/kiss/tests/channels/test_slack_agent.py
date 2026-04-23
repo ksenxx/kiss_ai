@@ -17,8 +17,7 @@ from typing import Any, cast
 import pytest
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.channels.slack_agent import (
+from kiss.agents.channels.slack_agent import (
     _SLACK_DIR,
     SlackAgent,
     SlackChannelBackend,
@@ -30,6 +29,7 @@ from kiss.channels.slack_agent import (
     _token_path,
     main,
 )
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 
 
 def _backup_and_clear() -> str | None:
@@ -159,7 +159,7 @@ class TestListWorkspaces:
 
     def test_no_slack_dir(self, capsys: pytest.CaptureFixture[str]) -> None:
         """_list_workspaces() prints 'No workspaces found.' when _SLACK_DIR missing."""
-        import kiss.channels.slack_agent as mod
+        import kiss.agents.channels.slack_agent as mod
 
         original = mod._SLACK_DIR
         mod._SLACK_DIR = Path(tempfile.mkdtemp()) / "nonexistent"
@@ -172,7 +172,7 @@ class TestListWorkspaces:
 
     def test_empty_slack_dir(self, capsys: pytest.CaptureFixture[str]) -> None:
         """_list_workspaces() prints 'No workspaces found.' when no workspace dirs."""
-        import kiss.channels.slack_agent as mod
+        import kiss.agents.channels.slack_agent as mod
 
         original = mod._SLACK_DIR
         empty_dir = Path(tempfile.mkdtemp())
