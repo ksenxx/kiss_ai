@@ -49,3 +49,4 @@
 - When replaying events in demo mode, group events into logical panels and replay each panel as a unit with a brief pause and collapse, rather than replaying events one-by-one with individual delays.
 - When adding related work or citations to a LaTeX paper, validate every citation by checking that the arXiv ID returns HTTP 200 or the URL resolves before inserting it into the bibliography. Compile twice with pdflatex and verify no undefined citation warnings remain.
 - When asked to cite recent papers, read the abstracts to judge relevance and verify publication dates before adding to the paper. Prioritize papers with high citation counts and direct topical relevance.
+- Before making changes to a file, verify the current state matches the assumed precondition by reading the file and checking git history; if the file already implements what was requested (e.g. due to a prior refactor that was not reverted), report that fact instead of making redundant changes.
