@@ -38,7 +38,7 @@ with native function calling.  The Relentless Agent extends this with
 automatic multi-session continuation, enabling
 arbitrarily long tasks that survive context-window exhaustion.  The
 Sorcar Agent adds coding tools, browser automation, and parallel
-sub-agent execution.  The Stateful Sorcar Agent introduces persistent
+sub-agent execution.  The Chat Sorcar Agent introduces persistent
 multi-turn chat sessions, and the Worktree Sorcar Agent isolates every
 task on a dedicated git branch via worktrees so the developer's main
 working tree is never modified.  We describe the design of each layer,
@@ -70,7 +70,7 @@ in which each layer adds exactly one concern:
     sub-sessions.
   \item \textbf{Sorcar Agent} --- coding tools, browser automation,
     and parallel sub-agent execution.
-  \item \textbf{Stateful Sorcar Agent} --- persistent multi-turn chat
+  \item \textbf{Chat Sorcar Agent} --- persistent multi-turn chat
     sessions with history recall.
   \item \textbf{Worktree Sorcar Agent} --- git-worktree isolation so
     every task runs on its own branch.
@@ -288,11 +288,11 @@ commands inside a container, providing an additional layer of
 sandboxing for untrusted tasks.
 
 %......................................................................
-\subsection{Stateful Sorcar Agent}
-\label{sec:stateful-agent}
+\subsection{Chat Sorcar Agent}
+\label{sec:chat-agent}
 %......................................................................
 
-The Stateful Sorcar Agent adds multi-turn conversation persistence.
+The Chat Sorcar Agent adds multi-turn conversation persistence.
 
 \textbf{Chat sessions.}  Each task is assigned to a chat session
 identified by a stable chat ID.  The agent persists tasks and their
@@ -1333,7 +1333,7 @@ real-world software development.  The KISS Agent provides a robust
 execution core with budget tracking.  The Relentless Agent eliminates
 the context-window ceiling through automatic continuation.  The Sorcar
 Agent equips the agent with the tools a
-developer actually uses.  The Stateful Sorcar Agent enables multi-turn
+developer actually uses.  The Chat Sorcar Agent enables multi-turn
 conversations that persist across sessions.  The Worktree Sorcar Agent
 ensures that every task is safely isolated in git, giving the
 developer full control over what gets merged.
