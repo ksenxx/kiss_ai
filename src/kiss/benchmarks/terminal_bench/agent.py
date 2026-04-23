@@ -150,7 +150,9 @@ class SorcarHarborAgent(BaseAgent):
         if not await self._exec_check(
             environment,
             "apt-get update -qq && apt-get install -y -qq curl"
-            " && curl -LsSf https://astral.sh/uv/install.sh | sh",
+            " && curl -LsSf https://astral.sh/uv/install.sh -o /tmp/install-uv.sh"
+            " && sh /tmp/install-uv.sh"
+            " && test -x /root/.local/bin/uv",
             "install uv",
         ):
             return
