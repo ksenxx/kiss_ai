@@ -381,7 +381,7 @@ class TestTabIdTypeConsistency(unittest.TestCase):
             ("_broadcast_worktree_done", _MergeFlowMixin._broadcast_worktree_done),
             ("_stop_task", _TaskRunnerMixin._stop_task),
         ]:
-            sig = inspect.signature(method)
+            sig = inspect.signature(method)  # type: ignore[arg-type]
             for pname, param in sig.parameters.items():
                 if "tab" in pname.lower() and param.default is not inspect.Parameter.empty:
                     methods_with_defaults[name] = param.default
@@ -400,7 +400,7 @@ class TestTabIdTypeConsistency(unittest.TestCase):
             ("_handle_merge_action", _MergeFlowMixin._handle_merge_action),
             ("_stop_task", _TaskRunnerMixin._stop_task),
         ]:
-            sig = inspect.signature(method)
+            sig = inspect.signature(method)  # type: ignore[arg-type]
             for pname, param in sig.parameters.items():
                 if "tab" in pname.lower() and param.default is not inspect.Parameter.empty:
                     annotations[name] = str(param.annotation)

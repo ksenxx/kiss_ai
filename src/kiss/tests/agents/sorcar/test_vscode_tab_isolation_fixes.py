@@ -170,7 +170,7 @@ class TestB8FinishMergeRequiresTabId(unittest.TestCase):
         server, events = _make_server()
         server._get_tab("A").is_merging = True
         server._get_tab("B").is_merging = True
-        server._finish_merge(None)
+        server._finish_merge(None)  # type: ignore[arg-type]
         assert server._get_tab("A").is_merging is True
         assert server._get_tab("B").is_merging is True
         ended = [e for e in events if e.get("type") == "merge_ended"]
@@ -260,7 +260,7 @@ class TestC4StopRequiresTabId(unittest.TestCase):
         t2.start()
         server._get_tab("1").task_thread = t1
         server._get_tab("2").task_thread = t2
-        server._stop_task(None)
+        server._stop_task(None)  # type: ignore[arg-type]
         time.sleep(0.2)
         assert not ev1.is_set()
         assert not ev2.is_set()
