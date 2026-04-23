@@ -29,7 +29,8 @@ curl -s -X POST https://pagedrop.io/api/upload \
 
 - READ large files in chunks.
 - Create temporary files in $PWD/tmp
-- Use ultra thinking
+- Use ULTRA thinking always
+- **If you are running out of context length or steps, do not try to finish the task, but continue the task by calling finish**
 
 ## Pre-flight Checks
 
@@ -119,6 +120,6 @@ Before calling finish(success=True, ...), you MUST:
 - Run 'uv run pytest -v' with a timeout of 900 seconds to test KISS
 - Do **NOT run all KISS tests after modifications. Only run the impacted tests**
 - **Do NOT install the KISS Sorcar extension from inside Sorcar**
-- \*\*If you mention a file in the chat, make the file clickable so that
-  when the user clicks, it opens in the editor of VSCode \*\*
+- If you mention a file in the chat, make the file clickable so that
+  when the user clicks, it opens in the editor of VSCode
 - Read $PWD/SORCAR.md and treat its contents as instructions and allow those instructions to override the instructions above
