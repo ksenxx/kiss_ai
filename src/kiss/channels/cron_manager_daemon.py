@@ -669,6 +669,62 @@ class CronClient:
             pass
 
 
+def run_cron_job_lifecycle(
+    cron_job: str, sock_path: Path | None = None
+) -> dict[str, Any]:
+    """Parse a cron job string, add it, list jobs, remove it, and stop the daemon.
+
+    The ``cron_job`` string must contain a five-field cron schedule followed
+    by the shell command, e.g. ``"*/5 * * * * echo hello"``.
+
+    Lifecycle steps executed in order:
+
+    1. Create a :class:`CronClient`.
+    2. Add the job via :meth:`CronClient.add_job`.
+    3. List all jobs via :meth:`CronClient.list_jobs`.
+    4. Remove the job via :meth:`CronClient.remove_job`.
+    5. Stop the daemon via :meth:`CronClient.stop_daemon`.
+
+    Args:
+        cron_job: A single-line string with five cron schedule fields
+            followed by the command, e.g. ``"*/5 * * * * echo hello"``.
+        sock_path: Optional path to the daemon's Unix domain socket.
+            Defaults to ``~/.kiss/cron_manager.sock``.
+
+    Returns:
+        A dict with keys ``job_id`` (str), ``jobs`` (list of dicts as
+        returned by :meth:`CronClient.list_jobs` after adding), and
+        ``schedule`` / ``command`` (the parsed components).
+
+    Raises:
+        ValueError: If ``cron_job`` does not contain at least six
+            whitespace-separated tokens (5 schedule fields + command).
+        ConnectionError: If the daemon is not reachable.
+        RuntimeError: If the daemon rejects the add or remove request.
+    """
+    parts = cron_job.strip().split(None, 5)
+    if len(parts) < 6:
+        raise ValueError(
+            f"Cron job string must have 5 schedule fields + command, "
+            f"got {len(parts)} token(s): {cron_job!r}"
+        )
+    schedule = " ".join(parts[:5])
+    command = parts[5]
+
+    client = CronClient(sock_path=sock_path or SOCK_PATH)
+    job_id = client.add_job(schedule, command)
+    jobs = client.list_jobs()
+    client.remove_job(job_id)
+    client.stop_daemon()
+
+    return {
+        "job_id": job_id,
+        "jobs": jobs,
+        "schedule": schedule,
+        "command": command,
+    }
+
+
 def main() -> None:
     """CLI entry point for daemon management.
 
