@@ -61,6 +61,9 @@ export function buildChatHtml(
   const scriptUri = webview.asWebviewUri(
     vscode.Uri.joinPath(extensionUri, 'media', 'main.js'),
   );
+  const demoScriptUri = webview.asWebviewUri(
+    vscode.Uri.joinPath(extensionUri, 'media', 'demo.js'),
+  );
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -138,6 +141,13 @@ export function buildChatHtml(
                 <polygon points="5,3 19,12 5,21"/>
               </svg>
             </button>
+            <button id="demo-toggle-btn" data-tooltip="Toggle demo mode">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
+                <line x1="8" y1="21" x2="16" y2="21"/>
+                <line x1="12" y1="17" x2="12" y2="21"/>
+              </svg>
+            </button>
             <div id="model-dropdown">
               <input type="text" id="model-search" placeholder="Search models...">
               <div id="model-list"></div>
@@ -182,6 +192,7 @@ export function buildChatHtml(
   <script nonce="${nonce}" src="${hljsUri}"></script>
   <script nonce="${nonce}" src="${markedUri}"></script>
   <script nonce="${nonce}" src="${scriptUri}"></script>
+  <script nonce="${nonce}" src="${demoScriptUri}"></script>
 </body>
 </html>`;
 }

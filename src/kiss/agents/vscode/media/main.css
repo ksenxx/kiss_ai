@@ -700,6 +700,21 @@ body {
 #run-prompt-btn:not(:disabled):hover { color: color-mix(in srgb, var(--green) 91%, transparent); }
 #run-prompt-btn:disabled { opacity: 0.15; cursor: not-allowed; }
 
+#demo-toggle-btn {
+  background: none; border: none;
+  color: color-mix(in srgb, var(--fg) 50%, transparent); cursor: pointer;
+  padding: 4px; transition: color 0.15s, opacity 0.15s;
+  display: flex; align-items: center;
+}
+#demo-toggle-btn:hover { color: color-mix(in srgb, var(--fg) 66%, transparent); }
+#demo-toggle-btn.active {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-radius: 4px;
+}
+#demo-toggle-btn.active:hover { color: var(--accent); }
+#demo-toggle-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
 #model-dropdown {
   position: absolute; bottom: 100%; left: 0; min-width: 280px; max-width: 380px;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
