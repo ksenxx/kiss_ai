@@ -93,20 +93,6 @@ supplies their own API key, and the system handles the rest.
 Section~\ref{sec:vscode-features} describes the extension's unique
 features in detail.
 
-\paragraph{The system prompt as a first-class artifact.}
-Recent empirical studies have shown that project-level instruction
-files---such as \texttt{.cursorrules}, \texttt{AGENTS.md}, or
-\texttt{CLAUDE.md}---significantly improve agent
-performance~\citep{chatlatanagulchai2025readmes,mohsenimofidi2025context}.
-We take this idea further: the system prompt is not a static preamble
-but a carefully engineered document that encodes invariants about code
-quality, verification discipline, and self-improvement.  We drew
-initial inspiration from the GetShitDone prompt engineering
-collection~\citep{getshitdone2025}, which demonstrated that
-prescriptive prompts can make coding agents substantially more
-effective, and we iteratively refined the prompt through months of
-daily use on a production codebase (Section~\ref{sec:system-prompt}).
-
 \paragraph{Quality over speed.}
 We deliberately prioritize output quality over latency.  In our
 experience, using a weaker or cheaper model often forces the developer
@@ -149,46 +135,6 @@ system prompt.  Section~\ref{sec:vscode-features} covers the VS~Code
 extension.  Section~\ref{sec:evaluation} reports preliminary
 evaluation results.  Section~\ref{sec:related} discusses related work,
 and Section~\ref{sec:conclusion} concludes.
-
-%----------------------------------------------------------------------
-\section{Motivation and Key Design Principles}
-\label{sec:motivation}
-%----------------------------------------------------------------------
-
-\paragraph{Finite context, infinite tasks.}
-Even the largest context windows are insufficient for complex
-refactoring or multi-file bug hunts.  Rather than hoping the model
-finishes before hitting the limit, we design the system from the
-ground up to \emph{continue} across multiple sub-sessions, each with
-its own context window, while preserving a compressed summary of prior
-progress.
-
-\paragraph{Budget accountability.}
-Every API call costs money.  We track input tokens, output tokens,
-cache hits, and cache writes at every step, compute a running dollar
-cost, and enforce per-task and global budget ceilings.  If the agent
-exceeds the budget, it raises a hard error rather than silently
-accumulating charges.
-
-\paragraph{Safe-by-default code changes.}
-Applying AI-generated changes directly to a developer's working tree
-is risky: a bad edit can break a build, and reverting requires manual
-git archaeology.  We eliminate this risk entirely with the worktree layer, which runs
-every task on a disposable git branch in a separate worktree
-directory.  The developer reviews changes and explicitly chooses to
-merge or discard.
-
-\paragraph{No mocks, no fakes, real integration tests.}
-Our test suite enforces a strict policy: tests must exercise actual
-behavior, not mocked approximations.  This philosophy extends to the
-agent's instructions --- when the agent writes tests for user code, we
-instruct it to avoid mocks and achieve full branch coverage.
-
-\paragraph{Relentless execution.}
-We design the system to be \emph{relentless}: it does not give up
-when a sub-session fails.  Instead, it summarizes what happened and
-continues with a fresh strategy informed by a summary of all prior
-attempts.
 
 %----------------------------------------------------------------------
 \section{Agent Architecture}
