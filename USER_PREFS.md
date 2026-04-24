@@ -72,3 +72,4 @@
 - When updating the conclusion of a paper with evaluation results, include the key quantitative metrics (pass rate, pass@any, pass@all, comparisons to baselines) and connect them back to the paper's design claims.
 - The paper source files live in papers/kisssorcar/; build with the full pdflatex-bibtex-pdflatex-pdflatex cycle from that directory.
 - When updating README.md text from the paper, use the papers polished language and phrasing while preserving all original content points such as links, notes, and references. Fix any broken markdown formatting encountered during the update.
+- When an interactive event from the backend requires user attention (e.g. askUser modal), the extension host must reveal the sidebar panel via view.show(true) before forwarding the event to the webview, so the user sees the UI even if they switched to another panel while the task was running.
