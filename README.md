@@ -139,4 +139,5 @@ Apache-2.0
 ## ✍️ Authors
 
 - Koushik Sen (ksen@berkeley.edu) | [LinkedIn](https://www.linkedin.com/in/koushik-sen-80b99a/) | [X @koushik77](https://x.com/koushik77)
+- Marius Momeu (marius.momeu@berkeley.edu) | [LinkedIn](https://www.linkedin.com/in/mariusmomeu/) | [X @MariusMomeu](https://x.com/MariusMomeu)
 - Yogya Mehrotra (ymehrotr@ucsc.edu) | [LinkedIn](https://www.linkedin.com/in/yogyamehrotra/)
