@@ -19,15 +19,9 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 <details>
 <summary><strong>Table of Contents</strong></summary>
 
-- [Install and Launch KISS Sorcar](#install-and-launch-kiss-sorcar)
 - [Introduction to KISS Sorcar](#introduction-to-kiss-sorcar)
-- [The Problem with AI Agent Frameworks Today](#-the-problem-with-ai-agent-frameworks-today)
-- [Your First Agent in 30 Seconds](#-your-first-agent-in-30-seconds)
-- [Multi-Agent Orchestration](#-multi-agent-orchestration-is-function-composition)
-- [Key Features and Principles](#-key-features-and-principles-behind-kiss-and-sorcar)
-- [KISSAgent API Reference](#-kissagent-api-reference)
-- [GEPA Prompt Optimization](#-using-gepa-for-prompt-optimization)
-- [KISSEvolve Algorithm Discovery](#-using-kissevolve-for-algorithm-discovery)
+- [Install and Launch KISS Sorcar Extension](#install-and-launch-kiss-sorcar-extension)
+- [CLI Interface](#cli-interface)
 - [Models Supported](#-models-supported)
 - [Contributing](#-contributing)
 - [License](#-license)
@@ -38,7 +32,7 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 # Introduction to KISS Sorcar
 
 ![KISS Sorcar](assets/KISS-Sorcar-UI.png)
-**KISS Sorcar** (named after the [famous Bengali magician P.C. Sorcar](https://en.wikipedia.org/wiki/P._C._Sorcar)) is *a general-purpose agent with web browsing and native desktop app execution capabilities**. It runs **locally** as a VS Code extension. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours to days**. It is **implemented as a Visual Studio Code extension**. It has **full browser** support, **multimodal** support, and OpenClaw like features (we will post more information about them on our social media channels). The good part is that KISS Sorcar is **completely free** and **open-source**; you bring your API key and give it to KISS Sorcar.  <scriptsize>Note that **Sorcar** also means government in Bengali.</scriptsize>
+**KISS Sorcar** (named after the [famous Bengali magician P.C. Sorcar](https://en.wikipedia.org/wiki/P._C._Sorcar)) is *a general-purpose agent with web browsing and native desktop app execution capabilities**. It runs **locally** as a VS Code extension. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours to days**. It is **implemented as a Visual Studio Code extension**. It has **full browser** support, **multimodal** support, and OpenClaw like features (we will post more information about them on our social media channels). The good part is that KISS Sorcar is **completely free** and **open-source**; you bring your API key and give it to KISS Sorcar.  A paper on KISS Sorcar can be found at [papers/kisssorcar/kiss_sorcar.pdf](papers/kisssorcar/kiss_sorcar.pdf). <scriptsize>Note that **Sorcar** also means government in Bengali.</scriptsize>
 
 ```
 git clone https://github.com/ksenxx/kiss_ai.git
@@ -48,11 +42,14 @@ cd kiss_ai
 
 [https://www.youtube.com/watch?v=xnYxWvRqACE](https://www.youtube.com/watch?v=xnYxWvRqACE).
 
-## Install and Launch KISS Sorcar
+## Install and Launch KISS Sorcar Extension
 
 To Install KISS Sorcar, open Visual Studio Code, search for "KISS Sorcar" in the extension marketplace, install, and relaunch VS Code. Press ESC if you don't have a specific API key, but you must provide at least one API key.
 
 You can also manually download the extension from [src/kiss/agents/vscode/kiss-sorcar.vsix](src/kiss/agents/vscode/kiss-sorcar.vsix).
+
+
+## CLI Interface 
 
 If you do not want to use the KISS Sorcar IDE, you can open a terminal and use sorcar as a normal shell command. Some examples are:
 

@@ -94,7 +94,12 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       this.sendMergeAllDone(tabId);
       this._restoreChain = this._restoreChain
         .then(() => this._restorePreMergeEditors(tabId))
-        .catch(() => {});
+        .catch(err => {
+          console.error(
+            '[SorcarSidebarView] restorePreMergeEditors failed:',
+            err,
+          );
+        });
     });
     return mgr;
   }
@@ -177,7 +182,13 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
               }
               await mgr.openMerge(msg.data);
             })
-            .catch(() => {});
+            .catch(err => {
+              console.error(
+                '[SorcarSidebarView] openMerge failed for tab',
+                mergeTabId,
+                err,
+              );
+            });
         }
       }
       if (msg.type === 'worktree_created' || msg.type === 'worktree_done') {

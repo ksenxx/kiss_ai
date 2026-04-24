@@ -163,6 +163,11 @@ class _MergeFlowMixin:
         user sees merge/discard buttons only after the hunk review is
         complete.
 
+        Uses ``_get_tab`` to obtain the tab so the autocommit-prompt
+        check still fires even when the ``mergeAction`` command was
+        routed to a process that never ran the original task (e.g. the
+        service process after the task process was disposed).
+
         Args:
             tab_id: The tab whose merge session is finished.  When
                 falsy (*None* or empty string), the call is a no-op — a
@@ -173,16 +178,15 @@ class _MergeFlowMixin:
         if not tab_id:
             logger.debug("_finish_merge called without tab_id; ignoring")
             return
+        tab = self._get_tab(tab_id)
         with self._state_lock:
-            tab = self._tab_states.get(tab_id)
-            if tab is not None:
-                tab.is_merging = False
+            tab.is_merging = False
         self.printer.broadcast({"type": "merge_ended", "tabId": tab_id})
         _cleanup_merge_data(str(_merge_data_dir(tab_id)))
 
         self._present_pending_worktree(tab_id, try_merge_review=False)
 
-        if tab is not None and not tab.use_worktree:
+        if not tab.use_worktree:
             changed = self._main_dirty_files()
             if changed:
                 self.printer.broadcast({
