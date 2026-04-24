@@ -38,7 +38,7 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 # Introduction to KISS Sorcar
 
 ![KISS Sorcar](assets/KISS-Sorcar-UI.png)
-**KISS Sorcar** (named after the [famous Bengali magician P.C. Sorcar](https://en.wikipedia.org/wiki/P._C._Sorcar)) is *a general-purpose agent with web browsing and native desktop app execution capabilities**. It runs **locally** as a VS Code extension. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours to days**. It is **implemented as a Visual Studio Code extension**. It has **full browser** support and **multimodal** support. The good part is that KISS Sorcar is **completely free** and **open-source**; you bring your API key and give it to KISS Sorcar.
+**KISS Sorcar** (named after the [famous Bengali magician P.C. Sorcar](https://en.wikipedia.org/wiki/P._C._Sorcar)) is *a general-purpose agent with web browsing and native desktop app execution capabilities**. It runs **locally** as a VS Code extension. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours to days**. It is **implemented as a Visual Studio Code extension**. It has **full browser** support, **multimodal** support, and OpenClaw like features (we will post more information about them on our social media channels). The good part is that KISS Sorcar is **completely free** and **open-source**; you bring your API key and give it to KISS Sorcar.  <scriptsize>Note that **Sorcar** also means government in Bengali.</scriptsize>
 
 ```
 git clone https://github.com/ksenxx/kiss_ai.git
