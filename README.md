@@ -20,7 +20,8 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 <summary><strong>Table of Contents</strong></summary>
 
 - [Introduction to KISS Sorcar](#introduction-to-kiss-sorcar)
-- [Install and Launch KISS Sorcar Extension](#install-and-launch-kiss-sorcar-extension)
+- [Full Installation](#full-installation)
+- [KISS Sorcar Extension Installation](#kiss-sorcar-extension-installation)
 - [CLI Interface](#cli-interface)
 - [Models Supported](#-models-supported)
 - [Contributing](#-contributing)
@@ -32,7 +33,12 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 # Introduction to KISS Sorcar
 
 ![KISS Sorcar](assets/KISS-Sorcar-UI.png)
-**KISS Sorcar** (named after [P.C. Sorcar, the legendary Bengali magician](https://en.wikipedia.org/wiki/P._C._Sorcar), evoking the idea of an agent that performs feats that appear magical yet are grounded in disciplined engineering) is a **general-purpose assistant** and **integrated development environment** (IDE) built on top of the **KISS Agent Framework**, a stupidly-simple agentic framework of roughly 1,850 lines of code. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours**. KISS Sorcar is implemented as a **Visual Studio Code extension** that runs **locally**. It has **full browser** support (using open-source Chromium browser and Playwright), **multimodal** support, **Docker container** support, and OpenClaw like features. The good part is that KISS Sorcar is **completely free** and **open-source**; all one needs is a model API key from a major LLM provider, such as Anthropic. A paper on KISS Sorcar can be found at [papers/kisssorcar/kiss_sorcar.pdf](papers/kisssorcar/kiss_sorcar.pdf). <scriptsize>Note that **Sorcar** also means government in Bengali.</scriptsize>
+**KISS Sorcar** (named after [P.C. Sorcar, the legendary Bengali magician](https://en.wikipedia.org/wiki/P._C._Sorcar), evoking the idea of an agent that performs feats that appear magical yet are grounded in disciplined engineering) is a **general-purpose assistant** and **integrated development environment** (IDE) built on top of the **KISS Agent Framework**, a stupidly-simple agentic framework of roughly 1,850 lines of code. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours**. KISS Sorcar is implemented as a **Visual Studio Code extension** that runs **locally**. It has **full browser** support (using open-source Chromium browser and Playwright), **multimodal** support, **Docker container** support, and OpenClaw like features. The good part is that KISS Sorcar is **completely free** and **open-source**; all one needs is a model API key from a major LLM provider, such as Anthropic (highly recommended). A paper on KISS Sorcar can be found at [papers/kisssorcar/kiss_sorcar.pdf](papers/kisssorcar/kiss_sorcar.pdf). An old video on KISS Sorcar can be found at [https://www.youtube.com/watch?v=xnYxWvRqACE](https://www.youtube.com/watch?v=xnYxWvRqACE).  We **no longer** recommend to explicitly create a plan in KISS Sorcar. 
+
+<scriptsize>Note that **Sorcar** also means government in Bengali.</scriptsize>. 
+
+
+## Full Installation
 
 ```
 git clone https://github.com/ksenxx/kiss_ai.git
@@ -40,9 +46,8 @@ cd kiss_ai
 ./install.sh
 ```
 
-[https://www.youtube.com/watch?v=xnYxWvRqACE](https://www.youtube.com/watch?v=xnYxWvRqACE).
 
-## Install and Launch KISS Sorcar Extension
+## KISS Sorcar Extension Installation
 
 To Install KISS Sorcar, open Visual Studio Code, search for "KISS Sorcar" in the extension marketplace, install, and relaunch VS Code. Press ESC if you don't have a specific API key, but you must provide at least one API key.
 
