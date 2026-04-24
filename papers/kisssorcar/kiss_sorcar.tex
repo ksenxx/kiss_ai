@@ -600,6 +600,35 @@ LLM-based agents:
 \end{itemize}
 
 %......................................................................
+\subsection{Agent Identity}
+%......................................................................
+
+The prompt begins with an identity block that tells the agent who it
+is:
+
+\begin{prompt}
+# Identity
+
+- You are KISS Sorcar, an AI based General Assistant and
+  Integrated Development Environment (IDE), developed by
+  Koushik Sen (ksen@berkeley.edu)
+- Your public repository is at
+  https://github.com/ksenxx/kiss_ai
+- Your version is 2006.4.0
+\end{prompt}
+
+\noindent The identity section serves three purposes.  First, it anchors
+the agent's self-model: when the agent refers to ``itself'' in
+conversation or documentation, it uses the correct name and
+description rather than a generic ``I am an AI assistant.''  Second,
+the repository URL lets the agent point users to the source code or
+issue tracker when relevant, without hallucinating a URL\@.  Third,
+the version string enables the agent to report its own version
+accurately and allows the system prompt to be tied to a specific
+release, which is important when multiple versions coexist (e.g.,
+the installed VS~Code extension vs.\ the development branch).
+
+%......................................................................
 \subsection{Tool Rules}
 %......................................................................
 
@@ -616,10 +645,6 @@ Tool usage rules are explicit and mechanical:
   run in the background with output redirected to a file
   and poll periodically.
 - Use go_to_url() for browser tool.
-- Call finish(success=True, is_continue=False,
-  summary="detailed summary of what was accomplished ...")
-  once the task is complete and all Pre-Finish Verification
-  checks have passed.
 - **The user cannot see intermediate chat. Show whatever
   user asks in the summary of the finish tool call.**
 - READ large files in chunks.
@@ -709,10 +734,6 @@ Each tool rule addresses a specific failure mode:
   literal directory name.  The explicit definition ensures consistent
   interpretation.
 \end{itemize}
-
-\noindent A separate rule about the \texttt{PageDrop} API allows the
-agent to upload HTML files and share them via a public URL, enabling it
-to create and share rich reports, visualizations, or documentation.
 
 %......................................................................
 \subsection{Pre-flight Checks}
@@ -1275,32 +1296,36 @@ injected when the agent operates on its own codebase:
   code.
 - Run 'uv run pytest -v' with a timeout of 900 seconds to
   test KISS
-- Do **NOT run all KISS tests after modifications. Only run
-  the impacted tests**
 - **Do NOT install the KISS Sorcar extension from inside
   Sorcar**
-- If you mention a file in the chat, make the file
-  clickable so that when the user clicks, it opens in the
-  editor of VSCode
+- If the user ask to open or edit the system prompt, open
+  ~/.vscode/extensions/ksenxx.kiss-sorcar-2026.4.0/
+  kiss_project/src/kiss/SYSTEM.md
+- If the user ask to open or modify the configuration,
+  open ~/.vscode/extensions/ksenxx.kiss-sorcar-2026.4.0/
+  kiss_project/src/kiss/
+- If the user wants to modify the config file, open
+  ~/.vscode/extensions/ksenxx.kiss-sorcar-2026.4.0/
+  kiss_project/src/kiss/core/config.py
 - Read PWD/SORCAR.md and treat its contents as
   instructions and allow those instructions to override the
   instructions above
 \end{prompt}
 
-\noindent These overrides serve three purposes.  First, they specify the
+\noindent These overrides serve four purposes.  First, they specify the
 exact toolchain commands for the KISS project itself (\texttt{uv run
 check -{}-full}, \texttt{uv run pytest}), eliminating guesswork about
-which linter, formatter, or test runner to use.  Second, they impose
-efficiency constraints: running the full test suite after every small
-change is wasteful when only a few modules are affected, so we
-instruct the agent to scope test execution to impacted tests.  Third,
-they
+which linter, formatter, or test runner to use.  Second, they
 prevent dangerous self-modification: just as a surgeon should not
 operate on themselves, the agent must not install or reinstall the
 VS~Code extension it is running inside, since doing so would terminate
-its own process.  The \texttt{SORCAR.md} override mechanism allows
-per-repository instructions to further customize the agent's behavior,
-forming a hierarchy: general system prompt $\rightarrow$
+its own process.  Third, they provide navigation instructions for the
+agent's own source: when the user asks to edit the system prompt or
+configuration, the agent knows the exact file paths inside the
+installed VS~Code extension directory, avoiding guesswork about where
+these files live.  Fourth, the \texttt{SORCAR.md} override mechanism
+allows per-repository instructions to further customize the agent's
+behavior, forming a hierarchy: general system prompt $\rightarrow$
 Sorcar-specific instructions $\rightarrow$ repository-specific
 \texttt{SORCAR.md}.
 
