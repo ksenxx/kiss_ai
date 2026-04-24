@@ -38,9 +38,9 @@ def model_vendor(name: str) -> tuple[str, int]:
     Returns:
         Tuple of (display name, numeric sort order).
     """
-    if name.startswith("claude-"):
+    if name.startswith("claude-") or name.startswith("cc/"):
         return "Anthropic", 0
-    if name.startswith(_OPENAI_PREFIXES) and not name.startswith("openai/"):
+    if name.startswith("openai/") or name.startswith(_OPENAI_PREFIXES):
         return "OpenAI", 1
     if name.startswith("gemini-"):
         return "Gemini", 2
@@ -51,24 +51,68 @@ def model_vendor(name: str) -> tuple[str, int]:
     return "Together AI", 5
 
 
-def fast_model_for(selected_model: str) -> str:
-    """Return a cheap/fast model from the same provider as the user's selected model.
+def fast_model_for() -> str:
+    """Return a cheap/fast model based on which API keys are available.
 
-    Args:
-        selected_model: The user's currently selected model name.
+    Priority: Anthropic/OpenRouter/Together → Gemini → OpenAI.
 
     Returns:
-        A fast model name compatible with the same provider/API key.
+        A fast model name for the first available provider.
     """
     from kiss.core.config import DEFAULT_CONFIG
 
-    if selected_model.startswith("openrouter/"):
+    if DEFAULT_CONFIG.ANTHROPIC_API_KEY:
+        return "claude-haiku-4-5"
+    if DEFAULT_CONFIG.OPENROUTER_API_KEY:
         return "openrouter/anthropic/claude-haiku-4.5"
-    if selected_model.startswith("gemini-"):
-        return "gemini-2.0-flash"
-    if selected_model.startswith(_OPENAI_PREFIXES) and not selected_model.startswith("openai/"):
-        return "gpt-4o-mini"
-    return str(DEFAULT_CONFIG.FAST_MODEL)
+    if DEFAULT_CONFIG.TOGETHER_API_KEY:
+        return "deepseek-ai/DeepSeek-R1-0528"
+    if DEFAULT_CONFIG.GEMINI_API_KEY:
+        return "gemini-2.5-pro"
+    if DEFAULT_CONFIG.OPENAI_API_KEY:
+        return "gpt-4o"
+    return "claude-haiku-4-5"
+
+
+def generate_commit_message_from_diff(diff_text: str) -> str:
+    """Generate a git commit message from a diff via LLM.
+
+    Uses a fast/cheap model to produce a conventional-commit-style
+    message.  Returns a fallback string on any failure.
+
+    Args:
+        diff_text: Output of ``git diff --cached`` or similar.
+
+    Returns:
+        The cleaned commit-message string, or ``"kiss: auto-commit agent work"``
+        on failure.
+    """
+    from kiss.core.kiss_agent import KISSAgent
+
+    fallback = "kiss: auto-commit agent work"
+    if not diff_text:
+        return fallback
+    try:
+        agent = KISSAgent("Commit Message Generator")
+        raw = agent.run(
+            model_name=fast_model_for(),
+            prompt_template=(
+                "Generate a concise git commit message for these "
+                "changes. Use conventional commit format with a "
+                "clear subject line (type: description) and "
+                "optionally a body with bullet points for multiple "
+                "changes. Return ONLY the commit message text, no "
+                "quotes or markdown fences.\n\n{context}"
+            ),
+            arguments={"context": f"Diff:\n{diff_text}"},
+            is_agentic=False,
+            verbose=False,
+        )
+        msg = clean_llm_output(raw)
+        return msg if msg else fallback
+    except Exception:
+        logger.debug("Commit message generation failed", exc_info=True)
+        return fallback
 
 
 def generate_followup_text(task: str, result: str, model: str) -> str:

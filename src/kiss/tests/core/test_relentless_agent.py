@@ -22,6 +22,16 @@ from kiss.tests.conftest import requires_gemini_api_key
 TEST_MODEL = "gemini-2.0-flash"
 
 
+def _docker_available() -> bool:
+    try:
+        import docker
+
+        docker.from_env().ping()
+        return True
+    except Exception:
+        return False
+
+
 class TestTemplateConstants(unittest.TestCase):
     """Tests that template strings contain the expected placeholders."""
 
@@ -44,9 +54,10 @@ class TestTemplateConstants(unittest.TestCase):
         self.assertIn("MOST IMPORTANT INSTRUCTIONS", formatted)
 
     def test_continuation_prompt_placeholders(self) -> None:
-        """CONTINUATION_PROMPT has progress_text."""
-        formatted = CONTINUATION_PROMPT.format(progress_text="step 1 done")
+        """CONTINUATION_PROMPT has progress_text and continuation_number."""
+        formatted = CONTINUATION_PROMPT.format(progress_text="step 1 done", continuation_number=3)
         self.assertIn("step 1 done", formatted)
+        self.assertIn("Continuation 3", formatted)
         self.assertIn("Continue", formatted)
 
 
@@ -64,11 +75,19 @@ class TestFinish(unittest.TestCase):
 @requires_gemini_api_key
 class TestContinuation(unittest.TestCase):
     def test_empty_summary_no_progress(self) -> None:
-        """Empty summary -> no progress_section added."""
+        """Empty summary -> no progress_section added.
+
+        When every sub-session returns ``is_continue=True`` with an
+        empty summary, the relentless agent has no progress to carry
+        forward and should exhaust ``max_sub_sessions`` and raise
+        ``KISSError``.  If the Gemini API rate-limits mid-loop, a
+        non-KISS exception is caught and converted into an error
+        payload (no KISSError is raised) — skip in that case.
+        """
         agent = RelentlessAgent("EmptySummary")
         with tempfile.TemporaryDirectory() as td:
-            with self.assertRaises(KISSError):
-                agent.run(
+            try:
+                result = agent.run(
                     model_name=TEST_MODEL,
                     prompt_template=(
                         "Call finish(success=False, is_continue=True, summary='')"
@@ -79,6 +98,16 @@ class TestContinuation(unittest.TestCase):
                     work_dir=td,
                     verbose=False,
                 )
+            except KISSError:
+                return
+            parsed = yaml.safe_load(result)
+            summary = (parsed or {}).get("summary", "")
+            if "429" in summary or "RESOURCE_EXHAUSTED" in summary:
+                self.skipTest("Gemini API rate-limited (429)")
+            self.fail(
+                f"Expected KISSError after exhausting sub-sessions, got: "
+                f"{result!r}"
+            )
 
 
 @requires_gemini_api_key
@@ -106,6 +135,7 @@ class TestExceptionPaths(unittest.TestCase):
 
 
 @requires_gemini_api_key
+@unittest.skipUnless(_docker_available(), "Docker daemon not available")
 class TestRunBranches(unittest.TestCase):
     def test_with_docker(self) -> None:
         """Test the Docker path in run()."""
@@ -130,6 +160,7 @@ class TestRunBranches(unittest.TestCase):
 
 
 @requires_gemini_api_key
+@unittest.skipUnless(_docker_available(), "Docker daemon not available")
 class TestDockerStreamCallback(unittest.TestCase):
     """Test that docker_stream callback is invoked (covers line 292)."""
 

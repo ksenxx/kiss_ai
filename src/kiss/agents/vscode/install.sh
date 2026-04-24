@@ -241,7 +241,7 @@ export PATH="$HOME/.local/bin:$PATH"
     echo ""
 
     echo "--- Package VSIX ---"
-    npx vsce package --no-dependencies --allow-star-activation --allow-missing-repository -o kiss-sorcar.vsix 2>&1
+    npx vsce package --no-dependencies --allow-missing-repository -o kiss-sorcar.vsix 2>&1
     echo ""
 
     echo "--- Check Python version ---"
@@ -290,6 +290,11 @@ export PATH="$HOME/.local/bin:$PATH"
 
     echo "--- Install Extension ---"
     "$CODE" --install-extension "$VSIX" --force 2>&1
+    echo ""
+
+    echo "--- Clean up build artifacts ---"
+    rm -rf "$SCRIPT_DIR/out" "$SCRIPT_DIR/kiss_project"
+    echo "  Removed out/ and kiss_project/"
     echo ""
 
     echo "=== Install complete ==="

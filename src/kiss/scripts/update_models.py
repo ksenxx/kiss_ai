@@ -37,11 +37,6 @@ MODEL_INFO_PATH = PROJECT_ROOT / "src" / "kiss" / "core" / "models" / "model_inf
 _SSL_CTX = ssl.create_default_context()
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
 def api_get(url: str, headers: dict[str, str] | None = None) -> Any:
     req = Request(url, headers=headers or {})
     for attempt in range(3):  # pragma: no branch
@@ -65,11 +60,6 @@ def fmt_price(p: float) -> str:
     if s[-1] == "0" and len(s.split(".")[1]) > 2:  # pragma: no branch
         s = s[:-1]
     return s
-
-
-# ---------------------------------------------------------------------------
-# API Fetchers — each returns dict[model_name, dict] with ctx/pricing info
-# ---------------------------------------------------------------------------
 
 
 def fetch_openrouter(verbose: bool = False) -> dict[str, dict]:
@@ -260,11 +250,6 @@ def fetch_openai(verbose: bool = False) -> dict[str, dict]:
     return models
 
 
-# ---------------------------------------------------------------------------
-# Get current MODEL_INFO
-# ---------------------------------------------------------------------------
-
-
 def get_current_model_info() -> dict[str, dict]:
     from kiss.core.models.model_info import MODEL_INFO
 
@@ -279,11 +264,6 @@ def get_current_model_info() -> dict[str, dict]:
         }
         for name, info in MODEL_INFO.items()
     }
-
-
-# ---------------------------------------------------------------------------
-# Model capability testing
-# ---------------------------------------------------------------------------
 
 
 def test_generate(model_name: str) -> bool:
@@ -361,11 +341,6 @@ def test_model_capabilities(
         flags = " ".join(f"{k}={'Y' if v else 'N'}" for k, v in results.items())
         print(f" {flags}")
     return results
-
-
-# ---------------------------------------------------------------------------
-# Diff computation
-# ---------------------------------------------------------------------------
 
 
 def find_deprecated_models(
@@ -471,9 +446,7 @@ def compute_changes(
     updates: list[dict] = []
     new_models: list[dict] = []
 
-    # --- OpenRouter models ---
     for name, fetched in openrouter.items():
-        # Skip variant endpoints (:free, :exacto, :thinking, :extended, etc.)
         if ":" in name.split("/")[-1]:
             continue
         if name in current:
@@ -507,7 +480,6 @@ def compute_changes(
                     }
                 )
 
-    # --- Together AI models ---
     for name, fetched in together.items():
         if name in current:  # pragma: no branch
             cur = current[name]
@@ -544,7 +516,6 @@ def compute_changes(
                     }
                 )
 
-    # --- Gemini models (context from API, pricing from OpenRouter cross-ref) ---
     for name, fetched in gemini.items():
         if name in current:  # pragma: no branch
             cur = current[name]
@@ -573,7 +544,6 @@ def compute_changes(
                 }
             )
 
-    # --- Anthropic models (pricing/context from OpenRouter cross-ref) ---
     for name in anthropic:  # pragma: no branch
         if name not in current:  # pragma: no branch
             or_info = _lookup_openrouter_pricing(name, "anthropic", openrouter)
@@ -591,7 +561,6 @@ def compute_changes(
                 }
             )
 
-    # --- OpenAI models (pricing/context from OpenRouter cross-ref) ---
     for name in openai:  # pragma: no branch
         if name not in current:  # pragma: no branch
             or_info = _lookup_openrouter_pricing(name, "openai", openrouter)
@@ -609,7 +578,6 @@ def compute_changes(
                 }
             )
 
-    # --- Backfill pricing/context for existing zero-priced models via OpenRouter ---
     from kiss.core.models.model_info import _OPENAI_PREFIXES
 
     update_by_name = {upd["name"]: upd for upd in updates}
@@ -646,11 +614,6 @@ def compute_changes(
             updates.append({"name": name, "changes": changed, "source": "openrouter-xref"})
 
     return updates, new_models
-
-
-# ---------------------------------------------------------------------------
-# File update
-# ---------------------------------------------------------------------------
 
 
 def _make_entry_line(
@@ -692,7 +655,6 @@ def apply_updates_to_file(
     content = MODEL_INFO_PATH.read_text()
     lines = content.split("\n")
 
-    # --- Helpers for multi-line entries ---
     _key_pat = re.compile(r'^\s+"[^"]+"\s*:')
 
     def _find_entry_span(lines: list[str], name: str) -> tuple[int, int]:
@@ -712,7 +674,6 @@ def apply_updates_to_file(
                 return i, i + 1
         return -1, -1
 
-    # --- Remove deprecated models ---
     deprecated_names = {d["name"] for d in deprecated}
     removed = 0
     if deprecated_names:  # pragma: no branch
@@ -725,7 +686,6 @@ def apply_updates_to_file(
             del lines[start:end]
             removed += 1
 
-    # --- Apply pricing/context updates ---
     applied_updates = 0
     for upd in updates:  # pragma: no branch
         name = upd["name"]
@@ -753,9 +713,6 @@ def apply_updates_to_file(
             lines[start:end] = [new_line]
             applied_updates += 1
 
-    # --- Add new models ---
-    # Find the closing "}" of MODEL_INFO dict (first "}" on its own line
-    # after the MODEL_INFO opening)
     added = 0
     insert_before_closing = -1
     in_model_info = False
@@ -790,10 +747,6 @@ def apply_updates_to_file(
         for line in reversed(new_lines_to_add):  # pragma: no branch
             lines.insert(insert_before_closing, line)
 
-    # --- Sort all MODEL_INFO entries alphabetically ---
-    # Find the MODEL_INFO dict boundaries, extract entries, sort, replace.
-    # Entries may span multiple lines (e.g. long _mi() calls), so we group
-    # continuation lines with the preceding key line before sorting.
     dict_start = -1
     dict_end = -1
     in_mi = False
@@ -848,11 +801,6 @@ def apply_updates_to_file(
         print("  (dry-run, no files modified)")
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Update model_info.py from vendor APIs")
     parser.add_argument(
@@ -869,12 +817,10 @@ def main() -> None:
     print("Model Info Updater")
     print("=" * 60)
 
-    # 1. Load current MODEL_INFO
     print("\n[1/6] Loading current MODEL_INFO...")
     current = get_current_model_info()
     print(f"  {len(current)} models loaded")
 
-    # 2. Fetch from vendor APIs
     print("\n[2/6] Fetching from vendor APIs...")
     openrouter_models = fetch_openrouter(verbose=args.verbose)
     together_models = fetch_together(verbose=args.verbose)
@@ -882,7 +828,6 @@ def main() -> None:
     anthropic_models = fetch_anthropic(verbose=args.verbose)
     openai_models = fetch_openai(verbose=args.verbose)
 
-    # 3. Detect deprecated models
     print("\n[3/6] Detecting deprecated models...")
     deprecated = find_deprecated_models(
         current,
@@ -898,7 +843,6 @@ def main() -> None:
     else:
         print("  No deprecated models found")
 
-    # 4. Compute diff
     print("\n[4/6] Computing changes...")
     updates, new_models = compute_changes(
         current,
@@ -909,7 +853,6 @@ def main() -> None:
         openai_models,
     )
 
-    # Print summary
     if updates:  # pragma: no branch
         print(f"\n  Pricing/context updates ({len(updates)}):")
         for upd in updates:  # pragma: no branch
@@ -932,7 +875,6 @@ def main() -> None:
     else:
         print("\n  No new models discovered")
 
-    # Filter out models that are deprecated in any vendor from the new list
     deprecated_names = {d["name"] for d in deprecated}
     new_models = [nm for nm in new_models if nm["name"] not in deprecated_names]
 
@@ -940,7 +882,6 @@ def main() -> None:
         print("\nEverything is up to date!")
         return
 
-    # 5. Test new models
     if new_models and not args.skip_test:  # pragma: no branch
         print(f"\n[5/6] Testing {len(new_models)} new models...")
         for nm in new_models:  # pragma: no branch
@@ -961,7 +902,6 @@ def main() -> None:
     else:
         print("\n[5/6] No new models to test")
 
-    # Optionally re-test existing models
     if args.test_existing:  # pragma: no branch
         print("\n  Re-testing existing models...")
         for upd in updates:  # pragma: no branch
@@ -972,7 +912,6 @@ def main() -> None:
                 upd["changes"]["fc"] = caps["fc"]
                 print(f"    {name}: fc changed {cur['fc']} -> {caps['fc']}")
 
-    # 6. Apply changes
     print("\n[6/6] Applying changes...")
     apply_updates_to_file(updates, new_models, deprecated, current, dry_run=args.dry_run)
 

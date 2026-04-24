@@ -57,14 +57,12 @@ class DockerTools:
         """
         encoded = base64.b64encode(content.encode()).decode()
         path = shlex.quote(file_path)
-        # Use heredoc to avoid ARG_MAX limits for large files
         cmd = (
             f'mkdir -p "$(dirname {path})" && base64 -d > {path} << \'KISS_B64_EOF\'\n'
             f'{encoded}\n'
             f'KISS_B64_EOF'
         )
         result = self.bash(cmd, f"Write {file_path}")
-        # DockerManager.Bash appends "[exit code: N]" on non-zero exit
         if "[exit code:" in result:
             return result
         return f"Successfully wrote {len(content)} characters to {file_path}"
@@ -89,7 +87,6 @@ class DockerTools:
         path = shlex.quote(file_path)
         ra = "True" if replace_all else "False"
 
-        # Use python3 or python, whichever is available
         cmd = (
             f'PYTHON=$(command -v python3 || command -v python) || '
             f'{{ echo "Error: Python required for Edit"; exit 1; }}; '

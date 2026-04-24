@@ -87,9 +87,9 @@ class TestEndToEnd:
         assert len(md) > 1000
         assert md.startswith("# KISS Framework API Reference")
         assert "KISSAgent" in md
-        assert "DockerManager" in md
-        assert "SimpleRAG" in md
-        assert "GEPA" in md
+        assert "RelentlessAgent" in md
+        assert "SorcarAgent" in md
+        assert "kiss.agents.channels" in md
 
 
 if __name__ == "__main__":

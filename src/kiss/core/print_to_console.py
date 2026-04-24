@@ -1,6 +1,5 @@
 """Console output formatting for KISS agents."""
 
-import logging
 import sys
 from typing import Any
 
@@ -19,7 +18,6 @@ from kiss.core.printer import (
     truncate_result,
 )
 
-logger = logging.getLogger(__name__)
 
 class ConsolePrinter(StreamEventParser, Printer):
     def __init__(self, file: Any = None) -> None:
@@ -66,7 +64,7 @@ class ConsolePrinter(StreamEventParser, Printer):
         Args:
             content: The content to display.
             type: Content type (e.g. "text", "prompt", "stream_event",
-                "tool_call", "tool_result", "result", "usage_info", "message").
+                "tool_call", "tool_result", "result", "message").
             **kwargs: Additional options such as tool_input, is_error, cost,
                 total_tokens.
 
@@ -104,17 +102,6 @@ class ConsolePrinter(StreamEventParser, Printer):
         if type == "message":
             self._handle_message(content, **kwargs)
             return ""
-        if type == "usage_info":
-            self._flush_newline()
-            self._console.print(
-                Panel(
-                    Text(str(content).strip(), style="dim italic"),
-                    border_style="dim",
-                    padding=(0, 1),
-                    expand=True,
-                )
-            )
-            return ""
         if type == "bash_stream":
             self._file.write(str(content))
             self._file.flush()
@@ -140,7 +127,7 @@ class ConsolePrinter(StreamEventParser, Printer):
                 Panel(
                     body,
                     title="Result",
-                    subtitle=f"tokens={total_tokens}  cost={cost}",
+                    subtitle=f"tokens={total_tokens:,}  cost={cost}",
                     border_style="bold green",
                     padding=(1, 2),
                 )
@@ -158,6 +145,22 @@ class ConsolePrinter(StreamEventParser, Printer):
             self._stream_delta(token, style="dim cyan italic")
         else:
             self._stream_delta(token)
+
+    def thinking_callback(self, is_start: bool) -> None:
+        """Handle thinking-block boundary events.
+
+        Sets ``_current_block_type`` so ``token_callback`` uses the correct
+        style, and prints ruler lines to bracket thinking output.
+
+        Args:
+            is_start: ``True`` when a thinking block starts, ``False`` when it ends.
+        """
+        if is_start:
+            self._current_block_type = "thinking"
+            self._on_thinking_start()
+        else:
+            self._current_block_type = ""
+            self._on_thinking_end()
 
     def _format_tool_call(self, name: str, tool_input: dict[str, Any]) -> None:
         file_path, lang = extract_path_and_lang(tool_input)
@@ -248,7 +251,7 @@ class ConsolePrinter(StreamEventParser, Printer):
                 Panel(
                     body,
                     title="Result",
-                    subtitle=(f"tokens={total_tokens_used}  cost={cost_str}"),
+                    subtitle=(f"tokens={total_tokens_used:,}  cost={cost_str}"),
                     border_style="bold green",
                     padding=(1, 2),
                 )

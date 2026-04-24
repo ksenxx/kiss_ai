@@ -1,2 +1,2 @@
-uv run python -m kiss.agents.sorcar.stateful_sorcar_agent "${@:1}"
+uv run python -m kiss.agents.sorcar.worktree_sorcar_agent "${@:1}"
 

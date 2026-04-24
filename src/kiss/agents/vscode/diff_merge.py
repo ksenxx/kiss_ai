@@ -18,7 +18,6 @@ from kiss.core import config as config_module
 logger = logging.getLogger(__name__)
 
 
-
 def _load_gitignore_dirs(work_dir: str) -> set[str]:
     """Load directory names and paths to skip from .gitignore.
 
@@ -39,9 +38,7 @@ def _load_gitignore_dirs(work_dir: str) -> set[str]:
             line = raw_line.strip()
             if not line or line.startswith("#") or line.startswith("!"):
                 continue
-            # Strip trailing slash (directory marker)
             name = line.rstrip("/")
-            # Only use names/paths — skip glob patterns
             if "*" in name or "?" in name:
                 continue
             skip.add(name)
@@ -51,13 +48,21 @@ def _load_gitignore_dirs(work_dir: str) -> set[str]:
 
 
 def _scan_files(work_dir: str) -> list[str]:
+    """Scan workspace files, respecting .gitignore patterns.
+
+    Args:
+        work_dir: Repository root to scan.
+
+    Returns:
+        List of relative file and directory paths.
+    """
     paths: list[str] = []
     skip = _load_gitignore_dirs(work_dir)
     wd = Path(work_dir)
     try:
         for root, dirs, files in wd.walk():
             rel_root = root.relative_to(wd)
-            if len(rel_root.parts) - 1 > 3:
+            if len(rel_root.parts) > 10:
                 dirs.clear()
                 continue
             dirs[:] = sorted(
@@ -111,8 +116,22 @@ def _parse_hunk_line(line: str) -> tuple[int, int, int, int] | None:
     )
 
 
-def _parse_diff_hunks(work_dir: str) -> dict[str, list[tuple[int, int, int, int]]]:
-    result = _git(work_dir, "diff", "-U0", "HEAD", "--no-color")
+def _parse_diff_hunks(
+    work_dir: str,
+    base_ref: str = "HEAD",
+) -> dict[str, list[tuple[int, int, int, int]]]:
+    """Parse ``git diff -U0 <base_ref>`` output into per-file hunk lists.
+
+    Args:
+        work_dir: Repository root directory.
+        base_ref: The git ref to diff against (default ``"HEAD"``).
+            Pass a baseline commit SHA to include committed changes
+            between the baseline and the current working tree.
+
+    Returns:
+        Dict mapping filename to list of (old_start, old_count, new_start, new_count).
+    """
+    result = _git(work_dir, "diff", "-U0", base_ref, "--no-color")
     hunks: dict[str, list[tuple[int, int, int, int]]] = {}
     current_file = ""
     for line in result.stdout.split("\n"):
@@ -127,6 +146,14 @@ def _parse_diff_hunks(work_dir: str) -> dict[str, list[tuple[int, int, int, int]
 
 
 def _capture_untracked(work_dir: str) -> set[str]:
+    """Return the set of untracked files in the repo.
+
+    Args:
+        work_dir: Repository root directory.
+
+    Returns:
+        Set of untracked file paths relative to work_dir.
+    """
     result = _git(work_dir, "ls-files", "--others", "--exclude-standard")
     return {line.strip() for line in result.stdout.split("\n") if line.strip()}
 
@@ -151,47 +178,75 @@ def _snapshot_files(work_dir: str, fnames: set[str]) -> dict[str, str]:
     return result
 
 
-def _untracked_base_dir() -> Path:
-    """Return the directory for storing untracked file base copies.
+def _merge_data_dir(tab_id: str = "") -> Path:
+    """Return the per-tab directory for merge state files.
 
-    Uses ``{cwd}/.kiss.artifacts/merge_dir/untracked-base/`` so copies
-    live per-project alongside other merge artifacts.
+    Uses ``{artifact_root}/merge_dir/{tab_id}/`` so merge-temp,
+    untracked-base, and pending-merge.json live in the KISS artifacts
+    directory, isolated per tab to prevent concurrent merge sessions
+    from destroying each other's data.
 
-    Returns:
-        Path to the untracked-base directory.
-    """
-    return _merge_data_dir() / "untracked-base"
-
-
-def _merge_data_dir() -> Path:
-    """Return the per-project directory for merge state files.
-
-    Uses ``{cwd}/.kiss.artifacts/merge_dir/`` so merge-temp,
-    untracked-base, and pending-merge.json live per-project alongside
-    other artifacts.
+    Args:
+        tab_id: Frontend tab identifier.  When non-empty, the returned
+            path includes a tab-specific subdirectory.
 
     Returns:
         Path to the merge data directory.
     """
-    return Path(config_module.artifact_dir).parent.parent / "merge_dir"
+    base = config_module._artifact_root() / "merge_dir"
+    if tab_id:
+        return base / tab_id
+    return base
+
+
+def _untracked_base_dir(tab_id: str = "") -> Path:
+    """Return the directory for storing pre-task base file copies.
+
+    Uses ``{artifact_root}/merge_dir/{tab_id}/untracked-base/`` so copies
+    live alongside other merge artifacts, isolated per tab.
+
+    Only the non-worktree merge flow populates this directory (via
+    :func:`_save_untracked_base`).  The worktree flow diffs against the
+    baseline commit, which already captures all pre-task dirty state,
+    so ``git show {baseline}:{fname}`` yields the correct base content
+    and this directory remains empty.
+
+    Args:
+        tab_id: Frontend tab identifier for per-tab isolation.
+
+    Returns:
+        Path to the pre-task base-copy directory.
+    """
+    return _merge_data_dir(tab_id) / "untracked-base"
 
 
 def _save_untracked_base(
-    work_dir: str, untracked: set[str]
+    work_dir: str, files: set[str], tab_id: str = "",
 ) -> None:
-    """Save copies of untracked files before a task runs.
+    """Save copies of pre-task dirty files for later merge-view diffing.
 
-    These copies serve as the "base" for merge-view diffs when an agent
-    modifies a pre-existing untracked file.
+    Despite the historical name, this is called with the union of
+    untracked **and** tracked-modified files (see the ``untracked |
+    set(hunks.keys())`` call site in
+    :mod:`kiss.agents.vscode.task_runner`).  Each copy serves as the
+    "base" against which the agent's post-task changes are diffed, so
+    the merge view shows only what the agent did — on top of whatever
+    dirty state the user already had.
+
+    Only used by the non-worktree merge flow.  The worktree flow
+    relies on its baseline commit instead (see
+    :func:`_untracked_base_dir`).
 
     Args:
         work_dir: Repository root.
-        untracked: Set of untracked file paths (relative to work_dir).
+        files: Relative paths (to ``work_dir``) whose current on-disk
+            contents should be saved as the pre-task base.
+        tab_id: Frontend tab identifier for per-tab isolation.
     """
-    base_dir = _untracked_base_dir()
+    base_dir = _untracked_base_dir(tab_id)
     if base_dir.exists():
         shutil.rmtree(base_dir)
-    for fname in untracked:
+    for fname in files:
         fpath = Path(work_dir) / fname
         try:
             if not fpath.is_file() or fpath.stat().st_size > 2_000_000:  # pragma: no cover
@@ -239,22 +294,18 @@ def _diff_files(base_path: str, current_path: str) -> list[tuple[int, int, int, 
         current_lines = []
     hunks: list[tuple[int, int, int, int]] = []
     for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
-        None, base_lines, current_lines
+        None, base_lines, current_lines,
     ).get_opcodes():
         if tag == "equal":
             continue
         old_count = i2 - i1
         new_count = j2 - j1
         if old_count == 0:
-            # Pure insertion: diff -U0 reports old_start as the line
-            # before the insertion (1-based), or 0 for empty base files.
-            old_start = i1 if not base_lines or i1 > 0 else 1
+            old_start = i1
         else:
             old_start = i1 + 1
         if new_count == 0:
-            # Pure deletion: diff -U0 reports new_start as 0 when the
-            # result is empty; otherwise the first surviving line position.
-            new_start = j1 if not current_lines or j1 > 0 else 1
+            new_start = j1
         else:
             new_start = j1 + 1
         hunks.append((old_start, old_count, new_start, new_count))
@@ -275,7 +326,7 @@ def _hunk_to_dict(bs: int, bc: int, cs: int, cc: int) -> dict[str, int]:
     Returns:
         Dict with keys bs, bc, cs, cc (0-based start lines).
     """
-    return {"bs": bs - 1, "bc": bc, "cs": cs if cc == 0 else cs - 1, "cc": cc}
+    return {"bs": bs if bc == 0 else bs - 1, "bc": bc, "cs": cs if cc == 0 else cs - 1, "cc": cc}
 
 
 def _file_as_new_hunks(fpath: Path) -> list[dict[str, int]]:
@@ -345,20 +396,39 @@ def _prepare_merge_view(
     pre_hunks: dict[str, list[tuple[int, int, int, int]]],
     pre_untracked: set[str],
     pre_file_hashes: dict[str, str] | None = None,
+    base_ref: str = "HEAD",
 ) -> dict[str, Any]:
-    post_hunks = _parse_diff_hunks(work_dir)
-    ub_dir = _untracked_base_dir()
+    """Prepare merge-view data comparing pre-task and post-task states.
+
+    Computes the diff between the pre-task git state and the current
+    working tree, filters out pre-existing changes, and writes a
+    ``pending-merge.json`` manifest with base copies and hunk data.
+
+    Args:
+        work_dir: Repository root directory.
+        data_dir: Directory for merge artifacts.
+        pre_hunks: Pre-task diff hunks from ``_parse_diff_hunks``.
+        pre_untracked: Pre-task untracked file set.
+        pre_file_hashes: Pre-task MD5 hashes for change detection.
+        base_ref: Git ref to diff against (default ``"HEAD"``).
+            Pass a baseline commit SHA to include changes committed
+            by the agent between the baseline and the working tree.
+
+    Returns:
+        Dict with ``status``/``count``/``hunk_count`` on success,
+        or ``error`` key on failure.
+    """
+    post_hunks = _parse_diff_hunks(work_dir, base_ref=base_ref)
+    ub_dir = Path(data_dir) / "untracked-base"
     file_hunks: dict[str, list[dict[str, int]]] = {}
 
     def _file_changed(fname: str) -> bool:
-        """Return True if the agent actually modified this file."""
         if pre_file_hashes is None or fname not in pre_file_hashes:
             return True
         try:
             cur = hashlib.md5((Path(work_dir) / fname).read_bytes()).hexdigest()
         except OSError:
-            logger.debug("Exception caught", exc_info=True)
-            return False
+            return True
         return cur != pre_file_hashes[fname]
 
     for fname, hunks in post_hunks.items():
@@ -372,7 +442,6 @@ def _prepare_merge_view(
         filtered = _file_as_new_hunks(Path(work_dir) / fname)
         if filtered:
             file_hunks[fname] = filtered
-    # Detect modified pre-existing untracked files
     if pre_file_hashes:
         for fname in pre_untracked:
             if fname in file_hunks or fname not in pre_file_hashes:
@@ -391,17 +460,20 @@ def _prepare_merge_view(
     for fname, fh in file_hunks.items():
         current_path = Path(work_dir) / fname
         if not current_path.is_file():
-            continue
+            deleted_dir = merge_dir / ".deleted"
+            deleted_placeholder = deleted_dir / fname
+            deleted_placeholder.parent.mkdir(parents=True, exist_ok=True)
+            deleted_placeholder.write_text("")
+            current_path = deleted_placeholder
         base_path = merge_dir / fname
         base_path.parent.mkdir(parents=True, exist_ok=True)
-        # For untracked files, use saved pre-task copy as base if available
         saved_base = ub_dir / fname
         if saved_base.is_file():
             shutil.copy2(saved_base, base_path)
         else:
-            base_result = _git(work_dir, "show", f"HEAD:{fname}")
+            base_result = _git(work_dir, "show", f"{base_ref}:{fname}")
             base_path.write_text(
-                base_result.stdout if base_result.returncode == 0 else ""
+                base_result.stdout if base_result.returncode == 0 else "",
             )
         manifest_files.append(
             {
@@ -409,18 +481,19 @@ def _prepare_merge_view(
                 "base": str(base_path),
                 "current": str(current_path),
                 "hunks": fh,
-            }
+            },
         )
     if not manifest_files:
         return {"error": "No changes"}
     manifest = Path(data_dir) / "pending-merge.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.write_text(
         json.dumps(
             {
                 "branch": "HEAD",
                 "files": manifest_files,
-            }
-        )
+            },
+        ),
     )
     total_hunks = sum(len(f["hunks"]) for f in manifest_files)
     return {"status": "opened", "count": len(manifest_files), "hunk_count": total_hunks}

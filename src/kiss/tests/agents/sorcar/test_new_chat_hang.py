@@ -95,8 +95,9 @@ class TestTaskEndEventOrdering(unittest.TestCase):
         self.server._handle_command({
             "type": "run", "prompt": prompt,
             "model": "claude-opus-4-6", "workDir": self.tmpdir,
+            "tabId": "0",
         })
-        t = self.server._task_thread
+        t = self.server._get_tab("0").task_thread
         assert t is not None
         t.join(timeout=10)
         assert not t.is_alive()
@@ -107,7 +108,7 @@ class TestTaskEndEventOrdering(unittest.TestCase):
         with self.lock:
             self.events.clear()
 
-        self.server._handle_command({"type": "newChat"})
+        self.server._handle_command({"type": "newChat", "tabId": "0"})
         self._run_and_wait("task 2")
 
         with self.lock:
@@ -117,8 +118,24 @@ class TestTaskEndEventOrdering(unittest.TestCase):
             ]
         assert len(status_false) >= 1
 
-    def test_task_stopped_immediately_before_status_false(self) -> None:
-        """task_stopped and status:false must be adjacent."""
+
+class TestTaskEndEventPersistence(unittest.TestCase):
+    """task_done/task_stopped/task_error events are persisted in the DB."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.saved = _redirect_db(self.tmpdir)
+        _init_git_repo(self.tmpdir)
+        self.server, self.events, self.lock = _make_server(self.tmpdir)
+        self.original_run = _patch_run()
+
+    def tearDown(self) -> None:
+        _unpatch_run(self.original_run)
+        _restore_db(self.saved)
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_task_stopped_persisted_in_db(self) -> None:
+        """Stopped task persists task_stopped event in the events table."""
         _unpatch_run(self.original_run)
         parent = cast(Any, SorcarAgent.__mro__[1])
         saved = parent.run
@@ -129,45 +146,115 @@ class TestTaskEndEventOrdering(unittest.TestCase):
         parent.run = raise_ki
         try:
             self.server._handle_command({
-                "type": "run", "prompt": "stop me",
+                "type": "run", "prompt": "test stop persist",
                 "model": "claude-opus-4-6", "workDir": self.tmpdir,
+                "tabId": "0",
             })
-            t = self.server._task_thread
+            t = self.server._get_tab("0").task_thread
             assert t is not None
             t.join(timeout=10)
         finally:
             parent.run = saved
             self.original_run = _patch_run()
 
-        with self.lock:
-            events = list(self.events)
+        entries = th._load_history(limit=1)
+        assert entries
+        chat_id = entries[0]["chat_id"]
+        assert isinstance(chat_id, str) and chat_id
+        result = th._load_latest_chat_events_by_chat_id(chat_id)
+        assert result is not None
+        events = result["events"]
+        assert isinstance(events, list)
+        types = [e.get("type") for e in events]
+        assert "task_stopped" in types
 
-        stopped_idx = next(
-            (i for i, e in enumerate(events) if e.get("type") == "task_stopped"), None
-        )
-        status_false_idx = next(
-            (i for i, e in enumerate(events)
-             if e.get("type") == "status" and e.get("running") is False), None
-        )
-        assert stopped_idx is not None
-        assert status_false_idx is not None
-        assert status_false_idx == stopped_idx + 1
+
+class TestPeriodicEventFlush(unittest.TestCase):
+    """Verify events are periodically flushed to DB during task execution."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.saved = _redirect_db(self.tmpdir)
+        _init_git_repo(self.tmpdir)
+        self.server = VSCodeServer()
+        import io
+        import sys
+        self._real_stdout = sys.stdout
+        sys.stdout = io.StringIO()
+
+    def tearDown(self) -> None:
+        import sys
+        sys.stdout = self._real_stdout
+        _restore_db(self.saved)
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_events_flushed_before_task_completes(self) -> None:
+        """Partial events are saved to DB while task is still running."""
+        parent = cast(Any, SorcarAgent.__mro__[1])
+        saved_run = parent.run
+        resume = threading.Event()
+
+        def slow_run(self_agent: object, **kwargs: object) -> str:
+            printer = kwargs.get("printer")
+            if printer:
+                printer.broadcast({"type": "text_delta", "text": "partial "})  # type: ignore[union-attr,attr-defined]
+                printer.broadcast({"type": "text_delta", "text": "output"})  # type: ignore[union-attr,attr-defined]
+            resume.wait(timeout=15)
+            return "success: true\nsummary: slow\n"
+
+        parent.run = slow_run
+        try:
+            self.server._handle_command({
+                "type": "run", "prompt": "test periodic flush",
+                "model": "claude-opus-4-6", "workDir": self.tmpdir,
+                "tabId": "0",
+            })
+            import time
+            time.sleep(3)
+
+            entries = th._load_history()
+            flush_entry = next(
+                (e for e in entries if e["task"] == "test periodic flush"),
+                None,
+            )
+            assert flush_entry is not None
+            flush_chat_id = flush_entry["chat_id"]
+            assert isinstance(flush_chat_id, str) and flush_chat_id
+            result = th._load_latest_chat_events_by_chat_id(flush_chat_id)
+            assert result is not None
+            flush_events = result["events"]
+            assert isinstance(flush_events, list)
+            types = [e.get("type") for e in flush_events]
+            assert "text_delta" in types, f"Expected text_delta in {types}"
+
+            entries = th._load_history()
+            entry = next(
+                (e for e in entries if e["task"] == "test periodic flush"),
+                None,
+            )
+            assert entry is not None
+            assert entry["result"] == "Agent Failed Abruptly"
+
+            resume.set()
+            t = self.server._get_tab("0").task_thread
+            assert t is not None
+            t.join(timeout=10)
+        finally:
+            parent.run = saved_run
 
 
 class TestTypescriptIsRunningFix(unittest.TestCase):
-    """Verify SorcarPanel.ts sets _isRunning=false on task end events."""
+    """Verify SorcarSidebarView.ts tracks running tabs via _runningTabs set."""
 
-    def test_is_running_updated_by_status_event(self) -> None:
-        """_isRunning is reset by the status event handler (sent after task_done/stopped/error)."""
-        with open("src/kiss/agents/vscode/src/SorcarPanel.ts") as f:
+    def test_running_tabs_updated_by_status_event(self) -> None:
+        """_runningTabs is updated by the status event handler."""
+        with open("src/kiss/agents/vscode/src/SorcarSidebarView.ts") as f:
             source = f.read()
-        # The status handler manages _isRunning
         idx = source.find("msg.type === 'status'")
         assert idx >= 0, "status handler not found"
-        block = source[idx:idx + 200]
-        assert "this._isRunning = msg.running" in block
-        # Python server always sends status:running:false after task end events
-        with open("src/kiss/agents/vscode/server.py") as f:
+        block = source[idx:idx + 300]
+        assert "this._runningTabs" in block
+        with open("src/kiss/agents/vscode/task_runner.py") as f:
             py_source = f.read()
         assert '"type": "status", "running": False' in py_source
 

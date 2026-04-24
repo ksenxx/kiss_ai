@@ -3,129 +3,48 @@
  */
 
 import * as vscode from 'vscode';
-import { SorcarViewProvider } from './SorcarPanel';
-import { MergeManager } from './MergeManager';
-import { ensureDependencies, ensureLocalBinInPath } from './DependencyInstaller';
+import * as fs from 'fs';
+import * as path from 'path';
+import {SorcarSidebarView} from './SorcarSidebarView';
 
-let primaryProvider: SorcarViewProvider | undefined;
-let secondaryProvider: SorcarViewProvider | undefined;
-let mergeManager: MergeManager | undefined;
-let mergeOwner: SorcarViewProvider | undefined;
+import {ensureDependencies, ensureLocalBinInPath} from './DependencyInstaller';
 
-function getActiveProvider(): SorcarViewProvider | undefined {
-  return secondaryProvider ?? primaryProvider;
-}
-
-function getActiveMergeManager(): MergeManager | undefined {
-  return getActiveProvider()?.mergeManager ?? mergeManager;
-}
+let sidebarView: SorcarSidebarView | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
-  // Ensure ~/.local/bin is in PATH before any tool lookups or process spawns
   ensureLocalBinInPath();
-
   console.log('KISS Sorcar extension activating...');
 
-  // Check if VS Code supports secondary sidebar (1.98+)
-  const supportsSecondarySidebar = typeof vscode.ViewColumn !== 'undefined';
-
-  mergeManager = new MergeManager();
-  mergeManager.on('allDone', () => {
-    // X4 fix: route to merge owner, not just active provider
-    (mergeOwner ?? getActiveProvider())?.sendMergeAllDone();
-    mergeOwner = undefined;
-  });
-  context.subscriptions.push({ dispose: () => mergeManager?.dispose() });
-
-  const setMergeOwner = (provider: SorcarViewProvider) => { mergeOwner = provider; };
-
-  // Create and register the primary (activitybar) webview provider
-  primaryProvider = new SorcarViewProvider(context.extensionUri, mergeManager);
-  primaryProvider.mergeOwnerCallback = setMergeOwner;
-  context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider(
-      'kissSorcar.chatView',
-      primaryProvider,
-      { webviewOptions: { retainContextWhenHidden: true } }
-    )
-  );
-
-  // Register the Activity Bar launcher tree view that redirects to secondary sidebar
-  const launcherTreeProvider: vscode.TreeDataProvider<string> = {
-    getTreeItem: () => new vscode.TreeItem(''),
-    getChildren: () => [],
-  };
-  const launcherView = vscode.window.createTreeView('kissSorcar.launcherView', {
-    treeDataProvider: launcherTreeProvider,
-  });
-  context.subscriptions.push(launcherView);
-  context.subscriptions.push(
-    launcherView.onDidChangeVisibility((e) => {
-      if (e.visible) {
-        vscode.commands.executeCommand('kissSorcar.chatViewSecondary.focus');
-      }
-    })
-  );
-
-  // Create and register the secondary sidebar webview provider
-  secondaryProvider = new SorcarViewProvider(context.extensionUri, mergeManager);
-  secondaryProvider.mergeOwnerCallback = setMergeOwner;
+  // --- Secondary sidebar chat view ---
+  sidebarView = new SorcarSidebarView(context.extensionUri);
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(
       'kissSorcar.chatViewSecondary',
-      secondaryProvider,
-      { webviewOptions: { retainContextWhenHidden: true } }
-    )
+      sidebarView,
+      {webviewOptions: {retainContextWhenHidden: true}},
+    ),
   );
+  context.subscriptions.push({dispose: () => sidebarView?.dispose()});
 
-  // Register commands
+  // --- Commands ---
+
   context.subscriptions.push(
     vscode.commands.registerCommand('kissSorcar.openPanel', () => {
-      vscode.commands.executeCommand('kissSorcar.chatViewSecondary.focus').then(
-        undefined,
-        () => vscode.commands.executeCommand('kissSorcar.chatView.focus')
-      );
-    })
-  );
-
-  let _chatFocused = false;
-  let _focusToggling = false;
-  context.subscriptions.push(
-    vscode.window.onDidChangeActiveTextEditor(() => {
-      _chatFocused = false;
-    })
-  );
-  context.subscriptions.push(
-    vscode.commands.registerCommand('kissSorcar.toggleFocus', async () => {
-      if (_focusToggling) return;
-      _focusToggling = true;
-      try {
-        if (_chatFocused) {
-          _chatFocused = false;
-          await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
-        } else {
-          _chatFocused = true;
-          await getActiveProvider()?.focusChatInput();
-        }
-      } finally {
-        _focusToggling = false;
-      }
-    })
-  );
-  context.subscriptions.push(
-    vscode.commands.registerCommand('kissSorcar.focusEditor', () => {
-      _chatFocused = false;
-      vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
-    })
+      void sidebarView!.focusChatInput();
+    }),
   );
 
   context.subscriptions.push(
     vscode.commands.registerCommand('kissSorcar.newConversation', async () => {
-      await vscode.commands.executeCommand('kissSorcar.openPanel');
-      const provider = getActiveProvider();
-      provider?.newConversation();
-      await provider?.focusChatInput();
-    })
+      await sidebarView!.focusChatInput();
+      sidebarView!.newConversation();
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('kissSorcar.stopTask', () => {
+      sidebarView!.stopTask();
+    }),
   );
 
   context.subscriptions.push(
@@ -137,16 +56,53 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.window.showInformationMessage('No text selected');
         return;
       }
-      const provider = getActiveProvider();
-      if (!provider) return;
-      provider.submitTask(sel.trim());
-    })
+      sidebarView!.submitTask(sel.trim());
+    }),
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('kissSorcar.stopTask', () => {
-      getActiveProvider()?.stopTask();
-    })
+    vscode.commands.registerCommand('kissSorcar.insertSelectionToChat', () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) return;
+      const sel = editor.selection;
+      const text = editor.document.getText(sel);
+      if (!text || !text.trim()) {
+        vscode.window.showInformationMessage('No text selected');
+        return;
+      }
+      const filePath = vscode.workspace.asRelativePath(editor.document.uri);
+      const startLine = sel.start.line + 1;
+      const lineCount = sel.end.line - sel.start.line + 1;
+      const hunkRef = `PWD/${filePath}:@@ -${startLine},${lineCount} +${startLine},${lineCount} @@ `;
+      void sidebarView!.appendToInput(hunkRef);
+    }),
+  );
+
+  let _focusToggling = false;
+  context.subscriptions.push(
+    vscode.commands.registerCommand('kissSorcar.toggleFocus', async () => {
+      if (_focusToggling) return;
+      _focusToggling = true;
+      try {
+        if (sidebarView!.hasFocus) {
+          // Webview chat has focus → switch to the text editor
+          await vscode.commands.executeCommand(
+            'workbench.action.focusFirstEditorGroup',
+          );
+        } else {
+          // Editor (or anything else) has focus → focus the sidebar chat
+          await sidebarView!.focusChatInput();
+        }
+      } finally {
+        _focusToggling = false;
+      }
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('kissSorcar.focusEditor', () => {
+      vscode.commands.executeCommand('workbench.action.focusFirstEditorGroup');
+    }),
   );
 
   // Commit message generation — sets the Git SCM input box
@@ -166,94 +122,144 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   };
 
-  // Listen for commitMessage events from both providers
-  for (const provider of [primaryProvider, secondaryProvider]) {
-    if (provider) {
-      context.subscriptions.push(
-        provider.onCommitMessage((ev) => {
-          if (ev.error) {
-            vscode.window.showWarningMessage(`Commit message: ${ev.error}`);
-          } else if (ev.message) {
-            setScmMessage(ev.message);
-          }
-        })
-      );
-    }
-  }
-
-  // VS Code SCM passes (rootUri, context, cancellationToken) to scm/inputBox commands.
-  // Returning a Promise makes the sparkle button show a stop/cancel button while pending.
-  const triggerCommitMessageGeneration = (
-    _rootUri?: unknown,
-    _context?: unknown,
-    token?: vscode.CancellationToken
-  ): Thenable<void> | void => {
-    const provider = getActiveProvider();
-    if (!provider) return;
-    return provider.generateCommitMessage(token);
+  // Countdown shown in the SCM input box while a commit message is being
+  // generated. Starts at 15s, decrements every second, stays at 0 if the
+  // agent is still generating. Cleared/replaced when the result arrives.
+  const commitCountdownSeconds = 20;
+  let stopCommitCountdown: (() => void) | undefined;
+  const startCommitCountdown = () => {
+    stopCommitCountdown?.();
+    let seconds = commitCountdownSeconds;
+    void setScmMessage(`Generating in ${seconds}s ...`);
+    const interval = setInterval(() => {
+      seconds = Math.max(seconds - 1, 0);
+      void setScmMessage(`Generating in ${seconds}s ...`);
+    }, 1000);
+    stopCommitCountdown = () => {
+      clearInterval(interval);
+      stopCommitCountdown = undefined;
+    };
   };
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('kissSorcar.generateCommitMessage', triggerCommitMessageGeneration)
+    sidebarView!.onCommitMessage(ev => {
+      const countdownWasRunning = stopCommitCountdown !== undefined;
+      stopCommitCountdown?.();
+      if (ev.error) {
+        vscode.window.showWarningMessage(`Commit message: ${ev.error}`);
+        if (countdownWasRunning) void setScmMessage('');
+      } else if (ev.message) {
+        void setScmMessage(ev.message);
+      } else if (countdownWasRunning) {
+        void setScmMessage('');
+      }
+    }),
   );
 
-  // Try to take over common commit-message commands so the SCM sparkle
-  // button uses Gemini instead of Copilot.  registerCommand throws if the
-  // command is already registered, so we silently ignore failures.
+  // Returns true iff the first Git repository has at least one staged change.
+  const hasStagedChanges = async (): Promise<boolean> => {
+    try {
+      const gitExt = vscode.extensions.getExtension('vscode.git');
+      if (!gitExt) return true; // Can't check — let generation proceed.
+      const git = gitExt.isActive ? gitExt.exports : await gitExt.activate();
+      const api = git.getAPI(1);
+      if (api.repositories.length === 0) return true;
+      return api.repositories[0].state.indexChanges.length > 0;
+    } catch (err) {
+      console.error('[kissSorcar] Failed to check staged changes:', err);
+      return true;
+    }
+  };
+
+  const triggerCommitMessageGeneration = async (
+    _rootUri?: unknown,
+    _context?: unknown,
+    token?: vscode.CancellationToken,
+  ): Promise<void> => {
+    if (!(await hasStagedChanges())) {
+      await setScmMessage('Error: nothing staged');
+      return;
+    }
+    startCommitCountdown();
+    token?.onCancellationRequested(() => stopCommitCountdown?.());
+    return sidebarView!.generateCommitMessage(token);
+  };
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      'kissSorcar.generateCommitMessage',
+      triggerCommitMessageGeneration,
+    ),
+  );
+
   for (const cmdId of [
     'github.copilot.git.generateCommitMessage',
     'git.generateCommitMessage',
   ]) {
     try {
       context.subscriptions.push(
-        vscode.commands.registerCommand(cmdId, triggerCommitMessageGeneration)
+        vscode.commands.registerCommand(cmdId, triggerCommitMessageGeneration),
       );
     } catch {
       // Already registered by another extension — ignored
     }
   }
 
-  // Merge commands
-  for (const cmd of ['acceptChange', 'rejectChange', 'prevChange', 'nextChange', 'acceptAll', 'rejectAll', 'acceptFile', 'rejectFile'] as const) {
+  // Merge commands — route to the active tab's MergeManager
+  for (const cmd of [
+    'acceptChange',
+    'rejectChange',
+    'prevChange',
+    'nextChange',
+    'acceptAll',
+    'rejectAll',
+    'acceptFile',
+    'rejectFile',
+  ] as const) {
     context.subscriptions.push(
       vscode.commands.registerCommand(`kissSorcar.${cmd}`, () => {
-        getActiveMergeManager()?.[cmd]();
-      })
+        sidebarView!.handleMergeCommand(cmd);
+      }),
     );
   }
 
-  // Track panel visibility in globalState so we don't override user preference
-  // on subsequent launches.  undefined (first install) → auto-open; false → don't.
-  const PANEL_WAS_OPEN_KEY = 'kissSorcar.panelWasOpen';
-  for (const provider of [primaryProvider, secondaryProvider]) {
-    if (provider) {
-      context.subscriptions.push(
-        provider.onDidChangeVisibility((visible) => {
-          context.globalState.update(PANEL_WAS_OPEN_KEY, visible);
-        })
-      );
+  // Auto-reload when this extension's files are replaced (e.g. VSIX reinstall).
+  // fs.watchFile uses stat-polling so it works even when the file is deleted
+  // and recreated, which is what happens during VSIX installation.
+  const extJsPath = path.join(context.extensionPath, 'out', 'extension.js');
+  fs.watchFile(extJsPath, {interval: 2000}, (curr, prev) => {
+    if (curr.mtimeMs !== prev.mtimeMs || curr.ino !== prev.ino) {
+      fs.unwatchFile(extJsPath);
+      vscode.commands.executeCommand('workbench.action.reloadWindow');
     }
-  }
+  });
+  context.subscriptions.push({dispose: () => fs.unwatchFile(extJsPath)});
 
-  // Set context for conditional view visibility, then auto-open on startup
-  // only if the user hasn't explicitly closed the panel in a previous session.
-  const panelWasOpen = context.globalState.get<boolean>(PANEL_WAS_OPEN_KEY);
-  vscode.commands.executeCommand(
-    'setContext',
-    'kissSorcar:doesNotSupportSecondarySidebar',
-    !supportsSecondarySidebar
-  ).then(() => {
-    if (panelWasOpen !== false) {
-      vscode.commands.executeCommand('kissSorcar.openPanel');
+  // Register tree view so the activity-bar icon opens the sidebar on click.
+  const treeView = vscode.window.createTreeView('kissSorcar.chatView', {
+    treeDataProvider: {
+      getTreeItem: (el: string) => new vscode.TreeItem(el),
+      getChildren: () => [],
+    },
+  });
+  context.subscriptions.push(treeView);
+
+  treeView.onDidChangeVisibility(async e => {
+    if (e.visible) {
+      // Switch primary sidebar away from the KS tree view so the icon never
+      // toggles/closes the sidebar on repeated clicks.
+      await vscode.commands.executeCommand('workbench.view.explorer');
+      // Show the KISS Sorcar chat in the secondary sidebar
+      await sidebarView!.focusChatInput();
     }
   });
 
-  // Auto-install dependencies (uv, Python, Playwright Chromium) in background
+  // Auto-install dependencies in background
   ensureDependencies().catch(err => {
     const msg = err instanceof Error ? err.message : String(err);
     console.error('[KISS Sorcar] Dependency setup error:', err);
     vscode.window.showErrorMessage(
-      `KISS Sorcar: Setup failed — ${msg}. Check ~/.kiss/install.log for details.`
+      `KISS Sorcar: Setup failed — ${msg}. Check ~/.kiss/install.log for details.`,
     );
   });
 
@@ -261,9 +267,7 @@ export function activate(context: vscode.ExtensionContext): void {
 }
 
 export function deactivate(): void {
-  primaryProvider?.dispose();
-  primaryProvider = undefined;
-  secondaryProvider?.dispose();
-  secondaryProvider = undefined;
+  sidebarView?.dispose();
+  sidebarView = undefined;
   console.log('KISS Sorcar extension deactivated');
 }

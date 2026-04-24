@@ -53,6 +53,7 @@ def any_tools(request, temp_test_dir):
     if request.param:
         return UsefulTools(stream_callback=lambda _: None), temp_test_dir
     return UsefulTools(), temp_test_dir
+@pytest.mark.slow
 @pytest.mark.skipif(sys.platform == "win32", reason="Unix-only test (signals, bash scripts)")
 class TestAdversarial:
     """Adversarial tests to try to break the Popen/killpg changes."""

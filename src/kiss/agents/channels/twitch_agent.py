@@ -1,0 +1,415 @@
+"""Twitch Agent — ChatSorcarAgent extension with Twitch Helix API + Chat tools.
+
+Provides authenticated access to Twitch via OAuth2 tokens. Uses requests
+for Helix API and twitchio for chat. Stores config in
+``~/.kiss/channels/twitch/config.json``.
+
+Usage::
+
+    agent = TwitchAgent()
+    agent.run(prompt_template="Get stream info for channel 'shroud'")
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import requests
+
+from kiss.agents.channels._channel_agent_utils import (
+    BaseChannelAgent,
+    ChannelConfig,
+    ToolMethodBackend,
+    channel_main,
+)
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+
+_TWITCH_DIR = Path.home() / ".kiss" / "channels" / "twitch"
+_HELIX_BASE = "https://api.twitch.tv/helix"
+_config = ChannelConfig(
+    _TWITCH_DIR,
+    (
+        "client_id",
+        "access_token",
+    ),
+)
+
+
+class TwitchChannelBackend(ToolMethodBackend):
+    """Channel backend for Twitch Helix API."""
+
+    def __init__(self) -> None:
+        self._client_id: str = ""
+        self._access_token: str = ""
+        self._connection_info: str = ""
+
+    def _headers(self) -> dict[str, str]:
+        return {
+            "Client-ID": self._client_id,
+            "Authorization": f"Bearer {self._access_token}",
+        }
+
+    def _get(self, path: str, params: dict | None = None) -> dict[str, Any]:  # type: ignore[type-arg]
+        resp = requests.get(
+            f"{_HELIX_BASE}{path}", headers=self._headers(), params=params, timeout=30
+        )
+        return resp.json()  # type: ignore[no-any-return]
+
+    def _post(self, path: str, json_body: dict | None = None) -> dict[str, Any]:  # type: ignore[type-arg]
+        resp = requests.post(
+            f"{_HELIX_BASE}{path}", headers=self._headers(), json=json_body, timeout=30
+        )
+        return resp.json() if resp.content else {"ok": True}  # type: ignore[no-any-return]
+
+    def connect(self) -> bool:
+        """Authenticate with Twitch using stored config."""
+        cfg = _config.load()
+        if not cfg:  # pragma: no branch
+            self._connection_info = "No Twitch config found."
+            return False
+        self._client_id = cfg["client_id"]
+        self._access_token = cfg["access_token"]
+        try:
+            result = self._get("/users")
+            if "data" in result:  # pragma: no branch
+                users = result["data"]
+                name = users[0].get("login", "") if users else ""
+                self._connection_info = f"Authenticated as {name}"
+                return True
+            self._connection_info = f"Twitch auth failed: {result}"
+            return False
+        except Exception as e:
+            self._connection_info = f"Twitch connection failed: {e}"
+            return False
+
+    def poll_messages(
+        self, channel_id: str, oldest: str, limit: int = 10
+    ) -> tuple[list[dict[str, Any]], str]:
+        """Poll for Twitch events (basic REST polling)."""
+        return [], oldest
+
+    def send_message(self, channel_id: str, text: str, thread_ts: str = "") -> None:
+        """Send a Twitch chat message."""
+        self._post("/chat/messages", {"broadcaster_id": channel_id, "message": text})
+
+    def wait_for_reply(
+        self,
+        channel_id: str,
+        thread_ts: str,
+        user_id: str,
+        timeout_seconds: float = 300.0,
+    ) -> str | None:
+        """Reply waiting is not currently supported for Twitch."""
+        return None
+
+    def get_stream_info(self, broadcaster_login: str) -> str:
+        """Get live stream information for a Twitch channel.
+
+        Args:
+            broadcaster_login: Twitch channel username.
+
+        Returns:
+            JSON string with stream info (game, title, viewer count, etc).
+        """
+        try:
+            result = self._get("/streams", params={"user_login": broadcaster_login})
+            streams = result.get("data", [])
+            if not streams:  # pragma: no branch
+                return json.dumps({"ok": True, "live": False, "channel": broadcaster_login})
+            stream = streams[0]
+            return json.dumps(
+                {
+                    "ok": True,
+                    "live": True,
+                    "title": stream.get("title", ""),
+                    "game_name": stream.get("game_name", ""),
+                    "viewer_count": stream.get("viewer_count", 0),
+                    "started_at": stream.get("started_at", ""),
+                    "language": stream.get("language", ""),
+                }
+            )
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def get_channel_info(self, broadcaster_id: str) -> str:
+        """Get channel information for a Twitch broadcaster.
+
+        Args:
+            broadcaster_id: Twitch broadcaster ID.
+
+        Returns:
+            JSON string with channel info.
+        """
+        try:
+            result = self._get("/channels", params={"broadcaster_id": broadcaster_id})
+            channels = result.get("data", [])
+            if not channels:  # pragma: no branch
+                return json.dumps({"ok": False, "error": "Channel not found"})
+            return json.dumps({"ok": True, "channel": channels[0]}, indent=2)[:8000]
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def get_user_info(self, login_or_id: str) -> str:
+        """Get Twitch user information.
+
+        Args:
+            login_or_id: Twitch username (login) or user ID.
+
+        Returns:
+            JSON string with user info.
+        """
+        try:
+            if login_or_id.isdigit():  # pragma: no branch
+                result = self._get("/users", params={"id": login_or_id})
+            else:
+                result = self._get("/users", params={"login": login_or_id})
+            users = result.get("data", [])
+            if not users:  # pragma: no branch
+                return json.dumps({"ok": False, "error": "User not found"})
+            return json.dumps({"ok": True, "user": users[0]}, indent=2)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def get_chatters(self, broadcaster_id: str, moderator_id: str = "") -> str:
+        """Get current chatters in a Twitch channel.
+
+        Args:
+            broadcaster_id: Broadcaster user ID.
+            moderator_id: Moderator user ID (optional, defaults to broadcaster).
+
+        Returns:
+            JSON string with chatters list.
+        """
+        try:
+            params: dict[str, str] = {"broadcaster_id": broadcaster_id}
+            if moderator_id:  # pragma: no branch
+                params["moderator_id"] = moderator_id
+            else:
+                params["moderator_id"] = broadcaster_id
+            result = self._get("/chat/chatters", params=params)
+            return json.dumps({"ok": True, **result}, indent=2)[:8000]
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def send_chat_message(self, broadcaster_id: str, sender_id: str, message: str) -> str:
+        """Send a message to a Twitch chat.
+
+        Args:
+            broadcaster_id: Broadcaster channel ID.
+            sender_id: Sender user ID.
+            message: Message text.
+
+        Returns:
+            JSON string with ok status.
+        """
+        try:
+            result = self._post(
+                "/chat/messages",
+                {
+                    "broadcaster_id": broadcaster_id,
+                    "sender_id": sender_id,
+                    "message": message,
+                },
+            )
+            return json.dumps({"ok": True, **result})
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def ban_user(
+        self,
+        broadcaster_id: str,
+        moderator_id: str,
+        user_id: str,
+        duration: int = 0,
+        reason: str = "",
+    ) -> str:
+        """Ban or timeout a Twitch user.
+
+        Args:
+            broadcaster_id: Broadcaster channel ID.
+            moderator_id: Moderator user ID.
+            user_id: User ID to ban.
+            duration: Timeout duration in seconds (0 = permanent ban).
+            reason: Optional ban reason.
+
+        Returns:
+            JSON string with ok status.
+        """
+        try:
+            body: dict[str, Any] = {"user_id": user_id}
+            if duration:  # pragma: no branch
+                body["duration"] = duration
+            if reason:  # pragma: no branch
+                body["reason"] = reason
+            result = self._post(
+                f"/moderation/bans?broadcaster_id={broadcaster_id}&moderator_id={moderator_id}",
+                {"data": body},
+            )
+            return json.dumps({"ok": True, **result})
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def search_channels(self, query: str, limit: int = 10) -> str:
+        """Search for Twitch channels by name.
+
+        Args:
+            query: Search query.
+            limit: Maximum channels to return. Default: 10.
+
+        Returns:
+            JSON string with matching channels.
+        """
+        try:
+            result = self._get("/search/channels", params={"query": query, "first": limit})
+            return json.dumps({"ok": True, "channels": result.get("data", [])}, indent=2)[:8000]
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def get_clips(self, broadcaster_id: str, limit: int = 20) -> str:
+        """Get clips from a Twitch channel.
+
+        Args:
+            broadcaster_id: Broadcaster ID.
+            limit: Maximum clips to return. Default: 20.
+
+        Returns:
+            JSON string with clip list.
+        """
+        try:
+            result = self._get("/clips", params={"broadcaster_id": broadcaster_id, "first": limit})
+            return json.dumps({"ok": True, "clips": result.get("data", [])}, indent=2)[:8000]
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    def create_clip(self, broadcaster_id: str, has_delay: bool = False) -> str:
+        """Create a clip from a live stream.
+
+        Args:
+            broadcaster_id: Broadcaster ID.
+            has_delay: Whether to add a 5-second delay. Default: False.
+
+        Returns:
+            JSON string with clip edit URL.
+        """
+        try:
+            result = self._post(
+                f"/clips?broadcaster_id={broadcaster_id}&has_delay={str(has_delay).lower()}"
+            )
+            return json.dumps({"ok": True, **result})
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+
+class TwitchAgent(BaseChannelAgent, ChatSorcarAgent):
+    """ChatSorcarAgent extended with Twitch Helix API tools."""
+
+    def __init__(self) -> None:
+        super().__init__("Twitch Agent")
+        self._backend = TwitchChannelBackend()
+        cfg = _config.load()
+        if cfg:  # pragma: no branch
+            self._backend._client_id = cfg["client_id"]
+            self._backend._access_token = cfg["access_token"]
+
+    def _is_authenticated(self) -> bool:
+        """Return True if the backend is authenticated."""
+        return bool(self._backend._client_id)
+
+    def _get_auth_tools(self) -> list:
+        """Return channel-specific authentication tool functions."""
+        agent = self
+
+        def check_twitch_auth() -> str:
+            """Check if Twitch credentials are configured and valid.
+
+            Returns:
+                Authentication status or instructions.
+            """
+            if not agent._backend._client_id:  # pragma: no branch
+                return (
+                    "Not authenticated with Twitch. Use authenticate_twitch() to configure.\n"
+                    "You need client_id, client_secret, and access_token from "
+                    "https://dev.twitch.tv/console/apps — register an app, then "
+                    "generate an OAuth token at https://id.twitch.tv/oauth2/authorize."
+                )
+            try:
+                result = agent._backend._get("/users")
+                if "data" in result:  # pragma: no branch
+                    users = result["data"]
+                    return json.dumps(
+                        {
+                            "ok": True,
+                            "login": users[0].get("login", "") if users else "",
+                        }
+                    )
+                return json.dumps({"ok": False, "error": str(result)})
+            except Exception as e:
+                return json.dumps({"ok": False, "error": str(e)})
+
+        def authenticate_twitch(
+            client_id: str,
+            client_secret: str,
+            access_token: str,
+            channel_name: str = "",
+        ) -> str:
+            """Store and validate Twitch API credentials.
+
+            Args:
+                client_id: Twitch app client ID from dev console.
+                client_secret: Twitch app client secret.
+                access_token: OAuth2 access token (user or app token).
+                channel_name: Default channel to monitor. Optional.
+
+            Returns:
+                Validation result or error message.
+            """
+            for val, name in [(client_id, "client_id"), (access_token, "access_token")]:
+                if not val.strip():  # pragma: no branch
+                    return f"{name} cannot be empty."
+            agent._backend._client_id = client_id.strip()
+            agent._backend._access_token = access_token.strip()
+            try:
+                result = agent._backend._get("/users")
+                if "data" in result:  # pragma: no branch
+                    _config.save(
+                        {
+                            "client_id": client_id.strip(),
+                            "client_secret": client_secret.strip(),
+                            "access_token": access_token.strip(),
+                            "channel_name": channel_name.strip(),
+                        }
+                    )
+                    return json.dumps(
+                        {
+                            "ok": True,
+                            "message": "Twitch credentials saved.",
+                            "login": result["data"][0].get("login", "") if result["data"] else "",
+                        }
+                    )
+                return json.dumps({"ok": False, "error": str(result)})
+            except Exception as e:
+                return json.dumps({"ok": False, "error": str(e)})
+
+        def clear_twitch_auth() -> str:
+            """Clear the stored Twitch credentials.
+
+            Returns:
+                Status message.
+            """
+            _config.clear()
+            agent._backend._client_id = ""
+            agent._backend._access_token = ""
+            return "Twitch authentication cleared."
+
+        return [check_twitch_auth, authenticate_twitch, clear_twitch_auth]
+
+
+def main() -> None:
+    """Run the TwitchAgent from the command line with chat persistence."""
+    channel_main(TwitchAgent, "kiss-twitch")
+
+
+if __name__ == "__main__":
+    main()

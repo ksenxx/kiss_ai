@@ -65,14 +65,12 @@ class DockerManager:
         image = self.image
         tag = self.tag
         full_image_name = f"{image}:{tag}"
-        # Pull the image if it doesn't exist locally
         print(f"Pulling Docker image: {full_image_name}")
         try:
             self.client.images.get(full_image_name)
         except docker.errors.ImageNotFound:  # type: ignore[attr-defined]
             logger.debug("Exception caught", exc_info=True)
             self.client.images.pull(image, tag=tag)
-        # Create and start a container
         print(f"Creating and starting container from {full_image_name}")
         container_kwargs: dict[str, Any] = {
             "detach": True,
@@ -241,7 +239,6 @@ class DockerManager:
 
         self.container = None
 
-        # Clean up temporary directory
         if self.host_shared_path and os.path.exists(self.host_shared_path):  # pragma: no branch
             try:
                 shutil.rmtree(self.host_shared_path)

@@ -5,13 +5,16 @@
 
 """Anthropic model implementation for Claude models."""
 
+import logging
 from collections.abc import Callable
 from typing import Any
 
 from anthropic import Anthropic
 
 from kiss.core.kiss_error import KISSError
-from kiss.core.models.model import Attachment, Model, TokenCallback
+from kiss.core.models.model import Attachment, Model, TokenCallback, transcribe_audio
+
+logger = logging.getLogger(__name__)
 
 
 class AnthropicModel(Model):
@@ -40,7 +43,11 @@ class AnthropicModel(Model):
 
         Args:
             prompt: The initial user prompt to start the conversation.
-            attachments: Optional list of file attachments (images, PDFs) to include.
+            attachments: Optional list of file attachments (images, PDFs, audio,
+                video) to include. Audio attachments are automatically
+                transcribed to text via OpenAI Whisper when an ``OPENAI_API_KEY``
+                is available; otherwise they are skipped with a warning.  Video
+                attachments are always skipped.
         """
         self.client = Anthropic(api_key=self.api_key)
         content: str | list[dict[str, Any]] = prompt
@@ -54,8 +61,28 @@ class AnthropicModel(Model):
                 }
                 if att.mime_type.startswith("image/"):
                     blocks.append({"type": "image", "source": source})
-                elif att.mime_type == "application/pdf":  # pragma: no branch
+                elif att.mime_type == "application/pdf":
                     blocks.append({"type": "document", "source": source})
+                elif att.mime_type.startswith("audio/"):
+                    try:
+                        text = transcribe_audio(att.data, att.mime_type)
+                        blocks.append(
+                            {
+                                "type": "text",
+                                "text": f"[Audio transcription]\n{text}",
+                            }
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Anthropic does not support %s attachments and "
+                            "automatic transcription failed; skipping.",
+                            att.mime_type,
+                        )
+                elif att.mime_type.startswith("video/"):
+                    logger.warning(
+                        "Anthropic does not support %s attachments; skipping.",
+                        att.mime_type,
+                    )
             blocks.append({"type": "text", "text": prompt})
             content = blocks
         self.conversation = [{"role": "user", "content": content}]
@@ -151,7 +178,6 @@ class AnthropicModel(Model):
         enable_cache = kwargs.pop("enable_cache", True)
         system_instruction = kwargs.pop("system_instruction", None)
 
-        # Anthropic requires max_tokens; accept OpenAI-style "max_completion_tokens" too.
         max_tokens = kwargs.pop("max_tokens", None)
         if max_tokens is None:
             max_tokens = kwargs.pop("max_completion_tokens", None)
@@ -159,7 +185,6 @@ class AnthropicModel(Model):
         if max_tokens is None:
             max_tokens = 16384
 
-        # Map OpenAI-style stop -> Anthropic stop_sequences (best-effort).
         if "stop" in kwargs and "stop_sequences" not in kwargs:
             stop_val = kwargs.pop("stop")
             if isinstance(stop_val, str):
@@ -167,13 +192,12 @@ class AnthropicModel(Model):
             elif isinstance(stop_val, list):
                 kwargs["stop_sequences"] = stop_val
 
-        # Enable thinking by default for Claude 4.x+ models.
         if "thinking" not in kwargs and (
             self.model_name.startswith(("claude-opus-4", "claude-sonnet-4", "claude-haiku-4"))
         ):
             if not user_set_max_tokens:
                 max_tokens = 65536 if self.model_name.startswith("claude-opus-4") else 64000
-            if self.model_name.startswith("claude-opus-4-6"):
+            if self.model_name in ["claude-opus-4-6", "claude-opus-4-7"]:
                 kwargs["thinking"] = {"type": "adaptive"}
             else:
                 kwargs["thinking"] = {"type": "enabled", "budget_tokens": 10000}
@@ -191,10 +215,6 @@ class AnthropicModel(Model):
             kwargs["tools"] = tools
 
         if enable_cache:
-            # Use Anthropic's recommended automatic caching: a single top-level
-            # cache_control. The system applies the breakpoint to the last cacheable
-            # block and moves it forward as the conversation grows. No per-message
-            # stripping or manipulation needed.
             kwargs["cache_control"] = {"type": "ephemeral"}
 
         return kwargs
@@ -257,8 +277,6 @@ class AnthropicModel(Model):
         stop_reason = getattr(response, "stop_reason", None)
         blocks = self._normalize_content_blocks(getattr(response, "content", None))
 
-        # When max_tokens is hit, tool_use blocks may be truncated/incomplete.
-        # Strip them to avoid calling tools with missing arguments.
         if stop_reason == "max_tokens":
             blocks = [b for b in blocks if b.get("type") != "tool_use"]
 
@@ -289,16 +307,7 @@ class AnthropicModel(Model):
                 - "result": The result content string
                 - "tool_use_id": Optional explicit tool_use_id to use
         """
-        # Collect all tool_use blocks from the most recent assistant message
-        # Use a list to preserve order and handle multiple calls to the same function
-        tool_use_ids: list[tuple[str, str]] = []  # [(name, id), ...]
-        for msg in reversed(self.conversation):
-            if msg.get("role") == "assistant" and isinstance(msg.get("content"), list):
-                for b in msg["content"]:
-                    if b.get("type") == "tool_use":
-                        tool_use_ids.append((b.get("name", ""), b.get("id", "")))
-                if tool_use_ids:
-                    break
+        tool_call_ids = self._find_tool_call_ids_from_last_assistant()
 
         tool_results_blocks: list[dict[str, Any]] = []
         for i, (func_name, result_dict) in enumerate(function_results):
@@ -306,10 +315,9 @@ class AnthropicModel(Model):
             if self.usage_info_for_messages:
                 result_content = f"{result_content}\n\n{self.usage_info_for_messages}"
 
-            # Use explicit tool_use_id if provided, otherwise match by position
             tool_use_id = result_dict.get("tool_use_id")
-            if tool_use_id is None and i < len(tool_use_ids):
-                tool_use_id = tool_use_ids[i][1]
+            if tool_use_id is None and i < len(tool_call_ids):
+                tool_use_id = tool_call_ids[i][1]
             if tool_use_id is None:
                 tool_use_id = f"toolu_{func_name}_{i}"
 

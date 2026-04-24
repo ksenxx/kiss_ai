@@ -1,12 +1,16 @@
 """Tests for web_use_tool.py module."""
 
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
 from kiss.agents.sorcar.web_use_tool import (
+    _SINGLETON_FILES,
     WebUseTool,
+    _activate_app,
+    _get_frontmost_app,
 )
 
 FORM_PAGE = b"""<!DOCTYPE html>
@@ -111,7 +115,7 @@ def http_server():
 
 @pytest.fixture(scope="module")
 def web_tool():
-    tool = WebUseTool(user_data_dir=None)
+    tool = WebUseTool(user_data_dir=None, headless=True)
     yield tool
     tool.close()
 
@@ -121,6 +125,80 @@ class TestNavigation:
     def test_go_to_invalid_url(self, web_tool):
         result = web_tool.go_to_url("http://localhost:99999/nonexistent")
         assert "Error" in result
+
+
+class TestCrashRecovery:
+    """Verify the tool auto-recovers after Chromium/context dies unexpectedly.
+
+    Simulates the "Google Chrome for Testing quit unexpectedly" scenario by
+    closing the browser context out from under the tool.
+    """
+
+    def test_auto_relaunch_after_context_close(self, web_tool, http_server):
+        web_tool.go_to_url(http_server + "/")
+        assert web_tool._is_alive()
+        web_tool._context.close()
+        assert not web_tool._is_alive()
+        result = web_tool.go_to_url(http_server + "/")
+        assert "Test" in result
+        assert web_tool._is_alive()
+
+
+class TestSingletonLockCleanup:
+    """Stale Singleton{Lock,Cookie,Socket} from a previously crashed Chromium
+    must be removed before launching a persistent context."""
+
+    def test_cleans_stale_singleton_files(self, tmp_path):
+        (tmp_path / _SINGLETON_FILES[0]).symlink_to("stale-host-99999")
+        (tmp_path / _SINGLETON_FILES[1]).write_text("stale")
+        tool = WebUseTool(user_data_dir=str(tmp_path), headless=True)
+        try:
+            tool._clean_singleton_locks()
+            for name in _SINGLETON_FILES:
+                assert not (tmp_path / name).exists()
+                assert not (tmp_path / name).is_symlink()
+        finally:
+            tool.close()
+
+    def test_clean_singleton_locks_no_profile(self):
+        """Called on an in-memory tool — no-op, does not raise."""
+        tool = WebUseTool(user_data_dir=None, headless=True)
+        tool._clean_singleton_locks()
+        tool.close()
+
+
+class TestFocusHelpers:
+    """Tests for _get_frontmost_app and _activate_app focus management."""
+
+    def test_get_frontmost_app_returns_string_on_macos(self):
+        """On macOS, _get_frontmost_app should return the current app name."""
+        result = _get_frontmost_app()
+        if sys.platform == "darwin":
+            assert isinstance(result, str)
+            assert len(result) > 0
+        else:
+            assert result is None
+
+    def test_activate_app_none_is_noop(self):
+        """_activate_app(None) should silently do nothing."""
+        _activate_app(None)
+
+    def test_activate_app_with_valid_app(self):
+        """_activate_app with a real app should not raise."""
+        if sys.platform == "darwin":
+            _activate_app("Finder")
+
+    def test_activate_app_with_nonexistent_app(self):
+        """_activate_app with a bogus name should not raise (best-effort)."""
+        _activate_app("NonExistentApp12345")
+
+    def test_ensure_browser_calls_focus_helpers(self, web_tool):
+        """_ensure_browser should save and restore focus even in headless mode."""
+        web_tool._context.close()
+        assert not web_tool._is_alive()
+        web_tool._ensure_browser()
+        assert web_tool._is_alive()
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

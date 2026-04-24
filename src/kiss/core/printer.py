@@ -116,17 +116,9 @@ def extract_extras(tool_input: dict) -> dict[str, str]:
         tool_input: Dictionary of tool call arguments.
 
     Returns:
-        dict[str, str]: Keys not in KNOWN_KEYS mapped to their string values
-            (truncated to 200 chars).
+        dict[str, str]: Keys not in KNOWN_KEYS mapped to their string values.
     """
-    extras: dict[str, str] = {}
-    for k, v in tool_input.items():
-        if k not in KNOWN_KEYS:
-            val = str(v)
-            if len(val) > 200:
-                val = val[:200] + "..."
-            extras[k] = val
-    return extras
+    return {k: str(v) for k, v in tool_input.items() if k not in KNOWN_KEYS}
 
 
 class StreamEventParser:
@@ -227,7 +219,7 @@ class Printer(ABC):
         Args:
             content: The content to display.
             type: Content type (e.g. "text", "prompt", "stream_event",
-                "tool_call", "tool_result", "result", "usage_info", "message").
+                "tool_call", "tool_result", "result", "message").
             **kwargs: Additional type-specific options (e.g. tool_input, is_error).
 
         Returns:
@@ -240,6 +232,20 @@ class Printer(ABC):
 
         Args:
             token: The text token to process.
+        """
+
+    def thinking_callback(self, is_start: bool) -> None:
+        """Handle thinking-block boundary events from the LLM.
+
+        Called with ``True`` when a thinking block starts and ``False``
+        when it ends.  Printers use this to switch between thinking and
+        text display modes so that ``token_callback`` tokens are routed
+        to the correct panel.
+
+        The default implementation is a no-op.
+
+        Args:
+            is_start: ``True`` for block start, ``False`` for block end.
         """
 
     @abstractmethod
@@ -260,11 +266,13 @@ class MultiPrinter(Printer):
             **kwargs: Additional options forwarded to each child printer.
 
         Returns:
-            str: The result from the last child printer.
+            str: The first non-empty result from child printers.
         """
         result = ""
         for p in self.printers:
-            result = p.print(content, type=type, **kwargs)
+            r = p.print(content, type=type, **kwargs)
+            if not result and r:
+                result = r
         return result
 
     def token_callback(self, token: str) -> None:
@@ -275,6 +283,15 @@ class MultiPrinter(Printer):
         """
         for p in self.printers:
             p.token_callback(token)
+
+    def thinking_callback(self, is_start: bool) -> None:
+        """Forward a thinking-block boundary event to all child printers.
+
+        Args:
+            is_start: ``True`` for block start, ``False`` for block end.
+        """
+        for p in self.printers:
+            p.thinking_callback(is_start)
 
     def reset(self) -> None:
         """Reset streaming state on all child printers."""

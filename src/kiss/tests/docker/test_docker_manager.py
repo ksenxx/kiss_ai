@@ -4,6 +4,7 @@ import socket
 import unittest
 
 import docker
+import pytest
 import requests
 
 from kiss.docker.docker_manager import DockerManager
@@ -18,6 +19,7 @@ def is_docker_available() -> bool:
         return False
 
 
+@pytest.mark.slow
 @unittest.skipUnless(is_docker_available(), "Docker daemon is not running")
 class TestDockerManager(unittest.TestCase):
     def test_port_mapping(self) -> None:

@@ -9,18 +9,22 @@ from __future__ import annotations
 
 import json
 import logging
-import shutil
-import socket
+import os
 import sqlite3
 import threading
 import time
-import uuid
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 
-_KISS_DIR = Path.home() / ".kiss"
+def _default_kiss_dir() -> Path:
+    """Return the KISS data directory, respecting ``KISS_HOME`` env var."""
+    env = os.environ.get("KISS_HOME")
+    return Path(env) if env else Path.home() / ".kiss"
+
+
+_KISS_DIR = _default_kiss_dir()
 _DB_PATH = _KISS_DIR / "history.db"
 
 _MAX_FILE_USAGE_ENTRIES = 1000
@@ -32,10 +36,6 @@ def _ensure_kiss_dir() -> None:
 
 _HistoryEntry = dict[str, object]
 
-
-# ---------------------------------------------------------------------------
-# Database connection (singleton)
-# ---------------------------------------------------------------------------
 
 _db_conn: sqlite3.Connection | None = None
 _db_lock = threading.Lock()
@@ -52,7 +52,7 @@ def _close_db() -> None:
 
 
 _HISTORY_SELECT = (
-    "SELECT id, timestamp, task, has_events, result, chat_id "
+    "SELECT id, timestamp, task, has_events, result, chat_id, extra "
     "FROM task_history "
 )
 
@@ -60,7 +60,7 @@ _CLEAR_LAST_MODEL = "UPDATE model_usage SET is_last = 0 WHERE is_last = 1"
 
 
 def _init_tables(conn: sqlite3.Connection) -> None:
-    """Create all tables and indexes if they do not exist."""
+    """Create all tables and indexes."""
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS task_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -68,37 +68,38 @@ def _init_tables(conn: sqlite3.Connection) -> None:
             task TEXT NOT NULL,
             has_events INTEGER DEFAULT 0,
             result TEXT DEFAULT '',
-            chat_id TEXT DEFAULT ''
+            chat_id CHAR(32) DEFAULT '',
+            extra TEXT DEFAULT ''
         );
-        CREATE INDEX IF NOT EXISTS idx_th_timestamp
-            ON task_history(timestamp);
-        CREATE INDEX IF NOT EXISTS idx_th_task
-            ON task_history(task);
-        CREATE INDEX IF NOT EXISTS idx_th_chat_id
-            ON task_history(chat_id);
-
         CREATE TABLE IF NOT EXISTS events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             task_id INTEGER NOT NULL REFERENCES task_history(id),
             seq INTEGER NOT NULL,
-            event_json TEXT NOT NULL
+            event_json TEXT NOT NULL,
+            timestamp REAL NOT NULL
         );
-        CREATE INDEX IF NOT EXISTS idx_ev_task_id
-            ON events(task_id);
-
         CREATE TABLE IF NOT EXISTS model_usage (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             model TEXT NOT NULL UNIQUE,
             count INTEGER DEFAULT 0,
             is_last INTEGER DEFAULT 0
         );
-
         CREATE TABLE IF NOT EXISTS file_usage (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             path TEXT NOT NULL UNIQUE,
             count INTEGER DEFAULT 0,
             last_used REAL DEFAULT 0
         );
+    """)
+    conn.executescript("""
+        CREATE INDEX IF NOT EXISTS idx_th_timestamp
+            ON task_history(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_th_task
+            ON task_history(task);
+        CREATE INDEX IF NOT EXISTS idx_th_chat_id
+            ON task_history(chat_id);
+        CREATE INDEX IF NOT EXISTS idx_ev_task_id
+            ON events(task_id);
     """)
 
 
@@ -131,10 +132,6 @@ def _get_db() -> sqlite3.Connection:
         return _db_conn
 
 
-# ---------------------------------------------------------------------------
-# Task history
-# ---------------------------------------------------------------------------
-
 def _most_recent_task_id(db: sqlite3.Connection, task: str | None) -> int | None:
     """Return the row id of the most recent run of *task*, or the latest row."""
     if task is not None:
@@ -150,48 +147,53 @@ def _most_recent_task_id(db: sqlite3.Connection, task: str | None) -> int | None
     return row["id"] if row else None
 
 
-def _generate_chat_id() -> str:
-    """Generate a unique hex chat session ID. Thread-safe.
+def _add_task(task: str, chat_id: str = "") -> tuple[int, str]:
+    """Append a task to the history and return ``(task_id, chat_id)``.
 
-    Produces a 32-character lowercase hex string via UUID4 and verifies
-    it does not already exist in the task_history table before returning.
-    """
-    db = _get_db()
-    with _db_lock:
-        while True:
-            candidate = uuid.uuid4().hex
-            row = db.execute(
-                "SELECT 1 FROM task_history WHERE chat_id = ? LIMIT 1",
-                (candidate,),
-            ).fetchone()
-            if row is None:  # pragma: no branch — UUID4 collision virtually impossible
-                return candidate
+    When *chat_id* is ``""`` (new session), a new UUID-style string
+    is generated as the chat session identifier.
+    Otherwise the given *chat_id* is stored directly (continuation task).
 
-
-def _add_task(task: str, chat_id: str = "") -> int:
-    """Append a task to the history and return its row id. Thread-safe.
-
-    Single-statement write protected by ``_db_lock`` so callers can rely on
-    the returned row id for subsequent updates.
+    Thread-safe: all writes are protected by ``_db_lock``.
 
     Args:
         task: The task description string.
-        chat_id: Chat session identifier to associate this task with.
+        chat_id: Chat session identifier.  ``""`` starts a new session.
 
     Returns:
-        The inserted ``task_history.id`` value.
+        ``(task_id, chat_id)`` — the inserted row id and the
+        chat session identifier.
     """
+    import uuid
     db = _get_db()
     with _db_lock:
+        if chat_id == "":
+            chat_id = uuid.uuid4().hex
         cursor = db.execute(
             "INSERT INTO task_history (timestamp, task, chat_id, result) VALUES (?, ?, ?, ?)",
             (time.time(), task, chat_id, "Agent Failed Abruptly"),
         )
-        db.commit()
         row_id = cursor.lastrowid
         if row_id is None:  # pragma: no cover
             raise RuntimeError("sqlite did not return lastrowid")
-        return row_id
+        db.commit()
+        return row_id, chat_id
+
+
+def _allocate_chat_id() -> str:
+    """Pre-allocate a chat session id without keeping a task row.
+
+    Generates a new UUID-style string that can be used as a unique
+    chat session identifier.
+
+    This is used by ``WorktreeSorcarAgent`` to name worktree branches
+    *before* the first task in a session is persisted.
+
+    Returns:
+        A unique 32-character string suitable for use as a ``chat_id``.
+    """
+    import uuid
+    return uuid.uuid4().hex
 
 
 def _load_history(limit: int = 0, offset: int = 0) -> list[_HistoryEntry]:
@@ -199,7 +201,7 @@ def _load_history(limit: int = 0, offset: int = 0) -> list[_HistoryEntry]:
 
     Args:
         limit: Maximum number of entries to return.
-            0 returns all entries.
+            0 returns up to 10000 entries (hard cap).
         offset: Number of entries to skip before returning results.
 
     Returns:
@@ -207,19 +209,16 @@ def _load_history(limit: int = 0, offset: int = 0) -> list[_HistoryEntry]:
         ``task``, ``has_events``, ``result``, and ``chat_id`` keys.
     """
     db = _get_db()
-    sql = _HISTORY_SELECT + "ORDER BY timestamp DESC"
-    if limit > 0:
-        sql += " LIMIT ? OFFSET ?"
-        rows = db.execute(sql, (limit, offset)).fetchall()
-    else:
-        rows = db.execute(sql).fetchall()
+    effective_limit = limit if limit > 0 else 10000
+    sql = _HISTORY_SELECT + "ORDER BY timestamp DESC LIMIT ? OFFSET ?"
+    rows = db.execute(sql, (effective_limit, offset)).fetchall()
     return [dict(r) for r in rows]
 
 
 def _prefix_match_task(query: str) -> str:
-    """Find the most recent task starting with *query* (case-insensitive).
+    """Find the most recent task starting with *query* (case-sensitive).
 
-    Uses a SQL ``LIKE 'prefix%'`` query with the ``idx_th_task`` index,
+    Uses a SQL ``GLOB`` query for case-sensitive prefix matching,
     avoiding the need to load many rows into Python for prefix scanning.
 
     Args:
@@ -231,13 +230,12 @@ def _prefix_match_task(query: str) -> str:
     if not query:
         return ""
     db = _get_db()
-    # Escape LIKE wildcards in the query, then append '%'
-    escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    escaped = query.replace("[", "[[]").replace("*", "[*]").replace("?", "[?]")
     row = db.execute(
         "SELECT task FROM task_history "
-        "WHERE task LIKE ? ESCAPE '\\' AND LENGTH(task) > ? "
+        "WHERE task GLOB ? AND LENGTH(task) > ? "
         "ORDER BY timestamp DESC LIMIT 1",
-        (escaped + "%", len(query)),
+        (escaped + "*", len(query)),
     ).fetchone()
     return row["task"] if row else ""
 
@@ -283,34 +281,22 @@ def _get_history_entry(idx: int) -> _HistoryEntry | None:
     return dict(row) if row else None
 
 
-def _load_task_chat_events(
-    task: str,
-) -> list[dict[str, object]]:
-    """Load chat events for a specific task.
-
-    Returns the events for the most recent run of *task*.
+def _resolve_task_id(
+    db: sqlite3.Connection,
+    task_id: int | None,
+    task: str | None,
+) -> int | None:
+    """Resolve a stable row id, falling back to the most recent task.
 
     Args:
-        task: The task description string.
+        db: Active database connection.
+        task_id: Explicit row id when available.
+        task: Fallback task description for legacy callers.
 
     Returns:
-        List of chat event dicts, or empty list if none stored.
+        The resolved row id, or ``None`` if not found.
     """
-    db = _get_db()
-    task_id = _most_recent_task_id(db, task)
-    if task_id is None:
-        return []
-    rows = db.execute(
-        "SELECT event_json FROM events WHERE task_id = ? ORDER BY seq",
-        (task_id,),
-    ).fetchall()
-    result: list[dict[str, object]] = []
-    for r in rows:
-        try:
-            result.append(json.loads(r["event_json"]))
-        except (json.JSONDecodeError, TypeError):
-            logger.debug("Exception caught", exc_info=True)
-    return result
+    return task_id if task_id is not None else _most_recent_task_id(db, task)
 
 
 def _save_task_result(
@@ -327,46 +313,41 @@ def _save_task_result(
     """
     db = _get_db()
     with _db_lock:
-        resolved_task_id = task_id if task_id is not None else _most_recent_task_id(db, task)
-        if resolved_task_id is None:
+        resolved = _resolve_task_id(db, task_id, task)
+        if resolved is None:
             return
         db.execute(
             "UPDATE task_history SET result = ? WHERE id = ?",
-            (result, resolved_task_id),
+            (result, resolved),
         )
         db.commit()
 
 
-def _set_latest_chat_events(
-    events: list[dict[str, object]],
+def _save_task_extra(
+    extra: dict[str, object],
     task_id: int | None = None,
     task: str | None = None,
-    result: str = "",
 ) -> None:
-    """Save chat events for a task.
+    """Save extra metadata for a task as a JSON string.
+
+    Stores a JSON-serialized dict in the ``extra`` column of
+    ``task_history``.  Typical keys: ``model``, ``work_dir``,
+    ``version``, ``tokens``, ``cost``, ``is_parallel``, ``is_worktree``.
 
     Args:
-        events: The chat events to store.
+        extra: Dictionary of metadata to persist.
         task_id: Stable row id to update when available.
         task: Fallback task description string for legacy callers.
-        result: The task result text to store in the history entry.
     """
     db = _get_db()
-    has_ev = 1 if events else 0
     with _db_lock:
-        resolved_task_id = task_id if task_id is not None else _most_recent_task_id(db, task)
-        if resolved_task_id is None:
+        resolved = _resolve_task_id(db, task_id, task)
+        if resolved is None:
             return
         db.execute(
-            "UPDATE task_history SET has_events = ?, result = ? WHERE id = ?",
-            (has_ev, result, resolved_task_id),
+            "UPDATE task_history SET extra = ? WHERE id = ?",
+            (json.dumps(extra), resolved),
         )
-        db.execute("DELETE FROM events WHERE task_id = ?", (resolved_task_id,))
-        if has_ev:
-            db.executemany(
-                "INSERT INTO events (task_id, seq, event_json) VALUES (?, ?, ?)",
-                [(resolved_task_id, i, json.dumps(ev)) for i, ev in enumerate(events)],
-            )
         db.commit()
 
 
@@ -384,17 +365,21 @@ def _append_chat_event(
     """
     db = _get_db()
     with _db_lock:
-        resolved_task_id = task_id if task_id is not None else _most_recent_task_id(db, task)
-        if resolved_task_id is None:
+        resolved = _resolve_task_id(db, task_id, task)
+        if resolved is None:
             return
         row = db.execute(
             "SELECT COALESCE(MAX(seq), -1) + 1 AS next_seq FROM events WHERE task_id = ?",
-            (resolved_task_id,),
+            (resolved,),
         ).fetchone()
         next_seq = row["next_seq"] if row else 0
         db.execute(
-            "INSERT INTO events (task_id, seq, event_json) VALUES (?, ?, ?)",
-            (resolved_task_id, next_seq, json.dumps(event)),
+            "INSERT INTO events (task_id, seq, event_json, timestamp) VALUES (?, ?, ?, ?)",
+            (resolved, next_seq, json.dumps(event), time.time()),
+        )
+        db.execute(
+            "UPDATE task_history SET has_events = 1 WHERE id = ?",
+            (resolved,),
         )
         db.commit()
 
@@ -406,7 +391,7 @@ def _load_task_chat_id(task: str) -> str:
         task: The task description string.
 
     Returns:
-        The chat_id string, or empty string if not found.
+        The string chat_id, or ``""`` if not found.
     """
     db = _get_db()
     task_id = _most_recent_task_id(db, task)
@@ -415,7 +400,7 @@ def _load_task_chat_id(task: str) -> str:
     row = db.execute(
         "SELECT chat_id FROM task_history WHERE id = ?", (task_id,)
     ).fetchone()
-    return row["chat_id"] if row and row["chat_id"] else ""
+    return str(row["chat_id"]) if row and row["chat_id"] else ""
 
 
 def _load_last_chat_id() -> str:
@@ -428,14 +413,163 @@ def _load_last_chat_id() -> str:
     row = db.execute(
         "SELECT chat_id FROM task_history ORDER BY timestamp DESC LIMIT 1"
     ).fetchone()
-    return row["chat_id"] if row and row["chat_id"] else ""
+    return str(row["chat_id"]) if row and row["chat_id"] else ""
+
+
+def _list_recent_chats(limit: int = 10) -> list[dict[str, object]]:
+    """List recent chat sessions with their tasks and results.
+
+    Returns the most recent *limit* distinct chat sessions, ordered by
+    most-recent-first.  Each entry contains the ``chat_id`` and a list
+    of ``tasks`` (each with ``task``, ``result``, ``timestamp``) in
+    chronological order.
+
+    Args:
+        limit: Maximum number of chat sessions to return.
+
+    Returns:
+        List of dicts, each with ``chat_id`` (str) and ``tasks``
+        (list of dicts with ``task``, ``result``, ``timestamp``).
+    """
+    db = _get_db()
+    chat_rows = db.execute(
+        "SELECT chat_id, MAX(timestamp) AS latest "
+        "FROM task_history WHERE chat_id != '' "
+        "GROUP BY chat_id ORDER BY latest DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    result: list[dict[str, object]] = []
+    for cr in chat_rows:
+        cid = cr["chat_id"]
+        tasks = db.execute(
+            "SELECT task, result, timestamp FROM task_history "
+            "WHERE chat_id = ? ORDER BY timestamp ASC",
+            (cid,),
+        ).fetchall()
+        result.append({
+            "chat_id": cid,
+            "tasks": [
+                {"task": t["task"], "result": t["result"],
+                 "timestamp": t["timestamp"]}
+                for t in tasks
+            ],
+        })
+    return result
+
+
+def _load_latest_chat_events_by_chat_id(
+    chat_id: str,
+) -> dict[str, object] | None:
+    """Load the latest task and its events for a chat session.
+
+    Finds the most recent task in the given chat session and returns
+    its task description string and recorded events.
+
+    Args:
+        chat_id: The string chat session identifier.
+
+    Returns:
+        A dict with ``task`` (str), ``events`` (list of event dicts),
+        ``chat_id`` (str), and ``extra`` (str, JSON metadata),
+        or ``None`` if chat_id is ``""`` or has no tasks.
+    """
+    if not chat_id:
+        return None
+    db = _get_db()
+    row = db.execute(
+        "SELECT id, task, extra FROM task_history "
+        "WHERE chat_id = ? ORDER BY timestamp DESC LIMIT 1",
+        (chat_id,),
+    ).fetchone()
+    if not row:
+        return None
+    task_id = row["id"]
+    task = row["task"]
+    extra_str = row["extra"] or ""
+    event_rows = db.execute(
+        "SELECT event_json, timestamp FROM events WHERE task_id = ? ORDER BY seq",
+        (task_id,),
+    ).fetchall()
+    events: list[dict[str, object]] = []
+    for r in event_rows:
+        try:
+            ev = json.loads(r["event_json"])
+            ev["_timestamp"] = r["timestamp"]
+            events.append(ev)
+        except (json.JSONDecodeError, TypeError):
+            logger.debug("Exception caught", exc_info=True)
+    return {"task": task, "events": events, "chat_id": chat_id, "extra": extra_str}
+
+
+def _get_adjacent_task_by_chat_id(
+    chat_id: str, current_task: str, direction: str
+) -> dict[str, object] | None:
+    """Return the adjacent task within a chat session, relative to *current_task*.
+
+    Args:
+        chat_id: The string chat session identifier.
+        current_task: The current task description string used to find
+            the reference timestamp within the chat.
+        direction: ``"prev"`` for the earlier task, ``"next"`` for the
+            later task in the same chat session.
+
+    Returns:
+        A dict with ``task`` (str) and ``events`` (list of event dicts),
+        or ``None`` if no adjacent task exists.
+    """
+    if not chat_id or not current_task:
+        return None
+    db = _get_db()
+    row = db.execute(
+        "SELECT id, timestamp FROM task_history "
+        "WHERE chat_id = ? AND task = ? "
+        "ORDER BY timestamp DESC LIMIT 1",
+        (chat_id, current_task),
+    ).fetchone()
+    if not row:
+        return None
+    ts = row["timestamp"]
+
+    if direction == "prev":
+        adj = db.execute(
+            "SELECT id, task FROM task_history "
+            "WHERE chat_id = ? AND timestamp < ? "
+            "ORDER BY timestamp DESC LIMIT 1",
+            (chat_id, ts),
+        ).fetchone()
+    else:
+        adj = db.execute(
+            "SELECT id, task FROM task_history "
+            "WHERE chat_id = ? AND timestamp > ? "
+            "ORDER BY timestamp ASC LIMIT 1",
+            (chat_id, ts),
+        ).fetchone()
+
+    if not adj:
+        return None
+
+    adj_id = adj["id"]
+    adj_task = adj["task"]
+    event_rows = db.execute(
+        "SELECT event_json, timestamp FROM events WHERE task_id = ? ORDER BY seq",
+        (adj_id,),
+    ).fetchall()
+    events: list[dict[str, object]] = []
+    for r in event_rows:
+        try:
+            ev = json.loads(r["event_json"])
+            ev["_timestamp"] = r["timestamp"]
+            events.append(ev)
+        except (json.JSONDecodeError, TypeError):
+            logger.debug("Exception caught", exc_info=True)
+    return {"task": adj_task, "events": events}
 
 
 def _load_chat_context(chat_id: str) -> list[_HistoryEntry]:
     """Load all tasks and results for a chat session in chronological order.
 
     Args:
-        chat_id: The chat session identifier.
+        chat_id: The string chat session identifier.
 
     Returns:
         List of dicts with ``task`` and ``result`` keys, ordered by
@@ -451,10 +585,6 @@ def _load_chat_context(chat_id: str) -> list[_HistoryEntry]:
     ).fetchall()
     return [{"task": r["task"], "result": r["result"]} for r in rows]
 
-
-# ---------------------------------------------------------------------------
-# Model usage
-# ---------------------------------------------------------------------------
 
 def _load_model_usage() -> dict[str, int]:
     """Return model usage counts as ``{model_name: count}``."""
@@ -504,10 +634,6 @@ def _record_model_usage(model: str) -> None:
         db.commit()
 
 
-# ---------------------------------------------------------------------------
-# File usage
-# ---------------------------------------------------------------------------
-
 def _load_file_usage() -> dict[str, int]:
     """Return file usage counts ordered oldest-first (by last_used).
 
@@ -541,54 +667,3 @@ def _record_file_usage(path: str) -> None:
         db.commit()
 
 
-# ---------------------------------------------------------------------------
-# Stale directory cleanup (unchanged)
-# ---------------------------------------------------------------------------
-
-def _cleanup_stale_cs_dirs(max_age_hours: int = 24) -> int:
-    """Remove the sorcar data directory if stale.
-
-    Checks ``~/.kiss/sorcar-data`` and removes it if older than
-    ``max_age_hours`` and no process is listening on its port.
-    Also removes any legacy ``~/.kiss/cs-*`` per-workdir directories,
-    ``cs-port-*`` files, and the old ``cs-data`` directory.
-
-    Args:
-        max_age_hours: Maximum age in hours before the directory is
-            eligible for cleanup.
-
-    Returns:
-        Number of directories removed.
-    """
-    threshold = time.time() - max_age_hours * 3600
-    removed = 0
-    for p in sorted(_KISS_DIR.glob("cs-port-*")):
-        if p.is_file():
-            try:
-                p.unlink()
-            except OSError:  # pragma: no cover — OS-level unlink failure
-                logger.debug("Exception caught", exc_info=True)
-    for d in sorted(_KISS_DIR.glob("cs-*")):
-        if not d.is_dir() or d.name == "cs-extensions":
-            continue
-        shutil.rmtree(d, ignore_errors=True)
-        removed += 1
-    d = _KISS_DIR / "sorcar-data"
-    if not d.is_dir():
-        return removed
-    try:
-        if d.stat().st_mtime > threshold:
-            return removed
-        _pf = d / "cs-port"
-        if _pf.exists():
-            try:
-                port = int(_pf.read_text().strip())
-                with socket.create_connection(("127.0.0.1", port), timeout=0.3):
-                    return removed
-            except (ConnectionRefusedError, OSError, ValueError):
-                pass
-        shutil.rmtree(d, ignore_errors=True)
-        removed += 1
-    except OSError:  # pragma: no cover
-        logger.debug("Exception caught", exc_info=True)
-    return removed

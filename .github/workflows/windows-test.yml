@@ -114,7 +114,7 @@ jobs:
         run: |
           $kissProject = $env:KISS_PROJECT
           $uvExe = "$env:USERPROFILE\.local\bin\uv.exe"
-          & $uvExe run --directory $kissProject python -c "from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent; print('StatefulSorcarAgent import OK')" 2>&1
+          & $uvExe run --directory $kissProject python -c "from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent; print('ChatSorcarAgent import OK')" 2>&1
           & $uvExe run --directory $kissProject python -c "import platform; print(f'Python {platform.python_version()} on {platform.system()} {platform.machine()}')" 2>&1
 
       - name: Test Anthropic API connectivity
@@ -149,8 +149,8 @@ jobs:
           print(f'Work dir: {work_dir}')
           print(f'Files before: {os.listdir(work_dir)}')
           t0 = time.time()
-          from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
-          agent = StatefulSorcarAgent('windows-test')
+          from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+          agent = ChatSorcarAgent('windows-test')
           print(f'Agent created in {time.time()-t0:.1f}s')
           print('Running task...')
           agent.run(

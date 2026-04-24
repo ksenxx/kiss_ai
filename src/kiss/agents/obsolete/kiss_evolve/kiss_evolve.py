@@ -1,0 +1,997 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
+
+"""KISSEvolve: Evolutionary Algorithm Discovery using LLMs."""
+
+import logging
+import math
+import random
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any
+
+from kiss.agents.obsolete.kiss_evolve.novelty_prompts import INNOVATION_INSTRUCTIONS
+from kiss.agents.obsolete.kiss_evolve.simple_rag import SimpleRAG
+from kiss.core.models.model import Model
+
+logger = logging.getLogger(__name__)
+
+@dataclass
+class CodeVariant:
+    """Represents a code variant in the evolutionary population."""
+
+    code: str
+    fitness: float = 0.0
+    metrics: dict[str, float] = field(default_factory=dict)
+    parent_id: int | None = None
+    generation: int = 0
+    id: int = 0
+    artifacts: dict[str, Any] = field(default_factory=dict)
+    evaluation_error: str | None = None
+    offspring_count: int = 0
+
+
+class KISSEvolve:
+    """KISSEvolve: Evolutionary algorithm discovery using LLMs.
+
+    KISSEvolve evolves code variants through:
+    1. Initial population generation
+    2. Evaluation of each variant
+    3. Selection of promising variants
+    4. Mutation/crossover to create new variants
+    5. Iteration until convergence or max generations
+    # Pseudocode for KISSEvolve showing use of all parameters
+
+    class KISSEvolve:
+        - Input parameters:
+            - code_agent_wrapper: function to generate new code from prompts and instructions
+            - initial_code: starting code for the population
+            - evaluation_fn: function that evaluates code's fitness/metrics
+            - model_names: list of (model_name, probability) tuples for LLM selection
+            - extra_coding_instructions: extra prompt instructions for LLM
+            - population_size: number of code variants per generation
+            - max_generations: how many evolutionary generations to run
+            - mutation_rate: probability of applying mutation each step
+            - elite_size: number of top performers to keep ("elitism")
+            - num_islands: number of isolated subpopulations (for island-model evolution)
+            - migration_frequency: how often to migrate code between islands
+            - migration_size: how many individuals migrate at each event
+            - migration_topology: migration pattern (e.g. ring, fully_connected)
+            - enable_novelty_rejection: whether to use code-novelty sampling
+            - novelty_threshold: similarity cutoff for considering code novel
+            - max_rejection_attempts: max tries to generate novel code before accepting
+            - novelty_rag_model: model for code similarity/RAG
+            - parent_sampling_method: how parents are picked (uniform, probabilistic, etc.)
+            - power_law_alpha: parameter for power-law parent selection
+            - performance_novelty_lambda: weight for combining performance and novelty
+        # Evolutionary algorithm workflow:
+        #
+        # 1. Initialize population:
+        #    - Start with a set of CodeVariant objects using initial_code as the source.
+        # 2. Evaluate population:
+        #    - Use evaluation_fn to compute 'fitness', 'metrics', and additional
+        #      artifacts for each variant.
+        # 3. For each generation up to max_generations:
+        #    a. (If islands are used)
+        #       - Maintain separate island subpopulations.
+        #       - Evolve islands independently.
+        #       - Every migration_frequency generations, migrate migration_size
+        #         variants according to migration_topology.
+        #    b. Selection:
+        #       - Retain elite_size highest-fitness variants (elitism).
+        #       - Select parents using parent_sampling_method (e.g., uniform,
+        #         fitness-proportional, power-law).
+        #    c. Mutation:
+        #       - For each non-elite slot, with probability mutation_rate, generate a mutation:
+        #           - Use code_agent_wrapper for new code, with extra_coding_instructions.
+        #           - If enable_novelty_rejection: check RAG similarity with novelty_rag_model,
+        #               retry up to max_rejection_attempts for a novel variant
+        #               (similarity < novelty_threshold).
+        #    d. Crossover:
+        #       - Occasionally create a new variant by combining code from two parents.
+        #    e. Evaluate all new code variants with evaluation_fn.
+        #    f. Update the population and repeat.
+        # 4. Return best CodeVariant (highest .fitness) found upon completion.
+    """
+
+    def __init__(
+        self,
+        code_agent_wrapper: Callable[..., str],
+        initial_code: str,
+        evaluation_fn: Callable[[str], dict[str, Any]],
+        model_names: list[tuple[str, float]],
+        extra_coding_instructions: str = "",
+        population_size: int = 8,
+        max_generations: int = 10,
+        mutation_rate: float = 0.7,
+        elite_size: int = 2,
+        num_islands: int = 2,
+        migration_frequency: int = 5,
+        migration_size: int = 1,
+        migration_topology: str = "ring",
+        enable_novelty_rejection: bool = False,
+        novelty_threshold: float = 0.95,
+        max_rejection_attempts: int = 5,
+        novelty_rag_model: Model | None = None,
+        parent_sampling_method: str = "power_law",
+        power_law_alpha: float = 1.0,
+        performance_novelty_lambda: float = 1.0,
+    ):
+        """Initialize KISSEvolve optimizer.
+
+        Args:
+            code_agent_wrapper (Callable[..., str]): The code generation agent
+                wrapper. Should accept keyword arguments: model_name (str),
+                prompt_template (str), and arguments (dict[str, str]).
+            initial_code (str): The initial code to evolve.
+            evaluation_fn (Callable[[str], dict[str, Any]]): Function that takes
+                code string and returns dict with:
+                - 'fitness': float (higher is better)
+                - 'metrics': dict[str, float] (optional additional metrics)
+                - 'artifacts': dict[str, Any] (optional execution artifacts)
+                - 'error': str (optional error message if evaluation failed)
+            model_names (list[tuple[str, float]]): List of tuples containing
+                (model_name, probability). Probabilities will be normalized to sum to 1.0.
+            extra_coding_instructions (str): Extra instructions to add to the code
+                generation prompt.
+            population_size (int): Number of variants to maintain in population.
+            max_generations (int): Maximum number of evolutionary generations.
+            mutation_rate (float): Probability of mutating a variant.
+            elite_size (int): Number of best variants to preserve each generation.
+            num_islands (int): Number of islands for island-based evolution.
+            migration_frequency (int): Number of generations between migrations.
+            migration_size (int): Number of individuals to migrate between islands.
+            migration_topology (str): Migration topology
+                ('ring', 'fully_connected', 'random').
+            enable_novelty_rejection (bool): Enable code novelty rejection sampling.
+            novelty_threshold (float): Cosine similarity threshold for rejecting code
+                (0.0-1.0, higher = more strict).
+            max_rejection_attempts (int): Maximum number of rejection attempts before
+                accepting a variant anyway.
+            novelty_rag_model (Model | None): Model to use for generating code embeddings.
+                If None and novelty rejection is enabled, uses the first model from models list.
+            parent_sampling_method (str): Parent sampling method ('tournament', 'power_law',
+                or 'performance_novelty').
+            power_law_alpha (float): Power-law sampling parameter (α) for rank-based
+                sampling. Lower = more exploration, higher = more exploitation.
+            performance_novelty_lambda (float): Performance-novelty sampling parameter (λ)
+                controlling selection pressure.
+        """
+        self.initial_code = initial_code
+        self.evaluation_fn = evaluation_fn
+        self.code_agent_wrapper = code_agent_wrapper
+        self.extra_coding_instructions = extra_coding_instructions
+
+        self.model_names = self._validate_and_normalize_models(model_names)
+
+        self.population_size = population_size
+        self.max_generations = max_generations
+        self.mutation_rate = mutation_rate
+        self.elite_size = elite_size
+        self.num_islands = num_islands
+        self.migration_frequency = migration_frequency
+        self.migration_size = migration_size
+        self.migration_topology = migration_topology
+        self.enable_novelty_rejection = enable_novelty_rejection
+        self.novelty_threshold = novelty_threshold
+        self.max_rejection_attempts = max_rejection_attempts
+        self.parent_sampling_method = parent_sampling_method
+        self.power_law_alpha = power_law_alpha
+        self.performance_novelty_lambda = performance_novelty_lambda
+
+        self._validate_parameters()
+        self._initialize_tracking(novelty_rag_model)
+        self._setup_prompt_templates()
+
+    @staticmethod
+    def _validate_and_normalize_models(
+        model_names: list[tuple[str, float]],
+    ) -> list[tuple[str, float]]:
+        """Validate and normalize model probabilities.
+
+        Args:
+            model_names: List of (model_name, probability) tuples.
+
+        Returns:
+            List of (model_name, normalized_probability) tuples where
+            probabilities sum to 1.0.
+
+        Raises:
+            ValueError: If model_names is empty, contains negative probabilities,
+                or has probabilities summing to zero.
+        """
+        if not model_names:
+            raise ValueError("models list cannot be empty")
+        if not all(isinstance(p, (int, float)) and p >= 0 for _, p in model_names):
+            raise ValueError("all probabilities must be non-negative numbers")
+        total_prob = sum(prob for _, prob in model_names)
+        if total_prob == 0:
+            raise ValueError("sum of probabilities cannot be zero")
+        return [(name, prob / total_prob) for name, prob in model_names]
+
+    def _validate_parameters(self) -> None:
+        """Validate all configuration parameters.
+
+        Raises:
+            ValueError: If any configuration parameter is invalid (e.g., elite_size
+                >= population_size, mutation_rate outside [0, 1], invalid topology).
+        """
+        if self.elite_size >= self.population_size:
+            error_msg = (
+                f"elite_size ({self.elite_size}) must be less than "
+                f"population_size ({self.population_size})"
+            )
+            raise ValueError(error_msg)
+        if not 0.0 <= self.mutation_rate <= 1.0:
+            error_msg = f"mutation_rate must be between 0.0 and 1.0, got {self.mutation_rate}"
+            raise ValueError(error_msg)
+        if self.num_islands < 1:
+            raise ValueError(f"num_islands must be at least 1, got {self.num_islands}")
+        if self.migration_frequency < 1:
+            raise ValueError(
+                f"migration_frequency must be at least 1, got {self.migration_frequency}"
+            )
+        if self.migration_size < 1:
+            raise ValueError(f"migration_size must be at least 1, got {self.migration_size}")
+        if self.migration_topology not in ["ring", "fully_connected", "random"]:
+            raise ValueError(
+                f"migration_topology must be 'ring', 'fully_connected', or 'random', "
+                f"got {self.migration_topology}"
+            )
+        if not 0.0 <= self.novelty_threshold <= 1.0:
+            raise ValueError(
+                f"novelty_threshold must be between 0.0 and 1.0, got {self.novelty_threshold}"
+            )
+        if self.max_rejection_attempts < 1:
+            raise ValueError(
+                f"max_rejection_attempts must be at least 1, got {self.max_rejection_attempts}"
+            )
+        if self.parent_sampling_method not in ["tournament", "power_law", "performance_novelty"]:
+            raise ValueError(
+                f"parent_sampling_method must be 'tournament', 'power_law', or "
+                f"'performance_novelty', got {self.parent_sampling_method}"
+            )
+        if self.power_law_alpha < 0:
+            raise ValueError(f"power_law_alpha must be non-negative, got {self.power_law_alpha}")
+        if self.performance_novelty_lambda <= 0:
+            raise ValueError(
+                f"performance_novelty_lambda must be positive, "
+                f"got {self.performance_novelty_lambda}"
+            )
+
+    def _initialize_tracking(self, novelty_rag_model: Model | None) -> None:
+        """Initialize population tracking and novelty RAG.
+
+        Args:
+            novelty_rag_model: Optional model for novelty RAG. If None and novelty
+                rejection is enabled, uses the first model from model_names.
+        """
+        self.population: list[CodeVariant] = []
+        self.variant_counter = 0
+        self.generation_history: list[list[CodeVariant]] = []
+
+        self.islands: list[list[CodeVariant]] = []
+        self.island_histories: list[list[list[CodeVariant]]] = []
+
+        self.novelty_rag: SimpleRAG | None = None
+        if self.enable_novelty_rejection:
+            rag_model_name: str
+            if novelty_rag_model is not None:
+                rag_model_name = novelty_rag_model.model_name
+            else:
+                rag_model_name = self.model_names[0][0]
+            self.novelty_rag = SimpleRAG(model_name=rag_model_name, metric="cosine")
+            print(
+                f"Code novelty rejection sampling enabled: "
+                f"threshold={self.novelty_threshold}, "
+                f"max_attempts={self.max_rejection_attempts}"
+            )
+
+    def _setup_prompt_templates(self) -> None:
+        """Initialize prompt templates for mutation and crossover.
+
+        Sets up the mutation_prompt_template, crossover_prompt_template,
+        and constraints string used during code evolution.
+        """
+        self.mutation_prompt_template = """You are an expert code optimizer. Your task is to \
+improve the given code by optimizing it for better performance while maintaining correctness.
+
+## Instructions ##
+- Analyze the given code and identify optimization opportunities
+- Focus on performance improvements (speed, memory efficiency, algorithmic
+  improvements)
+- Maintain correctness - the optimized code must produce the same results
+- You can optimize: algorithms, data structures, memory access patterns,
+  computation order
+- You MUST return ONLY the optimized code by calling the 'finish' tool with
+  the code as the 'result' argument.
+- The code should be a complete, runnable function or module
+
+## Original Code ##
+{original_code}
+
+## Evaluation Feedback ##
+{feedback}
+
+## Optimization Constraints ##
+{constraints}
+
+"""
+
+        self.crossover_prompt_template = """You are an expert code optimizer. Your task is to \
+combine the best aspects of two code variants to create an improved version.
+
+## Instructions ##
+- Analyze both code variants and identify their strengths
+- Combine the best features from both variants
+- Ensure the combined code is correct and performs well
+- You MUST return ONLY the combined code by calling the 'finish' tool with
+  the code as the 'result' argument.
+- The code should be a complete, runnable function or module
+
+## Code Variant 1 (Fitness: {fitness1}) ##
+{code1}
+
+## Code Variant 2 (Fitness: {fitness2}) ##
+{code2}
+
+"""
+
+        self.constraints = (
+            "- MUST NOT change function signatures or external API\n"
+            "- MUST maintain correctness (same input -> same output)\n"
+            "- ALLOWED: Internal optimizations, algorithm improvements, "
+            "data structure changes\n"
+        )
+
+    def _select_model(self) -> str:
+        """Randomly select a model name based on probabilities.
+
+        Returns:
+            Selected model name string, chosen based on the normalized
+            probability weights.
+        """
+        model_names, weights = zip(*self.model_names)
+        selected: str = random.choices(model_names, weights=weights, k=1)[0]
+        return selected
+
+    def _is_code_novel(self, code: str) -> bool:
+        """Check if code is novel (sufficiently different from existing code in RAG).
+
+        Args:
+            code: Code string to check for novelty.
+
+        Returns:
+            True if code is novel (similarity below threshold), False otherwise.
+        """
+        if not self.enable_novelty_rejection or self.novelty_rag is None:
+            return True
+
+        stats = self.novelty_rag.get_collection_stats()
+        if stats["num_documents"] == 0:
+            return True
+
+        results = self.novelty_rag.query(code, top_k=1)
+        if not results:
+            return True
+
+        max_similarity = float(results[0]["score"])
+        is_novel: bool = max_similarity < self.novelty_threshold
+
+        if not is_novel:
+            print(
+                f"  Rejected code variant (similarity: {max_similarity:.4f} >= "
+                f"threshold: {self.novelty_threshold:.4f})"
+            )
+
+        return is_novel
+
+    def _add_code_to_rag(self, code: str, variant_id: int) -> None:
+        """Add code variant to RAG for novelty tracking.
+
+        Args:
+            code: Code string to add.
+            variant_id: Unique identifier for the code variant.
+        """
+        if not self.enable_novelty_rejection or self.novelty_rag is None:
+            return
+
+        document = {
+            "id": str(variant_id),
+            "text": code,
+            "metadata": {"variant_id": variant_id},
+        }
+        self.novelty_rag.add_documents([document])
+
+    def __pick_random_innovation_prompt(self) -> str:
+        """Pick a random innovation prompt from the list of innovation prompts.
+
+        Returns:
+            A random innovation prompt string, or empty string (50% chance).
+        """
+        if random.random() < 0.5:
+            return ""
+        rand_index = random.randint(0, len(INNOVATION_INSTRUCTIONS) - 1)
+        return INNOVATION_INSTRUCTIONS[rand_index]["prompt"]
+
+    def _mutate_code(self, variant: CodeVariant, feedback: str = "") -> str:
+        """Mutate a code variant using LLM with novelty rejection sampling.
+
+        Args:
+            variant: Code variant to mutate.
+            feedback: Evaluation feedback for the variant.
+
+        Returns:
+            Mutated code string that passes novelty check (or after max attempts).
+        """
+        model_name = self._select_model()
+        prompt = (
+            self.mutation_prompt_template
+            + self.extra_coding_instructions
+            + self.__pick_random_innovation_prompt()
+        )
+
+        result = variant.code
+        for attempt in range(self.max_rejection_attempts):
+            result = self.code_agent_wrapper(
+                model_name=model_name,
+                prompt_template=prompt,
+                arguments={
+                    "original_code": variant.code,
+                    "feedback": feedback or "No specific feedback available.",
+                    "constraints": self.constraints,
+                },
+            )
+
+            if self._is_code_novel(result):
+                return result
+
+            if attempt < self.max_rejection_attempts - 1:
+                print(
+                    f"  Retrying mutation (attempt {attempt + 2}/{self.max_rejection_attempts})..."
+                )
+
+        print(
+            f"  Accepted code variant after {self.max_rejection_attempts} attempts "
+            "(may not be novel)"
+        )
+        return result
+
+    def _crossover_code(self, variant1: CodeVariant, variant2: CodeVariant) -> str:
+        """Create a new variant by combining two parent variants with novelty rejection sampling.
+
+        Args:
+            variant1: First parent code variant.
+            variant2: Second parent code variant.
+
+        Returns:
+            Combined code string that passes novelty check (or after max attempts).
+        """
+        model_name = self._select_model()
+        prompt = (
+            self.crossover_prompt_template
+            + self.extra_coding_instructions
+            + self.__pick_random_innovation_prompt()
+        )
+
+        result = variant1.code
+        for attempt in range(self.max_rejection_attempts):
+            result = self.code_agent_wrapper(
+                model_name=model_name,
+                prompt_template=prompt,
+                arguments={
+                    "code1": variant1.code,
+                    "fitness1": str(variant1.fitness),
+                    "code2": variant2.code,
+                    "fitness2": str(variant2.fitness),
+                },
+            )
+
+            if self._is_code_novel(result):
+                return result
+
+            if attempt < self.max_rejection_attempts - 1:
+                print(
+                    f"  Retrying crossover (attempt {attempt + 2}/{self.max_rejection_attempts})..."
+                )
+
+        print(
+            f"  Accepted code variant after {self.max_rejection_attempts} attempts "
+            "(may not be novel)"
+        )
+        return result
+
+    def _evaluate_variant(self, variant: CodeVariant) -> None:
+        """Evaluate a code variant and update its fitness.
+
+        Args:
+            variant: The code variant to evaluate. Modified in place with
+                fitness, metrics, artifacts, and evaluation_error fields.
+        """
+        try:
+            result = self.evaluation_fn(variant.code)
+            variant.fitness = result.get("fitness", 0.0)
+            variant.metrics = result.get("metrics", {})
+            variant.artifacts = result.get("artifacts", {})
+            variant.evaluation_error = result.get("error")
+        except Exception as e:
+            logger.debug("Exception caught", exc_info=True)
+            variant.fitness = 0.0
+            variant.evaluation_error = str(e)
+            variant.metrics = {}
+            variant.artifacts = {}
+
+    def _initialize_population(self) -> None:
+        """Initialize the population with the initial code.
+
+        Creates a single variant from initial_code, evaluates it, and adds
+        it to the population and novelty RAG.
+        """
+        initial_variant = CodeVariant(
+            code=self.initial_code,
+            id=self.variant_counter,
+            generation=0,
+        )
+        self.variant_counter += 1
+        self._evaluate_variant(initial_variant)
+        self.population = [initial_variant]
+        self._add_code_to_rag(self.initial_code, initial_variant.id)
+
+    def _initialize_islands(self) -> None:
+        """Initialize islands for island-based evolution.
+
+        Creates num_islands separate populations, each initialized with a
+        copy of the initial code. Each island maintains independent evolution.
+        """
+        self.islands = []
+        self.island_histories = []
+
+        for _ in range(self.num_islands):
+            initial_variant = CodeVariant(
+                code=self.initial_code,
+                id=self.variant_counter,
+                generation=0,
+            )
+            self.variant_counter += 1
+            self._evaluate_variant(initial_variant)
+
+            island_population = [initial_variant]
+            self.islands.append(island_population)
+            self.island_histories.append([island_population.copy()])
+            self._add_code_to_rag(self.initial_code, initial_variant.id)
+
+    def _power_law_sample(self, population: list[CodeVariant], n: int = 1) -> list[CodeVariant]:
+        """Select parents using power-law (rank-based) sampling.
+
+        Programs are ranked by fitness, and selection probabilities follow a power-law
+        distribution: p_i = r_i^(-α) / Σ r_j^(-α), where r_i is the rank.
+
+        Args:
+            population: List of code variants to sample from.
+            n: Number of parents to select.
+
+        Returns:
+            List of selected parent variants.
+        """
+        if len(population) < n:
+            return population.copy()
+
+        sorted_pop = sorted(population, key=lambda v: v.fitness, reverse=True)
+        num_variants = len(sorted_pop)
+
+        ranks = list(range(1, num_variants + 1))
+        weights = [r ** (-self.power_law_alpha) for r in ranks]
+        total_weight = sum(weights)
+
+        probabilities = [w / total_weight for w in weights]
+
+        selected = random.choices(sorted_pop, weights=probabilities, k=n)
+        return selected
+
+    def _performance_novelty_sample(
+        self, population: list[CodeVariant], n: int = 1
+    ) -> list[CodeVariant]:
+        """Select parents using weighted performance-novelty sampling.
+
+        Combines fitness (via sigmoid) with novelty (based on offspring count) to
+        determine selection probability:
+        - Performance: s_i = σ(λ · (F(P_i) - α₀)), where α₀ is median fitness
+        - Novelty: h_i = 1 / (1 + N(P_i)), where N(P_i) is offspring count
+        - Combined: p_i = (s_i · h_i) / Σ(s_j · h_j)
+
+        Args:
+            population: List of code variants to sample from.
+            n: Number of parents to select.
+
+        Returns:
+            List of selected parent variants.
+        """
+        if len(population) < n:
+            return population.copy()
+
+        if len(population) == 1:
+            return population * n
+
+        fitnesses = [v.fitness for v in population]
+        fitnesses_sorted = sorted(fitnesses)
+        median_idx = len(fitnesses_sorted) // 2
+        if len(fitnesses_sorted) % 2 == 0:
+            alpha_0 = (fitnesses_sorted[median_idx - 1] + fitnesses_sorted[median_idx]) / 2.0
+        else:
+            alpha_0 = fitnesses_sorted[median_idx]
+
+        weights = []
+        for variant in population:
+            sigmoid_input = self.performance_novelty_lambda * (variant.fitness - alpha_0)
+            sigmoid_input = max(-500, min(500, sigmoid_input))
+            performance_score = 1.0 / (1.0 + math.exp(-sigmoid_input))
+
+            novelty_discount = 1.0 / (1.0 + variant.offspring_count)
+
+            weight = performance_score * novelty_discount
+            weights.append(weight)
+
+        total_weight = sum(weights)
+        if total_weight == 0:
+            probabilities = [1.0 / len(population)] * len(population)
+        else:
+            probabilities = [w / total_weight for w in weights]
+
+        selected = random.choices(population, weights=probabilities, k=n)
+        return selected
+
+    def _select_parents(
+        self, n: int = 2, population: list[CodeVariant] | None = None
+    ) -> list[CodeVariant]:
+        """Select parent variants using the configured sampling method.
+
+        Args:
+            n: Number of parents to select.
+            population: Population to select from. If None, uses self.population.
+
+        Returns:
+            List of selected parent variants.
+        """
+        pop = population if population is not None else self.population
+        if len(pop) < n:
+            return pop.copy()
+
+        if self.parent_sampling_method == "power_law":
+            return self._power_law_sample(pop, n)
+        elif self.parent_sampling_method == "performance_novelty":
+            return self._performance_novelty_sample(pop, n)
+        else:
+            tournament_size = min(3, len(pop))
+            selected = []
+            for _ in range(n):
+                tournament = random.sample(pop, tournament_size)
+                best = max(tournament, key=lambda v: v.fitness)
+                selected.append(best)
+            return selected
+
+    def _evolve_population(
+        self, population: list[CodeVariant], generation: int
+    ) -> list[CodeVariant]:
+        """Evolve one generation of a population.
+
+        Args:
+            population: The population to evolve.
+            generation: The current generation number.
+
+        Returns:
+            The new population after evolution.
+        """
+        population.sort(key=lambda v: v.fitness, reverse=True)
+
+        elite = population[: self.elite_size].copy()
+        new_population = []
+
+        for variant in elite:
+            elite_copy = CodeVariant(
+                code=variant.code,
+                fitness=variant.fitness,
+                metrics=variant.metrics.copy(),
+                parent_id=variant.id,
+                generation=generation,
+                id=self.variant_counter,
+            )
+            self.variant_counter += 1
+            new_population.append(elite_copy)
+
+        while len(new_population) < self.population_size:
+            should_mutate = random.random() < self.mutation_rate and len(population) > 0
+            if should_mutate:
+                parents = self._select_parents(1, population)
+                parent = parents[0] if parents else random.choice(population)
+                feedback = ""
+                if parent.artifacts:
+                    feedback = f"Previous performance: {parent.fitness:.4f}. "
+                    if parent.evaluation_error:
+                        feedback += f"Error: {parent.evaluation_error}"
+
+                mutated_code = self._mutate_code(parent, feedback)
+                new_variant = CodeVariant(
+                    code=mutated_code,
+                    parent_id=parent.id,
+                    generation=generation,
+                    id=self.variant_counter,
+                )
+                self.variant_counter += 1
+                parent.offspring_count += 1
+                self._evaluate_variant(new_variant)
+                self._add_code_to_rag(mutated_code, new_variant.id)
+                new_population.append(new_variant)
+            else:
+                parents = self._select_parents(2, population)
+                if len(parents) >= 2:
+                    combined_code = self._crossover_code(parents[0], parents[1])
+                    new_variant = CodeVariant(
+                        code=combined_code,
+                        parent_id=parents[0].id,
+                        generation=generation,
+                        id=self.variant_counter,
+                    )
+                    self.variant_counter += 1
+                    parents[0].offspring_count += 1
+                    parents[1].offspring_count += 1
+                    self._evaluate_variant(new_variant)
+                    self._add_code_to_rag(combined_code, new_variant.id)
+                    new_population.append(new_variant)
+                else:
+                    if population:
+                        parent = random.choice(population)
+                        new_variant = CodeVariant(
+                            code=parent.code,
+                            fitness=parent.fitness,
+                            metrics=parent.metrics.copy(),
+                            parent_id=parent.id,
+                            generation=generation,
+                            id=self.variant_counter,
+                        )
+                        self.variant_counter += 1
+                        new_population.append(new_variant)
+
+        return new_population
+
+    def _evolve_generation(self, generation: int) -> None:
+        """Evolve one generation of the population.
+
+        Args:
+            generation: The current generation number.
+        """
+        self.population = self._evolve_population(self.population, generation)
+        self.generation_history.append(self.population.copy())
+
+    def evolve(self) -> CodeVariant:
+        """Run the evolutionary algorithm.
+
+        Returns:
+            CodeVariant: The best code variant found during evolution.
+        """
+        if self.num_islands > 1:
+            return self._evolve_with_islands()
+        else:
+            return self._evolve_single_population()
+
+    def _evolve_single_population(self) -> CodeVariant:
+        """Run the evolutionary algorithm with a single population.
+
+        Returns:
+            The best CodeVariant found during evolution.
+        """
+        pop_size = self.population_size
+        print(f"Initializing KISSEvolve with population size {pop_size}")
+        self._initialize_population()
+
+        self.population.sort(key=lambda v: v.fitness, reverse=True)
+        best_fitness = self.population[0].fitness
+        print(f"Generation 0: Best fitness = {best_fitness:.4f}")
+
+        for generation in range(1, self.max_generations + 1):
+            print(f"\nEvolving generation {generation}...")
+            self._evolve_generation(generation)
+
+            self.population.sort(key=lambda v: v.fitness, reverse=True)
+            best = self.population[0]
+            print(f"Generation {generation}: Best fitness = {best.fitness:.4f}")
+            if best.metrics:
+                print(f"  Metrics: {best.metrics}")
+
+        self.population.sort(key=lambda v: v.fitness, reverse=True)
+        return self.population[0]
+
+    def _evolve_with_islands(self) -> CodeVariant:
+        """Run the evolutionary algorithm with island-based evolution.
+
+        Returns:
+            The best CodeVariant found across all islands during evolution.
+        """
+        pop_size = self.population_size
+        print(
+            f"Initializing KISSEvolve with {self.num_islands} islands, "
+            f"population size {pop_size} per island"
+        )
+        print(
+            f"Migration: every {self.migration_frequency} generations, "
+            f"{self.migration_size} individuals, topology: {self.migration_topology}"
+        )
+        self._initialize_islands()
+
+        all_variants = [v for island in self.islands for v in island]
+        all_variants.sort(key=lambda v: v.fitness, reverse=True)
+        best_fitness = all_variants[0].fitness
+        print(f"Generation 0: Best fitness across all islands = {best_fitness:.4f}")
+        for island_id, island_pop in enumerate(self.islands):
+            if island_pop:
+                island_best = max(island_pop, key=lambda v: v.fitness)
+                print(
+                    f"  Island {island_id}: Best fitness = {island_best.fitness:.4f}, "
+                    f"Population size = {len(island_pop)}"
+                )
+
+        for generation in range(1, self.max_generations + 1):
+            print(f"\nEvolving generation {generation}...")
+
+            for island_id in range(self.num_islands):
+                new_population = self._evolve_island_generation(island_id, generation)
+                self.islands[island_id] = new_population
+                self.island_histories[island_id].append(new_population.copy())
+
+            if generation % self.migration_frequency == 0:
+                print(f"  Performing migration at generation {generation}...")
+                self._migrate_between_islands()
+
+            all_variants = [v for island in self.islands for v in island]
+            all_variants.sort(key=lambda v: v.fitness, reverse=True)
+            best = all_variants[0]
+            print(f"Generation {generation}: Best fitness across all islands = {best.fitness:.4f}")
+            if best.metrics:
+                print(f"  Metrics: {best.metrics}")
+
+            for island_id, island_pop in enumerate(self.islands):
+                if island_pop:
+                    island_best = max(island_pop, key=lambda v: v.fitness)
+                    island_avg = sum(v.fitness for v in island_pop) / len(island_pop)
+                    print(
+                        f"  Island {island_id}: Best = {island_best.fitness:.4f}, "
+                        f"Avg = {island_avg:.4f}, Size = {len(island_pop)}"
+                    )
+
+        all_variants = [v for island in self.islands for v in island]
+        all_variants.sort(key=lambda v: v.fitness, reverse=True)
+        return all_variants[0]
+
+    def get_best_variant(self) -> CodeVariant:
+        """Get the best variant from the current population or islands.
+
+        Returns:
+            The CodeVariant with the highest fitness from the current population
+            or all islands. Returns a default variant with initial_code if no
+            population exists.
+        """
+        if self.num_islands > 1 and self.islands:
+            all_variants = [v for island in self.islands for v in island]
+            if all_variants:
+                return max(all_variants, key=lambda v: v.fitness)
+        elif self.population:
+            return max(self.population, key=lambda v: v.fitness)
+        return CodeVariant(code=self.initial_code, id=0)
+
+    def get_population_stats(self) -> dict[str, Any]:
+        """Get statistics about the current population.
+
+        Returns:
+            Dictionary containing:
+                - size: Total population size
+                - avg_fitness: Average fitness across all variants
+                - best_fitness: Maximum fitness value
+                - worst_fitness: Minimum fitness value
+        """
+        if self.num_islands > 1 and self.islands:
+            all_variants = [v for island in self.islands for v in island]
+            if all_variants:
+                fitnesses = [v.fitness for v in all_variants]
+                return {
+                    "size": len(all_variants),
+                    "avg_fitness": sum(fitnesses) / len(fitnesses),
+                    "best_fitness": max(fitnesses),
+                    "worst_fitness": min(fitnesses),
+                }
+
+        if not self.population:
+            return {"size": 0, "avg_fitness": 0.0, "best_fitness": 0.0, "worst_fitness": 0.0}
+
+        fitnesses = [v.fitness for v in self.population]
+        return {
+            "size": len(self.population),
+            "avg_fitness": sum(fitnesses) / len(fitnesses),
+            "best_fitness": max(fitnesses),
+            "worst_fitness": min(fitnesses),
+        }
+
+    def _get_migration_targets(self, island_id: int) -> list[int]:
+        """Get target islands for migration from a given island.
+
+        Args:
+            island_id: The source island ID.
+
+        Returns:
+            List of target island IDs based on the migration topology:
+                - ring: Returns the next island in circular order
+                - fully_connected: Returns all other islands
+                - random: Returns a single randomly chosen other island
+        """
+        if self.migration_topology == "ring":
+            return [(island_id + 1) % self.num_islands]
+        elif self.migration_topology == "fully_connected":
+            return [i for i in range(self.num_islands) if i != island_id]
+        elif self.migration_topology == "random":
+            other_islands = [i for i in range(self.num_islands) if i != island_id]
+            if other_islands:
+                return [random.choice(other_islands)]
+            return []
+        else:
+            return []
+
+    def _migrate_between_islands(self) -> None:
+        """Perform migration between islands.
+
+        Selects the top migration_size individuals from each island and copies
+        them to target islands based on the migration topology. If target
+        island becomes too large, worst individuals are removed to make room.
+        """
+        if self.num_islands <= 1:
+            return
+
+        migrants_by_target: dict[int, list[CodeVariant]] = {i: [] for i in range(self.num_islands)}
+
+        for island_id in range(self.num_islands):
+            island_pop = self.islands[island_id]
+            if not island_pop:
+                continue
+
+            sorted_pop = sorted(island_pop, key=lambda v: v.fitness, reverse=True)
+            num_migrants = min(self.migration_size, len(sorted_pop))
+            migrants = sorted_pop[:num_migrants]
+
+            target_islands = self._get_migration_targets(island_id)
+
+            for target_id in target_islands:
+                for migrant in migrants:
+                    migrant_copy = CodeVariant(
+                        code=migrant.code,
+                        fitness=migrant.fitness,
+                        metrics=migrant.metrics.copy(),
+                        parent_id=migrant.id,
+                        generation=migrant.generation,
+                        id=self.variant_counter,
+                        artifacts=migrant.artifacts.copy(),
+                        evaluation_error=migrant.evaluation_error,
+                    )
+                    self.variant_counter += 1
+                    migrants_by_target[target_id].append(migrant_copy)
+
+        for target_id, migrants in migrants_by_target.items():
+            if migrants:
+                target_island = self.islands[target_id]
+                if len(target_island) + len(migrants) > self.population_size:
+                    target_island.sort(key=lambda v: v.fitness, reverse=True)
+                    target_island = target_island[: self.population_size - len(migrants)]
+                    self.islands[target_id] = target_island
+
+                self.islands[target_id].extend(migrants)
+                print(f"  Migrated {len(migrants)} individuals to island {target_id}")
+
+    def _evolve_island_generation(self, island_id: int, generation: int) -> list[CodeVariant]:
+        """Evolve one generation for a specific island.
+
+        Args:
+            island_id: The island index to evolve.
+            generation: The current generation number.
+
+        Returns:
+            The new population for the island after evolution.
+        """
+        return self._evolve_population(self.islands[island_id], generation)

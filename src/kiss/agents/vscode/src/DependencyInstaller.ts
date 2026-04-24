@@ -8,8 +8,8 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as https from 'https';
-import { exec, execSync, spawn } from 'child_process';
-import { findKissProject, findUvPath } from './AgentProcess';
+import {exec, execSync, spawn} from 'child_process';
+import {findKissProject, findUvPath} from './AgentProcess';
 
 const HOME_DIR = process.env.HOME || process.env.USERPROFILE || '';
 const LOG_DIR = path.join(HOME_DIR, '.kiss');
@@ -19,6 +19,9 @@ const MIN_PYTHON_MINOR = 13;
 const UV_VERSION = '0.11.2';
 const NODE_VERSION = 'v22.16.0';
 
+/** Guard against concurrent ensureDependencies calls. */
+let pendingDeps: Promise<void> | null = null;
+
 /**
  * Write a timestamped message to ~/.kiss/install.log and the developer console.
  */
@@ -26,9 +29,11 @@ function log(message: string): void {
   const line = `[${new Date().toISOString()}] ${message}`;
   console.log('[KISS Sorcar]', message);
   try {
-    fs.mkdirSync(LOG_DIR, { recursive: true });
+    fs.mkdirSync(LOG_DIR, {recursive: true});
     fs.appendFileSync(LOG_FILE, line + '\n');
-  } catch { /* ignore write errors */ }
+  } catch {
+    /* ignore write errors */
+  }
 }
 
 /**
@@ -56,7 +61,9 @@ function findNodeDirWindows(baseDir: string): string {
       const candidate = path.join(baseDir, entry);
       if (fs.existsSync(path.join(candidate, 'node.exe'))) return candidate;
     }
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
   return baseDir;
 }
 
@@ -67,19 +74,30 @@ function findNodeDirWindows(baseDir: string): string {
  */
 export function getDefaultModel(): string {
   if (process.env.ANTHROPIC_API_KEY) return 'claude-opus-4-6';
-  if (process.env.OPENROUTER_API_KEY) return 'openrouter/anthropic/claude-opus-4.6';
+  if (process.env.OPENROUTER_API_KEY)
+    return 'openrouter/anthropic/claude-opus-4.6';
   if (process.env.GEMINI_API_KEY) return 'gemini-3.1-pro-preview';
   if (process.env.OPENAI_API_KEY) return 'gpt-5.4';
-  if (process.env.TOGETHER_API_KEY) return 'Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8';
+  if (process.env.TOGETHER_API_KEY)
+    return 'Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8';
   return 'claude-opus-4-6';
 }
 
 /**
  * Ensure all required dependencies are installed.
  * Shows a progress notification during first-time installation.
- * Safe to call multiple times — skips already-installed dependencies.
+ * Safe to call multiple times — uses a concurrency guard so overlapping
+ * calls reuse the in-flight check instead of racing.
  */
-export async function ensureDependencies(): Promise<void> {
+export function ensureDependencies(): Promise<void> {
+  if (pendingDeps) return pendingDeps;
+  pendingDeps = ensureDependenciesImpl().finally(() => {
+    pendingDeps = null;
+  });
+  return pendingDeps;
+}
+
+async function ensureDependenciesImpl(): Promise<void> {
   ensureLocalBinInPath();
   log('=== Dependency check started ===');
 
@@ -88,8 +106,8 @@ export async function ensureDependencies(): Promise<void> {
     log('KISS project not found — skipping dependency setup');
     vscode.window.showErrorMessage(
       'KISS Sorcar: Could not find the KISS project directory. ' +
-      'Please set "kissSorcar.kissProjectPath" in VS Code settings. ' +
-      'See ~/.kiss/install.log for details.'
+        'Please set "kissSorcar.kissProjectPath" in VS Code settings. ' +
+        'See ~/.kiss/install.log for details.',
     );
     return;
   }
@@ -98,55 +116,104 @@ export async function ensureDependencies(): Promise<void> {
   let uvPath = findUvPath();
   let venvExists = fs.existsSync(path.join(kissProjectPath, '.venv'));
 
-  // If .venv exists but Python is too old, remove it so uv sync recreates it
-  if (uvPath && venvExists && !checkPythonVersion(uvPath, kissProjectPath)) {
-    try {
-      fs.rmSync(path.join(kissProjectPath, '.venv'), { recursive: true, force: true });
-    } catch { /* ignored */ }
-    venvExists = false;
+  // If .venv exists but Python is genuinely too old, remove it so uv sync
+  // recreates it.  Transient errors (timeout, spawn failure) must NOT delete
+  // .venv — that causes unnecessary slow-path rebuilds on every activation.
+  if (uvPath && venvExists) {
+    const pyStatus = checkPythonVersion(uvPath, kissProjectPath);
+    if (pyStatus === 'too_old') {
+      log('Python version too old — removing .venv for recreation');
+      try {
+        fs.rmSync(path.join(kissProjectPath, '.venv'), {
+          recursive: true,
+          force: true,
+        });
+      } catch {
+        /* ignored */
+      }
+      venvExists = false;
+    } else if (pyStatus === 'error') {
+      log('Python version check failed (transient) — keeping .venv');
+    }
   }
 
+  // Check if build-extension.sh just ran (marker file written by the script).
+  // When the marker exists, always show the restart notification — even on
+  // the fast path where uv + .venv are already present.
+  const updateMarker = path.join(LOG_DIR, '.extension-updated');
   let showRestartNotification = false;
+  if (fs.existsSync(updateMarker)) {
+    showRestartNotification = true;
+    try {
+      fs.unlinkSync(updateMarker);
+    } catch {
+      /* ignore */
+    }
+    log('Extension-updated marker found — will show restart notification');
+  }
 
   // Fast path: everything looks ready, ensure playwright in background
   if (uvPath && venvExists) {
     log('Fast path: uv and .venv present, ensuring Playwright in background');
     const uv = uvPath; // capture narrowed non-null type for closure
-    runAsync(uv, ['run', 'python', '-m', 'playwright', 'install', 'chromium'], kissProjectPath).then(() => {
-      if (process.platform === 'linux') {
-        return runAsync(uv, ['run', 'python', '-m', 'playwright', 'install-deps', 'chromium'], kissProjectPath);
-      }
-    }).catch(err => {
-      log(`Fast-path Playwright install failed: ${err instanceof Error ? err.message : err}`);
-      vscode.window.showWarningMessage(
-        'KISS Sorcar: Chromium browser update failed in background. See ~/.kiss/install.log for details.'
-      );
-    });
+    runAsync(
+      uv,
+      ['run', 'python', '-m', 'playwright', 'install', 'chromium'],
+      kissProjectPath,
+    )
+      .then(async () => {
+        if (process.platform === 'linux') {
+          await runAsync(
+            uv,
+            ['run', 'python', '-m', 'playwright', 'install-deps', 'chromium'],
+            kissProjectPath,
+          );
+        }
+      })
+      .catch(err => {
+        log(
+          `Fast-path Playwright install failed: ${err instanceof Error ? err.message : err}`,
+        );
+        // Only warn the user if Chromium is genuinely missing.  Playwright
+        // browsers are cached system-wide (outside .venv), so a transient
+        // background update failure is benign when chromium is already cached.
+        if (!isChromiumInstalled()) {
+          vscode.window.showWarningMessage(
+            'KISS Sorcar: Chromium browser update failed in background. See ~/.kiss/install.log for details.',
+          );
+        }
+      });
     // Ensure git, Node.js, and VS Code CLI are available even on fast path
     if (!gitWorks()) {
-      installGit().then(installed => {
+      void installGit().then(installed => {
         if (!installed) {
           vscode.window.showWarningMessage(
-            `KISS Sorcar: git is not available. ${gitInstallHint()}`
+            `KISS Sorcar: git is not available. ${gitInstallHint()}`,
           );
         }
       });
     }
     if (!commandExists('node')) {
-      installNode().then(installed => {
+      void installNode().then(installed => {
         if (!installed) {
           vscode.window.showWarningMessage(
-            'KISS Sorcar: Node.js could not be installed automatically. Some agent tools may be unavailable.'
+            'KISS Sorcar: Node.js could not be installed automatically. Some agent tools may be unavailable.',
           );
         }
       });
     }
-    if (!commandExists('code')) { installCodeCli(); }
+    if (!commandExists('code')) {
+      void installCodeCli();
+    }
   } else {
     // Slow path: show progress bar and install missing deps
     const success = await vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Notification, title: 'KISS Sorcar: Setting up', cancellable: false },
-      async (progress) => {
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: 'KISS Sorcar: Setting up',
+        cancellable: false,
+      },
+      async progress => {
         // 1. Install uv if needed
         if (!uvPath) {
           // curl and tar are required to download and extract uv
@@ -154,50 +221,53 @@ export async function ensureDependencies(): Promise<void> {
             for (const bin of ['curl', 'tar']) {
               if (!commandExists(bin)) {
                 vscode.window.showErrorMessage(
-                  `KISS Sorcar: '${bin}' is required to install uv but was not found. Please install '${bin}' and restart VS Code.`
+                  `KISS Sorcar: '${bin}' is required to install uv but was not found. Please install '${bin}' and restart VS Code.`,
                 );
                 return false;
               }
             }
           }
-          progress.report({ message: 'Installing uv package manager...', increment: 0 });
+          progress.report({
+            message: 'Installing uv package manager...',
+            increment: 0,
+          });
           uvPath = await installUv();
           if (!uvPath) {
             vscode.window.showErrorMessage(
-              'KISS Sorcar: Failed to install uv. Install manually: curl -LsSf https://astral.sh/uv/install.sh | sh'
+              'KISS Sorcar: Failed to install uv. Install manually: curl -LsSf https://astral.sh/uv/install.sh | sh',
             );
             return false;
           }
-          progress.report({ increment: 20 });
+          progress.report({increment: 20});
         }
 
         // 2. Install git if needed
         if (!gitWorks()) {
-          progress.report({ message: 'Installing git...' });
+          progress.report({message: 'Installing git...'});
           const gitInstalled = await installGit();
           if (!gitInstalled) {
             vscode.window.showWarningMessage(
-              `KISS Sorcar: git could not be installed automatically. ${gitInstallHint()}`
+              `KISS Sorcar: git could not be installed automatically. ${gitInstallHint()}`,
             );
           }
         }
 
         // 3. Install Node.js if needed (provides node, npm, npx for agent tasks)
         if (!commandExists('node')) {
-          progress.report({ message: 'Installing Node.js...' });
+          progress.report({message: 'Installing Node.js...'});
           const nodeInstalled = await installNode();
           if (!nodeInstalled) {
             log('Node.js could not be installed automatically');
             vscode.window.showWarningMessage(
               'KISS Sorcar: Node.js could not be installed automatically. ' +
-              'Some agent tools may be unavailable. Install from https://nodejs.org'
+                'Some agent tools may be unavailable. Install from https://nodejs.org',
             );
           }
         }
 
         // 4. Ensure VS Code CLI is on PATH
         if (!commandExists('code')) {
-          progress.report({ message: 'Setting up VS Code CLI...' });
+          progress.report({message: 'Setting up VS Code CLI...'});
           const codeInstalled = await installCodeCli();
           if (!codeInstalled) {
             log('VS Code CLI could not be set up on PATH');
@@ -206,40 +276,47 @@ export async function ensureDependencies(): Promise<void> {
 
         // 5. Set up Python environment (installs Python 3.13+ and all pip dependencies)
         if (!venvExists) {
-          progress.report({ message: 'Setting up Python environment (first time, may take a minute)...' });
+          progress.report({
+            message:
+              'Setting up Python environment (first time, may take a minute)...',
+          });
           await runAsync(uvPath, ['sync'], kissProjectPath);
-          progress.report({ increment: 50 });
+          progress.report({increment: 50});
         }
 
         // 6. Verify Python version meets minimum requirement
-        if (!checkPythonVersion(uvPath, kissProjectPath)) {
+        if (checkPythonVersion(uvPath, kissProjectPath) !== 'ok') {
           vscode.window.showErrorMessage(
             `KISS Sorcar requires Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR}+. ` +
-            `Please install Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR} or later and restart VS Code.`
+              `Please install Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR} or later and restart VS Code.`,
           );
           return false;
         }
 
         // 7. Install Playwright Chromium
-        progress.report({ message: 'Installing Chromium browser...' });
+        progress.report({message: 'Installing dependencies...'});
         await runAsync(
           uvPath,
           ['run', 'python', '-m', 'playwright', 'install', 'chromium'],
-          kissProjectPath
+          kissProjectPath,
         );
         if (process.platform === 'linux') {
           await runAsync(
             uvPath,
             ['run', 'python', '-m', 'playwright', 'install-deps', 'chromium'],
-            kissProjectPath
-          ).catch(err => log(`Playwright deps install failed (may need sudo): ${err instanceof Error ? err.message : err}`));
+            kissProjectPath,
+          ).catch(err =>
+            log(
+              `Playwright deps install failed (may need sudo): ${err instanceof Error ? err.message : err}`,
+            ),
+          );
         }
-        progress.report({ increment: 30 });
+        progress.report({increment: 30});
         return true;
-      }
+      },
     );
 
-    showRestartNotification = !!success;
+    showRestartNotification = showRestartNotification || !!success;
   }
 
   // Install CLI wrapper so `sorcar` is available from any terminal
@@ -267,7 +344,9 @@ export async function ensureDependencies(): Promise<void> {
       }
     }
   } catch (err) {
-    log(`Failed to update shell rc PATH: ${err instanceof Error ? err.message : err}`);
+    log(
+      `Failed to update shell rc PATH: ${err instanceof Error ? err.message : err}`,
+    );
   }
 
   log('=== Dependency check finished ===');
@@ -278,18 +357,20 @@ export async function ensureDependencies(): Promise<void> {
   // Show restart notification only after API key prompting has completed.
   if (showRestartNotification) {
     if (apiKeysReady) {
-      vscode.window.showInformationMessage(
-        'KISS Sorcar: Installation complete! Please restart VS Code and any open terminal for changes to take effect.',
-        'Restart VS Code'
-      ).then(choice => {
-        if (choice === 'Restart VS Code') {
-          vscode.commands.executeCommand('workbench.action.reloadWindow');
-        }
-      });
+      vscode.window
+        .showInformationMessage(
+          'KISS Sorcar: Installation complete! Please restart VS Code and any open terminal for changes to take effect.',
+          'Restart VS Code',
+        )
+        .then(choice => {
+          if (choice === 'Restart VS Code') {
+            vscode.commands.executeCommand('workbench.action.reloadWindow');
+          }
+        });
     } else {
       vscode.window.showWarningMessage(
         'KISS Sorcar: Installation complete, but at least one LLM API key is required. ' +
-        'Set an API key (Anthropic, OpenAI, Gemini, Together AI, or OpenRouter) in your environment or restart VS Code to be prompted again.'
+          'Set an API key (Anthropic, OpenAI, Gemini, Together AI, or OpenRouter) in your environment or restart VS Code to be prompted again.',
       );
     }
   }
@@ -301,43 +382,45 @@ export async function ensureDependencies(): Promise<void> {
  * The wrapper calls `uv run sorcar` from the bundled kiss_project directory.
  */
 function installCliScript(kissProjectPath: string, uvPath: string): void {
-  const homeDir = process.env.HOME || process.env.USERPROFILE || '';
-  if (!homeDir) return;
+  if (!HOME_DIR) return;
 
-  const binDir = path.join(homeDir, '.local', 'bin');
+  const binDir = path.join(HOME_DIR, '.local', 'bin');
 
   // Resolve uv to an absolute path for the wrapper script
   let absUvPath = uvPath;
   if (uvPath === 'uv' || !path.isAbsolute(uvPath)) {
     try {
-      const whichCmd = process.platform === 'win32' ? `where ${uvPath}` : `which ${uvPath}`;
-      absUvPath = execSync(whichCmd, { encoding: 'utf-8' }).trim().split('\n')[0];
+      const whichCmd =
+        process.platform === 'win32' ? `where ${uvPath}` : `which ${uvPath}`;
+      absUvPath = execSync(whichCmd, {encoding: 'utf-8'}).trim().split('\n')[0];
     } catch {
       const suffix = process.platform === 'win32' ? '.exe' : '';
-      absUvPath = path.join(homeDir, '.local', 'bin', `uv${suffix}`);
+      absUvPath = path.join(HOME_DIR, '.local', 'bin', `uv${suffix}`);
     }
   }
 
   try {
-    fs.mkdirSync(binDir, { recursive: true });
+    fs.mkdirSync(binDir, {recursive: true});
 
     if (process.platform === 'win32') {
       const cmdPath = path.join(binDir, 'sorcar.cmd');
       const script =
-        `@echo off\r\n` +
-        `REM Installed by KISS Sorcar VS Code extension\r\n` +
+        '@echo off\r\n' +
+        'REM Installed by KISS Sorcar VS Code extension\r\n' +
         `"${absUvPath}" run --directory "${kissProjectPath}" sorcar %*\r\n`;
       fs.writeFileSync(cmdPath, script);
     } else {
       const scriptPath = path.join(binDir, 'sorcar');
       const script =
-        `#!/bin/bash\n` +
-        `# Installed by KISS Sorcar VS Code extension\n` +
+        '#!/bin/bash\n' +
+        '# Installed by KISS Sorcar VS Code extension\n' +
         `exec "${absUvPath}" run --directory "${kissProjectPath}" sorcar "$@"\n`;
-      fs.writeFileSync(scriptPath, script, { mode: 0o755 });
+      fs.writeFileSync(scriptPath, script, {mode: 0o755});
     }
   } catch (err) {
-    log(`Failed to install CLI script: ${err instanceof Error ? err.message : err}`);
+    log(
+      `Failed to install CLI script: ${err instanceof Error ? err.message : err}`,
+    );
   }
 }
 
@@ -345,20 +428,28 @@ function installCliScript(kissProjectPath: string, uvPath: string): void {
  * Map Node.js platform/arch to the uv GitHub release asset triplet.
  * Returns [archName, platformSuffix, extension] or null if unsupported.
  */
-function uvAssetInfo(): { archName: string; triplet: string; ext: string } | null {
+function uvAssetInfo(): {
+  archName: string;
+  triplet: string;
+  ext: string;
+} | null {
   const archMap: Record<string, string> = {
-    'arm64': 'aarch64',
-    'x64': 'x86_64',
+    arm64: 'aarch64',
+    x64: 'x86_64',
   };
   const arch = archMap[process.arch];
   if (!arch) return null;
 
   if (process.platform === 'darwin') {
-    return { archName: arch, triplet: `${arch}-apple-darwin`, ext: 'tar.gz' };
+    return {archName: arch, triplet: `${arch}-apple-darwin`, ext: 'tar.gz'};
   } else if (process.platform === 'linux') {
-    return { archName: arch, triplet: `${arch}-unknown-linux-gnu`, ext: 'tar.gz' };
+    return {
+      archName: arch,
+      triplet: `${arch}-unknown-linux-gnu`,
+      ext: 'tar.gz',
+    };
   } else if (process.platform === 'win32') {
-    return { archName: arch, triplet: `${arch}-pc-windows-msvc`, ext: 'zip' };
+    return {archName: arch, triplet: `${arch}-pc-windows-msvc`, ext: 'zip'};
   }
   return null;
 }
@@ -370,38 +461,39 @@ function uvAssetInfo(): { archName: string; triplet: string; ext: string } | nul
 async function installUv(): Promise<string | null> {
   const asset = uvAssetInfo();
   if (!asset) {
-    log(`Unsupported platform/arch for uv: ${process.platform}/${process.arch}`);
+    log(
+      `Unsupported platform/arch for uv: ${process.platform}/${process.arch}`,
+    );
     return null;
   }
 
-  const homeDir = process.env.HOME || process.env.USERPROFILE || '';
-  const installDir = path.join(homeDir, '.local', 'bin');
+  const installDir = path.join(HOME_DIR, '.local', 'bin');
   const assetName = `uv-${asset.triplet}`;
   const url = `https://releases.astral.sh/github/uv/releases/download/${UV_VERSION}/${assetName}.${asset.ext}`;
   log(`Downloading uv ${UV_VERSION} from ${url}`);
 
   try {
     // Ensure install directory exists
-    fs.mkdirSync(installDir, { recursive: true });
+    fs.mkdirSync(installDir, {recursive: true});
 
     if (process.platform === 'win32') {
       // Windows: download zip and extract with PowerShell
       const zipPath = path.join(installDir, `${assetName}.zip`);
       await execPromise(
         `powershell -Command "Invoke-WebRequest -Uri '${url}' -OutFile '${zipPath}'; ` +
-        `Expand-Archive -Force -Path '${zipPath}' -DestinationPath '${installDir}'; ` +
-        `Move-Item -Force '${path.join(installDir, assetName, 'uv.exe')}' '${path.join(installDir, 'uv.exe')}'; ` +
-        `Move-Item -Force '${path.join(installDir, assetName, 'uvx.exe')}' '${path.join(installDir, 'uvx.exe')}'; ` +
-        `Remove-Item -Force '${zipPath}'; Remove-Item -Recurse -Force '${path.join(installDir, assetName)}'"`
+          `Expand-Archive -Force -Path '${zipPath}' -DestinationPath '${installDir}'; ` +
+          `Move-Item -Force '${path.join(installDir, assetName, 'uv.exe')}' '${path.join(installDir, 'uv.exe')}'; ` +
+          `Move-Item -Force '${path.join(installDir, assetName, 'uvx.exe')}' '${path.join(installDir, 'uvx.exe')}'; ` +
+          `Remove-Item -Force '${zipPath}'; Remove-Item -Recurse -Force '${path.join(installDir, assetName)}'"`,
       );
     } else {
       // macOS/Linux: download tar.gz and extract with tar, then move binaries
       await execPromise(
         `curl -fsSL '${url}' | tar xz -C '${installDir}' && ` +
-        `mv -f '${path.join(installDir, assetName, 'uv')}' '${installDir}/' && ` +
-        `mv -f '${path.join(installDir, assetName, 'uvx')}' '${installDir}/' && ` +
-        `rm -rf '${path.join(installDir, assetName)}' && ` +
-        `chmod +x '${path.join(installDir, 'uv')}' '${path.join(installDir, 'uvx')}'`
+          `mv -f '${path.join(installDir, assetName, 'uv')}' '${installDir}/' && ` +
+          `mv -f '${path.join(installDir, assetName, 'uvx')}' '${installDir}/' && ` +
+          `rm -rf '${path.join(installDir, assetName)}' && ` +
+          `chmod +x '${path.join(installDir, 'uv')}' '${path.join(installDir, 'uvx')}'`,
       );
     }
 
@@ -416,9 +508,17 @@ async function installUv(): Promise<string | null> {
 /**
  * Check that the Python version in the project's .venv is >= MIN_PYTHON.
  * Runs `uv run python --version` and parses the output (e.g. "Python 3.13.2").
- * Returns true if the version meets the requirement, false otherwise.
+ *
+ * Returns ``'ok'`` when the version meets the requirement, ``'too_old'``
+ * when a valid version was parsed but is below the minimum, and ``'error'``
+ * when the check itself failed (timeout, spawn error, etc.).  Callers
+ * should only delete `.venv` on ``'too_old'`` — transient errors must not
+ * destroy a potentially valid environment.
  */
-function checkPythonVersion(uvPath: string, cwd: string): boolean {
+function checkPythonVersion(
+  uvPath: string,
+  cwd: string,
+): 'ok' | 'too_old' | 'error' {
   try {
     const output = execSync(`"${uvPath}" run python --version`, {
       cwd,
@@ -427,10 +527,47 @@ function checkPythonVersion(uvPath: string, cwd: string): boolean {
     }).trim();
     // Output format: "Python 3.13.2"
     const match = output.match(/Python\s+(\d+)\.(\d+)/);
-    if (!match) return false;
+    if (!match) return 'error';
     const major = parseInt(match[1], 10);
     const minor = parseInt(match[2], 10);
-    return major > MIN_PYTHON_MAJOR || (major === MIN_PYTHON_MAJOR && minor >= MIN_PYTHON_MINOR);
+    if (
+      major > MIN_PYTHON_MAJOR ||
+      (major === MIN_PYTHON_MAJOR && minor >= MIN_PYTHON_MINOR)
+    ) {
+      return 'ok';
+    }
+    return 'too_old';
+  } catch {
+    return 'error';
+  }
+}
+
+/**
+ * Return the Playwright browsers cache directory for the current platform.
+ */
+function playwrightBrowsersPath(): string {
+  const env = process.env.PLAYWRIGHT_BROWSERS_PATH;
+  if (env) return env;
+  if (process.platform === 'darwin') {
+    return path.join(HOME_DIR, 'Library', 'Caches', 'ms-playwright');
+  } else if (process.platform === 'win32') {
+    return path.join(
+      process.env.LOCALAPPDATA || path.join(HOME_DIR, 'AppData', 'Local'),
+      'ms-playwright',
+    );
+  }
+  return path.join(HOME_DIR, '.cache', 'ms-playwright');
+}
+
+/**
+ * Check if Playwright Chromium is already installed in the browser cache.
+ * Returns true if any chromium-* directory exists in the cache.
+ */
+function isChromiumInstalled(): boolean {
+  try {
+    const cacheDir = playwrightBrowsersPath();
+    if (!fs.existsSync(cacheDir)) return false;
+    return fs.readdirSync(cacheDir).some(e => e.startsWith('chromium-'));
   } catch {
     return false;
   }
@@ -503,13 +640,15 @@ async function installGit(): Promise<boolean> {
           return true;
         }
       } catch (err) {
-        log(`Homebrew git install failed: ${err instanceof Error ? err.message : err}`);
+        log(
+          `Homebrew git install failed: ${err instanceof Error ? err.message : err}`,
+        );
       }
     }
 
     // Fall back to Xcode Command Line Tools (installs Apple's prebuilt git binary)
     try {
-      execSync('xcode-select -p', { stdio: 'ignore' });
+      execSync('xcode-select -p', {stdio: 'ignore'});
       // CLT already installed but git not working — unusual, nothing more we can do
       log('Xcode CLT present but git not working');
       return false;
@@ -519,13 +658,14 @@ async function installGit(): Promise<boolean> {
 
     log('Triggering Xcode Command Line Tools installation...');
     try {
-      execSync('xcode-select --install', { stdio: 'ignore', timeout: 5_000 });
+      execSync('xcode-select --install', {stdio: 'ignore', timeout: 5_000});
     } catch {
       // Expected: opens a system dialog and may exit non-zero
     }
 
     // Poll for git to become available while the user completes the CLT dialog
-    for (let i = 0; i < 120; i++) {   // up to 10 minutes
+    for (let i = 0; i < 120; i++) {
+      // up to 10 minutes
       await new Promise(resolve => setTimeout(resolve, 5_000));
       if (gitWorks()) {
         log('Git installed via Xcode Command Line Tools');
@@ -533,15 +673,17 @@ async function installGit(): Promise<boolean> {
       }
     }
     return false;
-
   } else if (process.platform === 'linux') {
     // Try common package managers with non-interactive sudo (-n)
     const attempts: [string, string][] = [
-      ['apt-get', 'sudo -n sh -c "apt-get update -y && apt-get install -y git"'],
-      ['dnf',     'sudo -n dnf install -y git'],
-      ['yum',     'sudo -n yum install -y git'],
-      ['pacman',  'sudo -n pacman -S --noconfirm git'],
-      ['apk',     'sudo -n apk add git'],
+      [
+        'apt-get',
+        'sudo -n sh -c "apt-get update -y && apt-get install -y git"',
+      ],
+      ['dnf', 'sudo -n dnf install -y git'],
+      ['yum', 'sudo -n yum install -y git'],
+      ['pacman', 'sudo -n pacman -S --noconfirm git'],
+      ['apk', 'sudo -n apk add git'],
     ];
     for (const [bin, cmd] of attempts) {
       if (commandExists(bin)) {
@@ -558,7 +700,6 @@ async function installGit(): Promise<boolean> {
       }
     }
     return false;
-
   } else if (process.platform === 'win32') {
     return installMinGitWindows();
   }
@@ -580,14 +721,14 @@ async function installMinGitWindows(): Promise<boolean> {
   log(`Downloading MinGit from ${url}`);
 
   try {
-    fs.mkdirSync(gitDir, { recursive: true });
+    fs.mkdirSync(gitDir, {recursive: true});
 
     const zipPath = path.join(gitDir, `${assetName}.zip`);
     await execPromise(
-      `powershell -Command "` +
-      `Invoke-WebRequest -Uri '${url}' -OutFile '${zipPath}'; ` +
-      `Expand-Archive -Force -Path '${zipPath}' -DestinationPath '${gitDir}'; ` +
-      `Remove-Item -Force '${zipPath}'"`
+      'powershell -Command "' +
+        `Invoke-WebRequest -Uri '${url}' -OutFile '${zipPath}'; ` +
+        `Expand-Archive -Force -Path '${zipPath}' -DestinationPath '${gitDir}'; ` +
+        `Remove-Item -Force '${zipPath}'"`,
     );
 
     // Add MinGit's cmd directory to PATH so git.exe is found
@@ -602,7 +743,9 @@ async function installMinGitWindows(): Promise<boolean> {
     }
     log('MinGit extracted but git.exe not found in cmd/');
   } catch (err) {
-    log(`MinGit installation failed: ${err instanceof Error ? err.message : err}`);
+    log(
+      `MinGit installation failed: ${err instanceof Error ? err.message : err}`,
+    );
   }
   return false;
 }
@@ -613,7 +756,7 @@ async function installMinGitWindows(): Promise<boolean> {
  * node, npm, and npx are available on PATH via ~/.local/bin/.
  */
 async function installNode(): Promise<boolean> {
-  const archMap: Record<string, string> = { 'arm64': 'arm64', 'x64': 'x64' };
+  const archMap: Record<string, string> = {arm64: 'arm64', x64: 'x64'};
   const arch = archMap[process.arch];
   if (!arch) {
     log(`Unsupported architecture for Node.js: ${process.arch}`);
@@ -626,13 +769,13 @@ async function installNode(): Promise<boolean> {
     const installDir = path.join(HOME_DIR, '.local', 'node');
     log(`Downloading Node.js from ${url}`);
     try {
-      fs.mkdirSync(installDir, { recursive: true });
+      fs.mkdirSync(installDir, {recursive: true});
       const zipPath = path.join(installDir, `${assetName}.zip`);
       await execPromise(
-        `powershell -Command "` +
-        `Invoke-WebRequest -Uri '${url}' -OutFile '${zipPath}'; ` +
-        `Expand-Archive -Force -Path '${zipPath}' -DestinationPath '${installDir}'; ` +
-        `Remove-Item -Force '${zipPath}'"`
+        'powershell -Command "' +
+          `Invoke-WebRequest -Uri '${url}' -OutFile '${zipPath}'; ` +
+          `Expand-Archive -Force -Path '${zipPath}' -DestinationPath '${installDir}'; ` +
+          `Remove-Item -Force '${zipPath}'"`,
       );
       // Add node directory to PATH
       const nodeDir = path.join(installDir, assetName);
@@ -645,7 +788,9 @@ async function installNode(): Promise<boolean> {
         return true;
       }
     } catch (err) {
-      log(`Node.js installation failed: ${err instanceof Error ? err.message : err}`);
+      log(
+        `Node.js installation failed: ${err instanceof Error ? err.message : err}`,
+      );
     }
     return false;
   }
@@ -658,14 +803,16 @@ async function installNode(): Promise<boolean> {
 
   try {
     const installDir = path.join(HOME_DIR, '.local');
-    fs.mkdirSync(installDir, { recursive: true });
+    fs.mkdirSync(installDir, {recursive: true});
     await execPromise(
-      `curl -fsSL '${url}' | tar xz -C '${installDir}' --strip-components=1`
+      `curl -fsSL '${url}' | tar xz -C '${installDir}' --strip-components=1`,
     );
     log('Node.js installed successfully');
     return commandExists('node');
   } catch (err) {
-    log(`Node.js installation failed: ${err instanceof Error ? err.message : err}`);
+    log(
+      `Node.js installation failed: ${err instanceof Error ? err.message : err}`,
+    );
     return false;
   }
 }
@@ -681,18 +828,25 @@ async function installCodeCli(): Promise<boolean> {
   if (commandExists('code')) return true;
 
   if (process.platform === 'darwin') {
-    const vscodeApp = '/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code';
+    const vscodeApp =
+      '/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code';
     if (fs.existsSync(vscodeApp)) {
       const binDir = path.join(HOME_DIR, '.local', 'bin');
       try {
-        fs.mkdirSync(binDir, { recursive: true });
+        fs.mkdirSync(binDir, {recursive: true});
         const linkPath = path.join(binDir, 'code');
-        try { fs.unlinkSync(linkPath); } catch { /* doesn't exist */ }
+        try {
+          fs.unlinkSync(linkPath);
+        } catch {
+          /* doesn't exist */
+        }
         fs.symlinkSync(vscodeApp, linkPath);
         log('VS Code CLI symlinked to ~/.local/bin/code');
         return true;
       } catch (err) {
-        log(`Failed to symlink VS Code CLI: ${err instanceof Error ? err.message : err}`);
+        log(
+          `Failed to symlink VS Code CLI: ${err instanceof Error ? err.message : err}`,
+        );
       }
     }
   } else if (process.platform === 'linux') {
@@ -712,9 +866,9 @@ async function installCodeCli(): Promise<boolean> {
       try {
         await execPromise(
           'curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | sudo -n gpg --dearmor -o /usr/share/keyrings/microsoft.gpg && ' +
-          'echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/code stable main" | ' +
-          'sudo -n tee /etc/apt/sources.list.d/vscode.list >/dev/null && ' +
-          'sudo -n apt-get update -y && sudo -n apt-get install -y code'
+            'echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/code stable main" | ' +
+            'sudo -n tee /etc/apt/sources.list.d/vscode.list >/dev/null && ' +
+            'sudo -n apt-get update -y && sudo -n apt-get install -y code',
         );
         if (commandExists('code')) {
           log('VS Code CLI installed via apt');
@@ -739,12 +893,16 @@ function runAsync(cmd: string, args: string[], cwd: string): Promise<void> {
     const proc = spawn(cmd, args, {
       cwd,
       stdio: 'pipe',
-      env: { ...process.env, PYTHONUNBUFFERED: '1' },
+      env: {...process.env, PYTHONUNBUFFERED: '1'},
     });
     let output = '';
-    proc.stdout?.on('data', (d: Buffer) => { output += d.toString(); });
-    proc.stderr?.on('data', (d: Buffer) => { output += d.toString(); });
-    proc.on('close', (code) => {
+    proc.stdout?.on('data', (d: Buffer) => {
+      output += d.toString();
+    });
+    proc.stderr?.on('data', (d: Buffer) => {
+      output += d.toString();
+    });
+    proc.on('close', code => {
       if (output.trim()) log(`Output [${cmdLine}]:\n${output.trim()}`);
       if (code === 0) {
         log(`Completed: ${cmdLine}`);
@@ -753,7 +911,7 @@ function runAsync(cmd: string, args: string[], cwd: string): Promise<void> {
         reject(new Error(`${cmdLine} failed (exit code ${code}): ${output}`));
       }
     });
-    proc.on('error', (err) => {
+    proc.on('error', err => {
       log(`Spawn error [${cmdLine}]: ${err.message}`);
       reject(err);
     });
@@ -765,7 +923,7 @@ function runAsync(cmd: string, args: string[], cwd: string): Promise<void> {
  */
 function execPromise(cmd: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    exec(cmd, { timeout: 300_000 }, (err, stdout) => {
+    exec(cmd, {timeout: 300_000}, (err, stdout) => {
       if (err) reject(err);
       else resolve(stdout);
     });
@@ -803,7 +961,7 @@ function getShellRcPath(): string {
  * Returns true if the key is valid (HTTP 200), false otherwise.
  */
 function validateAnthropicKey(key: string): Promise<boolean> {
-  return new Promise((resolve) => {
+  return new Promise(resolve => {
     const req = https.request(
       {
         hostname: 'api.anthropic.com',
@@ -815,10 +973,10 @@ function validateAnthropicKey(key: string): Promise<boolean> {
         },
         timeout: 15000,
       },
-      (res) => {
+      res => {
         resolve(res.statusCode === 200);
         res.resume(); // consume response body
-      }
+      },
     );
     req.on('error', () => resolve(false));
     req.on('timeout', () => {
@@ -837,7 +995,7 @@ function readShellRc(rcPath: string): string {
   try {
     return fs.readFileSync(rcPath, 'utf-8');
   } catch {
-    fs.mkdirSync(path.dirname(rcPath), { recursive: true });
+    fs.mkdirSync(path.dirname(rcPath), {recursive: true});
     return '';
   }
 }
@@ -899,15 +1057,14 @@ function ensurePathInShellRc(rcPath: string, dirPath: string): void {
   const homeDir = process.env.HOME || process.env.USERPROFILE || '';
   let dirRef = dirPath;
   if (homeDir && dirPath.startsWith(homeDir)) {
-    dirRef = isPs1
-      ? dirPath.replace(homeDir, '$HOME')
-      : dirPath.replace(homeDir, '$HOME');
+    dirRef = dirPath.replace(homeDir, '$HOME');
   }
 
   let content = readShellRc(rcPath);
 
   // Check if the directory is already referenced in a PATH line
-  const escaped = dirRef.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const escaped = dirRef
+    .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     .replace('\\$HOME', '(\\$HOME|~)');
   const alreadyPresent = isPs1
     ? new RegExp(`\\$env:PATH.*${escaped}`, 'm').test(content)
@@ -943,7 +1100,7 @@ async function promptForApiKey(
   displayName: string,
   placeholder: string,
   validate?: (key: string) => Promise<boolean>,
-  optional?: boolean
+  optional?: boolean,
 ): Promise<string | undefined> {
   while (true) {
     const prompt = optional
@@ -960,9 +1117,12 @@ async function promptForApiKey(
       if (!optional) {
         const choice = await vscode.window.showWarningMessage(
           `${displayName} is required for KISS Sorcar to function.`,
-          'Enter Key', 'Skip'
+          'Enter Key',
+          'Skip',
         );
-        if (choice === 'Enter Key') { continue; }
+        if (choice === 'Enter Key') {
+          continue;
+        }
       }
       return undefined;
     }
@@ -974,15 +1134,18 @@ async function promptForApiKey(
 
     if (validate) {
       const valid = await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: `Validating ${displayName}...` },
-        () => validate(trimmed)
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: `Validating ${displayName}...`,
+        },
+        () => validate(trimmed),
       );
 
       if (!valid) {
         const choice = await vscode.window.showWarningMessage(
           `The ${displayName} is not valid. Please try again.`,
           'Try Again',
-          'Cancel'
+          'Cancel',
         );
         if (choice !== 'Try Again') {
           return undefined;
@@ -1020,8 +1183,10 @@ function loadApiKeysFromShellRc(): void {
     const name = match[1];
     let value = match[2].trim();
     // Strip surrounding quotes
-    if ((value.startsWith('"') && value.endsWith('"')) ||
-        (value.startsWith("'") && value.endsWith("'"))) {
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
       value = value.slice(1, -1);
     }
     if (name && value && !process.env[name]) {
@@ -1050,11 +1215,32 @@ async function ensureApiKeys(): Promise<boolean> {
   loadApiKeysFromShellRc();
 
   const keys = [
-    { envName: 'ANTHROPIC_API_KEY', displayName: 'Anthropic API Key', placeholder: 'sk-ant-...', validate: validateAnthropicKey },
-    { envName: 'OPENAI_API_KEY', displayName: 'OpenAI API Key', placeholder: 'sk-...' },
-    { envName: 'GEMINI_API_KEY', displayName: 'Gemini API Key', placeholder: 'AI...' },
-    { envName: 'TOGETHER_API_KEY', displayName: 'Together API Key', placeholder: 'tok-...' },
-    { envName: 'OPENROUTER_API_KEY', displayName: 'OpenRouter API Key', placeholder: 'sk-or-...' },
+    {
+      envName: 'ANTHROPIC_API_KEY',
+      displayName: 'Anthropic API Key',
+      placeholder: 'sk-ant-...',
+      validate: validateAnthropicKey,
+    },
+    {
+      envName: 'OPENAI_API_KEY',
+      displayName: 'OpenAI API Key',
+      placeholder: 'sk-...',
+    },
+    {
+      envName: 'GEMINI_API_KEY',
+      displayName: 'Gemini API Key',
+      placeholder: 'AI...',
+    },
+    {
+      envName: 'TOGETHER_API_KEY',
+      displayName: 'Together API Key',
+      placeholder: 'tok-...',
+    },
+    {
+      envName: 'OPENROUTER_API_KEY',
+      displayName: 'OpenRouter API Key',
+      placeholder: 'sk-or-...',
+    },
   ];
 
   const hasAnyKey = () => keys.some(k => !!process.env[k.envName]);
@@ -1068,12 +1254,17 @@ async function ensureApiKeys(): Promise<boolean> {
 
   // Prompt for keys until at least one is provided
   while (true) {
-    for (const { envName, displayName, placeholder, validate } of keys) {
+    for (const {envName, displayName, placeholder, validate} of keys) {
       if (process.env[envName]) continue;
       // Once we have at least one key and were already prompted, skip remaining
       if (hasAnyKey() && alreadyPrompted) break;
 
-      const key = await promptForApiKey(displayName, placeholder, validate, true);
+      const key = await promptForApiKey(
+        displayName,
+        placeholder,
+        validate,
+        true,
+      );
       if (key) {
         process.env[envName] = key;
         addToShellRc(rcPath, envName, key);
@@ -1086,7 +1277,8 @@ async function ensureApiKeys(): Promise<boolean> {
     // No key provided — warn and offer retry
     const choice = await vscode.window.showWarningMessage(
       'KISS Sorcar requires at least one LLM API key (Anthropic, OpenAI, Gemini, Together AI, or OpenRouter).',
-      'Enter Key', 'Skip'
+      'Enter Key',
+      'Skip',
     );
     if (choice !== 'Enter Key') break;
   }
@@ -1094,10 +1286,12 @@ async function ensureApiKeys(): Promise<boolean> {
   // Write marker so additional keys aren't re-prompted on next restart
   if (!alreadyPrompted) {
     try {
-      fs.mkdirSync(LOG_DIR, { recursive: true });
+      fs.mkdirSync(LOG_DIR, {recursive: true});
       fs.writeFileSync(markerPath, new Date().toISOString() + '\n');
       log('API key prompt marker written');
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }
 
   return hasAnyKey();

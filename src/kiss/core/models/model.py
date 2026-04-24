@@ -3,14 +3,22 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 
-"""Abstract base class for LLM provider model implementations."""
+"""Abstract base class for LLM provider model implementations.
+
+Also contains shared text-based tool calling helpers used by models that
+lack native function calling support (e.g. DeepSeek R1, Claude Code CLI).
+"""
 
 import base64
 import dataclasses
 import inspect
+import json
 import logging
 import mimetypes
+import os
+import re
 import types as types_module
+import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from pathlib import Path
@@ -18,8 +26,9 @@ from typing import Any, Union, get_args, get_origin
 
 logger = logging.getLogger(__name__)
 
-# Type alias for the synchronous token streaming callback.
 TokenCallback = Callable[[str], None]
+
+ThinkingCallback = Callable[[bool], None]
 
 SUPPORTED_MIME_TYPES = {
     "image/jpeg",
@@ -27,16 +36,30 @@ SUPPORTED_MIME_TYPES = {
     "image/gif",
     "image/webp",
     "application/pdf",
+    "audio/mpeg",
+    "audio/wav",
+    "audio/x-wav",
+    "audio/ogg",
+    "audio/webm",
+    "audio/flac",
+    "audio/aac",
+    "audio/mp4",
+    "video/mp4",
+    "video/webm",
+    "video/ogg",
+    "video/mpeg",
+    "video/quicktime",
 }
 
 
 @dataclasses.dataclass
 class Attachment:
-    """A file attachment (image or document) to include in a prompt.
+    """A file attachment (image, document, audio, or video) to include in a prompt.
 
     Attributes:
         data: Raw file bytes.
-        mime_type: MIME type string (e.g. "image/jpeg", "application/pdf").
+        mime_type: MIME type string (e.g. "image/jpeg", "application/pdf",
+            "audio/mpeg", "video/mp4").
     """
 
     data: bytes
@@ -67,6 +90,16 @@ class Attachment:
                 ".gif": "image/gif",
                 ".webp": "image/webp",
                 ".pdf": "application/pdf",
+                ".mp3": "audio/mpeg",
+                ".wav": "audio/wav",
+                ".ogg": "audio/ogg",
+                ".webm": "video/webm",
+                ".flac": "audio/flac",
+                ".aac": "audio/aac",
+                ".m4a": "audio/mp4",
+                ".mp4": "video/mp4",
+                ".mpeg": "video/mpeg",
+                ".mov": "video/quicktime",
             }
             mime_type = mime_map.get(suffix, "")
         if mime_type not in SUPPORTED_MIME_TYPES:
@@ -85,6 +118,58 @@ class Attachment:
         return f"data:{self.mime_type};base64,{self.to_base64()}"
 
 
+_AUDIO_MIME_TO_EXT: dict[str, str] = {
+    "audio/mpeg": ".mp3",
+    "audio/mp3": ".mp3",
+    "audio/wav": ".wav",
+    "audio/x-wav": ".wav",
+    "audio/ogg": ".ogg",
+    "audio/webm": ".webm",
+    "audio/flac": ".flac",
+    "audio/aac": ".aac",
+    "audio/mp4": ".m4a",
+}
+
+
+def transcribe_audio(data: bytes, mime_type: str, api_key: str | None = None) -> str:
+    """Transcribe audio bytes to text using OpenAI's Whisper API.
+
+    This is used as a fallback for model providers that do not support audio
+    attachments natively (e.g. Anthropic).
+
+    Args:
+        data: Raw audio file bytes.
+        mime_type: MIME type of the audio (e.g. ``"audio/mpeg"``).
+        api_key: OpenAI API key.  Falls back to the ``OPENAI_API_KEY``
+            environment variable when *None*.
+
+    Returns:
+        The transcribed text.
+
+    Raises:
+        ValueError: If no API key is available.
+        RuntimeError: If the transcription API call fails.
+    """
+    from openai import OpenAI
+
+    key = api_key or os.environ.get("OPENAI_API_KEY", "")
+    if not key:
+        raise ValueError("OpenAI API key is required for audio transcription")
+
+    ext = _AUDIO_MIME_TO_EXT.get(mime_type, ".mp3")
+    client = OpenAI(api_key=key)
+    try:
+        transcript = client.audio.transcriptions.create(
+            model="whisper-1",
+            file=(f"audio{ext}", data, mime_type),
+            response_format="text",
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Audio transcription failed: {exc}") from exc
+
+    return str(transcript).strip()
+
+
 class Model(ABC):
     """Abstract base class for LLM provider implementations."""
 
@@ -93,6 +178,7 @@ class Model(ABC):
         model_name: str,
         model_config: dict[str, Any] | None = None,
         token_callback: TokenCallback | None = None,
+        thinking_callback: ThinkingCallback | None = None,
     ):
         """Initialize a Model instance.
 
@@ -100,10 +186,14 @@ class Model(ABC):
             model_name: The name/identifier of the model.
             model_config: Optional dictionary of model configuration parameters.
             token_callback: Optional callback invoked with each streamed text token.
+            thinking_callback: Optional callback invoked with ``True`` when a
+                thinking block starts and ``False`` when it ends.  Used by
+                printers to switch between thinking and text display modes.
         """
         self.model_name = model_name
         self.model_config = model_config or {}
         self.token_callback = token_callback
+        self.thinking_callback = thinking_callback
         self.usage_info_for_messages: str = ""
         self.conversation: list[Any] = []
         self.client: Any = None
@@ -113,6 +203,15 @@ class Model(ABC):
         if self.token_callback is not None:
             self.token_callback(token)
 
+    def _invoke_thinking_callback(self, is_start: bool) -> None:
+        """Invoke the thinking callback synchronously.
+
+        Args:
+            is_start: ``True`` when a thinking block starts, ``False`` when it ends.
+        """
+        if self.thinking_callback is not None:
+            self.thinking_callback(is_start)
+
     def reset_conversation(self) -> None:
         """Reset conversation state for reuse across sub-sessions.
 
@@ -121,6 +220,36 @@ class Model(ABC):
         """
         self.conversation = []
         self.usage_info_for_messages = ""
+
+    def _replace_last_assistant_with_tool_calls(
+        self, content: str, function_calls: list[dict[str, Any]]
+    ) -> None:
+        """Replace the last assistant message with one that includes tool calls.
+
+        Used by text-based tool calling paths (ClaudeCodeModel, OpenAIModel)
+        where ``generate()`` already appended a plain assistant message and it
+        needs to be upgraded to include parsed tool call metadata.
+
+        Args:
+            content: The full text content of the assistant message.
+            function_calls: Parsed tool calls, each with ``id``, ``name``,
+                and ``arguments`` (dict).
+        """
+        self.conversation[-1] = {
+            "role": "assistant",
+            "content": content,
+            "tool_calls": [
+                {
+                    "id": fc["id"],
+                    "type": "function",
+                    "function": {
+                        "name": fc["name"],
+                        "arguments": json.dumps(fc["arguments"]),
+                    },
+                }
+                for fc in function_calls
+            ],
+        }
 
     def __str__(self) -> str:
         return f"{self.__class__.__name__}(name={self.model_name})"
@@ -133,7 +262,9 @@ class Model(ABC):
 
         Args:
             prompt: The initial user prompt to start the conversation.
-            attachments: Optional list of file attachments (images, PDFs) to include.
+            attachments: Optional list of file attachments (images, PDFs, audio,
+                video) to include. Provider support varies — unsupported types
+                are skipped with a warning.
         """
         pass  # pragma: no cover
 
@@ -165,6 +296,34 @@ class Model(ABC):
         """
         pass  # pragma: no cover
 
+    def _find_tool_call_ids_from_last_assistant(self) -> list[tuple[str, str]]:
+        """Find tool call (name, id) pairs from the last assistant message.
+
+        Searches backwards through the conversation for the most recent
+        assistant message containing tool calls and extracts their IDs.
+
+        Returns:
+            list[tuple[str, str]]: A list of (function_name, tool_call_id) tuples,
+                or an empty list if no assistant message with tool calls is found.
+        """
+        for msg in reversed(self.conversation):
+            if msg.get("role") == "assistant":
+                if msg.get("tool_calls"):
+                    return [
+                        (tc["function"]["name"], tc["id"]) for tc in msg["tool_calls"]
+                    ]
+                content = msg.get("content")
+                if isinstance(content, list):
+                    ids = [
+                        (b.get("name", ""), b.get("id", ""))
+                        for b in content
+                        if b.get("type") == "tool_use"
+                    ]
+                    if ids:
+                        return ids
+                break
+        return []
+
     def add_function_results_to_conversation_and_return(
         self, function_results: list[tuple[str, dict[str, Any]]]
     ) -> None:
@@ -175,13 +334,7 @@ class Model(ABC):
         Args:
             function_results: List of tuples containing (function_name, result_dict).
         """
-        tool_calls: list[dict[str, str]] = []
-        for msg in reversed(self.conversation):
-            if msg.get("role") == "assistant" and msg.get("tool_calls"):
-                tool_calls = [
-                    {"name": tc["function"]["name"], "id": tc["id"]} for tc in msg["tool_calls"]
-                ]
-                break
+        tool_calls = self._find_tool_call_ids_from_last_assistant()
 
         for i, (func_name, result_dict) in enumerate(function_results):
             result_content = result_dict.get("result", str(result_dict))
@@ -189,7 +342,7 @@ class Model(ABC):
                 result_content = f"{result_content}\n\n{self.usage_info_for_messages}"
 
             if i < len(tool_calls):
-                tool_call_id = tool_calls[i]["id"]
+                tool_call_id = tool_calls[i][1]
             else:
                 tool_call_id = f"call_{func_name}_{i}"
 
@@ -248,9 +401,6 @@ class Model(ABC):
         """
         self.usage_info_for_messages = usage_info
 
-    # =========================================================================
-    # Helper methods for building tool schemas (shared across implementations)
-    # =========================================================================
 
     def _resolve_openai_tools_schema(
         self,
@@ -300,10 +450,8 @@ class Model(ABC):
         sig = inspect.signature(func)
         doc = inspect.getdoc(func) or ""
 
-        # Parse docstring for parameter descriptions
         param_descriptions = self._parse_docstring_params(doc)
 
-        # Build parameters schema
         properties: dict[str, Any] = {}
         required: list[str] = []
 
@@ -311,17 +459,14 @@ class Model(ABC):
             param_type = param.annotation
             param_schema = self._python_type_to_json_schema(param_type)
 
-            # Add description from docstring if available
             if param_name in param_descriptions:
                 param_schema["description"] = param_descriptions[param_name]
 
             properties[param_name] = param_schema
 
-            # Check if parameter is required (no default value)
             if param.default is inspect.Parameter.empty:
                 required.append(param_name)
 
-        # Get first line of docstring as function description
         description = doc.split("\n")[0] if doc else f"Function {func.__name__}"
 
         return {
@@ -360,13 +505,10 @@ class Model(ABC):
                 continue
 
             if in_args_section and ":" in stripped:
-                # Parse "param_name: description" or "param_name (type): description"
                 parts = stripped.split(":", 1)
-                # split(":", 1) with ":" always gives 2 parts
                 if len(parts) == 2:  # pragma: no branch
                     param_part = parts[0].strip()
                     desc_part = parts[1].strip()
-                    # Handle "param_name (type)" format
                     if "(" in param_part:
                         param_name = param_part.split("(")[0].strip()
                     else:
@@ -390,16 +532,12 @@ class Model(ABC):
         origin = get_origin(python_type)
         args = get_args(python_type)
 
-        # Handle Union types (including Optional which is Union[X, None])
         if origin is Union or origin is types_module.UnionType:
-            # Filter out NoneType
             non_none_args = [a for a in args if a is not type(None)]
             if len(non_none_args) == 1:
                 return self._python_type_to_json_schema(non_none_args[0])
-            # Multiple types - use anyOf
             return {"anyOf": [self._python_type_to_json_schema(a) for a in non_none_args]}
 
-        # Handle list/List types
         if origin is list:
             if args:
                 return {
@@ -408,11 +546,9 @@ class Model(ABC):
                 }
             return {"type": "array"}
 
-        # Handle dict/Dict types
         if origin is dict:
             return {"type": "object"}
 
-        # Handle basic types
         type_mapping: dict[type, dict[str, str]] = {
             str: {"type": "string"},
             int: {"type": "integer"},
@@ -424,5 +560,150 @@ class Model(ABC):
         if python_type in type_mapping:
             return type_mapping[python_type]
 
-        # Default to string for unknown types
         return {"type": "string"}
+
+
+def _build_text_based_tools_prompt(function_map: dict[str, Callable[..., Any]]) -> str:
+    """Build a text-based tools description for models without native function calling.
+
+    Args:
+        function_map: Dictionary mapping function names to callable functions.
+
+    Returns:
+        A formatted prompt string describing available tools and how to call them,
+        or an empty string if no functions are provided.
+    """
+    if not function_map:
+        return ""
+
+    tools_desc = []
+    for func_name, func in function_map.items():
+        sig = inspect.signature(func)
+        doc = inspect.getdoc(func) or f"Function {func_name}"
+
+        params = []
+        for param_name, param in sig.parameters.items():
+            param_type = param.annotation
+            type_name = getattr(param_type, "__name__", str(param_type))
+            if type_name == "_empty":
+                type_name = "any"
+            params.append(f"    - {param_name} ({type_name})")
+
+        params_str = "\n".join(params) if params else "    (no parameters)"
+        first_line = doc.split(chr(10))[0]
+        tools_desc.append(f"- **{func_name}**: {first_line}\n  Parameters:\n{params_str}")
+
+    return f"""
+## Available Tools
+
+To call a tool, output a JSON object in the following format:
+
+```json
+{{"tool_calls": [{{"name": "tool_name", "arguments": {{"arg1": "value1", "arg2": "value2"}}}}]}}
+```
+
+You can call multiple tools at once by including multiple objects in the tool_calls array.
+
+### Tools:
+{chr(10).join(tools_desc)}
+
+IMPORTANT: When you want to call a tool, output ONLY the JSON object with tool_calls.
+Do not include any other text before or after the JSON.
+When you have the final answer, call the `finish` tool with your result.
+"""
+
+
+def _parse_text_based_tool_calls(content: str) -> list[dict[str, Any]]:
+    """Parse tool calls from text-based model output.
+
+    Looks for JSON objects with tool_calls array in the content.
+
+    Args:
+        content: The text content to parse for tool calls.
+
+    Returns:
+        A list of function call dictionaries, each containing 'id', 'name',
+        and 'arguments' keys. Returns empty list if no valid tool calls found.
+    """
+    function_calls: list[dict[str, Any]] = []
+
+    json_patterns = [
+        r"```json\s*(\{.*?\})\s*```",
+        r"```\s*(\{.*?\})\s*```",
+        r"(\{[^{}]*\"tool_calls\"[^{}]*\[[^\]]*\][^{}]*\})",
+    ]
+
+    for pattern in json_patterns:
+        matches = re.findall(pattern, content, re.DOTALL)
+        for match in matches:
+            try:
+                data = json.loads(match)
+                if "tool_calls" in data and isinstance(data["tool_calls"], list):
+                    for tc in data["tool_calls"]:
+                        if "name" in tc:
+                            function_calls.append(
+                                {
+                                    "id": f"call_{uuid.uuid4().hex[:8]}",
+                                    "name": tc["name"],
+                                    "arguments": tc.get("arguments", {}),
+                                }
+                            )
+                    if function_calls:
+                        return function_calls
+            except json.JSONDecodeError:
+                logger.debug("Exception caught", exc_info=True)
+                continue
+
+    try:
+        data = json.loads(content.strip())
+        if "tool_calls" in data and isinstance(data["tool_calls"], list):
+            for tc in data["tool_calls"]:
+                if "name" in tc:
+                    function_calls.append(
+                        {
+                            "id": f"call_{uuid.uuid4().hex[:8]}",
+                            "name": tc["name"],
+                            "arguments": tc.get("arguments", {}),
+                        }
+                    )
+    except json.JSONDecodeError:
+        logger.debug("Exception caught", exc_info=True)
+        pass
+
+    return function_calls
+
+
+_STRIP_PATTERNS = [
+    r"```json\s*\{[^`]*?\"tool_calls\"[^`]*?\}\s*```",
+    r"```\s*\{[^`]*?\"tool_calls\"[^`]*?\}\s*```",
+    r"\{[^{}]*\"tool_calls\"\s*:\s*\[.*?\][^{}]*\}",
+]
+
+
+def _strip_text_based_tool_calls(content: str) -> str:
+    """Remove tool_calls JSON blocks from *content*, keeping surrounding text.
+
+    Uses the same heuristics as :func:`_parse_text_based_tool_calls` so that
+    exactly the blocks that would be parsed as tool calls are stripped.
+
+    If the entire content is a single JSON object with ``tool_calls``, an
+    empty string is returned.
+
+    Args:
+        content: The full model response text.
+
+    Returns:
+        The text with tool_calls JSON removed, stripped of leading/trailing
+        whitespace.
+    """
+    try:
+        data = json.loads(content.strip())
+        if isinstance(data, dict) and "tool_calls" in data:
+            return ""
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    result = content
+    for pattern in _STRIP_PATTERNS:
+        result = re.sub(pattern, "", result, flags=re.DOTALL)
+    return result.strip()

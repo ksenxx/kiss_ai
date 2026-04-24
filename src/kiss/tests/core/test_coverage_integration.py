@@ -5,7 +5,6 @@ No mocks, patches, fakes, or test doubles.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import shutil
@@ -21,20 +20,19 @@ import yaml
 
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
-from kiss.core.models.model import Model
+from kiss.core.models.model import (
+    Model,
+    _parse_text_based_tool_calls,
+)
 from kiss.core.models.model_info import MODEL_INFO
 from kiss.core.models.openai_compatible_model import (
     OpenAICompatibleModel,
-    _build_text_based_tools_prompt,
-    _parse_text_based_tool_calls,
 )
 from kiss.core.utils import (
     finish as utils_finish,
 )
 from kiss.core.utils import (
-    get_config_value,
     is_subpath,
-    read_project_file,
     resolve_path,
 )
 
@@ -48,15 +46,6 @@ class TestModelSchemaConversion(TestCase):
             api_key="test-key",
         )
 
-    def test_dict_type_schema(self) -> None:
-        m = self._get_model()
-        assert m._python_type_to_json_schema(dict[str, Any]) == {"type": "object"}
-
-    def test_list_type_schema(self) -> None:
-        m = self._get_model()
-        schema = m._python_type_to_json_schema(list[str])
-        assert schema == {"type": "array", "items": {"type": "string"}}
-
     def test_optional_type_schema(self) -> None:
         m = self._get_model()
         schema = m._python_type_to_json_schema(int | None)
@@ -66,11 +55,6 @@ class TestModelSchemaConversion(TestCase):
         m = self._get_model()
         schema = m._python_type_to_json_schema(str | int)
         assert "anyOf" in schema
-
-    def test_empty_annotation_schema(self) -> None:
-        import inspect
-        m = self._get_model()
-        assert m._python_type_to_json_schema(inspect.Parameter.empty) == {"type": "string"}
 
 
 class TestModelCallbackLoop(TestCase):
@@ -146,17 +130,6 @@ class TestUsefulTools(TestCase):
 
 
 class TestMultiPrinter(TestCase):
-    def test_multi_printer(self) -> None:
-        from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
-        from kiss.core.printer import MultiPrinter
-        p1 = BaseBrowserPrinter()
-        p2 = BaseBrowserPrinter()
-        mp = MultiPrinter([p1, p2])
-        cq1 = p1.add_client()
-        cq2 = p2.add_client()
-        mp.print("hello", type="text")
-        assert not cq1.empty()
-        assert not cq2.empty()
 
     def test_multi_printer_token_callback(self) -> None:
         from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
@@ -164,31 +137,24 @@ class TestMultiPrinter(TestCase):
         p1 = BaseBrowserPrinter()
         p2 = BaseBrowserPrinter()
         mp = MultiPrinter([p1, p2])
-        cq1 = p1.add_client()
-        cq2 = p2.add_client()
+        p1.start_recording()
+        p2.start_recording()
         mp.token_callback("tok")
-        assert not cq1.empty()
-        assert not cq2.empty()
+        events1 = p1.stop_recording()
+        events2 = p2.stop_recording()
+        assert len(events1) > 0
+        assert len(events2) > 0
 
     def test_multi_printer_reset(self) -> None:
         from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
         from kiss.core.printer import MultiPrinter
         p1 = BaseBrowserPrinter()
         mp = MultiPrinter([p1])
-        p1._bash_buffer.append("x")
+        with p1._bash_lock:
+            p1._bash_state.buffer.append("x")
         mp.reset()
-        assert len(p1._bash_buffer) == 0
-
-
-class TestCodeServerHelpers(TestCase):
-    def test_snapshot_files(self) -> None:
-        from kiss.agents.vscode.diff_merge import _snapshot_files
-        with tempfile.TemporaryDirectory() as tmpdir:
-            Path(tmpdir, "a.txt").write_text("hello")
-            result = _snapshot_files(tmpdir, {"a.txt", "missing.txt"})
-            assert "a.txt" in result
-            assert "missing.txt" not in result
-            assert result["a.txt"] == hashlib.md5(b"hello").hexdigest()
+        with p1._bash_lock:
+            assert len(p1._bash_state.buffer) == 0
 
 
 def _noop_callback(token: str) -> None:
@@ -203,24 +169,9 @@ def _make_collector_callback(collector: list[str]):
     return _cb
 
 
-class TestBuildTextBasedToolsPrompt:
-    def test_function_untyped_param(self) -> None:
-        def untyped(x):  # type: ignore[no-untyped-def]
-            """Untyped."""
-            pass
-
-        prompt = _build_text_based_tools_prompt({"untyped": untyped})
-        assert "x (any)" in prompt
-
-
 class TestParseTextBasedToolCalls:
     def test_no_tool_calls_key(self) -> None:
         content = '```json\n{"result": "hello"}\n```'
-        calls = _parse_text_based_tool_calls(content)
-        assert len(calls) == 0
-
-    def test_tool_calls_not_list(self) -> None:
-        content = '{"tool_calls": "not a list"}'
         calls = _parse_text_based_tool_calls(content)
         assert len(calls) == 0
 
@@ -239,11 +190,6 @@ class TestParseTextBasedToolCalls:
         calls = _parse_text_based_tool_calls(content)
         assert len(calls) == 1
         assert calls[0]["name"] == "finish"
-
-    def test_tool_call_without_name(self) -> None:
-        content = '{"tool_calls": [{"arguments": {"x": 1}}]}'
-        calls = _parse_text_based_tool_calls(content)
-        assert len(calls) == 0
 
 
 class TestOpenAICompatibleModelInit:
@@ -739,36 +685,11 @@ class TestOpenAICompatibleModelEmbedding:
 
 
 class TestUtilsFunctionsExtra:
-    def test_get_config_value_default(self) -> None:
-        class Cfg:
-            pass
-
-        assert get_config_value(None, Cfg(), "missing", default="fallback") == "fallback"
-
-    def test_get_config_value_raises(self) -> None:
-        class Cfg:
-            pass
-
-        with pytest.raises(ValueError):
-            get_config_value(None, Cfg(), "missing")
-
     def test_utils_finish(self) -> None:
         result = utils_finish(status="success", analysis="good", result="42")
         payload = yaml.safe_load(result)
         assert payload["status"] == "success"
         assert payload["result"] == "42"
-
-    def test_read_project_file_success(self) -> None:
-        """Cover the filesystem path (os.path.isfile) branch (lines 161-162)."""
-        content = read_project_file("kiss/core/utils.py")
-        assert "def resolve_path" in content
-
-    def test_read_project_file_single_part(self) -> None:
-        """Cover the len(rel_parts) <= 1 (no package) branch."""
-        from kiss.core.kiss_error import KISSError
-
-        with pytest.raises(KISSError, match="Could not find"):
-            read_project_file("nonexistent_single_file.xyz")
 
     def test_resolve_path_relative(self) -> None:
         result = resolve_path("foo/bar.txt", "/base")

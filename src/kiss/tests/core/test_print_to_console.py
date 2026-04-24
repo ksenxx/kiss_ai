@@ -88,7 +88,6 @@ class TestBashStreamDedup(unittest.TestCase):
         p.print("line1\n", type="bash_stream")
         buf_before = buf.getvalue()
         assert "line1" in buf_before
-        # Error tool_result should show FAILED but not repeat streamed content
         p.print("line1\n", type="tool_result", tool_name="Bash", is_error=True)
         buf_after = buf.getvalue()
         new_output = buf_after[len(buf_before):]
