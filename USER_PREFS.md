@@ -66,3 +66,4 @@
 - When a user-initiated action (e.g. autocommit) happens after the task lifecycle has ended, persist the result event explicitly via a direct call to the persistence layer, since the automatic broadcast-based persistence path is inactive after task cleanup.
 - When writing an abstract for a paper, derive it directly from the key points emphasized in the introduction: problem statement, proposed solution, key design decisions, and evaluation results. Keep it self-contained and concise.
 - When updating one instance of a repeated fact in a paper (e.g. line counts, agent counts), grep for all occurrences and update them all consistently (abstract, introduction body, detailed paragraph).
+- The paper source files live in papers/kisssorcar/; build with the full pdflatex-bibtex-pdflatex-pdflatex cycle from that directory.
