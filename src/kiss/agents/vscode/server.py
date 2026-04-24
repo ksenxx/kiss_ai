@@ -206,7 +206,7 @@ class VSCodeServer(
         """Send deduplicated task texts for arrow-key cycling.
 
         Loads the full persisted history so ArrowUp can traverse every
-        distinct task stored in ``history.db``, not just an arbitrary
+        distinct task stored in ``sorcar.db``, not just an arbitrary
         recent subset.
         """
         entries = _load_history()

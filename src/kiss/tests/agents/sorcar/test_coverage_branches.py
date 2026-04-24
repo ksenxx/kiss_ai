@@ -159,7 +159,7 @@ class TestTaskHistoryBranches:
         kiss_dir = tmp_path / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
         th._KISS_DIR = kiss_dir
-        th._DB_PATH = kiss_dir / "history.db"
+        th._DB_PATH = kiss_dir / "sorcar.db"
         th._db_conn = None
         return saved
 
