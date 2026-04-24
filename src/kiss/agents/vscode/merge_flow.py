@@ -306,7 +306,8 @@ class _MergeFlowMixin:
                 # Persist to task history so the commit shows up in
                 # session replay ("the report").
                 if tab_id:
-                    tab = self._tab_states.get(tab_id)
+                    with self._state_lock:
+                        tab = self._tab_states.get(tab_id)
                     task_id = (
                         tab.agent._last_task_id
                         if tab is not None
