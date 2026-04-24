@@ -270,6 +270,12 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         }
       }
 
+      // Reveal the sidebar when the agent asks a question so the user
+      // sees the modal even if they switched to another panel.
+      if (msg.type === 'askUser' && this._view) {
+        this._view.show(true);
+      }
+
       this._sendToWebview(msg);
       if (msg.type === 'status') {
         const statusTabId = msg.tabId;
