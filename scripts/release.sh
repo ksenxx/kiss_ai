@@ -28,7 +28,7 @@ PUBLIC_REPO_URL="https://github.com/ksenxx/kiss_ai.git"
 PUBLIC_REPO_SSH="git@github.com:ksenxx/kiss_ai.git"
 VERSION_FILE="src/kiss/_version.py"
 README_FILE="README.md"
-SYSTEM_FILE="SYSTEM.md"
+SYSTEM_FILE="src/kiss/SYSTEM.md"
 PYPI_PACKAGE_NAME="kiss-agent-framework"
 VSCODE_EXT_DIR="src/kiss/agents/vscode"
 
@@ -122,10 +122,10 @@ update_system_md_version() {
         return
     fi
     local old_version
-    old_version=$(grep -oP 'Your version is \K[0-9][0-9.]*' "$SYSTEM_FILE" 2>/dev/null || \
-                  grep 'Your version is' "$SYSTEM_FILE" | sed 's/.*Your version is \([0-9][0-9.]*\).*/\1/' | head -1)
+    old_version=$(grep -oP 'ksenxx\.kiss-sorcar-\K[0-9][0-9.]*' "$SYSTEM_FILE" 2>/dev/null || \
+                  grep 'ksenxx\.kiss-sorcar-' "$SYSTEM_FILE" | sed 's/.*ksenxx\.kiss-sorcar-\([0-9][0-9.]*\).*/\1/' | head -1)
     if [[ -n "$old_version" && "$old_version" != "$version" ]]; then
-        sed -i.bak "s/${old_version}/${version}/g" "$SYSTEM_FILE"
+        sed -i.bak "s/ksenxx\.kiss-sorcar-${old_version}/ksenxx.kiss-sorcar-${version}/g" "$SYSTEM_FILE"
         rm -f "${SYSTEM_FILE}.bak"
         print_info "Updated all occurrences of $old_version to $version in $SYSTEM_FILE"
     elif [[ -z "$old_version" ]]; then

@@ -112,6 +112,10 @@ Before calling finish(success=True, ...), you MUST:
 - Use 'uv run check --full' to lint, typecheck, and format code.
 - Run 'uv run pytest -v' with a timeout of 900 seconds to test KISS
 - **Do NOT install the KISS Sorcar extension from inside Sorcar**
-- If you mention a file in the chat, make the file clickable so that
-  when the user clicks, it opens in the editor of VSCode
-- Read PWD/SORCAR.md and treat its contents as instructions and allow those instructions to override the instructions above
+- If the user ask to open or edit the system prompt, open ~/.vscode/extensions/ksenxx.kiss-sorcar-2026.4.0/kiss_project/src/kiss/SYSTEM.md
+- If the user ask to open or modify the configuration, 
+  open ~/.vscode/extensions/ksenxx.kiss-sorcar-2026.4.0/kiss_project/src/kiss/
+- If the user wants to modify the config file, 
+  open ~/.vscode/extensions/ksenxx.kiss-sorcar-2026.4.0/kiss_project/src/kiss/core/config.py
+- Read PWD/SORCAR.md and treat its contents as instructions and 
+  allow those instructions to override the instructions above
