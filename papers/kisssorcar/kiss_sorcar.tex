@@ -1392,6 +1392,131 @@ tools (CI dashboards, issue trackers) without leaving the editor.
 
 
 %----------------------------------------------------------------------
+\section{Painless Software Engineering with KISS Sorcar}
+\label{sec:painless}
+%----------------------------------------------------------------------
+
+A central claim of our system is that natural-language interaction can
+replace manual code inspection and ad-hoc scripting for understanding and
+evolving non-trivial subsystems.  We illustrate this with a real
+development session drawn from the project's own history, in which the
+worktree merge workflow (Section~\ref{sec:worktree-agent}) was first
+understood and then redesigned entirely through conversational prompts.
+The session comprises four consecutive tasks; we reproduce the prompts
+verbatim and summarize the agent's responses.
+
+\paragraph{Step~1: Understanding the existing workflow.}
+The developer begins by asking the agent to explain the current
+post-task git lifecycle:
+
+\begin{prompt}
+Can you tell me what happens with git in
+worktree_sorcar_agent.py when a task finishes?
+\end{prompt}
+
+\noindent The agent reads the source code and returns a structured
+summary of the four-phase lifecycle:
+(1)~during \texttt{run()}, a new branch and worktree are created and the
+task executes inside the worktree; when the task completes,
+\emph{nothing is committed or merged}---the result is returned with
+merge instructions appended and the worktree stays pending;
+(2)~\texttt{merge()} calls \texttt{\_finalize\_worktree()}, which stages
+all changes, generates a commit message via the LLM, commits, removes
+the worktree, checks out the original branch, and runs
+\texttt{git merge};
+(3)~\texttt{discard()} removes the worktree, prunes, checks out the
+original branch, and deletes the task branch;
+(4)~in CLI mode an interactive prompt forces the user to choose
+\texttt{[c]ommit and merge} or \texttt{[d]iscard} before exiting.
+The agent also notes a key design invariant: nothing auto-merges,
+auto-commit only happens at merge/finalize time, all steps are
+idempotent, and state can be recovered from git on restart.
+
+\paragraph{Step~2: Simplifying the workflow via natural language.}
+Armed with the workflow description, the developer decides the
+three-way choice (auto-merge, manual merge, discard) is
+unnecessarily complex and issues a redesign request:
+
+\begin{prompt}
+Can you change worktree_sorcar_agent.py and the
+extension so that after the agent finishes its task,
+it simply asks "Commit and Merge" or "Discard".
+When "Commit and Merge" is clicked by the user, the
+agent must commit the changes with a generated commit
+message and then merge the branch with the original
+branch, and delete the worktree and the branch
+associated with the worktree. If the user clicks
+"discard", it must delete the worktree and the branch,
+and checkout the original branch.
+\end{prompt}
+
+\noindent The agent modifies six files across Python and
+TypeScript: it updates \texttt{discard()} to check out the original
+branch before deleting the task branch, removes the
+\texttt{manual\_merge()} method entirely, simplifies
+\texttt{merge\_instructions()} to show only two options, updates the
+webview UI to replace the three-button toolbar with a two-button
+``Commit and Merge or Discard?'' bar, removes the \texttt{manual}
+action type from the TypeScript type definitions, and removes the
+corresponding handler from the Python backend.  Three tests for the
+deleted manual-merge path are removed and one routing test is updated.
+All 28~worktree tests pass after the change.
+
+\paragraph{Step~3: Investigating unexpected post-merge state.}
+After testing the simplified flow, the developer notices that files
+appear in the Source Control panel of VS~Code on the original branch
+after pressing ``Commit and Merge'' and asks:
+
+\begin{prompt}
+After the user presses "Commit and Merge", why do the
+modified files show up as committed in the original
+branch?
+\end{prompt}
+
+\noindent The agent traces the exact execution path through
+\texttt{squash\_merge\_branch()} and discovers that the
+implementation deliberately \emph{unstages} the squash-merged changes
+via \texttt{git reset HEAD} so they appear as uncommitted working-tree
+modifications in VS~Code's Source Control panel.  The design intention
+was to let the user review the diff before committing manually.  The
+agent reports this finding with the relevant code snippet and a
+verified end-state showing no new commit on the branch.
+
+\paragraph{Step~4: Directing a design change in one sentence.}
+The developer realizes that code review already happened while the
+worktree was active and decides the unstage step is unnecessary:
+
+\begin{prompt}
+The review is already happening in the worktree
+branch. You don't need user to review the modified and
+new files in the original branch. Fix it.
+\end{prompt}
+
+\noindent The agent replaces the \texttt{git reset HEAD} call in
+\texttt{squash\_merge\_branch()} with a conditional
+\texttt{git commit --no-edit} that uses the auto-generated squash
+message.  It adds a \texttt{git diff --cached --quiet} guard for the
+edge case where the merge produces no changes.  One existing test
+(\texttt{test\_merge\_leaves\_changes\_uncommitted}) is renamed to
+\texttt{test\_merge\_commits\_changes} and its assertions are
+updated to verify a clean working tree.  All 104~worktree tests pass.
+
+\medskip
+\noindent\textbf{Discussion.}
+The four-step session illustrates the ``painless'' development loop that
+our system enables.  The developer never opens a source file, never writes
+a line of code, and never runs a test manually.  Instead, the entire
+cycle---understand the workflow, redesign it, investigate an anomaly,
+direct a fix---happens through natural-language prompts, with the agent
+handling code reading, multi-file editing, test updates, and
+verification.  This style of development becomes possible because of
+the agent hierarchy described in Section~\ref{sec:architecture}: the
+Worktree Sorcar Agent isolates changes on a branch, the Chat Sorcar Agent
+preserves conversational context across tasks, and the Relentless Agent
+automatically continues when the context window is exhausted.
+
+
+%----------------------------------------------------------------------
 \section{Related Work}
 \label{sec:related}
 %----------------------------------------------------------------------
