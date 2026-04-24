@@ -20,7 +20,7 @@ _test_kiss_home = tempfile.mkdtemp(prefix="kiss_test_")
 os.environ["KISS_HOME"] = _test_kiss_home
 _th._db_conn = None
 _th._KISS_DIR = Path(_test_kiss_home)
-_th._DB_PATH = _th._KISS_DIR / "history.db"
+_th._DB_PATH = _th._KISS_DIR / "sorcar.db"
 
 DEFAULT_MODEL = "claude-opus-4-6"
 
