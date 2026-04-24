@@ -61,14 +61,17 @@ developer tools~\citep{chen2021evaluating,roziere2023code}.  A growing
 body of work has explored how to harness these capabilities for
 autonomous software engineering, from single-session agents that
 resolve GitHub issues~\citep{yang2024sweagent,wang2024openhands} to
-industrial products marketed as AI
-teammates~\citep{copilot2021,cursor2024,devin2024,claudecode2025,codex2025,openclaw2025}.  Yet using an LLM
-as a practical software engineering assistant still exposes several
-stubborn gaps: context windows are finite, a single mistake can derail
-an entire session, and generated changes are difficult to review or
-revert once applied to a live codebase.
+industrial products marketed as AI software and general assistants
+~\citep{copilot2021,cursor2024,devin2024,claudecode2025,codex2025,openclaw2025}.  
+Yet using an LLM as a practical software engineering or general assistant 
+still exposes several stubborn gaps: context windows are finite, a single 
+mistake can derail an entire session, agents get stuck in dead ends, 
+and generated changes are difficult 
+to review or revert once applied to a live codebase.
 
-We address these gaps through a five-layer agent hierarchy in which
+We propose KISS Agent Framework, a stupidly simple AI agentic framework 
+containing around 1500 lines of code.  
+We address the above mentioned gaps through a five-layer agent hierarchy in which
 each layer adds exactly one concern:
 
 \begin{enumerate}[nosep]
@@ -88,15 +91,20 @@ The name ``KISS'' reflects the \emph{Keep It Simple, Stupid} design
 philosophy: each layer is small, each concern is isolated, and the
 overall system avoids unnecessary abstraction.  
 
-We realize this architecture as a free, open-source Visual Studio Code
-extension with full browser automation, multimodal support via a
-built-in Chromium instance, and real-time cost tracking.  The user
-supplies their own API key, and the system handles the rest.
-Section~\ref{sec:vscode-features} describes the extension's unique
-features in detail.  The name ``Sorcar''
-pays homage to P.~C.~Sorcar, the legendary Indian magician, evoking
+In order to access the power and the capabilities of the KISS agent framework,
+we implement KISS Sorcar. KISS Sorcar is a general purpose assistant and an 
+integrated development environment (IDE) built on top of the KISS agent framework. 
+It codes really well and works pretty fast. The agent can run relentlessly for hours. 
+We implemented KISS Sorcar as a Visual Studio Code extension and runs locally. 
+It has full browser support (using open-source Chromium browser), multimodal support, 
+Docker container support, and OpenClaw 
+like features (whose discussion is beyond the scope of the paper). The good part is that 
+KISS Sorcar is completely free and open-source; all one needs to use is a 
+model API key from a major LLM provider, such as Anthropic.  We implemented this 
+framework in roughly 4.5 months and the repository is available at \url{https://github.com/ksenxx/kiss_ai}.
+The name ``Sorcar'' pays homage to P.~C.~Sorcar, the legendary Bengali magician, evoking
 the idea of an agent that performs feats that appear magical yet are
-grounded in disciplined engineering.
+grounded in disciplined engineering. 
 
 \paragraph{Quality over speed.}
 We deliberately prioritize output quality over latency.  In our
@@ -113,9 +121,10 @@ the code produced by our agent is consistently well-organized, simple,
 and idiomatic.
 
 \paragraph{Self-hosting as a stress test.}
+
 We built the system using itself.  The entire codebase---the KISS
 Agent framework, the Sorcar agent layers, the VS~Code extension, and
-the system prompt---was developed and maintained by the agent operating
+the system prompt---was developed by KISS Sorcar operating
 on its own repository.  This self-hosting discipline provides a
 continuous integration-style stress test: if the agent introduces a
 bug that impairs its own ability to work, the feedback loop is
@@ -146,8 +155,14 @@ and Section~\ref{sec:conclusion} concludes.
 \label{sec:architecture}
 %----------------------------------------------------------------------
 
-The five agent layers form a strict inheritance chain.  Each layer
-delegates upward for the concerns it does not own.
+We initially built the KISS Agentic Farmework to rapidly prototype and 
+experiment with various prompt optimization techniques, such as Gepa, and evolutionary
+algorithms for algorithmic and code optimization, such as AlphaEvolve and OpenEvolve.
+We heavily focussed on keeping the agent framework simple so that we can rapidly prototype
+and experiment with ideas.  The simplicity of the framework also enabled coding agents to
+write code that were simple and bug-free.  The KISS Agent Framework uses five agent 
+layers using a strict inheritance chain.  Each layer delegates upward for the concerns 
+it does not own.
 
 %......................................................................
 \subsection{KISS Agent}
@@ -174,8 +189,7 @@ each step: per-agent budget, global budget, and maximum step count.
 \textbf{Error resilience.}  The agent retries transient API errors
 (rate limits, server errors) up to a configurable threshold of
 consecutive failures.  It detects non-retryable errors (authentication
-failures, permission denials) by matching error type names and message
-substrings, and raises them immediately.
+failures, permission denials), and raises them immediately.
 
 \textbf{Non-agentic mode.}  When tools are not needed, the agent can
 run a single generation without the ReAct loop, which is useful for
@@ -272,11 +286,6 @@ end of the budget:
 - Current process PID: {current_pid} -- NEVER kill this
   process.
 \end{prompt}
-
-\textbf{Budget aggregation.}  We accumulate token counts and dollar
-costs across all sub-sessions.  Each new sub-session receives
-offsets so that the usage display shown to the user reflects the true
-cumulative cost, not just the cost of the current sub-session.
 
 %......................................................................
 \subsection{Sorcar Agent}
@@ -389,6 +398,136 @@ attributes from git config, enabling seamless recovery.
 git repository, if the repository has no commits, or if HEAD is
 detached, the agent falls back to direct execution without worktree
 isolation, ensuring it never fails due to git preconditions.
+
+
+%----------------------------------------------------------------------
+\section{Evaluation on Terminal Bench~2.0}
+\label{sec:evaluation}
+%----------------------------------------------------------------------
+
+Before we discuss a crucial aspect of KISS Sorcar, the system prompt, we describe the 
+evaluation outcome of KISS Sorcar on the Terminal Bench 2.0, which was also recently 
+used by the Cursor agent of Composer 2.0. 
+We evaluate our system on Terminal
+Bench~2.0,\footnote{\url{https://www.tbench.ai/}} a benchmark of 89
+diverse terminal-based programming tasks that range from building
+legacy compilers and configuring servers to solving cryptanalysis
+challenges and training machine-learning models.  Each task runs
+inside an isolated Docker container; a separate verifier judges the
+result automatically.  We use the
+Harbor\footnote{\url{https://github.com/harbor-framework/harbor}}
+framework to orchestrate execution, and Claude Opus~4.6 as the
+underlying LLM.
+
+\subsection{Setup}
+
+We run 5 independent trials per task (totaling 442 scored trials after
+excluding 3 that produced no verifier output due to verifier
+timeouts).  The agent is \texttt{SorcarHarborAgent}, a thin Harbor
+adapter that installs and invokes the sorcar CLI inside each
+container.  We hard-skip 9 tasks that we verified to be infeasible for
+Opus~4.6 across 6+ prior attempts (e.g.\ CompCert compilation,
+Windows~3.11 GUI installation, video OCR).  Skipped tasks still count
+as failures.
+
+\subsection{Aggregate Results}
+
+Table~\ref{tab:tb2-aggregate} summarizes the aggregate statistics.
+
+\begin{table}[h]
+\centering
+\caption{Terminal Bench~2.0 aggregate results (89 tasks, 5 trials each, Claude Opus~4.6).}
+\label{tab:tb2-aggregate}
+\begin{tabular}{lr}
+\toprule
+\textbf{Metric} & \textbf{Value} \\
+\midrule
+Total tasks              & 89 \\
+Total scored trials      & 442 \\
+Overall pass rate        & 62.7\% (277/442) \\
+pass@any (at least 1/5 passes) & 78.7\% (70/89) \\
+pass@all (all 5 pass)    & 43.8\% (39/89) \\
+Always-fail tasks        & 19 \\
+Always-pass tasks        & 39 \\
+Mixed-result tasks       & 31 \\
+Median cost per trial    & \$0.45 \\
+Mean cost per trial      & \$0.90 \\
+Median duration per trial & 202\,s \\
+Mean duration per trial  & 446\,s \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The 62.7\% overall pass rate compares favorably to other agents
+using the same underlying model: at the time of writing, Claude~Code
+(also Opus~4.6) scores approximately 58\% on the Terminal Bench~2.0
+leaderboard, and Cursor's Composer~2---a custom fine-tuned
+model trained with large-scale reinforcement
+learning~\citep{cursor2026composer2}---achieves 61.7\%.  Our result
+suggests that the layered architecture and the structured system
+prompt described in
+Sections~\ref{sec:architecture}--\ref{sec:system-prompt} contribute
+meaningfully beyond what the base model provides.
+
+\subsection{Task-Level Breakdown}
+
+\textbf{Consistently solved tasks (39 of 89).}
+These include cryptanalysis (FEAL differential), game-playing
+(chess best move), git operations (leak recovery), server configuration
+(gRPC key-value store, PyPI server, NGINX logging), data processing
+(resharding), formal verification (Coq~\texttt{plus\_comm}), ML
+inference (HuggingFace model serving, LLM batching scheduler), and
+system emulation (QEMU startup).  The breadth of this set---spanning
+systems, security, data engineering, and formal methods---demonstrates
+that the agent's generality is not limited to a single domain.
+
+\textbf{Consistently failed tasks (19 of 89).}
+The failures cluster into three categories: (1)~tasks requiring
+graphical or multimedia capabilities unavailable in the container
+(video processing, Windows~3.11 GUI, MTEB leaderboard scraping,
+extracting moves from video), (2)~tasks demanding very long or
+resource-intensive builds that exceed the container's time or memory
+limits (CompCert, Doom for MIPS, Caffe CIFAR-10, training fastText on
+Yelp data), and (3)~tasks with niche domain-specific requirements that
+the model struggles to satisfy (DNA insertion, OCaml GC patching,
+polyglot C/Python binaries, protein assembly, cell segmentation).
+
+\textbf{Mixed-result tasks (31 of 89).}
+Tasks such as \texttt{write-compressor} (3/5),
+\texttt{crack-7z-hash} (4/5), and \texttt{feal-linear-cryptanalysis}
+(4/5) succeed in most trials but occasionally fail due to
+non-determinism in the model's reasoning or timing-sensitive
+environment interactions.  Conversely,
+\texttt{cancel-async-tasks} (1/5) and \texttt{dna-assembly}
+(1/5) succeed rarely, suggesting they are at the boundary of the
+model's capability.
+
+\subsection{Discussion}
+
+With 5 complete trials per task, these results are ready for
+official leaderboard submission.  Several observations stand out:
+
+\begin{itemize}[nosep]
+  \item \textbf{System prompt matters.}  An earlier version of
+    our agent using only a basic prompt achieved approximately 61\% on
+    Terminal Bench.  The improved prompt presented in this paper
+    raises that to 67\% in our latest configuration run (66.2\% with
+    2 trials per task), confirming that the prompt engineering
+    described in Section~\ref{sec:system-prompt} has measurable impact.
+  \item \textbf{Variance is high.}  The gap between pass@any
+    (78.7\%) and pass@all (43.8\%) shows that many tasks are
+    solvable in principle but not reliably.  This variance is
+    inherent to the underlying LLM and is not specific to our agent.
+  \item \textbf{Cost is modest.}  At a median of \$0.45 per trial
+    and \$0.90 mean, the agent is practical for routine use.  The
+    total cost for the 442-trial run was approximately \$323.
+  \item \textbf{Leaderboard context.}  Anthropic has noted on social
+    media that approximately 81\% represents the feasibility ceiling
+    for Terminal Bench~2.0.  Recent analysis has also shown that
+    several top-scoring agents on the leaderboard employ
+    benchmark-specific optimizations that inflate their scores.
+\end{itemize}
+
 
 %----------------------------------------------------------------------
 \section{The System Prompt}
@@ -1355,131 +1494,6 @@ agent generates the commit message instead.  This is a minor but
 practical feature: it allows users who do not have a Copilot
 subscription to still use the sparkle button, powered by whatever
 LLM backend the extension is configured to use.
-
-%----------------------------------------------------------------------
-\section{Evaluation on Terminal Bench~2.0}
-\label{sec:evaluation}
-%----------------------------------------------------------------------
-
-We evaluate our system on Terminal
-Bench~2.0,\footnote{\url{https://www.tbench.ai/}} a benchmark of 89
-diverse terminal-based programming tasks that range from building
-legacy compilers and configuring servers to solving cryptanalysis
-challenges and training machine-learning models.  Each task runs
-inside an isolated Docker container; a separate verifier judges the
-result automatically.  We use the
-Harbor\footnote{\url{https://github.com/harbor-framework/harbor}}
-framework to orchestrate execution, and Claude Opus~4.6 as the
-underlying LLM.
-
-\subsection{Setup}
-
-We run 5 independent trials per task (totaling 442 scored trials after
-excluding 3 that produced no verifier output due to verifier
-timeouts).  The agent is \texttt{SorcarHarborAgent}, a thin Harbor
-adapter that installs and invokes the sorcar CLI inside each
-container.  We hard-skip 9 tasks that we verified to be infeasible for
-Opus~4.6 across 6+ prior attempts (e.g.\ CompCert compilation,
-Windows~3.11 GUI installation, video OCR).  Skipped tasks still count
-as failures.
-
-\subsection{Aggregate Results}
-
-Table~\ref{tab:tb2-aggregate} summarizes the aggregate statistics.
-
-\begin{table}[h]
-\centering
-\caption{Terminal Bench~2.0 aggregate results (89 tasks, 5 trials each, Claude Opus~4.6).}
-\label{tab:tb2-aggregate}
-\begin{tabular}{lr}
-\toprule
-\textbf{Metric} & \textbf{Value} \\
-\midrule
-Total tasks              & 89 \\
-Total scored trials      & 442 \\
-Overall pass rate        & 62.7\% (277/442) \\
-pass@any (at least 1/5 passes) & 78.7\% (70/89) \\
-pass@all (all 5 pass)    & 43.8\% (39/89) \\
-Always-fail tasks        & 19 \\
-Always-pass tasks        & 39 \\
-Mixed-result tasks       & 31 \\
-Median cost per trial    & \$0.45 \\
-Mean cost per trial      & \$0.90 \\
-Median duration per trial & 202\,s \\
-Mean duration per trial  & 446\,s \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-The 62.7\% overall pass rate compares favorably to other agents
-using the same underlying model: at the time of writing, Claude~Code
-(also Opus~4.6) scores approximately 58\% on the Terminal Bench~2.0
-leaderboard, and Cursor's Composer~2---a custom fine-tuned
-model trained with large-scale reinforcement
-learning~\citep{cursor2026composer2}---achieves 61.7\%.  Our result
-suggests that the layered architecture and the structured system
-prompt described in
-Sections~\ref{sec:architecture}--\ref{sec:system-prompt} contribute
-meaningfully beyond what the base model provides.
-
-\subsection{Task-Level Breakdown}
-
-\textbf{Consistently solved tasks (39 of 89).}
-These include cryptanalysis (FEAL differential), game-playing
-(chess best move), git operations (leak recovery), server configuration
-(gRPC key-value store, PyPI server, NGINX logging), data processing
-(resharding), formal verification (Coq~\texttt{plus\_comm}), ML
-inference (HuggingFace model serving, LLM batching scheduler), and
-system emulation (QEMU startup).  The breadth of this set---spanning
-systems, security, data engineering, and formal methods---demonstrates
-that the agent's generality is not limited to a single domain.
-
-\textbf{Consistently failed tasks (19 of 89).}
-The failures cluster into three categories: (1)~tasks requiring
-graphical or multimedia capabilities unavailable in the container
-(video processing, Windows~3.11 GUI, MTEB leaderboard scraping,
-extracting moves from video), (2)~tasks demanding very long or
-resource-intensive builds that exceed the container's time or memory
-limits (CompCert, Doom for MIPS, Caffe CIFAR-10, training fastText on
-Yelp data), and (3)~tasks with niche domain-specific requirements that
-the model struggles to satisfy (DNA insertion, OCaml GC patching,
-polyglot C/Python binaries, protein assembly, cell segmentation).
-
-\textbf{Mixed-result tasks (31 of 89).}
-Tasks such as \texttt{write-compressor} (3/5),
-\texttt{crack-7z-hash} (4/5), and \texttt{feal-linear-cryptanalysis}
-(4/5) succeed in most trials but occasionally fail due to
-non-determinism in the model's reasoning or timing-sensitive
-environment interactions.  Conversely,
-\texttt{cancel-async-tasks} (1/5) and \texttt{dna-assembly}
-(1/5) succeed rarely, suggesting they are at the boundary of the
-model's capability.
-
-\subsection{Discussion}
-
-With 5 complete trials per task, these results are ready for
-official leaderboard submission.  Several observations stand out:
-
-\begin{itemize}[nosep]
-  \item \textbf{System prompt matters.}  An earlier version of
-    our agent using only a basic prompt achieved approximately 61\% on
-    Terminal Bench.  The improved prompt presented in this paper
-    raises that to 67\% in our latest configuration run (66.2\% with
-    2 trials per task), confirming that the prompt engineering
-    described in Section~\ref{sec:system-prompt} has measurable impact.
-  \item \textbf{Variance is high.}  The gap between pass@any
-    (78.7\%) and pass@all (43.8\%) shows that many tasks are
-    solvable in principle but not reliably.  This variance is
-    inherent to the underlying LLM and is not specific to our agent.
-  \item \textbf{Cost is modest.}  At a median of \$0.45 per trial
-    and \$0.90 mean, the agent is practical for routine use.  The
-    total cost for the 442-trial run was approximately \$323.
-  \item \textbf{Leaderboard context.}  Anthropic has noted on social
-    media that approximately 81\% represents the feasibility ceiling
-    for Terminal Bench~2.0.  Recent analysis has also shown that
-    several top-scoring agents on the leaderboard employ
-    benchmark-specific optimizations that inflate their scores.
-\end{itemize}
 
 %----------------------------------------------------------------------
 \section{Related Work}
