@@ -411,6 +411,7 @@ isolation, ensuring it never fails due to git preconditions.
 Before we discuss a crucial aspect of KISS Sorcar, the system prompt, we describe the 
 evaluation outcome of KISS Sorcar on the Terminal Bench 2.0, which was also recently 
 used by the Cursor agent of Composer 2.0. 
+
 We evaluate our system on Terminal
 Bench~2.0,\footnote{\url{https://www.tbench.ai/}} a benchmark of 89
 diverse terminal-based programming tasks that range from building
@@ -505,42 +506,24 @@ environment interactions.  Conversely,
 (1/5) succeed rarely, suggesting they are at the boundary of the
 model's capability.
 
-\subsection{Discussion}
-
-With 5 complete trials per task, these results are ready for
-official leaderboard submission.  Several observations stand out:
-
-\begin{itemize}[nosep]
-  \item \textbf{System prompt matters.}  An earlier version of
-    our agent using only a basic prompt achieved approximately 61\% on
-    Terminal Bench.  The improved prompt presented in this paper
-    raises that to 67\% in our latest configuration run (66.2\% with
-    2 trials per task), confirming that the prompt engineering
-    described in Section~\ref{sec:system-prompt} has measurable impact.
-  \item \textbf{Variance is high.}  The gap between pass@any
-    (78.7\%) and pass@all (43.8\%) shows that many tasks are
-    solvable in principle but not reliably.  This variance is
-    inherent to the underlying LLM and is not specific to our agent.
-  \item \textbf{Cost is modest.}  At a median of \$0.45 per trial
-    and \$0.90 mean, the agent is practical for routine use.  The
-    total cost for the 442-trial run was approximately \$323.
-  \item \textbf{Leaderboard context.}  Anthropic has noted on social
-    media that approximately 81\% represents the feasibility ceiling
-    for Terminal Bench~2.0.  Recent analysis has found widespread
-    cheating on popular agent benchmarks, including Terminal
-    Bench~2.0: the top three submissions commit harness-level cheating
-    (e.g.\ leaking verifier code or answer keys into the agent's
-    environment), and task-level cheating (e.g.\ Googling answers,
-    mining git history, hardcoding test outputs) affects 28+
-    submissions across 9
-    benchmarks~\citep{stein2026cheatingblog,stein2026detecting}.
-    Separately, an automated benchmark audit agent discovered 45
-    confirmed hacking solutions across 13 widely-used benchmarks,
-    including process-isolation failures, answer leakage, and weak
-    test assertions that allow perfect scores without solving a single
-    problem~\citep{wang2026trustworthyblog}.
-\end{itemize}
-
+\textbf{Leaderboard context.}  KISS Sorcar does not score as hish as other 
+coding agents reported at the Terminal Bench 2.0 leaderboard, but we believe 
+that our results are cheat-free and honest, showing reasonable improvements 
+over Claude Code and Cursor agent.  
+Regarding low score comapred to other coding agents, we wanted to note that 
+recent analysis has found widespread cheating on popular agent benchmarks, 
+including Terminal
+Bench~2.0: the top three submissions commit harness-level cheating
+(e.g.\ leaking verifier code or answer keys into the agent's
+environment), and task-level cheating (e.g.\ Googling answers,
+mining git history, hardcoding test outputs) affects 28+
+submissions across 9
+benchmarks~\citep{stein2026cheatingblog,stein2026detecting}.
+Separately, we discovered using an automated benchmark audit agent that 45
+confirmed hacking solutions across 13 widely-used benchmarks,
+including process-isolation failures, answer leakage, and weak
+test assertions that allow perfect scores without solving a single
+problem~\citep{wang2026trustworthyblog}.
 
 %----------------------------------------------------------------------
 \section{The System Prompt}
