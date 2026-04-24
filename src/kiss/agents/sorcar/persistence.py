@@ -1,6 +1,6 @@
 """SQLite persistence for task history, chat events, model and file usage.
 
-All data is stored in a single SQLite database at ``~/.kiss/history.db``
+All data is stored in a single SQLite database at ``~/.kiss/sorcar.db``
 using WAL mode for concurrent access.  Four tables hold task history,
 chat events, model usage counters, and file usage counters.
 """
@@ -25,7 +25,7 @@ def _default_kiss_dir() -> Path:
 
 
 _KISS_DIR = _default_kiss_dir()
-_DB_PATH = _KISS_DIR / "history.db"
+_DB_PATH = _KISS_DIR / "sorcar.db"
 
 _MAX_FILE_USAGE_ENTRIES = 1000
 

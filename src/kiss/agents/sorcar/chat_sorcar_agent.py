@@ -25,7 +25,7 @@ class ChatSorcarAgent(SorcarAgent):
     """SorcarAgent with chat-session state management.
 
     Maintains a ``chat_id`` and automatically loads prior chat context,
-    persists tasks and results to ``history.db``, and augments prompts
+    persists tasks and results to ``sorcar.db``, and augments prompts
     with previous session context — replicating the stateful workflow
     from the VS Code extension as a standalone reusable agent.
     """
