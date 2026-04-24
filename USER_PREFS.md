@@ -62,3 +62,4 @@
 - When bumping version numbers in the release script, update ALL files that embed the version: _version.py, README.md, SYSTEM.md, package.json, and package-lock.json. For lockfiles, only update the project's own version entries (not dependency versions).
 - When adding evaluation sections to papers, compute aggregate statistics (pass rate, pass@k, cost, timing) directly from the raw result JSON files in the jobs directory rather than relying on remembered numbers. Present both overall pass rate and pass@any to show variance.
 - When referencing Terminal Bench 2.0 results, use data from the most complete run (highest trial count per task) and note when the benchmark is still running with preliminary results.
+- When a user-initiated action (e.g. autocommit) happens after the task lifecycle has ended, persist the result event explicitly via a direct call to the persistence layer, since the automatic broadcast-based persistence path is inactive after task cleanup.

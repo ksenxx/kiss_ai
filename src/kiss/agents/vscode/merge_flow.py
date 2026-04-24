@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps, repo_lock
+from kiss.agents.sorcar.persistence import _append_chat_event
 from kiss.agents.vscode.diff_merge import (
     _capture_untracked,
     _cleanup_merge_data,
@@ -289,14 +290,26 @@ class _MergeFlowMixin:
                 ok = GitWorktreeOps.commit_staged(repo, msg)
             if ok:
                 subject = msg.splitlines()[0] if msg.splitlines() else msg
-                self.printer.broadcast({
+                done_event: dict[str, Any] = {
                     "type": "autocommit_done",
                     "success": True,
                     "committed": True,
                     "message": f"Committed: {subject}",
                     "commitMessage": msg,
                     "tabId": tab_id,
-                })
+                }
+                self.printer.broadcast(done_event)
+                # Persist to task history so the commit shows up in
+                # session replay ("the report").
+                if tab_id:
+                    tab = self._tab_states.get(tab_id)
+                    task_id = (
+                        tab.agent._last_task_id
+                        if tab is not None
+                        else None
+                    )
+                    if task_id is not None:
+                        _append_chat_event(done_event, task_id=task_id)
             else:
                 self.printer.broadcast({
                     "type": "autocommit_done",

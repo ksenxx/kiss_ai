@@ -19,6 +19,7 @@ _DISPLAY_EVENT_TYPES = frozenset({
     "system_output", "result", "system_prompt", "prompt",
     "task_done", "task_error", "task_stopped",
     "followup_suggestion",
+    "autocommit_done",
 })
 
 

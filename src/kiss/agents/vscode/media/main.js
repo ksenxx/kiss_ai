@@ -1371,6 +1371,13 @@
         }
         break;
       }
+      case 'autocommit_done': {
+        var cls2 = ev && ev.success ? 'wt-result-ok' : 'wt-result-err';
+        var acDiv = mkEl('div', 'ev ' + cls2);
+        acDiv.textContent = (ev && ev.message) || '';
+        target.appendChild(acDiv);
+        break;
+      }
     }
   }
 
