@@ -50,6 +50,7 @@
 - When adding new webview features, implement them in separate JS files and expose a minimal API from main.js via a window global object, keeping changes to main.js minimal.
 - When replaying events in demo mode, group events into logical panels and replay each panel as a unit with a brief pause and collapse, rather than replaying events one-by-one with individual delays.
 - When adding related work or citations to a LaTeX paper, validate every citation by checking that the arXiv ID returns HTTP 200 or the URL resolves before inserting it into the bibliography. Compile twice with pdflatex and verify no undefined citation warnings remain.
+- When the paper uses a .bib file with BibTeX, build with the full pdflatex-bibtex-pdflatex-pdflatex cycle rather than just pdflatex twice.
 - When asked to cite recent papers, read the abstracts to judge relevance and verify publication dates before adding to the paper. Prioritize papers with high citation counts and direct topical relevance.
 - Before making changes to a file, verify the current state matches the assumed precondition by reading the file and checking git history; if the file already implements what was requested (e.g. due to a prior refactor that was not reverted), report that fact instead of making redundant changes.
 - When a singleton resource (e.g. decoration manager) is needed per-tab, create per-tab instances rather than sharing a single instance with deferral — each tab gets its own instance so concurrent operations proceed independently without queuing or serialization.
