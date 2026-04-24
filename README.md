@@ -2,7 +2,7 @@
 
 ![KISS Framework](assets/KISS-Sorcar.png)
 
-# When Simplicity Becomes Your Superpower: Meet KISS Multi-Agent Multi-Optimization Framework
+# When Simplicity Becomes Your Superpower: Meet KISS Sorcar, a General-purpose and Software engineering AI Assistant and Integreated Development Environment (IDE)
 
 [![Version](https://img.shields.io/badge/version-0.2.79-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
@@ -32,7 +32,7 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 # Introduction to KISS Sorcar
 
 ![KISS Sorcar](assets/KISS-Sorcar-UI.png)
-**KISS Sorcar** (named after the [famous Bengali magician P.C. Sorcar](https://en.wikipedia.org/wiki/P._C._Sorcar)) is *a general-purpose agent with web browsing and native desktop app execution capabilities**. It runs **locally** as a VS Code extension. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours to days**. It is **implemented as a Visual Studio Code extension**. It has **full browser** support, **multimodal** support, and OpenClaw like features (we will post more information about them on our social media channels). The good part is that KISS Sorcar is **completely free** and **open-source**; you bring your API key and give it to KISS Sorcar.  A paper on KISS Sorcar can be found at [papers/kisssorcar/kiss_sorcar.pdf](papers/kisssorcar/kiss_sorcar.pdf). <scriptsize>Note that **Sorcar** also means government in Bengali.</scriptsize>
+**KISS Sorcar** (named after [P.C. Sorcar, the legendary Bengali magician](https://en.wikipedia.org/wiki/P._C._Sorcar), evoking the idea of an agent that performs feats that appear magical yet are grounded in disciplined engineering) is a **general-purpose assistant** and **integrated development environment** (IDE) built on top of the **KISS Agent Framework**, a stupidly-simple agentic framework of roughly 1,850 lines of code. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours**. KISS Sorcar is implemented as a **Visual Studio Code extension** that runs **locally**. It has **full browser** support (using open-source Chromium browser and Playwright), **multimodal** support, **Docker container** support, and OpenClaw like features. The good part is that KISS Sorcar is **completely free** and **open-source**; all one needs is a model API key from a major LLM provider, such as Anthropic. A paper on KISS Sorcar can be found at [papers/kisssorcar/kiss_sorcar.pdf](papers/kisssorcar/kiss_sorcar.pdf). <scriptsize>Note that **Sorcar** also means government in Bengali.</scriptsize>
 
 ```
 git clone https://github.com/ksenxx/kiss_ai.git

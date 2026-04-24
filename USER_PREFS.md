@@ -70,3 +70,4 @@
 - When updating one instance of a repeated fact in a paper (e.g. line counts, agent counts), grep for all occurrences and update them all consistently (abstract, introduction body, detailed paragraph).
 - When updating the conclusion of a paper with evaluation results, include the key quantitative metrics (pass rate, pass@any, pass@all, comparisons to baselines) and connect them back to the paper's design claims.
 - The paper source files live in papers/kisssorcar/; build with the full pdflatex-bibtex-pdflatex-pdflatex cycle from that directory.
+- When updating README.md text from the paper, use the papers polished language and phrasing while preserving all original content points such as links, notes, and references. Fix any broken markdown formatting encountered during the update.
