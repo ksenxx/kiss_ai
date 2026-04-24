@@ -99,7 +99,7 @@ class TestTaskHistory(TestCase):
         kiss_dir.mkdir(parents=True, exist_ok=True)
         self._saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
         th._KISS_DIR = kiss_dir
-        th._DB_PATH = kiss_dir / "history.db"
+        th._DB_PATH = kiss_dir / "sorcar.db"
         th._db_conn = None
 
     def tearDown(self) -> None:
