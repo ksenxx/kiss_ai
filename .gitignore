@@ -40,6 +40,8 @@ src/kiss/benchmarks/dashboard.html
 jobs/
 *.out
 *.aux
+*.bbl
+*.blg
 *.fdb_latexmk
 *.synctex.gz
 *.fls
