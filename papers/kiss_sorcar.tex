@@ -106,7 +106,7 @@ we implement KISS Sorcar. KISS Sorcar is a general purpose assistant and an
 integrated development environment (IDE) built on top of the KISS agent framework. 
 It codes really well and works pretty fast. The agent can run relentlessly for hours. 
 We implemented KISS Sorcar as a Visual Studio Code extension and runs locally. 
-It has full browser support (using open-source Chromium browser), multimodal support, 
+It has full browser support (using open-source Chromium browser and Playwright), multimodal support, 
 Docker container support, and OpenClaw 
 like features (whose discussion is beyond the scope of the paper). The good part is that 
 KISS Sorcar is completely free and open-source; all one needs to use is a 
@@ -137,8 +137,9 @@ Agent framework, the Sorcar agent layers, the VS~Code extension, and
 the system prompt---was developed by KISS Sorcar operating
 on its own repository.  This self-hosting discipline provides a
 continuous integration-style stress test: if the agent introduces a
-bug that impairs its own ability to work, the feedback loop is
-immediate.  The simplicity of the layered architecture was both a
+bug that impairs its own ability to work, we immediately asked the agent 
+to fix the bug by analyzing the trajectory and code of KISS Sorcar.  
+The simplicity of the layered architecture was both a
 prerequisite for and a consequence of this bootstrapping process.
 The four core agent classes are remarkably compact: the KISS Agent
 comprises 409~lines, the Sorcar Agent 323~lines, the Chat Sorcar
