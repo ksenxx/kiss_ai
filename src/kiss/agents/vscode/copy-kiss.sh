@@ -46,8 +46,6 @@ pathlib.Path('$DEST/pyproject.toml').write_text(text)
 "
 cp "$PROJECT_ROOT/uv.lock" "$DEST/"
 cp "$PROJECT_ROOT/README.md" "$DEST/"
-cp "$PROJECT_ROOT/src/kiss/SYSTEM.md" "$DEST/"
-cp "$PROJECT_ROOT/SORCAR.md" "$DEST/"
 
 # Copy LICENSE to the extension directory so vsce package can find it
 cp "$PROJECT_ROOT/LICENSE" "$SCRIPT_DIR/LICENSE"
