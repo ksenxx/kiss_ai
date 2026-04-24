@@ -3,127 +3,122 @@
 This module provides a JSON-based stdio interface between the VS Code
 extension and the Sorcar agent. Commands are read from stdin as JSON
 lines, and events are written to stdout as JSON lines.
+
+The per-command handlers, task-runner, merge / worktree flow and
+autocomplete logic live in sibling mixin modules.  This file keeps the
+core dispatch loop, per-tab state accessors, the history / chat /
+commit-message helpers, and the ``main`` CLI entry point.
 """
 
 from __future__ import annotations
 
-import base64
-import ctypes
-import itertools
 import json
 import logging
 import os
 import queue
-import re
 import sys
 import threading
 from typing import Any
 
 from kiss.agents.sorcar.persistence import (
     _append_chat_event,
-    _load_file_usage,
+    _get_adjacent_task_by_chat_id,
     _load_history,
     _load_last_model,
+    _load_latest_chat_events_by_chat_id,
     _load_model_usage,
-    _load_task_chat_events,
-    _prefix_match_task,
-    _record_file_usage,
-    _record_model_usage,
-    _save_last_model,
     _search_history,
-    _set_latest_chat_events,
 )
-from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
-from kiss.agents.vscode.diff_merge import (
-    _capture_untracked,
+from kiss.agents.vscode.autocomplete import _AutocompleteMixin
+from kiss.agents.vscode.commands import _CommandsMixin
+from kiss.agents.vscode.diff_merge import (  # noqa: F401 (re-export for tests)
     _cleanup_merge_data,
     _git,
     _merge_data_dir,
-    _parse_diff_hunks,
-    _prepare_merge_view,
-    _save_untracked_base,
-    _snapshot_files,
 )
 from kiss.agents.vscode.helpers import (
-    clean_llm_output,
-    clip_autocomplete_suggestion,
     fast_model_for,
+    generate_commit_message_from_diff,
     generate_followup_text,
     model_vendor,
-    rank_file_suggestions,
 )
-from kiss.core.kiss_agent import KISSAgent
-from kiss.core.models.model import Attachment
+from kiss.agents.vscode.merge_flow import _MergeFlowMixin
+from kiss.agents.vscode.printer import VSCodePrinter
+from kiss.agents.vscode.tab_state import _TabState, parse_task_tags
+from kiss.agents.vscode.task_runner import _TaskRunnerMixin
 from kiss.core.models.model_info import MODEL_INFO, get_available_models, get_default_model
+
+__all__ = [
+    "VSCodePrinter",
+    "VSCodeServer",
+    "_TabState",
+    "main",
+    "parse_task_tags",
+]
 
 logger = logging.getLogger(__name__)
 
-ctypes.pythonapi.PyThreadState_SetAsyncExc.argtypes = [
-    ctypes.c_ulong,
-    ctypes.py_object,
-]
 
-
-class VSCodePrinter(BaseBrowserPrinter):
-    """Printer that outputs JSON events to stdout for VS Code extension.
-
-    Inherits from BaseBrowserPrinter to get identical event parsing and
-    emission (thinking_start/delta/end, text_delta/end, tool_call,
-    tool_result, system_output, result, usage_info). Overrides
-    broadcast() to write JSON lines to stdout instead of SSE queues.
-    """
-
-    def __init__(self) -> None:
-        super().__init__()
-        self._stdout_lock = threading.Lock()
-
-    def broadcast(self, event: dict[str, Any]) -> None:
-        """Write event as a JSON line to stdout and record it.
-
-        Args:
-            event: The event dictionary to emit.
-        """
-        with self._lock:
-            self._record_event(event)
-        with self._stdout_lock:
-            sys.stdout.write(json.dumps(event) + "\n")
-            sys.stdout.flush()
-
-
-class VSCodeServer:
+class VSCodeServer(
+    _CommandsMixin,
+    _TaskRunnerMixin,
+    _MergeFlowMixin,
+    _AutocompleteMixin,
+):
     """Backend server for VS Code extension."""
 
     def __init__(self) -> None:
         self.printer = VSCodePrinter()
-        self.agent = StatefulSorcarAgent("Sorcar VS Code")
+        self._tab_states: dict[str, _TabState] = {}
         self.work_dir = os.environ.get("KISS_WORKDIR", os.getcwd())
-        self._stop_event: threading.Event | None = None
-        self._user_answer_queue: queue.Queue[str] = queue.Queue(maxsize=1)
         persisted = _load_last_model()
-        self._selected_model = (
+        self._default_model = (
             persisted
             or os.environ.get("KISS_MODEL", "")
             or get_default_model()
         )
-        self._file_cache: list[str] = []
+        self._state_lock = threading.Lock()
+        self._complete_seq: int = 0
+        self._complete_seq_latest: int = -1
+        self._complete_queue: queue.Queue[tuple[str, int, str, str]] | None = None
+        self._complete_worker: threading.Thread | None = None
+        self._file_cache: list[str] | None = None
         self._last_active_file: str = ""
         self._last_active_content: str = ""
-        # Lock ordering: _state_lock < printer._lock < printer._stdout_lock < printer._bash_lock
-        self._state_lock = threading.Lock()
-        self._task_thread: threading.Thread | None = None
-        self._merging = False
-        self._task_generation = 0
-        self._recording_id = 0
-        self._complete_seq = itertools.count()
-        self._complete_seq_latest = -1
-        self._complete_lock = threading.Lock()
-        self._complete_queue: queue.Queue[tuple[str, int, str, str]] = queue.Queue()
-        self._complete_worker = threading.Thread(
-            target=self._complete_worker_loop, daemon=True
-        )
-        self._complete_worker.start()
-        self._task_history_id: int | None = None
+
+    def _get_tab(self, tab_id: str) -> _TabState:
+        """Get or create per-tab state for the given tab.
+
+        Each tab gets its own agent instances so concurrent tabs never
+        share mutable agent state (chat_id, task_id, worktree, etc.).
+        The tab_id is a frontend string identifier; the agent's chat_id
+        is a string assigned by the database on first task insertion.
+
+        Thread-safe: acquires ``_state_lock`` to protect the
+        get-or-create pattern against concurrent callers.
+
+        Args:
+            tab_id: The frontend tab identifier string.
+
+        Returns:
+            The per-tab state object.
+        """
+        with self._state_lock:
+            tab = self._tab_states.get(tab_id)
+            if tab is None:
+                tab = _TabState(tab_id, self._default_model)
+                self._tab_states[tab_id] = tab
+            return tab
+
+    def _any_non_wt_running(self) -> bool:
+        """True if any tab is running a non-worktree task on the main tree.
+
+        Must be called with ``_state_lock`` held.
+
+        Returns:
+            True if at least one tab has ``is_running_non_wt`` set.
+        """
+        return any(t.is_running_non_wt for t in self._tab_states.values())
 
     def run(self) -> None:
         """Main loop: read commands from stdin, execute them."""
@@ -131,364 +126,32 @@ class VSCodeServer:
             line = line.strip()
             if not line:
                 continue
+            cmd: dict[str, Any] = {}
             try:
                 cmd = json.loads(line)
                 self._handle_command(cmd)
             except json.JSONDecodeError as e:
                 self.printer.broadcast({"type": "error", "text": f"Invalid JSON: {e}"})
             except Exception as e:  # pragma: no cover
-                self.printer.broadcast({"type": "error", "text": str(e)})
+                event: dict[str, Any] = {"type": "error", "text": str(e)}
+                tab_id = cmd.get("tabId") if isinstance(cmd, dict) else None
+                if tab_id is not None:
+                    event["tabId"] = tab_id
+                self.printer.broadcast(event)
 
     def _handle_command(self, cmd: dict[str, Any]) -> None:
-        """Handle a command from VS Code."""
-        cmd_type = cmd.get("type")
-
-        if cmd_type == "run":
-            with self._state_lock:
-                if self._task_thread and self._task_thread.is_alive():
-                    self.printer.broadcast({"type": "error", "text": "Task already running"})
-                    self.printer.broadcast({"type": "status", "running": False})
-                    return
-                self._task_thread = threading.Thread(
-                    target=self._run_task, args=(cmd,), daemon=True
-                )
-                self._task_thread.start()
-        elif cmd_type == "stop":
-            self._stop_task()
-        elif cmd_type == "getModels":
-            self._get_models()
-        elif cmd_type == "selectModel":
-            model = cmd.get("model", self._selected_model)
-            self._selected_model = model
-            _save_last_model(model)
-        elif cmd_type == "getHistory":
-            self._get_history(cmd.get("query"), cmd.get("offset", 0), cmd.get("generation", 0))
-        elif cmd_type == "getFiles":
-            self._get_files(cmd.get("prefix", ""))
-        elif cmd_type == "refreshFiles":
-            self._refresh_file_cache()
-        elif cmd_type == "recordFileUsage":
-            path = cmd.get("path", "")
-            if path:
-                _record_file_usage(path)
-        elif cmd_type == "userAnswer":
-            # Drain any stale answer, then put the new one (P2/D3 fix)
-            while not self._user_answer_queue.empty():
-                try:
-                    self._user_answer_queue.get_nowait()
-                except queue.Empty:  # pragma: no cover — race guard
-                    break
-            self._user_answer_queue.put(cmd.get("answer", ""))
-        elif cmd_type == "resumeSession":
-            if self._task_thread and self._task_thread.is_alive():
-                return
-            task = cmd.get("sessionId", "")
-            if task:
-                self._replay_session(task)
-        elif cmd_type == "mergeAction":
-            self._handle_merge_action(cmd.get("action", ""))
-        elif cmd_type == "getLastSession":
-            self._get_last_session()
-        elif cmd_type == "newChat":
-            if not (self._task_thread and self._task_thread.is_alive()):
-                self.agent.new_chat()
-        elif cmd_type == "complete":
-            query = cmd.get("query", "")
-            active_file = cmd.get("activeFile")
-            active_content = cmd.get("activeFileContent")
-            with self._state_lock:
-                if active_file:
-                    self._last_active_file = active_file
-                if active_content is not None:
-                    self._last_active_content = active_content
-                snapshot_file = self._last_active_file
-                snapshot_content = self._last_active_content
-            seq = next(self._complete_seq)
-            with self._complete_lock:
-                self._complete_seq_latest = seq
-            if query:
-                self._complete_queue.put((query, seq, snapshot_file, snapshot_content))
-        elif cmd_type == "getInputHistory":
-            self._get_input_history()
-        elif cmd_type == "generateCommitMessage":
-            threading.Thread(
-                target=self._generate_commit_message, daemon=True
-            ).start()
+        """Dispatch a command from VS Code to the appropriate handler."""
+        cmd_type: str = cmd.get("type", "")
+        handler = self._HANDLERS.get(cmd_type)
+        if handler is not None:
+            handler(self, cmd)
         else:
-            self.printer.broadcast({"type": "error", "text": f"Unknown command: {cmd_type}"})
+            event: dict[str, Any] = {"type": "error", "text": f"Unknown command: {cmd_type}"}
+            tab_id = cmd.get("tabId")
+            if tab_id is not None:
+                event["tabId"] = tab_id
+            self.printer.broadcast(event)
 
-    def _run_task(self, cmd: dict[str, Any]) -> None:
-        """Run the agent with the given task.
-
-        An outer try/finally guarantees that ``status: running: False``
-        is **always** broadcast when this method exits, regardless of
-        which code-path is taken.  Previously, early returns (e.g. the
-        ``_merging`` guard) and exceptions before the inner try/finally
-        could leave the TypeScript ``_isRunning`` flag stuck at ``true``,
-        silently dropping all subsequent task submissions.
-        """
-        try:
-            self.printer.broadcast({"type": "status", "running": True})
-            self._run_task_inner(cmd)
-        finally:
-            with self._state_lock:
-                self._task_thread = None
-            self.printer.broadcast({"type": "status", "running": False})
-
-    def _run_task_inner(self, cmd: dict[str, Any]) -> None:
-        """Inner implementation of _run_task (without the status guarantee)."""
-        prompt = cmd.get("prompt", "")
-        model = cmd.get("model") or self._selected_model
-        work_dir = cmd.get("workDir") or self.work_dir
-        active_file = cmd.get("activeFile")
-        with self._state_lock:
-            self._last_active_file = active_file or ""
-        raw_attachments = cmd.get("attachments", [])
-
-        attachments: list[Attachment] | None = None
-        if raw_attachments:
-            attachments = []
-            for att in raw_attachments:
-                data_b64 = att.get("data", "")
-                mime = att.get("mimeType", "application/octet-stream")
-                data = base64.b64decode(data_b64)
-                attachments.append(Attachment(data=data, mime_type=mime))
-
-        with self._state_lock:
-            if self._merging:
-                self.printer.broadcast(
-                    {
-                        "type": "error",
-                        "text": "Cannot run a task while merge review is in progress."
-                        " Accept or reject all changes first.",
-                    }
-                )
-                return
-
-        self._stop_event = threading.Event()
-        self.printer._thread_local.stop_event = self._stop_event
-        # Drain stale answers from previous task (P2 fix)
-        while not self._user_answer_queue.empty():
-            try:
-                self._user_answer_queue.get_nowait()
-            except queue.Empty:  # pragma: no cover — race guard
-                break
-
-        self.printer.broadcast({"type": "clear"})
-
-        # Increment task generation so stale followups are suppressed (P12 fix)
-        with self._state_lock:
-            self._task_generation += 1
-            gen = self._task_generation
-
-        # Use a unique recording ID instead of thread ident (P16 fix)
-        self._recording_id += 1
-        rec_id = self._recording_id
-
-        # Git snapshot captures pre-task state (may be slow for large repos)
-        pre_hunks = _parse_diff_hunks(work_dir)
-        pre_untracked = _capture_untracked(work_dir)
-        pre_file_hashes = _snapshot_files(
-            work_dir, set(pre_hunks.keys()) | pre_untracked
-        )
-        _save_untracked_base(work_dir, pre_untracked | set(pre_hunks.keys()))
-
-        # start_recording inside try so stop_recording always runs (P14 fix)
-        result_summary = ""
-        task_end_event: dict[str, Any] | None = None
-        try:
-            self.printer.start_recording(rec_id)
-            self._task_history_id = None
-            try:
-                self.agent.run(
-                    prompt_template=prompt,
-                    model_name=model,
-                    work_dir=work_dir,
-                    printer=self.printer,
-                    current_editor_file=active_file,
-                    attachments=attachments,
-                    wait_for_user_callback=self._wait_for_user,
-                    ask_user_question_callback=self._ask_user_question,
-                )
-                self._task_history_id = self.agent._last_task_id
-                result_summary = self._extract_result_summary() or "No summary available"
-                task_end_event = {"type": "task_done"}
-            except KeyboardInterrupt:
-                self._task_history_id = self.agent._last_task_id
-                task_end_event = {"type": "task_stopped"}
-            except Exception as e:  # pragma: no cover
-                self._task_history_id = self.agent._last_task_id
-                task_end_event = {"type": "task_error", "text": str(e)}
-        except BaseException:  # pragma: no cover — async interrupt before inner try
-            # P14: interrupt before inner try — ensure stop_recording runs
-            task_end_event = task_end_event or {"type": "task_stopped"}
-        finally:
-            _record_model_usage(model)
-            # Entire cleanup wrapped in try/except BaseException (P13 fix)
-            try:
-                chat_events = self.printer.stop_recording(rec_id)
-                _set_latest_chat_events(
-                    chat_events,
-                    task_id=self._task_history_id,
-                    task=prompt,
-                    result=result_summary,
-                )
-                self.printer.broadcast({"type": "tasks_updated"})
-                self.printer.reset()
-                self._stop_event = None
-                try:
-                    merge_dir = str(_merge_data_dir())
-                    merge_result = _prepare_merge_view(
-                        work_dir,
-                        merge_dir,
-                        pre_hunks,
-                        pre_untracked,
-                        pre_file_hashes,
-                    )
-                    if merge_result.get("status") == "opened":  # pragma: no cover
-                        merge_json = os.path.join(merge_dir, "pending-merge.json")
-                        self._start_merge_session(merge_json)
-                except BaseException:  # pragma: no cover — merge view error handler
-                    logger.debug("Merge view error", exc_info=True)
-                self._refresh_file_cache()
-                if task_end_event:  # pragma: no branch — always set
-                    self.printer.broadcast(task_end_event)
-                if result_summary:
-                    self._generate_followup_async(
-                        prompt,
-                        result_summary,
-                        model,
-                        gen,
-                        self._task_history_id,
-                    )
-                self._task_history_id = None
-            except BaseException:  # pragma: no cover — cleanup interrupted
-                logger.debug("Cleanup interrupted", exc_info=True)
-                if task_end_event:
-                    self.printer.broadcast(task_end_event)
-
-    def _start_merge_session(self, merge_json_path: str) -> bool:
-        """Load merge data from disk and broadcast merge_data + merge_started events.
-
-        Args:
-            merge_json_path: Path to the pending-merge.json file.
-
-        Returns:
-            True if a merge session was started, False otherwise.
-        """
-        try:
-            with open(merge_json_path) as f:
-                merge_data = json.load(f)
-            files = merge_data.get("files", [])
-            if not files:
-                return False
-            total_hunks = sum(len(f.get("hunks", [])) for f in files)
-            if total_hunks == 0:
-                return False
-            with self._state_lock:
-                self._merging = True
-            self.printer.broadcast({
-                "type": "merge_data",
-                "data": merge_data,
-                "hunk_count": total_hunks,
-            })
-            self.printer.broadcast({"type": "merge_started"})
-            return True
-        except (OSError, json.JSONDecodeError, KeyError):
-            logger.debug("Failed to load merge data", exc_info=True)
-            return False
-
-    def _handle_merge_action(self, action: str) -> None:
-        """Handle merge accept/reject actions from the extension.
-
-        Only ``all-done`` triggers cleanup. Individual ``accept``/``reject``
-        actions are tracked on the TypeScript side; the Python server
-        only needs to know when the entire merge session is finished.
-        """
-        if action == "all-done":
-            self._finish_merge()
-
-    def _finish_merge(self) -> None:
-        """End the merge session: reset state, notify clients, clean up data."""
-        with self._state_lock:
-            self._merging = False
-        self.printer.broadcast({"type": "merge_ended"})
-        _cleanup_merge_data(str(_merge_data_dir()))
-
-    def _stop_task(self) -> None:
-        """Signal the agent to stop.
-
-        Sets the cooperative stop event and, if the task thread doesn't
-        exit promptly, forces a ``KeyboardInterrupt`` in the task thread
-        using ``ctypes.pythonapi.PyThreadState_SetAsyncExc``.  This
-        handles the case where the agent is blocked in an LLM API call
-        or other I/O and never reaches a cooperative ``_check_stop()``
-        call.
-        """
-        if self._stop_event:
-            self._stop_event.set()
-        task_thread = self._task_thread
-        if task_thread is not None and task_thread.is_alive():
-            threading.Thread(
-                target=self._force_stop_thread,
-                args=(task_thread,),
-                daemon=True,
-            ).start()
-
-    @staticmethod
-    def _force_stop_thread(task_thread: threading.Thread) -> None:
-        """Watchdog that forces ``KeyboardInterrupt`` in *task_thread*.
-
-        Waits 1 second for the cooperative stop-event mechanism to work.
-        If the thread is still alive, raises ``KeyboardInterrupt``
-        asynchronously in it.  Retries once after 5 seconds in case the
-        first exception was swallowed or the thread was in C code.
-        """
-        task_thread.join(timeout=1)
-        for _ in range(2):  # pragma: no branch — thread always dies within 2 attempts
-            if not task_thread.is_alive():
-                return
-            tid = task_thread.ident
-            if tid is not None:  # pragma: no branch — running thread always has ident
-                ctypes.pythonapi.PyThreadState_SetAsyncExc(
-                    ctypes.c_ulong(tid),
-                    ctypes.py_object(KeyboardInterrupt),
-                )
-            task_thread.join(timeout=5)
-
-    def _await_user_response(self) -> str:
-        """Block until the user sends a response, checking stop_event periodically.
-
-        Returns:
-            The user's answer string.
-
-        Raises:
-            KeyboardInterrupt: If the stop event is set before an answer arrives.
-        """
-        stop = getattr(self.printer._thread_local, "stop_event", None) or self.printer.stop_event
-        while True:
-            try:
-                return self._user_answer_queue.get(timeout=0.5)
-            except queue.Empty:
-                if stop.is_set():
-                    raise KeyboardInterrupt("Stopped while waiting for user")
-
-    def _wait_for_user(self, instruction: str, url: str) -> None:
-        """Callback for browser action prompts."""
-        self.printer.broadcast({
-            "type": "waitForUser",
-            "instruction": instruction,
-            "url": url,
-        })
-        self._await_user_response()
-
-    def _ask_user_question(self, question: str) -> str:
-        """Callback for agent questions."""
-        self.printer.broadcast({
-            "type": "askUser",
-            "question": question,
-        })
-        return self._await_user_response()
 
     def _get_models(self) -> None:
         """Send available models list with usage counts and pricing."""
@@ -512,7 +175,7 @@ class VSCodeServer:
         self.printer.broadcast({
             "type": "models",
             "models": models_list,
-            "selected": self._selected_model,
+            "selected": self._default_model,
         })
 
     def _get_history(self, query: str | None, offset: int = 0, generation: int = 0) -> None:
@@ -526,14 +189,13 @@ class VSCodeServer:
         for entry in entries:
             task = str(entry.get("task", ""))
             has_events = bool(entry.get("has_events", False))
+            chat_id = str(entry.get("chat_id", "") or "")
             sessions.append({
-                "id": task,
+                "id": chat_id,
                 "title": task[:50] + "..." if len(task) > 50 else task,
                 "timestamp": entry.get("timestamp", 0),
                 "preview": task,
-                "text": task,
                 "has_events": has_events,
-                "chat_id": entry.get("chat_id", ""),
             })
         self.printer.broadcast({
             "type": "history", "sessions": sessions,
@@ -557,66 +219,127 @@ class VSCodeServer:
                 tasks.append(task)
         self.printer.broadcast({"type": "inputHistory", "tasks": tasks})
 
-    def _replay_session(self, task: str) -> None:
-        """Replay recorded chat events for a previous task."""
-        events = _load_task_chat_events(task)
-        if not events:
-            self.printer.broadcast({"type": "error", "text": "No recorded events for this session"})
+    def _close_tab(self, tab_id: str) -> None:
+        """Clean up all backend state for a closed tab.
+
+        Removes the tab from ``_tab_states``, cleans up per-tab printer
+        state (bash buffers, recordings), and drops the persist-agent
+        reference.  Does nothing if the tab is currently running a task
+        or in a merge review — the frontend should stop/resolve those
+        first.
+
+        When the tab has a pending worktree, auto-merges it (just like
+        starting a new task would) before removing the tab, so the
+        worktree branch and directory are not orphaned.
+
+        Args:
+            tab_id: The frontend tab identifier to close.
+        """
+        with self._state_lock:
+            tab = self._tab_states.get(tab_id)
+            if tab is not None and (
+                tab.is_task_active
+                or tab.is_merging
+                or (tab.task_thread is not None and tab.task_thread.is_alive())
+            ):
+                return
+            self._tab_states.pop(tab_id, None)
+        if tab is not None and tab.agent._wt_pending:
+            try:
+                tab.agent._release_worktree()
+            except Exception:
+                logger.debug("Worktree release on tab close failed", exc_info=True)
+        self.printer.cleanup_tab(tab_id)
+        self.printer._persist_agents.pop(tab_id, None)
+        _cleanup_merge_data(str(_merge_data_dir(tab_id)))
+
+    def _new_chat(self, tab_id: str) -> None:
+        """Start a new chat session for the given tab.
+
+        The ``newChat`` command is only issued by the frontend's
+        ``createNewTab`` flow, which always allocates a fresh tab id
+        that the backend has never seen before.  ``_get_tab`` creates a
+        clean ``_TabState``, so there is no prior run state (no active
+        task, no in-progress merge, no pending worktree, no carried-over
+        warnings) to guard against here.
+
+        Args:
+            tab_id: The frontend tab identifier (a freshly-minted uuid).
+        """
+        tab = self._get_tab(tab_id)
+        tab.agent.new_chat()
+        self.printer.broadcast({"type": "showWelcome", "tabId": tab_id})
+
+    def _replay_session(self, chat_id: str, tab_id: str = "") -> None:
+        """Replay recorded chat events for a previous chat session.
+
+        Sets the tab's agent chat_id to match the resumed session.
+        The tab_id (frontend key in ``_tab_states``) does not change.
+
+        When ``tab_id`` is empty the call is a no-op — the previous
+        behavior of synthesizing a phantom tab keyed by ``chat_id`` and
+        mutating its ``use_worktree`` flag violated per-tab state
+        isolation (C2/C3 fix).
+
+        Args:
+            chat_id: The string chat session identifier to replay.
+            tab_id: The frontend tab identifier.
+        """
+        if not tab_id:
+            logger.debug("_replay_session called without tab_id; ignoring")
             return
-        self.agent.resume_chat(task)
-        self.printer.broadcast({"type": "task_events", "events": events})
+        result = _load_latest_chat_events_by_chat_id(chat_id)
+        if not result or not result.get("events"):
+            return
+        tab = self._get_tab(tab_id)
+        tab.agent.resume_chat_by_id(chat_id)
 
-    def _get_last_session(self) -> None:
-        """Load the most recent task from history and replay its events.
+        extra_str = str(result.get("extra", "") or "")
+        if extra_str:
+            try:
+                extra = json.loads(extra_str)
+                with self._state_lock:
+                    tab.use_worktree = bool(extra.get("is_worktree"))
+            except (json.JSONDecodeError, TypeError):
+                pass
 
-        Also restores any pending merge session from disk so that
-        merge-diff buttons reappear after a VS Code restart.
-        """
-        entries = _load_history(limit=1)
-        if entries:
-            task = str(entries[0].get("task", ""))
-            if task:
-                events = _load_task_chat_events(task)
-                self.agent.resume_chat(task)
-                self.printer.broadcast({"type": "task_events", "events": events, "task": task})
-        self._restore_pending_merge()
+        self.printer.broadcast({
+            "type": "task_events",
+            "events": result["events"],
+            "task": result["task"],
+            "chat_id": chat_id,
+            "extra": result.get("extra", ""),
+            "tabId": tab_id,
+        })
+        self._emit_pending_worktree(tab_id)
 
-    def _restore_pending_merge(self) -> None:
-        """Restore a pending merge session from disk if one exists.
-
-        Reads ``pending-merge.json`` from the merge data directory and
-        sends ``merge_data`` and ``merge_started`` events so the VS Code
-        extension re-opens the merge view with decorations and the
-        webview shows the accept/reject toolbar.
-        """
-        self._start_merge_session(str(_merge_data_dir() / "pending-merge.json"))
 
     def _generate_followup_async(
-        self, task: str, result: str, model: str, gen: int, task_id: int | None
+        self,
+        task: str,
+        result: str,
+        task_id: int | None,
     ) -> None:
         """Generate and broadcast a follow-up suggestion in a background thread.
 
         The suggestion is broadcast to the webview and also appended to
         the persisted chat events so it survives panel re-creation.
-        Stale followups from a previous task are suppressed by checking
-        the generation counter.
 
         Args:
             task: The completed task description.
             result: The task result summary.
-            model: The model used for the task.
-            gen: Task generation counter at time of launch.
             task_id: Stable history row id for the completed task.
         """
+        owner_tab = getattr(self.printer._thread_local, "tab_id", None)
+
         def _run() -> None:
+            if owner_tab is not None:
+                self.printer._thread_local.tab_id = owner_tab
             try:
                 suggestion = generate_followup_text(
-                    task, result, fast_model_for(model)
+                    task, result, fast_model_for()
                 )
                 if suggestion:  # pragma: no cover — requires LLM API call
-                    # P12 fix: only broadcast if still same task generation
-                    if not self._is_current_task_generation(gen):
-                        return  # pragma: no cover
                     event: dict[str, object] = {
                         "type": "followup_suggestion",
                         "text": suggestion,
@@ -628,149 +351,35 @@ class VSCodeServer:
 
         threading.Thread(target=_run, daemon=True).start()
 
-    def _is_current_task_generation(self, gen: int) -> bool:
-        """Return whether *gen* still matches the current task generation."""
-        with self._state_lock:
-            return self._task_generation == gen
-
     def _extract_result_summary(self) -> str:
-        """Extract result summary from the last recorded events."""
-        with self.printer._lock:
-            snapshot = [list(v) for v in self.printer._recordings.values()]
-        for events_list in snapshot:
-            for ev in reversed(events_list):
-                if ev.get("type") == "result":
-                    summary = ev.get("summary") or ev.get("text") or ""
-                    return str(summary)
+        """Extract result summary from the current recording."""
+        events = self.printer.peek_recording()
+        for ev in reversed(events):
+            if ev.get("type") == "result":
+                summary = ev.get("summary") or ev.get("text") or ""
+                return str(summary)
         return ""
 
-    def _complete_from_active_file(
-        self, query: str, snapshot_file: str = "", snapshot_content: str = ""
-    ) -> str:
-        """Complete the trailing token of *query* using identifiers from the active file.
-
-        Extracts single-word identifiers and dot-chained identifiers
-        (e.g. ``self.method``, ``os.path.join``) from the active editor
-        buffer (or falls back to reading from disk). Matches the trailing
-        token of the query — which may contain dots — against all
-        candidates via case-sensitive prefix matching.
-
-        Args:
-            query: The full query string from the chat input.
-            snapshot_file: Atomically-captured active file path.
-            snapshot_content: Atomically-captured active file content.
-
-        Returns:
-            The remaining suffix to append, or empty string if no match.
-        """
-        content = snapshot_content
-        if not content:
-            active_path = snapshot_file
-            if not active_path:
-                return ""
-            try:
-                with open(active_path) as f:
-                    content = f.read(50000)
-            except OSError:
-                return ""
-
-        # If the query ends with whitespace the user has moved past the word;
-        # don't complete a word that is no longer being typed.
-        if query != query.rstrip():
-            return ""
-        # Extract the trailing token (may include dots for chains)
-        m = re.search(r"([\w][\w.]*)[^\w]*$", query)
-        if not m:
-            return ""
-        partial = m.group(1)
-        if len(partial) < 2:
-            return ""
-        # Extract single-word identifiers (length >= 3) and dot-chained identifiers
-        words = set(re.findall(r"\b[A-Za-z_]\w{2,}\b", content))
-        chains = set(re.findall(r"\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+\b", content))
-        candidates = words | chains
-
-        best = ""
-        for candidate in candidates:
-            if candidate.startswith(partial) and len(candidate) > len(partial):
-                suffix = candidate[len(partial):]
-                if len(suffix) > len(best):  # pragma: no branch
-                    best = suffix
-        return best
-
-    def _complete_worker_loop(self) -> None:
-        """Persistent worker that drains the complete queue."""
-        while True:
-            item = self._complete_queue.get()
-            # Drain to latest request (skip stale ones)
-            while not self._complete_queue.empty():
-                try:
-                    item = self._complete_queue.get_nowait()
-                except queue.Empty:  # pragma: no cover — race guard
-                    break
-            query, seq, snapshot_file, snapshot_content = item
-            self._complete(query, seq, snapshot_file, snapshot_content)
-
-    def _complete(
-        self,
-        query: str,
-        seq: int = -1,
-        snapshot_file: str = "",
-        snapshot_content: str = "",
+    def _get_adjacent_task(
+        self, chat_id: str, task: str, direction: str, tab_id: str = "",
     ) -> None:
-        """Ghost text autocomplete via fast local prefix matching.
+        """Send events for the adjacent task in the same chat session.
 
         Args:
-            query: Raw query text from the chat input.
-            seq: Sequence number for this request. If a newer request has
-                been issued (``seq`` no longer matches the counter), this
-                call exits early to avoid broadcasting stale results.
-            snapshot_file: Atomically-captured active file path.
-            snapshot_content: Atomically-captured active file content.
+            chat_id: The string chat session identifier.
+            task: Current task description string (used as timestamp reference).
+            direction: ``"prev"`` or ``"next"``.
+            tab_id: Frontend tab identifier used to route the event.
         """
-        with self._complete_lock:
-            if seq >= 0 and seq != self._complete_seq_latest:
-                return
-        if not query or len(query) < 2:
-            self.printer.broadcast({"type": "ghost", "suggestion": "", "query": query})
-            return
-
-        match = _prefix_match_task(query)
-        if match:
-            fast = match[len(query):]
-        else:
-            fast = self._complete_from_active_file(query, snapshot_file, snapshot_content)
-        fast = clip_autocomplete_suggestion(query, fast)
-        with self._complete_lock:
-            if seq >= 0 and seq != self._complete_seq_latest:
-                return
-            self.printer.broadcast({"type": "ghost", "suggestion": fast, "query": query})
-
-    def _refresh_file_cache(self) -> None:
-        """Refresh the file cache from disk in a background thread.
-
-        Serves stale cache while refresh is in progress.
-        """
-        def _do_refresh() -> None:
-            from kiss.agents.vscode.diff_merge import _scan_files
-            result = _scan_files(self.work_dir)
-            with self._state_lock:
-                self._file_cache = result
-
-        threading.Thread(target=_do_refresh, daemon=True).start()
-
-    def _get_files(self, prefix: str) -> None:
-        """Send file list for autocomplete with usage-based sorting."""
-        with self._state_lock:
-            cache = self._file_cache
-        if not cache:
-            from kiss.agents.vscode.diff_merge import _scan_files
-            cache = _scan_files(self.work_dir)
-            with self._state_lock:
-                self._file_cache = cache
-        usage = _load_file_usage()
-        ranked = rank_file_suggestions(cache, prefix, usage)
-        self.printer.broadcast({"type": "files", "files": ranked})
+        result = _get_adjacent_task_by_chat_id(chat_id, task, direction)
+        event: dict[str, Any] = {
+            "type": "adjacent_task_events",
+            "direction": direction,
+            "task": result["task"] if result else "",
+            "events": result["events"] if result else [],
+            "tabId": tab_id,
+        }
+        self.printer.broadcast(event)
 
     def _generate_commit_message(self) -> None:
         """Generate a git commit message from current changes."""
@@ -780,10 +389,12 @@ class VSCodeServer:
             if not diff_text:  # pragma: no branch — LLM API required for else
                 self.printer.broadcast({
                     "type": "commitMessage",
-                    "message": "Error: No staged files.",
+                    "message": "",
+                    "error": "No staged changes found. Stage files with 'git add' first.",
                 })
                 return
-            self._generate_commit_message_llm(diff_text)  # pragma: no cover
+            msg = generate_commit_message_from_diff(diff_text)  # pragma: no cover
+            self.printer.broadcast({"type": "commitMessage", "message": msg})  # pragma: no cover
         except Exception:  # pragma: no cover — LLM API error handler
             logger.debug("Commit message generation failed", exc_info=True)
             self.printer.broadcast({
@@ -791,25 +402,6 @@ class VSCodeServer:
                 "message": "",
                 "error": "Failed to generate",
             })
-
-    def _generate_commit_message_llm(self, diff_text: str) -> None:  # pragma: no cover
-        """Call LLM to generate commit message from diff text."""
-        agent = KISSAgent("Commit Message Generator")
-        raw = agent.run(
-            model_name=fast_model_for(self._selected_model),
-            prompt_template=(
-                "Generate a nicely markdown formatted, informative git commit message for "
-                "these changes. Use conventional commit format with a clear subject "
-                "line (type: description) and optionally a body with bullet points "
-                "for multiple changes. Return ONLY the commit message text, no "
-                "quotes or markdown fences.\n\n{context}"
-            ),
-            arguments={"context": f"Diff:\n{diff_text}"},
-            is_agentic=False,
-            verbose=False,
-        )
-        msg = clean_llm_output(raw)
-        self.printer.broadcast({"type": "commitMessage", "message": msg})
 
 
 def main() -> None:  # pragma: no cover — CLI entry point

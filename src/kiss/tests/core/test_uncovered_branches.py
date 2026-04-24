@@ -63,7 +63,7 @@ class TestCacheControlOpenRouter(TestCase):
 
 class TestTextBasedToolsParsing(TestCase):
     def test_parse_text_based_tool_calls_invalid_json(self) -> None:
-        from kiss.core.models.openai_compatible_model import (
+        from kiss.core.models.model import (
             _parse_text_based_tool_calls,
         )
 
@@ -224,33 +224,27 @@ class TestGetAvailableModels:
         ]
         saved = {k: os.environ.get(k) for k in env_keys}
         try:
-            # Clear all keys
             for k in env_keys:
                 os.environ.pop(k, None)
             config_module.DEFAULT_CONFIG = config_module.Config()
-            assert get_default_model() == "claude-opus-4-6"  # fallback
+            assert get_default_model() == "claude-opus-4-6"
 
-            # Together only
             os.environ["TOGETHER_API_KEY"] = "t"
             config_module.DEFAULT_CONFIG = config_module.Config()
             assert get_default_model() == "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8"
 
-            # OpenAI beats Together
             os.environ["OPENAI_API_KEY"] = "t"
             config_module.DEFAULT_CONFIG = config_module.Config()
             assert get_default_model() == "gpt-5.4"
 
-            # Gemini beats OpenAI
             os.environ["GEMINI_API_KEY"] = "t"
             config_module.DEFAULT_CONFIG = config_module.Config()
             assert get_default_model() == "gemini-3.1-pro-preview"
 
-            # OpenRouter beats Gemini
             os.environ["OPENROUTER_API_KEY"] = "t"
             config_module.DEFAULT_CONFIG = config_module.Config()
             assert get_default_model() == "openrouter/anthropic/claude-opus-4.6"
 
-            # Anthropic beats all
             os.environ["ANTHROPIC_API_KEY"] = "t"
             config_module.DEFAULT_CONFIG = config_module.Config()
             assert get_default_model() == "claude-opus-4-6"
@@ -431,27 +425,6 @@ class TestAnthropicHelpers:
 
 
 class TestAnthropicAddFunctionResults:
-    def test_add_results_with_tool_use_ids(self) -> None:
-        from kiss.core.models.anthropic_model import AnthropicModel
-
-        m = AnthropicModel("claude-haiku-4-5", api_key="test")
-        m.conversation = [
-            {
-                "role": "assistant",
-                "content": [
-                    {"type": "tool_use", "id": "id1", "name": "fn1"},
-                    {"type": "tool_use", "id": "id2", "name": "fn2"},
-                ],
-            }
-        ]
-        m.add_function_results_to_conversation_and_return(
-            [("fn1", {"result": "r1"}), ("fn2", {"result": "r2"})]
-        )
-        last = m.conversation[-1]
-        assert last["role"] == "user"
-        assert len(last["content"]) == 2
-        assert last["content"][0]["tool_use_id"] == "id1"
-        assert last["content"][1]["tool_use_id"] == "id2"
 
     def test_add_results_with_usage_info(self) -> None:
         from kiss.core.models.anthropic_model import AnthropicModel

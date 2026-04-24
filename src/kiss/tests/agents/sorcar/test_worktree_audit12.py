@@ -1,0 +1,355 @@
+"""Audit 12: Integration tests for bugs in worktree and non-worktree workflows.
+
+BUG-59: ``squash_merge_from_baseline`` doesn't check ``rev-list --count``
+    return code.  When the baseline SHA is invalid (garbage-collected,
+    corrupt git config), ``rev-list`` fails (rc != 0) but its stdout is
+    read and compared to ``"0"``.  The empty string is not ``"0"``, so
+    the function proceeds to ``cherry-pick`` with an invalid range.
+    Cherry-pick fails and returns ``MergeResult.CONFLICT`` — misleading
+    the user into thinking there's a content conflict when the real
+    issue is an invalid baseline.
+
+BUG-60: ``_do_merge`` passes ``wt.original_branch`` (type ``str | None``)
+    to ``checkout()`` (expects ``str``) without an internal type guard.
+    Both callers check for None beforehand, but the method itself is
+    type-unsafe.  If a future caller omits the guard, git would attempt
+    to checkout a branch called "None".
+
+BUG-61: Non-worktree merge view preparation races with concurrent
+    operations.  In ``_run_task_inner``'s finally block,
+    ``is_running_non_wt`` is cleared BEFORE ``_prepare_and_start_merge``
+    runs.  Between clearing the flag and capturing the post-task diff, a
+    concurrent worktree merge can modify the working tree, causing the
+    merge view to show the other tab's merge changes as the current
+    agent's changes.
+
+BUG-62 (removed in audit14/RED-8): the previously-tested
+    ``manual_merge_branch`` helper was dead code — no production
+    caller.  It has been removed along with ``ManualMergeResult``.
+"""
+
+from __future__ import annotations
+
+import inspect
+import subprocess
+from pathlib import Path
+
+from kiss.agents.sorcar.git_worktree import (
+    GitWorktree,
+    GitWorktreeOps,
+    MergeResult,
+)
+from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.agents.vscode.server import VSCodeServer
+
+
+def _make_repo(tmp_path: Path, name: str = "repo") -> Path:
+    """Create a bare-minimum git repo with one commit."""
+    repo = tmp_path / name
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=repo, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=repo, capture_output=True,
+    )
+    (repo / "init.txt").write_text("init\n")
+    subprocess.run(["git", "add", "."], cwd=repo, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=repo, capture_output=True,
+    )
+    return repo
+
+
+def _create_worktree_branch(
+    repo: Path, branch: str, dirty_file: str | None = None,
+) -> tuple[Path, str | None]:
+    """Create a worktree branch with optional baseline from dirty state."""
+    wt_dir = repo / ".kiss-worktrees" / branch.replace("/", "_")
+    assert GitWorktreeOps.create(repo, branch, wt_dir)
+    GitWorktreeOps.save_original_branch(repo, branch, "main")
+
+    baseline: str | None = None
+    if dirty_file:
+        (wt_dir / dirty_file).write_text("dirty content\n")
+        GitWorktreeOps.stage_all(wt_dir)
+        GitWorktreeOps.commit_staged(
+            wt_dir, "kiss: baseline", no_verify=True,
+        )
+        baseline = GitWorktreeOps.head_sha(wt_dir)
+        if baseline:
+            GitWorktreeOps.save_baseline_commit(repo, branch, baseline)
+    return wt_dir, baseline
+
+
+def _add_agent_commit(wt_dir: Path, fname: str, content: str) -> None:
+    """Add a commit in the worktree simulating agent work."""
+    (wt_dir / fname).write_text(content)
+    GitWorktreeOps.stage_all(wt_dir)
+    GitWorktreeOps.commit_staged(wt_dir, f"agent: edit {fname}")
+
+
+def _cleanup(repo: Path, branch: str, wt_dir: Path) -> None:
+    """Best-effort cleanup."""
+    if wt_dir.exists():
+        GitWorktreeOps.remove(repo, wt_dir)
+    GitWorktreeOps.prune(repo)
+    if GitWorktreeOps.branch_exists(repo, branch):
+        GitWorktreeOps.delete_branch(repo, branch)
+
+
+class TestBug59RevListReturnCode:
+    """BUG-59: ``squash_merge_from_baseline`` doesn't check the return
+    code of ``git rev-list --count baseline..branch``.  When the
+    baseline SHA is invalid, rev-list fails but the empty stdout is
+    compared to ``"0"`` — it's not ``"0"``, so the code proceeds to
+    cherry-pick with an invalid baseline range.
+
+    FIX: Check ``log_result.returncode``.  If non-zero (invalid
+    baseline), return ``MergeResult.CONFLICT`` immediately with a
+    log warning, so the caller can fall back to ``squash_merge_branch``.
+    """
+
+    def test_invalid_baseline_returns_conflict_not_crash(
+        self, tmp_path: Path,
+    ) -> None:
+        """Invalid baseline must fail gracefully, not produce misleading error."""
+        repo = _make_repo(tmp_path)
+        branch = "kiss/wt-bug59a-1"
+        wt_dir = repo / ".kiss-worktrees" / branch.replace("/", "_")
+        assert GitWorktreeOps.create(repo, branch, wt_dir)
+
+        _add_agent_commit(wt_dir, "agent.txt", "agent work\n")
+
+        GitWorktreeOps.remove(repo, wt_dir)
+        GitWorktreeOps.prune(repo)
+
+        bogus = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+        result = GitWorktreeOps.squash_merge_from_baseline(
+            repo, branch, bogus,
+        )
+        assert result == MergeResult.CONFLICT, (
+            "BUG-59: squash_merge_from_baseline should return CONFLICT "
+            "for invalid baseline, not proceed to cherry-pick"
+        )
+
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=repo, capture_output=True, text=True,
+        )
+        assert not status.stdout.strip(), (
+            "Repo should be clean after failed merge with invalid baseline"
+        )
+
+        if GitWorktreeOps.branch_exists(repo, branch):
+            GitWorktreeOps.delete_branch(repo, branch)
+
+    def test_valid_baseline_still_merges(self, tmp_path: Path) -> None:
+        """Regression: valid baseline must still produce SUCCESS."""
+        repo = _make_repo(tmp_path)
+        branch = "kiss/wt-bug59b-1"
+        wt_dir, baseline = _create_worktree_branch(
+            repo, branch, dirty_file="dirty.txt",
+        )
+
+        _add_agent_commit(wt_dir, "agent.txt", "agent work\n")
+
+        GitWorktreeOps.remove(repo, wt_dir)
+        GitWorktreeOps.prune(repo)
+
+        assert baseline is not None
+        result = GitWorktreeOps.squash_merge_from_baseline(
+            repo, branch, baseline,
+        )
+        assert result == MergeResult.SUCCESS, (
+            "Regression: valid baseline should merge successfully"
+        )
+
+        assert (repo / "agent.txt").read_text() == "agent work\n"
+
+        if GitWorktreeOps.branch_exists(repo, branch):
+            GitWorktreeOps.delete_branch(repo, branch)
+
+    def test_valid_baseline_no_changes_returns_success(
+        self, tmp_path: Path,
+    ) -> None:
+        """Baseline with no subsequent commits returns SUCCESS."""
+        repo = _make_repo(tmp_path)
+        branch = "kiss/wt-bug59c-1"
+        wt_dir, baseline = _create_worktree_branch(
+            repo, branch, dirty_file="dirty.txt",
+        )
+
+
+        GitWorktreeOps.remove(repo, wt_dir)
+        GitWorktreeOps.prune(repo)
+
+        assert baseline is not None
+        result = GitWorktreeOps.squash_merge_from_baseline(
+            repo, branch, baseline,
+        )
+        assert result == MergeResult.SUCCESS
+
+        if GitWorktreeOps.branch_exists(repo, branch):
+            GitWorktreeOps.delete_branch(repo, branch)
+
+
+class TestBug60DoMergeTypeGuard:
+    """BUG-60: ``_do_merge`` passes ``wt.original_branch`` to
+    ``checkout()`` without checking for None.  The type is
+    ``str | None`` but ``checkout()`` expects ``str``.
+
+    Both callers guard (``merge()`` and ``_release_worktree()``), but
+    ``_do_merge`` itself should be safe regardless.
+
+    FIX: Add an assertion/guard inside ``_do_merge`` that returns
+    ``(MergeResult.CHECKOUT_FAILED, "")`` when ``original_branch``
+    is None.
+    """
+
+    def test_do_merge_with_none_original_branch(
+        self, tmp_path: Path,
+    ) -> None:
+        """_do_merge must handle None original_branch gracefully."""
+        repo = _make_repo(tmp_path)
+        branch = "kiss/wt-bug60a-1"
+        wt_dir = repo / ".kiss-worktrees" / branch.replace("/", "_")
+        assert GitWorktreeOps.create(repo, branch, wt_dir)
+
+        _add_agent_commit(wt_dir, "agent.txt", "agent work\n")
+        GitWorktreeOps.remove(repo, wt_dir)
+        GitWorktreeOps.prune(repo)
+
+        agent = WorktreeSorcarAgent("test")
+        agent._wt = GitWorktree(
+            repo_root=repo,
+            branch=branch,
+            original_branch=None,
+            wt_dir=wt_dir,
+            baseline_commit=None,
+        )
+
+        wt = agent._wt
+        result, warning = agent._do_merge(wt)
+
+        assert result == MergeResult.CHECKOUT_FAILED, (
+            "BUG-60: _do_merge should return CHECKOUT_FAILED when "
+            "original_branch is None, not attempt checkout"
+        )
+
+        current = GitWorktreeOps.current_branch(repo)
+        assert current != "None", (
+            "BUG-60: git should not have checked out a branch called 'None'"
+        )
+
+        if GitWorktreeOps.branch_exists(repo, branch):
+            GitWorktreeOps.delete_branch(repo, branch)
+
+    def test_do_merge_with_valid_branch_still_works(
+        self, tmp_path: Path,
+    ) -> None:
+        """Regression: _do_merge with valid original_branch succeeds."""
+        repo = _make_repo(tmp_path)
+        branch = "kiss/wt-bug60b-1"
+        wt_dir = repo / ".kiss-worktrees" / branch.replace("/", "_")
+        assert GitWorktreeOps.create(repo, branch, wt_dir)
+        GitWorktreeOps.save_original_branch(repo, branch, "main")
+
+        _add_agent_commit(wt_dir, "agent.txt", "agent work\n")
+        GitWorktreeOps.remove(repo, wt_dir)
+        GitWorktreeOps.prune(repo)
+
+        agent = WorktreeSorcarAgent("test")
+        agent._wt = GitWorktree(
+            repo_root=repo,
+            branch=branch,
+            original_branch="main",
+            wt_dir=wt_dir,
+            baseline_commit=None,
+        )
+
+        wt = agent._wt
+        result, warning = agent._do_merge(wt)
+        assert result == MergeResult.SUCCESS, (
+            "Regression: valid original_branch should merge successfully"
+        )
+        assert (repo / "agent.txt").read_text() == "agent work\n"
+
+
+class TestBug61NonWtMergeViewRace:
+    """BUG-61: ``is_running_non_wt`` is cleared BEFORE
+    ``_prepare_and_start_merge`` in the finally block.  Between
+    clearing and diff capture, a concurrent worktree merge can modify
+    the working tree, causing the merge view to show incorrect changes.
+
+    FIX: Move ``_prepare_and_start_merge`` BEFORE clearing
+    ``is_running_non_wt`` so the diff capture happens while the flag
+    blocks concurrent worktree merges.
+    """
+
+    def test_merge_view_prepared_before_flag_clear(self) -> None:
+        """In the source, _prepare_and_start_merge must appear BEFORE
+        is_running_non_wt = False in the finally block.
+
+        The merge view captures a git diff of the working tree.  If
+        the flag is cleared first, a concurrent worktree merge can
+        modify the tree between flag-clear and diff-capture.
+        """
+        source = inspect.getsource(VSCodeServer._run_task_inner)
+        lines = source.split("\n")
+
+        finally_start = None
+        for i, line in enumerate(lines):
+            if "finally:" in line and "# Entire cleanup" not in line:
+                continue
+            if "_record_model_usage" in line:
+                finally_start = i
+                break
+
+        assert finally_start is not None, "Could not find finally block"
+
+        merge_view_line = None
+        flag_clear_line = None
+
+        for i in range(finally_start, len(lines)):
+            if "_prepare_and_start_merge" in lines[i] and merge_view_line is None:
+                merge_view_line = i
+            if (
+                "is_running_non_wt = False" in lines[i]
+                and flag_clear_line is None
+            ):
+                flag_clear_line = i
+
+        assert merge_view_line is not None, (
+            "Could not find _prepare_and_start_merge in finally block"
+        )
+        assert flag_clear_line is not None, (
+            "Could not find is_running_non_wt = False in finally block"
+        )
+
+        assert merge_view_line < flag_clear_line, (
+            "BUG-61: _prepare_and_start_merge (line offset "
+            f"{merge_view_line}) must appear BEFORE "
+            f"is_running_non_wt = False (line offset {flag_clear_line}) "
+            "in the finally block.  Clearing the flag first allows "
+            "concurrent worktree merges to modify the working tree "
+            "during diff capture."
+        )
+
+    def test_flag_still_cleared_on_merge_view_failure(self) -> None:
+        """The flag must be cleared even when _prepare_and_start_merge
+        raises.  Otherwise the flag gets stuck True (BUG-39 regression).
+        """
+        source = inspect.getsource(VSCodeServer._run_task_inner)
+
+        clear_count = source.count("is_running_non_wt = False")
+        assert clear_count >= 2, (
+            "There must be at least 2 flag-clear sites: one in the "
+            "normal finally path and one in the except handler, to "
+            "guarantee the flag never gets stuck"
+        )
+

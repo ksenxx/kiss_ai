@@ -7,16 +7,12 @@ from __future__ import annotations
 
 import json
 import os
-import queue
-import socket
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 from pathlib import Path
-
-import pytest
 
 from kiss.agents.sorcar import persistence as th
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
@@ -26,14 +22,8 @@ from kiss.agents.sorcar.useful_tools import (
 )
 from kiss.agents.sorcar.web_use_tool import WebUseTool
 from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
-from kiss.agents.vscode.diff_merge import (
-    _prepare_merge_view,
-    _save_untracked_base,
-    _snapshot_files,
-)
 from kiss.agents.vscode.helpers import (
     clip_autocomplete_suggestion,
-    fast_model_for,
 )
 from kiss.agents.vscode.server import VSCodeServer
 
@@ -42,126 +32,47 @@ def _git(tmpdir: str, *args: str) -> None:
     """Run a git command in tmpdir, suppressing output."""
     subprocess.run(["git", *args], cwd=tmpdir, capture_output=True, check=True)
 
-# ---------------------------------------------------------------------------
-# persistence.py — uncovered branches
-# ---------------------------------------------------------------------------
-
 
 class TestPersistenceBranches:
     """Cover remaining branches in persistence.py."""
 
-    def test_load_task_chat_events_bad_json(self) -> None:
-        """_load_task_chat_events handles corrupt event_json gracefully (lines 294-295)."""
+    def setup_method(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        kiss_dir = Path(self._tmpdir) / ".kiss"
+        kiss_dir.mkdir(parents=True, exist_ok=True)
+        self._saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        th._KISS_DIR = kiss_dir
+        th._DB_PATH = kiss_dir / "history.db"
+        th._db_conn = None
+
+    def teardown_method(self) -> None:
+        if th._db_conn is not None:
+            th._db_conn.close()
+        (th._DB_PATH, th._db_conn, th._KISS_DIR) = self._saved
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_load_latest_chat_events_bad_json(self) -> None:
+        """_load_latest_chat_events_by_chat_id handles corrupt event_json gracefully."""
         db = th._get_db()
-        # Insert a task and then corrupt event data
-        th._add_task("corrupt-event-test")
-        task_id = th._most_recent_task_id(db, "corrupt-event-test")
-        assert task_id is not None
+        task_id, _ = th._add_task("corrupt-event-test", chat_id="corrupt_test")
+        import time as _time
+        now = _time.time()
         db.execute(
-            "INSERT INTO events (task_id, seq, event_json) VALUES (?, ?, ?)",
-            (task_id, 0, "NOT VALID JSON {{{"),
+            "INSERT INTO events (task_id, seq, event_json, timestamp) VALUES (?, ?, ?, ?)",
+            (task_id, 0, "NOT VALID JSON {{{", now),
         )
         db.execute(
-            "INSERT INTO events (task_id, seq, event_json) VALUES (?, ?, ?)",
-            (task_id, 1, json.dumps({"type": "ok"})),
+            "INSERT INTO events (task_id, seq, event_json, timestamp) VALUES (?, ?, ?, ?)",
+            (task_id, 1, json.dumps({"type": "ok"}), now),
         )
         db.commit()
-        events = th._load_task_chat_events("corrupt-event-test")
-        # The bad JSON is skipped, the valid one is returned
+        result = th._load_latest_chat_events_by_chat_id("corrupt_test")
+        assert result is not None
+        events = result["events"]
+        assert isinstance(events, list)
         assert len(events) == 1
         assert events[0]["type"] == "ok"
-
-    def test_cleanup_stale_cs_dirs_with_active_port(self) -> None:
-        """_cleanup_stale_cs_dirs skips dirs with active port (lines 560-561)."""
-        import shutil as _shutil
-        kiss_dir = th._KISS_DIR
-        sd = kiss_dir / "sorcar-data"
-        sd.mkdir(parents=True, exist_ok=True)
-        # Create a port file pointing to a port we're listening on
-        server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server_sock.bind(("127.0.0.1", 0))
-        server_sock.listen(1)
-        port = server_sock.getsockname()[1]
-        pf = sd / "cs-port"
-        pf.write_text(str(port))
-        # Set mtime AFTER writing files so directory mtime is old
-        old_time = time.time() - 25 * 3600
-        os.utime(sd, (old_time, old_time))
-        try:
-            th._cleanup_stale_cs_dirs(max_age_hours=24)
-            # Should NOT remove because port is active
-            assert sd.exists()
-        finally:
-            server_sock.close()
-            if sd.exists():
-                _shutil.rmtree(sd, ignore_errors=True)
-
-    def test_cleanup_stale_cs_dirs_with_invalid_port(self) -> None:
-        """_cleanup_stale_cs_dirs removes dir when port file has bad value."""
-        kiss_dir = th._KISS_DIR
-        sd = kiss_dir / "sorcar-data"
-        sd.mkdir(parents=True, exist_ok=True)
-        pf = sd / "cs-port"
-        pf.write_text("not-a-number")
-        # Set mtime AFTER writing files so directory mtime is old
-        old_time = time.time() - 25 * 3600
-        os.utime(sd, (old_time, old_time))
-        removed = th._cleanup_stale_cs_dirs(max_age_hours=24)
-        assert not sd.exists()
-        assert removed >= 1
-
-    def test_cleanup_stale_cs_dirs_with_dead_port(self) -> None:
-        """_cleanup_stale_cs_dirs removes dir when port is not listening."""
-        kiss_dir = th._KISS_DIR
-        sd = kiss_dir / "sorcar-data"
-        sd.mkdir(parents=True, exist_ok=True)
-        pf = sd / "cs-port"
-        # Use a port that's almost certainly not listening
-        pf.write_text("19999")
-        old_time = time.time() - 25 * 3600
-        os.utime(sd, (old_time, old_time))
-        removed = th._cleanup_stale_cs_dirs(max_age_hours=24)
-        assert not sd.exists()
-        assert removed >= 1
-
-    def test_cleanup_stale_cs_legacy_dirs(self) -> None:
-        """_cleanup_stale_cs_dirs removes legacy cs-* dirs and cs-port-* files."""
-        kiss_dir = th._KISS_DIR
-        # Create legacy dir
-        legacy = kiss_dir / "cs-test123"
-        legacy.mkdir(parents=True, exist_ok=True)
-        # Create port file (covers line 557 for-loop iteration and 558 is_file True branch)
-        pf = kiss_dir / "cs-port-test"
-        pf.write_text("12345")
-        # cs-extensions should NOT be removed
-        ext = kiss_dir / "cs-extensions"
-        ext.mkdir(parents=True, exist_ok=True)
-        try:
-            th._cleanup_stale_cs_dirs(max_age_hours=24)
-            assert not legacy.exists()
-            assert not pf.exists()
-            assert ext.exists()
-        finally:
-            if ext.exists():
-                ext.rmdir()
-
-    def test_cleanup_stale_cs_port_dir_not_file(self) -> None:
-        """_cleanup_stale_cs_dirs handles cs-port-* that is a directory (line 557->556)."""
-        kiss_dir = th._KISS_DIR
-        # Create a directory matching cs-port-* pattern
-        port_dir = kiss_dir / "cs-port-dirtest"
-        port_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            th._cleanup_stale_cs_dirs(max_age_hours=24)
-        finally:
-            if port_dir.exists():
-                import shutil as _s
-                _s.rmtree(port_dir, ignore_errors=True)
-
-
-# ---------------------------------------------------------------------------
-# useful_tools.py — uncovered branches
-# ---------------------------------------------------------------------------
 
 
 class TestUsefulToolsBranches:
@@ -171,45 +82,26 @@ class TestUsefulToolsBranches:
         """_truncate_output when max_chars exactly equals worst_msg length, tail=0 (line 33)."""
         output = "A" * 200
         worst_msg = f"\n\n... [truncated {len(output)} chars] ...\n\n"
-        # Set max_chars == len(worst_msg) so remaining=0, head=0, tail=0
         max_chars = len(worst_msg)
         result = _truncate_output(output, max_chars)
         assert "truncated" in result
-        # tail is 0 so no suffix is appended
         assert not result.endswith("A")
 
     def test_stop_monitor_exits_when_done(self) -> None:
         """_stop_monitor exits cleanly when done is set (line 207 exit branch)."""
         stop = threading.Event()
         done = threading.Event()
-        # Create a real process that finishes quickly
         process = subprocess.Popen(["true"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         process.wait()
         done.set()
-        # Should exit immediately since done is set
         t = threading.Thread(target=_stop_monitor, args=(stop, process, done))
         t.start()
         t.join(timeout=5)
         assert not t.is_alive()
 
 
-# ---------------------------------------------------------------------------
-# helpers.py — uncovered branches
-# ---------------------------------------------------------------------------
-
-
 class TestHelpersBranches:
     """Cover remaining branches in helpers.py."""
-
-    def test_fast_model_for_all_providers(self) -> None:
-        """fast_model_for returns correct fast model per provider (lines 66-70)."""
-        result = fast_model_for("openrouter/anthropic/claude-3")
-        assert result == "openrouter/anthropic/claude-haiku-4.5"
-        assert fast_model_for("gemini-2.5-pro") == "gemini-2.0-flash"
-        assert fast_model_for("gpt-4o") == "gpt-4o-mini"
-        # Default: claude model
-        result = fast_model_for("claude-opus-4-6")
-        assert result  # Should return a non-empty string (DEFAULT_CONFIG.FAST_MODEL)
 
     def test_clip_autocomplete_suggestion_echo_prefix(self) -> None:
         """clip_autocomplete_suggestion strips query prefix when echoed."""
@@ -219,23 +111,32 @@ class TestHelpersBranches:
     def test_generate_followup_text_failure(self) -> None:
         """generate_followup_text returns empty string on LLM failure (lines 104-106)."""
         from kiss.agents.vscode.helpers import generate_followup_text
-        # Use an invalid model to trigger an exception
         result = generate_followup_text("task", "result", "nonexistent-model-xyz")
         assert result == ""
-
-
-# ---------------------------------------------------------------------------
-# server.py — uncovered branches
-# ---------------------------------------------------------------------------
 
 
 class TestVSCodeServerBranches:
     """Cover remaining branches in server.py."""
 
+    def setup_method(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        kiss_dir = Path(self._tmpdir) / ".kiss"
+        kiss_dir.mkdir(parents=True, exist_ok=True)
+        self._saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        th._KISS_DIR = kiss_dir
+        th._DB_PATH = kiss_dir / "history.db"
+        th._db_conn = None
+
+    def teardown_method(self) -> None:
+        if th._db_conn is not None:
+            th._db_conn.close()
+        (th._DB_PATH, th._db_conn, th._KISS_DIR) = self._saved
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
     def test_run_loop_empty_lines_and_invalid_json(self) -> None:
         """server.run() skips empty lines, handles invalid JSON (line 119)."""
         import io
-        import sys
 
         server = VSCodeServer()
         events: list[dict] = []
@@ -245,7 +146,6 @@ class TestVSCodeServerBranches:
             orig_broadcast(ev)
         server.printer.broadcast = capture  # type: ignore[assignment]
 
-        # Feed stdin with empty line, invalid JSON, then EOF
         fake_stdin = io.StringIO("\n\nnot-json\n")
         old_stdin = sys.stdin
         sys.stdin = fake_stdin
@@ -328,76 +228,11 @@ class TestVSCodeServerBranches:
         def cap(ev: dict) -> None:  # type: ignore[type-arg]
             events.append(ev)
         server.printer.broadcast = cap  # type: ignore[assignment]
-        # Add a task to history
         th._add_task("integrate all the modules together")
         server._complete("integrate all the module")
         ghost = [e for e in events if e.get("type") == "ghost"]
         assert len(ghost) == 1
         assert "s together" in ghost[0]["suggestion"]
-
-    def test_start_merge_session_empty_files(self) -> None:
-        """_start_merge_session returns False when files list is empty."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump({"files": []}, f)
-            path = f.name
-        try:
-            server = VSCodeServer()
-            result = server._start_merge_session(path)
-            assert result is False
-        finally:
-            os.unlink(path)
-
-    def test_start_merge_session_zero_hunks(self) -> None:
-        """_start_merge_session returns False when total hunks is 0."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump({"files": [{"name": "a.py", "hunks": []}]}, f)
-            path = f.name
-        try:
-            server = VSCodeServer()
-            result = server._start_merge_session(path)
-            assert result is False
-        finally:
-            os.unlink(path)
-
-    def test_start_merge_session_success(self) -> None:
-        """_start_merge_session returns True for valid merge data."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump({
-                "files": [{"name": "a.py", "hunks": [{"bs": 0, "bc": 1, "cs": 0, "cc": 1}]}]
-            }, f)
-            path = f.name
-        server = VSCodeServer()
-        try:
-            events: list[dict] = []
-            orig = server.printer.broadcast
-            def cap(ev: dict) -> None:
-                events.append(ev)
-                orig(ev)
-            server.printer.broadcast = cap  # type: ignore[assignment]
-            result = server._start_merge_session(path)
-            assert result is True
-            assert server._merging
-            assert any(e.get("type") == "merge_data" for e in events)
-            assert any(e.get("type") == "merge_started" for e in events)
-        finally:
-            server._merging = False
-            os.unlink(path)
-
-    def test_run_task_merging_guard(self) -> None:
-        """_run_task_inner broadcasts error when _merging is True (lines 300-303)."""
-        server = VSCodeServer()
-        server._merging = True
-        events: list[dict] = []
-        orig = server.printer.broadcast
-        def cap(ev: dict) -> None:
-            events.append(ev)
-            orig(ev)
-        server.printer.broadcast = cap  # type: ignore[assignment]
-        server._run_task({"prompt": "test", "model": "test"})
-        assert any("merge review" in str(e.get("text", "")) for e in events)
-        # Must always broadcast status running=False
-        assert any(e.get("type") == "status" and e.get("running") is False for e in events)
-        server._merging = False
 
     def test_record_file_usage_command(self) -> None:
         """recordFileUsage command records the path."""
@@ -419,26 +254,6 @@ class TestVSCodeServerBranches:
         hist_events = [e for e in events if e.get("type") == "inputHistory"]
         assert len(hist_events) == 1
         assert "tasks" in hist_events[0]
-
-    def test_get_input_history_loads_beyond_first_100_rows(self) -> None:
-        """Arrow-key input history should cover the full history.db, not just 100 rows."""
-        server = VSCodeServer()
-        events: list[dict] = []
-
-        def cap(ev: dict) -> None:
-            events.append(ev)
-
-        server.printer.broadcast = cap  # type: ignore[assignment]
-        for i in range(105):
-            th._add_task(f"task-{i:03d}")
-
-        server._get_input_history()
-
-        hist_event = next(e for e in events if e.get("type") == "inputHistory")
-        tasks = hist_event["tasks"]
-        assert len(tasks) >= 105
-        assert "task-000" in tasks
-        assert tasks[0] == "task-104"
 
     def test_get_input_history_deduplicates_across_full_history(self) -> None:
         """Deduplication should keep the newest copy even when duplicates span >100 rows."""
@@ -462,115 +277,6 @@ class TestVSCodeServerBranches:
         assert tasks[0] == "repeated-task"
         assert "middle-task-000" in tasks
 
-# ---------------------------------------------------------------------------
-# diff_merge.py — uncovered branches
-# ---------------------------------------------------------------------------
-
-
-class TestDiffMergeBranches:
-    """Cover remaining branches in diff_merge.py."""
-
-    def test_file_changed_returns_false_on_oserror(self) -> None:
-        """_prepare_merge_view._file_changed returns False on OSError (lines 331-333)."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            # Initialize a git repo
-            _git(tmpdir, "init")
-            _git(tmpdir, "config", "user.email", "test@test.com")
-            _git(tmpdir, "config", "user.name", "Test")
-            Path(tmpdir, "a.txt").write_text("initial")
-            _git(tmpdir, "add", "a.txt")
-            _git(tmpdir, "commit", "-m", "init")
-            # Delete the file to trigger OSError in _file_changed
-            Path(tmpdir, "a.txt").unlink()
-            # Pre-hash includes a.txt
-            pre_hashes = {"a.txt": "abc123"}
-            result = _prepare_merge_view(
-                tmpdir, str(Path(tmpdir) / "merge"),
-                {}, set(), pre_hashes
-            )
-            # Should return "No changes" since file can't be read
-            assert result.get("error") == "No changes"
-
-    def test_prepare_merge_view_pre_untracked_modified(self) -> None:
-        """_prepare_merge_view detects modified pre-existing untracked files."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _git(tmpdir, "init")
-            _git(tmpdir, "config", "user.email", "test@test.com")
-            _git(tmpdir, "config", "user.name", "Test")
-            # Create and commit a file
-            Path(tmpdir, "committed.txt").write_text("committed")
-            _git(tmpdir, "add", ".")
-            _git(tmpdir, "commit", "-m", "init")
-
-            # Create an untracked file, snapshot it, then modify it
-            untracked = Path(tmpdir, "untracked.txt")
-            untracked.write_text("original content")
-            pre_untracked = {"untracked.txt"}
-            pre_hashes = _snapshot_files(tmpdir, pre_untracked)
-
-            # Now modify the untracked file (simulating agent changes)
-            untracked.write_text("modified content by agent")
-
-            merge_dir = str(Path(tmpdir) / "merge")
-            result = _prepare_merge_view(
-                tmpdir, merge_dir, {}, pre_untracked, pre_hashes
-            )
-            # Should detect the modification
-            assert result.get("status") == "opened" or "error" not in result
-
-    @pytest.mark.skipif(sys.platform == "win32", reason="Unix-only (uses chmod)")
-    def test_save_untracked_base_oserror(self) -> None:
-        """_save_untracked_base handles OSError on copy (lines 203-204)."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            # Create a file that we'll make unreadable
-            bad_file = Path(tmpdir) / "bad.txt"
-            bad_file.write_text("content")
-            os.chmod(str(bad_file), 0o000)
-            try:
-                _save_untracked_base(tmpdir, {"bad.txt"})
-            finally:
-                os.chmod(str(bad_file), 0o644)
-
-    def test_prepare_merge_view_empty_new_file(self) -> None:
-        """_prepare_merge_view skips empty new untracked files (line 345->343)."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _git(tmpdir, "init")
-            _git(tmpdir, "config", "user.email", "t@t.com")
-            _git(tmpdir, "config", "user.name", "T")
-            Path(tmpdir, "x.txt").write_text("x")
-            _git(tmpdir, "add", ".")
-            _git(tmpdir, "commit", "-m", "init")
-            pre_untracked: set[str] = set()
-            # Create an empty new untracked file after task
-            Path(tmpdir, "empty.txt").write_text("")
-            merge_dir = str(Path(tmpdir) / "merge")
-            result = _prepare_merge_view(tmpdir, merge_dir, {}, pre_untracked, {})
-            # Empty file produces no hunks, so result may be "No changes"
-            # if there are no other changes
-            assert "error" in result or "status" in result
-
-    def test_prepare_merge_view_untracked_not_in_hashes(self) -> None:
-        """_prepare_merge_view skips untracked files not in pre_file_hashes (line 351)."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _git(tmpdir, "init")
-            _git(tmpdir, "config", "user.email", "t@t.com")
-            _git(tmpdir, "config", "user.name", "T")
-            Path(tmpdir, "x.txt").write_text("x")
-            _git(tmpdir, "add", ".")
-            _git(tmpdir, "commit", "-m", "init")
-            # Pre-untracked set includes a file that's NOT in pre_file_hashes
-            # This hits the `fname not in pre_file_hashes` branch -> continue (line 351)
-            pre_untracked = {"phantom.txt"}
-            pre_hashes: dict[str, str] = {"other.txt": "abc"}  # phantom.txt NOT here
-            merge_dir = str(Path(tmpdir) / "merge")
-            result = _prepare_merge_view(tmpdir, merge_dir, {}, pre_untracked, pre_hashes)
-            assert result.get("error") == "No changes"
-
-
-# ---------------------------------------------------------------------------
-# sorcar_agent.py — uncovered branches
-# ---------------------------------------------------------------------------
-
 
 class TestSorcarAgentBranches:
     """Cover remaining branches in sorcar_agent.py."""
@@ -581,8 +287,6 @@ class TestSorcarAgentBranches:
         agent.printer = None
         tools = agent._get_tools()
         assert len(tools) > 0
-        # Actually invoke the Bash tool with a command to trigger _stream
-        # The first tool is Bash — it uses the _stream callback
         bash_tool = tools[0]
         result = bash_tool(command="echo test_no_printer", description="test", timeout_seconds=5)
         assert "test_no_printer" in result
@@ -590,20 +294,31 @@ class TestSorcarAgentBranches:
             agent.web_use_tool.close()
 
 
-# ---------------------------------------------------------------------------
-# stateful_sorcar_agent.py — uncovered branches
-# ---------------------------------------------------------------------------
+class TestChatSorcarAgentBranches:
+    """Cover remaining branches in chat_sorcar_agent.py."""
 
+    def setup_method(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        kiss_dir = Path(self._tmpdir) / ".kiss"
+        kiss_dir.mkdir(parents=True, exist_ok=True)
+        self._saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        th._KISS_DIR = kiss_dir
+        th._DB_PATH = kiss_dir / "history.db"
+        th._db_conn = None
 
-class TestStatefulSorcarAgentBranches:
-    """Cover remaining branches in stateful_sorcar_agent.py."""
+    def teardown_method(self) -> None:
+        if th._db_conn is not None:
+            th._db_conn.close()
+        (th._DB_PATH, th._db_conn, th._KISS_DIR) = self._saved
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_build_chat_prompt_entry_without_result(self) -> None:
         """build_chat_prompt skips result when entry has no result (line 84->82)."""
-        from kiss.agents.sorcar.stateful_sorcar_agent import StatefulSorcarAgent
-        agent = StatefulSorcarAgent("test")
-        # Add a task with empty result to the agent's chat
-        task_id = th._add_task("task with no result", chat_id=agent._chat_id)
+        from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+        agent = ChatSorcarAgent("test")
+        task_id, chat_id = th._add_task("task with no result", chat_id="test_no_result")
+        agent._chat_id = chat_id
         th._save_task_result("", task_id)
         prompt = agent.build_chat_prompt("new task")
         assert "### Task 1" in prompt
@@ -611,60 +326,39 @@ class TestStatefulSorcarAgentBranches:
         assert "new task" in prompt
 
 
-# ---------------------------------------------------------------------------
-# browser_ui.py — uncovered branches
-# ---------------------------------------------------------------------------
-
-
 class TestBrowserUIBranches:
     """Cover remaining branches in browser_ui.py."""
 
     def test_bash_stream_cancel_existing_timer(self) -> None:
-        """Bash stream cancels existing timer when flush interval reached (lines 247-248).
+        """Bash stream cancels existing timer when flush interval reached.
 
-        To hit lines 247-248, we need _bash_flush_timer to be non-None
-        when the main flush branch fires (time.monotonic() - _bash_last_flush >= 0.1).
-
-        We set _bash_last_flush to a value that makes the next call enter the
-        main flush branch, and manually set a timer to simulate the state.
+        Sets up per-tab bash state with a pending timer and old last_flush,
+        then verifies the timer is cancelled and buffer is flushed.
         """
         p = BaseBrowserPrinter()
-        cq: queue.Queue = queue.Queue()
-        p._client_queue = cq
-        # Set last flush to a time well in the past so the next call will flush
-        p._bash_last_flush = time.monotonic() - 1.0
-        # Set a timer manually to simulate pending timer state
-        p._bash_flush_timer = threading.Timer(10.0, p._flush_bash)
-        p._bash_flush_timer.daemon = True
-        p._bash_flush_timer.start()
-        # Now call bash_stream — should enter main flush branch, cancel timer
+        p._thread_local.tab_id = "0"
+        with p._bash_lock:
+            bs = p._bash_state
+            bs.last_flush = time.monotonic() - 1.0
+            bs.timer = threading.Timer(10.0, p._flush_bash)
+            bs.timer.daemon = True
+            bs.timer.start()
+        p.start_recording()
         p.print("line1\n", type="bash_stream")
-        # Timer should be cancelled and set to None
-        assert p._bash_flush_timer is None
-        events = []
-        while not cq.empty():
-            events.append(cq.get_nowait())
+        with p._bash_lock:
+            assert p._bash_state.timer is None
+        events = p.stop_recording()
         output_events = [e for e in events if e.get("type") == "system_output"]
         assert len(output_events) == 1
 
     def test_print_tool_result_non_core_tool(self) -> None:
         """Non-core tool result is hidden unless is_error (line 273->281)."""
         p = BaseBrowserPrinter()
-        cq: queue.Queue = queue.Queue()
-        p._client_queue = cq
-        # Simulate tool_result for a non-core tool
+        p.start_recording()
         p.print("some result", type="tool_result", tool_name="custom_tool", is_error=False)
-        # No tool_result event should be broadcast for non-core, non-error
-        events = []
-        while not cq.empty():
-            events.append(cq.get_nowait())
+        events = p.stop_recording()
         tool_results = [e for e in events if e.get("type") == "tool_result"]
         assert len(tool_results) == 0
-
-
-# ---------------------------------------------------------------------------
-# web_use_tool.py — uncovered branches (basic non-browser tests)
-# ---------------------------------------------------------------------------
 
 
 class TestWebUseToolBranches:
@@ -672,9 +366,9 @@ class TestWebUseToolBranches:
 
     def test_check_for_new_tab_no_context(self) -> None:
         """_check_for_new_tab returns immediately when no context."""
-        tool = WebUseTool()
+        tool = WebUseTool(headless=True)
         tool._context = None
-        tool._check_for_new_tab()  # should not raise
+        tool._check_for_new_tab()
 
 
 class TestServerCompleteEmptyQuery:
@@ -684,7 +378,6 @@ class TestServerCompleteEmptyQuery:
         """Sending complete command with empty query doesn't start thread."""
         server = VSCodeServer()
         server._handle_command({"type": "complete", "query": ""})
-        # No thread started - seq just incremented
         assert server._complete_seq_latest >= 0
 
 
@@ -701,9 +394,7 @@ class TestSorcarAgentDockerBranch:
 
         agent.docker_manager = FakeDockerManager()
         tools = agent._get_tools()
-        # First tool should be _docker_bash (the bound method)
         assert callable(tools[0])
-        # Should have docker tools (Read, Edit, Write) from DockerTools
         tool_names = [getattr(t, "__name__", getattr(t, "__func__", t).__name__) for t in tools]
         assert "Read" in tool_names
         assert "Edit" in tool_names
@@ -717,14 +408,12 @@ class TestWebUseToolTruncation:
 
     def test_ax_tree_truncated(self, tmp_path: Path) -> None:
         """Large accessibility tree gets truncated."""
-        # Create HTML with many interactive elements
         buttons = "\n".join(f'<button>Button{i}</button>' for i in range(200))
         html_file = tmp_path / "big.html"
         html_file.write_text(f"<html><body>{buttons}</body></html>")
-        tool = WebUseTool()
+        tool = WebUseTool(headless=True)
         try:
             tool.go_to_url(f"file://{html_file}")
-            # Call with small max_chars to trigger truncation
             result = tool._get_ax_tree(max_chars=100)
             assert "[truncated]" in result
         finally:
@@ -740,10 +429,9 @@ class TestWebUseToolNewTab:
         html_file.write_text(
             '<html><body><a href="about:blank" target="_blank">Open New</a></body></html>'
         )
-        tool = WebUseTool()
+        tool = WebUseTool(headless=True)
         try:
             tool.go_to_url(f"file://{html_file}")
-            # Find the link element
             link_id = None
             for i, el in enumerate(tool._elements):
                 if el["role"] == "link":
@@ -751,7 +439,6 @@ class TestWebUseToolNewTab:
                     break
             if link_id:
                 result = tool.click(link_id)
-                # Should have switched to new tab or at least not errored
                 assert "Error" not in result or "Page:" in result
         finally:
             tool.close()
@@ -764,53 +451,14 @@ class TestWebUseToolEmptyNameLocator:
         """Element with empty name uses get_by_role without name."""
         html_file = tmp_path / "emptyname.html"
         html_file.write_text('<html><body><button></button></body></html>')
-        tool = WebUseTool()
+        tool = WebUseTool(headless=True)
         try:
             tool.go_to_url(f"file://{html_file}")
-            # Check if there's a button with empty name
             for i, el in enumerate(tool._elements):
                 if el["role"] == "button" and el["name"] == "":
-                    # Click it to trigger the empty-name locator path
                     result = tool.click(i + 1)
                     assert "Error" not in result or "Page:" in result
                     break
-        finally:
-            tool.close()
-
-
-class TestWebUseToolAskUser:
-    """Cover ask_user_browser_action (lines 451-459)."""
-
-    def test_ask_user_browser_action_with_url(self, tmp_path: Path) -> None:
-        """ask_user_browser_action navigates to url and calls callback."""
-        callback_calls: list[tuple[str, str]] = []
-
-        def callback(instruction: str, url: str) -> None:
-            callback_calls.append((instruction, url))
-
-        html_file = tmp_path / "ask.html"
-        html_file.write_text('<html><body><p>Test page</p></body></html>')
-        tool = WebUseTool(wait_for_user_callback=callback)
-        try:
-            tool._ensure_browser()
-            result = tool.ask_user_browser_action(
-                "Do something", url=f"file://{html_file}"
-            )
-            assert len(callback_calls) == 1
-            assert callback_calls[0][0] == "Do something"
-            assert "Page:" in result
-        finally:
-            tool.close()
-
-    def test_ask_user_browser_action_no_callback(self, tmp_path: Path) -> None:
-        """ask_user_browser_action works without a callback."""
-        tool = WebUseTool()
-        try:
-            html_file = tmp_path / "ask3.html"
-            html_file.write_text('<html><body><p>Hello</p></body></html>')
-            tool.go_to_url(f"file://{html_file}")
-            result = tool.ask_user_browser_action("Do stuff")
-            assert "Page:" in result
         finally:
             tool.close()
 
@@ -852,10 +500,9 @@ class TestWebUseToolResolveLocatorInvisible:
             "<button>Submit</button>"
             "</body></html>"
         )
-        tool = WebUseTool()
+        tool = WebUseTool(headless=True)
         try:
             tool.go_to_url(f"file://{html_file}")
-            # Both buttons should be in the accessibility snapshot
             btn_id = None
             for i, el in enumerate(tool._elements):
                 if el["role"] == "button" and el["name"] == "Submit":

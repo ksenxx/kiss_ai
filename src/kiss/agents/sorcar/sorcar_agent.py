@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import argparse
-import sys
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +15,7 @@ from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.agents.sorcar.web_use_tool import WebUseTool
 from kiss.core.base import SYSTEM_PROMPT
 from kiss.core.models.model import Attachment
+from kiss.core.models.model_info import get_default_model
 from kiss.core.printer import Printer
 from kiss.core.relentless_agent import RelentlessAgent
 
@@ -26,8 +27,8 @@ class SorcarAgent(RelentlessAgent):
         super().__init__(name)
         self.web_use_tool: WebUseTool | None = None
         self.docker_manager: Any = None
-        self._wait_for_user_callback: Callable[[str, str], None] | None = None
         self._use_web_tools: bool = True
+        self._is_parallel: bool = False
 
     def _get_tools(self) -> list:
         """Build tool list, using DockerTools when docker_manager is active.
@@ -70,9 +71,55 @@ class SorcarAgent(RelentlessAgent):
         else:
             tools = [useful_tools.Bash, useful_tools.Read, useful_tools.Edit, useful_tools.Write]
         if self._use_web_tools and self.web_use_tool is None:
-            self.web_use_tool = WebUseTool(wait_for_user_callback=self._wait_for_user_callback)
+            self.web_use_tool = WebUseTool()
             tools.extend(self.web_use_tool.get_tools())
+        def run_parallel(tasks: list[str], max_workers: int | None = None) -> str:
+            """Run multiple independent tasks concurrently using parallel agents.
+
+            Spawns a separate SorcarAgent for each task string and executes
+            them in parallel threads.  Use this tool when you have two or
+            more **independent** sub-tasks that do not depend on each
+            other's results (e.g. summarising several files, researching
+            separate topics, running independent code changes).
+
+            Each parallel agent inherits the current model and working
+            directory.  Results are returned in the same order as the
+            input tasks.
+
+            **When NOT to use**: Do not use this for tasks that must run
+            sequentially or that depend on each other's output.
+
+            Args:
+                tasks: List of task description strings.  Each string is a
+                    complete, self-contained instruction that a fresh
+                    SorcarAgent can execute on its own.  Example::
+
+                        [
+                            "Read src/foo.py and summarize its purpose",
+                            "Read src/bar.py and summarize its purpose",
+                            "Find the current weather in San Francisco",
+                        ]
+                max_workers: Maximum number of concurrent threads.
+                    ``None`` (default) lets Python choose automatically.
+                    Set to a lower number to limit concurrency.
+
+            Returns:
+                A YAML-formatted string containing a list of result
+                objects, one per task, in the same order as the input.
+                Each result object has ``success`` and ``summary`` keys.
+            """
+            results = run_tasks_parallel(
+                tasks,
+                max_workers=max_workers,
+                model=getattr(self, "model_name", None),
+                work_dir=getattr(self, "work_dir", None),
+            )
+            result_str: str = yaml.dump(results, sort_keys=False)
+            return result_str
+
         tools.append(ask_user_question)
+        if self._is_parallel:
+            tools.append(run_parallel)
         return tools
 
     def perform_task(
@@ -103,7 +150,7 @@ class SorcarAgent(RelentlessAgent):
         printer: Printer | None = None,
         verbose: bool | None = None,
     ) -> None:
-        resolved_model = model_name or _load_last_model() or "claude-opus-4-6"
+        resolved_model = model_name or _load_last_model() or get_default_model()
         _save_last_model(resolved_model)
         super()._reset(
             model_name=resolved_model,
@@ -131,10 +178,10 @@ class SorcarAgent(RelentlessAgent):
         max_sub_sessions: int | None = None,
         docker_image: str | None = None,
         web_tools: bool = True,
+        is_parallel: bool = False,
         verbose: bool | None = None,
         current_editor_file: str | None = None,
         attachments: list[Attachment] | None = None,
-        wait_for_user_callback: Callable[[str, str], None] | None = None,
         ask_user_question_callback: Callable[[str], str] | None = None,
     ) -> str:
         """Run the assistant agent with coding tools and browser automation.
@@ -153,24 +200,21 @@ class SorcarAgent(RelentlessAgent):
             docker_image: Docker image name to run tools inside a container.
             web_tools: Whether to include browser/web tools. Defaults to True.
                 Set to False for terminal-only environments.
+            is_parallel: Whether to include the run_parallel tool. Defaults to False.
+                When True, the agent can spawn parallel sub-agents for independent tasks.
             verbose: Whether to print output to console. Defaults to config verbose setting.
             current_editor_file: Path to the currently active editor file, appended to prompt.
             attachments: Optional file attachments (images, PDFs) for the initial prompt.
-            wait_for_user_callback: Optional callback used by browser tools when user
-                action is required.
             ask_user_question_callback: Optional callback used by the ask_user_question
                 tool to collect a text response from the user.
 
         Returns:
             YAML string with 'success' and 'summary' keys.
         """
-        self._wait_for_user_callback = wait_for_user_callback
         self._ask_user_question_callback = ask_user_question_callback
         self._use_web_tools = web_tools
-        # Lazy-initialized when web tools are first accessed via _get_tools()
+        self._is_parallel = is_parallel
         self.web_use_tool = None
-        # Extract the per-thread stop event from the printer so UsefulTools
-        # can monitor it and kill child processes when the agent is stopped.
         tl = getattr(printer, "_thread_local", None) if printer else None
         self._stop_event = getattr(tl, "stop_event", None) if tl else None
 
@@ -183,11 +227,17 @@ class SorcarAgent(RelentlessAgent):
             if attachments:
                 pdf_count = sum(1 for a in attachments if a.mime_type == "application/pdf")
                 img_count = sum(1 for a in attachments if a.mime_type.startswith("image/"))
+                audio_count = sum(1 for a in attachments if a.mime_type.startswith("audio/"))
+                video_count = sum(1 for a in attachments if a.mime_type.startswith("video/"))
                 parts = []
                 if img_count:
                     parts.append(f"{img_count} image(s)")
                 if pdf_count:
                     parts.append(f"{pdf_count} PDF(s)")
+                if audio_count:
+                    parts.append(f"{audio_count} audio file(s)")
+                if video_count:
+                    parts.append(f"{video_count} video file(s)")
                 if parts:
                     prompt += (
                         f"\n\n# Important\n - User attached {', '.join(parts)}. "
@@ -222,47 +272,65 @@ class SorcarAgent(RelentlessAgent):
             if self.web_use_tool:
                 self.web_use_tool.close()
             self.web_use_tool = None
-            self._wait_for_user_callback = None
             self._ask_user_question_callback = None
 
 
-def _build_arg_parser() -> argparse.ArgumentParser:
-    """Build and return the argument parser for main().
+def run_tasks_parallel(
+    tasks: list[str],
+    max_workers: int | None = None,
+    model: str | None = None,
+    work_dir: str | None = None,
+) -> list[str]:
+    """Execute multiple SorcarAgent tasks concurrently using threads.
+
+    Each task gets its own ``SorcarAgent`` instance and runs in a separate
+    thread via :class:`~concurrent.futures.ThreadPoolExecutor`.  This is
+    ideal for I/O-bound workloads (LLM API calls, network requests) where
+    the GIL is released during I/O waits.
+
+    Args:
+        tasks: List of task description strings.  Each string is passed as
+            the ``prompt_template`` argument to :meth:`SorcarAgent.run`.
+            Example::
+
+                [
+                    "Summarize file A",
+                    "Summarize file B",
+                ]
+        max_workers: Maximum number of threads.  ``None`` lets
+            :class:`~concurrent.futures.ThreadPoolExecutor` pick a default
+            (typically ``min(32, cpu_count + 4)``).
+        model: LLM model name for all parallel agents.  ``None`` uses the
+            default from persistence (same as :meth:`SorcarAgent.run`).
+        work_dir: Working directory for all parallel agents.  ``None`` uses
+            the default (``artifact_dir/kiss_workdir``).
 
     Returns:
-        Configured ArgumentParser instance.
+        List of YAML result strings in the **same order** as *tasks*.
+        Each string contains ``success`` and ``summary`` keys.  If a task
+        raises an unhandled exception the corresponding entry is a YAML
+        string with ``success: false`` and the traceback in ``summary``.
     """
-    parser = argparse.ArgumentParser(description="Run SorcarAgent demo")
-    parser.add_argument(
-        "-m", "--model_name", type=str, default="claude-opus-4-6", help="LLM model name"
-    )
-    parser.add_argument(
-        "-e", "--endpoint", type=str, default=None, help="Custom endpoint for local model"
-    )
-    parser.add_argument(
-        "-b", "--max_budget", type=float, default=100.0, help="Maximum budget in USD"
-    )
-    parser.add_argument("-w", "--work_dir", type=str, default=None, help="Working directory")
-    parser.add_argument(
-        "-v", "--verbose",
-        type=lambda x: str(x).lower() == "true",
-        default=True,
-        help="Print output to console",
-    )
-    parser.add_argument(
-        "--no-web",
-        action="store_true",
-        default=False,
-        help="Disable browser/web tools (terminal-only mode)",
-    )
-    parser.add_argument(
-        "-t", "--task", type=str, default=None, help="Prompt template/task description"
-    )
-    parser.add_argument(
-        "-f", "--file", type=str, default=None,
-        help="Path to a file whose contents to use as the task",
-    )
-    return parser
+
+    def _run_single(task: str) -> str:
+        agent = SorcarAgent(f"Parallel-{task[:40]}")
+        try:
+            result: str = agent.run(
+                prompt_template=task,
+                model_name=model,
+                work_dir=work_dir,
+            )
+            return result
+        except Exception as exc:
+            error_result: str = yaml.dump(
+                {"success": False, "summary": f"Unhandled exception: {exc}"},
+                sort_keys=False,
+            )
+            return error_result
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        results = list(pool.map(_run_single, tasks))
+    return results
 
 
 _DEFAULT_TASK = """
@@ -292,19 +360,6 @@ def _resolve_task(args: argparse.Namespace) -> str:
     return _DEFAULT_TASK
 
 
-def cli_wait_for_user(instruction: str, url: str) -> None:
-    """CLI callback for browser-action prompts (prints and waits for Enter).
-
-    Args:
-        instruction: What the user should do.
-        url: Current browser URL (printed if non-empty).
-    """
-    print(f"\n>>> Browser action needed: {instruction}")
-    if url:
-        print(f"    Current URL: {url}")
-    input("Press Enter when done... ")
-
-
 def cli_ask_user_question(question: str) -> str:
     """CLI callback for agent questions (prints and reads from stdin).
 
@@ -318,63 +373,3 @@ def cli_ask_user_question(question: str) -> str:
     return input("Your answer: ")
 
 
-def main() -> None:  # pragma: no cover – CLI entry point requires API
-    import time as time_mod
-
-
-    if len(sys.argv) <= 1:
-        print("Usage: sorcar_agent.py [-m MODEL_NAME] [-e ENDPOINT] [-b MAX_BUDGET] "
-              "[-w WORK_DIR] [-v true/false] "
-              "[-t TASK_DESCRIPTION] [-f TASK_FILE]")
-        sys.exit(1)
-    parser = _build_arg_parser()
-    agent = SorcarAgent("Sorcar Agent")
-    try:
-        args = parser.parse_args()
-    except Exception:
-        task_description = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else ""
-        work_dir = str(Path(".").resolve())
-        run_kwargs: dict[str, Any] = {
-            "prompt_template": task_description,
-            "work_dir": work_dir,
-            "wait_for_user_callback": cli_wait_for_user,
-            "ask_user_question_callback": cli_ask_user_question,
-        }
-    else:
-        task_description = _resolve_task(args)
-        if args.work_dir is not None:
-            work_dir = args.work_dir
-            Path(work_dir).mkdir(parents=True, exist_ok=True)
-        else:
-            work_dir = str(Path(".").resolve())
-        model_config = {}
-        if args.endpoint:
-            model_config["base_url"] = args.endpoint
-        run_kwargs = {
-            "prompt_template": task_description,
-            "model_name": args.model_name,
-            "max_budget": args.max_budget,
-            "model_config": model_config,
-            "work_dir": work_dir,
-            "web_tools": not args.no_web,
-            "verbose": args.verbose,
-            "wait_for_user_callback": cli_wait_for_user,
-            "ask_user_question_callback": cli_ask_user_question,
-        }
-
-    start_time = time_mod.time()
-    result = agent.run(**run_kwargs)
-    elapsed = time_mod.time() - start_time
-
-    print("FINAL RESULT:")
-    result_data = yaml.safe_load(result)
-    print("Completed successfully: " + str(result_data["success"]))
-    print(result_data["summary"])
-    print("Work directory was: " + work_dir)
-    print(f"Time: {elapsed:.1f}s")
-    print(f"Cost: ${agent.budget_used:.4f}")
-    print(f"Total tokens: {agent.total_tokens_used}")
-
-
-if __name__ == "__main__":
-    main()

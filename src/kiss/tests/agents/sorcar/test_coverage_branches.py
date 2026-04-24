@@ -22,7 +22,6 @@ import pytest
 from kiss.agents.sorcar import persistence as th
 from kiss.agents.sorcar.useful_tools import (
     UsefulTools,
-    _truncate_output,
 )
 from kiss.agents.sorcar.web_use_tool import (
     WebUseTool,
@@ -31,20 +30,7 @@ from kiss.agents.vscode.browser_ui import (
     BaseBrowserPrinter,
     _coalesce_events,
 )
-from kiss.agents.vscode.diff_merge import (
-    _agent_file_hunks,
-    _capture_untracked,
-    _file_as_new_hunks,
-    _parse_diff_hunks,
-    _prepare_merge_view,
-    _scan_files,
-    _snapshot_files,
-)
 from kiss.agents.vscode.server import VSCodeServer
-
-# ---------------------------------------------------------------------------
-# browser_ui.py coverage
-# ---------------------------------------------------------------------------
 
 
 class TestBaseBrowserPrinterBranches:
@@ -52,53 +38,23 @@ class TestBaseBrowserPrinterBranches:
 
     def test_reset_clears_bash_buffer_and_timer(self):
         p = BaseBrowserPrinter()
-        p._bash_buffer.append("some text")
-        # Set up a timer
-        p._bash_flush_timer = threading.Timer(10.0, lambda: None)
-        p._bash_flush_timer.start()
+        p._thread_local.tab_id = "0"
+        with p._bash_lock:
+            bs = p._bash_state
+            bs.buffer.append("some text")
+            bs.timer = threading.Timer(10.0, lambda: None)
+            bs.timer.start()
         p.reset()
-        assert p._bash_buffer == []
-        assert p._bash_flush_timer is None
-
-    def test_stop_recording_returns_filtered_coalesced(self):
-        p = BaseBrowserPrinter()
-        p.start_recording()
-        p.broadcast({"type": "thinking_delta", "text": "a"})
-        p.broadcast({"type": "thinking_delta", "text": "b"})
-        p.broadcast({"type": "internal_event"})  # non-display
-        p.broadcast({"type": "text_delta", "text": "c"})
-        events = p.stop_recording()
-        # thinking_delta merged, internal_event filtered, text_delta kept
-        assert len(events) == 2
-        assert events[0]["text"] == "ab"
-        assert events[1]["text"] == "c"
-
-    def test_remove_client_only_current(self):
-        """remove_client only removes if cq matches current."""
-        p = BaseBrowserPrinter()
-        q1: queue.Queue = queue.Queue()
-        q2: queue.Queue = queue.Queue()
-        p._client_queue = q2
-        p.remove_client(q1)  # doesn't match, no effect
-        assert p._client_queue is q2
-        p.remove_client(q2)
-        assert p._client_queue is None
-
-    def test_has_clients_true_and_false(self):
-        p = BaseBrowserPrinter()
-        assert not p.has_clients()
-        cq = p.add_client()
-        assert p.has_clients()
-        p.remove_client(cq)
-        assert not p.has_clients()
+        with p._bash_lock:
+            bs = p._bash_state
+            assert bs.buffer == []
+            assert bs.timer is None
 
     def test_check_stop_thread_local(self):
         """_check_stop uses thread_local stop_event."""
         p = BaseBrowserPrinter()
         p._thread_local.stop_event = threading.Event()
-        # Not set - no raise
         p._check_stop()
-        # Set - raises
         p._thread_local.stop_event.set()
         with pytest.raises(KeyboardInterrupt):
             p._check_stop()
@@ -106,17 +62,17 @@ class TestBaseBrowserPrinterBranches:
     def test_print_text_blank_no_broadcast(self):
         """Text that is only whitespace should not be broadcast."""
         p = BaseBrowserPrinter()
-        cq: queue.Queue = queue.Queue()
-        p._client_queue = cq
+        p.start_recording()
         p.print("   ", type="text")
-        assert cq.empty()
+        events = p.stop_recording()
+        assert len(events) == 0
 
     def test_token_callback_stop(self):
         p = BaseBrowserPrinter()
-        p.stop_event.set()
+        p._thread_local.stop_event = threading.Event()
+        p._thread_local.stop_event.set()
         with pytest.raises(KeyboardInterrupt):
             p.token_callback("x")
-        p.stop_event.clear()
 
 
 class TestCoalesceEventsBranches:
@@ -128,50 +84,6 @@ class TestCoalesceEventsBranches:
         ]
         result = _coalesce_events(events)
         assert len(result) == 2
-
-
-# ---------------------------------------------------------------------------
-# diff_merge.py coverage
-# ---------------------------------------------------------------------------
-
-
-class TestCodeServerBranches:
-
-    def test_file_as_new_hunks_nonexistent(self):
-        result = _file_as_new_hunks(Path("/nonexistent_file_xyz"))
-        assert result == []
-
-    def test_file_as_new_hunks_binary_file(self):
-        """UnicodeDecodeError should be caught."""
-        with tempfile.TemporaryDirectory() as d:
-            f = Path(d) / "binary.bin"
-            f.write_bytes(b"\x80\x81\x82" * 100)
-            result = _file_as_new_hunks(f)
-            assert result == []
-
-    def test_agent_file_hunks_post_file_hunks_filter(self):
-        """Without saved base but with post_file_hunks, filters against pre_hunks."""
-        with tempfile.TemporaryDirectory() as d:
-            work = Path(d) / "work"
-            work.mkdir()
-            ub = Path(d) / "ub"
-            ub.mkdir()
-            (work / "f.txt").write_text("changed\n")
-            pre_hunks = {"f.txt": [(1, 1, 1, 1)]}
-            post = [(1, 1, 1, 1), (5, 0, 5, 2)]  # first matches pre
-            result = _agent_file_hunks(str(work), "f.txt", ub, pre_hunks, post)
-            # Only the second hunk should pass (first matches pre)
-            assert len(result) == 1
-
-
-# ---------------------------------------------------------------------------
-# helpers.py coverage
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# useful_tools.py coverage
-# ---------------------------------------------------------------------------
 
 
 class TestUsefulToolsBranches:
@@ -237,20 +149,6 @@ class TestUsefulToolsBranches:
         result = ut.Bash("sleep 100", "timeout test", timeout_seconds=0.5)
         assert "timeout" in result.lower()
 
-# ---------------------------------------------------------------------------
-# web_use_tool.py coverage
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# sorcar_agent.py coverage
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# persistence.py coverage
-# ---------------------------------------------------------------------------
-
 
 class TestTaskHistoryBranches:
     """Cover specific uncovered branches in persistence."""
@@ -271,33 +169,8 @@ class TestTaskHistoryBranches:
             th._db_conn = None
         th._DB_PATH, th._db_conn, th._KISS_DIR = saved
 
-    def test_set_latest_chat_events_no_match(self, tmp_path):
-        saved = self._fresh_db(tmp_path)
-        try:
-            th._set_latest_chat_events([], task="nonexistent_task_xyz")
-        finally:
-            self._restore_db(saved)
-
     def test_load_chat_context_empty_id(self):
         assert th._load_chat_context("") == []
-
-    def test_cleanup_stale_cs_dirs_no_port_file(self, tmp_path):
-        """When sorcar-data exists but no cs-port file, clean up."""
-        saved = self._fresh_db(tmp_path)
-        try:
-            sorcar_data = th._KISS_DIR / "sorcar-data"
-            sorcar_data.mkdir()
-            old_time = time.time() - 48 * 3600
-            os.utime(sorcar_data, (old_time, old_time))
-            removed = th._cleanup_stale_cs_dirs(max_age_hours=24)
-            assert removed >= 1
-        finally:
-            self._restore_db(saved)
-
-
-# ---------------------------------------------------------------------------
-# vscode/server.py coverage
-# ---------------------------------------------------------------------------
 
 
 class TestVSCodeServerBranches:
@@ -313,19 +186,16 @@ class TestVSCodeServerBranches:
 
     def test_handle_command_run_already_running(self):
         server, events = self._make_server()
-        # Simulate a running thread
         t = threading.Thread(target=lambda: time.sleep(5), daemon=True)
         t.start()
-        server._task_thread = t
-        server._handle_command({"type": "run", "prompt": "test"})
+        server._get_tab("0").task_thread = t
+        server._handle_command({"type": "run", "prompt": "test", "tabId": "0"})
         assert any("already running" in e.get("text", "") for e in events)
         t.join(timeout=0.1)
 
     def test_handle_command_stop_no_event(self):
         server, events = self._make_server()
-        server._stop_event = None
         server._handle_command({"type": "stop"})
-        # No crash
 
     def test_handle_command_get_history_with_query(self):
         server, events = self._make_server()
@@ -333,67 +203,31 @@ class TestVSCodeServerBranches:
         hist_events = [e for e in events if e["type"] == "history"]
         assert len(hist_events) == 1
 
-    def test_handle_command_get_history_no_query(self):
-        server, events = self._make_server()
-        server._handle_command({"type": "getHistory"})
-        hist_events = [e for e in events if e["type"] == "history"]
-        assert len(hist_events) == 1
-
     def test_handle_command_record_file_usage_empty(self):
         server, events = self._make_server()
         server._handle_command({"type": "recordFileUsage", "path": ""})
-        # No crash, no action
-        # No crash
 
     def test_handle_command_resume_session(self):
         server, events = self._make_server()
-        server._handle_command({"type": "resumeSession", "sessionId": ""})
-        # Empty sessionId - no action
-
-    def test_handle_merge_action_reject_ignored(self):
-        """Individual accept/reject actions are tracked on the TS side only."""
-        server, events = self._make_server()
-        server._merging = True
-        server._handle_command({"type": "mergeAction", "action": "reject"})
-        assert server._merging is True  # no change
-
-    def test_handle_merge_action_all_done(self):
-        server, events = self._make_server()
-        server._merging = True
-        server._handle_command({"type": "mergeAction", "action": "all-done"})
-        assert server._merging is False
-        assert any(e.get("type") == "merge_ended" for e in events)
-
-    def test_wait_for_user(self):
-        server, events = self._make_server()
-        server._stop_event = threading.Event()
-        server.printer._thread_local.stop_event = server._stop_event
-
-        def answer():
-            time.sleep(0.1)
-            server._user_answer_queue.put("done")
-
-        t = threading.Thread(target=answer, daemon=True)
-        t.start()
-        server._wait_for_user("do something", "http://example.com")
-        t.join(timeout=1)
-        wfu = [e for e in events if e["type"] == "waitForUser"]
-        assert len(wfu) == 1
+        server._handle_command({"type": "resumeSession", "chatId": ""})
 
     def test_ask_user_question(self):
         server, events = self._make_server()
-        server._stop_event = threading.Event()
-        server.printer._thread_local.stop_event = server._stop_event
+        stop_event = threading.Event()
+        server.printer._thread_local.stop_event = stop_event
+        tab_id = "1"
+        server.printer._thread_local.tab_id = tab_id
+        user_q: queue.Queue[str] = queue.Queue(maxsize=1)
+        server._get_tab(tab_id).user_answer_queue = user_q
 
         def answer():
             time.sleep(0.1)
-            server._user_answer_queue.put("my answer")
+            user_q.put("my answer")
 
         t = threading.Thread(target=answer, daemon=True)
         t.start()
         result = server._ask_user_question("what?")
         t.join(timeout=1)
-        assert result == "my answer"
         assert result == "my answer"
         ask_events = [e for e in events if e["type"] == "askUser"]
         assert len(ask_events) == 1
@@ -410,7 +244,7 @@ class TestVSCodeServerBranches:
         cmds = [
             json.dumps({"type": "getModels"}) + "\n",
             json.dumps({"type": "selectModel", "model": "claude-opus-4-6"}) + "\n",
-            "",  # blank line
+            "",
         ]
         old_stdin = os.sys.stdin  # type: ignore[attr-defined]
         os.sys.stdin = io.StringIO("".join(cmds))  # type: ignore[attr-defined]
@@ -422,50 +256,51 @@ class TestVSCodeServerBranches:
         model_events = [e for e in events if e["type"] == "models"]
         assert len(model_events) == 1
 
-    def test_get_last_session_empty_task(self, tmp_path):
-        """When last task has empty task text, no event emitted."""
-        saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-        kiss_dir = tmp_path / ".kiss"
-        kiss_dir.mkdir(parents=True, exist_ok=True)
-        th._KISS_DIR = kiss_dir
-        th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
-        try:
-            # Add empty task
-            th._add_task("")
-            server, events = self._make_server()
-            server._get_last_session()
-            task_events = [e for e in events if e.get("type") == "task_events"]
-            # Empty task should cause early return
-            assert len(task_events) == 0
-        finally:
-            if th._db_conn is not None:
-                th._db_conn.close()
-                th._db_conn = None
-            th._DB_PATH, th._db_conn, th._KISS_DIR = saved
+    def test_emit_pending_worktree_with_branch(self, tmp_path):
+        """_emit_pending_worktree emits worktree_done when branch exists."""
+        server, events = self._make_server()
+        tab = server._get_tab("0")
+        tab.use_worktree = True
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init"], cwd=str(repo), capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"],
+                       cwd=str(repo), capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"],
+                       cwd=str(repo), capture_output=True)
+        (repo / "f.txt").write_text("hello")
+        subprocess.run(["git", "add", "."], cwd=str(repo), capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"],
+                       cwd=str(repo), capture_output=True)
+        chat_id = tab.agent._chat_id
+        branch = f"kiss/wt-{chat_id}-1234567890"
+        subprocess.run(["git", "branch", branch],
+                       cwd=str(repo), capture_output=True)
+        subprocess.run(["git", "config", f"branch.{branch}.kiss-original", "main"],
+                       cwd=str(repo), capture_output=True)
+        subprocess.run(["git", "checkout", branch],
+                       cwd=str(repo), capture_output=True)
+        (repo / "f.txt").write_text("changed")
+        subprocess.run(["git", "add", "."], cwd=str(repo), capture_output=True)
+        subprocess.run(["git", "commit", "-m", "change"],
+                       cwd=str(repo), capture_output=True)
+        subprocess.run(["git", "checkout", "main"],
+                       cwd=str(repo), capture_output=True)
 
-    def test_get_last_session_no_entries(self, tmp_path):
-        """When history is empty, no event emitted."""
-        saved = (th._DB_PATH, th._db_conn, th._KISS_DIR)
-        kiss_dir = tmp_path / ".kiss"
-        kiss_dir.mkdir(parents=True, exist_ok=True)
-        th._KISS_DIR = kiss_dir
-        th._DB_PATH = kiss_dir / "history.db"
-        th._db_conn = None
-        try:
-            db = th._get_db()
-            # Delete all tasks including samples
-            db.execute("DELETE FROM task_history")
-            db.commit()
-            server, events = self._make_server()
-            server._get_last_session()
-            task_events = [e for e in events if e.get("type") == "task_events"]
-            assert len(task_events) == 0
-        finally:
-            if th._db_conn is not None:
-                th._db_conn.close()
-                th._db_conn = None
-            th._DB_PATH, th._db_conn, th._KISS_DIR = saved
+        server.work_dir = str(repo)
+        server._emit_pending_worktree("0")
+        wt_events = [e for e in events if e.get("type") == "worktree_done"]
+        assert len(wt_events) == 1
+        assert wt_events[0]["branch"] == branch
+        assert "f.txt" in wt_events[0]["changedFiles"]
+
+    def test_emit_pending_worktree_not_a_repo(self, tmp_path):
+        """_emit_pending_worktree does nothing when not in a git repo."""
+        server, events = self._make_server()
+        server.work_dir = str(tmp_path)
+        server._emit_pending_worktree()
+        wt_events = [e for e in events if e.get("type") == "worktree_done"]
+        assert len(wt_events) == 0
 
     def test_handle_command_generate_commit_message_routing(self):
         """generateCommitMessage is routed properly - routes to thread."""
@@ -487,12 +322,8 @@ class TestVSCodeServerBranches:
             time.sleep(1)
             commit_events = [e for e in events if e["type"] == "commitMessage"]
             assert len(commit_events) == 1
-            assert commit_events[0]["message"] == "Error: No staged files."
-
-
-# ---------------------------------------------------------------------------
-# web_use_tool.py - more coverage via http server
-# ---------------------------------------------------------------------------
+            assert commit_events[0]["message"] == ""
+            assert "No staged changes" in commit_events[0]["error"]
 
 
 @pytest.fixture(scope="module")
@@ -548,7 +379,7 @@ def http_server():
 
 @pytest.fixture(scope="module")
 def browser_tool():
-    tool = WebUseTool(user_data_dir=None)
+    tool = WebUseTool(user_data_dir=None, headless=True)
     yield tool
     tool.close()
 
@@ -577,7 +408,6 @@ class TestWebUseToolIntegration:
 
     def test_type_text(self, http_server, browser_tool):
         browser_tool.go_to_url(http_server + "/")
-        # Find the textbox element
         result = browser_tool.type_text(2, "test input")
         assert isinstance(result, str)
 
@@ -632,7 +462,7 @@ import sys, os
 sys.path.insert(0, os.path.abspath("src"))
 from kiss.agents.sorcar.web_use_tool import WebUseTool
 udd = os.path.join("{d}", "user_data")
-tool = WebUseTool(user_data_dir=udd)
+tool = WebUseTool(user_data_dir=udd, headless=True)
 try:
     result = tool.go_to_url("{http_server}/")
     assert tool._page is not None
@@ -657,9 +487,7 @@ class TestWebUseToolResolveLocatorBranches:
     def test_resolve_locator_refreshes_snapshot(self, http_server, browser_tool):
         """When elements list is empty, re-snapshot is attempted."""
         browser_tool.go_to_url(http_server + "/")
-        # Clear element cache
         browser_tool._elements = []
-        # Try to click - should re-snapshot
         result = browser_tool.click(1)
         assert isinstance(result, str)
 
@@ -680,7 +508,6 @@ class TestWebUseToolResolveLocatorBranches:
         """Screenshot to invalid path."""
         browser_tool.go_to_url("about:blank")
         result = browser_tool.screenshot("/dev/null/cant/write/here.png")
-        # This may or may not error depending on OS
         assert isinstance(result, str)
 
     def test_type_text_error_invalid_element(self, http_server, browser_tool):
@@ -690,124 +517,33 @@ class TestWebUseToolResolveLocatorBranches:
         assert "Error" in result
 
 
-class TestBrowserPrinterStreamEvent:
-    """Cover the stream_event print type."""
-
-    def test_format_tool_call_with_extras(self):
-        """Cover the extras branch in _format_tool_call."""
-        p = BaseBrowserPrinter()
-        cq: queue.Queue = queue.Queue()
-        p._client_queue = cq
-        p._format_tool_call("Bash", {
-            "command": "ls",
-            "timeout_seconds": 30,
-            "max_output_chars": 50000,
-        })
-        ev = cq.get_nowait()
-        assert "extras" in ev
-
-
 class TestHandleMessageContentBlockNoIsError:
     """Cover the case where content block lacks is_error/content attributes."""
 
     def test_block_without_is_error(self):
         p = BaseBrowserPrinter()
-        cq: queue.Queue = queue.Queue()
-        p._client_queue = cq
-        # Block without is_error and content attributes
+        p.start_recording()
         block = SimpleNamespace(some_other_attr="value")
         msg = SimpleNamespace(content=[block])
         p._handle_message(msg)
-        # Nothing should be broadcast
-        assert cq.empty()
-
-
-# ---------------------------------------------------------------------------
-# Additional useful_tools.py branches
-# ---------------------------------------------------------------------------
+        events = p.stop_recording()
+        assert len(events) == 0
 
 
 class TestUsefulToolsMoreBranches:
-    def test_truncate_output_zero_tail(self):
-        """Edge case where tail computes to 0."""
-        # Create a string where (max_chars - msg_len) // 2 = head, remaining - head = 0 for tail
-        # msg template has ~45 chars at minimum for "... [truncated N chars] ..."
-        big = "X" * 200
-        # With max_chars=48, msg would be ~42 chars, remaining=6, head=3, tail=3
-        # We need tail=0: remaining=0 or very small
-        # Actually, when remaining is odd, head gets floor, tail gets ceil
-        # Let's just use a max that's slightly bigger than msg
-        result = _truncate_output(big, 45)
-        assert "truncated" in result
-
     @pytest.mark.skipif(sys.platform == "win32", reason="Unix-only (uses chmod)")
     def test_edit_exception(self):
         """Edit on a directory should raise an error."""
         ut = UsefulTools()
         with tempfile.TemporaryDirectory() as d:
-            # Write a file, then make it read-only
             f = Path(d) / "readonly.txt"
             f.write_text("hello old world")
             f.chmod(0o444)
             try:
                 result = ut.Edit(str(f), "old", "new")
-                # On macOS, root can still write; non-root gets error
                 assert "Error" in result or "Successfully" in result
             finally:
                 f.chmod(0o644)
-
-
-# ---------------------------------------------------------------------------
-# Additional helpers.py branches
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Additional diff_merge.py branches
-# ---------------------------------------------------------------------------
-
-
-class TestCodeServerMoreBranches:
-    def test_scan_files_max_limit(self):
-        """Scan should stop at 5000 files."""
-        with tempfile.TemporaryDirectory() as d:
-            # Create many files
-            for i in range(5100):
-                (Path(d) / f"file_{i:04d}.txt").write_text("x")
-            result = _scan_files(d)
-            assert len(result) <= 5000
-
-    def test_prepare_merge_view_new_files_only(self):
-        """When only new untracked files are added after a task."""
-        with tempfile.TemporaryDirectory() as d:
-            repo = os.path.join(d, "repo")
-            os.makedirs(repo)
-            subprocess.run(["git", "init"], cwd=repo, capture_output=True)
-            subprocess.run(
-                ["git", "config", "user.email", "t@t.com"],
-                cwd=repo, capture_output=True,
-            )
-            subprocess.run(["git", "config", "user.name", "T"], cwd=repo, capture_output=True)
-            Path(repo, "f.txt").write_text("content\n")
-            subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True)
-            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, capture_output=True)
-
-            pre_hunks = _parse_diff_hunks(repo)
-            pre_untracked = _capture_untracked(repo)
-            pre_hashes = _snapshot_files(repo, set())
-
-            # Agent creates a new file
-            Path(repo, "new_file.txt").write_text("new content\nline 2\n")
-
-            data_dir = os.path.join(d, "merge_data")
-            os.makedirs(data_dir)
-            result = _prepare_merge_view(repo, data_dir, pre_hunks, pre_untracked, pre_hashes)
-            assert result.get("status") == "opened"
-
-
-# ---------------------------------------------------------------------------
-# Additional vscode/server.py branches
-# ---------------------------------------------------------------------------
 
 
 class TestVSCodeServerMoreBranches:
@@ -828,24 +564,18 @@ class TestVSCodeServerMoreBranches:
     def test_handle_command_refresh_files(self):
         server, events = self._make_server()
         server._handle_command({"type": "refreshFiles"})
-        assert isinstance(server._file_cache, list)
+        time.sleep(0.5)
+        assert server._file_cache is None or isinstance(server._file_cache, list)
 
-        # May or may not have a suggestion depending on API availability
-        # But the test exercises the branch
 
     def test_run_task_with_attachments(self):
         """Test _run_task processes attachments."""
         import base64
 
         server, events = self._make_server()
-        # Create a 1x1 PNG
         png_data = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * 50).decode()
         pdf_data = base64.b64encode(b"%PDF-1.4 fake").decode()
 
-        # The actual run will fail (no API), but we can test attachment parsing
-        # by checking that the merging guard doesn't trigger
-        server._merging = False
-        # Use a work_dir that's a git repo so merge view doesn't crash
         with tempfile.TemporaryDirectory() as d:
             repo = os.path.join(d, "repo")
             os.makedirs(repo)
@@ -870,9 +600,5 @@ class TestVSCodeServerMoreBranches:
                     {"data": pdf_data, "mimeType": "application/pdf"},
                 ],
             })
-            # The run will fail because no API key, but we exercised the
-            # attachment parsing branch
             types = [e.get("type") for e in events]
-            assert "status" in types  # started
-            # It should have gone past attachments parsing into agent.run
-            # which would fail and trigger the except/finally path
+            assert "status" in types

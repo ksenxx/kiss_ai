@@ -37,13 +37,15 @@ if the task is not complete and you are at risk of running out of steps or conte
 """
 
 CONTINUATION_PROMPT = """
-# Task Progress
+# Task Progress (Continuation {continuation_number})
 
 {progress_text}
 
 # Continue
 - Complete the rest of the task.
 - **DON'T** redo completed work.
+- If you have been retrying the same approach without progress, step back \
+and rethink the strategy from scratch.
 """
 
 SUMMARIZER_PROMPT = """
@@ -57,8 +59,22 @@ The trajectory of the agent is stored in the file: {trajectory_file}
   with the reason for doing that along with relevant code snippets
 """
 
+def _str_to_bool(value: str | bool) -> bool:
+    """Coerce a string or bool to a Python bool.
 
-def finish(success: bool, is_continue: bool, summary: str) -> str:
+    Args:
+        value: A string ("true", "1", "yes" → True; anything else → False)
+            or an already-boolean value.
+
+    Returns:
+        The boolean interpretation of *value*.
+    """
+    if isinstance(value, str):
+        return value.lower() in ("true", "1", "yes")
+    return bool(value)
+
+
+def finish(success: bool, is_continue: bool = False, summary: str = "") -> str:
     """Finish execution with status and summary.
 
     Args:
@@ -68,12 +84,12 @@ def finish(success: bool, is_continue: bool, summary: str) -> str:
             agent did with the reason for doing that along with
             relevant code snippets
     """
-    if isinstance(success, str):
-        success = success.lower() in ("true", "1", "yes")
-    if isinstance(is_continue, str):
-        is_continue = is_continue.lower() in ("true", "1", "yes")
     result: str = yaml.dump(
-        {"success": bool(success), "is_continue": bool(is_continue), "summary": summary},
+        {
+            "success": _str_to_bool(success),
+            "is_continue": _str_to_bool(is_continue),
+            "summary": summary,
+        },
         sort_keys=False,
     )
     return result
@@ -104,10 +120,12 @@ class RelentlessAgent(Base):
         self.model_name = model_name if model_name is not None else "claude-opus-4-6"
         self.budget_used: float = 0.0
         self.total_tokens_used: int = 0
+        self.total_steps: int = 0
         self.docker_image = docker_image
         self.docker_manager: Any = None
         self.task_description: str = ""
         self.system_prompt: str = ""
+        self.model_config: dict[str, Any] | None = None
         self.set_printer(printer, verbose=verbose)
 
     def _docker_bash(self, command: str, description: str) -> str:
@@ -137,6 +155,7 @@ class RelentlessAgent(Base):
 
         progress_section = ""
         summary = ""
+        summaries: list[str] = []
         current_pid = str(os.getpid())
         important_instructions = IMPORTANT_INSTRUCTIONS.format(
             step_threshold=str(self.max_steps - 2),
@@ -145,8 +164,11 @@ class RelentlessAgent(Base):
         )
         system_prompt = self.system_prompt + important_instructions
         for session in range(self.max_sub_sessions):
+            if self.printer:
+                self.printer.tokens_offset = self.total_tokens_used  # type: ignore[attr-defined]
+                self.printer.budget_offset = self.budget_used  # type: ignore[attr-defined]
+                self.printer.steps_offset = self.total_steps  # type: ignore[attr-defined]
             executor = KISSAgent(f"{self.name} Session-{session}")
-            session_info = f"Session: {session + 1}/{self.max_sub_sessions}"
             try:
                 result = executor.run(
                     model_name=self.model_name,
@@ -162,13 +184,9 @@ class RelentlessAgent(Base):
                     model_config=self.model_config,
                     printer=self.printer,
                     attachments=attachments if session == 0 else None,
-                    session_info=session_info,
                 )
             except Exception as exc:
                 logger.debug("Exception caught", exc_info=True)
-                # Non-retryable errors: return immediately if the error has a
-                # chained cause, isn't a KISSError, or the executor never
-                # started (no steps executed means a setup/config failure).
                 if (
                     exc.__cause__ is not None
                     or not isinstance(exc, KISSError)
@@ -176,12 +194,12 @@ class RelentlessAgent(Base):
                 ):
                     self.budget_used += executor.budget_used
                     self.total_tokens_used += executor.total_tokens_used
+                    self.total_steps += executor.step_count
                     error_result: str = yaml.dump(
                         {"success": False, "is_continue": False, "summary": str(exc)},
                         sort_keys=False,
                     )
                     return error_result
-                # For step/budget limit errors, try to summarize and continue
                 trajectory_path: Path | None = None
                 try:
                     tmp_dir = Path(self.work_dir) / "tmp"
@@ -224,6 +242,7 @@ class RelentlessAgent(Base):
 
             self.budget_used += executor.budget_used
             self.total_tokens_used += executor.total_tokens_used
+            self.total_steps += executor.step_count
 
             try:
                 payload = yaml.safe_load(result)
@@ -233,20 +252,24 @@ class RelentlessAgent(Base):
             if not isinstance(payload, dict):  # pragma: no cover
                 payload = {}
 
-            success = payload.get("success", False)
-            if isinstance(success, str):  # pragma: no cover
-                success = success.lower() in ("true", "1", "yes")
-
-            is_continue = payload.get("is_continue", False)
-            if isinstance(is_continue, str):  # pragma: no cover
-                is_continue = is_continue.lower() in ("true", "1", "yes")
+            success = _str_to_bool(payload.get("success", False))
+            is_continue = _str_to_bool(payload.get("is_continue", False))
 
             if not is_continue or success:
                 return result
 
             summary = payload.get("summary", "")
             if summary:  # pragma: no branch
-                progress_section = CONTINUATION_PROMPT.format(progress_text=summary)
+                summaries.append(summary)
+
+                all_summaries = "\n\n---\n\n".join(
+                    f"### Attempt {i + 1}\n{s}"
+                    for i, s in enumerate(summaries)
+                )
+                progress_section = CONTINUATION_PROMPT.format(
+                    progress_text=all_summaries,
+                    continuation_number=session + 1,
+                )
         raise KISSError(f"Task failed after {self.max_sub_sessions} sub-sessions")
 
     def run(

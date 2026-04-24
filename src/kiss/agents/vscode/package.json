@@ -2,7 +2,7 @@
   "name": "kiss-sorcar",
   "displayName": "KISS Sorcar",
   "description": "AI coding assistant powered by KISS Sorcar Agent",
-  "version": "0.2.79",
+  "version": "2026.4.1",
   "publisher": "ksenxx",
   "repository": {
     "type": "git",
@@ -17,19 +17,62 @@
     "Other"
   ],
   "activationEvents": [
-    "*"
+    "onStartupFinished"
   ],
   "icon": "media/icon.png",
   "main": "./out/extension.js",
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "kissSorcarContainer",
+          "title": "KISS Sorcar",
+          "icon": "media/kiss-icon.svg"
+        }
+      ],
+      "secondarySidebar": [
+        {
+          "id": "kissSorcarSecondary",
+          "title": "KISS Sorcar",
+          "icon": "media/kiss-icon.svg",
+          "order": -100
+        }
+      ]
+    },
+    "views": {
+      "kissSorcarContainer": [
+        {
+          "id": "kissSorcar.chatView",
+          "name": "Chat"
+        }
+      ],
+      "kissSorcarSecondary": [
+        {
+          "type": "webview",
+          "id": "kissSorcar.chatViewSecondary",
+          "name": "Chat"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "kissSorcar.chatView",
+        "contents": "Start a new conversation with KISS Sorcar.\n[New Conversation](command:kissSorcar.newConversation)\n[Open Chat](command:kissSorcar.openPanel)"
+      }
+    ],
     "commands": [
       {
         "command": "kissSorcar.openPanel",
-        "title": "KISS: Open Sorcar Chat"
+        "title": "KISS: Open Sorcar Chat",
+        "icon": {
+          "light": "media/kiss-icon.svg",
+          "dark": "media/kiss-icon.svg"
+        }
       },
       {
         "command": "kissSorcar.newConversation",
-        "title": "KISS: New Conversation"
+        "title": "KISS: New Conversation",
+        "icon": "media/kiss-icon.png"
       },
       {
         "command": "kissSorcar.stopTask",
@@ -83,62 +126,61 @@
       {
         "command": "kissSorcar.runSelection",
         "title": "KISS: Run Selection in Chat"
+      },
+      {
+        "command": "kissSorcar.insertSelectionToChat",
+        "title": "KISS: Insert Selection into Chat"
       }
     ],
     "menus": {
-      "scm/inputBox": [
+      "editor/title": [
+        {
+          "command": "kissSorcar.newConversation",
+          "group": "navigation@-1"
+        }
+      ],
+      "scm/title": [
         {
           "command": "kissSorcar.generateCommitMessage",
           "when": "scmProvider == git",
           "group": "navigation"
         }
-      ]
-    },
-    "viewsContainers": {
-      "activitybar": [
-        {
-          "id": "kissSorcar",
-          "title": "KISS Sorcar",
-          "icon": "media/kiss-icon.svg"
-        }
       ],
-      "secondarySidebar": [
+      "commandPalette": [
         {
-          "id": "kissSorcarSecondary",
-          "title": "KISS Sorcar",
-          "icon": "media/kiss-icon.svg",
-          "order": -100
-        }
-      ]
-    },
-    "views": {
-      "kissSorcar": [
-        {
-          "id": "kissSorcar.launcherView",
-          "name": "KISS Sorcar",
-          "when": "!kissSorcar:doesNotSupportSecondarySidebar"
+          "command": "kissSorcar.acceptChange",
+          "when": "false"
         },
         {
-          "type": "webview",
-          "id": "kissSorcar.chatView",
-          "name": "Chat",
-          "when": "kissSorcar:doesNotSupportSecondarySidebar"
-        }
-      ],
-      "kissSorcarSecondary": [
+          "command": "kissSorcar.rejectChange",
+          "when": "false"
+        },
         {
-          "type": "webview",
-          "id": "kissSorcar.chatViewSecondary",
-          "name": "Chat"
+          "command": "kissSorcar.prevChange",
+          "when": "false"
+        },
+        {
+          "command": "kissSorcar.nextChange",
+          "when": "false"
+        },
+        {
+          "command": "kissSorcar.acceptAll",
+          "when": "false"
+        },
+        {
+          "command": "kissSorcar.rejectAll",
+          "when": "false"
+        },
+        {
+          "command": "kissSorcar.acceptFile",
+          "when": "false"
+        },
+        {
+          "command": "kissSorcar.rejectFile",
+          "when": "false"
         }
       ]
     },
-    "viewsWelcome": [
-      {
-        "view": "kissSorcar.launcherView",
-        "contents": "Open KISS Sorcar Chat in the secondary sidebar.\n[Open Chat](command:kissSorcar.openPanel)"
-      }
-    ],
     "keybindings": [
       {
         "command": "kissSorcar.newConversation",
@@ -152,12 +194,17 @@
       },
       {
         "command": "kissSorcar.runSelection",
-        "key": "cmd+l",
+        "key": "ctrl+e",
+        "mac": "cmd+e"
+      },
+      {
+        "command": "kissSorcar.insertSelectionToChat",
+        "key": "ctrl+l",
         "mac": "cmd+l"
       }
     ],
     "configurationDefaults": {
-      "workbench.notifications.position": "top-right"
+      "workbench.notifications.position": "bottom-left"
     },
     "configuration": {
       "title": "KISS Sorcar",
@@ -180,11 +227,23 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "copy-kiss": "bash copy-kiss.sh",
-    "package": "vsce package --no-dependencies --allow-star-activation --allow-missing-repository -o kiss-sorcar.vsix"
+    "package": "vsce package --no-dependencies --allow-missing-repository -o kiss-sorcar.vsix",
+    "lint": "npm run lint:ts && npm run lint:css && npm run lint:html",
+    "lint:ts": "eslint 'src/**/*.ts' 'media/**/*.js' --ignore-pattern 'media/**/*.min.js'",
+    "lint:css": "stylelint 'media/**/*.css' --ignore-pattern 'media/**/*.min.css'",
+    "lint:html": "htmlhint 'src/**/*.html' 'media/**/*.html' || true",
+    "lint:fix": "eslint 'src/**/*.ts' 'media/**/*.js' --ignore-pattern 'media/**/*.min.js' --fix && stylelint 'media/**/*.css' --ignore-pattern 'media/**/*.min.css' --fix",
+    "typecheck": "tsc --noEmit -p ./",
+    "check": "npm run typecheck && npm run lint"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.98.0",
+    "@vscode/vsce": "^3.9.1",
+    "gts": "^7.0.0",
+    "htmlhint": "^1.9.2",
+    "stylelint": "^17.8.0",
+    "stylelint-config-standard": "^40.0.0",
     "typescript": "^5.0.0"
   }
 }

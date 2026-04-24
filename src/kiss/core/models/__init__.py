@@ -11,12 +11,14 @@ __all__ = [
     "Attachment",
     "Model",
     "AnthropicModel",
+    "ClaudeCodeModel",
     "OpenAICompatibleModel",
     "GeminiModel",
 ]
 
 _LAZY_IMPORTS = {
     "AnthropicModel": "kiss.core.models.anthropic_model",
+    "ClaudeCodeModel": "kiss.core.models.claude_code_model",
     "OpenAICompatibleModel": "kiss.core.models.openai_compatible_model",
     "GeminiModel": "kiss.core.models.gemini_model",
 }
@@ -32,7 +34,7 @@ def __getattr__(name: str) -> type:
         try:
             module = importlib.import_module(module_path)
             cls: type = getattr(module, name)
-            globals()[name] = cls  # Cache for subsequent accesses
+            globals()[name] = cls
             return cls
         except ImportError:
             logging.getLogger(__name__).debug("Exception caught", exc_info=True)

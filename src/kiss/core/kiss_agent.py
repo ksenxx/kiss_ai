@@ -57,6 +57,7 @@ class KISSAgent(Base):
 
     def __init__(self, name: str) -> None:
         super().__init__(name)
+        self.step_offset = 0
 
     def _reset(
         self,
@@ -67,14 +68,13 @@ class KISSAgent(Base):
         model_config: dict[str, Any] | None,
         printer: Printer | None = None,
         verbose: bool | None = None,
-        session_info: str = "",
     ) -> None:
         self.model_name = model_name
         self.verbose = verbose if verbose is not None else True
         self.set_printer(printer, verbose=self.verbose)
         token_callback = self.printer.token_callback if self.printer else None
+        thinking_callback = self.printer.thinking_callback if self.printer else None
 
-        # Reuse existing model client if model name and config haven't changed
         existing = getattr(self, "model", None)
         if (  # pragma: no branch
             existing is not None
@@ -83,9 +83,15 @@ class KISSAgent(Base):
         ):
             existing.reset_conversation()
             existing.token_callback = token_callback
+            existing.thinking_callback = thinking_callback
             self.model = existing
         else:
-            self.model = model(model_name, model_config=model_config, token_callback=token_callback)
+            self.model = model(
+                model_name,
+                model_config=model_config,
+                token_callback=token_callback,
+                thinking_callback=thinking_callback,
+            )
         self.is_agentic = is_agentic
         self.max_steps = max_steps if max_steps is not None else 100
         self.max_budget = max_budget if max_budget is not None else 10.0
@@ -95,7 +101,6 @@ class KISSAgent(Base):
         self.step_count = 0
         self.total_tokens_used = 0
         self.budget_used = 0.0
-        self.session_info = session_info
         self.run_start_timestamp = int(time.time())
 
     def _set_prompt(
@@ -137,7 +142,6 @@ class KISSAgent(Base):
         printer: Printer | None = None,
         verbose: bool | None = None,
         attachments: list[Attachment] | None = None,
-        session_info: str = "",
     ) -> str:
         """
         Runs the agent's main ReAct loop to solve the task.
@@ -164,8 +168,6 @@ class KISSAgent(Base):
                 Default is None (verbose enabled).
             attachments (list[Attachment] | None): Optional file attachments (images, PDFs)
                 to include in the initial prompt. Default is None.
-            session_info (str): Sub-session label string (e.g. "Session: 1/5") to
-                include in usage info output. Default is empty string.
 
         Returns:
             str: The result of the agent's task.
@@ -173,7 +175,7 @@ class KISSAgent(Base):
         try:
             if system_prompt:
                 model_config = dict(model_config) if model_config else {}
-                model_config["system_instruction"] = system_prompt
+                model_config.setdefault("system_instruction", system_prompt)
             self._reset(
                 model_name,
                 is_agentic,
@@ -182,7 +184,6 @@ class KISSAgent(Base):
                 model_config,
                 printer,
                 verbose,
-                session_info=session_info,
             )
 
             if not self.is_agentic and tools is not None:
@@ -195,11 +196,9 @@ class KISSAgent(Base):
                 self.printer.print(system_prompt, type="system_prompt")
             self._set_prompt(prompt_template, arguments, attachments=attachments)
 
-            # Non-agentic mode: single generation, no tool loop
             if not self.is_agentic:
                 return self._run_non_agentic()
 
-            # Agentic mode: ReAct loop
             return self._run_agentic_loop()
 
         finally:
@@ -305,6 +304,14 @@ class KISSAgent(Base):
         self._update_tokens_and_budget_from_response(response)
         usage_info = self._get_usage_info_string()
         self.model.set_usage_info_for_messages(usage_info)
+        if self.printer:
+            self.printer.print(
+                usage_info,
+                type="usage_info",
+                total_tokens=self.total_tokens_used,
+                cost=f"${self.budget_used:.4f}",
+                total_steps=self.step_count,
+            )
 
         if not function_calls:  # pragma: no cover – requires LLM returning zero tool calls
             self._add_message(
@@ -317,9 +324,6 @@ class KISSAgent(Base):
             self._add_message("user", retry_msg)
             self.model.add_message_to_conversation("user", retry_msg)
             return None
-
-        if self.printer:
-            self.printer.print(usage_info, type="usage_info")
 
         call_reprs = []
         function_results: list[tuple[str, dict[str, Any]]] = []
@@ -400,7 +404,7 @@ class KISSAgent(Base):
             raise KISSError(f"Agent {self.name} budget exceeded.")
         if Base.get_global_budget_used() > 200.0:
             raise KISSError("Global budget exceeded.")
-        if self.step_count > self.max_steps:  # pragma: no branch
+        if self.step_count > self.max_steps:
             raise KISSError(f"Agent {self.name} exceeded {self.max_steps} steps.")
 
     def _add_functions(self, tools: list[Callable[..., Any]]) -> None:
@@ -446,14 +450,10 @@ class KISSAgent(Base):
             max_tokens = get_max_context_length(self.model.model_name)
             capped_tokens = self.total_tokens_used % max_tokens
             global_max = 200.0
-            session_part = (
-                f"{self.session_info}, " if self.session_info else ""
-            )
             global_budget_used = Base.get_global_budget_used()
             return (
-                f"{session_part}"
                 f"Steps: {self.step_count}/{self.max_steps}, "
-                f"Tokens: {capped_tokens}/{max_tokens}, "
+                f"Tokens: {capped_tokens:,}/{max_tokens:,}, "
                 f"Budget: ${self.budget_used:.4f}/${self.max_budget:.2f}, "
                 f"Global Budget: ${global_budget_used:.4f}/${global_max:.2f}"
             )

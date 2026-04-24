@@ -46,7 +46,6 @@ def _compute_swebench_stats(data: dict | list[dict]) -> dict:
     if isinstance(data, dict):
         results = data.get("results", data)
         if isinstance(results, dict):
-            # Flat dict: instance_id -> pass/fail
             items = [
                 {"instance_id": k, "passed": v} for k, v in results.items()
             ]
@@ -95,20 +94,6 @@ def _compute_tbench_stats(data: list[dict]) -> dict:
     }
 
 
-def _make_bar(label: str, value: float, max_width: int = 300) -> str:
-    """Generate an inline SVG bar for a percentage value."""
-    width = int(value * max_width)
-    color = "#22c55e" if value >= 0.5 else "#f59e0b" if value >= 0.25 else "#ef4444"
-    return (
-        f'<div style="display:flex;align-items:center;gap:8px;margin:4px 0">'
-        f'<span style="width:160px;text-align:right">{label}</span>'
-        f'<svg width="{max_width + 10}" height="20">'
-        f'<rect x="0" y="2" width="{width}" height="16" '
-        f'fill="{color}" rx="3"/></svg>'
-        f"<span>{value:.1%}</span></div>"
-    )
-
-
 def _breakdown_table(title: str, data: dict[str, dict[str, int]]) -> str:
     """Generate an HTML table for per-repo or per-category breakdown."""
     rows = ""
@@ -146,7 +131,6 @@ def generate_dashboard(
     swebench_section = ""
     tbench_section = ""
 
-    # SWE-bench Pro
     if swebench_results_path:
         data = _load_json(swebench_results_path)
         if data:
@@ -165,7 +149,6 @@ def generate_dashboard(
                 + "</div>\n"
             )
 
-    # Terminal-Bench
     if tbench_results_path:
         data = _load_json(tbench_results_path)
         if data and isinstance(data, list):
