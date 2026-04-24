@@ -63,3 +63,4 @@
 - When adding evaluation sections to papers, compute aggregate statistics (pass rate, pass@k, cost, timing) directly from the raw result JSON files in the jobs directory rather than relying on remembered numbers. Present both overall pass rate and pass@any to show variance.
 - When referencing Terminal Bench 2.0 results, use data from the most complete run (highest trial count per task) and note when the benchmark is still running with preliminary results.
 - When a user-initiated action (e.g. autocommit) happens after the task lifecycle has ended, persist the result event explicitly via a direct call to the persistence layer, since the automatic broadcast-based persistence path is inactive after task cleanup.
+- When writing an abstract for a paper, derive it directly from the key points emphasized in the introduction: problem statement, proposed solution, key design decisions, and evaluation results. Keep it self-contained and concise.
