@@ -600,35 +600,6 @@ LLM-based agents:
 \end{itemize}
 
 %......................................................................
-\subsection{Agent Identity}
-%......................................................................
-
-The prompt begins with an identity block that tells the agent who it
-is:
-
-\begin{prompt}
-# Identity
-
-- You are KISS Sorcar, an AI based General Assistant and
-  Integrated Development Environment (IDE), developed by
-  Koushik Sen (ksen@berkeley.edu)
-- Your public repository is at
-  https://github.com/ksenxx/kiss_ai
-- Your version is 2006.4.0
-\end{prompt}
-
-\noindent The identity section serves three purposes.  First, it anchors
-the agent's self-model: when the agent refers to ``itself'' in
-conversation or documentation, it uses the correct name and
-description rather than a generic ``I am an AI assistant.''  Second,
-the repository URL lets the agent point users to the source code or
-issue tracker when relevant, without hallucinating a URL\@.  Third,
-the version string enables the agent to report its own version
-accurately and allows the system prompt to be tied to a specific
-release, which is important when multiple versions coexist (e.g.,
-the installed VS~Code extension vs.\ the development branch).
-
-%......................................................................
 \subsection{Tool Rules}
 %......................................................................
 
@@ -1323,7 +1294,9 @@ its own process.  Third, they provide navigation instructions for the
 agent's own source: when the user asks to edit the system prompt or
 configuration, the agent knows the exact file paths inside the
 installed VS~Code extension directory, avoiding guesswork about where
-these files live.  Fourth, the \texttt{SORCAR.md} override mechanism
+these files live.  Moreover, it does not create unnecessary UI components 
+in KISS Sorcar just to edit the system prompt and its configuration. 
+Fourth, the \texttt{SORCAR.md} override mechanism
 allows per-repository instructions to further customize the agent's
 behavior, forming a hierarchy: general system prompt $\rightarrow$
 Sorcar-specific instructions $\rightarrow$ repository-specific
@@ -1399,9 +1372,7 @@ efficiency.
 \label{sec:browser-feature}
 %......................................................................
 
-While some assistants can search the web (Devin, Perplexity-based
-tools), none provide full programmatic browser control from within the
-IDE.  Our extension includes a browser automation tool that allows the
+Our extension includes a browser automation tool that allows the
 agent to navigate to URLs, read accessibility trees, click elements,
 type text, press keys, scroll, and take screenshots---all controlled
 programmatically from within a VS~Code task via Playwright.  
@@ -1546,7 +1517,7 @@ the agent hierarchy described in Section~\ref{sec:architecture}: the
 Worktree Sorcar Agent isolates changes on a branch, the Chat Sorcar Agent
 preserves conversational context across tasks, and the Relentless Agent
 automatically continues when the context window is exhausted.
-
+¡Gracias!
 
 %----------------------------------------------------------------------
 \section{Related Work}
