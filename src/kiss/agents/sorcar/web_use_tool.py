@@ -1,23 +1,59 @@
 """Browser automation tool for LLM agents using Playwright.
 
-Uses Playwright for page analysis and automation (accessibility tree,
-clicking, typing, screenshots). Opens URLs in the user's default OS browser
-when user interaction is needed (ask_user_browser_action).
+Uses non-headless Playwright Chromium for page analysis and automation
+(accessibility tree, clicking, typing, screenshots).
 """
 
 from __future__ import annotations
 
+import atexit
 import logging
 import re
 import subprocess
 import sys
-import webbrowser
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
+_SINGLETON_FILES = ("SingletonLock", "SingletonCookie", "SingletonSocket")
+
+
+def _get_frontmost_app() -> str | None:
+    """Return the name of the frontmost macOS application, or None on failure."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        r = subprocess.run(
+            [
+                "osascript",
+                "-e",
+                'tell application "System Events" to get name of first '
+                "application process whose frontmost is true",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        return r.stdout.strip() or None
+    except Exception:
+        return None
+
+
+def _activate_app(name: str | None) -> None:
+    """Bring *name* to the foreground on macOS. No-op if name is None or non-macOS."""
+    if not name or sys.platform != "darwin":
+        return
+    try:
+        subprocess.run(
+            ["osascript", "-e", f'tell application "{name}" to activate'],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except Exception:
+        pass
 
 
 INTERACTIVE_ROLES = {
@@ -65,11 +101,11 @@ def _number_interactive_elements(snapshot: str) -> tuple[str, list[dict[str, str
 
 
 class WebUseTool:
-    """Browser automation tool using Playwright + default OS browser.
+    """Browser automation tool using non-headless Playwright Chromium.
 
-    Uses non-headless Playwright (chromium) for page analysis and automation,
-    so the user can see the browser window. Opens URLs in the user's default
-    OS browser when user interaction is needed (ask_user_browser_action).
+    The user can see and interact with the Chromium window directly.
+    All browsing (including user-interaction flows like OAuth, CAPTCHAs)
+    happens in this single Chromium instance.
     """
 
     _DEFAULT_USER_DATA_DIR = str(Path.home() / ".kiss" / "browser_profile")
@@ -78,17 +114,18 @@ class WebUseTool:
         self,
         viewport: tuple[int, int] = (1280, 900),
         user_data_dir: str | None = _DEFAULT_USER_DATA_DIR,
-        wait_for_user_callback: Callable[[str, str], None] | None = None,
+        headless: bool = False,
         **_kwargs: Any,
     ) -> None:
         self.viewport = viewport
         self.user_data_dir = user_data_dir
-        self._wait_for_user_callback = wait_for_user_callback
+        self._headless = headless
         self._playwright: Any = None
         self._browser: Any = None
         self._context: Any = None
         self._page: Any = None
         self._elements: list[dict[str, str]] = []
+        atexit.register(self.close)
 
     def _context_args(self) -> dict[str, Any]:
         return {
@@ -101,17 +138,59 @@ class WebUseTool:
             "device_scale_factor": 2,
         }
 
+    def _is_alive(self) -> bool:
+        """Return True iff the current page/context survived (not crashed/closed)."""
+        if self._playwright is None or self._context is None or self._page is None:
+            return False
+        try:
+            return not self._page.is_closed()
+        except Exception:  # pragma: no cover — Playwright internals rarely throw here
+            logger.debug("Exception caught", exc_info=True)
+            return False
+
+    def _on_browser_lost(self, _obj: Any = None) -> None:
+        """Drop page/context/browser references after a crash or disconnect.
+
+        The Playwright driver (`self._playwright`) is kept running so that the
+        next tool call can launch a fresh browser without restarting the driver
+        (sync_playwright cannot be restarted in the same process).
+        """
+        self._page = None
+        self._context = None
+        self._browser = None
+        self._elements = []
+
+    def _close_browser_only(self) -> None:
+        """Close context/browser if present, leaving self._playwright running."""
+        for obj in (self._context, self._browser):
+            if obj is None:
+                continue
+            try:
+                obj.close()
+            except Exception:  # pragma: no cover — already-dead objects raise
+                logger.debug("Exception caught", exc_info=True)
+        self._on_browser_lost()
+
     def _ensure_browser(self) -> None:
-        """Ensure a Playwright browser page is ready, installing Chromium if needed."""
-        if self._playwright is not None and self._page is not None:
+        """Ensure a Playwright browser page is ready, installing Chromium if needed.
+
+        Detects and recovers from a previously-crashed Chromium by tearing down
+        stale references and relaunching. This handles the common case where
+        "Google Chrome for Testing quit unexpectedly" leaves the tool with a
+        dead page that would otherwise fail every subsequent call.
+        """
+        if self._is_alive():
             return
+        self._close_browser_only()
         from playwright.sync_api import sync_playwright
 
+        prev_app = _get_frontmost_app()
         try:
-            self._playwright = sync_playwright().start()
+            if self._playwright is None:
+                self._playwright = sync_playwright().start()
             launcher = self._playwright.chromium
             kwargs: dict[str, Any] = {
-                "headless": False,
+                "headless": self._headless,
                 "args": [
                     "--disable-blink-features=AutomationControlled",
                     "--disable-features=IsolateOrigins,site-per-process",
@@ -134,10 +213,31 @@ class WebUseTool:
         except Exception:  # pragma: no cover — Playwright init failure
             self.close()
             raise
+        finally:
+            _activate_app(prev_app)
+
+    def _clean_singleton_locks(self) -> None:
+        """Remove stale Singleton* files from a previously crashed Chromium.
+
+        Chromium writes Singleton{Lock,Cookie,Socket} when a persistent profile
+        is opened. If the process dies without cleaning up, the next launch
+        may fail or crash. Safe to call unconditionally — live Chromium
+        recreates the files during startup.
+        """
+        if not self.user_data_dir:
+            return
+        for name in _SINGLETON_FILES:
+            path = Path(self.user_data_dir) / name
+            try:
+                if path.is_symlink() or path.exists():
+                    path.unlink()
+            except OSError:  # pragma: no cover — race with another launch
+                logger.debug("Exception caught", exc_info=True)
 
     def _launch_browser(self, launcher: Any, kwargs: dict[str, Any]) -> None:
         if self.user_data_dir:
             Path(self.user_data_dir).mkdir(parents=True, exist_ok=True)
+            self._clean_singleton_locks()
             self._context = launcher.launch_persistent_context(
                 self.user_data_dir, **kwargs, **self._context_args()
             )
@@ -146,6 +246,8 @@ class WebUseTool:
             self._browser = launcher.launch(**kwargs)
             self._context = self._browser.new_context(**self._context_args())
             self._page = self._context.new_page()
+        self._context.on("close", self._on_browser_lost)
+        self._page.on("crash", self._on_browser_lost)
 
     def _get_ax_tree(self, max_chars: int = 50000) -> str:
         self._ensure_browser()
@@ -403,69 +505,16 @@ class WebUseTool:
         except Exception:  # pragma: no cover — Playwright close rarely fails
             logger.debug("Exception caught", exc_info=True)
             pass
-        self._page = None
-        self._context = None
-        self._browser = None
+        self._on_browser_lost()
         self._playwright = None
-        self._elements = []
         return "Browser closed."
-
-    @staticmethod
-    def _open_in_default_browser(url: str) -> None:
-        """Open a URL in the user's default OS browser."""
-        try:
-            if not webbrowser.open(url):  # pragma: no cover – platform-dependent
-                logger.warning("webbrowser.open() returned False for %s", url)
-        except Exception:  # pragma: no cover – webbrowser.open rarely raises
-            logger.warning("Failed to open default browser", exc_info=True)
-            cmd: list[str] = []
-            if sys.platform == "darwin":
-                cmd = ["open", url]
-            elif sys.platform.startswith("linux"):
-                cmd = ["xdg-open", url]
-            elif sys.platform == "win32":
-                cmd = ["cmd", "/c", "start", "", url]
-            if cmd:
-                try:
-                    subprocess.Popen(
-                        cmd,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-                except Exception:
-                    logger.warning("Fallback command %s also failed", cmd, exc_info=True)
-
-    def ask_user_browser_action(self, instruction: str, url: str = "") -> str:
-        """Open URL in user's default browser for interaction, wait for completion.
-
-        Use when the agent needs the human to interact with a webpage directly —
-        CAPTCHAs, 2FA/MFA, OAuth flows, cookie consent, or any complex interaction
-        the agent cannot automate. Opens the URL in the user's default OS browser
-        (Chrome, Safari, Firefox, etc.) rather than a Playwright-controlled window.
-
-        Args:
-            instruction: What the user should do (e.g. "Please solve the CAPTCHA").
-            url: Optional URL to navigate to before handing control to the user.
-
-        Returns:
-            Updated accessibility tree after the user signals they are done.
-        """
-        self._ensure_browser()
-        target_url = url or self._page.url
-        if url:
-            self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            self._wait_for_stable()
-        self._open_in_default_browser(target_url)
-        if self._wait_for_user_callback:
-            self._wait_for_user_callback(instruction, target_url)
-        return self._get_ax_tree()
 
     def get_tools(self) -> list[Callable[..., str]]:
         """Return callable web tools for registration with an agent.
 
         Returns:
             List of callables: go_to_url, click, type_text, press_key, scroll, screenshot,
-            get_page_content, ask_user_browser_action. Does not include close."""
+            get_page_content. Does not include close."""
         return [
             self.go_to_url,
             self.click,
@@ -474,5 +523,4 @@ class WebUseTool:
             self.scroll,
             self.screenshot,
             self.get_page_content,
-            self.ask_user_browser_action,
         ]

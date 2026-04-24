@@ -7,7 +7,7 @@
 # Workflow:
 # 1. Stash any uncommitted changes
 # 2. Check if origin is ahead of kiss_ai repo
-# 3. If ahead, bump version in _version.py, README.md, SYSTEM.md, package.json
+# 3. If ahead, bump version in _version.py, README.md, SYSTEM.md, package.json, package-lock.json
 # 4. Build VS Code extension (.vsix) so it's included in the commit
 # 5. Commit changes with "Version bumped" (includes vsix)
 # 6. Push to origin
@@ -28,7 +28,7 @@ PUBLIC_REPO_URL="https://github.com/ksenxx/kiss_ai.git"
 PUBLIC_REPO_SSH="git@github.com:ksenxx/kiss_ai.git"
 VERSION_FILE="src/kiss/_version.py"
 README_FILE="README.md"
-SYSTEM_FILE="SYSTEM.md"
+SYSTEM_FILE="src/kiss/SYSTEM.md"
 PYPI_PACKAGE_NAME="kiss-agent-framework"
 VSCODE_EXT_DIR="src/kiss/agents/vscode"
 
@@ -74,10 +74,18 @@ get_version() {
 
 bump_version() {
     local current_version="$1"
-    local major minor patch
-    IFS='.' read -r major minor patch <<< "$current_version"
-    patch=$((patch + 1))
-    echo "${major}.${minor}.${patch}"
+    local cur_year cur_month cur_minor
+    IFS='.' read -r cur_year cur_month cur_minor <<< "$current_version"
+
+    local now_year now_month
+    now_year=$(date +%Y)
+    now_month=$(date +%-m)  # no leading zero
+
+    if [[ "$cur_year" == "$now_year" && "$cur_month" == "$now_month" ]]; then
+        echo "${now_year}.${now_month}.$(( cur_minor + 1 ))"
+    else
+        echo "${now_year}.${now_month}.0"
+    fi
 }
 
 update_version_file() {
@@ -113,17 +121,34 @@ update_system_md_version() {
         print_warn "SYSTEM file not found: $SYSTEM_FILE - skipping"
         return
     fi
-    local old_version
+    local old_version updated=false
+
+    # Replace "Your version is X.Y.Z"
     old_version=$(grep -oP 'Your version is \K[0-9][0-9.]*' "$SYSTEM_FILE" 2>/dev/null || \
-                  grep 'Your version is' "$SYSTEM_FILE" | sed 's/.*Your version is \([0-9][0-9.]*\).*/\1/' | head -1)
+                  grep 'Your version is ' "$SYSTEM_FILE" | sed 's/.*Your version is \([0-9][0-9.]*\).*/\1/' | head -1)
     if [[ -n "$old_version" && "$old_version" != "$version" ]]; then
-        sed -i.bak "s/${old_version}/${version}/g" "$SYSTEM_FILE"
+        sed -i.bak "s/Your version is ${old_version}/Your version is ${version}/g" "$SYSTEM_FILE"
         rm -f "${SYSTEM_FILE}.bak"
-        print_info "Updated all occurrences of $old_version to $version in $SYSTEM_FILE"
-    elif [[ -z "$old_version" ]]; then
-        print_warn "Version not found in $SYSTEM_FILE - skipping"
-    else
-        print_info "SYSTEM.md already at version $version"
+        print_info "Updated 'Your version is' from $old_version to $version in $SYSTEM_FILE"
+        updated=true
+    fi
+
+    # Replace "ksenxx.kiss-sorcar-X.Y.Z"
+    old_version=$(grep -oP 'ksenxx\.kiss-sorcar-\K[0-9][0-9.]*' "$SYSTEM_FILE" 2>/dev/null || \
+                  grep 'ksenxx\.kiss-sorcar-' "$SYSTEM_FILE" | sed 's/.*ksenxx\.kiss-sorcar-\([0-9][0-9.]*\).*/\1/' | head -1)
+    if [[ -n "$old_version" && "$old_version" != "$version" ]]; then
+        sed -i.bak "s/ksenxx\.kiss-sorcar-${old_version}/ksenxx.kiss-sorcar-${version}/g" "$SYSTEM_FILE"
+        rm -f "${SYSTEM_FILE}.bak"
+        print_info "Updated 'ksenxx.kiss-sorcar-' from $old_version to $version in $SYSTEM_FILE"
+        updated=true
+    fi
+
+    if [[ "$updated" == false ]]; then
+        if [[ -z "$old_version" ]]; then
+            print_warn "Version not found in $SYSTEM_FILE - skipping"
+        else
+            print_info "SYSTEM.md already at version $version"
+        fi
     fi
 }
 
@@ -137,6 +162,20 @@ update_vscode_package_version() {
     sed -i.bak "s/\"version\": \"[^\"]*\"/\"version\": \"${version}\"/" "$pkg_json"
     rm -f "${pkg_json}.bak"
     print_info "Updated $pkg_json to version $version"
+}
+
+update_vscode_package_lock_version() {
+    local version="$1"
+    local lock_json="${VSCODE_EXT_DIR}/package-lock.json"
+    if [[ ! -f "$lock_json" ]]; then
+        print_warn "VS Code package-lock.json not found: $lock_json - skipping"
+        return
+    fi
+    # Only the first 15 lines contain the project's own version (lines 3 and 9);
+    # dependency versions deeper in the file must not be touched.
+    sed -i.bak "1,15s/\"version\": \"[^\"]*\"/\"version\": \"${version}\"/" "$lock_json"
+    rm -f "${lock_json}.bak"
+    print_info "Updated $lock_json to version $version"
 }
 
 ensure_remote() {
@@ -189,6 +228,8 @@ build_vscode_extension() {
     fi
 
     print_info "Built kiss-sorcar.vsix"
+    rm -rf out kiss_project
+    print_info "Cleaned up build artifacts (out/, kiss_project/)"
     cd - > /dev/null
 }
 
@@ -330,6 +371,7 @@ main() {
     update_readme_version "$VERSION"
     update_system_md_version "$VERSION"
     update_vscode_package_version "$VERSION"
+    update_vscode_package_lock_version "$VERSION"
 
     # Step 3: Build VS Code extension (before commit so vsix is included)
     build_vscode_extension

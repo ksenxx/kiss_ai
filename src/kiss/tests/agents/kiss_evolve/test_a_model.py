@@ -8,7 +8,7 @@ import unittest
 
 import pytest
 
-from kiss.agents.kiss_evolve.simple_rag import SimpleRAG
+from kiss.agents.obsolete.kiss_evolve.simple_rag import SimpleRAG
 from kiss.tests.conftest import DEFAULT_MODEL, skip_if_no_api_key_for_model
 
 TEST_TIMEOUT = 60

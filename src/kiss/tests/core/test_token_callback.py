@@ -49,6 +49,7 @@ class TestToolOutputStreaming:
             """
             raise ValueError("intentional test failure")
 
+        api_error: Exception | None = None
         try:
             agent.run(
                 model_name="gemini-2.0-flash",
@@ -58,8 +59,12 @@ class TestToolOutputStreaming:
                 max_steps=3,
                 printer=printer,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            api_error = e
+        if api_error is not None:
+            msg = str(api_error)
+            if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
+                pytest.skip("Gemini API rate-limited (429)")
         tool_result_prints = [p for p in printer.prints if p[0] == "tool_result"]
         assert len(tool_result_prints) > 0
 

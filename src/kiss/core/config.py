@@ -7,6 +7,7 @@
 
 import os
 import random
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ from pydantic import BaseModel, Field
 _PROJECT_DIR = Path(__file__).resolve().parents[3]
 _ARTIFACTS_DIR_NAME = ".kiss.artifacts"
 _artifact_dir: str | None = None
+_artifact_dir_lock = threading.Lock()
 
 
 def _artifact_root(base_dir: str | Path | None = None) -> Path:
@@ -60,7 +62,9 @@ def get_artifact_dir() -> str:
     """Return the active artifact directory, creating it lazily if needed."""
     global _artifact_dir
     if _artifact_dir is None:
-        _artifact_dir = _generate_artifact_dir()
+        with _artifact_dir_lock:
+            if _artifact_dir is None:
+                _artifact_dir = _generate_artifact_dir()
     return _artifact_dir
 
 
@@ -72,14 +76,10 @@ class _ArtifactDirProxy:
         return get_artifact_dir()
 
     def __eq__(self, other: object) -> bool:
-        if isinstance(other, _ArtifactDirProxy):
-            return get_artifact_dir() == other.__fspath__()
-        if isinstance(other, str):
-            return get_artifact_dir() == other
-        return NotImplemented
+        return str(self) == str(other)
 
     def __hash__(self) -> int:
-        return hash(get_artifact_dir())
+        return hash(str(self))
 
 
 artifact_dir = _ArtifactDirProxy()
@@ -109,10 +109,6 @@ class Config(BaseModel):
     MINIMAX_API_KEY: str = Field(
         default_factory=lambda: os.getenv("MINIMAX_API_KEY", ""),
         description="MiniMax API key (can also be set via MINIMAX_API_KEY env var)",
-    )
-    FAST_MODEL: str = Field(
-        default="claude-haiku-4-5",
-        description="Model for fast operations like commit and suggestion generation",
     )
 
 

@@ -84,7 +84,6 @@ class GeminiModel(Model):
                 if isinstance(content, str) and content:
                     parts.append(types.Part.from_text(text=content))
 
-                # Handle tool calls
                 tool_calls = msg.get("tool_calls")
                 if tool_calls:
                     for tc in tool_calls:
@@ -92,7 +91,6 @@ class GeminiModel(Model):
                         args = fn.get("arguments")
                         args = args if isinstance(args, dict) else {}
                         call_id = tc.get("id")
-                        # Include thought_signature if we have one for this tool call
                         thought_sig = self._thought_signatures.get(call_id) if call_id else None
                         if thought_sig:
                             parts.append(
@@ -109,13 +107,13 @@ class GeminiModel(Model):
                             )
 
             elif role == "tool":
-                gemini_role = "user"  # Function responses come from the 'user' side in Gemini chat
+                gemini_role = "user"
 
                 tool_call_id = msg.get("tool_call_id")
                 func_name = "unknown"
                 for prev_msg in reversed(self.conversation):
                     if prev_msg is msg:
-                        continue  # Skip current
+                        continue
                     if prev_msg["role"] == "assistant" and prev_msg.get("tool_calls"):
                         for tc in prev_msg["tool_calls"]:
                             if tc["id"] == tool_call_id:
@@ -135,8 +133,6 @@ class GeminiModel(Model):
                     logger.debug("Exception caught", exc_info=True)
                     response_dict = {"result": content}
 
-                # Include thought_signature if we have one for this tool call
-                # (required for Gemini 3.x models with thinking enabled)
                 thought_sig = self._thought_signatures.get(tool_call_id)
                 if thought_sig:
                     parts.append(
@@ -352,7 +348,6 @@ class GeminiModel(Model):
         model_to_use = embedding_model or "text-embedding-004"
         try:
             response = self.client.models.embed_content(model=model_to_use, contents=text)
-            # Response has embeddings (list), we take the first one
             return list(response.embeddings[0].values)
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)

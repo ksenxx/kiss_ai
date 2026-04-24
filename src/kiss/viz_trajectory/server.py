@@ -2,7 +2,6 @@
 # Author: Koushik Sen (ksen@berkeley.edu)
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
-# add your name here
 
 """Simple Flask server for visualizing agent trajectories."""
 
@@ -20,7 +19,6 @@ from flask import Flask, jsonify, render_template
 
 logger = logging.getLogger(__name__)
 
-# Set template folder relative to this file
 template_dir = Path(__file__).parent / "templates"
 app = Flask(__name__, template_folder=str(template_dir))
 app.json.sort_keys = False  # type: ignore[attr-defined]  # Preserve key order in JSON
@@ -54,25 +52,20 @@ def _parse_trajectory_yaml(file_path: Path) -> dict:
     global_max_budget = data.get("global_max_budget") or agent_cfg.get("global_max_budget") or 0.0
 
     return {
-        # Basic metadata
         "name": data.get("name", "Unknown"),
         "id": data.get("id", 0),
         "run_start_timestamp": data.get("run_start_timestamp", 0),
         "run_end_timestamp": data.get("run_end_timestamp", 0),
         "model": data.get("model", "Unknown"),
         "command": data.get("command", "Unknown"),
-        # Counters
         "step_count": data.get("step_count", 0),
         "max_steps": data.get("max_steps", 0),
         "tokens_used": data.get("tokens_used", 0),
         "max_tokens": data.get("max_tokens", 0),
-        # Local (agent) budget
         "agent_budget_used": data.get("budget_used", 0.0),
         "agent_max_budget": agent_max_budget,
-        # Global budget
         "global_budget_used": data.get("global_budget_used", 0.0),
         "global_max_budget": global_max_budget,
-        # Actual messages
         "messages": messages,
     }
 
@@ -88,14 +81,13 @@ def _parse_state_dir_timestamp(state_dir: str) -> datetime:
     """
     try:
         parts = state_dir.split("_")
-        # Expected format: job_YYYY_MM_DD_HH_MM_SS_random
         if len(parts) >= 7 and parts[0] == "job":
             yyyy, mo, dd, hh, mm, ss = map(int, parts[1:7])
             return datetime(yyyy, mo, dd, hh, mm, ss)
     except (ValueError, IndexError):
         logger.debug("Exception caught", exc_info=True)
         pass
-    return datetime.min  # fallback for unparseable names
+    return datetime.min
 
 
 def list_jobs(artifact_dir: Path) -> list[dict]:
@@ -125,7 +117,6 @@ def list_jobs(artifact_dir: Path) -> list[dict]:
             }
         )
 
-    # Sort by creation time (newest first)
     jobs.sort(key=lambda x: _parse_state_dir_timestamp(str(x["name"])), reverse=True)
     return jobs
 
@@ -152,7 +143,6 @@ def load_job_trajectories(artifact_dir: Path, job_name: str) -> list[dict]:
             logger.debug("Exception caught", exc_info=True)
             print(f"Error loading {file_path}: {e}")
 
-    # Sort by run_start_timestamp in ascending order
     trajectories.sort(key=lambda x: x.get("run_start_timestamp", 0))
     return trajectories
 
@@ -196,7 +186,6 @@ def get_job_trajectories(job_name: str):
     if ARTIFACT_DIR is None:
         return jsonify({"error": "Artifact directory not set"}), 500
 
-    # Validate job_name to prevent path traversal
     if "/" in job_name or "\\" in job_name or ".." in job_name:
         return jsonify({"error": "Invalid job name"}), 400
 

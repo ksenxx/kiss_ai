@@ -14,7 +14,6 @@ Usage with harbor CLI:
 
 from __future__ import annotations
 
-import base64
 import logging
 import os
 import shlex
@@ -27,50 +26,49 @@ from harbor.environments.base import BaseEnvironment, ExecResult
 from harbor.models.agent.context import AgentContext
 
 from kiss._version import __version__
-from kiss.benchmarks.terminal_bench.tbench_prompt import TBENCH_SYSTEM_PROMPT
 
-# Phrases that uniquely identify tasks known to always timeout.
-# These tasks have failed 0/6 across multiple evaluation runs due to
-# fundamental constraints (compilation too slow, needs GUI, needs GPU,
-# expert time estimate measured in hours/days).
 _SKIP_PHRASES: tuple[str, ...] = (
-    # compile-compcert: CompCert build needs hours with 2 CPUs/4GB
     "CompCert C verified compiler",
-    # install-windows-3.11: requires VNC GUI interaction
     "Windows 3.11 for Workgroups",
-    # extract-moves-from-video: YouTube download + video OCR
     "video of someone playing zork",
-    # gpt2-codegolf: <5000 byte C for GPT-2 inference, expert ~40h
     "gpt-2 weights stored as a TF .ckpt",
-    # train-fasttext: model training too slow for timeout
     "train a fasttext model on the yelp data",
-    # caffe-cifar-10: Caffe source build + training, always times out
     "BVLC Caffe deep learning framework",
-    # make-doom-for-mips: MIPS cross-compilation, expert ~8h
     "build the doomgeneric_mips ELF",
-    # mteb-leaderboard: hardcoded expected answer from stale snapshot;
-    # leaderboard changes, agent always finds different top models
     "Scandinavian MTEB leaderboard",
-    # fix-ocaml-gc: OCaml GC debugging, consistently times out (1+ hour)
     "OCaml garbage collector",
 )
 
 logger = logging.getLogger(__name__)
+
 
 _wheel_lock = threading.Lock()
 _wheel_path: Path | None = None
 
 
 def _get_wheel() -> Path:
-    """Build a wheel from local source, cached for the process lifetime.
+    """Return the kiss-agent-framework wheel, using a pre-built one if available.
+
+    When ``KISS_WHEEL_PATH`` is set (by :func:`run.build_package`),
+    the pre-built wheel is used directly, avoiding a redundant rebuild
+    inside the harbor subprocess.  Falls back to building from source
+    when the environment variable is not set.
 
     Returns:
-        Path to the built .whl file.
+        Path to the ``.whl`` file.
     """
     global _wheel_path
     with _wheel_lock:
         if _wheel_path is not None and _wheel_path.exists():
             return _wheel_path
+
+        env_wheel = os.environ.get("KISS_WHEEL_PATH")
+        if env_wheel:
+            p = Path(env_wheel)
+            if p.exists():
+                _wheel_path = p
+                return _wheel_path
+
         import kiss
 
         project_root = Path(kiss.__file__).resolve().parent.parent.parent
@@ -86,7 +84,6 @@ def _get_wheel() -> Path:
         return _wheel_path
 
 
-# API key environment variables to forward into the container.
 _API_KEY_VARS = (
     "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
@@ -143,52 +140,31 @@ class SorcarHarborAgent(BaseAgent):
         """Install sorcar inside the harbor container.
 
         Installs uv, then kiss-agent-framework as a uv tool (which
-        manages its own Python), and writes a tbench-specific SYSTEM.md
-        that replaces the generic IDE system prompt with terminal-bench
-        instructions.  Each step is run separately so failures are
-        logged clearly and do not silently abort the chain.
+        manages its own Python).  Each step is run separately so
+        failures are logged clearly and do not silently abort the
+        chain.
 
         Args:
             environment: The harbor execution environment.
         """
-        # Step 1: Install system deps + uv
         if not await self._exec_check(
             environment,
             "apt-get update -qq && apt-get install -y -qq curl"
-            " && curl -LsSf https://astral.sh/uv/install.sh | sh",
+            " && curl -LsSf https://astral.sh/uv/install.sh -o /tmp/install-uv.sh"
+            " && sh /tmp/install-uv.sh"
+            " && test -x /root/.local/bin/uv",
             "install uv",
         ):
             return
 
-        # Step 2: Build a wheel from local source (avoids stale PyPI package),
-        # upload it to the container, and install it.  Pin to Python 3.13
-        # because transitive deps (e.g. pyiceberg) lack pre-built wheels for
-        # 3.14, and minimal Docker images don't have a C compiler for source
-        # builds.
         wheel = _get_wheel()
         container_wheel = f"/tmp/{wheel.name}"
         await environment.upload_file(wheel, container_wheel)
-        if not await self._exec_check(
+        await self._exec_check(
             environment,
             'export PATH="/root/.local/bin:$PATH"'
             f" && uv tool install --python 3.13 {container_wheel}",
             "install kiss-agent-framework",
-        ):
-            return
-
-        # Step 3: Write the terminal-bench SYSTEM.md using the tool's own
-        # Python to decode base64, avoiding dependency on shell `base64`
-        # command which is missing in some minimal Docker images.
-        b64 = base64.b64encode(TBENCH_SYSTEM_PROMPT.encode()).decode()
-        await self._exec_check(
-            environment,
-            'export PATH="/root/.local/bin:$PATH"'
-            " && /root/.local/share/uv/tools"
-            "/kiss-agent-framework/bin/python3 -c "
-            '"import base64; from pathlib import Path; import kiss;'
-            " d = Path(kiss.__file__).parent.parent.parent;"
-            f' (d / \\"SYSTEM.md\\").write_text(base64.b64decode(\\"{b64}\\").decode())"',
-            "write SYSTEM.md",
         )
 
     async def _run_sorcar(
@@ -212,7 +188,7 @@ class SorcarHarborAgent(BaseAgent):
         escaped = shlex.quote(task)
         return await environment.exec(
             f'export PATH="/root/.local/bin:$PATH"'
-            f" && sorcar -t {escaped} -w /app --no-web -n {model_flag}",
+            f" && sorcar -t {escaped} -w /app --no-web {model_flag}",
             user="root",
             env=env,
         )
@@ -225,11 +201,6 @@ class SorcarHarborAgent(BaseAgent):
     ) -> None:
         """Run sorcar with the task instruction inside the container.
 
-        Pre-reads the verifier test script and injects it into the
-        instruction so the agent sees exact assertions.  After the
-        first sorcar run, automatically runs the tests and retries
-        once with failure output if tests don't pass.
-
         Args:
             instruction: Natural language task description from harbor.
             environment: The harbor execution environment.
@@ -241,7 +212,6 @@ class SorcarHarborAgent(BaseAgent):
                 context.metadata = {"skipped": True, "reason": phrase}
                 return
 
-        # Verify sorcar is installed before attempting to run it.
         check = await environment.exec(
             'export PATH="/root/.local/bin:$PATH" && which sorcar',
             user="root",
@@ -254,43 +224,7 @@ class SorcarHarborAgent(BaseAgent):
         model_flag = f"-m {self.model_name}" if self.model_name else ""
         env = {k: v for k in _API_KEY_VARS if (v := os.environ.get(k, ""))}
 
-        # Pre-read the verifier test script so the agent sees every
-        # assertion, expected path, and expected value up front.
-        test_read = await environment.exec(
-            "cat /tests/test_outputs.py /tests/verify.sh"
-            " /app/test.sh 2>/dev/null | head -300",
-            user="root",
-        )
-        augmented = instruction
-        if test_read.stdout and test_read.stdout.strip():
-            augmented += (
-                "\n\n## VERIFIER TEST SCRIPT (your solution MUST pass ALL"
-                " these tests — read every assertion):\n```\n"
-                + test_read.stdout.strip()
-                + "\n```"
-            )
-
-        # First sorcar run.
-        result = await self._run_sorcar(environment, augmented, env, model_flag)
-
-        # Auto-verify: run the test suite and retry once on failure.
-        test_result = await environment.exec(
-            "cd /app && bash test.sh 2>&1 | tail -80",
-            user="root",
-            timeout_sec=180,
-        )
-        test_out = test_result.stdout or ""
-        if test_result.return_code != 0 or "FAILED" in test_out:
-            logger.info("Tests failed after first run — retrying with failure context")
-            retry_task = (
-                "The verifier tests FAILED after your previous attempt."
-                " Fix the root cause and make ALL tests pass.\n\n"
-                f"Test output:\n{test_out}\n\n"
-                f"Original task: {instruction}"
-            )
-            result = await self._run_sorcar(
-                environment, retry_task, env, model_flag
-            )
+        result = await self._run_sorcar(environment, instruction, env, model_flag)
 
         context.metadata = {
             "stdout": result.stdout,

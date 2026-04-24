@@ -97,7 +97,6 @@ def _make_agent(model_obj: Any, max_steps: int = 5) -> KISSAgent:
     agent.step_count = 0
     agent.total_tokens_used = 0
     agent.budget_used = 0.0
-    agent.session_info = ""
     agent.run_start_timestamp = 0
     agent._cached_tools_schema = None
     return agent

@@ -1,7 +1,5 @@
 """Shared browser UI components for KISS agent viewers."""
 
-import logging
-import queue
 import threading
 import time
 from typing import Any
@@ -15,17 +13,13 @@ from kiss.core.printer import (
     truncate_result,
 )
 
-logger = logging.getLogger(__name__)
-
-
-
-
 _DISPLAY_EVENT_TYPES = frozenset({
     "clear", "thinking_start", "thinking_delta", "thinking_end",
     "text_delta", "text_end", "tool_call", "tool_result",
-    "system_output", "result", "system_prompt", "prompt", "usage_info",
+    "system_output", "result", "system_prompt", "prompt",
     "task_done", "task_error", "task_stopped",
     "followup_suggestion",
+    "autocommit_done",
 })
 
 
@@ -60,142 +54,279 @@ def _coalesce_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return result
 
 
-class BaseBrowserPrinter(StreamEventParser, Printer):
+class _BashState:
+    """Bash buffering state for streaming output.
+
+    Buffers bash output fragments and flushes them periodically to
+    avoid overwhelming the frontend with tiny events.
+    """
+
+    __slots__ = ("buffer", "timer", "generation", "last_flush", "streamed")
+
     def __init__(self) -> None:
+        self.buffer: list[str] = []
+        self.timer: threading.Timer | None = None
+        self.generation: int = 0
+        self.last_flush: float = 0.0
+        self.streamed: bool = False
+
+
+class BaseBrowserPrinter(StreamEventParser, Printer):
+    """Base printer for browser-based UIs.
+
+    Stream-parsing state (``_current_block_type``, ``_tool_name``,
+    ``_tool_json_buffer``) is stored in thread-local storage so
+    concurrent task threads cannot corrupt each other's in-flight
+    parsing.  Recording and bash buffering are per-tab (keyed by
+    ``tab_id``) so one task's ``stop_recording()`` or ``reset()``
+    does not destroy another tab's state.
+    """
+
+
+    @property
+    def _current_block_type(self) -> str:  # type: ignore[override]
+        return getattr(self._thread_local, "_cbt", "")
+
+    @_current_block_type.setter
+    def _current_block_type(self, value: str) -> None:
+        self._thread_local._cbt = value
+
+    @property
+    def _tool_name(self) -> str:  # type: ignore[override]
+        return getattr(self._thread_local, "_tn", "")
+
+    @_tool_name.setter
+    def _tool_name(self, value: str) -> None:
+        self._thread_local._tn = value
+
+    @property
+    def _tool_json_buffer(self) -> str:  # type: ignore[override]
+        return getattr(self._thread_local, "_tjb", "")
+
+    @_tool_json_buffer.setter
+    def _tool_json_buffer(self, value: str) -> None:
+        self._thread_local._tjb = value
+
+    @property
+    def _bash_state(self) -> _BashState:
+        """Return the bash buffering state for the current thread's tab.
+
+        Each tab gets its own ``_BashState`` so concurrent tasks on
+        different tabs cannot corrupt each other's bash buffer,
+        ``streamed`` flag, generation counter, or flush timer.
+
+        The caller should hold ``_bash_lock`` when accessing this in
+        multi-threaded production code.
+        """
+        key = getattr(self._thread_local, "tab_id", None) or ""
+        bs = self._bash_states.get(key)
+        if bs is None:
+            bs = _BashState()
+            self._bash_states[key] = bs
+        return bs
+
+    def __init__(self) -> None:
+        self._thread_local = threading.local()
         StreamEventParser.__init__(self)
-        self._client_queue: queue.Queue[dict[str, Any]] | None = None
         self._lock = threading.Lock()
         self._bash_lock = threading.Lock()
-        self._bash_buffer: list[str] = []
-        self._bash_last_flush = 0.0
-        self._bash_flush_timer: threading.Timer | None = None
-        self._bash_generation = 0
-        self._bash_streamed = False
-        self.stop_event = threading.Event()
-        self._thread_local = threading.local()
-        self._recordings: dict[int, list[dict[str, Any]]] = {}
+        self._bash_states: dict[str, _BashState] = {}
+        self._tokens_offsets: dict[str, int] = {}
+        self._budget_offsets: dict[str, float] = {}
+        self._steps_offsets: dict[str, int] = {}
+        self._recordings: dict[str, list[dict[str, Any]]] = {}
+
+    def _offset_key(self) -> str:
+        """Return the thread-local tab key for per-tab usage offsets.
+
+        Falls back to the empty string for threads without a tab_id
+        (e.g. unit tests that do not set ``_thread_local.tab_id``).
+        """
+        return getattr(self._thread_local, "tab_id", None) or ""
+
+    @property
+    def tokens_offset(self) -> int:
+        """Per-tab token-count offset used when broadcasting ``usage_info``.
+
+        Backed by a ``tab_id``-keyed dict so concurrent tasks on
+        different tabs never clobber each other's accumulated tokens
+        (A7 fix).
+        """
+        return self._tokens_offsets.get(self._offset_key(), 0)
+
+    @tokens_offset.setter
+    def tokens_offset(self, value: int) -> None:
+        self._tokens_offsets[self._offset_key()] = value
+
+    @property
+    def budget_offset(self) -> float:
+        """Per-tab dollar-budget offset used when broadcasting ``usage_info``."""
+        return self._budget_offsets.get(self._offset_key(), 0.0)
+
+    @budget_offset.setter
+    def budget_offset(self, value: float) -> None:
+        self._budget_offsets[self._offset_key()] = value
+
+    @property
+    def steps_offset(self) -> int:
+        """Per-tab step-count offset used when broadcasting ``usage_info``."""
+        return self._steps_offsets.get(self._offset_key(), 0)
+
+    @steps_offset.setter
+    def steps_offset(self, value: int) -> None:
+        self._steps_offsets[self._offset_key()] = value
+
+    def cleanup_tab(self, tab_id: str) -> None:
+        """Remove all per-tab state for *tab_id* to free memory.
+
+        Should be called when a tab is closed on the frontend.  Cancels
+        any pending bash flush timer and removes the tab's entries from
+        ``_bash_states`` and ``_recordings``.
+
+        Args:
+            tab_id: The frontend tab identifier to clean up.
+        """
+        key = tab_id or ""
+        with self._bash_lock:
+            bs = self._bash_states.pop(key, None)
+            if bs is not None and bs.timer is not None:
+                bs.timer.cancel()
+        with self._lock:
+            self._recordings.pop(key, None)
+            self._tokens_offsets.pop(key, None)
+            self._budget_offsets.pop(key, None)
+            self._steps_offsets.pop(key, None)
 
     def reset(self) -> None:
         """Reset internal streaming and tool-parsing state for a new turn."""
         self.reset_stream_state()
-        self._bash_streamed = False
         with self._bash_lock:
-            self._bash_generation += 1
-            self._bash_buffer.clear()
-            if self._bash_flush_timer is not None:
-                self._bash_flush_timer.cancel()
-                self._bash_flush_timer = None
+            self._bash_state.generation += 1
+            self._bash_state.buffer.clear()
+            self._bash_state.streamed = False
+            if self._bash_state.timer is not None:
+                self._bash_state.timer.cancel()
+                self._bash_state.timer = None
 
     def _flush_bash(self) -> None:
-        with self._bash_lock:
-            gen = self._bash_generation
-            if self._bash_flush_timer is not None:
-                self._bash_flush_timer.cancel()
-                self._bash_flush_timer = None
-            if self._bash_buffer:
-                text = "".join(self._bash_buffer)
-                self._bash_buffer.clear()
-                self._bash_last_flush = time.monotonic()
-            else:
-                text = ""
-        if text and gen == self._bash_generation:
-            self.broadcast({"type": "system_output", "text": text})
+        """Flush the bash buffer.
 
-    def start_recording(self, recording_id: int | None = None) -> None:
-        """Start recording broadcast events.
-
-        Uses an explicit *recording_id* to avoid thread-ID reuse corruption.
-        Falls back to thread ident when no ID is given (backward compat).
-
-        Args:
-            recording_id: Unique identifier for this recording session.
+        Captures the generation counter inside ``_bash_lock`` along with
+        the buffered text.  After releasing the lock, re-checks the
+        generation inside a second ``_bash_lock`` acquisition: if
+        ``reset()`` ran in between (incrementing the generation), the
+        captured text is stale and is discarded.  The ``broadcast()``
+        call is made while still holding the second lock to close the
+        TOCTOU window that would otherwise allow ``reset()`` +
+        ``start_recording()`` to slip in between the generation check
+        and the broadcast.
         """
-        key = recording_id if recording_id is not None else threading.current_thread().ident
-        with self._lock:
-            if key is not None:  # pragma: no branch – always set for alive threads
-                self._recordings[key] = []
+        with self._bash_lock:
+            bs = self._bash_state
+            gen = bs.generation
+            if bs.timer is not None:
+                bs.timer.cancel()
+                bs.timer = None
+            text = "".join(bs.buffer) if bs.buffer else ""
+            bs.buffer.clear()
+            bs.last_flush = time.monotonic()
+        if text:
+            with self._bash_lock:
+                if self._bash_state.generation != gen:
+                    return
+                self.broadcast({"type": "system_output", "text": text})
 
-    def stop_recording(self, recording_id: int | None = None) -> list[dict[str, Any]]:
-        """Stop recording and return its display events.
+    def _recording_key(self) -> str:
+        """Return the per-tab key for the current thread's recording.
+
+        Uses thread-local ``tab_id`` so each task thread records into
+        its own list.  Falls back to ``""`` for callers that don't set
+        a tab_id (e.g. unit tests).
+        """
+        return getattr(self._thread_local, "tab_id", None) or ""
+
+    def start_recording(self) -> None:
+        """Start recording broadcast events for the current tab."""
+        key = self._recording_key()
+        with self._lock:
+            self._recordings[key] = []
+
+    @staticmethod
+    def _filter_and_coalesce(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Filter to display events and merge consecutive deltas.
 
         Args:
-            recording_id: The recording ID passed to start_recording.
+            raw: Unfiltered list of recorded events.
+
+        Returns:
+            Display-relevant events with consecutive deltas merged.
+        """
+        filtered = [e for e in raw if e.get("type") in _DISPLAY_EVENT_TYPES]
+        return _coalesce_events(filtered)
+
+    def stop_recording(self) -> list[dict[str, Any]]:
+        """Stop recording for the current tab and return its display events.
 
         Returns:
             List of display-relevant events with consecutive deltas merged.
         """
-        key = recording_id if recording_id is not None else threading.current_thread().ident
-        assert key is not None
+        key = self._recording_key()
         with self._lock:
             raw = self._recordings.pop(key, [])
-        filtered = [e for e in raw if e.get("type") in _DISPLAY_EVENT_TYPES]
-        return _coalesce_events(filtered)
+        return self._filter_and_coalesce(raw)
+
+    def peek_recording(self) -> list[dict[str, Any]]:
+        """Return a snapshot of the current tab's recording without stopping it.
+
+        Used for periodic crash-recovery flushes: the caller can persist
+        a snapshot of events to the database while recording continues.
+
+        Returns:
+            List of display-relevant events with consecutive deltas merged.
+        """
+        key = self._recording_key()
+        with self._lock:
+            rec = self._recordings.get(key)
+            raw = list(rec) if rec is not None else []
+        return self._filter_and_coalesce(raw)
 
     def _record_event(self, event: dict[str, Any]) -> None:
-        """Append event to all active per-thread recordings.
+        """Append event to the active recording for the event's tab.
+
+        Looks up the recording list by ``tabId`` from the event (set by
+        ``VSCodePrinter.broadcast``), falling back to the thread-local
+        ``tab_id``.  This ensures timer-thread broadcasts (bash flush)
+        are routed to the correct tab's recording.
 
         Must be called with ``self._lock`` held.
         """
-        for events_list in self._recordings.values():
-            events_list.append(event)
+        key = event.get("tabId") or getattr(self._thread_local, "tab_id", None) or ""
+        rec = self._recordings.get(key)
+        if rec is not None:
+            rec.append(event)
 
     def broadcast(self, event: dict[str, Any]) -> None:
-        """Send an SSE event dict to the connected client.
-
-        The event is also appended to every active per-thread recording.
+        """Broadcast an event and record it.
 
         Args:
             event: The event dictionary to broadcast.
         """
         with self._lock:
             self._record_event(event)
-            if self._client_queue is not None:
-                self._client_queue.put(event)
-
-    def add_client(self) -> queue.Queue[dict[str, Any]]:
-        """Register the SSE client and return its event queue.
-
-        Only one client is supported. A new connection replaces any
-        previous one.
-
-        Returns:
-            queue.Queue[dict[str, Any]]: A queue that will receive broadcast events.
-        """
-        cq: queue.Queue[dict[str, Any]] = queue.Queue()
-        with self._lock:
-            self._client_queue = cq
-        return cq
-
-    def remove_client(self, cq: queue.Queue[dict[str, Any]]) -> None:
-        """Unregister the SSE client's event queue.
-
-        Only clears the queue if *cq* is the current client (handles
-        reconnection races where the old connection tears down after a
-        new one has already connected).
-
-        Args:
-            cq: The client queue to remove.
-        """
-        with self._lock:
-            if self._client_queue is cq:
-                self._client_queue = None
-
-    def has_clients(self) -> bool:
-        """Return True if a client is currently connected."""
-        with self._lock:
-            return self._client_queue is not None
 
     def _broadcast_result(
         self,
         text: str,
         total_tokens: int = 0,
         cost: str = "N/A",
+        step_count: int = 0,
     ) -> None:
         event: dict[str, Any] = {
             "type": "result",
             "text": text or "(no result)",
             "total_tokens": total_tokens,
             "cost": cost,
+            "step_count": step_count,
         }
         parsed = parse_result_yaml(text) if text else None
         if parsed:
@@ -205,19 +336,16 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
 
     def _check_stop(self) -> None:
         ev = getattr(self._thread_local, "stop_event", None)
-        if ev is not None:
-            if ev.is_set():
-                raise KeyboardInterrupt("Agent stop requested")
-        elif self.stop_event.is_set():
+        if ev is not None and ev.is_set():
             raise KeyboardInterrupt("Agent stop requested")
 
     def print(self, content: Any, type: str = "text", **kwargs: Any) -> str:
-        """Render content by broadcasting SSE events to connected browser clients.
+        """Render content by broadcasting events to connected clients.
 
         Args:
             content: The content to display.
             type: Content type (e.g. "text", "prompt", "stream_event",
-                "tool_call", "tool_result", "result", "usage_info", "message").
+                "tool_call", "tool_result", "result", "message").
             **kwargs: Additional options such as tool_input, is_error, cost,
                 total_tokens.
 
@@ -244,31 +372,38 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
         if type == "message":
             self._handle_message(content, **kwargs)
             return ""
-        if type == "usage_info":
-            self.broadcast({"type": "usage_info", "text": str(content).strip()})
-            return ""
         if type == "bash_stream":
             text = ""
             with self._bash_lock:
-                self._bash_buffer.append(str(content))
-                if time.monotonic() - self._bash_last_flush >= 0.1:
-                    if self._bash_flush_timer is not None:
-                        self._bash_flush_timer.cancel()
-                        self._bash_flush_timer = None
-                    text = "".join(self._bash_buffer)
-                    self._bash_buffer.clear()
-                    self._bash_last_flush = time.monotonic()
-                elif self._bash_flush_timer is None:
-                    self._bash_flush_timer = threading.Timer(0.1, self._flush_bash)
-                    self._bash_flush_timer.daemon = True
-                    self._bash_flush_timer.start()
+                bs = self._bash_state
+                bs.buffer.append(str(content))
+                if time.monotonic() - bs.last_flush >= 0.1:
+                    if bs.timer is not None:
+                        bs.timer.cancel()
+                        bs.timer = None
+                    text = "".join(bs.buffer)
+                    bs.buffer.clear()
+                    bs.last_flush = time.monotonic()
+                elif bs.timer is None:
+                    owner_tab = getattr(self._thread_local, "tab_id", None)
+
+                    def _timer_flush(tid: int | None = owner_tab) -> None:
+                        if tid is not None:
+                            self._thread_local.tab_id = tid
+                        self._flush_bash()
+
+                    bs.timer = threading.Timer(0.1, _timer_flush)
+                    bs.timer.daemon = True
+                    bs.timer.start()
             if text:
                 self.broadcast({"type": "system_output", "text": text})
-            self._bash_streamed = True
+            with self._bash_lock:
+                self._bash_state.streamed = True
             return ""
         if type == "tool_call":
             self._flush_bash()
-            self._bash_streamed = False
+            with self._bash_lock:
+                self._bash_state.streamed = False
             self.broadcast({"type": "text_end"})
             self._format_tool_call(str(content), kwargs.get("tool_input", {}))
             return ""
@@ -277,8 +412,10 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
             tool_name = kwargs.get("tool_name", "")
             core_tools = {"Bash", "Read", "Edit", "Write"}
             show_result = tool_name in core_tools or kwargs.get("is_error", False)
-            result_content = "" if self._bash_streamed else truncate_result(str(content))
-            self._bash_streamed = False
+            with self._bash_lock:
+                streamed = self._bash_state.streamed
+                self._bash_state.streamed = False
+            result_content = "" if streamed else truncate_result(str(content))
             if show_result:
                 self.broadcast(
                     {
@@ -288,18 +425,37 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
                     }
                 )
             return ""
+        if type == "usage_info":
+            raw_tokens = kwargs.get("total_tokens", 0)
+            raw_cost = kwargs.get("cost", "N/A")
+            raw_steps = kwargs.get("total_steps", 0)
+            total_tokens = raw_tokens + self.tokens_offset
+            total_steps = raw_steps + self.steps_offset
+            if isinstance(raw_cost, str) and raw_cost.startswith("$"):
+                total_cost = f"${float(raw_cost[1:]) + self.budget_offset:.4f}"
+            else:
+                total_cost = raw_cost
+            self.broadcast({
+                "type": "usage_info",
+                "text": str(content),
+                "total_tokens": total_tokens,
+                "cost": total_cost,
+                "total_steps": total_steps,
+            })
+            return ""
         if type == "result":
             self.broadcast({"type": "text_end"})
             self._broadcast_result(
                 str(content),
                 kwargs.get("total_tokens", 0),
                 kwargs.get("cost", "N/A"),
+                kwargs.get("step_count", 0),
             )
             return ""
         return ""
 
     def token_callback(self, token: str) -> None:
-        """Broadcast a streamed token as an SSE delta event to browser clients.
+        """Broadcast a streamed token as a delta event.
 
         Args:
             token: The text token to broadcast.
@@ -310,6 +466,23 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
                 "thinking_delta" if self._current_block_type == "thinking" else "text_delta"
             )
             self.broadcast({"type": delta_type, "text": token})
+
+    def thinking_callback(self, is_start: bool) -> None:
+        """Handle thinking-block boundary events.
+
+        Sets ``_current_block_type`` so that subsequent ``token_callback``
+        tokens are routed to the thinking panel, and broadcasts
+        ``thinking_start`` / ``thinking_end`` events.
+
+        Args:
+            is_start: ``True`` when a thinking block starts, ``False`` when it ends.
+        """
+        if is_start:
+            self._current_block_type = "thinking"
+            self.broadcast({"type": "thinking_start"})
+        else:
+            self._current_block_type = ""
+            self.broadcast({"type": "thinking_end"})
 
     def _format_tool_call(self, name: str, tool_input: dict[str, Any]) -> None:
         file_path, lang = extract_path_and_lang(tool_input)

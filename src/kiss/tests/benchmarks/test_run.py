@@ -42,5 +42,4 @@ class TestResolveDockerImages:
             )
             assert images == []
         except Exception:
-            # Harbor may raise; that's acceptable too
             pass
