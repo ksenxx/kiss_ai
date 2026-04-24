@@ -128,7 +128,7 @@ class _CommandsMixin:
 
     def _cmd_user_answer(self, cmd: dict[str, Any]) -> None:
         """Route a user answer to the correct tab's queue."""
-        ans_tab = cmd.get("tabId")
+        ans_tab = cmd.get("tabId", "")
         with self._state_lock:
             ans_state = self._tab_states.get(ans_tab) if ans_tab is not None else None
             q = ans_state.user_answer_queue if ans_state is not None else None

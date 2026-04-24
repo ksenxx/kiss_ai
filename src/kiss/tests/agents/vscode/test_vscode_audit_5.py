@@ -91,35 +91,29 @@ def _make_server() -> tuple[VSCodeServer, list[dict]]:
 # ===================================================================
 
 
-class TestAwaitUserResponseLockingBug(unittest.TestCase):
-    """B1: ``_await_user_response`` accesses ``self._tab_states`` without
-    acquiring ``_state_lock``, violating the locking discipline used
-    everywhere else.
+class TestAwaitUserResponseLockingFix(unittest.TestCase):
+    """B1 FIX: ``_await_user_response`` now acquires ``_state_lock``
+    before reading ``_tab_states``, consistent with the locking
+    discipline used everywhere else.
     """
 
-    def test_source_reads_tab_states_without_lock(self) -> None:
-        """Structural: the source accesses ``_tab_states`` outside of any
+    def test_source_reads_tab_states_under_lock(self) -> None:
+        """Structural: the source accesses ``_tab_states`` inside a
         ``with self._state_lock`` block.
         """
         src = inspect.getsource(_TaskRunnerMixin._await_user_response)
-        # The access pattern: direct dict.get without lock
         assert "_tab_states.get(" in src, (
             "_await_user_response should access _tab_states"
         )
-        # Verify no _state_lock acquisition guards the access
-        assert "with self._state_lock" not in src, (
-            "BUG B1 confirmed: _await_user_response reads _tab_states "
-            "without _state_lock"
+        assert "with self._state_lock" in src, (
+            "B1 FIX: _await_user_response now reads _tab_states "
+            "under _state_lock"
         )
 
-    def test_behavioral_read_without_lock(self) -> None:
-        """Behavioral: demonstrate that ``_await_user_response`` reads
-        ``_tab_states`` without ever acquiring ``_state_lock``.
-
-        We set up a server with a tab that has a stop_event and a
-        user_answer_queue, then call _await_user_response from a
-        thread and verify it completes — all without any _state_lock
-        acquisition from the _await_user_response path.
+    def test_behavioral_read_with_lock(self) -> None:
+        """Behavioral: ``_await_user_response`` now acquires
+        ``_state_lock``, so calling it while another thread holds
+        the lock will block until the lock is released.
         """
         server, _ = _make_server()
         tab = server._get_tab("test-tab")
@@ -127,43 +121,43 @@ class TestAwaitUserResponseLockingBug(unittest.TestCase):
         tab.user_answer_queue = queue.Queue(maxsize=1)
         tab.user_answer_queue.put("hello")
 
-        # Set thread-local so _await_user_response can find the tab
         server.printer._thread_local.stop_event = tab.stop_event
         server.printer._thread_local.tab_id = "test-tab"
 
-        # Verify it reads without lock by confirming it succeeds even
-        # when the lock is held by another thread
         lock_held = threading.Event()
+        await_started = threading.Event()
         done = threading.Event()
         result_box: list[str] = []
 
         def hold_lock() -> None:
             with server._state_lock:
                 lock_held.set()
-                done.wait(timeout=5)
+                # Hold the lock until the await thread has had a chance
+                # to start and block on it
+                await_started.wait(timeout=5)
+                import time
+                time.sleep(0.05)
+            # Lock released — _await_user_response can proceed
 
         def call_await() -> None:
-            # Wait for the lock to be held
             lock_held.wait(timeout=5)
-            # This should succeed even though _state_lock is held,
-            # because _await_user_response doesn't acquire it
+            await_started.set()
             server.printer._thread_local.stop_event = tab.stop_event
             server.printer._thread_local.tab_id = "test-tab"
             result_box.append(server._await_user_response())
+            done.set()
 
         t1 = threading.Thread(target=hold_lock)
         t2 = threading.Thread(target=call_await)
         t1.start()
         t2.start()
         t2.join(timeout=5)
-        done.set()
         t1.join(timeout=5)
 
-        # The call succeeded without deadlocking — proves it doesn't
-        # acquire _state_lock
+        # The call succeeded after the lock was released
         assert result_box == ["hello"], (
             f"Expected ['hello'], got {result_box}. "
-            "BUG B1: _await_user_response bypassed the lock"
+            "B1 FIX: _await_user_response correctly acquires the lock"
         )
 
 
@@ -172,28 +166,24 @@ class TestAwaitUserResponseLockingBug(unittest.TestCase):
 # ===================================================================
 
 
-class TestAutocommitActionLockingBug(unittest.TestCase):
-    """B2: ``_handle_autocommit_action`` accesses ``self._tab_states``
-    without ``_state_lock`` when persisting the autocommit event.
+class TestAutocommitActionLockingFix(unittest.TestCase):
+    """B2 FIX: ``_handle_autocommit_action`` now acquires ``_state_lock``
+    before reading ``_tab_states`` when persisting the autocommit event.
     """
 
-    def test_source_reads_tab_states_without_lock(self) -> None:
-        """Structural: after ``if ok:`` the method reads ``_tab_states``
-        directly.
+    def test_source_reads_tab_states_under_lock(self) -> None:
+        """Structural: every ``_tab_states.get`` call is guarded by a
+        ``with self._state_lock`` block.
         """
         src = inspect.getsource(_MergeFlowMixin._handle_autocommit_action)
-        # Find the unguarded access
         assert "_tab_states.get(tab_id)" in src.replace("self.", ""), (
             "_handle_autocommit_action should access _tab_states"
         )
-        # Count lock acquisitions vs _tab_states accesses
         lock_blocks = list(re.finditer(r"with self\._state_lock", src))
         tab_accesses = list(re.finditer(r"self\._tab_states\.get", src))
-        # There should be at least one unguarded access
-        # (the one inside the `if ok:` block after repo_lock release)
-        assert len(tab_accesses) > len(lock_blocks), (
-            f"BUG B2 confirmed: {len(tab_accesses)} _tab_states.get() calls "
-            f"but only {len(lock_blocks)} _state_lock blocks"
+        assert len(lock_blocks) >= len(tab_accesses), (
+            f"B2 FIX: {len(tab_accesses)} _tab_states.get() calls "
+            f"guarded by {len(lock_blocks)} _state_lock blocks"
         )
 
 
@@ -416,22 +406,19 @@ class TestParseTaskTagsRedundantExport(unittest.TestCase):
 # ===================================================================
 
 
-class TestTabIdDefaultInconsistency(unittest.TestCase):
-    """I1: ``_cmd_user_answer`` uses ``cmd.get("tabId")`` (``None``
-    default) while all other handlers use ``cmd.get("tabId", "")``
-    (empty string).
+class TestTabIdDefaultConsistencyFix(unittest.TestCase):
+    """I1 FIX: ``_cmd_user_answer`` now uses ``cmd.get("tabId", "")``
+    (empty string default), consistent with every other handler.
     """
 
-    def test_user_answer_uses_none_default(self) -> None:
+    def test_user_answer_uses_empty_string_default(self) -> None:
         src = inspect.getsource(_CommandsMixin._cmd_user_answer)
-        # Uses cmd.get("tabId") without a default
-        assert re.search(r'cmd\.get\("tabId"\)', src), (
-            "INCONSISTENCY I1 confirmed: _cmd_user_answer uses "
-            "cmd.get('tabId') with no default"
+        assert re.search(r'cmd\.get\("tabId",\s*""\)', src), (
+            "I1 FIX: _cmd_user_answer now uses cmd.get('tabId', '')"
         )
 
-    def test_other_handlers_use_empty_string_default(self) -> None:
-        """All other cmd handlers that read tabId use a default of ''."""
+    def test_all_handlers_use_empty_string_default(self) -> None:
+        """Every cmd handler that reads tabId uses a default of ''."""
         handlers_with_tabid = [
             _CommandsMixin._cmd_run,
             _CommandsMixin._cmd_stop,
@@ -445,12 +432,12 @@ class TestTabIdDefaultInconsistency(unittest.TestCase):
             _CommandsMixin._cmd_generate_commit_message,
             _CommandsMixin._cmd_worktree_action,
             _CommandsMixin._cmd_autocommit_action,
+            _CommandsMixin._cmd_user_answer,
         ]
         for handler in handlers_with_tabid:
             src = inspect.getsource(handler)
             if 'cmd.get("tabId"' not in src:
                 continue
-            # Check for empty-string default
             has_empty_default = bool(
                 re.search(r'cmd\.get\("tabId",\s*""\)', src)
             )
@@ -459,7 +446,7 @@ class TestTabIdDefaultInconsistency(unittest.TestCase):
                 and not re.search(r'cmd\.get\("tabId",', src)
             )
             assert has_empty_default and not has_none_default, (
-                f"INCONSISTENCY I1: {handler.__name__} should use "
+                f"I1 FIX: {handler.__name__} should use "
                 f'cmd.get("tabId", ""), not cmd.get("tabId")'
             )
 

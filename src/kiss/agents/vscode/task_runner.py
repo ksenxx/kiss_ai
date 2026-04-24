@@ -397,8 +397,9 @@ class _TaskRunnerMixin:
         if stop is None:
             raise KeyboardInterrupt("No stop event set")
         tab_id = getattr(self.printer._thread_local, "tab_id", None)
-        tab = self._tab_states.get(tab_id) if tab_id is not None else None
-        q = tab.user_answer_queue if tab is not None else None
+        with self._state_lock:
+            tab = self._tab_states.get(tab_id) if tab_id is not None else None
+            q = tab.user_answer_queue if tab is not None else None
         while True:
             if q is not None:
                 try:
