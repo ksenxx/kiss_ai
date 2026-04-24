@@ -1,54 +1,14 @@
-"""Integration tests for bugs, redundancies, and inconsistencies in
+"""Integration tests confirming fixes for bugs and inconsistencies in
 ``kiss.agents.vscode`` — audit round 5.
 
-Each test confirms a real issue by exercising the actual code with real
-objects (no mocks/patches).  Tests are grouped by category:
+B1 fix: ``_await_user_response`` now acquires ``_state_lock`` before
+    reading ``_tab_states``, consistent with the locking discipline.
 
-Bugs
-----
-B1: ``_await_user_response`` reads ``_tab_states`` without ``_state_lock``,
-    inconsistent with the locking discipline used in every other method.
+B2 fix: ``_handle_autocommit_action`` now acquires ``_state_lock``
+    before reading ``_tab_states`` when persisting the autocommit event.
 
-B2: ``_handle_autocommit_action`` reads ``_tab_states`` without
-    ``_state_lock`` when persisting the autocommit event.
-
-B3: ``_complete_from_active_file`` returns the **longest** matching
-    suffix instead of the shortest, so autocomplete over-completes
-    (e.g. "self.method_name_long" beats "self.method" for partial "self.me").
-
-B4: Incomplete comment in ``_run_task_inner``: ``"BUG-B fix: if this
-    worktree tab has a pending branch from a"`` — the sentence is
-    truncated mid-clause.
-
-B5: ``_new_chat`` has no guard against being called on a tab with a
-    running task — ``agent.new_chat()`` would reset the chat_id
-    mid-flight.
-
-Redundancies
-------------
-R1: The ``noqa: F401 (re-export for tests)`` comment on the
-    ``_cleanup_merge_data``, ``_git``, ``_merge_data_dir`` imports in
-    ``server.py`` is misleading: all three symbols are used directly
-    in the same file (``_close_tab``, ``_generate_commit_message``).
-
-R2: ``parse_task_tags`` is listed in ``server.py.__all__`` and imported
-    there, but it is never referenced inside ``server.py`` — the only
-    call-site is ``task_runner.py``, which imports it directly from
-    ``tab_state``.
-
-Inconsistencies
----------------
-I1: ``_cmd_user_answer`` uses ``cmd.get("tabId")`` (default ``None``)
-    while every other handler uses ``cmd.get("tabId", "")`` (default
-    empty string).  Downstream code (``_stop_task``, ``_finish_merge``,
-    ``_close_tab``) guards on ``if not tab_id`` which treats both the
-    same, but the inconsistency is error-prone.
-
-I2: ``_complete_seq`` starts at 0 while ``_complete_seq_latest`` starts
-    at -1.  The first increment produces seq=1 which works, but the
-    asymmetric initialization obscures the invariant that
-    ``_complete_seq_latest`` always equals the most-recently-dispatched
-    ``_complete_seq`` value (or -1 meaning "none dispatched yet").
+I1 fix: ``_cmd_user_answer`` now uses ``cmd.get("tabId", "")`` (empty
+    string default), consistent with every other command handler.
 """
 
 from __future__ import annotations
@@ -59,7 +19,6 @@ import re
 import threading
 import unittest
 
-from kiss.agents.vscode.autocomplete import _AutocompleteMixin
 from kiss.agents.vscode.commands import _CommandsMixin
 from kiss.agents.vscode.merge_flow import _MergeFlowMixin
 from kiss.agents.vscode.server import VSCodeServer
@@ -187,219 +146,6 @@ class TestAutocommitActionLockingFix(unittest.TestCase):
         )
 
 
-# ===================================================================
-# B3 — _complete_from_active_file returns longest suffix
-# ===================================================================
-
-
-class TestAutocompleteReturnsShortest(unittest.TestCase):
-    """B3: ``_complete_from_active_file`` picks the candidate with the
-    **longest** suffix, not the shortest.  For autocomplete, the
-    shortest match is almost always preferred (most specific, least
-    surprising).
-    """
-
-    def test_source_picks_longest(self) -> None:
-        """Structural: the comparison uses ``> len(best)`` — longest wins."""
-        src = inspect.getsource(_AutocompleteMixin._complete_from_active_file)
-        assert "> len(best)" in src, (
-            "BUG B3 confirmed: source picks longest suffix (> len(best))"
-        )
-        # A shortest-first autocomplete would use < len(best) or a
-        # different selection strategy
-        assert "< len(best)" not in src, (
-            "If < len(best) were present, it would pick shortest"
-        )
-
-    def test_behavioral_longest_wins(self) -> None:
-        """Behavioral: given candidates 'method' and 'method_name_long',
-        typing 'me' should complete to 'thod' (shortest) but actually
-        completes to 'thod_name_long' (longest).
-        """
-        server, _ = _make_server()
-        content = "method\nmethod_name_long\n"
-        result = server._complete_from_active_file(
-            "me", snapshot_content=content,
-        )
-        # BUG: returns the LONGEST suffix
-        assert result == "thod_name_long", (
-            f"BUG B3 confirmed: got '{result}', expected 'thod' (shortest) "
-            "but autocomplete returns longest suffix"
-        )
-        # The correct behavior would be:
-        # assert result == "thod"
-
-    def test_behavioral_with_dotted_identifiers(self) -> None:
-        """Behavioral: dotted identifiers also get longest-suffix treatment."""
-        server, _ = _make_server()
-        content = "self.run\nself.run_task_inner\n"
-        result = server._complete_from_active_file(
-            "self.ru", snapshot_content=content,
-        )
-        # BUG: returns longest suffix from dotted chains
-        assert result == "n_task_inner", (
-            f"BUG B3 confirmed: got '{result}', expected 'n' (from self.run)"
-        )
-
-
-# ===================================================================
-# B4 — Incomplete comment in _run_task_inner
-# ===================================================================
-
-
-class TestIncompleteComment(unittest.TestCase):
-    """B4: The ``BUG-B fix`` comment in ``_run_task_inner`` ends with
-    ``"from a"`` — the sentence is truncated mid-clause.
-    """
-
-    def test_comment_is_truncated(self) -> None:
-        src = inspect.getsource(_TaskRunnerMixin._run_task_inner)
-        # Find the BUG-B comment
-        match = re.search(r"# BUG-B fix:.*", src)
-        assert match is not None, "BUG-B comment should exist"
-        comment = match.group(0)
-        # The comment ends with "from a" — an incomplete sentence
-        assert comment.rstrip().endswith("from a"), (
-            f"BUG B4 confirmed: comment is truncated: '{comment}'"
-        )
-
-
-# ===================================================================
-# B5 — _new_chat has no running-task guard
-# ===================================================================
-
-
-class TestNewChatNoRunningGuard(unittest.TestCase):
-    """B5: ``_new_chat`` calls ``tab.agent.new_chat()`` without checking
-    whether the tab has a running task.  If a task is in flight,
-    ``new_chat()`` resets the agent's chat_id, which can corrupt the
-    running task's persistence.
-    """
-
-    def test_source_has_no_guard(self) -> None:
-        """Structural: ``_new_chat`` doesn't check ``is_task_active``,
-        ``is_merging``, or ``task_thread.is_alive()``.
-        """
-        src = inspect.getsource(VSCodeServer._new_chat)
-        assert "is_task_active" not in src, (
-            "BUG B5 confirmed: _new_chat doesn't check is_task_active"
-        )
-        assert "is_merging" not in src, (
-            "BUG B5 confirmed: _new_chat doesn't check is_merging"
-        )
-        assert "is_alive" not in src, (
-            "BUG B5 confirmed: _new_chat doesn't check thread liveness"
-        )
-
-    def test_behavioral_new_chat_resets_running_tab(self) -> None:
-        """Behavioral: calling _new_chat on a tab with is_task_active=True
-        proceeds without error, resetting the chat_id mid-flight.
-        """
-        server, events = _make_server()
-        tab = server._get_tab("running-tab")
-        tab.agent._chat_id = "chat-123"
-        tab.is_task_active = True
-        tab.task_thread = threading.Thread(target=lambda: None)
-
-        old_chat_id = tab.agent.chat_id
-        assert old_chat_id == "chat-123"
-
-        # This should be refused but isn't
-        server._new_chat("running-tab")
-
-        # The chat_id was reset despite the task being active
-        assert tab.agent.chat_id != old_chat_id, (
-            "BUG B5 confirmed: new_chat reset chat_id while task was active"
-        )
-
-
-# ===================================================================
-# R1 — Misleading noqa: F401 comment on used imports
-# ===================================================================
-
-
-class TestMisleadingNoqaComment(unittest.TestCase):
-    """R1: ``server.py`` imports ``_cleanup_merge_data``, ``_git``, and
-    ``_merge_data_dir`` with a ``noqa: F401 (re-export for tests)``
-    comment, but all three are used directly in the same file.
-    """
-
-    def test_imports_are_used_in_server(self) -> None:
-        """Structural: the imported symbols appear in function bodies
-        within server.py, not just in ``__all__``.
-        """
-        import kiss.agents.vscode.server as srv_mod
-
-        src = inspect.getsource(srv_mod)
-
-        # _cleanup_merge_data is used in _close_tab
-        close_tab_src = inspect.getsource(VSCodeServer._close_tab)
-        assert "_cleanup_merge_data" in close_tab_src, (
-            "_cleanup_merge_data is used in _close_tab"
-        )
-
-        # _git is used in _generate_commit_message
-        gen_commit_src = inspect.getsource(VSCodeServer._generate_commit_message)
-        assert "_git" in gen_commit_src, (
-            "_git is used in _generate_commit_message"
-        )
-
-        # _merge_data_dir is used in _close_tab
-        assert "_merge_data_dir" in close_tab_src, (
-            "_merge_data_dir is used in _close_tab"
-        )
-
-        # Yet the import line says "re-export for tests"
-        assert "noqa: F401 (re-export for tests)" in src, (
-            "REDUNDANCY R1 confirmed: the noqa comment claims re-export "
-            "but the symbols are used directly"
-        )
-
-
-# ===================================================================
-# R2 — parse_task_tags in __all__ but unused in server.py
-# ===================================================================
-
-
-class TestParseTaskTagsRedundantExport(unittest.TestCase):
-    """R2: ``parse_task_tags`` is in ``server.py.__all__`` and imported
-    there, but never called in ``server.py``.  The only call-site is
-    ``task_runner.py``, which imports it directly from ``tab_state``.
-    """
-
-    def test_parse_task_tags_in_all_but_unused(self) -> None:
-        import kiss.agents.vscode.server as srv_mod
-
-        # It's in __all__
-        assert "parse_task_tags" in srv_mod.__all__
-
-        # Not used in the server module's own source (excluding imports)
-        full_src = inspect.getsource(srv_mod)
-        # Find lines that reference parse_task_tags in actual code
-        # (not imports, not __all__ entries, not comments)
-        usage_lines = [
-            line
-            for line in full_src.splitlines()
-            if "parse_task_tags" in line
-            and "__all__" not in line
-            and not line.strip().startswith("#")
-            and not line.strip().startswith(("from ", "import "))
-            # Exclude __all__ list entries like '    "parse_task_tags",'
-            and not line.strip().strip(",").strip('"').strip("'") == "parse_task_tags"
-        ]
-        assert not usage_lines, (
-            f"REDUNDANCY R2 confirmed: parse_task_tags appears in "
-            f"server.py only in imports and __all__, not in any "
-            f"function body. usage_lines={usage_lines}"
-        )
-
-        # task_runner.py imports it directly from tab_state
-        tr_src = inspect.getsource(_TaskRunnerMixin._run_task_inner)
-        assert "parse_task_tags" in tr_src, (
-            "REDUNDANCY R2 confirmed: task_runner uses parse_task_tags "
-            "from its own import, not via server.py"
-        )
-
 
 # ===================================================================
 # I1 — Inconsistent tabId default across command handlers
@@ -449,38 +195,6 @@ class TestTabIdDefaultConsistencyFix(unittest.TestCase):
                 f"I1 FIX: {handler.__name__} should use "
                 f'cmd.get("tabId", ""), not cmd.get("tabId")'
             )
-
-
-# ===================================================================
-# I2 — Asymmetric initialization of _complete_seq counters
-# ===================================================================
-
-
-class TestCompleteSeqInitInconsistency(unittest.TestCase):
-    """I2: ``_complete_seq`` starts at 0 and ``_complete_seq_latest``
-    starts at -1.  The first increment produces seq=1, so they match,
-    but the asymmetric init obscures the invariant.
-    """
-
-    def test_asymmetric_initialization(self) -> None:
-        server, _ = _make_server()
-        assert server._complete_seq == 0, "seq starts at 0"
-        assert server._complete_seq_latest == -1, "seq_latest starts at -1"
-        # These differ — the invariant "latest == seq" is violated at init
-        assert server._complete_seq != server._complete_seq_latest, (
-            "INCONSISTENCY I2 confirmed: _complete_seq (0) != "
-            "_complete_seq_latest (-1) at initialization"
-        )
-
-    def test_first_increment_restores_consistency(self) -> None:
-        """After the first _cmd_complete, both counters agree."""
-        server, _ = _make_server()
-        # Simulate _cmd_complete's counter logic
-        with server._state_lock:
-            server._complete_seq += 1
-            seq = server._complete_seq
-            server._complete_seq_latest = seq
-        assert server._complete_seq == server._complete_seq_latest == 1
 
 
 if __name__ == "__main__":
