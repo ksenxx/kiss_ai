@@ -39,7 +39,7 @@ mistakes that derail entire sessions, agents that get stuck in dead ends,
 and generated changes that are difficult to review or revert.
 We present \textbf{KISS Sorcar}, a general-purpose assistant and
 integrated development environment built on top of the \textbf{KISS Agent
-Framework}, a stupidly-simple agentic framework of roughly 1,500~lines of
+Framework}, a stupidly-simple agentic framework of roughly 1,850~lines of
 code.  The framework addresses these gaps through a five-layer agent
 hierarchy in which each layer adds exactly one concern: budget-tracked
 ReAct execution, automatic continuation across sub-sessions, coding and
@@ -54,7 +54,7 @@ tests---dramatically reduces the low-quality code that plagues faster but
 less thorough agents.  The entire system was built using itself,
 providing a continuous stress test in which any agent-introduced bug
 immediately impairs its own ability to work.  On Terminal~Bench~2.0, KISS
-Sorcar achieves a 62.7\% overall pass rate with Claude Opus~4.6,
+Sorcar achieves a 62.2\% overall pass rate with Claude Opus~4.6,
 comparing favorably to Claude~Code (58\%) and Cursor Composer~2
 (61.7\%).
 \end{abstract}
@@ -144,10 +144,10 @@ prerequisite for and a consequence of this bootstrapping process.
 The four core agent classes are remarkably compact: the KISS Agent
 comprises 409~lines, the Sorcar Agent 323~lines, the Chat Sorcar
 Agent 120~lines, and the Worktree Sorcar Agent 692~lines---a total
-of roughly 1,500~lines of code (excluding empty lines and comments).
+of roughly 1,850~lines of code (excluding empty lines and comments).
 
 \paragraph{Evaluation.}
-We evaluate on Terminal Bench~2.0 and achieve a 62.7\% overall pass
+We evaluate on Terminal Bench~2.0 and achieve a 62.2\% overall pass
 rate using Claude Opus~4.6, comparing
 favorably to Claude~Code (58\%) and Cursor
 Composer~2 (61.7\%)~\citep{cursor2026composer2} on the same
@@ -434,14 +434,12 @@ underlying LLM.
 
 \subsection{Setup}
 
-We run 5 independent trials per task (totaling 442 scored trials after
-excluding 3 that produced no verifier output due to verifier
-timeouts).  The agent is \texttt{SorcarHarborAgent}, a thin Harbor
+We run 5 independent trials per task.  The agent is \texttt{SorcarHarborAgent}, a thin Harbor
 adapter that installs and invokes the sorcar CLI inside each
 container.  We hard-skip 9 tasks that we verified to be infeasible for
 Opus~4.6 across 6+ prior attempts (e.g.\ CompCert compilation,
 Windows~3.11 GUI installation, video OCR).  Skipped tasks still count
-as failures.
+as failures. 
 
 \subsection{Aggregate Results}
 
@@ -456,8 +454,7 @@ Table~\ref{tab:tb2-aggregate} summarizes the aggregate statistics.
 \textbf{Metric} & \textbf{Value} \\
 \midrule
 Total tasks              & 89 \\
-Total scored trials      & 442 \\
-Overall pass rate        & 62.7\% (277/442) \\
+Overall pass rate        & 62.2\% (277/445) \\
 pass@any (at least 1/5 passes) & 78.7\% (70/89) \\
 pass@all (all 5 pass)    & 43.8\% (39/89) \\
 Always-fail tasks        & 19 \\
@@ -471,7 +468,7 @@ Mean duration per trial  & 446\,s \\
 \end{tabular}
 \end{table}
 
-The 62.7\% overall pass rate compares favorably to other agents
+The 62.2\% overall pass rate compares favorably to other agents
 using the same underlying model: at the time of writing, Claude~Code
 (also Opus~4.6) scores approximately 58\% on the Terminal Bench~2.0
 leaderboard, and Cursor's Composer~2---a custom fine-tuned
@@ -591,9 +588,7 @@ LLM-based agents:
   documentation rather than relying on parametric memory.
 
 \item \textbf{``CHECK FACTS.''} A more specific version of ``be
-  accurate'': when the model is about to state a fact (e.g., ``this
-  function takes three arguments''), it should read the source rather
-  than relying on its training data, which may be outdated or wrong.
+  accurate'' for information collected by KISS Sorcar use web tools.
 
 \item \textbf{``NO AI SLOP.''} ``AI slop'' refers to the low-quality,
   generic, hedging text that LLMs produce when they lack confidence:
@@ -604,22 +599,12 @@ LLM-based agents:
 \end{itemize}
 
 %......................................................................
-\subsection{Identity and Tool Rules}
+\subsection{Tool Rules}
 %......................................................................
 
-We give the agent a concrete identity (name, developer, repository
-URL) rather than a vague persona.  Tool usage rules are explicit and
-mechanical:
+Tool usage rules are explicit and mechanical:
 
 \begin{prompt}
-# Identity
-
-- You are KISS Sorcar, an AI based General Assistant and
-  Integrated Development Environment (IDE), developed by
-  Koushik Sen (ksen@berkeley.edu)
-- Your public repository is at
-  https://github.com/ksenxx/kiss_ai
-
 # Rules
 
 - Write() for new files. Edit() for small changes.
@@ -646,13 +631,6 @@ mechanical:
   working directory.
 \end{prompt}
 
-\noindent The identity block gives the agent a concrete name, developer,
-and repository URL rather than a vague persona such as ``you are a
-helpful assistant.''  This anchors the model's self-representation,
-reducing the likelihood of confused or contradictory self-references,
-and it provides a URL the model can share when asked about its source
-code.
-
 Each tool rule addresses a specific failure mode:
 
 \begin{itemize}[nosep]
@@ -676,7 +654,7 @@ Each tool rule addresses a specific failure mode:
 
 \item \textbf{``Use go\_to\_url() for browser tool.''}  The agent has
   access to multiple tools that could plausibly interact with the web
-  (shell-based \texttt{curl}, the browser tool, etc.).  This
+  (shell-based \texttt{curl}, a Python programs, the browser tool, etc.).  This
   instruction eliminates ambiguity by specifying which tool to use for
   browser-based interactions.
 
@@ -1055,7 +1033,9 @@ The testing section is perhaps the most opinionated:
   pass with flying colors while the system is fundamentally broken,
   because the mocks hide the real dependencies.  Integration tests
   that exercise actual behavior are more expensive to run but provide
-  genuine confidence that the system works.
+  genuine confidence that the system works.  Moreover, the act of writing
+  integration tests forces the model to think deeply which often enables
+  the agent to find deeper bugs in the written code.
 
 \item \textbf{``You MUST write integration tests.''}  This reinforces
   the no-mocks rule by explicitly requiring integration tests rather
@@ -1328,7 +1308,7 @@ Sorcar-specific instructions $\rightarrow$ repository-specific
 \label{sec:vscode-features}
 %----------------------------------------------------------------------
 
-We ship our system as a VS~Code extension.  While
+We release our system as a VS~Code extension.  While
 the underlying agent architecture (Sections~\ref{sec:architecture}
 and~\ref{sec:system-prompt}) already differs from existing AI coding
 assistants, the extension's user-facing design introduces several
@@ -1338,55 +1318,6 @@ Cursor~\citep{cursor2024}, Windsurf~\citep{windsurf2024},
 Devin~\citep{devin2024}, and Aider~\citep{aider2023}.  We enumerate
 these features below.
 
-%......................................................................
-\subsection{Git-Worktree Isolation with In-Editor Merge Review}
-\label{sec:worktree-merge}
-%......................................................................
-
-Every mainstream AI coding assistant applies changes directly to the
-user's working tree.  Copilot and Cursor insert completions or edits
-in place; Windsurf modifies files in the current branch; Aider
-auto-commits each change to the current branch.  If the AI makes a
-bad edit, the developer must manually revert or cherry-pick.
-
-Our extension never touches the user's working tree.  Every task runs
-in a disposable git worktree on its own branch
-(Section~\ref{sec:worktree-agent}).  When the task completes, we
-present a per-hunk, per-file, and whole-task merge UI directly inside
-VS~Code: the developer can accept or reject individual changes,
-navigate between hunks with dedicated commands, or accept/reject all
-changes in a file or across the entire task.  This gives the developer
-the same granularity of control as a pull-request review, but embedded
-in the editor and operating on changes the AI just produced seconds
-ago.
-
-No other assistant combines worktree-level isolation with an
-inline merge review flow.  The closest analog is Aider's per-change
-auto-commit, but that operates on the current branch and provides no
-accept/reject UI---the developer must use standard git tooling to
-inspect and revert individual commits.
-
-%......................................................................
-\subsection{Automatic Multi-Session Continuation}
-\label{sec:continuation-feature}
-%......................................................................
-
-Context windows are finite, and complex tasks---large refactorings,
-multi-file bug hunts, benchmark evaluations---routinely exceed them.
-Existing assistants handle this by either truncating the conversation
-(Copilot, Cursor) or asking the user to manually start a new session
-and re-describe the task (Windsurf, Aider).  Devin operates in a
-sandboxed environment with a single long context, but when the context
-is exhausted, the task ends.
-
-Our extension continues automatically.  The Relentless Agent
-(Section~\ref{sec:relentless-agent}) detects when the context window
-or step limit is approaching, serializes progress into a structured
-summary, and spawns a new sub-session that picks up where the previous
-one left off.  If a sub-session crashes, a separate summarizer agent
-extracts useful context from the trajectory and feeds it to the next
-attempt.  From the user's perspective, the task simply runs until it
-succeeds, regardless of how many sub-sessions are needed.
 
 %......................................................................
 \subsection{Cross-Session Self-Improvement}
@@ -1431,25 +1362,6 @@ tasks to delegate to the AI and how to structure prompts for cost
 efficiency.
 
 %......................................................................
-\subsection{Multi-Tab Concurrent Tasks}
-\label{sec:multi-tab}
-%......................................................................
-
-Most AI coding assistants support only a single active task at a time.
-Copilot Chat, Cursor's agent mode, and Windsurf process one request
-before accepting the next.  Devin can run tasks in the background but
-provides a separate web interface rather than IDE-native concurrency.
-
-Our extension supports multiple concurrent tasks via a tabbed
-interface in the sidebar.  Each tab runs an independent agent instance
-with its own worktree, context window, and budget tracking.  The user
-can start a refactoring task in one tab, switch to another tab to ask
-an unrelated question, and return to find the refactoring still
-running.  Per-tab state---DOM elements, pending user questions, merge
-UI---is preserved across tab switches by detaching and re-attaching
-per-tab DOM nodes rather than serializing and restoring values.
-
-%......................................................................
 \subsection{Integrated Browser Automation}
 \label{sec:browser-feature}
 %......................................................................
@@ -1469,36 +1381,6 @@ web forms as part of a testing workflow, scraping documentation to
 inform a code generation task, or interacting with web-based developer
 tools (CI dashboards, issue trackers) without leaving the editor.
 
-%......................................................................
-\subsection{Crash Recovery from Git State}
-\label{sec:crash-recovery}
-%......................................................................
-
-If VS~Code crashes or the user restarts the editor mid-task, most AI
-assistants lose all context: the conversation is gone, and any
-partially applied changes are left in an indeterminate state in the
-working tree.
-
-Our extension stores all worktree state in git itself---branch names,
-configuration entries, commit history---rather than in ephemeral
-sidecar files.  On process restart, the agent queries git for any
-pending branches matching its chat ID prefix and reconstructs all
-instance attributes from git config.  The user can resume reviewing
-and merging agent changes after a crash without any data loss.
-
-%......................................................................
-\subsection{Copilot Commit-Message Interception}
-\label{sec:commit-interception}
-%......................................................................
-
-VS~Code's Source Control view exposes a sparkle button that invokes
-\texttt{github.copilot.git.generateCommitMessage} to generate a
-commit message using GitHub Copilot.  Our extension registers its own
-handler for this command ID, intercepting the button so that our
-agent generates the commit message instead.  This is a minor but
-practical feature: it allows users who do not have a Copilot
-subscription to still use the sparkle button, powered by whatever
-LLM backend the extension is configured to use.
 
 %----------------------------------------------------------------------
 \section{Related Work}
@@ -1693,14 +1575,7 @@ within those bounds.
 
 We have shown that a layered, single-concern architecture can address
 the practical challenges of deploying LLM agents for real-world
-software development.  The KISS Agent provides a robust execution core
-with budget tracking.  The Relentless Agent eliminates the
-context-window ceiling through automatic continuation.  The Sorcar
-Agent equips the system with the tools a developer actually uses.  The
-Chat Sorcar Agent enables multi-turn conversations that persist across
-sessions.  The Worktree Sorcar Agent ensures that every task is safely
-isolated in git, giving the developer full control over what gets
-merged.
+software development. 
 
 We complement the architecture with a system prompt that encodes
 engineering discipline directly into the agent's behavior: read before
@@ -1720,287 +1595,7 @@ We make the source code publicly available at
 \small
 
 \bibliographystyle{plainnat}
-
-\begin{thebibliography}{99}
-
-\bibitem[Chen et~al.(2021)]{chen2021evaluating}
-Chen, M., Tworek, J., Jun, H., Yuan, Q., Pinto, H.~P., Kaplan, J.,
-Edwards, H., Burda, Y., Joseph, N., Brockman, G., et~al.
-\newblock Evaluating large language models trained on code.
-\newblock {\em arXiv preprint arXiv:2107.03374}, 2021.
-
-\bibitem[Rozi\`{e}re et~al.(2023)]{roziere2023code}
-Rozi\`{e}re, B., Gehring, J., Gloeckle, F., Sootla, S., Gat, I.,
-Tan, X.~E., Adi, Y., Liu, J., Remez, T., Rapin, J., et~al.
-\newblock Code Llama: Open foundation models for code.
-\newblock {\em arXiv preprint arXiv:2308.12950}, 2023.
-
-\bibitem[Yao et~al.(2023)]{yao2023react}
-Yao, S., Zhao, J., Yu, D., Du, N., Shafran, I., Narasimhan, K., and
-Cao, Y.
-\newblock ReAct: Synergizing reasoning and acting in language models.
-\newblock In {\em International Conference on Learning
-  Representations (ICLR)}, 2023.
-
-\bibitem[Schick et~al.(2023)]{schick2023toolformer}
-Schick, T., Dwivedi-Yu, J., Dess\`{i}, R., Raileanu, R., Lomeli, M.,
-Zettlemoyer, L., Cancedda, N., and Scialom, T.
-\newblock Toolformer: Language models can teach themselves to use
-  tools.
-\newblock In {\em Advances in Neural Information Processing Systems
-  (NeurIPS)}, 2023.
-
-\bibitem[Yang et~al.(2024)]{yang2024sweagent}
-Yang, J., Jimenez, C.~E., Wettig, A., Liber, K., Narasimhan, K., and
-Press, O.
-\newblock {SWE-agent}: Agent-computer interfaces enable automated
-  software engineering.
-\newblock {\em arXiv preprint arXiv:2405.15793}, 2024.
-
-\bibitem[Wang et~al.(2024)]{wang2024openhands}
-Wang, X., Chen, Y., Yuan, L., Zhang, Y., Li, Y., Peng, H., and Ji,
-H.
-\newblock {OpenHands}: An open platform for {AI} software developers as
-  generalist agents.
-\newblock {\em arXiv preprint arXiv:2407.16741}, 2024.
-
-\bibitem[{Significant Gravitas}(2023)]{autogpt2023}
-{Significant Gravitas}.
-\newblock {AutoGPT}.
-\newblock \url{https://github.com/Significant-Gravitas/AutoGPT}, 2023.
-
-\bibitem[{OpenAI}(2025)]{codex2025}
-{OpenAI}.
-\newblock Introducing {Codex}: A cloud-based software engineering agent.
-\newblock \url{https://openai.com/index/introducing-codex/}, 2025.
-
-\bibitem[{OpenClaw AI}(2025)]{openclaw2025}
-{OpenClaw AI}.
-\newblock {OpenClaw}: Personal {AI} assistant.
-\newblock \url{https://openclaw.ai}, 2025.
-
-\bibitem[Nakajima(2023)]{babyagi2023}
-Nakajima, Y.
-\newblock {BabyAGI}.
-\newblock \url{https://github.com/yoheinakajima/babyagi}, 2023.
-
-\bibitem[{GitHub}(2021)]{copilot2021}
-{GitHub}.
-\newblock {GitHub Copilot}: Your {AI} pair programmer.
-\newblock \url{https://github.com/features/copilot}, 2021.
-
-\bibitem[{Cursor}(2024)]{cursor2024}
-{Cursor}.
-\newblock {Cursor}: The {AI}-first code editor.
-\newblock \url{https://cursor.sh}, 2024.
-
-\bibitem[{Codeium}(2024)]{windsurf2024}
-{Codeium}.
-\newblock {Windsurf}: The {AI}-powered {IDE}.
-\newblock \url{https://windsurf.com}, 2024.
-
-\bibitem[Jimenez et~al.(2024)]{jimenez2024swebench}
-Jimenez, C.~E., Yang, J., Wettig, A., Yao, S., Pei, K., Press, O.,
-and Narasimhan, K.
-\newblock {SWE-bench}: Can language models resolve real-world {GitHub}
-  issues?
-\newblock In {\em International Conference on Learning
-  Representations (ICLR)}, 2024.
-
-\bibitem[Xia et~al.(2024)]{xia2024agentless}
-Xia, C.~S., Deng, Y., Dunn, S., and Zhang, L.
-\newblock Agentless: Demystifying {LLM}-based software engineering
-  agents.
-\newblock {\em arXiv preprint arXiv:2407.01489}, 2024.
-
-\bibitem[{Anthropic}(2025)]{claudecode2025}
-{Anthropic}.
-\newblock {Claude Code}: Anthropic's agentic coding system.
-\newblock \url{https://www.anthropic.com/product/claude-code}, 2025.
-
-\bibitem[{Cognition Labs}(2024)]{devin2024}
-{Cognition Labs}.
-\newblock {Devin}: The first {AI} software engineer.
-\newblock \url{https://devin.ai}, 2024.
-
-\bibitem[Gauthier(2023)]{aider2023}
-Gauthier, P.
-\newblock {Aider}: {AI} pair programming in your terminal.
-\newblock \url{https://github.com/paul-gauthier/aider}, 2023.
-
-\bibitem[Wei et~al.(2022)]{wei2022chain}
-Wei, J., Wang, X., Schuurmans, D., Bosma, M., Ichter, B., Xia, F.,
-Chi, E., Le, Q., and Zhou, D.
-\newblock Chain-of-thought prompting elicits reasoning in large
-  language models.
-\newblock In {\em Advances in Neural Information Processing Systems
-  (NeurIPS)}, 2022.
-
-\bibitem[Yao et~al.(2024)]{yao2024tree}
-Yao, S., Yu, D., Zhao, J., Shafran, I., Griffiths, T.~L.,
-Cao, Y., and Narasimhan, K.
-\newblock Tree of thoughts: Deliberate problem solving with large
-  language models.
-\newblock In {\em Advances in Neural Information Processing Systems
-  (NeurIPS)}, 2024.
-
-\bibitem[Shinn et~al.(2023)]{shinn2023reflexion}
-Shinn, N., Cassano, F., Gopinath, A., Narasimhan, K., and Yao, S.
-\newblock Reflexion: Language agents with verbal reinforcement
-  learning.
-\newblock In {\em Advances in Neural Information Processing Systems
-  (NeurIPS)}, 2023.
-
-\bibitem[Qian et~al.(2024)]{qian2024chatdev}
-Qian, C., Liu, W., Liu, H., Chen, N., Dang, Y., Li, J., Yang, C.,
-Chen, W., Su, Y., Cong, X., Xu, J., Li, D., Liu, Z., and Sun, M.
-\newblock {ChatDev}: Communicative agents for software development.
-\newblock In {\em Proceedings of the 62nd Annual Meeting of the
-  Association for Computational Linguistics (ACL)}, 2024.
-
-\bibitem[Hong et~al.(2024)]{hong2024metagpt}
-Hong, S., Zhuge, M., Chen, J., Zheng, X., Cheng, Y., Zhang, C.,
-Wang, J., Wang, Z., Yau, S.~K.~S., Lin, Z., Zhou, L., Ran, C.,
-Xiao, L., Wu, C., and Schmidhuber, J.
-\newblock {MetaGPT}: Meta programming for a multi-agent collaborative
-  framework.
-\newblock In {\em International Conference on Learning
-  Representations (ICLR)}, 2024.
-
-\bibitem[Wu et~al.(2023)]{wu2023autogen}
-Wu, Q., Bansal, G., Zhang, J., Wu, Y., Li, B., Zhu, E., Jiang, L.,
-Zhang, X., Zhang, S., Liu, J., Awadallah, A.~H., White, R.~W.,
-Burger, D., and Wang, C.
-\newblock {AutoGen}: Enabling next-gen {LLM} applications via
-  multi-agent conversation.
-\newblock {\em arXiv preprint arXiv:2308.08155}, 2023.
-
-\bibitem[Li et~al.(2023)]{li2023starcoder}
-Li, R., Allal, L.~B., Zi, Y., Muennighoff, N., Kocetkov, D.,
-Mou, C., Marone, M., Akiki, C., Li, J., Chim, J., et~al.
-\newblock {StarCoder}: May the source be with you!
-\newblock {\em Transactions on Machine Learning Research (TMLR)},
-  2023.
-
-\bibitem[Guo et~al.(2024)]{guo2024deepseek}
-Guo, D., Zhu, Q., Yang, D., Xie, Z., Dong, K., Zhang, W.,
-Chen, G., Bi, X., Wu, Y., Li, Y.~K., Luo, F., Xiong, Y., and
-Liang, W.
-\newblock {DeepSeek-Coder}: When the large language model meets
-  programming --- the rise of code intelligence.
-\newblock {\em arXiv preprint arXiv:2401.14196}, 2024.
-
-\bibitem[Austin et~al.(2021)]{austin2021program}
-Austin, J., Odena, A., Nye, M., Bosma, M., Michalewski, H.,
-Dohan, D., Jiang, E., Cai, C., Terry, M., Le, Q., and Sutton, C.
-\newblock Program synthesis with large language models.
-\newblock {\em arXiv preprint arXiv:2108.07732}, 2021.
-
-\bibitem[{LangChain}(2022)]{langchain2022}
-{LangChain}.
-\newblock {LangChain}: Build context-aware reasoning applications.
-\newblock \url{https://github.com/langchain-ai/langchain}, 2022.
-
-\bibitem[Xi et~al.(2023)]{xi2023rise}
-Xi, Z., Chen, W., Guo, X., He, W., Ding, Y., Hong, B., Zhang, M.,
-Wang, J., Jin, S., Zhou, E., et~al.
-\newblock The rise and potential of large language model based agents:
-  A survey.
-\newblock {\em arXiv preprint arXiv:2309.07864}, 2023.
-
-\bibitem[Wang et~al.(2024b)]{wang2024survey}
-Wang, L., Ma, C., Feng, X., Zhang, Z., Yang, H., Zhang, J.,
-Chen, Z., Tang, J., Chen, X., Lin, Y., Zhao, W.~X., Wei, Z., and
-Wen, J.
-\newblock A survey on large language model based autonomous agents.
-\newblock {\em Frontiers of Computer Science}, 18(6):186345, 2024.
-
-\bibitem[Hassan et~al.(2025)]{hassan2025agentic}
-Hassan, A.~E., Li, H., Lin, D., and Adams, B.
-\newblock Agentic software engineering: Foundational pillars and a
-  research roadmap.
-\newblock {\em arXiv preprint arXiv:2509.06216}, 2025.
-
-\bibitem[Li et~al.(2025)]{li2025rise}
-Li, H., Zhang, H., and Hassan, A.~E.
-\newblock The rise of {AI} teammates in software engineering ({SE}~3.0):
-  How autonomous coding agents are reshaping software engineering.
-\newblock {\em arXiv preprint arXiv:2507.15003}, 2025.
-
-\bibitem[Deng et~al.(2025)]{deng2025swebenchpro}
-Deng, X., Da, J., Pan, E., He, Y.~Y., Ide, C., Garg, K.,
-Lauffer, N., Park, A., Pasari, N., Rane, C., et~al.
-\newblock {SWE-Bench Pro}: Can {AI} agents solve long-horizon software
-  engineering tasks?
-\newblock {\em arXiv preprint arXiv:2509.16941}, 2025.
-
-\bibitem[Prathifkumar et~al.(2025)]{prathifkumar2025swebenchverified}
-Prathifkumar, T., Mathews, N.~S., and Nagappan, M.
-\newblock Does {SWE-Bench-Verified} test agent ability or model memory?
-\newblock {\em arXiv preprint arXiv:2512.10218}, 2025.
-
-\bibitem[Horikawa et~al.(2025)]{horikawa2025agentic}
-Horikawa, K., Li, H., Kashiwa, Y., and Adams, B.
-\newblock Agentic refactoring: An empirical study of {AI} coding agents.
-\newblock {\em arXiv preprint arXiv:2511.04824}, 2025.
-
-\bibitem[Wang et~al.(2025)]{wang2025agentic}
-Wang, H., Gong, J., Zhang, H., Xu, J., and Wang, J.
-\newblock {AI} agentic programming: A survey of techniques, challenges,
-  and opportunities.
-\newblock {\em arXiv preprint arXiv:2508.11126}, 2025.
-
-\bibitem[Chatlatanagulchai et~al.(2025)]{chatlatanagulchai2025readmes}
-Chatlatanagulchai, W., Li, H., Kashiwa, Y., and Reid, B.
-\newblock Agent {README}s: An empirical study of context files for
-  agentic coding.
-\newblock {\em arXiv preprint arXiv:2511.12884}, 2025.
-
-\bibitem[Mohsenimofidi et~al.(2025)]{mohsenimofidi2025context}
-Mohsenimofidi, S., Galster, M., and Treude, C.
-\newblock Context engineering for {AI} agents in open-source software.
-\newblock {\em arXiv preprint arXiv:2510.21413}, 2025.
-
-\bibitem[Robeyns et~al.(2025)]{robeyns2025selfimproving}
-Robeyns, M., Szummer, M., and Aitchison, L.
-\newblock A self-improving coding agent.
-\newblock {\em arXiv preprint arXiv:2504.15228}, 2025.
-
-\bibitem[Gao et~al.(2025)]{gao2025trae}
-Gao, P., Tian, Z., Meng, X., and {Trae Research Team}.
-\newblock Trae Agent: An {LLM}-based agent for software engineering
-  with test-time scaling.
-\newblock {\em arXiv preprint arXiv:2507.23370}, 2025.
-
-\bibitem[{Cursor Research}(2026)]{cursor2026composer2}
-{Cursor Research}.
-\newblock Composer~2 technical report.
-\newblock {\em arXiv preprint arXiv:2603.24477}, 2026.
-
-\bibitem[{GetShitDone}(2025)]{getshitdone2025}
-{GetShitDone}.
-\newblock {GetShitDone}: Prompt engineering for coding agents.
-\newblock \url{https://github.com/alexnodejs/get-shit-done}, 2025.
-
-\bibitem[Stein et~al.(2026a)]{stein2026cheatingblog}
-Stein, A., Brown, D., Hassani, H., Naik, M., and Wong, E.
-\newblock Finding widespread cheating on popular agent benchmarks.
-\newblock Blog post, \url{https://debugml.github.io/cheating-agents/}, 2026.
-
-\bibitem[Stein et~al.(2026b)]{stein2026detecting}
-Stein, A., Brown, D., Hassani, H., Naik, M., and Wong, E.
-\newblock Detecting safety violations across many agent traces.
-\newblock {\em arXiv preprint arXiv:2604.11806}, 2026.
-
-\bibitem[Wang et~al.(2026)]{wang2026trustworthyblog}
-Wang, H., Mang, Q., Cheung, A., Sen, K., and Song, D.
-\newblock We scored 100\% on {AI} benchmarks without solving a single
-  problem.
-\newblock Blog post,
-  \url{https://moogician.github.io/blog/2026/trustworthy-benchmarks/},
-  2026.
-
-\end{thebibliography}
+\bibliography{kiss_sorcar}
 }
 
 \end{document}
