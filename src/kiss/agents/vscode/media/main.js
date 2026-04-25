@@ -1444,11 +1444,13 @@
       }
     }
     if (target === llmPanel) llmPanel.scrollTop = llmPanel.scrollHeight;
-    // Keep the chevron "right" state consistent across new panels added by streaming
+    // Keep the chevron "right" state consistent across new panels added by streaming.
+    // Skip during demo replay — demo mode never sets isRunning so
+    // applyChevronState(false) would hide every non-result panel via chv-hidden.
     const tab = tabs.find(x => {
       return x.id === activeTabId;
     });
-    if (tab && !tab.panelsExpanded) applyChevronState(false);
+    if (tab && !tab.panelsExpanded && !_demoActive) applyChevronState(false);
   }
 
   /**
