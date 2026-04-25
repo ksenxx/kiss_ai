@@ -73,7 +73,7 @@ export function activate(context: vscode.ExtensionContext): void {
       const filePath = vscode.workspace.asRelativePath(editor.document.uri);
       const startLine = sel.start.line + 1;
       const lineCount = sel.end.line - sel.start.line + 1;
-      const hunkRef = `PWD/${filePath}:@@ -${startLine},${lineCount} +${startLine},${lineCount} @@ `;
+      const hunkRef = `hunk @@ -${startLine},${lineCount} +${startLine},${lineCount} @@ in PWD/${filePath}:`;
       void sidebarView!.appendToInput(hunkRef);
     }),
   );
