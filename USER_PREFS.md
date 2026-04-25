@@ -73,4 +73,4 @@
 - The paper source files live in papers/kisssorcar/; build with the full pdflatex-bibtex-pdflatex-pdflatex cycle from that directory.
 - When updating README.md text from the paper, use the papers polished language and phrasing while preserving all original content points such as links, notes, and references. Fix any broken markdown formatting encountered during the update.
 - When an interactive event from the backend requires user attention (e.g. askUser modal), the extension host must reveal the sidebar panel via view.show(true) before forwarding the event to the webview, so the user sees the UI even if they switched to another panel while the task was running.
-- When processOutputEvent or any streaming event handler applies global UI state (e.g. chevron collapse), guard it with the current mode flag (e.g. _demoActive) so that non-running replay modes do not hide panels that should be visible.
+- When processOutputEvent or any streaming event handler applies global UI state (e.g. chevron collapse), guard it with the current mode flag (e.g. \_demoActive) so that non-running replay modes do not hide panels that should be visible.
