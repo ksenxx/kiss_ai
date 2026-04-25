@@ -251,21 +251,6 @@ publish_vscode_extension() {
     print_info "View at: https://marketplace.visualstudio.com/items?itemName=ksenxx.kiss-sorcar"
 }
 
-install_sorcar_linux() {
-    local bin_dir="$HOME/.local/bin"
-    local script_src
-    script_src="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/sorcar-linux"
-
-    if [[ -f "$script_src" ]]; then
-        mkdir -p "$bin_dir"
-        ln -sf "$script_src" "$bin_dir/sorcar-linux"
-        chmod +x "$script_src"
-        print_info "sorcar-linux linked to $bin_dir/sorcar-linux"
-    else
-        print_warn "sorcar-linux not found at $script_src — skipping"
-    fi
-}
-
 install_local_extension() {
     local vsix_path="${VSCODE_EXT_DIR}/kiss-sorcar.vsix"
 
@@ -432,9 +417,6 @@ main() {
 
     # Step 10: Install extension into local VS Code and Cursor IDE if available
     install_local_extension
-
-    # Step 11: Symlink sorcar-linux into ~/.local/bin
-    install_sorcar_linux
 
     # Restore stashed changes
     trap - EXIT
