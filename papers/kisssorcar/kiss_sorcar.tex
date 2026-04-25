@@ -744,7 +744,13 @@ Can you tell me what happens with git in worktree_sorcar_agent.py when a task fi
 \paragraph{Step~2: Simplifying the workflow via natural language.} Armed with the workflow description, the developer decides the three-way choice (auto-merge, manual merge, discard) is unnecessarily complex and issues a redesign request:
 
 \begin{prompt}
-Can you change worktree_sorcar_agent.py and the extension so that after the agent finishes its task, it simply asks "Commit and Merge" or "Discard". When "Commit and Merge" is clicked by the user, the agent must commit the changes with a generated commit message, merge the branch with the original branch, and delete the worktree and the branch associated with the worktree. If the user clicks "discard", it must delete the worktree and the branch, and checkout the original branch.
+Can you change worktree_sorcar_agent.py and the extension so that after the agent 
+finishes its task, it simply asks "Commit and Merge" or "Discard". When "Commit 
+and Merge" is clicked by the user, the agent must commit the changes with a 
+generated commit message, merge the branch with the original branch, and delete 
+the worktree and the branch associated with the worktree. If the user clicks 
+"discard", it must delete the worktree and the branch, and checkout the 
+original branch.
 \end{prompt}
 
 \noindent The agent modifies six files across Python and TypeScript: it updates \texttt{discard()} to check out the original branch before deleting the task branch, removes the \texttt{manual\_merge()} method entirely, simplifies \texttt{merge\_instructions()} to show only two options, updates the webview UI to replace the three-button toolbar with a two-button ``Commit and Merge or Discard?'' bar, removes the \texttt{manual} action type from the TypeScript type definitions, and removes the corresponding handler from the Python backend.  Three tests for the deleted manual-merge path have been removed, and one routing test has been updated. All 28 worktree tests pass after the change.
@@ -752,9 +758,8 @@ Can you change worktree_sorcar_agent.py and the extension so that after the agen
 \paragraph{Step~3: Investigating unexpected post-merge state.} After testing the simplified flow, the developer notices that files appear in the Source Control panel of VS~Code on the original branch after pressing ``Commit and Merge'' and asks:
 
 \begin{prompt}
-After the user presses "Commit and Merge", why do the
-modified files show up as committed in the original
-branch?
+After the user presses "Commit and Merge", why do the modified files show up as 
+committed in the original branch?
 \end{prompt}
 
 \noindent The agent traces the exact execution path through \texttt{squash\_merge\_branch()} and discovers that the implementation deliberately \emph{unstages} the squash-merged changes via \texttt{git reset HEAD} so they appear as uncommitted working-tree modifications in VS~Code's Source Control panel.  The design intention was to let the user review the diff before committing manually.  The agent reports this finding along with the relevant code snippet and a verified end state showing no new commits on the branch.
@@ -762,7 +767,8 @@ branch?
 \paragraph{Step~4: Directing a design change in one sentence.} The developer realizes that code review already happened while the worktree was active and decides the unstage step is unnecessary:
 
 \begin{prompt}
-The review is already happening in the worktree branch. You don't need the user to review the modified and new files in the original branch. Fix it.
+The review is already happening in the worktree branch. You don't need the user 
+to review the modified and new files in the original branch. Fix it.
 \end{prompt}
 
 \noindent The agent replaces the \texttt{git reset HEAD} call in \texttt{squash\_merge\_branch()} with a conditional \texttt{git commit --no-edit} that uses the auto-generated squash message.  It adds a \texttt{git diff --cached --quiet} guard for the edge case where the merge produces no changes.  One existing test (\texttt{test\_merge\_leaves\_changes\_uncommitted}) is renamed to \texttt{test\_merge\_commits\_changes} and its assertions are updated to verify a clean working tree.  All 104 worktree tests pass.
