@@ -265,11 +265,6 @@ find_code_cli() {
         fi
     done
 
-    # Symlink sorcar-linux launcher
-    if [ -f "$PROJECT_DIR/sorcar-linux" ]; then
-        ln -sf "$PROJECT_DIR/sorcar-linux" "$BIN_DIR/sorcar-linux"
-        echo "   sorcar-linux linked to $BIN_DIR/sorcar-linux"
-    fi
     echo "   Python environment ready"
     echo ""
 
