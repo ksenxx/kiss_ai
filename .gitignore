@@ -10,8 +10,6 @@ dist/
 .mypy_cache/
 .ruff_cache/
 .coverage
-ref
-artifacts/
 .cursor
 .claude
 .ipynb_checkpoints
@@ -19,13 +17,7 @@ artifacts/
 .coverage_per_test
 *.log
 .coverage*
-.cursorrules
-.cursor
-.claude
-.ipynb_checkpoints
-screenshots/    
 .kiss.artifacts
-bin/
 env.sh
 node_modules/
 src/kiss/agents/vscode/out/
@@ -36,7 +28,6 @@ tmp/
 src/kiss/benchmarks/results/
 !src/kiss/benchmarks/results/.gitkeep
 src/kiss/benchmarks/swebench_pro/vendor/
-src/kiss/benchmarks/dashboard.html
 jobs/
 *.out
 *.aux
