@@ -34,32 +34,27 @@
 
 
 \begin{abstract}
-Large language models can generate code and operate developer tools with
-remarkable fluency, yet deploying them as practical software-engineering
-assistants still exposes stubborn gaps: finite context windows, single
+Large language models can generate code and call tools with
+remarkable fluency, yet deploying them as practical software engineering
+assistants still expose stubborn gaps: finite context windows, single
 mistakes that derail entire sessions, agents that get stuck in dead ends,
 AI slop, and generated changes that are difficult to review or revert.
-We present \textbf{KISS Sorcar}, a general-purpose assistant and
-integrated development environment built on top of the \textbf{KISS Agent
-Framework}, a stupidly-simple agentic framework of roughly 1,850~lines of
+
+We present \textbf{KISS Sorcar}, a general-purpose assistant and integrated development environment (IDE) built on top of the \textbf{KISS Agent Framework}, a 
+stupidly-simple AI agent framework of roughly 1,850~lines of
 code.  The framework addresses these gaps using a robust system prompt
-and through a five-layer agent
-hierarchy in which each layer adds exactly one concern: budget-tracked
-ReAct execution, automatic continuation across sub-sessions, coding and
-browser tools with parallel sub-agents, persistent multi-turn chat with
-history recall, and git-worktree isolation so every task runs on its own
+and through a five-layer agent hierarchy in which each layer adds exactly one concern: budget-tracked ReAct execution, automatic continuation across sub-sessions via summarization, coding, and browser tools with parallel sub-agents, persistent multi-turn chat with
+history recall, and git worktree isolation so every task runs on its own
 branch.  
 
-To assess the power of the agentic framework, we implemented KISS Sorcar 
+To assess the power of the KISS agent framework, we implemented KISS Sorcar 
 as a free, open-source Visual Studio Code extension that runs locally and effectively 
 for long-horizon tasks, and supports browser automation, multimodal input, 
 and Docker containers.  
 
-In this research, we deliberately prioritize output quality over latency: 
-giving a frontier model adequate time to
-validate its own output---running linters, type checkers, and
+In this research, we deliberately prioritize output quality over latency:  giving a frontier model adequate time to validate its own output---running linters, type checkers, and
 tests---dramatically reduces the low-quality code that plagues faster but
-less thorough agents.  The entire system was built using itself,
+less thorough agents.  The entire system was built using itself in 4.5 months,
 providing a continuous stress test in which any agent-introduced bug
 immediately impairs its own ability to work.  On Terminal~Bench~2.0, KISS
 Sorcar achieves a 62.2\% overall pass rate with Claude Opus~4.6,
@@ -72,25 +67,9 @@ comparing favorably to Claude~Code (58\%) and Cursor Composer~2
 \label{sec:intro}
 %----------------------------------------------------------------------
 
-Modern Large language models (LLMs), such as Anthropic's Claude Opus 4.6, OpenAI's GPT 5.4,
-and Google's Gemini 3.1, have demonstrated remarkable ability to
-generate code, reason about software architecture, and operate
-developer tools~\citep{chen2021evaluating,roziere2023code}.  A growing
-body of work has explored how to harness these capabilities for
-autonomous software engineering, from single-session agents that
-resolve GitHub issues~\citep{yang2024sweagent,wang2024openhands} to
-industrial products marketed as AI software and general assistants
-~\citep{copilot2021,cursor2024,devin2024,claudecode2025,codex2025,openclaw2025}.  
-Yet using an LLM as a practical software engineering or general assistant 
-still exposes several stubborn gaps: context windows are finite, a single 
-mistake can derail an entire session, agents get stuck in dead ends, models 
-generate AI slop, and generated changes are difficult to review or revert 
-once applied to a live codebase.
+Modern Large language models (LLMs), such as Anthropic's Claude Opus 4.6, OpenAI's GPT 5.4, and Google's Gemini 3.1, have demonstrated a remarkable ability to generate code, reason about software architecture, and use developer tools~\citep{chen2021evaluating,roziere2023code}.  A growing body of work has explored how to harness these capabilities for autonomous software engineering, from single-session agents that resolve GitHub issues~\citep{yang2024sweagent,wang2024openhands} to industrial products marketed as AI software and general assistants ~\citep{copilot2021,cursor2024,devin2024,claudecode2025,codex2025,openclaw2025}. Yet using an LLM as a practical software engineering or general assistant still exposes several stubborn gaps: context windows are finite, a single mistake can derail an entire session, agents get stuck in dead ends, models generate AI slop, and generated changes are difficult to review or revert once applied to a live codebase.
 
-We propose KISS Agent Framework, a stupidly simple AI agentic framework 
-containing around 1,850 lines of code.  
-We address the above-mentioned gaps through a robust system prompt (which we describe in 
-depth in Section~\ref{sec:system-prompt}) and a five-layer agent hierarchy in which
+We propose the \emph{KISS Agent Framework}, a stupidly simple AI agent framework containing around 1,850 lines of code.  We address the above-mentioned gaps through a robust system prompt (which we describe in depth in Section~\ref{sec:system-prompt}) and a five-layer agent hierarchy in which
 each layer solves exactly one concern:
 
 \begin{enumerate}[nosep]
@@ -102,163 +81,58 @@ each layer solves exactly one concern:
     and parallel sub-agent execution.
   \item \textbf{Chat Sorcar Agent} --- persistent multi-turn chat
     sessions with history recall.
-  \item \textbf{Worktree Sorcar Agent} --- git-worktree isolation so
+  \item \textbf{Worktree Sorcar Agent} --- git worktree isolation so
     every task runs on its own branch.
 \end{enumerate}
 
-The name ``KISS'' reflects the \emph{Keep It Simple, Stupid} design
-philosophy: each layer is small, each concern is isolated, and the
-overall system avoids unnecessary abstraction.  
+The name ``KISS'' reflects the \emph{Keep It Simple, Stupid} design philosophy in software engineering: each layer is small, each concern is isolated, and the overall system avoids unnecessary abstraction.  
 
-In order to access the power and the capabilities of the KISS agent framework,
-we implement KISS Sorcar. KISS Sorcar is a general purpose assistant and an 
-integrated development environment (IDE) built on top of the KISS agent framework. 
-It codes really well and works pretty fast.  
-We implemented KISS Sorcar as a Visual Studio Code extension and runs locally. 
-It has full browser support (using open-source Chromium browser and Playwright), multimodal support, 
-Docker container support, and OpenClaw 
-like features (whose discussion is beyond the scope of the paper). The good part is that 
-KISS Sorcar is completely free and open-source; all one needs to use is a 
-model API key from a major LLM provider, such as Anthropic.  We implemented this 
-framework in roughly 4.5 months and the repository is available at \url{https://github.com/ksenxx/kiss_ai}.
-The name ``Sorcar'' pays homage to P.~C.~Sorcar, the legendary Bengali magician, evoking
-the idea of an agent that performs feats that appear magical yet are
-grounded in disciplined engineering. 
+To access the power and capabilities of the KISS agent framework, we implement KISS Sorcar. KISS Sorcar is a general-purpose assistant and an integrated development environment (IDE) built on top of the KISS agent framework. It codes really well and works pretty fast.  We implemented KISS Sorcar as a Visual Studio Code extension and runs locally. It has full browser support (using open-source Chromium browser and Playwright), multimodal support, Docker container support, and OpenClaw-like features (whose discussion is beyond the scope of the paper). The good part is that KISS Sorcar is completely free and open-source; all one needs is a model API key from a major LLM provider, such as Anthropic.  We implemented this framework in roughly 4.5 months, and the repository is available at \url{https://github.com/ksenxx/kiss_ai}.
+The name ``Sorcar'' pays homage to P.~C.~Sorcar, the legendary Bengali magician, evoking the idea of an agent that performs feats that appear magical yet are grounded in disciplined engineering. 
 
-\paragraph{Quality over speed.}
+In the project, we deliberately prioritize output quality over latency.  In our experience, using a weaker or cheaper model often forces the developer to discard the agent's work and retry, ultimately increasing the total cost of completing a task.  Conversely, giving a frontier model adequate time to validate its own output---running linters, type checkers, and tests before declaring success---dramatically reduces the ``slop'' (low-quality, subtly incorrect code) that plagues faster but less thorough agents.  We expect token costs and inference latencies to continue to fall~\citep {gao2025trae}, making this quality-first posture increasingly practical.  In the meantime, the code produced by our agent is consistently well-organized, simple, and idiomatic.
 
-We deliberately prioritize output quality over latency.  In our
-experience, using a weaker or cheaper model often forces the developer
-to discard the agent's work and retry, ultimately increasing the total
-cost of completing a task.  Conversely, giving a frontier model
-adequate time to validate its own output---running linters, type
-checkers, and tests before declaring success---dramatically reduces
-the ``slop'' (low-quality, subtly incorrect code) that plagues
-faster but less thorough agents.  We expect token costs and inference
-latencies to continue falling~\citep{gao2025trae}, which will make
-this quality-first posture increasingly practical.  In the meantime,
-the code produced by our agent is consistently well-organized, simple,
-and idiomatic.
+We built the system using itself.  The entire codebase---the KISS Agent framework, the Sorcar agent layers, the VS~Code extension, and the system prompt---was developed by KISS Sorcar operating on its own repository.  This self-hosting discipline provides a continuous-integration-style stress test: if the agent introduces a bug that impairs its ability to function, we immediately ask the agent to fix it by analyzing the trajectory and code of KISS Sorcar.  The simplicity of the layered architecture was both a prerequisite for and a consequence of this bootstrapping process. The five core agent classes are remarkably compact: the KISS Agent comprises 409~lines, the Relentless Agent 297~lines, the Sorcar Agent 323~lines, the Chat Sorcar Agent 120~lines, and the Worktree Sorcar Agent 692~lines---a total of roughly 1,850~lines of code (excluding empty lines and comments).
 
-\paragraph{Self-hosting as a stress test.}
-
-We built the system using itself.  The entire codebase---the KISS
-Agent framework, the Sorcar agent layers, the VS~Code extension, and
-the system prompt---was developed by KISS Sorcar operating
-on its own repository.  This self-hosting discipline provides a
-continuous integration-style stress test: if the agent introduces a
-bug that impairs its own ability to work, we immediately asked the agent 
-to fix the bug by analyzing the trajectory and code of KISS Sorcar.  
-The simplicity of the layered architecture was both a
-prerequisite for and a consequence of this bootstrapping process.
-The five core agent classes are remarkably compact: the KISS Agent
-comprises 409~lines, the Relentless Agent 297~lines, the Sorcar Agent 323~lines, the Chat Sorcar
-Agent 120~lines, and the Worktree Sorcar Agent 692~lines---a total
-of roughly 1,850~lines of code (excluding empty lines and comments).
-
-\paragraph{Evaluation.}
-We evaluate on Terminal Bench~2.0 and achieve a 62.2\% overall pass
-rate using Claude Opus~4.6, comparing
-favorably to Claude~Code (58\%) and Cursor
-Composer~2 (61.7\%)~\citep{cursor2026composer2} on the same
-benchmark (Section~\ref{sec:evaluation}).
+We evaluate on Terminal Bench~2.0 and achieve a 62.2\% overall pass rate using Claude Opus~4.6, comparing favorably to Claude~Code (58\%) and Cursor Composer~2 (61.7\%)~\citep{cursor2026composer2} on the same benchmark (Section~\ref{sec:evaluation}).
 
 \paragraph{Outline.}
-Section~\ref{sec:architecture} presents the five-layer
-agent architecture and its motivating design principles.
-Section~\ref{sec:evaluation} reports evaluation results on Terminal
-Bench~2.0.  Section~\ref{sec:system-prompt} details the system prompt.
-Section~\ref{sec:vscode-features} covers the VS~Code extension.
-Section~\ref{sec:painless} illustrates painless software engineering
-through a real development session.
-Section~\ref{sec:related} discusses related work,
-and Section~\ref{sec:conclusion} concludes.
+Section~\ref{sec:architecture} presents the five-layer agent architecture and its motivating design principles. Section~\ref{sec:evaluation} reports evaluation results on Terminal Bench~2.0.  Section~\ref{sec:system-prompt} details the system prompt. Section~\ref{sec:vscode-features} covers the VS~Code extension. Section~\ref{sec:painless} illustrates painless software engineering through a real development session. Section~\ref{sec:related} discusses related work, and Section~\ref{sec:conclusion} concludes.
 
 %----------------------------------------------------------------------
 \section{Agent Architecture}
 \label{sec:architecture}
 %----------------------------------------------------------------------
 
-We initially built the KISS Agentic Framework to rapidly prototype and 
-experiment with various prompt optimization techniques, such as Gepa~\citep{agrawal2025gepa}, and evolutionary
-algorithms for algorithmic and code optimization, such as AlphaEvolve~\citep{novikov2025alphaevolve} and OpenEvolve~\citep{openevolve2025}.
-We heavily focussed on keeping the agent framework simple so that we can rapidly prototype
-and experiment with ideas.  The simplicity of the framework also enabled coding agents to
-write code that were simple and bug-free.  We ended up not using any prompt optimization 
-technique in creating the prompts of KISS Sorcar.  The KISS Agent Framework uses five agent 
-layers using a strict inheritance chain.  Each layer delegates upward for the concerns 
-it does not own.
+We initially built the KISS Agent Framework to rapidly prototype and experiment with various prompt optimization techniques, such as Gepa~\citep{agrawal2025gepa}, and evolutionary algorithms for algorithmic and code optimization, such as AlphaEvolve~\citep{novikov2025alphaevolve} and OpenEvolve~\citep{openevolve2025}. We focused heavily on keeping the agent framework simple so we could rapidly prototype and experiment with ideas.  The simplicity of the framework also enabled coding agents to write simple, bug-free code.  We ended up not using any prompt optimization techniques when creating the prompts for KISS Sorcar.  The KISS Agent Framework uses five agent layers using a strict inheritance chain. Each layer delegates upward for the concerns it does not own.
 
 %......................................................................
 \subsection{KISS Agent}
 \label{sec:kiss-agent}
 %......................................................................
 
-The KISS Agent is the innermost execution unit.  It implements a
-standard ReAct loop~\citep{yao2023react} with the following
-characteristics:
+The KISS Agent is the innermost execution unit.  It implements a standard ReAct loop~\citep{yao2023react} with the following characteristics:
 
-\textbf{Native function calling.}  We register tools as ordinary
-Python callables.  The agent builds an OpenAI-compatible tool schema
-once at setup time and caches it, avoiding redundant schema
-construction on every LLM call.  A special \texttt{finish} tool
-signals task completion and returns the result to the caller.
+\textbf{Native function calling.}  We register tools as ordinary Python callables.  The agent builds an OpenAI-compatible tool schema once at setup time and caches it, avoiding redundant schema construction on every LLM call.  A special \texttt{finish} tool signals task completion and returns the result to the caller.
 
-\textbf{Step, token, and budget tracking.}  At every step the agent
-extracts input and output token counts from the API response, computes
-the dollar cost using a per-model pricing table, and updates both a
-local budget counter and a global (cross-agent) budget counter
-protected by a class-level lock.  The agent checks three limits before
-each step: per-agent budget, global budget, and maximum step count.
+\textbf{Step, token, and budget tracking.}  At every step, the agent extracts input and output token counts from the API response, computes the dollar cost using a per-model pricing table, and updates both a local budget counter and a global (cross-agent) budget counter protected by a class-level lock.  The agent checks three limits before each step: the per-agent budget, the global budget, and the maximum step count.
 
-\textbf{Error resilience.}  The agent retries transient API errors
-(rate limits, server errors) up to a configurable threshold of
-consecutive failures.  It detects non-retryable errors (authentication
-failures, permission denials), and raises them immediately.
+\textbf{Error resilience.}  The agent retries transient API errors (rate limits, server errors) up to a configurable threshold of consecutive failures.  It detects non-retryable errors (authentication failures, permission denials) and raises them immediately.
 
-\textbf{Non-agentic mode.}  When tools are not needed, the agent can
-run a single generation without the ReAct loop, which is useful for
-summarization or question-answering sub-tasks.
+\textbf{Non-agentic mode.}  When tools are not needed, the agent can run a single generation without the ReAct loop, which is useful for summarization or question-answering sub-tasks.
 
-The KISS Agent is stateless across runs: each call to its run method
-resets the conversation, token counters, and tool registry.  This
-makes it safe to reuse a single agent instance for multiple sequential
-tasks.
+The KISS Agent is stateless across runs: each call to its run method resets the conversation, token counters, and tool registry.  This makes it safe to reuse a single agent instance for multiple sequential tasks.
 
 %......................................................................
 \subsection{Relentless Agent}
 \label{sec:relentless-agent}
 %......................................................................
 
-The Relentless Agent wraps a KISS Agent in a continuation loop.  Its
-core contribution is the ability to execute tasks that exceed a single
-context window by breaking them into sub-sessions.
+The Relentless Agent wraps a KISS Agent in a continuation loop.  Its core contribution is the ability to execute tasks that exceed a single context window by breaking them into sub-sessions.
 
-Rather than investing in context-compaction techniques, we adopt a
-simple continuation protocol: when a sub-session exhausts its context
-window or step budget, the agent produces a \emph{structured summary}
-of every action taken so far---chronologically ordered, with
-explanations and relevant code snippets---and a fresh sub-session
-resumes from that summary.  This approach is related in spirit to
-Reflexion~\citep{shinn2023reflexion}, which feeds verbal
-self-critiques back into subsequent trials, but operates at the
-granularity of full software engineering tasks rather than isolated
-reasoning problems.  We found empirically that a na\"ive instruction
-to ``summarize the current context'' produced poor continuations;
-requiring a \emph{step-by-step chronological account with code
-  snippets} dramatically improved coherence across sub-sessions.
-A potential limitation is that summaries may grow unwieldy for
-multi-day tasks; in practice, we have not encountered this problem
-even for tasks spanning several hours, but a thorough evaluation of
-summary scaling remains future work.
+Rather than investing in context-compaction techniques, we adopt a simple continuation protocol: when a sub-session exhausts its context window or step budget, the agent produces a \emph{structured summary} of every action taken so far---chronologically ordered, with explanations and relevant code snippets---and a fresh sub-session resumes from that summary.  This approach is related in spirit to Reflexion~\citep{shinn2023reflexion}, which feeds verbal self-critiques back into subsequent trials, but uses Reflexion-like technique to continue a task.  While developing KISS Sorcar, we found in our experience that a na\"ive instruction to ``summarize the current context'' produced poor continuations; requiring a \emph{step-by-step chronological account with code snippets} dramatically improved coherence across sub-sessions. A potential limitation is that summaries may grow unwieldy for multi-day tasks; in practice, we have not encountered this problem even for tasks spanning several hours, but a thorough evaluation of summary scaling remains future work.
 
-\textbf{Continuation protocol.}  The \texttt{finish} tool exposed to
-the inner KISS Agent accepts three fields: a success flag, a continue
-flag, and a summary.  When the agent sets \texttt{is\_continue=True},
-the Relentless Agent starts a new sub-session with a fresh context
-window.  The prompt for the new session includes a chronologically
-ordered list of all prior attempt summaries, instructing the agent not
-to redo completed work.  The continuation prompt template is:
+\textbf{Continuation protocol.}  The \texttt{finish} tool exposed to the inner KISS Agent accepts three fields: a success flag, a continue flag, and a summary.  When the agent sets \texttt{is\_continue=True}, the Relentless Agent starts a new sub-session with a fresh context window.  The prompt for the new session includes a chronologically ordered list of all prior attempt summaries and instructs the agent not to redo completed work.  The continuation prompt template is:
 
 \begin{prompt}
 # Task Progress (Continuation {continuation_number})
@@ -272,14 +146,7 @@ to redo completed work.  The continuation prompt template is:
   step back and rethink the strategy from scratch.
 \end{prompt}
 
-\textbf{Forced continuation on failure.}  If a sub-session raises an
-exception (e.g., the step limit is hit before the agent calls finish),
-the Relentless Agent does not abort.  Instead, it saves the full
-trajectory to a temporary file, spawns a separate summarizer agent to
-read the trajectory and produce a concise summary, and then uses that
-summary as the progress text for the next sub-session.  This ensures
-that even crashed sessions contribute useful context to subsequent
-attempts.  The summarizer receives the following prompt:
+\textbf{Forced continuation on failure.}  If a sub-session raises an exception (e.g., the step limit is hit before the agent calls finish), the Relentless Agent does not abort.  Instead, it saves the full trajectory to a temporary file, spawns a separate summarizer agent to read the trajectory and produce a concise summary, and then uses that summary as the progress text for the next sub-session.  This ensures that even crashed sessions contribute useful context to subsequent attempts.  The summarizer receives the following prompt:
 
 \begin{prompt}
 # Summarizer
@@ -294,9 +161,7 @@ The trajectory of the agent is stored in the file: {trajectory_file}
   code snippets
 \end{prompt}
 
-\noindent To force the agent to self-continue before hitting the step limit,
-we augment the system prompt with an instruction that fires near the
-end of the budget:
+\noindent To force the agent to self-continue before hitting the step limit, we augment the system prompt with an instruction that fires near the end of the budget:
 
 \begin{prompt}
 # MOST IMPORTANT INSTRUCTIONS
@@ -320,34 +185,15 @@ end of the budget:
 The Sorcar Agent adds the tools that make the system useful for
 software development and general-purpose automation.
 
-\textbf{Coding tools.}  We provide four core tools: a shell command
-executor with streaming output, a file reader, a precise string-based
-file editor, and a file writer.  The shell executor supports a
-configurable timeout, streams output to the user interface in real
-time, and respects a stop event that allows the user to cancel a
-running command.
+\textbf{Coding tools.}  We provide four core tools: a shell command executor with streaming output, a file reader, a precise string-based file editor, and a file writer.  The shell executor supports a configurable timeout, streams output to the user interface in real time, and respects a stop event that allows the user to cancel a running command.  Note that we kept the tool names (Bash, Edit, Write, Read) the same as those in Claude Code, because the underlying Anthropic models do not make mistakes with those tools.
 
-\textbf{Browser automation.}  A web-use tool provides programmatic
-browser control: navigating to URLs, reading page accessibility trees,
-clicking elements, typing text, pressing keys, scrolling, and taking
-screenshots.  This enables the agent to research documentation, verify
-deployed applications, and interact with web-based tools.
+\textbf{Browser automation.}  A web-use tool provides programmatic browser control: navigating to URLs, reading page accessibility trees, clicking elements, typing text, pressing keys, scrolling, and taking screenshots.  This enables the agent to research documentation, verify deployed applications, and interact with web-based tools.
 
-\textbf{Parallel sub-agents.}  An optional parallel execution tool
-spawns independent Sorcar Agent instances in a thread pool.  Each
-sub-agent gets its own LLM context and tool set.  This is useful for
-embarrassingly parallel tasks such as summarizing multiple files or
-researching independent topics.  We collect the results and return
-them in input order.
+\textbf{Parallel sub-agents.}  An optional parallel execution tool spawns independent Sorcar Agent instances in a thread pool.  Each sub-agent gets its own LLM context and tool set.  This is useful for embarrassingly parallel tasks such as summarizing multiple files or researching independent topics.  We collect the results and return them in input order.  We do not activate this tool by default because in the IDE, we cannot stream multiple agent outputs coherently in the chat window.
 
-\textbf{User interaction.}  An ask-user-question tool allows the agent
-to pause execution and request clarification from the user.  In the
-VS~Code integration, this renders as a text input in the sidebar; in
-CLI mode, it reads from standard input.
+\textbf{User interaction.}  An ask-user-question tool allows the agent to pause execution and request clarification from the user.  In the VS~Code integration, this renders as a text input in the sidebar; in CLI mode, it reads from standard input.
 
-\textbf{Docker isolation.}  When a Docker image is specified, we
-replace the coding tools with Docker-aware variants that execute
-commands inside a container, providing an additional layer of
+\textbf{Docker isolation.}  When a Docker image is specified, we replace the coding tools with Docker-aware variants that execute commands inside a container, providing an additional layer of
 sandboxing for untrusted tasks.
 
 %......................................................................
@@ -357,25 +203,11 @@ sandboxing for untrusted tasks.
 
 The Chat Sorcar Agent adds multi-turn conversation persistence.
 
-\textbf{Chat sessions.}  We assign each task to a chat session
-identified by a stable chat ID.  The agent persists tasks and their
-results to a local database.  When a new task arrives within the same
-chat session, the agent loads all prior tasks and results and prepends
-them to the prompt as numbered context entries, allowing the LLM to
-reference earlier work.
+\textbf{Chat sessions.}  We assign each task to a chat session identified by a stable chat ID.  The agent persists tasks and their results to a local database.  When a new task arrives within the same chat session, the agent loads all prior tasks and results and prepends them to the prompt as numbered context entries, allowing the LLM to reference earlier work.
 
-\textbf{Session management.}  The agent supports three operations:
-starting a new chat (which clears the chat ID), resuming a chat by
-task description (which looks up the corresponding chat ID), and
-resuming by explicit chat ID.  This enables both automatic session
-continuity in an IDE and manual session selection from the command
-line.
+\textbf{Session management.}  The agent supports three operations: starting a new chat (with a fresh chat ID), resuming a chat by task description (which looks up the corresponding chat ID), and resuming by explicit chat ID.  This enables both automatic session continuity in an IDE and manual session selection from the command line.
 
-\textbf{Metadata persistence.}  After each task, the agent records
-metadata including the model used, working directory, software version,
-token count, cost, and whether the task used parallel execution or
-worktree isolation.  This audit trail supports cost analysis and
-debugging.
+\textbf{Metadata persistence.}  After each task, the agent records metadata including the model used, working directory, software version, token count, cost, and whether the task used parallel execution or worktree isolation.  This audit trail supports cost analysis and debugging.
 
 %......................................................................
 \subsection{Worktree Sorcar Agent}
@@ -386,43 +218,15 @@ The Worktree Sorcar Agent is the outermost layer and the one that
 users interact with in the VS~Code extension.  Its defining feature is
 git-worktree isolation.
 
-\textbf{Branch-per-task.}  When a task starts, the agent creates a new
-git branch and a corresponding worktree directory.  The branch name
-encodes the chat ID and a timestamp for uniqueness.  All agent
-modifications happen inside the worktree; the user's main working tree
-remains untouched.
+\textbf{Branch-per-task.}  When a task starts, the agent creates a new git branch and a corresponding worktree directory.  The branch name encodes the chat ID and a timestamp for uniqueness.  All agent modifications happen inside the worktree; the user's main working tree remains untouched.
 
-\textbf{Dirty-state preservation.}  If the user's main working tree
-has uncommitted changes, the agent copies them into the worktree and
-creates a baseline commit.  This ensures the agent sees the same state
-the user sees, while keeping the user's actual index and working tree
-clean.  During merge, we use cherry-pick from the baseline
-commit to replay only the agent's changes, excluding the
-dirty-state snapshot.
+\textbf{Dirty-state preservation.}  If the user's main working tree has uncommitted changes, the agent copies them into the worktree and creates a baseline commit.  This ensures the agent sees the same state the user sees, while keeping the user's actual index and working tree clean.  During merge, we use cherry-pick from the baseline commit to replay only the agent's changes, excluding the dirty-state snapshot.
 
-\textbf{Auto-commit and auto-merge.}  When the user starts a new task
-or a new chat, we automatically commit any pending worktree from a
-previous task with an LLM-generated commit message and squash-merge it
-into the original branch.  If the merge has conflicts, we preserve the
-branch and provide the user with instructions for manual resolution.
+\textbf{Concurrency safety.}  A per-repository file lock serializes the checkout, stash, merge, and pop sequence so that concurrent tabs in the IDE cannot interleave operations on the same repository. Thread-local storage isolates per-task state (stream parsing buffers, bash output buffers, recording state) so that stopping one task does not corrupt another.
 
-\textbf{Concurrency safety.}  A per-repository file lock serializes
-the checkout, stash, merge, and pop sequence so that concurrent tabs
-in the IDE cannot interleave operations on the same repository.
-Thread-local storage isolates per-task state (stream parsing buffers,
-bash output buffers, recording state) so that stopping one task does
-not corrupt another.
+\textbf{Crash recovery.}  We store all worktree state in git itself (branch names, git config entries) rather than in sidecar files.  On process restart, the agent queries git for any pending branch matching its chat ID prefix and reconstructs all instance attributes from git config, enabling seamless recovery.
 
-\textbf{Crash recovery.}  We store all worktree state in git itself
-(branch names, git config entries) rather than in sidecar files.  On
-process restart, the agent queries git for any pending
-branch matching its chat ID prefix and reconstructs all instance
-attributes from git config, enabling seamless recovery.
-
-\textbf{Graceful fallback.}  If the working directory is not inside a
-git repository, if the repository has no commits, or if HEAD is
-detached, the agent falls back to direct execution without worktree
-isolation, ensuring it never fails due to git preconditions.
+\textbf{Graceful fallback.}  If the working directory is not inside a git repository, if the repository has no commits, or if HEAD is detached, the agent falls back to direct execution without worktree isolation, ensuring it never fails due to git preconditions.
 
 
 %----------------------------------------------------------------------
@@ -430,30 +234,13 @@ isolation, ensuring it never fails due to git preconditions.
 \label{sec:evaluation}
 %----------------------------------------------------------------------
 
-To keep the readers engaged, before we discuss a crucial aspect of KISS Sorcar, 
-the system prompt, we describe the 
-evaluation outcome of KISS Sorcar on the Terminal Bench 2.0, which was also recently 
-used by the Cursor agent of Composer 2.0. 
+Before we discuss a crucial aspect of KISS Sorcar, the system prompt, in a lengthy section, we describe the evaluation outcome of KISS Sorcar on the Terminal Bench 2.0, which was also recently used by the Cursor agent of Composer 2.0. 
 
-We evaluate our system on Terminal
-Bench~2.0,\footnote{\url{https://www.tbench.ai/}} a benchmark of 89
-diverse terminal-based programming tasks that range from building
-legacy compilers and configuring servers to solving cryptanalysis
-challenges and training machine-learning models.  Each task runs
-inside an isolated Docker container; a separate verifier judges the
-result automatically.  We use the
-Harbor\footnote{\url{https://github.com/harbor-framework/harbor}}
-framework to orchestrate execution, and Claude Opus~4.6 as the
-underlying LLM.
+We evaluate our system on Terminal Bench~2.0,\footnote{\url{https://www.tbench.ai/}} a benchmark comprising 89 diverse terminal-based programming tasks, ranging from building legacy compilers and configuring servers to solving cryptanalysis challenges and training machine-learning models.  Each task runs in an isolated Docker container; a separate verifier automatically judges the result.  We use the Harbor\footnote{\url{https://github.com/harbor-framework/harbor}} framework to orchestrate execution, and Claude Opus~4.6 as the underlying LLM.  We do not modify the general system prompt or inject Terminal Bench 2.0-specific instructions during the evaluation.  We carried out our evaluation on a 2025 MacBook Air 15".
 
 \subsection{Setup}
 
-We run 5 independent trials per task.  The agent is \texttt{SorcarHarborAgent}, a thin Harbor
-adapter that installs and invokes the sorcar CLI inside each
-container.  We hard-skip 9 tasks that we verified to be infeasible for
-Opus~4.6 across 6+ prior attempts (e.g.\ CompCert compilation,
-Windows~3.11 GUI installation, video OCR).  Skipped tasks still count
-as failures. 
+We run 5 independent trials per task.  The agent is \texttt{SorcarHarborAgent}, a thin Harbor adapter that installs and invokes the sorcar CLI inside each container.  We hard-skip 9 tasks that we verified to be infeasible for Opus~4.6 across 6+ prior attempts (e.g.\ CompCert compilation, Windows~3.11 GUI installation, video OCR) to save time and token cost.  Skipped tasks still count as failures. 
 
 \subsection{Aggregate Results}
 
@@ -482,78 +269,25 @@ Mean duration per trial  & 446\,s \\
 \end{tabular}
 \end{table}
 
-The 62.2\% overall pass rate compares favorably to other agents
-using the same underlying model: at the time of writing, Claude~Code
-(also Opus~4.6) scores approximately 58\% on the Terminal Bench~2.0
-leaderboard, and Cursor's Composer~2---a custom fine-tuned
-model trained with large-scale reinforcement
-learning~\citep{cursor2026composer2}---achieves 61.7\%.  Our result
-suggests that the layered architecture and the structured system
-prompt described in
-Sections~\ref{sec:architecture}--\ref{sec:system-prompt} contribute
-meaningfully beyond what the base model provides.
+The 62.2\% overall pass rate compares favorably to other agents using the same underlying model: at the time of writing, Claude~Code (also Opus~4.6) scores approximately 58\% on the Terminal Bench~2.0 leaderboard, and Cursor's Composer~2---a custom fine-tuned model trained with large-scale reinforcement learning~\citep{cursor2026composer2}---achieves 61.7\%.  Our result suggests that the layered architecture and the structured system prompt described in Sections~\ref{sec:architecture}--\ref{sec:system-prompt} contribute meaningfully beyond what the base model provides.
 
 \subsection{Task-Level Breakdown}
 
-\textbf{Consistently solved tasks (39 of 89).}
-These include cryptanalysis (FEAL differential), game-playing
-(chess best move), git operations (leak recovery), server configuration
-(gRPC key-value store, PyPI server, NGINX logging), data processing
-(resharding), formal verification (Coq~\texttt{plus\_comm}), ML
-inference (HuggingFace model serving, LLM batching scheduler), and
-system emulation (QEMU startup).  The breadth of this set---spanning
-systems, security, data engineering, and formal methods---demonstrates
-that the agent's generality is not limited to a single domain.
+\textbf{Consistently solved tasks (39 of 89).} These include cryptanalysis (FEAL differential), game-playing (chess best move), git operations (leak recovery), server configuration (gRPC key-value store, PyPI server, NGINX logging), data processing (resharding), formal verification (Coq~\texttt{plus\_comm}), ML inference (HuggingFace model serving, LLM batching scheduler), and system emulation (QEMU startup).  The breadth of this set---spanning systems, security, data engineering, and formal methods---demonstrates that the agent's generality is not limited to a single domain.
 
-\textbf{Consistently failed tasks (19 of 89).}
-The failures cluster into three categories: (1)~tasks requiring
-graphical or multimedia capabilities unavailable in the container
-(video processing, Windows~3.11 GUI, MTEB leaderboard scraping,
-extracting moves from video), (2)~tasks demanding very long or
-resource-intensive builds that exceed the container's time or memory
-limits (CompCert, Doom for MIPS, Caffe CIFAR-10, training fastText on
-Yelp data), and (3)~tasks with niche domain-specific requirements that
-the model struggles to satisfy (DNA insertion, OCaml GC patching,
-polyglot C/Python binaries, protein assembly, cell segmentation).
+\textbf{Consistently failed tasks (19 of 89).} The failures cluster into three categories: (1)~tasks requiring graphical or multimedia capabilities unavailable in the container (video processing, Windows~3.11 GUI, MTEB leaderboard scraping, extracting moves from video), (2)~tasks demanding very long or resource-intensive builds that exceed the container's time or memory limits (CompCert, Doom for MIPS, Caffe CIFAR-10, training fastText on Yelp data), and (3)~tasks with niche domain-specific requirements that the model struggles to satisfy (DNA insertion, OCaml GC patching, polyglot C/Python binaries, protein assembly, cell segmentation).
 
-\textbf{Mixed-result tasks (31 of 89).}
-Tasks such as \texttt{write-compressor} (3/5),
-\texttt{crack-7z-hash} (4/5), and \texttt{feal-linear-cryptanalysis}
-(4/5) succeed in most trials but occasionally fail due to
-non-determinism in the model's reasoning or timing-sensitive
-environment interactions.  Conversely,
-\texttt{cancel-async-tasks} (1/5) and \texttt{dna-assembly}
-(1/5) succeed rarely, suggesting they are at the boundary of the
-model's capability.
+\textbf{Mixed-result tasks (31 of 89).} Tasks such as \texttt{write-compressor} (3/5), \texttt{crack-7z-hash} (4/5), and \texttt{feal-linear-cryptanalysis} (4/5) succeed in most trials but occasionally fail due to non-determinism in the model's reasoning or timing-sensitive environment interactions.  Conversely, \texttt{cancel-async-tasks} (1/5) and \texttt{dna-assembly} (1/5) succeed rarely, suggesting they are at the boundary of the model's capability.
 
-\textbf{Leaderboard context.}  KISS Sorcar does not score as high as other 
-coding agents reported at the Terminal Bench 2.0 leaderboard, but we believe 
-that our results are cheat-free and honest, showing reasonable improvements 
-over Claude Code and Cursor agent.  
-Regarding low score compared to other coding agents, we wanted to note that 
-recent analysis has found widespread cheating on popular agent benchmarks, 
-including Terminal
-Bench~2.0: the top three submissions commit harness-level cheating
-(e.g.\ leaking verifier code or answer keys into the agent's
-environment), and task-level cheating (e.g.\ Googling answers,
-mining git history, hardcoding test outputs) affects 28+
-submissions across 9
-benchmarks~\citep{stein2026cheatingblog,stein2026detecting}.
-Separately, we discovered using an automated benchmark audit agent that 45
-confirmed hacking solutions across 13 widely-used benchmarks,
-including process-isolation failures, answer leakage, and weak
-test assertions that allow perfect scores without solving a single
-problem~\citep{wang2026trustworthyblog}.
+\textbf{Leaderboard context.}  KISS Sorcar does not score as high as other coding agents reported at the Terminal Bench 2.0 leaderboard, but we believe that our results are cheat-free and honest, showing reasonable improvements over the Claude Code and Cursor agents.  
+Regarding low score compared to other coding agents, we wanted to note that recent analysis has found widespread cheating on popular agent benchmarks, including Terminal Bench~2.0: the top three submissions commit harness-level cheating (e.g.\ leaking verifier code or answer keys into the agent's environment), and task-level cheating (e.g.\ Googling answers, mining git history, hardcoding test outputs) affects 28+ submissions across 9 benchmarks~\citep{stein2026cheatingblog,stein2026detecting}. Separately, we discovered, using an automated benchmark audit agent, that 45 confirmed hacking solutions across 13 widely used benchmarks exhibited process-isolation failures, answer leakage, and weak test assertions that allow perfect scores without solving a single problem~\citep{wang2026trustworthyblog}.
 
 %----------------------------------------------------------------------
 \section{The System Prompt}
 \label{sec:system-prompt}
 %----------------------------------------------------------------------
 
-The system prompt is a structured document that governs the agent's
-behavior across all tasks.  It is not a generic instruction to ``be
-helpful'' but rather a precise specification of engineering discipline.
-We describe its key sections.
+The system prompt is a structured document that governs the agent's behavior across all tasks.  It is not a generic instruction to ``be helpful'' but rather a precise specification of an engineering discipline. We describe its key sections.
 
 %......................................................................
 \subsection{Execution Mindset}
@@ -570,47 +304,19 @@ The prompt opens with a directive that sets the tone:
 \noindent Each directive addresses a specific failure mode observed in
 LLM-based agents:
 
-\begin{itemize}[nosep]
-\item \textbf{``FOCUS ON THE GIVEN TASK. ITS COMPLETION IS YOUR SOLE
-  GOAL.''} LLMs have a tendency to drift: they comment on the
-  difficulty of a problem, explore tangential concerns, or ask
-  clarifying questions that the user has already answered.  This
-  directive anchors the model on the task at hand and discourages
-  meta-commentary that consumes tokens without making progress.
+\textbf{``FOCUS ON THE GIVEN TASK. ITS COMPLETION IS YOUR SOLE GOAL.''} LLMs have a tendency to drift: they comment on the difficulty of a problem, explore tangential concerns, or ask clarifying questions that the user has already answered.  This directive anchors the model on the task at hand and discourages meta-commentary that consumes tokens without making progress.
 
-\item \textbf{``BE RELENTLESS.''} When an agent encounters an
-  error---a failing test, a lint violation, a command that returns
-  unexpected output---the default LLM behavior is to apologize,
-  summarize the failure, and ask the user what to do next.  This
-  directive instructs the model to treat errors as obstacles to
-  overcome, not as reasons to stop.
+\textbf{``BE RELENTLESS.''} When an agent encounters an error---a failing test, a type violation, a command that returns unexpected output---the default LLM behavior is to apologize, summarize the failure, and ask the user what to do next.  This directive instructs the model to treat errors as obstacles to overcome, not as reasons to stop.
 
-\item \textbf{``BE CALM.''} The complement of relentlessness.  An
-  overly aggressive agent that panics on encountering an error may
-  thrash between approaches without deliberation.  This directive
-  encourages the model to analyze errors methodically before reacting.
+\textbf{``BE CALM.''} The complement of relentlessness.  An overly aggressive agent that panics on encountering an error may thrash between approaches without deliberation.  This directive encourages the model to analyze errors methodically before reacting.
 
-\item \textbf{``BE RIGOROUS.''} This instructs the model to follow
-  the verification and testing disciplines encoded later in the
-  prompt, rather than taking shortcuts when a solution \emph{looks}
-  right.
+\textbf{``BE RIGOROUS.''} This instructs the model to follow the verification and testing disciplines encoded later in the prompt, rather than taking shortcuts when a solution \emph{looks} right.
 
-\item \textbf{``BE ACCURATE.''} LLMs frequently generate
-  plausible-but-wrong code, file paths, or command-line flags.  This
-  directive raises the model's threshold for asserting facts,
-  encouraging it to verify claims against the actual file system or
-  documentation rather than relying on parametric memory.
+\textbf{``BE ACCURATE.''} LLMs frequently generate plausible-but-wrong code, file paths, or command-line flags.  This directive raises the model's threshold for asserting facts, encouraging it to verify claims against the actual file system or documentation rather than relying on parametric memory.
 
-\item \textbf{``CHECK FACTS.''} A more specific version of ``be
-  accurate'' for information collected by KISS Sorcar use web tools.
+\textbf{``CHECK FACTS.''} A more specific version of ``be accurate'' for information collected by KISS Sorcar uses web tools.
 
-\item \textbf{``NO AI SLOP.''} ``AI slop'' refers to the low-quality,
-  generic, hedging text that LLMs produce when they lack confidence:
-  filler phrases like ``certainly!'', unnecessary caveats, and
-  boilerplate explanations that the user did not ask for.  This
-  directive discourages such output and encourages the model to be
-  concise and substantive.
-\end{itemize}
+\textbf{``NO AI SLOP.''} ``AI slop'' refers to the low-quality, generic, hedging text that LLMs produce when they lack confidence: filler phrases like ``certainly!'', unnecessary caveats, and boilerplate explanations that the user did not ask for.  This directive discourages such output and encourages the model to be concise and substantive.
 
 %......................................................................
 \subsection{Tool Rules}
@@ -643,87 +349,29 @@ Tool usage rules are explicit and mechanical:
 
 Each tool rule addresses a specific failure mode:
 
-\begin{itemize}[nosep]
-\item \textbf{``Write() for new files.\ Edit() for small changes.''}
-  Without this distinction, the model may use \texttt{Write()} to
-  overwrite an existing file with a slightly modified version, losing
-  content it forgot to include.  By reserving \texttt{Write()} for new
-  files and requiring \texttt{Edit()} for modifications, the
-  instruction ensures that changes are surgical and that unchanged
-  portions of a file are never at risk.
+\textbf{``Write() for new files.\ Edit() for small changes.''} Without this distinction, the model may use \texttt{Write()} to overwrite an existing file with a slightly modified version, losing content it forgot to include.  By reserving \texttt{Write()} for new files and requiring \texttt{Edit()} for modifications, the instruction ensures that changes are surgical and that unchanged portions of a file are never at risk.
 
-\item \textbf{Bash timeout guidance.}  LLMs frequently launch shell
-  commands without considering their runtime.  A compilation or test
-  suite that takes five minutes will time out at the default
-  30-second shell timeout in most agent frameworks, causing spurious
-  failures.  The instruction to use 300~seconds as the default, retry
-  with higher timeouts on timeout, and run long commands in the
-  background with output redirected to a file provides a mechanical
-  protocol that handles the common cases without requiring the model
-  to estimate runtime from first principles.
+\textbf{Bash timeout guidance.}  LLMs frequently launch shell commands without considering their runtime.  A compilation or test suite that takes five minutes will time out at the default 30-second shell timeout in most agent frameworks, causing spurious failures.  The instruction to use 300~seconds as the default, retry with higher timeouts on timeouts, and run long-running commands in the background with output redirected to a file provides a mechanical protocol that handles common cases without requiring the model to estimate runtime from first principles.
 
-\item \textbf{``Use go\_to\_url() for browser tool.''}  The agent has
-  access to multiple tools that could plausibly interact with the web
-  (shell-based \texttt{curl}, a Python programs, the browser tool, etc.).  This
-  instruction eliminates ambiguity by specifying which tool to use for
-  browser-based interactions.
+\textbf{``Use go\_to\_url() for browser tool.''}  The agent has access to multiple tools that could plausibly interact with the web (shell-based \texttt{curl}, a Python program, the browser tool, etc.).  This instruction eliminates ambiguity by specifying which tool to use for browser-based interactions.
 
-\item \textbf{``The user cannot see intermediate chat.''}  In the
-  VS~Code extension, the user sees only the final summary returned by
-  the \texttt{finish} tool, not the intermediate chain-of-thought or
-  tool calls.  Without this instruction, the model may ``tell'' the
-  user something in an intermediate message and then assume the user
-  has seen it, leading to confusion when the user asks for information
-  the model believes it already provided.  The instruction forces the
-  model to put all user-facing information into the \texttt{finish}
-  summary.
+\textbf{``The user cannot see intermediate chat.''}  Users can get lost in the detailed trajectory generated by KISS Sorcar in the chat window.  Often users want to see only the final summary returned by the \texttt{finish} tool, not the intermediate chain-of-thought or tool calls.  Without this instruction, the model may ``tell'' the user something in an intermediate message and then assume the user has seen it, leading to confusion when the user asks for information the model believes it already provided.  The instruction forces the model to put all user-facing information into the \texttt{finish} summary.
 
-\item \textbf{``READ large files in chunks.''}  Reading a
-  10,000-line file in a single tool call consumes a large fraction of
-  the context window.  By instructing the model to read files in
-  chunks, the prompt prevents context-window exhaustion on a single
-  file read, preserving capacity for the rest of the task.
+\textbf{``READ large files in chunks.''}  Reading a 10,000-line file in a single tool call consumes a large fraction of the context window.  By instructing the model to read files in chunks, the prompt prevents context window exhaustion from a single file read, preserving capacity for the rest of the task.
 
-\item \textbf{``Create temporary files in PWD/tmp.''}  Without this
-  instruction, the model creates temporary files in unpredictable
-  locations (the system \texttt{/tmp}, the home directory, or
-  scattered throughout the project).  Centralizing temporary files in
-  a known directory makes cleanup predictable and prevents polluting
-  the project tree with artifacts.
+\textbf{``Create temporary files in PWD/tmp.''}  Without this instruction, the model creates temporary files in unpredictable locations (the system \texttt{/tmp}, the home directory, or scattered throughout the project).  Centralizing temporary files in a known directory makes cleanup predictable and prevents polluting the project tree with artifacts.
 
-\item \textbf{``Use ULTRA thinking always.''}  This instruction
-  activates the model's extended reasoning mode (also known as
-  ``thinking'' or ``chain-of-thought'' mode), in which the model
-  performs additional internal deliberation before producing a
-  response.  Extended reasoning is particularly valuable for complex
-  multi-step tasks where the model must plan before acting.
+\textbf{``Use ULTRA thinking always.''}  This instruction activates the model's extended reasoning mode (also known as ``thinking'' or ``chain-of-thought'' mode), in which the model performs additional internal deliberation before producing a response.  Extended reasoning is particularly valuable for complex, multi-step tasks in which the model must plan before acting.
 
-\item \textbf{``If you are running out of context length or steps, DO
-  NOT try to complete the task urgently, but continue the task by
-  calling finish.''}  When the context window is nearly full, LLMs
-  exhibit a ``rush to finish'' behavior: they skip verification
-  steps, make hasty edits, and call \texttt{finish} with an
-  incomplete result.  This instruction redirects that urgency into
-  the continuation protocol (Section~\ref{sec:relentless-agent}),
-  ensuring that a clean handoff to a new sub-session produces better
-  results than a frantic attempt to squeeze everything into the
-  remaining tokens.
+\textbf{``If you are running out of context length or steps, DO NOT try to complete the task urgently, but continue the task by calling finish.''}  When the context window is nearly full, LLMs exhibit a ``rush to finish'' behavior: they skip verification steps, make hasty edits, and call \texttt{finish} with an incomplete result.  This instruction redirects that urgency into the continuation protocol (Section~\ref{sec:relentless-agent}), ensuring that a clean handoff to a new sub-session produces better results than a frantic attempt to squeeze everything into the remaining tokens.
 
-\item \textbf{``PWD in the system prompt and user prompt denotes
-  current working directory.''}  The acronym ``PWD'' appears
-  throughout the prompt and in user task descriptions (e.g.,
-  ``edit PWD/src/main.py'').  Without this definition, the model
-  might interpret PWD as the Unix environment variable
-  \texttt{\$PWD} and attempt to expand it, or misinterpret it as a
-  literal directory name.  The explicit definition ensures consistent
-  interpretation.
-\end{itemize}
+\textbf{``PWD in the system prompt and user prompt denotes current working directory.''}  The acronym ``PWD'' appears throughout the prompt and in user task descriptions (e.g., ``edit PWD/src/main.py'').  Without this definition, the model might interpret PWD as the Unix environment variable \texttt{\$PWD} and attempt to expand it, or misinterpret it as a literal directory name.  The explicit definition ensures consistent interpretation.
 
 %......................................................................
 \subsection{Pre-flight Checks}
 %......................................................................
 
-Before modifying any file, we instruct the agent to read it first:
+Before modifying any file, we instruct the agent to read it first.  These instructions were motivated by the GitHub project 'get shit done'~\cite{getshitdone2025}:
 
 \begin{prompt}
 ## Pre-flight Checks
@@ -740,42 +388,13 @@ Before modifying any file, we instruct the agent to read it first:
 \noindent Each pre-flight check targets a specific category of avoidable
 error:
 
-\begin{itemize}[nosep]
-\item \textbf{``Read every file you will modify before changing it.''}
-  The most common source of agent-introduced bugs is modifying a file
-  based on an incorrect assumption about its current contents.  The
-  model may ``remember'' an older version of the file from its
-  training data, or it may extrapolate from a partial reading.  By
-  requiring a fresh read immediately before any edit, the instruction
-  ensures that the model operates on the actual current state of the
-  file, not a stale mental model.
+\textbf{``Read every file you will modify before changing it.''} The most common source of agent-introduced bugs is modifying a file based on an incorrect assumption about its current contents.  The model may ``remember'' an older version of the file from its training data, or it may extrapolate from a partial reading.  By requiring a fresh read immediately before any edit, the instruction ensures that the model operates on the file's current state, not a stale mental model.
 
-\item \textbf{``If the task depends on existing architecture or
-  behavior, read the relevant source files first.''}  This extends the
-  previous rule from individual files to architectural context.  A
-  task like ``add a caching layer to the database module'' requires
-  understanding not just the file to be modified, but also how callers
-  interact with it, what interfaces exist, and what invariants are
-  assumed.  The instruction prevents the model from jumping straight
-  to code generation without understanding the broader context.
+\textbf{``If the task depends on existing architecture or behavior, read the relevant source files first.''}  This extends the previous rule from individual files to architectural context. A task like ``add a caching layer to the database module'' requires understanding not just the file to be modified, but also how callers interact with it, what interfaces exist, and what invariants are assumed.  The instruction prevents the model from jumping straight to code generation without understanding the broader context.
 
-\item \textbf{``If the task references files, commands, or config that
-  do not exist, stop and ask or report instead of guessing.''}  LLMs
-  have a strong tendency to confabulate: when asked to modify a file
-  that does not exist, the model will often proceed as if it does,
-  producing edits against phantom content.  This instruction converts
-  a silent failure (wrong edits applied to a nonexistent file,
-  silently creating it) into an explicit clarification request.
+\textbf{``If the task references files, commands, or config that do not exist, stop and ask or report instead of guessing.''}  LLMs have a strong tendency to confabulate: when asked to modify a file that does not exist, the model will often proceed as if it does, producing edits against phantom content.  This instruction converts a silent failure (incorrect edits applied to a nonexistent file, which silently creates it) into an explicit clarification request.
 
-\item \textbf{``When fixing a bug, an issue, or a race, write tests
-  to confirm them.\ Then fix them.''}  This instruction mandates a
-  test-first discipline for bug fixes.  The motivation is two-fold:
-  first, a test that reproduces the bug provides concrete verification
-  that the fix is correct (the test should pass after the fix and fail
-  before it).  Second, writing the test forces the model to understand
-  the bug precisely before attempting a fix, reducing the risk of an
-  ad~hoc patch that addresses a symptom rather than the root cause.
-\end{itemize}
+\textbf{``When fixing a bug, an issue, or a race, write tests to confirm them.\ Then fix them.''}  This instruction mandates a test-first discipline for bug fixes.  The motivation is two-fold: first, a test that reproduces the bug provides concrete verification that the fix is correct (the test should pass after the fix and fail before it).  Second, writing the test forces the model to understand the bug precisely before attempting a fix, reducing the risk of an ad~hoc patch that addresses a symptom rather than the root cause.
 
 %......................................................................
 \subsection{Code Style Guidelines}
@@ -805,73 +424,23 @@ The prompt encodes a minimalist code philosophy:
 \noindent Each guideline addresses a specific anti-pattern commonly
 exhibited by LLM-generated code:
 
-\begin{itemize}[nosep]
-\item \textbf{``Write simple, clean, and readable code with minimal
-  indirection.''}  LLMs tend to over-engineer solutions, introducing
-  unnecessary abstractions, helper classes, and levels of indirection.
-  Simple code is easier to review, test, and maintain.
+\textbf{``Write simple, clean, and readable code with minimal indirection.''}  LLMs tend to over-engineer solutions, introducing unnecessary abstractions, helper classes, and levels of indirection. Simple code is easier to review, test, and maintain.
 
-\item \textbf{``Avoid unnecessary object attributes, local variables,
-  and config variables.''}  LLMs frequently introduce intermediate
-  variables that serve no purpose---for example, assigning a return
-  value to a local variable only to immediately return it on the next
-  line, or storing a constant in a configuration file when it is used
-  in exactly one place.  Each unnecessary variable adds a name the
-  reader must track and a site where the value could be accidentally
-  mutated.
+\textbf{``Avoid unnecessary object attributes, local variables, and config variables.''}  LLMs frequently introduce intermediate variables that serve no purpose---for example, assigning a return value to a local variable only to immediately return it on the next line, or storing a constant in a configuration file when it is used in exactly one place.  Each unnecessary variable adds a name the developer must track and a site where the value could be accidentally mutated.
 
-\item \textbf{``Avoid tight coupling among files and modules.''}
-  When the model adds a feature that touches multiple files, it may
-  introduce imports, shared global state, or cross-module function
-  calls that create tight coupling.  This instruction encourages
-  modular design where each module has a clear, narrow interface.
+\textbf{``Avoid tight coupling among files and modules.''} When the model adds a feature that touches multiple files, it may introduce imports, shared global state, or cross-module function calls that create tight coupling.  This instruction encourages modular design where each module has a clear, narrow interface.
 
-\item \textbf{``Avoid object/struct attribute redirections.''}  An
-  attribute redirection occurs when an object stores a reference to
-  another object solely to forward method calls to it---for example,
-  \texttt{self.x = other.x} at construction time, creating two paths
-  to the same value.  LLMs commonly introduce such redirections when
-  adapting code from one context to another.  They make it harder to
-  reason about ownership and lifetime.
+\textbf{``Avoid object/struct attribute redirections.''}  An attribute redirection occurs when an object stores a reference to another object solely to forward method calls to it---for example, \texttt{self.x = other.x} at construction time, creating two paths to the same value.  LLMs commonly introduce such redirections when adapting code from one context to another.  They make it harder to reason about ownership and lifetime.
 
-\item \textbf{``No redundant abstractions or duplicate code.''}  LLMs
-  sometimes create a new utility function or class that duplicates
-  functionality already present in the codebase, because they did not
-  read the existing code thoroughly.  This instruction reminds the
-  model to check for existing implementations before creating new
-  ones, and to factor out duplication when it encounters it.
+\textbf{``No redundant abstractions or duplicate code.''}  LLMs sometimes create a new utility function or class that duplicates functionality already present in the codebase, because they did not read the existing code thoroughly.  This instruction reminds the model to check for existing implementations before creating new ones, and to factor out duplication when it encounters it.
 
-\item \textbf{``Public methods MUST have full documentation.''}  While
-  the prompt generally discourages unnecessary documentation (see the
-  last item), public methods are the API surface that other developers
-  and modules depend on.  Documentation on public methods is not
-  optional---it specifies the contract.
+\textbf{``Public methods MUST have full documentation.''}  While the prompt generally discourages unnecessary documentation (see the last item), public methods are the API surface that other developers and modules depend on.  Documentation on public methods is not optional---it specifies the contract. 
 
-\item \textbf{``Understand the root cause of an issue or bug, and
-  patch the root cause instead of an ad hoc superficial fix.''}  LLMs
-  frequently apply symptom-level fixes: adding a null check where the
-  real problem is that a variable should never be null, or catching an
-  exception where the real problem is that the caller passes invalid
-  arguments.  This instruction forces the model to trace the causal
-  chain to the root and fix it there.
+\textbf{``Understand the root cause of an issue or bug, and patch the root cause instead of an ad hoc superficial fix.''}  LLMs frequently apply symptom-level fixes: adding a null check where the real problem is that a variable should never be null, or catching an exception where the real problem is that the caller passes invalid arguments.  This instruction forces the model to trace the causal chain to the root and fix it there.
 
-\item \textbf{``Before you write code, wait and think if the code is
-  simple, elegant, general, and minimal.''}  This is a metacognitive
-  instruction that asks the model to pause and evaluate its plan
-  before committing to an implementation.  By explicitly requesting
-  this pause, the prompt encourages the model to spend more
-  inference-time compute on design, reducing the likelihood of
-  producing a first-draft solution that works but is unnecessarily
-  complex.
+\textbf{``Before you write code, wait and think if the code is simple, elegant, general, and minimal.''}  This is a metacognitive instruction that asks the model to pause and evaluate its plan before committing to an implementation.  By explicitly requesting this pause, the prompt encourages the model to spend more inference-time compute on design, reducing the likelihood of producing a first-draft solution that works but is unnecessarily complex.
 
-\item \textbf{``Once you finish the task, DO NOT write documentations
-  unless the task specifically requires it.''}  Without this
-  instruction, the model frequently concludes a task by writing README
-  updates, docstrings, and inline comments that the user did not ask
-  for.  This busywork wastes tokens, creates maintenance burden, and
-  may introduce inaccuracies in documentation that is not
-  automatically validated.
-\end{itemize}
+\textbf{``Once you finish the task, DO NOT write documentation unless the task specifically requires it.''}  Claude Opus 4.6 tends to generate many documentation files. These instructions prevent the behavior.
 
 %......................................................................
 \subsection{Deep Work Rules}
@@ -893,52 +462,22 @@ exhibited by LLM-generated code:
   verification method (test, grep, CLI command).
 \end{prompt}
 
-\noindent The deep work rules address a failure mode where the model
-interprets an instruction loosely and makes changes that are
+\noindent The deep work rules (inspired by 'get shit done '~\cite {getshitdone2025}) address a failure mode where the model interprets an instruction loosely and makes changes that are
 directionally correct but concretely wrong:
 
-\begin{itemize}[nosep]
-\item \textbf{``When the task says `align', `match', or `make
-  consistent', read the target to determine the exact target state
-  before editing.''}  When a user says ``make file~A consistent with
-  file~B,'' the model often reads file~A, infers what file~B probably
-  contains, and edits A based on that inference---without ever reading
-  B\@.  This instruction mandates reading the target first, ensuring
-  that the alignment is based on concrete facts rather than
-  assumptions.
+\textbf{``When the task says `align', `match', or `make consistent', read the target to determine the exact target state before editing.''}  When a user says ``make file~A consistent with file~B,'' the model often reads file~A, infers what file~B probably contains, and edits A based on that inference---without ever reading B.  This instruction mandates reading the target first, ensuring that the alignment is based on concrete facts rather than assumptions.
 
-\item \textbf{``Use concrete values, not indirections.''}  A related
-  failure mode occurs when the model's plan says ``update X to match
-  Y'' but the model never resolves what Y actually is.  The
-  instruction requires the model to first read~Y, extract the
-  specific values, and then write those values into~X\@.  This
-  eliminates a class of errors where the model's mental model of~Y
-  differs from reality.
+\textbf{``Use concrete values, not indirections.''}  A related failure mode occurs when the model's plan says ``update X to match Y'' but the model never resolves what Y actually is.  The instruction requires the model to first read~Y, extract the specific values, and then write those values into~X.  This eliminates a class of errors where the model's mental model of~Y differs from reality.
 
-\item \textbf{``For multi-part work, list the concrete planned changes
-  before executing them.''}  When a task requires changes to multiple
-  files, executing them one at a time without a plan leads to
-  inconsistencies: the model may change a function signature in one
-  file but forget to update a caller in another.  Listing all planned
-  changes before executing any of them forces the model to consider
-  the full scope of the change and identify dependencies.
+\textbf{``For multi-part work, list the concrete planned changes before executing them.''}  When a task requires changes to multiple files, executing them one at a time without a plan leads to inconsistencies: the model may change a function signature in one file but forget to update a caller in another.  Listing all planned changes before executing any of them forces the model to consider the full scope of the change and identify dependencies.
 
-\item \textbf{``Every meaningful change should have a concrete
-  verification method.''}  A change without a verification method is a
-  change that cannot be confirmed to work.  This instruction requires
-  the model to pair each change with a specific check---a test, a grep
-  for the expected pattern, a CLI command that exercises the changed
-  behavior---ensuring that the change can be validated
-  programmatically rather than by visual inspection of a diff.
-\end{itemize}
+\textbf{``Every meaningful change should have a concrete verification method.''}  A change without a verification method is a change that cannot be confirmed to work.  This instruction requires the model to pair each change with a specific check---a test, a grep for the expected pattern, a CLI command that exercises the changed behavior---ensuring that the change can be validated programmatically rather than by visual inspection of a diff.
 
 %......................................................................
 \subsection{Planning for Complex Tasks}
 %......................................................................
 
-The planning instructions use a complexity threshold---three or more
-files, cross-module changes, or architectural work---to decide when
-formal planning is required:
+The planning instructions use a complexity threshold---three or more files, cross-module changes, or architectural work---to decide when formal planning is required:
 
 \begin{prompt}
 ## Planning for Complex Tasks
@@ -957,41 +496,15 @@ execute directly.
 
 \noindent Each planning step targets a specific failure mode:
 
-\begin{itemize}[nosep]
-\item \textbf{``List the files that need to change and why.''}  This
-  forces the model to enumerate the full blast radius of a change
-  before touching any file.  Without this step, the model often
-  discovers mid-task that additional files need changes, leading to
-  incomplete or inconsistent modifications.
+\textbf{``List the files that need to change and why.''}  This forces the model to enumerate the full blast radius of a change before touching any file.  Without this step, the model often discovers mid-task that additional files need changes, leading to incomplete or inconsistent modifications.
 
-\item \textbf{``State the exact intended change in each file.''}
-  Listing files alone is insufficient; the model must also articulate
-  \emph{what} will change in each file.  This converts a vague plan
-  (``update the database module'') into a concrete specification
-  (``add a \texttt{cache\_ttl} parameter to
-  \texttt{DatabaseClient.\_\_init\_\_}, modify the query method to
-  check the cache before hitting the database, add a cache
-  invalidation method'').
+\textbf{``State the exact intended change in each file.''} Listing files alone is insufficient; the model must also articulate \emph{what} will change in each file.  This converts a vague plan (``update the database module'') into a concrete specification (``add a \texttt{cache\_ttl} parameter to \texttt{DatabaseClient.\_\_init\_\_}, modify the query method to check the cache before hitting the database, add a cache invalidation method).
 
-\item \textbf{``Identify dependencies and execution order.''}  Some
-  changes must precede others: a new utility function must be written
-  before callers can import it, a migration must run before code that
-  depends on the new schema.  Identifying these dependencies prevents
-  the model from executing changes in an order that produces
-  intermediate states where the code does not compile or tests do not
-  pass.
+\textbf{``Identify dependencies and execution order.''}  Some changes must precede others: a new utility function must be written before callers can import it, a migration must run before code that depends on the new schema.  Identifying these dependencies prevents the model from applying changes in an order that produces intermediate states in which the code does not compile, or tests do not pass.
 
-\item \textbf{``State how each change will be verified.''}  The
-  verification requirement from the Deep Work Rules is reinforced here
-  at the planning stage, ensuring that verification is planned
-  alongside the changes rather than treated as an afterthought.
-\end{itemize}
+\textbf{``State how each change will be verified.''}  The verification requirement from the Deep Work Rules is reinforced here at the planning stage, ensuring that verification is planned alongside the changes rather than treated as an afterthought.
 
-\noindent The escape clause---``for simple single-file tasks, skip
-formal planning and execute directly''---avoids the overhead of
-planning trivial changes.  Requiring a formal plan for a one-line typo
-fix would waste tokens and slow down the agent without any
-compensating benefit.
+\noindent The escape clause---``for simple single-file tasks, skip formal planning and execute directly''---avoids the overhead of planning trivial changes.  Requiring a formal plan for a one-line typo fix would waste tokens and slow down the agent without any compensating benefit.
 
 %......................................................................
 \subsection{Testing Instructions}
@@ -1017,66 +530,19 @@ The testing section is perhaps the most opinionated:
 
 \noindent Each testing instruction addresses a specific concern:
 
-\begin{itemize}[nosep]
-\item \textbf{``Run lint and typecheckers and fix any lint and
-  typecheck errors.''}  Before committing any change, the agent must
-  ensure it does not introduce lint violations or type errors.  This
-  catches a broad class of issues---unused imports, type mismatches,
-  style violations---that would otherwise accumulate across tasks.
+\textbf{``Run lint and typecheckers and fix any lint and typecheck errors.''}  Before committing any change, the agent must ensure it does not introduce lint violations or type errors.  This catches a broad class of issues---unused imports, type mismatches, style violations---that would otherwise accumulate across tasks.
 
-\item \textbf{``You MUST achieve 100\% branch coverage.''}  Full
-  branch coverage ensures that every conditional path in the code
-  under test has been exercised.  LLMs tend to write happy-path tests
-  that cover the main code path but ignore error handling, edge cases,
-  and early-return branches.  The 100\% target forces the model to
-  write tests for every branch, including error paths and boundary
-  conditions.
+\textbf{``You MUST achieve 100\% branch coverage.''}  Full branch coverage ensures that every conditional path in the code under test has been exercised.  LLMs tend to write happy-path tests that cover the main code path but ignore error handling, edge cases, and early-return branches.  The 100\% target forces the model to write tests for every branch, including error paths and boundary conditions.  Moreover, such tests help with regression — developers can confidently use AI coding agents without fear that changes will break existing program behavior.
 
-\item \textbf{``Tests MUST NOT use mocks, patches, fakes, or any form
-  of test doubles.''}  This is the most opinionated rule.  Mocks test
-  that code calls certain methods in a certain order---they test the
-  implementation, not the behavior.  A test suite built on mocks can
-  pass with flying colors while the system is fundamentally broken,
-  because the mocks hide the real dependencies.  Integration tests
-  that exercise actual behavior are more expensive to run but provide
-  genuine confidence that the system works.  Moreover, the act of writing
-  integration tests forces the model to think deeply which often enables
-  the agent to find deeper bugs in the written code.
+\textbf{``Tests MUST NOT use mocks, patches, fakes, or any form of test doubles.''}  This is the most opinionated rule.  Mock tests that verify code call certain methods in a certain order — these test the implementation, not the behavior.  A test suite built on mocks can pass with flying colors while the system is fundamentally broken,  because the mocks hide the real dependencies.  Integration tests that exercise actual behavior are more expensive to run but provide genuine confidence that the system works.  Moreover, writing integration tests forces the model to think more deeply, often enabling the agent to find deeper bugs in the code.
 
-\item \textbf{``You MUST write integration tests.''}  This reinforces
-  the no-mocks rule by explicitly requiring integration tests rather
-  than unit tests.  The distinction matters: a unit test in isolation
-  may verify that a function produces the right output for a given
-  input, but an integration test verifies that the function works
-  correctly within the larger system---with real file I/O, real
-  database connections, and real inter-module interactions.
+\textbf{``You MUST write integration tests.''}  This reinforces the no-mocks rule by explicitly requiring integration tests rather than unit tests.  The distinction matters: a unit test in isolation may verify that a function produces the right output for a given input, but an integration test verifies that the function works correctly within the larger system---with real file I/O, real database connections, and real inter-module interactions.
 
-\item \textbf{``Each test should be independent and verify actual
-  behavior.''}  Test independence means that running tests in any
-  order produces the same results.  Tests that depend on shared state
-  or execution order are brittle and difficult to debug when they
-  fail.  ``Verify actual behavior'' reiterates that tests should
-  assert on observable outcomes (return values, side effects, system
-  state) rather than implementation details.
+\textbf{``Each test should be independent and verify actual behavior.''}  Test independence means that running tests in any order produces the same results.  Tests that depend on shared state or execution order are brittle and difficult to debug when they fail.  ``Verify actual behavior'' reiterates that tests should assert on observable outcomes (return values, side effects, system state) rather than implementation details.
 
-\item \textbf{``Do NOT run all tests after modifications.\ Only run
-  the impacted tests.''}  Running the full test suite after every
-  small change is wasteful when only a few modules are affected.  For
-  a large project, a full test run may take minutes, and doing it
-  after every edit adds up to significant wasted time and compute.
-  This instruction directs the model to identify which tests are
-  affected by its changes and run only those, improving iteration
-  speed.
+\textbf{``Do NOT run all tests after modifications.\ Only run the impacted tests.''}  Running the full test suite after every small change is wasteful when only a few modules are affected.  For a large project, a full test run may take minutes, and doing it after every edit adds up to significant wasted time and compute. This instruction directs the model to identify which tests are affected by its changes and run only those, improving iteration speed.
 
-\item \textbf{``To confirm a race condition, add sleep statements
-  before racing statements with delays less than 0.1s.''}  Race
-  conditions are notoriously difficult to reproduce because they
-  depend on precise timing.  By inserting small sleep delays at
-  strategic points, the model can widen the race window and make the
-  bug manifest deterministically in a test.  The 0.1-second upper
-  bound keeps the test fast while still being sufficient to expose
-  most races.
-\end{itemize}
+\textbf{``To confirm a race condition, add sleep statements before racing statements with delays less than 0.1s.''}  Race conditions are notoriously difficult to reproduce because they depend on precise timing.  By inserting small sleep delays at strategic points, the model can widen the race window and make the bug manifest deterministically during testing.  The 0.1-second upper bound keeps the test fast while still being sufficient to expose most races.
 
 %......................................................................
 \subsection{Self-Improvement Loop}
@@ -1100,47 +566,19 @@ discovered during task execution:
 \noindent Each instruction in this section serves the goal of
 cross-session learning:
 
-\begin{itemize}[nosep]
-\item \textbf{``Read the instructions in PWD/USER\_PREFS.md at the
-  start of each task.''}  The preferences file contains invariants
-  learned from previous tasks---coding conventions, project-specific
-  rules, architectural decisions.  Reading it at the start of each
-  task ensures that the agent's behavior is consistent across
-  sessions, even though each session starts with a fresh context
-  window.
+\textbf{``Read the instructions in PWD/USER\_PREFS.md at the start of each task.''}  The preferences file contains invariants learned from previous tasks---coding conventions, project-specific rules, architectural decisions.  Reading it at the start of each task ensures that the agent's behavior is consistent across sessions, even though each session starts with a fresh context window.
 
-\item \textbf{``Then update PWD/USER\_PREFS.md to capture the user
-  preferences and invariants by analyzing the task.''}  After
-  completing a task, the agent may have learned new information about
-  the user's preferences: a preferred naming convention, a disliked
-  pattern, a project-specific invariant.  Writing these to the
-  preferences file makes them available to future sessions.  This
-  mechanism allows the agent to accumulate project knowledge over time
-  without requiring the user to repeat themselves.
+\textbf{``Then update PWD/USER\_PREFS.md to capture the user preferences and invariants by analyzing the task.''}  After completing a task, the agent may have learned new information about the user's preferences: a preferred naming convention, a disliked pattern, a project-specific invariant.  Writing these to the preferences file makes them available to future sessions.  This mechanism allows the agent to accumulate project knowledge over time without requiring the user to repeat themselves.
 
-\item \textbf{``DO NOT ADD ANY CODE SNIPPETS OR SYMBOLS.''}  Code
-  snippets in the preferences file are fragile: they become stale as
-  the codebase evolves, and they consume tokens that would be better
-  spent on natural-language descriptions of invariants.  This
-  instruction keeps the file compact and robust to code changes.
+\textbf{``DO NOT ADD ANY CODE SNIPPETS OR SYMBOLS.''}  Code snippets in the preferences file are fragile: they become stale as the codebase evolves, and they consume tokens that would be better spent on natural-language descriptions of invariants.  This instruction keeps the file compact and robust to code changes.
 
-\item \textbf{``You MUST carefully and thoroughly get rid of the user
-  preferences and invariants that conflict with the newly added
-  ones.''}  Over time, preferences may become contradictory---for
-  example, an early preference might say ``use camelCase for test
-  methods'' while a later correction says ``use snake\_case.''
-  Without explicit conflict resolution, the file would accumulate
-  contradictions that confuse the agent.  This instruction mandates
-  that the agent actively resolve conflicts when updating the file,
-  keeping it internally consistent.
-\end{itemize}
+\textbf{``You MUST carefully and thoroughly get rid of the user preferences and invariants that conflict with the newly added ones.''}  Over time, preferences may become contradictory---for example, an early preference might say ``use camelCase for test methods'' while a later correction says ``use snake\_case.'' Without explicit conflict resolution, the file would accumulate contradictions, confusing the agent.  This instruction mandates that the agent actively resolve conflicts when updating the file to keep it internally consistent.  \emph{Note that we do not keep learnings in a database or in various folders because it makes the information stale when lots of code changes are happening.  It is impossible for an agent to eliminate stale information across databases and multiple folders.}
 
 %......................................................................
 \subsection{Pre-Finish Verification}
 %......................................................................
 
-Before declaring a task complete, the agent must pass a structured
-verification checklist:
+Before declaring a task complete, the agent must pass a structured verification checklist (inspired by 'get shit done '~\cite {getshitdone2025}):
 
 \begin{prompt}
 ## Pre-Finish Verification
@@ -1160,54 +598,23 @@ Before calling finish(success=True, ...), you MUST:
    and try a different strategy.
 \end{prompt}
 
-\noindent Each step in this checklist addresses a specific way agents
-declare premature success:
+\noindent Each step in this checklist addresses a specific way agents declare premature success:
 
-\begin{itemize}[nosep]
-\item \textbf{``Re-read every file you modified and verify the changes
-  are correct.''}  This is the analog of a code review performed by
-  the agent on its own work.  The model may have introduced a typo,
-  forgotten to close a bracket, or made an edit that looked correct in
-  the diff but is wrong in the full file context.  Re-reading the file
-  after all edits are complete catches these errors.
+\textbf{``Re-read every file you modified and verify the changes are correct.''}  This is the analog of a code review performed by the agent on its own work.  The model may have introduced a typo, forgotten to close a bracket, or made an edit that looked correct in the diff but was wrong in the full-file context.  Re-reading the file after all edits are complete catches these errors.
 
-\item \textbf{``Run the required checks (lint, typecheck, tests) and
-  fix any failures.''}  This converts the subjective assessment ``I
-  think my changes are correct'' into an objective, automated
-  verification.  If the lint, typecheck, or test suite fails, the
-  agent must fix the failure before declaring success.
+\textbf{``Run the required checks (lint, typecheck, tests) and fix any failures.''}  This converts the subjective assessment ``I think my changes are correct'' into an objective, automated verification.  If the lint, typecheck, or test suite fails, the agent must fix the failure before declaring success.
 
-\item \textbf{``Explicitly check each user requirement against what
-  was delivered.''}  The model may have completed a task that it
-  \emph{thinks} satisfies the user's request but actually misses a
-  requirement.  This instruction forces a systematic comparison
-  between the original task description and the delivered result,
-  catching gaps and misinterpretations.
+\textbf{``Explicitly check each user requirement against what was delivered.''}  The model may have completed a task that it \emph{thinks} satisfies the user's request, but actually misses a requirement.  This instruction forces a systematic comparison between the original task description and the delivered result, catching gaps and misinterpretations.
 
-\item \textbf{``If any check fails, continue working instead of
-  finishing.''}  Without this instruction, the model may call
-  \texttt{finish(success=True)} even when it knows a check has failed,
-  rationalizing that the failure is ``minor'' or ``unrelated.''  The
-  instruction makes the rule absolute: no finishing until all checks
-  pass.
+\textbf{``If any check fails, continue working instead of finishing.''}  Without this instruction, the model may call \texttt{finish(success=True)} even when it knows a check has failed, rationalizing that the failure is ``minor'' or ``unrelated.''  The instruction makes the rule absolute: no finishing until all checks pass.
 
-\item \textbf{``If you have retried the same fix 3 times without
-  progress, step back, rethink the approach from scratch, and try a
-  different strategy.''}  LLMs can enter repetitive loops where they
-  apply the same incorrect fix repeatedly, each time hoping for a
-  different result.  The three-retry threshold forces the model to
-  break out of such loops by abandoning the current approach and
-  reconsidering the problem from first principles.  This is analogous
-  to the debugging heuristic ``if you've been staring at the same code
-  for twenty minutes, you're looking in the wrong place.''
-\end{itemize}
+\textbf{``If you have retried the same fix 3 times without progress, step back, rethink the approach from scratch, and try a different strategy.''}  LLMs can enter repetitive loops where they apply the same incorrect fix repeatedly, each time hoping for a different result.  The three-retry threshold forces the model to break out of such loops by abandoning the current approach and reconsidering the problem from first principles.  This is analogous to the debugging heuristic ``if you've been staring at the same code for twenty minutes, you're looking in the wrong place.''
 
 %......................................................................
 \subsection{Web Research Protocol}
 %......................................................................
 
-When the agent needs external knowledge, the prompt prescribes a
-structured research workflow rather than allowing ad-hoc browsing:
+When the agent needs external knowledge, the prompt prescribes a structured research workflow rather than allowing ad-hoc browsing:
 
 \begin{prompt}
 ## Use web tools when you need to:
@@ -1224,24 +631,9 @@ structured research workflow rather than allowing ad-hoc browsing:
   login. You **MUST NOT** ask the user to login to Google.
 \end{prompt}
 
-\noindent The rationale is a two-phase separation between \emph{collection}
-and \emph{synthesis}.  LLMs tend to anchor on the first few results
-they encounter, which biases their solutions toward a narrow slice of
-the design space.  By forcing the agent to accumulate a broad set of
-information into a file \emph{before} reasoning about it, the protocol
-counteracts anchoring bias and encourages the model to consider
-diverse approaches.  The ``at least 100 web sites'' threshold is
-deliberately aggressive: it ensures the agent does not shortcut the
-research phase after two or three hits, and the resulting information
-file serves as an auditable artifact of what the agent considered.
+\noindent The rationale is a two-phase separation between \emph{collection} and \emph{synthesis}.  LLMs tend to anchor on the first few results they encounter, which biases their solutions toward a narrow slice of the design space.  By forcing the agent to accumulate a broad set of information into a file \emph{before} reasoning about it, the protocol counteracts anchoring bias and encourages the model to consider diverse approaches.  The ``at least 100 web sites threshold is deliberately aggressive: it ensures the agent does not shortcut the research phase after two or three hits, and the resulting information file serves as an auditable artifact of what the agent considered.
 
-The login instruction addresses a practical obstacle in web research:
-many websites require authentication before revealing their content.
-Rather than silently skipping gated pages or hallucinating their
-contents, we instruct the agent to ask the user for help with login.
-The Google exception acknowledges that the agent can search the web
-without a Google account, and asking the user to log into Google
-would provide no benefit while creating unnecessary friction.
+The login instruction addresses a practical obstacle in web research: many websites require authentication before revealing their content. Rather than silently skipping gated pages or hallucinating their contents, we instruct the agent to ask the user for help with login. The Google exception acknowledges that the agent can search the web without a Google account, and asking the user to log in to Google would provide no benefit while creating unnecessary friction.
 
 %......................................................................
 \subsection{Desktop Application Control}
@@ -1258,20 +650,13 @@ screenshots, keyboard, and mouse:
 - Do not launch VS Code or its extensions.
 \end{prompt}
 
-\noindent This instruction enables the agent to operate GUI applications
-(Preview, browsers, graphical diff tools) when command-line
-alternatives are insufficient.  The explicit prohibition on launching
-VS~Code prevents a recursive loop: since the agent runs \emph{inside}
-a VS~Code extension, launching another VS~Code instance or modifying
-extension state from within the agent could corrupt the host session
-or create deadlocks.
+\noindent This instruction enables the agent to operate GUI applications (Preview, browsers, graphical diff tools) when command-line alternatives are insufficient.  The explicit prohibition on launching VS~Code prevents a recursive loop: since the agent runs \emph{inside} a VS~Code extension, launching another VS~Code instance or modifying extension state from within the agent could corrupt the host session or create deadlocks.
 
 %......................................................................
 \subsection{Sorcar-Specific Overrides}
 %......................................................................
 
-A final section provides project-specific instructions that are
-injected when the agent operates on its own codebase:
+A final section provides project-specific instructions that are injected when the agent operates on its own codebase:
 
 \begin{prompt}
 ## Sorcar-specific instructions:
@@ -1296,39 +681,14 @@ injected when the agent operates on its own codebase:
   instructions above
 \end{prompt}
 
-\noindent These overrides serve four purposes.  First, they specify the
-exact toolchain commands for the KISS project itself (\texttt{uv run
-check -{}-full}, \texttt{uv run pytest}), eliminating guesswork about
-which linter, formatter, or test runner to use.  Second, they
-prevent dangerous self-modification: just as a surgeon should not
-operate on themselves, the agent must not install or reinstall the
-VS~Code extension it is running inside, since doing so would terminate
-its own process.  Third, they provide navigation instructions for the
-agent's own source: when the user asks to edit the system prompt or
-configuration, the agent knows the exact file paths inside the
-installed VS~Code extension directory, avoiding guesswork about where
-these files live.  Moreover, it does not create unnecessary UI components 
-in KISS Sorcar just to edit the system prompt and its configuration. 
-Fourth, the \texttt{SORCAR.md} override mechanism
-allows per-repository instructions to further customize the agent's
-behavior, forming a hierarchy: general system prompt $\rightarrow$
-Sorcar-specific instructions $\rightarrow$ repository-specific
-\texttt{SORCAR.md}.
+These overrides serve four purposes.  First, they specify the exact toolchain commands for the KISS project itself (\texttt{uv run check -{}-full}, \texttt{uv run pytest}), eliminating guesswork about which linter, formatter, or test runner to use.  Second, they prevent dangerous self-modification: just as a surgeon should not operate on themselves, the agent must not install or reinstall the VS~Code extension it is running inside, since doing so would terminate its own process.  Third, they provide navigation instructions for the agent's own source: when the user asks to edit the system prompt or configuration, the agent knows the exact file paths inside the installed VS~Code extension directory, avoiding guesswork about where these files live.  Moreover, it does not create unnecessary UI components in KISS Sorcar just to edit the system prompt and its configuration.  Fourth, the \texttt{SORCAR.md} override mechanism allows per-repository instructions to further customize the agent's behavior, forming a hierarchy: general system prompt $\rightarrow$ Sorcar-specific instructions $\rightarrow$ repository-specific \texttt{SORCAR.md}.  This approach also enables us to not hardcode \texttt{SORCAR.md} in the KISS Sorcar code, removing one more dependency.  In the \texttt{SORCAR.md}, one can include more markdown files for further instructions.
 
 %----------------------------------------------------------------------
 \section{VS Code Extension: Unique Features}
 \label{sec:vscode-features}
 %----------------------------------------------------------------------
 
-We release our system as a VS~Code extension.  While
-the underlying agent architecture (Sections~\ref{sec:architecture}
-and~\ref{sec:system-prompt}) already differs from existing AI coding
-assistants, the extension's user-facing design introduces several
-features that, to our knowledge, are not present in any competing IDE
-or assistant---including GitHub Copilot~\citep{copilot2021},
-Cursor~\citep{cursor2024}, Windsurf~\citep{windsurf2024},
-Devin~\citep{devin2024}, and Aider~\citep{aider2023}.  We enumerate
-these features below.
+We release our system as a VS~Code extension.  While the underlying agent architecture (Sections~\ref{sec:architecture} and~\ref{sec:system-prompt}) already differs from existing AI coding assistants, the extension's user-facing design introduces several features that, to our knowledge, are not present in any competing IDE or assistant---including GitHub Copilot~\citep{copilot2021}, Cursor~\citep{cursor2024}, Windsurf~\citep{windsurf2024}, Devin~\citep{devin2024}, and Aider~\citep{aider2023}.  We enumerate these features below.
 
 \begin{figure}[t]
 \centering
@@ -1343,61 +703,28 @@ these features below.
 \label{sec:self-improvement-feature}
 %......................................................................
 
-Every AI assistant starts each session from scratch: the user must
-re-explain project conventions, preferred patterns, and past decisions.
-Some tools support a static configuration file (e.g.,
-\texttt{.cursorrules} for Cursor, \texttt{AGENTS.md} or
-\texttt{CLAUDE.md} for various agents), but these files must be
-written and maintained by the developer.
+Every AI assistant starts each session from scratch: the user must re-explain project conventions, preferred patterns, and past decisions. Some tools support a static configuration file (e.g., \texttt{.cursorrules} for Cursor, \texttt{AGENTS.md} or \texttt{CLAUDE.md} for various agents), but these files must be written and maintained by the developer.
 
-Our extension maintains a \texttt{USER\_PREFS.md} file that the agent
-reads at the start of each task and \emph{updates} at the end.  When
-the agent discovers a new user preference or project invariant during
-task execution---a naming convention, an architectural constraint, a
-disliked pattern---it writes it to the file.  Crucially, the agent
-also resolves conflicts: if a new preference contradicts an existing
-one, the old entry is removed.  Over time, the file accumulates a
-curated set of project-specific knowledge that makes the agent
-progressively more effective without any manual configuration from the
-developer.
+Our extension maintains a \texttt{USER\_PREFS.md} file that the agent reads at the start of each task and \emph{updates} at the end of each task.  When the agent discovers a new user preference or project invariant during task execution---a naming convention, an architectural constraint, a disliked pattern---it writes it to the file.  Crucially, the agent also resolves conflicts: if a new preference contradicts an existing one, the old entry is removed.  Over time, the file accumulates a curated set of project-specific knowledge, making the agent progressively more effective without any manual configuration by the developer.
 
 %......................................................................
 \subsection{Real-Time Budget Accountability}
 \label{sec:budget-feature}
 %......................................................................
 
-AI coding assistants typically operate on a subscription model
-(Copilot, Cursor) or a per-seat pricing model (Devin, Windsurf) that
-obscures the per-task cost.  The developer has no visibility into how
-many tokens a task consumed or how much it cost.
+AI coding assistants typically operate on a subscription model (Copilot, Cursor) or a per-seat pricing model (Devin, Windsurf), both of which obscure the per-task cost.  The developer has no visibility into how many tokens a task consumed or how much it cost.
 
-Our extension displays real-time cost tracking in the sidebar: input
-tokens, output tokens, cache hits, dollar cost, and elapsed time are
-updated at every agent step.  We enforce both per-task and global
-budget ceilings.  If a task exceeds its budget, the agent raises a
-hard error rather than silently accumulating charges.  This
-transparency allows developers to make informed decisions about which
-tasks to delegate to the AI and how to structure prompts for cost
-efficiency.
+Our extension displays real-time cost tracking in the sidebar: input tokens, output tokens, cache hits, dollar cost, and elapsed time are updated at every agent step.  We enforce both per-task and global budget ceilings.  If a task exceeds its budget, the agent raises a hard error rather than silently accumulating charges.  This transparency allows developers to make informed decisions about which tasks to delegate to the AI and how to structure prompts for cost
+efficiency.  The KISS Agent also appends the current usage in the context so that the model is fully aware of its limits.
 
 %......................................................................
 \subsection{Integrated Browser Automation}
 \label{sec:browser-feature}
 %......................................................................
 
-Our extension includes a browser automation tool that allows the
-agent to navigate to URLs, read accessibility trees, click elements,
-type text, press keys, scroll, and take screenshots---all controlled
-programmatically from within a VS~Code task via Playwright.  
-We render a live browser preview inside the extension's sidebar, 
-allowing the developer to watch the agent interact with web applications 
-in real time.
+Our extension includes a browser automation tool that allows the agent to navigate to URLs, read accessibility trees, and click elements, type text, press keys, scroll, and take screenshots--all controlled programmatically from within a VS~Code task via Playwright. We render a live browser preview in the extension's sidebar, allowing the developer to watch the agent interact with web applications in real time.
 
-This capability enables use cases that no other IDE assistant supports:
-verifying a deployed web application after a code change, filling out
-web forms as part of a testing workflow, scraping documentation to
-inform a code generation task, or interacting with web-based developer
-tools (CI dashboards, issue trackers) without leaving the editor.
+This capability enables use cases that no other IDE assistant supports: verifying a deployed web application after a code change, filling out web forms as part of a testing workflow, scraping documentation to inform a code generation task, or interacting with web-based developer tools (CI dashboards, issue trackers) without leaving the editor.
 
 
 %----------------------------------------------------------------------
@@ -1405,82 +732,25 @@ tools (CI dashboards, issue trackers) without leaving the editor.
 \label{sec:painless}
 %----------------------------------------------------------------------
 
-A central claim of our system is that natural-language interaction can
-replace manual code inspection and ad-hoc scripting for understanding and
-evolving non-trivial subsystems.  While developing KISS Sorcar we found 
-a particular workflow significantly useful.  In the workflow, we first 
-ask KISS Sorcar to generate a detailed step-by-step description of a workflow
-in KISS Sorcar which we found buggy, 
-and then we ask KISS Sorcar to change some buggy step in the workflow 
-in natural language.
-We illustrate this with a real
-development session drawn from the project's own history, in which the
-worktree merge workflow (Section~\ref{sec:worktree-agent}) was first
-understood and then redesigned entirely through conversational prompts.
-The session comprises four consecutive tasks; we reproduce the prompts
-verbatim and summarize the agent's responses.
+A central claim of our system is that natural-language interaction can replace manual code inspection and ad hoc scripting for understanding and evolving nontrivial subsystems.  While developing KISS Sorcar, we found a particular workflow to be particularly useful.  In the workflow, we first ask KISS Sorcar to generate a detailed step-by-step description of a workflow in KISS Sorcar which we found buggy, and then we ask KISS Sorcar to change some buggy step in the workflow in natural language. We illustrate this with a real development session drawn from the project's own history, in which the worktree merge workflow (Section~\ref{sec:worktree-agent}) was first understood and then redesigned entirely through conversational prompts.  The session comprises four consecutive tasks; we reproduce the prompts verbatim and summarize the agent's responses.
 
-\paragraph{Step~1: Understanding the existing workflow.}
-The developer begins by asking the agent to explain the current
-post-task git lifecycle:
+\paragraph{Step~1: Understanding the existing workflow.} The developer begins by asking the agent to explain the current post-task git lifecycle:
 
 \begin{prompt}
-Can you tell me what happens with git in
-worktree_sorcar_agent.py when a task finishes?
+Can you tell me what happens with git in worktree_sorcar_agent.py when a task finishes?
 \end{prompt}
 
-\noindent The agent reads the source code and returns a structured
-summary of the four-phase lifecycle:
-(1)~during \texttt{run()}, a new branch and worktree are created and the
-task executes inside the worktree; when the task completes,
-\emph{nothing is committed or merged}---the result is returned with
-merge instructions appended and the worktree stays pending;
-(2)~\texttt{merge()} calls \texttt{\_finalize\_worktree()}, which stages
-all changes, generates a commit message via the LLM, commits, removes
-the worktree, checks out the original branch, and runs
-\texttt{git merge};
-(3)~\texttt{discard()} removes the worktree, prunes, checks out the
-original branch, and deletes the task branch;
-(4)~in CLI mode an interactive prompt forces the user to choose
-\texttt{[c]ommit and merge} or \texttt{[d]iscard} before exiting.
-The agent also notes a key design invariant: nothing auto-merges,
-auto-commit only happens at merge/finalize time, all steps are
-idempotent, and state can be recovered from git on restart.
+\noindent The agent reads the source code and returns a structured summary of the four-phase lifecycle: (1)~during \texttt{run()}, a new branch and worktree are created and the task executes inside the worktree; when the task completes, \emph{nothing is committed or merged}---the result is returned with merge instructions appended and the worktree stays pending; (2)~\texttt{merge()} calls \texttt{\_finalize\_worktree()}, which stages all changes, generates a commit message via the LLM, commits, removes the worktree, checks out the original branch, and runs \texttt{git merge}; (3)~\texttt{discard()} removes the worktree, prunes, checks out the original branch, and deletes the task branch; (4)~in CLI mode an interactive prompt forces the user to choose \texttt{[c]ommit and merge} or \texttt{[d]iscard} before exiting. The agent also notes a key design invariant: nothing auto-merges; auto-commit occurs only at merge/finalize time; all steps are idempotent; and state can be recovered from git on restart.
 
-\paragraph{Step~2: Simplifying the workflow via natural language.}
-Armed with the workflow description, the developer decides the
-three-way choice (auto-merge, manual merge, discard) is
-unnecessarily complex and issues a redesign request:
+\paragraph{Step~2: Simplifying the workflow via natural language.} Armed with the workflow description, the developer decides the three-way choice (auto-merge, manual merge, discard) is unnecessarily complex and issues a redesign request:
 
 \begin{prompt}
-Can you change worktree_sorcar_agent.py and the
-extension so that after the agent finishes its task,
-it simply asks "Commit and Merge" or "Discard".
-When "Commit and Merge" is clicked by the user, the
-agent must commit the changes with a generated commit
-message and then merge the branch with the original
-branch, and delete the worktree and the branch
-associated with the worktree. If the user clicks
-"discard", it must delete the worktree and the branch,
-and checkout the original branch.
+Can you change worktree_sorcar_agent.py and the extension so that after the agent finishes its task, it simply asks "Commit and Merge" or "Discard". When "Commit and Merge" is clicked by the user, the agent must commit the changes with a generated commit message, merge the branch with the original branch, and delete the worktree and the branch associated with the worktree. If the user clicks "discard", it must delete the worktree and the branch, and checkout the original branch.
 \end{prompt}
 
-\noindent The agent modifies six files across Python and
-TypeScript: it updates \texttt{discard()} to check out the original
-branch before deleting the task branch, removes the
-\texttt{manual\_merge()} method entirely, simplifies
-\texttt{merge\_instructions()} to show only two options, updates the
-webview UI to replace the three-button toolbar with a two-button
-``Commit and Merge or Discard?'' bar, removes the \texttt{manual}
-action type from the TypeScript type definitions, and removes the
-corresponding handler from the Python backend.  Three tests for the
-deleted manual-merge path are removed and one routing test is updated.
-All 28~worktree tests pass after the change.
+\noindent The agent modifies six files across Python and TypeScript: it updates \texttt{discard()} to check out the original branch before deleting the task branch, removes the \texttt{manual\_merge()} method entirely, simplifies \texttt{merge\_instructions()} to show only two options, updates the webview UI to replace the three-button toolbar with a two-button ``Commit and Merge or Discard?'' bar, removes the \texttt{manual} action type from the TypeScript type definitions, and removes the corresponding handler from the Python backend.  Three tests for the deleted manual-merge path have been removed, and one routing test has been updated. All 28 worktree tests pass after the change.
 
-\paragraph{Step~3: Investigating unexpected post-merge state.}
-After testing the simplified flow, the developer notices that files
-appear in the Source Control panel of VS~Code on the original branch
-after pressing ``Commit and Merge'' and asks:
+\paragraph{Step~3: Investigating unexpected post-merge state.} After testing the simplified flow, the developer notices that files appear in the Source Control panel of VS~Code on the original branch after pressing ``Commit and Merge'' and asks:
 
 \begin{prompt}
 After the user presses "Commit and Merge", why do the
@@ -1488,47 +758,18 @@ modified files show up as committed in the original
 branch?
 \end{prompt}
 
-\noindent The agent traces the exact execution path through
-\texttt{squash\_merge\_branch()} and discovers that the
-implementation deliberately \emph{unstages} the squash-merged changes
-via \texttt{git reset HEAD} so they appear as uncommitted working-tree
-modifications in VS~Code's Source Control panel.  The design intention
-was to let the user review the diff before committing manually.  The
-agent reports this finding with the relevant code snippet and a
-verified end-state showing no new commit on the branch.
+\noindent The agent traces the exact execution path through \texttt{squash\_merge\_branch()} and discovers that the implementation deliberately \emph{unstages} the squash-merged changes via \texttt{git reset HEAD} so they appear as uncommitted working-tree modifications in VS~Code's Source Control panel.  The design intention was to let the user review the diff before committing manually.  The agent reports this finding along with the relevant code snippet and a verified end state showing no new commits on the branch.
 
-\paragraph{Step~4: Directing a design change in one sentence.}
-The developer realizes that code review already happened while the
-worktree was active and decides the unstage step is unnecessary:
+\paragraph{Step~4: Directing a design change in one sentence.} The developer realizes that code review already happened while the worktree was active and decides the unstage step is unnecessary:
 
 \begin{prompt}
-The review is already happening in the worktree
-branch. You don't need user to review the modified and
-new files in the original branch. Fix it.
+The review is already happening in the worktree branch. You don't need the user to review the modified and new files in the original branch. Fix it.
 \end{prompt}
 
-\noindent The agent replaces the \texttt{git reset HEAD} call in
-\texttt{squash\_merge\_branch()} with a conditional
-\texttt{git commit --no-edit} that uses the auto-generated squash
-message.  It adds a \texttt{git diff --cached --quiet} guard for the
-edge case where the merge produces no changes.  One existing test
-(\texttt{test\_merge\_leaves\_changes\_uncommitted}) is renamed to
-\texttt{test\_merge\_commits\_changes} and its assertions are
-updated to verify a clean working tree.  All 104~worktree tests pass.
+\noindent The agent replaces the \texttt{git reset HEAD} call in \texttt{squash\_merge\_branch()} with a conditional \texttt{git commit --no-edit} that uses the auto-generated squash message.  It adds a \texttt{git diff --cached --quiet} guard for the edge case where the merge produces no changes.  One existing test (\texttt{test\_merge\_leaves\_changes\_uncommitted}) is renamed to \texttt{test\_merge\_commits\_changes} and its assertions are updated to verify a clean working tree.  All 104 worktree tests pass.
 
 \medskip
-\noindent\textbf{Discussion.}
-The four-step session illustrates the ``painless'' development loop that
-our system enables.  The developer never opens a source file, never writes
-a line of code, and never runs a test manually.  Instead, the entire
-cycle---understand the workflow, redesign it, investigate an anomaly,
-direct a fix---happens through natural-language prompts, with the agent
-handling code reading, multi-file editing, test updates, and
-verification.  This style of development becomes possible because of
-the agent hierarchy described in Section~\ref{sec:architecture}: the
-Worktree Sorcar Agent isolates changes on a branch, the Chat Sorcar Agent
-preserves conversational context across tasks, and the Relentless Agent
-automatically continues when the context window is exhausted.
+\noindent\textbf{Discussion.} The four-step session illustrates the ``painless'' development loop that our system enables.  The developer never opens a source file, never writes a line of code, and never runs a test manually.  Instead, the entire cycle---understand the workflow, redesign it, investigate an anomaly, direct a fix---happens through natural-language prompts, with the agent handling code reading, multi-file editing, test updates, and verification.  This style of development becomes possible because of the agent hierarchy described in Section~\ref{sec:architecture}: the Worktree Sorcar Agent isolates changes on a branch, the Chat Sorcar Agent preserves conversational context across tasks, and the Relentless Agent automatically continues when the context window is exhausted.
 
 %----------------------------------------------------------------------
 \section{Related Work}
@@ -1537,100 +778,26 @@ automatically continues when the context window is exhausted.
 
 \textbf{Code generation agents.}
 SWE-Agent~\citep{yang2024sweagent} and
-OpenHands~\citep{wang2024openhands} provide LLM-based agents for
-resolving software engineering tasks such as GitHub issues.  Both use
-a single-session execution model without automatic continuation.
-Agentless~\citep{xia2024agentless} takes the opposite approach,
-showing that a simple two-phase localize-then-repair pipeline without
-autonomous agent loops can achieve competitive results on
-SWE-bench~\citep{jimenez2024swebench}.  Devin~\citep{devin2024}, an
-industrial product marketed as ``the first AI software engineer,''
-operates in a sandboxed environment with shell, browser, and editor
-access.  Aider~\citep{aider2023} provides a terminal-based pair
-programming interface with tight git integration, automatically
-committing each change.  Our Relentless Agent layer addresses the
-single-session limitation shared by most of these systems, while our
-worktree isolation provides stronger safety guarantees than per-change
-commits.
+OpenHands~\citep{wang2024openhands} provides LLM-based agents for resolving software engineering tasks such as GitHub issues.  Both use a single-session execution model without automatic continuation. Agentless~\citep{xia2024agentless} takes the opposite approach, showing that a simple two-phase localize-then-repair pipeline without autonomous agent loops can achieve competitive results on SWE-bench~\citep{jimenez2024swebench}.  Devin~\citep{devin2024}, an industrial product marketed as ``the first AI software engineer,'' operates in a sandboxed environment with shell, browser, and editor access.  Aider~\citep{aider2023} provides a terminal-based pair programming interface with tight git integration, automatically committing each change.  Our Relentless Agent layer addresses the single-session limitation shared by most of these systems, while our worktree isolation provides stronger safety guarantees than per-change commits.
 
 \textbf{ReAct and tool use.}
-The ReAct framework~\citep{yao2023react} interleaves reasoning and
-action.  Toolformer~\citep{schick2023toolformer} teaches models to use
-tools via self-supervised learning.  We use native function calling
-provided by modern LLM APIs rather than in-context tool
-descriptions, which reduces prompt overhead and improves reliability.
+The ReAct framework~\citep{yao2023react} interleaves reasoning and action.  Toolformer~\citep{schick2023toolformer} teaches models to use tools via self-supervised learning.  We use native function calling provided by modern LLM APIs rather than in-context tool descriptions, which reduces prompt overhead and improves reliability.
 
-\textbf{Reasoning and planning.}
-Chain-of-thought prompting~\citep{wei2022chain} demonstrated that
-eliciting step-by-step reasoning dramatically improves LLM performance
-on complex tasks.  Tree of Thoughts~\citep{yao2024tree} generalizes
-this to deliberate search over multiple reasoning paths.
-Reflexion~\citep{shinn2023reflexion} introduces verbal reinforcement
-learning, where an agent reflects on failed attempts and produces
-self-critiques that improve subsequent trials.  Our continuation
-protocol is conceptually related to Reflexion: failed sub-sessions
-produce summaries that inform subsequent attempts.  However, we
-operate at the level of full software
-engineering tasks rather than isolated reasoning problems, and its
-budget and step limits provide principled termination criteria.
+\textbf{Reasoning and planning.} Chain-of-thought prompting~\citep{wei2022chain} demonstrated that eliciting step-by-step reasoning dramatically improves LLM performance on complex tasks.  Tree of Thoughts~\citep{yao2024tree} generalizes this to deliberate search over multiple reasoning paths. Reflexion~\citep{shinn2023reflexion} introduces verbal reinforcement
+learning, where an agent reflects on failed attempts and produces self-critiques that improve subsequent trials.  Our continuation protocol is conceptually related to Reflexion: failed sub-sessions produce summaries that inform subsequent attempts.  However, in our case, we use the summaries to continue the task.
 
 \textbf{Multi-agent software development.}
-ChatDev~\citep{qian2024chatdev} models the software development
-process as a conversation between role-playing agents (CEO, CTO,
-programmer, tester) organized in a waterfall-like pipeline.
-MetaGPT~\citep{hong2024metagpt} takes a meta-programming approach,
-encoding standard operating procedures as structured outputs that
-coordinate specialized agents.
-AutoGen~\citep{wu2023autogen} provides a general-purpose framework
-for multi-agent conversation, enabling flexible topologies beyond
-fixed pipelines.  These systems focus on generating entire
-applications from scratch.  We take a different approach: rather than
-simulating an organization of specialists, we use a
-single agent with broad tool access and optional parallel sub-agents
-for embarrassingly parallel sub-tasks, prioritizing practical utility
-on real-world codebases over role-playing fidelity.
+ChatDev~\citep{qian2024chatdev} models the software development process as a conversation between role-playing agents (CEO, CTO, programmer, tester) organized in a waterfall-like pipeline. MetaGPT~\citep{hong2024metagpt} takes a meta-programming approach, encoding standard operating procedures as structured outputs that coordinate specialized agents. AutoGen~\citep{wu2023autogen} provides a general-purpose framework for multi-agent conversation, enabling flexible topologies beyond fixed pipelines.  These systems focus on generating entire applications from scratch.  We take a different approach: rather than simulating an organization of specialists, we use a single agent with broad access to tools and optional parallel sub-agents for embarrassingly parallel sub-tasks, prioritizing practical utility on real-world codebases over role-playing fidelity.
 
 \textbf{Multi-turn autonomous agents.}
-AutoGPT~\citep{autogpt2023} and BabyAGI~\citep{babyagi2023} implement
-multi-step autonomous agents.  These systems typically lack budget
-controls and safe code isolation.  Our layered architecture addresses
-each of these concerns in a dedicated layer.
+AutoGPT~\citep{autogpt2023} and BabyAGI~\citep{babyagi2023} implement multi-step autonomous agents.  These systems typically lack budget controls and safe code isolation.  Our layered architecture addresses each of these concerns in a dedicated layer.
 
 \textbf{Code-specialized language models.}
-Beyond the general-purpose LLMs that our system can use as backends,
-a rich line of work has produced models specifically trained for code.
-Code Llama~\citep{roziere2023code} fine-tunes Llama~2 for code
-generation and infilling.
-StarCoder~\citep{li2023starcoder} trains on permissively licensed code
-from GitHub with a fill-in-the-middle objective.
-DeepSeek-Coder~\citep{guo2024deepseek} trains on a 2-trillion-token
-corpus of code and natural language with a repository-level
-context window.  Our system is model-agnostic and can leverage any of
-these models through its pluggable LLM backend, benefiting from
-advances in code-specialized pre-training without architectural
-changes.
+Beyond the general-purpose LLMs that our system can use as backends, a rich line of work has produced models specifically trained for code. Code Llama~\citep{roziere2023code} fine-tunes Llama~2 for code generation and infilling. StarCoder~\citep{li2023starcoder} trains on permissively licensed code from GitHub with a fill-in-the-middle objective. DeepSeek-Coder~\citep{guo2024deepseek} trains on a 2-trillion-token corpus of code and natural language with a repository-level context window.  Our system is model-agnostic and can leverage any of these models through its pluggable LLM backend, benefiting from advances in code-specialized pre-training without architectural changes.
 
-\textbf{Software engineering benchmarks.}
-SWE-bench~\citep{jimenez2024swebench} evaluates agents on
-real-world GitHub issues drawn from popular Python repositories,
-requiring the agent to localize and fix bugs given only the issue
-description.  It has become the de facto standard for measuring agent
-capabilities in software engineering.
-HumanEval~\citep{chen2021evaluating} and
-MBPP~\citep{austin2021program} evaluate function-level code generation
-from docstrings.  These benchmarks focus on isolated coding problems;
-We target the broader workflow of multi-file, multi-step
-software engineering tasks that require tool use, testing, and version
-control.
+\textbf{Software engineering benchmarks.} SWE-bench~\citep{jimenez2024swebench} evaluates agents on real-world GitHub issues drawn from popular Python repositories, requiring the agent to localize and fix bugs given only the issue description.  It has become the de facto standard for measuring agent capabilities in software engineering. HumanEval~\citep{chen2021evaluating} and MBPP~\citep{austin2021program} evaluate function-level code generation from docstrings.  These benchmarks focus on isolated coding problems; We target the broader workflow of multi-file, multi-step software engineering tasks that require tool use, testing, and version control.
 
-\textbf{Agent frameworks and orchestration.}
-LangChain~\citep{langchain2022} provides modular abstractions for
-building LLM applications, including agent loops, tool integration,
-and memory.  It focuses on composability and breadth of integrations
-rather than on the specific concerns of software development.  Our
-architecture is purpose-built for software engineering, with
-each layer addressing a specific practical concern (budget tracking,
-continuation, code safety) rather than providing general-purpose
+\textbf{Agent frameworks and orchestration.} LangChain~\citep{langchain2022} provides modular abstractions for building LLM applications, including agent loops, tool integration, and memory. It focuses on composability and breadth of integrations rather than on the specific concerns of software development.  Our architecture is purpose-built for software engineering, with each layer addressing a specific practical concern (budget tracking, continuation, code safety) rather than providing general-purpose
 primitives.
 
 \textbf{LLM agent surveys.}
@@ -1721,30 +888,13 @@ within those bounds.
 \label{sec:conclusion}
 %----------------------------------------------------------------------
 
-We have shown that a layered, single-concern architecture can address
-the practical challenges of deploying LLM agents for real-world
-software development.  On Terminal Bench~2.0, a benchmark of 89
-diverse terminal-based tasks evaluated across 5 trials each, our
-system achieves a 62.2\% overall pass rate (277/445), a 78.7\%
-pass@any rate (70/89 tasks solved at least once), and a 43.8\%
-pass@all rate (39/89 tasks solved in every trial)---outperforming
-Claude~Code (58\%) and Cursor Composer~2 (61.7\%) on the same
-benchmark with the same underlying model (Claude Opus~4.6).  These
-results are achieved without benchmark-specific optimizations,
-fine-tuning, or reinforcement learning: the entire agent is roughly
-1,850~lines of straightforward Python.
+We have shown that a layered, single-concern architecture can address the practical challenges of deploying LLM agents for real-world software development.  On Terminal Bench~2.0, a benchmark of 89 diverse terminal-based tasks evaluated across 5 trials each, our system achieves a 62.2\% overall pass rate (277/445), a 78.7\% pass@any rate (70/89 tasks solved at least once), and a 43.8\% pass@all rate (39/89 tasks solved in every trial)---outperforming Claude~Code (58\%) and Cursor Composer~2 (61.7\%) on the same benchmark with the same underlying model (Claude Opus~4.6).  These results are achieved without benchmark-specific optimizations, fine-tuning, or reinforcement learning: the entire agent is roughly 1,850~lines of straightforward Python.
 
-We complement the architecture with a system prompt that encodes
-engineering discipline directly into the agent's behavior: read before
-writing, test before fixing, plan before executing, verify before
-finishing.  These are not novel insights---they are the practices of
-careful software engineering, translated into instructions that an LLM
-can follow.  The evaluation suggests that giving a frontier model the
-time and tools to validate its own output matters more than
-model-level customization.
+We complement the architecture with a system prompt that encodes engineering discipline directly into the agent's behavior: read before writing, test before fixing, plan before executing, verify before finishing.  These are not novel insights---they are the practices of careful software engineering, translated into instructions that an LLM can follow.  The evaluation suggests that giving a frontier model the time and tools to validate its own output matters more than model-level customization.
 
-We make the source code publicly available at
-\url{https://github.com/ksenxx/kiss_ai}.
+Finally, our experience building KISS Sorcar suggests that we are in the Golden Age of Experts. If someone is an expert in some particular domain and knows how to use Claude Opus 4.6 or a newer model effectively, they are the King. While implementing KISS and KISS Sorcar, we read the thinking tokens of Claude Opus 4.6, and we found it to be way more intelligent than anything or anyone we have encountered in the past. In fact, we found that Opus 4.6 is so intelligent that I feel that we are the bottleneck.  We are exploring and exploiting Opus 4.6 and see "what is possible".  We see that several academic research efforts will be obsolete in the future because Opus 4.6 can do them better with the right instructions.  We see that people will be writing and customizing their own software to meet their needs rather than relying on large software vendors.  We have to forget much conventional wisdom if we want to make big strides.  Hopefully, in 3-5 years, this expert knowledge will be incorporated into the best frontier model--the future will be bright for AI experts and bleak for the rest of the people.  
+
+While using it, we found that we don't spend much time working.  We are mostly getting bored. Although many experts suggest that AI will be harmful if it falls into the wrong hands without proper security and safety guardrails, we believe the biggest problem will be mental health issues, which could end human civilization if not properly addressed in advance.  
 
 \section*{Acknowledgments}
 
@@ -1756,12 +906,12 @@ Environments for Scientific Computing program (DESC0021982,) and the Defense Adv
 Research Projects Agency (DARPA) under Agreement No. HR00112590134. 
 
 We would like to thank Marius Momeu for finding critical bugs in the cost computation and
-in the UI usability; Yogya Mehrotra for testing and fixing bugs in the OpenClaw like
+in the UI usability, Yogya Mehrotra for testing and fixing bugs in the OpenClaw like
 channels in KISS Sorcar; Debabrata Dash, Yiwei Hou, Kaiyao Ke, Muxi Lyu, Anoop Mishra, 
 Manish Shetty, Ion Stoica, Shangyin Tan, Hao Wang, and Matei Zaharia for various 
 useful feedback.
 
-Disclaimer: The paper has been edited in part using KISS Sorcar which uses AI.
+Disclaimer: The paper has been edited in part using KISS Sorcar, an AI tool.
 
 %----------------------------------------------------------------------
 % References
