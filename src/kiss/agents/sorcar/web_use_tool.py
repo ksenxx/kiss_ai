@@ -79,6 +79,13 @@ _ROLE_LINE_RE = re.compile(r"^(\s*)-\s+([\w]+)\s*(.*)")
 
 _SCROLL_DELTA = {"down": (0, 300), "up": (0, -300), "right": (300, 0), "left": (-300, 0)}
 
+_BLOCKED_URL_RE = re.compile(r"https?://accounts\.google\.com", re.IGNORECASE)
+
+_BLOCKED_URL_MSG = (
+    "Navigation blocked: Google authentication URLs are not allowed. "
+    "Refusing to visit {url}."
+)
+
 
 def _number_interactive_elements(snapshot: str) -> tuple[str, list[dict[str, str]]]:
     result_lines: list[str] = []
@@ -335,6 +342,9 @@ class WebUseTool:
                     return self._get_ax_tree()
                 return f"Error: Tab index {idx} out of range (0-{len(pages) - 1})."
 
+            if _BLOCKED_URL_RE.search(url):
+                return _BLOCKED_URL_MSG.format(url=url)
+
             self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
             self._wait_for_stable()
             return self._get_ax_tree()
@@ -369,6 +379,10 @@ class WebUseTool:
             if len(self._context.pages) > pages_before:
                 self._check_for_new_tab()
                 self._wait_for_stable()
+            if _BLOCKED_URL_RE.search(self._page.url):
+                self._page.go_back()
+                self._wait_for_stable()
+                return _BLOCKED_URL_MSG.format(url=self._page.url)
             return self._get_ax_tree()
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)
