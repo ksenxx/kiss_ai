@@ -15,8 +15,25 @@
 \usepackage{enumitem}
 \usepackage{fancyvrb}
 \DefineVerbatimEnvironment{prompt}{Verbatim}{fontsize=\scriptsize,frame=single,framesep=2mm,samepage=true}
+\usepackage{listings}
+\lstdefinestyle{kisspy}{
+  language=Python,
+  basicstyle=\ttfamily\scriptsize,
+  keywordstyle=\color[rgb]{0.0,0.0,0.8}\bfseries,
+  commentstyle=\color[rgb]{0.25,0.5,0.35}\itshape,
+  stringstyle=\color[rgb]{0.73,0.13,0.13},
+  showstringspaces=false,
+  frame=single,
+  framesep=2mm,
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  numbersep=5pt,
+  breaklines=true,
+  tabsize=4,
+  captionpos=b,
+}
 
-\title{KISS Sorcar: A Stupidly-simple General-purpose and Software Engineering AI Assistant}
+\title{KISS Sorcar: A Stupidly-Simple General-Purpose and Software Engineering AI Assistant}
 
 \author{%
 Koushik Sen \\ EECS Department, UC Berkeley\\ \texttt{ksen@berkeley.edu} \\ }
@@ -94,7 +111,24 @@ We initially built the KISS Agent Framework to rapidly prototype and experiment 
 \label{sec:kiss-agent}
 %......................................................................
 
-The KISS Agent is the innermost execution unit.  It implements a standard ReAct loop~\citep{yao2023react} with the following characteristics:
+The KISS Agent is the innermost execution unit.  It implements a standard ReAct loop~\citep{yao2023react} with the following characteristics.  Listing~\ref{lst:simple-agent} shows a complete, working agent in under ten lines of code.  The developer defines an ordinary Python function (\texttt{calculate}), instantiates a \texttt{KISSAgent}, and calls its \texttt{run} method with a model name, a prompt template, template arguments, and a list of tools.  The framework handles tool-schema generation, the ReAct loop, and budget tracking automatically.
+
+\begin{lstlisting}[style=kisspy,caption={A complete KISS agent with a single tool.},label={lst:simple-agent}]
+from kiss.core.kiss_agent import KISSAgent
+
+def calculate(expression: str) -> str:
+    """Evaluate a math expression."""
+    return str(eval(expression))
+
+agent = KISSAgent(name="Math Buddy")
+result = agent.run(
+    model_name="gemini-2.5-flash",
+    prompt_template="Calculate: {question}",
+    arguments={"question": "What is 15% of 847?"},
+    tools=[calculate]
+)
+print(result)  # 127.05
+\end{lstlisting}
 
 \textbf{Native function calling.}  We register tools as ordinary Python callables.  The agent builds an OpenAI-compatible tool schema once at setup time and caches it, avoiding redundant schema construction on every LLM call.  A special \texttt{finish} tool signals task completion and returns the result to the caller.
 
