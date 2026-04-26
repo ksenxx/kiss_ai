@@ -8,3 +8,4 @@
 - Keep the media directory clean: remove unused image files from the extension
 - Build the paper with pdflatex -shell-escape flag since minted package requires it
 - The paper uses minted package with Pygments Markdown lexer for prompt syntax highlighting
+- All markdown files must pass mdformat check; run mdformat on files after content changes
