@@ -149,7 +149,10 @@ export function buildChatHtml(
               </svg>
             </button>
             <div id="model-dropdown">
-              <input type="text" id="model-search" placeholder="Search models...">
+              <div class="search-wrap">
+                <input type="text" id="model-search" placeholder="Search models...">
+                <button class="search-clear-btn" id="model-search-clear" style="display:none;">&times;</button>
+              </div>
               <div id="model-list"></div>
             </div>
           </div>
@@ -173,7 +176,10 @@ export function buildChatHtml(
       <button id="sidebar-close">&times;</button>
       <div class="sidebar-section">
         <div class="sidebar-hdr">Recent Conversations</div>
-        <input type="text" id="history-search" placeholder="Search history...">
+        <div class="search-wrap">
+          <input type="text" id="history-search" placeholder="Search history...">
+          <button class="search-clear-btn" id="history-search-clear" style="display:none;">&times;</button>
+        </div>
         <div id="history-list">
           <div class="sidebar-empty">No conversations yet</div>
         </div>
