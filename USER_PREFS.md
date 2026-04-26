@@ -7,6 +7,7 @@
 - Extension icon is set to media/thumbnail.jpeg in package.json
 - Keep the media directory clean: remove unused image files from the extension
 - The paper uses lstnewenvironment for prompt blocks instead of minted (no -shell-escape or Pygments needed)
+- In LaTeX prose (outside listings/verbatim), always escape underscores as backslash-underscore
 - All markdown files must pass mdformat check; run mdformat on files after content changes
 - Database queries should not have arbitrary hard caps; use unbounded queries when no limit is specified
 - Code listings in the paper should not have line numbers unless explicitly requested
