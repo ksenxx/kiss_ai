@@ -1,7 +1,7 @@
 """Nostr Agent — ChatSorcarAgent extension with Nostr protocol tools.
 
 Provides access to the Nostr decentralized protocol via pynostr.
-Stores config in ``~/.kiss/channels/nostr/config.json``.
+Stores config in ``~/.kiss/third_party_agents/nostr/config.json``.
 
 Usage::
 
@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.channels._channel_agent_utils import (
+from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
     ToolMethodBackend,
@@ -24,7 +24,7 @@ from kiss.agents.channels._channel_agent_utils import (
 )
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
-_NOSTR_DIR = Path.home() / ".kiss" / "channels" / "nostr"
+_NOSTR_DIR = Path.home() / ".kiss" / "third_party_agents" / "nostr"
 _config = ChannelConfig(_NOSTR_DIR, ("private_key",))
 
 

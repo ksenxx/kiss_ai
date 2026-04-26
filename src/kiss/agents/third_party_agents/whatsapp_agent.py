@@ -3,7 +3,7 @@
 Provides authenticated access to WhatsApp via the Meta Graph API.
 Handles authentication (reading config from disk or prompting the user
 via the browser), stores the access token and phone number ID securely
-in ``~/.kiss/channels/whatsapp/config.json``, and exposes a focused set
+in ``~/.kiss/third_party_agents/whatsapp/config.json``, and exposes a focused set
 of WhatsApp Business API tools that give the agent full control over
 messaging, media, templates, and business profile management.
 
@@ -25,12 +25,12 @@ from typing import Any
 
 import requests
 
-from kiss.agents.channels._backend_utils import (
+from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     stop_http_server,
     wait_for_matching_message,
 )
-from kiss.agents.channels._channel_agent_utils import (
+from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
     ToolMethodBackend,
@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_WEBHOOK_PORT = 18080
 
-_WHATSAPP_DIR = Path.home() / ".kiss" / "channels" / "whatsapp"
+_WHATSAPP_DIR = Path.home() / ".kiss" / "third_party_agents" / "whatsapp"
 _GRAPH_API_BASE = "https://graph.facebook.com/v21.0"
 _config = ChannelConfig(_WHATSAPP_DIR, ("access_token", "phone_number_id"))
 
@@ -194,7 +194,7 @@ class WhatsAppChannelBackend(ToolMethodBackend):
 
         Args:
             channel_id: Recipient phone number (unused — all messages returned).
-            oldest: Unused for push-mode channels.
+            oldest: Unused for push-mode third_party_agents.
             limit: Maximum messages to return.
 
         Returns:
@@ -868,7 +868,7 @@ class WhatsAppAgent(BaseChannelAgent, ChatSorcarAgent):
         ) -> str:
             """Store and validate WhatsApp Business API credentials.
 
-            Saves the credentials to ~/.kiss/channels/whatsapp/config.json
+            Saves the credentials to ~/.kiss/third_party_agents/whatsapp/config.json
             and validates them against the Meta Graph API.
 
             Args:

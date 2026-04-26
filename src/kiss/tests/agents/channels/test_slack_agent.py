@@ -17,7 +17,7 @@ from typing import Any, cast
 import pytest
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.channels.slack_agent import (
+from kiss.agents.third_party_agents.slack_agent import (
     _SLACK_DIR,
     SlackAgent,
     SlackChannelBackend,
@@ -159,7 +159,7 @@ class TestListWorkspaces:
 
     def test_no_slack_dir(self, capsys: pytest.CaptureFixture[str]) -> None:
         """_list_workspaces() prints 'No workspaces found.' when _SLACK_DIR missing."""
-        import kiss.agents.channels.slack_agent as mod
+        import kiss.agents.third_party_agents.slack_agent as mod
 
         original = mod._SLACK_DIR
         mod._SLACK_DIR = Path(tempfile.mkdtemp()) / "nonexistent"
@@ -172,7 +172,7 @@ class TestListWorkspaces:
 
     def test_empty_slack_dir(self, capsys: pytest.CaptureFixture[str]) -> None:
         """_list_workspaces() prints 'No workspaces found.' when no workspace dirs."""
-        import kiss.agents.channels.slack_agent as mod
+        import kiss.agents.third_party_agents.slack_agent as mod
 
         original = mod._SLACK_DIR
         empty_dir = Path(tempfile.mkdtemp())
@@ -266,7 +266,7 @@ class TestDeleteWorkspace:
 
 
 _SLACK_TOOL_ERROR_CASES = [
-    ("list_channels", {}),
+    ("list_third_party_agents", {}),
     ("read_messages", {"channel": "C01234567"}),
     ("post_message", {"channel": "C01234567", "text": "test"}),
     ("list_users", {}),
@@ -279,7 +279,7 @@ _SLACK_TOOL_ERROR_CASES = [
     ("add_reaction", {"channel": "C01234567", "timestamp": "1234.5678", "name": "thumbsup"}),
     ("search_messages", {"query": "test"}),
     ("set_channel_topic", {"channel": "C01234567", "topic": "new topic"}),
-    ("upload_file", {"channels": "C01234567", "content": "hello", "filename": "test.txt"}),
+    ("upload_file", {"third_party_agents": "C01234567", "content": "hello", "filename": "test.txt"}),
     ("get_channel_info", {"channel": "C01234567"}),
 ]
 

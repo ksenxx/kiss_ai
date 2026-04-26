@@ -6,7 +6,7 @@ handling, method signatures, and protocol conformance.
 
 from __future__ import annotations
 
-from kiss.agents.channels.slack_agent import (
+from kiss.agents.third_party_agents.slack_agent import (
     SlackChannelBackend,
     _save_token,
     _token_path,

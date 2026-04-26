@@ -1,7 +1,7 @@
 """Microsoft Teams Agent — ChatSorcarAgent extension with MS Teams Graph API tools.
 
 Provides authenticated access to Microsoft Teams via Azure AD client credentials.
-Stores config in ``~/.kiss/channels/msteams/config.json``.
+Stores config in ``~/.kiss/third_party_agents/msteams/config.json``.
 
 Usage::
 
@@ -19,8 +19,8 @@ from typing import Any
 
 import requests
 
-from kiss.agents.channels._backend_utils import wait_for_matching_message
-from kiss.agents.channels._channel_agent_utils import (
+from kiss.agents.third_party_agents._backend_utils import wait_for_matching_message
+from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
     ToolMethodBackend,
@@ -28,7 +28,7 @@ from kiss.agents.channels._channel_agent_utils import (
 )
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
-_MSTEAMS_DIR = Path.home() / ".kiss" / "channels" / "msteams"
+_MSTEAMS_DIR = Path.home() / ".kiss" / "third_party_agents" / "msteams"
 _config = ChannelConfig(_MSTEAMS_DIR, ("tenant_id", "client_id", "client_secret"))
 _GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 
@@ -116,7 +116,7 @@ class MSTeamsChannelBackend(ToolMethodBackend):
             params: dict[str, Any] = {"$top": limit, "$orderby": "lastModifiedDateTime asc"}
             if oldest:  # pragma: no branch
                 params["$filter"] = f"lastModifiedDateTime gt {oldest}"
-            result = self._get(f"/teams/{team_id}/channels/{chan_id}/messages", params=params)
+            result = self._get(f"/teams/{team_id}/third_party_agents/{chan_id}/messages", params=params)
             msgs = result.get("value", [])
             messages: list[dict[str, Any]] = []
             new_oldest = oldest
@@ -143,12 +143,12 @@ class MSTeamsChannelBackend(ToolMethodBackend):
         team_id, chan_id = channel_id.split(":", 1)
         if thread_ts:  # pragma: no branch
             self._post(
-                f"/teams/{team_id}/channels/{chan_id}/messages/{thread_ts}/replies",
+                f"/teams/{team_id}/third_party_agents/{chan_id}/messages/{thread_ts}/replies",
                 {"body": {"content": text, "contentType": "html"}},
             )
         else:
             self._post(
-                f"/teams/{team_id}/channels/{chan_id}/messages",
+                f"/teams/{team_id}/third_party_agents/{chan_id}/messages",
                 {"body": {"content": text, "contentType": "html"}},
             )
 
@@ -213,8 +213,8 @@ class MSTeamsChannelBackend(ToolMethodBackend):
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def list_channels(self, team_id: str) -> str:
-        """List channels in a Microsoft Team.
+    def list_third_party_agents(self, team_id: str) -> str:
+        """List third_party_agents in a Microsoft Team.
 
         Args:
             team_id: Team ID.
@@ -223,8 +223,8 @@ class MSTeamsChannelBackend(ToolMethodBackend):
             JSON string with channel list (id, displayName, membershipType).
         """
         try:
-            result = self._get(f"/teams/{team_id}/channels")
-            channels = [
+            result = self._get(f"/teams/{team_id}/third_party_agents")
+            third_party_agents = [
                 {
                     "id": c.get("id", ""),
                     "name": c.get("displayName", ""),
@@ -233,7 +233,7 @@ class MSTeamsChannelBackend(ToolMethodBackend):
                 }
                 for c in result.get("value", [])
             ]
-            return json.dumps({"ok": True, "channels": channels}, indent=2)[:8000]
+            return json.dumps({"ok": True, "third_party_agents": third_party_agents}, indent=2)[:8000]
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -250,7 +250,7 @@ class MSTeamsChannelBackend(ToolMethodBackend):
         """
         try:
             result = self._get(
-                f"/teams/{team_id}/channels/{channel_id}/messages",
+                f"/teams/{team_id}/third_party_agents/{channel_id}/messages",
                 params={"$top": top},
             )
             messages = [
@@ -282,7 +282,7 @@ class MSTeamsChannelBackend(ToolMethodBackend):
         """
         try:
             result = self._post(
-                f"/teams/{team_id}/channels/{channel_id}/messages",
+                f"/teams/{team_id}/third_party_agents/{channel_id}/messages",
                 {"body": {"content": content, "contentType": content_type}},
             )
             return json.dumps({"ok": True, "id": result.get("id", "")})
@@ -303,7 +303,7 @@ class MSTeamsChannelBackend(ToolMethodBackend):
         """
         try:
             result = self._post(
-                f"/teams/{team_id}/channels/{channel_id}/messages/{message_id}/replies",
+                f"/teams/{team_id}/third_party_agents/{channel_id}/messages/{message_id}/replies",
                 {"body": {"content": content, "contentType": "html"}},
             )
             return json.dumps({"ok": True, "id": result.get("id", "")})
