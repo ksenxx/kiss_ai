@@ -59,6 +59,9 @@ build-backend = "hatchling.build"
 [tool.hatch.version]
 path = "src/kiss/_version.py"
 
+[tool.hatch.build.targets.sdist]
+exclude = ["bin/"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/kiss"]
 
