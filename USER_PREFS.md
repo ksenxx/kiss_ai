@@ -6,3 +6,5 @@
 - SYSTEM.md lines must be at most 100 characters wide and must pass mdformat
 - Extension icon is set to media/thumbnail.jpeg in package.json
 - Keep the media directory clean: remove unused image files from the extension
+- Build the paper with pdflatex -shell-escape flag since minted package requires it
+- The paper uses minted package with Pygments Markdown lexer for prompt syntax highlighting
