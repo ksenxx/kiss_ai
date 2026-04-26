@@ -4,7 +4,6 @@
 
 Usage:
     python -m kiss.benchmarks.generate_dashboard \
-        --swebench results/swebench_pro_eval/eval_results.json \
         --tbench results/terminal_bench_results.jsonl \
         --output results/dashboard.html
 
