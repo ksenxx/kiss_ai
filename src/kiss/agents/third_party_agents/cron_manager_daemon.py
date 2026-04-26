@@ -13,13 +13,13 @@ lines are never disturbed::
 
 Daemon control::
 
-    python -m kiss.agents.channels.cron_manager_daemon start [--foreground]
-    python -m kiss.agents.channels.cron_manager_daemon stop
-    python -m kiss.agents.channels.cron_manager_daemon status
+    python -m kiss.agents.third_party_agents.cron_manager_daemon start [--foreground]
+    python -m kiss.agents.third_party_agents.cron_manager_daemon stop
+    python -m kiss.agents.third_party_agents.cron_manager_daemon status
 
 Client usage from any KISS agent::
 
-    from kiss.agents.channels.cron_manager_daemon import CronClient
+    from kiss.agents.third_party_agents.cron_manager_daemon import CronClient
 
     client = CronClient()
     job_id = client.add_job("*/5 * * * * echo hello")
@@ -724,9 +724,9 @@ def main() -> None:
 
     Usage::
 
-        python -m kiss.agents.channels.cron_manager_daemon start [--foreground]
-        python -m kiss.agents.channels.cron_manager_daemon stop
-        python -m kiss.agents.channels.cron_manager_daemon status
+        python -m kiss.agents.third_party_agents.cron_manager_daemon start [--foreground]
+        python -m kiss.agents.third_party_agents.cron_manager_daemon stop
+        python -m kiss.agents.third_party_agents.cron_manager_daemon status
     """
     if len(sys.argv) < 2:
         print("Usage: cron_manager_daemon {start|stop|status} [--foreground]")

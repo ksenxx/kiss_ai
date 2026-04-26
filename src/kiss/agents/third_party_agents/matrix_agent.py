@@ -1,7 +1,7 @@
 """Matrix Agent — ChatSorcarAgent extension with Matrix protocol tools.
 
 Provides authenticated access to Matrix via matrix-nio. Stores credentials
-in ``~/.kiss/channels/matrix/config.json``.
+in ``~/.kiss/third_party_agents/matrix/config.json``.
 
 Usage::
 
@@ -17,8 +17,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.channels._backend_utils import wait_for_matching_message
-from kiss.agents.channels._channel_agent_utils import (
+from kiss.agents.third_party_agents._backend_utils import wait_for_matching_message
+from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
     ToolMethodBackend,
@@ -26,7 +26,7 @@ from kiss.agents.channels._channel_agent_utils import (
 )
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
-_MATRIX_DIR = Path.home() / ".kiss" / "channels" / "matrix"
+_MATRIX_DIR = Path.home() / ".kiss" / "third_party_agents" / "matrix"
 _config = ChannelConfig(
     _MATRIX_DIR,
     (

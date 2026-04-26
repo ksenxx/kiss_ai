@@ -5,12 +5,12 @@ import threading
 import time
 from typing import Any, cast
 
-from kiss.agents.channels.irc_agent import IRCChannelBackend
-from kiss.agents.channels.line_agent import LineChannelBackend
-from kiss.agents.channels.slack_agent import SlackChannelBackend
-from kiss.agents.channels.synology_chat_agent import SynologyChatChannelBackend
-from kiss.agents.channels.whatsapp_agent import WhatsAppChannelBackend
-from kiss.agents.channels.zalo_agent import ZaloChannelBackend
+from kiss.agents.third_party_agents.irc_agent import IRCChannelBackend
+from kiss.agents.third_party_agents.line_agent import LineChannelBackend
+from kiss.agents.third_party_agents.slack_agent import SlackChannelBackend
+from kiss.agents.third_party_agents.synology_chat_agent import SynologyChatChannelBackend
+from kiss.agents.third_party_agents.whatsapp_agent import WhatsAppChannelBackend
+from kiss.agents.third_party_agents.zalo_agent import ZaloChannelBackend
 
 
 class _FakeSlackClient:

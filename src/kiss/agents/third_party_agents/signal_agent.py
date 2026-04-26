@@ -1,7 +1,7 @@
 """Signal Agent — ChatSorcarAgent extension with Signal CLI tools.
 
 Uses signal-cli subprocess to send/receive Signal messages. Stores
-configuration in ``~/.kiss/channels/signal/config.json``.
+configuration in ``~/.kiss/third_party_agents/signal/config.json``.
 
 Usage::
 
@@ -17,8 +17,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.channels._backend_utils import wait_for_matching_message
-from kiss.agents.channels._channel_agent_utils import (
+from kiss.agents.third_party_agents._backend_utils import wait_for_matching_message
+from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
     ToolMethodBackend,
@@ -26,7 +26,7 @@ from kiss.agents.channels._channel_agent_utils import (
 )
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
-_SIGNAL_DIR = Path.home() / ".kiss" / "channels" / "signal"
+_SIGNAL_DIR = Path.home() / ".kiss" / "third_party_agents" / "signal"
 _config = ChannelConfig(_SIGNAL_DIR, ("phone_number",))
 
 

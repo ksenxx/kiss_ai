@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kiss.agents.channels._channel_agent_utils import ChannelConfig
+from kiss.agents.third_party_agents._channel_agent_utils import ChannelConfig
 from kiss.core.config import (
     _ArtifactDirProxy,
     get_artifact_dir,

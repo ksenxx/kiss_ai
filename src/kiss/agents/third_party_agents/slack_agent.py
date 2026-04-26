@@ -3,14 +3,14 @@
 Provides authenticated access to a Slack workspace via a bot token
 with multi-turn chat-session persistence.  Handles authentication
 (reading token from disk or prompting the user via the browser),
-stores the token securely in ``~/.kiss/channels/slack/token.json``,
+stores the token securely in ``~/.kiss/third_party_agents/slack/token.json``,
 and exposes a focused set of Slack Web API tools that give the agent
-full control over messaging, channels, users, reactions, and search.
+full control over messaging, third_party_agents, users, reactions, and search.
 
 Usage::
 
     agent = SlackAgent()
-    agent.run(prompt_template="List all public channels in my workspace")
+    agent.run(prompt_template="List all public third_party_agents in my workspace")
 """
 
 from __future__ import annotations
@@ -26,8 +26,8 @@ from typing import Any, cast
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
-from kiss.agents.channels._backend_utils import wait_for_matching_message
-from kiss.agents.channels._channel_agent_utils import (
+from kiss.agents.third_party_agents._backend_utils import wait_for_matching_message
+from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ToolMethodBackend,
     channel_main,
@@ -39,7 +39,7 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
 logger = logging.getLogger(__name__)
 
-_SLACK_DIR = Path.home() / ".kiss" / "channels" / "slack"
+_SLACK_DIR = Path.home() / ".kiss" / "third_party_agents" / "slack"
 
 
 def _token_path(workspace: str = "default") -> Path:
@@ -50,7 +50,7 @@ def _token_path(workspace: str = "default") -> Path:
             Defaults to ``"default"``.
 
     Returns:
-        Path to ``~/.kiss/channels/slack/{workspace}/token.json``.
+        Path to ``~/.kiss/third_party_agents/slack/{workspace}/token.json``.
     """
     return _SLACK_DIR / workspace / "token.json"
 
@@ -58,8 +58,8 @@ def _token_path(workspace: str = "default") -> Path:
 def _migrate_legacy_token() -> None:
     """Migrate a legacy token file to the workspace-keyed path.
 
-    Moves ``~/.kiss/channels/slack/token.json`` to
-    ``~/.kiss/channels/slack/default/token.json`` if the legacy file
+    Moves ``~/.kiss/third_party_agents/slack/token.json`` to
+    ``~/.kiss/third_party_agents/slack/default/token.json`` if the legacy file
     exists and the new location does not.
     """
     legacy = _SLACK_DIR / "token.json"
@@ -132,8 +132,8 @@ class SlackChannelBackend(ToolMethodBackend):
         if not token:
             self._connection_info = (
                 "No Slack token found. Please store a bot token first.\n"
-                "Run: uv run python -m kiss.agents.channels.slack_agent --task 'check auth'\n"
-                "Or manually save token to ~/.kiss/channels/slack/token.json"
+                "Run: uv run python -m kiss.agents.third_party_agents.slack_agent --task 'check auth'\n"
+                "Or manually save token to ~/.kiss/third_party_agents/slack/token.json"
             )
             return False
         self._client = WebClient(token=token, retry_handlers=[])
@@ -164,8 +164,8 @@ class SlackChannelBackend(ToolMethodBackend):
             if cursor:  # pragma: no branch
                 kwargs["cursor"] = cursor
             resp = self._client.conversations_list(**kwargs)
-            channels: list[dict[str, Any]] = resp.get("channels", [])
-            for ch in channels:  # pragma: no branch
+            third_party_agents: list[dict[str, Any]] = resp.get("third_party_agents", [])
+            for ch in third_party_agents:  # pragma: no branch
                 if ch.get("name") == name:  # pragma: no branch
                     return str(ch["id"])
             cursor = (resp.get("response_metadata") or {}).get("next_cursor", "")
@@ -398,16 +398,16 @@ class SlackChannelBackend(ToolMethodBackend):
         return text
 
 
-    def list_channels(
+    def list_third_party_agents(
         self, types: str = "public_channel", limit: int = 200, cursor: str = ""
     ) -> str:
-        """List channels in the Slack workspace.
+        """List third_party_agents in the Slack workspace.
 
         Args:
             types: Comma-separated channel types. Options:
                 public_channel, private_channel, mpim, im.
                 Default: "public_channel".
-            limit: Maximum number of channels to return (1-1000).
+            limit: Maximum number of third_party_agents to return (1-1000).
                 Default: 200.
             cursor: Pagination cursor for next page of results.
                 Pass the value from the previous response's
@@ -423,8 +423,8 @@ class SlackChannelBackend(ToolMethodBackend):
             if cursor:  # pragma: no branch
                 kwargs["cursor"] = cursor
             resp = self._client.conversations_list(**kwargs)
-            raw_channels: list[dict[str, Any]] = resp.get("channels", [])
-            channels = [
+            raw_third_party_agents: list[dict[str, Any]] = resp.get("third_party_agents", [])
+            third_party_agents = [
                 {
                     "id": ch["id"],
                     "name": ch.get("name", ""),
@@ -432,9 +432,9 @@ class SlackChannelBackend(ToolMethodBackend):
                     "purpose": ch.get("purpose", {}).get("value", ""),
                     "num_members": ch.get("num_members", 0),
                 }
-                for ch in raw_channels
+                for ch in raw_third_party_agents
             ]
-            result: dict[str, Any] = {"ok": True, "channels": channels}
+            result: dict[str, Any] = {"ok": True, "third_party_agents": third_party_agents}
             next_cursor = (resp.get("response_metadata") or {}).get("next_cursor", "")
             if next_cursor:  # pragma: no branch
                 result["next_cursor"] = next_cursor
@@ -777,11 +777,11 @@ class SlackChannelBackend(ToolMethodBackend):
         except SlackApiError as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def upload_file(self, channels: str, content: str, filename: str, title: str = "") -> str:
-        """Upload text content as a file to Slack channels.
+    def upload_file(self, third_party_agents: str, content: str, filename: str, title: str = "") -> str:
+        """Upload text content as a file to Slack third_party_agents.
 
         Args:
-            channels: Comma-separated channel IDs to share the file in.
+            third_party_agents: Comma-separated channel IDs to share the file in.
             content: Text content of the file.
             filename: Name for the file (e.g. "report.txt").
             title: Optional title for the file.
@@ -791,9 +791,9 @@ class SlackChannelBackend(ToolMethodBackend):
         """
         assert self._client is not None
         try:
-            channel_list = [c.strip() for c in channels.split(",") if c.strip()]
+            channel_list = [c.strip() for c in third_party_agents.split(",") if c.strip()]
             resp = self._client.files_upload_v2(
-                channels=channel_list,
+                third_party_agents=channel_list,
                 content=content,
                 filename=filename,
                 title=title or filename,
@@ -964,7 +964,7 @@ class SlackAgent(BaseChannelAgent, ChatSorcarAgent):
             Navigates to the Slack API portal. Use your browser tools (go_to_url,
             click, type_text) to complete the following steps autonomously:
             1. Create a new app ("From scratch"), give it a name, select a workspace.
-            2. Go to "OAuth & Permissions", add bot scopes (channels:read, chat:write, etc.).
+            2. Go to "OAuth & Permissions", add bot scopes (third_party_agents:read, chat:write, etc.).
             3. Click "Install to Workspace" and approve the installation.
             4. Copy the "Bot User OAuth Token" (starts with xoxb-).
             5. Call authenticate_slack(token=<the token>).
@@ -991,7 +991,7 @@ class SlackAgent(BaseChannelAgent, ChatSorcarAgent):
 def _delete_workspace(workspace: str) -> None:
     """Delete a workspace's token directory from disk.
 
-    Removes the entire ``~/.kiss/channels/slack/{workspace}/`` directory,
+    Removes the entire ``~/.kiss/third_party_agents/slack/{workspace}/`` directory,
     including the token file and any other workspace-specific files.
 
     Args:
@@ -1008,7 +1008,7 @@ def _delete_workspace(workspace: str) -> None:
 def _list_workspaces() -> None:
     """Display all authenticated Slack workspaces and their token status.
 
-    Scans ``~/.kiss/channels/slack/`` for workspace subdirectories
+    Scans ``~/.kiss/third_party_agents/slack/`` for workspace subdirectories
     containing ``token.json`` files.  For each workspace, validates the
     token against the Slack API and prints the workspace name, status,
     team name, and bot user.

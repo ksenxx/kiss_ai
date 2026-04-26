@@ -89,7 +89,7 @@ class TestEndToEnd:
         assert "KISSAgent" in md
         assert "RelentlessAgent" in md
         assert "SorcarAgent" in md
-        assert "kiss.agents.channels" in md
+        assert "kiss.agents.third_party_agents" in md
 
 
 if __name__ == "__main__":

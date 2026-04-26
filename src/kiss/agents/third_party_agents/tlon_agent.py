@@ -1,7 +1,7 @@
 """Tlon/Urbit Agent — ChatSorcarAgent extension with Tlon/Urbit Eyre HTTP tools.
 
 Provides access to Urbit/Tlon via the Eyre HTTP server. Stores config
-in ``~/.kiss/channels/tlon/config.json``.
+in ``~/.kiss/third_party_agents/tlon/config.json``.
 
 Usage::
 
@@ -20,8 +20,8 @@ from typing import Any
 
 import requests
 
-from kiss.agents.channels._backend_utils import wait_for_matching_message
-from kiss.agents.channels._channel_agent_utils import (
+from kiss.agents.third_party_agents._backend_utils import wait_for_matching_message
+from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
     ToolMethodBackend,
@@ -29,7 +29,7 @@ from kiss.agents.channels._channel_agent_utils import (
 )
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
-_TLON_DIR = Path.home() / ".kiss" / "channels" / "tlon"
+_TLON_DIR = Path.home() / ".kiss" / "third_party_agents" / "tlon"
 _config = ChannelConfig(_TLON_DIR, ("ship_url", "code"))
 
 
@@ -110,8 +110,8 @@ class TlonChannelBackend(ToolMethodBackend):
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def list_channels(self, group_path: str) -> str:
-        """List channels in an Urbit group.
+    def list_third_party_agents(self, group_path: str) -> str:
+        """List third_party_agents in an Urbit group.
 
         Args:
             group_path: Group path (e.g. "~sampel/my-group").
@@ -120,7 +120,7 @@ class TlonChannelBackend(ToolMethodBackend):
             JSON string with channel list.
         """
         try:
-            result = self.scry("channels", f"/channels/{group_path}/light")
+            result = self.scry("third_party_agents", f"/third_party_agents/{group_path}/light")
             return result
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
@@ -138,7 +138,7 @@ class TlonChannelBackend(ToolMethodBackend):
         """
         try:
             path = f"/channel/{group_path}/{channel_name}/posts/newest/{count}/15"
-            result = self.scry("channels", path)
+            result = self.scry("third_party_agents", path)
             return result
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
@@ -156,7 +156,7 @@ class TlonChannelBackend(ToolMethodBackend):
         """
         try:
             result = self.poke(
-                "channels",
+                "third_party_agents",
                 "channel-action",
                 json.dumps(
                     {

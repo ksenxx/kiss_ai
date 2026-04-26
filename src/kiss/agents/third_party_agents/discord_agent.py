@@ -2,12 +2,12 @@
 
 Provides authenticated access to Discord via a bot token. Uses the Discord
 REST API v10 directly via requests (no discord.py needed). Stores the token
-in ``~/.kiss/channels/discord/config.json``.
+in ``~/.kiss/third_party_agents/discord/config.json``.
 
 Usage::
 
     agent = DiscordAgent()
-    agent.run(prompt_template="List all channels in my server")
+    agent.run(prompt_template="List all third_party_agents in my server")
 """
 
 from __future__ import annotations
@@ -20,8 +20,8 @@ from typing import Any
 
 import requests
 
-from kiss.agents.channels._backend_utils import wait_for_matching_message
-from kiss.agents.channels._channel_agent_utils import (
+from kiss.agents.third_party_agents._backend_utils import wait_for_matching_message
+from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
     ToolMethodBackend,
@@ -29,7 +29,7 @@ from kiss.agents.channels._channel_agent_utils import (
 )
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
-_DISCORD_DIR = Path.home() / ".kiss" / "channels" / "discord"
+_DISCORD_DIR = Path.home() / ".kiss" / "third_party_agents" / "discord"
 _API_BASE = "https://discord.com/api/v10"
 _config = ChannelConfig(_DISCORD_DIR, ("bot_token",))
 
@@ -110,10 +110,10 @@ class DiscordChannelBackend(ToolMethodBackend):
             if not isinstance(guilds, list):
                 return None
             for guild in guilds:
-                channels = self._get(f"/guilds/{guild['id']}/channels")
-                if not isinstance(channels, list):
+                third_party_agents = self._get(f"/guilds/{guild['id']}/third_party_agents")
+                if not isinstance(third_party_agents, list):
                     continue
-                for ch in channels:
+                for ch in third_party_agents:
                     if ch.get("name") == name:
                         return str(ch["id"])
         except Exception:
@@ -132,7 +132,7 @@ class DiscordChannelBackend(ToolMethodBackend):
                 params["after"] = oldest
             else:
                 params["after"] = str((int((time.time() - 1) * 1000) - 1420070400000) << 22)
-            result = self._get(f"/channels/{channel_id}/messages", params=params)
+            result = self._get(f"/third_party_agents/{channel_id}/messages", params=params)
             if not isinstance(result, list):  # pragma: no branch
                 return [], oldest
             msgs: list[dict[str, Any]] = sorted(result, key=lambda m: m.get("id", ""))
@@ -155,7 +155,7 @@ class DiscordChannelBackend(ToolMethodBackend):
     def send_message(self, channel_id: str, text: str, thread_ts: str = "") -> None:
         """Send a Discord message."""
         target = thread_ts if thread_ts else channel_id
-        self._post(f"/channels/{target}/messages", {"content": text})
+        self._post(f"/third_party_agents/{target}/messages", {"content": text})
 
     def wait_for_reply(
         self,
@@ -203,8 +203,8 @@ class DiscordChannelBackend(ToolMethodBackend):
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def list_channels(self, guild_id: str, channel_type: str = "") -> str:
-        """List channels in a guild.
+    def list_third_party_agents(self, guild_id: str, channel_type: str = "") -> str:
+        """List third_party_agents in a guild.
 
         Args:
             guild_id: Guild (server) ID.
@@ -214,10 +214,10 @@ class DiscordChannelBackend(ToolMethodBackend):
             JSON string with channel list (id, name, type, topic).
         """
         try:
-            result = self._get(f"/guilds/{guild_id}/channels")
+            result = self._get(f"/guilds/{guild_id}/third_party_agents")
             if not isinstance(result, list):  # pragma: no branch
                 return json.dumps({"ok": False, "error": str(result)})
-            channels = [
+            third_party_agents = [
                 {
                     "id": c["id"],
                     "name": c.get("name", ""),
@@ -228,7 +228,7 @@ class DiscordChannelBackend(ToolMethodBackend):
                 for c in result
                 if not channel_type or str(c.get("type", "")) == channel_type
             ]
-            return json.dumps({"ok": True, "channels": channels}, indent=2)[:8000]
+            return json.dumps({"ok": True, "third_party_agents": third_party_agents}, indent=2)[:8000]
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -242,7 +242,7 @@ class DiscordChannelBackend(ToolMethodBackend):
             JSON string with channel details.
         """
         try:
-            result = self._get(f"/channels/{channel_id}")
+            result = self._get(f"/third_party_agents/{channel_id}")
             if "id" not in result:  # pragma: no branch
                 return json.dumps({"ok": False, "error": str(result)})
             return json.dumps({"ok": True, **result}, indent=2)[:8000]
@@ -273,7 +273,7 @@ class DiscordChannelBackend(ToolMethodBackend):
                 params["before"] = before
             if after:  # pragma: no branch
                 params["after"] = after
-            result = self._get(f"/channels/{channel_id}/messages", params=params)
+            result = self._get(f"/third_party_agents/{channel_id}/messages", params=params)
             if not isinstance(result, list):  # pragma: no branch
                 return json.dumps({"ok": False, "error": str(result)})
             messages = [
@@ -311,7 +311,7 @@ class DiscordChannelBackend(ToolMethodBackend):
             body: dict[str, Any] = {"content": content, "tts": tts}
             if reply_to:  # pragma: no branch
                 body["message_reference"] = {"message_id": reply_to}
-            result = self._post(f"/channels/{channel_id}/messages", body)
+            result = self._post(f"/third_party_agents/{channel_id}/messages", body)
             if "id" not in result:  # pragma: no branch
                 return json.dumps({"ok": False, "error": str(result)})
             return json.dumps({"ok": True, "id": result["id"]})
@@ -331,7 +331,7 @@ class DiscordChannelBackend(ToolMethodBackend):
         """
         try:
             result = self._patch(
-                f"/channels/{channel_id}/messages/{message_id}", {"content": content}
+                f"/third_party_agents/{channel_id}/messages/{message_id}", {"content": content}
             )
             if "id" not in result:  # pragma: no branch
                 return json.dumps({"ok": False, "error": str(result)})
@@ -350,7 +350,7 @@ class DiscordChannelBackend(ToolMethodBackend):
             JSON string with ok status.
         """
         try:
-            self._delete(f"/channels/{channel_id}/messages/{message_id}")
+            self._delete(f"/third_party_agents/{channel_id}/messages/{message_id}")
             return json.dumps({"ok": True})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
@@ -369,7 +369,7 @@ class DiscordChannelBackend(ToolMethodBackend):
         try:
             from urllib.parse import quote
 
-            emoji_url = f"{_API_BASE}/channels/{channel_id}/messages/{message_id}"
+            emoji_url = f"{_API_BASE}/third_party_agents/{channel_id}/messages/{message_id}"
             emoji_url += f"/reactions/{quote(emoji)}/@me"
             resp = requests.put(emoji_url, headers=self._headers(), timeout=30)
             return json.dumps({"ok": resp.status_code == 204})
@@ -396,7 +396,7 @@ class DiscordChannelBackend(ToolMethodBackend):
         """
         try:
             result = self._post(
-                f"/channels/{channel_id}/messages/{message_id}/threads",
+                f"/third_party_agents/{channel_id}/messages/{message_id}/threads",
                 {"name": name, "auto_archive_duration": auto_archive_duration},
             )
             if "id" not in result:  # pragma: no branch
@@ -449,7 +449,7 @@ class DiscordChannelBackend(ToolMethodBackend):
         """
         try:
             result = self._post(
-                f"/channels/{channel_id}/invites",
+                f"/third_party_agents/{channel_id}/invites",
                 {"max_age": max_age, "max_uses": max_uses},
             )
             if "code" not in result:  # pragma: no branch
@@ -471,7 +471,7 @@ class DiscordAgent(BaseChannelAgent, ChatSorcarAgent):
     Example::
 
         agent = DiscordAgent()
-        result = agent.run(prompt_template="List all channels in my server")
+        result = agent.run(prompt_template="List all third_party_agents in my server")
     """
 
     def __init__(self) -> None:

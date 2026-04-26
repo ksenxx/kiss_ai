@@ -18,7 +18,7 @@ INCLUDE_FILES: set[Path] = {
     Path("agents/sorcar/git_worktree.py"),
     Path("agents/sorcar/worktree_sorcar_agent.py"),
 }
-INCLUDE_DIRS: set[Path] = {Path("channels")}
+INCLUDE_DIRS: set[Path] = {Path("third_party_agents")}
 
 
 @dataclass
@@ -394,7 +394,7 @@ def _sort_modules(modules: list[ModuleDoc]) -> list[ModuleDoc]:
         "kiss.agents.sorcar.chat_sorcar_agent",
         "kiss.agents.sorcar.git_worktree",
         "kiss.agents.sorcar.worktree_sorcar_agent",
-        "kiss.agents.channels",
+        "kiss.agents.third_party_agents",
     ]
     rank = {name: i for i, name in enumerate(order)}
 

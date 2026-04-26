@@ -110,7 +110,7 @@ class TestI2FindChannelReturnsName:
         The bug: it returns the name as-is, which is a string like
         'general', not a Discord snowflake ID.
         """
-        from kiss.agents.channels.discord_agent import DiscordChannelBackend
+        from kiss.agents.third_party_agents.discord_agent import DiscordChannelBackend
 
         backend = DiscordChannelBackend()
         result = backend.find_channel("general")
@@ -128,7 +128,7 @@ class TestI3SnowflakeTruncation:
         Bug: int(time.time() - 1) * 1000 truncates, should be
         int((time.time() - 1) * 1000).
         """
-        from kiss.agents.channels.discord_agent import DiscordChannelBackend
+        from kiss.agents.third_party_agents.discord_agent import DiscordChannelBackend
 
         source = inspect.getsource(DiscordChannelBackend.poll_messages)
 
@@ -212,7 +212,7 @@ class TestI7UnnecessaryCallableCheck:
         """_disconnect_backend should call disconnect() directly since
         it's a required protocol method, not use getattr+callable guard.
         """
-        from kiss.agents.channels._channel_agent_utils import ChannelRunner
+        from kiss.agents.third_party_agents._channel_agent_utils import ChannelRunner
 
         source = inspect.getsource(ChannelRunner._disconnect_backend)
 

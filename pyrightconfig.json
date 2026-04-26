@@ -8,31 +8,31 @@
   "reportUnsupportedDunderAll": "none",
   "executionEnvironments": [
     {
-      "root": "src/kiss/agents/channels/feishu_agent.py",
+      "root": "src/kiss/agents/third_party_agents/feishu_agent.py",
       "reportMissingImports": "none"
     },
     {
-      "root": "src/kiss/agents/channels/line_agent.py",
+      "root": "src/kiss/agents/third_party_agents/line_agent.py",
       "reportMissingImports": "none"
     },
     {
-      "root": "src/kiss/agents/channels/matrix_agent.py",
+      "root": "src/kiss/agents/third_party_agents/matrix_agent.py",
       "reportMissingImports": "none"
     },
     {
-      "root": "src/kiss/agents/channels/mattermost_agent.py",
+      "root": "src/kiss/agents/third_party_agents/mattermost_agent.py",
       "reportMissingImports": "none"
     },
     {
-      "root": "src/kiss/agents/channels/nostr_agent.py",
+      "root": "src/kiss/agents/third_party_agents/nostr_agent.py",
       "reportMissingImports": "none"
     },
     {
-      "root": "src/kiss/agents/channels/sms_agent.py",
+      "root": "src/kiss/agents/third_party_agents/sms_agent.py",
       "reportMissingImports": "none"
     },
     {
-      "root": "src/kiss/agents/channels/telegram_agent.py",
+      "root": "src/kiss/agents/third_party_agents/telegram_agent.py",
       "reportMissingImports": "none"
     },
     {
@@ -44,11 +44,11 @@
       "reportMissingImports": "none"
     },
     {
-      "root": "src/kiss/agents/channels/gmail_agent.py",
+      "root": "src/kiss/agents/third_party_agents/gmail_agent.py",
       "reportAttributeAccessIssue": "none"
     },
     {
-      "root": "src/kiss/agents/channels/googlechat_agent.py",
+      "root": "src/kiss/agents/third_party_agents/googlechat_agent.py",
       "reportAttributeAccessIssue": "none"
     }
   ]

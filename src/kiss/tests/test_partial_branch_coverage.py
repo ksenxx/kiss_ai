@@ -56,7 +56,7 @@ class TestDrainQueueMessages:
 
     def test_drain_with_filter(self) -> None:
         """Filter keeps some messages, rejects others (line 83 keep branch)."""
-        from kiss.agents.channels._backend_utils import drain_queue_messages
+        from kiss.agents.third_party_agents._backend_utils import drain_queue_messages
 
         q: queue.Queue[dict[str, Any]] = queue.Queue()
         q.put({"id": 1, "good": True})
@@ -67,7 +67,7 @@ class TestDrainQueueMessages:
 
     def test_drain_hits_limit(self) -> None:
         """Queue has more items than limit, while condition exits (line 78->85)."""
-        from kiss.agents.channels._backend_utils import drain_queue_messages
+        from kiss.agents.third_party_agents._backend_utils import drain_queue_messages
 
         q: queue.Queue[dict[str, Any]] = queue.Queue()
         for i in range(5):

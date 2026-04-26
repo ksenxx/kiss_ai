@@ -1,7 +1,7 @@
 """iMessage Agent — ChatSorcarAgent extension with iMessage tools via AppleScript.
 
 macOS only. Uses osascript to send/receive iMessages via the Messages app.
-Stores config in ``~/.kiss/channels/imessage/config.json``.
+Stores config in ``~/.kiss/third_party_agents/imessage/config.json``.
 
 Usage::
 
@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.channels._channel_agent_utils import (
+from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
     ToolMethodBackend,
@@ -25,7 +25,7 @@ from kiss.agents.channels._channel_agent_utils import (
 )
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
-_IMESSAGE_DIR = Path.home() / ".kiss" / "channels" / "imessage"
+_IMESSAGE_DIR = Path.home() / ".kiss" / "third_party_agents" / "imessage"
 _config = ChannelConfig(_IMESSAGE_DIR, ())
 
 _PLATFORM_ERROR = json.dumps(

@@ -2,7 +2,7 @@
 
 Provides authenticated access to Twitch via OAuth2 tokens. Uses requests
 for Helix API and twitchio for chat. Stores config in
-``~/.kiss/channels/twitch/config.json``.
+``~/.kiss/third_party_agents/twitch/config.json``.
 
 Usage::
 
@@ -18,7 +18,7 @@ from typing import Any
 
 import requests
 
-from kiss.agents.channels._channel_agent_utils import (
+from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
     ToolMethodBackend,
@@ -26,7 +26,7 @@ from kiss.agents.channels._channel_agent_utils import (
 )
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
-_TWITCH_DIR = Path.home() / ".kiss" / "channels" / "twitch"
+_TWITCH_DIR = Path.home() / ".kiss" / "third_party_agents" / "twitch"
 _HELIX_BASE = "https://api.twitch.tv/helix"
 _config = ChannelConfig(
     _TWITCH_DIR,
@@ -143,11 +143,11 @@ class TwitchChannelBackend(ToolMethodBackend):
             JSON string with channel info.
         """
         try:
-            result = self._get("/channels", params={"broadcaster_id": broadcaster_id})
-            channels = result.get("data", [])
-            if not channels:  # pragma: no branch
+            result = self._get("/third_party_agents", params={"broadcaster_id": broadcaster_id})
+            third_party_agents = result.get("data", [])
+            if not third_party_agents:  # pragma: no branch
                 return json.dumps({"ok": False, "error": "Channel not found"})
-            return json.dumps({"ok": True, "channel": channels[0]}, indent=2)[:8000]
+            return json.dumps({"ok": True, "channel": third_party_agents[0]}, indent=2)[:8000]
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -251,19 +251,19 @@ class TwitchChannelBackend(ToolMethodBackend):
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def search_channels(self, query: str, limit: int = 10) -> str:
-        """Search for Twitch channels by name.
+    def search_third_party_agents(self, query: str, limit: int = 10) -> str:
+        """Search for Twitch third_party_agents by name.
 
         Args:
             query: Search query.
-            limit: Maximum channels to return. Default: 10.
+            limit: Maximum third_party_agents to return. Default: 10.
 
         Returns:
-            JSON string with matching channels.
+            JSON string with matching third_party_agents.
         """
         try:
-            result = self._get("/search/channels", params={"query": query, "first": limit})
-            return json.dumps({"ok": True, "channels": result.get("data", [])}, indent=2)[:8000]
+            result = self._get("/search/third_party_agents", params={"query": query, "first": limit})
+            return json.dumps({"ok": True, "third_party_agents": result.get("data", [])}, indent=2)[:8000]
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
