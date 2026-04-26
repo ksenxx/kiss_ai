@@ -25,7 +25,6 @@ if TYPE_CHECKING:
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps, repo_lock
 from kiss.agents.sorcar.persistence import (
     _append_chat_event,
-    _record_model_usage,
     _save_task_extra,
     _save_task_result,
 )
@@ -255,7 +254,6 @@ class _TaskRunnerMixin:
         except BaseException:  # pragma: no cover — async interrupt before inner try
             task_end_event = task_end_event or {"type": "task_stopped"}
         finally:
-            _record_model_usage(model)
             try:
                 with self._state_lock:
                     tab.is_task_active = False
