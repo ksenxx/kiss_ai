@@ -129,7 +129,6 @@ class TestDemoStopButtonSpinnerStructural(unittest.TestCase):
         fn = _extract_fn(self.demo_src, "window._startDemoReplay")
         # Find the last occurrence of setRunningState(false)
         last_rs = fn.rfind("setRunningState(false)")
-        loop_end = fn.rfind("}")
         assert last_rs != -1, (
             "setRunningState(false) must be called after the replay loop"
         )
