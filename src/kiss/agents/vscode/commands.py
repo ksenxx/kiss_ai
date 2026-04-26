@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from kiss.agents.sorcar.persistence import (
     _record_file_usage,
-    _save_last_model,
+    _record_model_usage,
 )
 from kiss.agents.vscode.tab_state import _TabState
 
@@ -106,7 +106,7 @@ class _CommandsMixin:
         with self._state_lock:
             tab.selected_model = model
             self._default_model = model
-        _save_last_model(model)
+        _record_model_usage(model)
 
     def _cmd_get_history(self, cmd: dict[str, Any]) -> None:
         """Send conversation history."""
