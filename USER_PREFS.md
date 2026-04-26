@@ -8,3 +8,6 @@
 - Keep the media directory clean: remove unused image files from the extension
 - Build the paper with pdflatex -shell-escape flag since minted package requires it
 - The paper uses minted package with Pygments Markdown lexer for prompt syntax highlighting
+- All markdown files must pass mdformat check; run mdformat on files after content changes
+- Database queries should not have arbitrary hard caps; use unbounded queries when no limit is specified
+- Code listings in the paper should not have line numbers unless explicitly requested
