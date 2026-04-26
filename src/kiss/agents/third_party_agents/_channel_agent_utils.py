@@ -181,7 +181,7 @@ class ChannelConfig:
     ``_clear_config`` boilerplate in each channel agent module.
 
     Args:
-        channel_dir: Directory for this channel (e.g. ``~/.kiss/channels/discord``).
+        channel_dir: Directory for this channel (e.g. ``~/.kiss/third_party_agents/discord``).
         required_keys: Keys that must be present and non-empty for a valid config.
     """
 

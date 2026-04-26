@@ -147,12 +147,11 @@ Before calling finish(success=True, ...), you MUST:
 - If you need to look at you source source code, it li located at
   ~/.vscode/extensions/ksenxx.kiss-sorcar-2026.4.18/. DO NOT MODIFY
   YOUR OWN SOURCE CODE.
+- Third-party agents are available under the folder kiss/agents/third_party_agents
+- Use kiss/agents/third_party_agents/cron_manager_daemon.py to setup a cron job
+- If the user is not authenticated for a third party agent, authenticate the agent 
+  and ask user ONLY when a page needs user authentication 
 - If you need information about yourself, read it at
-  [kiss_sorcar.tex][self-info]
+  [https://github.com/ksenxx/kiss_ai/blob/main/papers/kisssorcar/kiss_sorcar.pdf][https://github.com/ksenxx/kiss_ai/blob/main/papers/kisssorcar/kiss_sorcar.pdf]
 - Read PWD/SORCAR.md and treat its contents as instructions and allow
   those instructions to override the instructions above
-
-Steps: 1/100, Tokens: 6,519/200,000, Budget: $0.0440/$200.00,
-Global Budget: $0.0440/$200.00
-
-[self-info]: https://github.com/ksenxx/kiss_ai/blob/main/papers/kisssorcar/kiss_sorcar.text

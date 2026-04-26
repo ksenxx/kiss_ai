@@ -1,7 +1,7 @@
 """Telegram Agent — ChatSorcarAgent extension with Telegram Bot API tools.
 
 Provides authenticated access to Telegram via a bot token from @BotFather.
-Stores the token securely in ``~/.kiss/channels/telegram/config.json`` and
+Stores the token securely in ``~/.kiss/third_party_agents/telegram/config.json`` and
 exposes a focused set of Telegram Bot API tools.
 
 Usage::
@@ -17,8 +17,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.channels._backend_utils import wait_for_matching_message
-from kiss.agents.channels._channel_agent_utils import (
+from kiss.agents.third_party_agents._backend_utils import wait_for_matching_message
+from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
     ToolMethodBackend,
@@ -26,7 +26,7 @@ from kiss.agents.channels._channel_agent_utils import (
 )
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
-_TELEGRAM_DIR = Path.home() / ".kiss" / "channels" / "telegram"
+_TELEGRAM_DIR = Path.home() / ".kiss" / "third_party_agents" / "telegram"
 _config = ChannelConfig(_TELEGRAM_DIR, ("bot_token",))
 
 

@@ -1,12 +1,12 @@
 """Mattermost Agent — ChatSorcarAgent extension with Mattermost REST API tools.
 
 Provides authenticated access to Mattermost via a personal access token.
-Stores config in ``~/.kiss/channels/mattermost/config.json``.
+Stores config in ``~/.kiss/third_party_agents/mattermost/config.json``.
 
 Usage::
 
     agent = MattermostAgent()
-    agent.run(prompt_template="List all channels in the team")
+    agent.run(prompt_template="List all third_party_agents in the team")
 """
 
 from __future__ import annotations
@@ -17,8 +17,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.channels._backend_utils import wait_for_matching_message
-from kiss.agents.channels._channel_agent_utils import (
+from kiss.agents.third_party_agents._backend_utils import wait_for_matching_message
+from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
     ToolMethodBackend,
@@ -26,7 +26,7 @@ from kiss.agents.channels._channel_agent_utils import (
 )
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
-_MATTERMOST_DIR = Path.home() / ".kiss" / "channels" / "mattermost"
+_MATTERMOST_DIR = Path.home() / ".kiss" / "third_party_agents" / "mattermost"
 _config = ChannelConfig(
     _MATTERMOST_DIR,
     (
@@ -154,8 +154,8 @@ class MattermostChannelBackend(ToolMethodBackend):
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def list_channels(self, team_id: str, page: int = 0, per_page: int = 60) -> str:
-        """List channels in a Mattermost team.
+    def list_third_party_agents(self, team_id: str, page: int = 0, per_page: int = 60) -> str:
+        """List third_party_agents in a Mattermost team.
 
         Args:
             team_id: Team ID.
@@ -167,7 +167,7 @@ class MattermostChannelBackend(ToolMethodBackend):
         """
         assert self._driver is not None
         try:
-            channels = self._driver.channels.get_channels_for_user(
+            third_party_agents = self._driver.third_party_agents.get_third_party_agents_for_user(
                 "me", team_id, params={"page": page, "per_page": per_page}
             )
             result = [
@@ -177,9 +177,9 @@ class MattermostChannelBackend(ToolMethodBackend):
                     "display_name": c.get("display_name", ""),
                     "type": c.get("type", ""),
                 }
-                for c in channels
+                for c in third_party_agents
             ]
-            return json.dumps({"ok": True, "channels": result}, indent=2)[:8000]
+            return json.dumps({"ok": True, "third_party_agents": result}, indent=2)[:8000]
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -194,7 +194,7 @@ class MattermostChannelBackend(ToolMethodBackend):
         """
         assert self._driver is not None
         try:
-            channel = self._driver.channels.get_channel(channel_id)
+            channel = self._driver.third_party_agents.get_channel(channel_id)
             return json.dumps({"ok": True, **channel}, indent=2)[:8000]
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
@@ -345,7 +345,7 @@ class MattermostChannelBackend(ToolMethodBackend):
         """
         assert self._driver is not None
         try:
-            channel = self._driver.channels.create_direct_message_channel(
+            channel = self._driver.third_party_agents.create_direct_message_channel(
                 options=[user1_id, user2_id]
             )
             return json.dumps({"ok": True, "channel_id": channel.get("id", "")})

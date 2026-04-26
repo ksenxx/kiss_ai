@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.channels.cron_manager_daemon import (
+from kiss.agents.third_party_agents.cron_manager_daemon import (
     CronClient,
     CronDaemon,
     CronJob,
@@ -638,7 +638,7 @@ class TestProcessKillRestart:
             import sys
             sys.path.insert(0, {src_root!r})
             from pathlib import Path
-            from kiss.agents.channels.cron_manager_daemon import CronDaemon
+            from kiss.agents.third_party_agents.cron_manager_daemon import CronDaemon
             d = CronDaemon(
                 sock_path=Path({sock!r}),
                 pid_path=Path({pid!r}),
@@ -812,7 +812,7 @@ class TestCLI:
         env["HOME"] = str(tmp_path)
         env["PYTHONPATH"] = str(Path(__file__).parents[3])
         return subprocess.run(
-            [sys.executable, "-m", "kiss.agents.channels.cron_manager_daemon", *args],
+            [sys.executable, "-m", "kiss.agents.third_party_agents.cron_manager_daemon", *args],
             env=env,
             capture_output=True,
             text=True,
@@ -853,7 +853,7 @@ class TestCLI:
                 [
                     sys.executable,
                     "-m",
-                    "kiss.agents.channels.cron_manager_daemon",
+                    "kiss.agents.third_party_agents.cron_manager_daemon",
                     "start",
                     "--foreground",
                 ],
@@ -879,7 +879,7 @@ class TestCLI:
                 [
                     sys.executable,
                     "-m",
-                    "kiss.agents.channels.cron_manager_daemon",
+                    "kiss.agents.third_party_agents.cron_manager_daemon",
                     "stop",
                 ],
                 env=env,

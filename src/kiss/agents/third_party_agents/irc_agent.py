@@ -1,7 +1,7 @@
 """IRC Agent — ChatSorcarAgent extension with IRC tools.
 
 Connects to IRC servers via the irc library. Stores config in
-``~/.kiss/channels/irc/config.json``.
+``~/.kiss/third_party_agents/irc/config.json``.
 
 Usage::
 
@@ -20,8 +20,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.channels._backend_utils import wait_for_matching_message
-from kiss.agents.channels._channel_agent_utils import (
+from kiss.agents.third_party_agents._backend_utils import wait_for_matching_message
+from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
     ToolMethodBackend,
@@ -29,7 +29,7 @@ from kiss.agents.channels._channel_agent_utils import (
 )
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
-_IRC_DIR = Path.home() / ".kiss" / "channels" / "irc"
+_IRC_DIR = Path.home() / ".kiss" / "third_party_agents" / "irc"
 _config = ChannelConfig(
     _IRC_DIR,
     (

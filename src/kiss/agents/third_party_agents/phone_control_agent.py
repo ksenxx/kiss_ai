@@ -1,7 +1,7 @@
 """Phone Control Agent — ChatSorcarAgent extension with Android phone control tools.
 
 Provides access to Android SMS, calls, and notifications via a companion
-REST app. Stores config in ``~/.kiss/channels/phone/config.json``.
+REST app. Stores config in ``~/.kiss/third_party_agents/phone/config.json``.
 
 Usage::
 
@@ -19,8 +19,8 @@ from typing import Any
 
 import requests
 
-from kiss.agents.channels._backend_utils import wait_for_matching_message
-from kiss.agents.channels._channel_agent_utils import (
+from kiss.agents.third_party_agents._backend_utils import wait_for_matching_message
+from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
     ToolMethodBackend,
@@ -28,7 +28,7 @@ from kiss.agents.channels._channel_agent_utils import (
 )
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
-_PHONE_DIR = Path.home() / ".kiss" / "channels" / "phone"
+_PHONE_DIR = Path.home() / ".kiss" / "third_party_agents" / "phone"
 _config = ChannelConfig(_PHONE_DIR, ("device_ip",))
 
 

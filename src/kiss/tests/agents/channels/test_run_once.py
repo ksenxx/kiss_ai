@@ -11,8 +11,8 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.channels._channel_agent_utils import ChannelRunner
-from kiss.agents.channels.slack_agent import (
+from kiss.agents.third_party_agents._channel_agent_utils import ChannelRunner
+from kiss.agents.third_party_agents.slack_agent import (
     SlackChannelBackend,
     _save_token,
     _token_path,

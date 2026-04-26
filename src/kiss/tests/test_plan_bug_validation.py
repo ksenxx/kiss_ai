@@ -10,7 +10,7 @@ import inspect
 class TestPollerSessionResume:
     def test_poller_uses_resume_chat_by_id(self) -> None:
         """_handle_message() uses resume_chat_by_id instead of mutating _chat_id."""
-        from kiss.agents.channels._channel_agent_utils import ChannelRunner
+        from kiss.agents.third_party_agents._channel_agent_utils import ChannelRunner
 
         source = inspect.getsource(ChannelRunner._handle_message)
         assert "agent._chat_id" not in source
@@ -33,21 +33,21 @@ class TestVSCodeTaskGenerationSync:
 class TestWaitForReplyHasTimeout:
     def test_slack_wait_for_reply_has_timeout(self) -> None:
         """Slack wait_for_reply accepts timeout_seconds."""
-        from kiss.agents.channels.slack_agent import SlackChannelBackend
+        from kiss.agents.third_party_agents.slack_agent import SlackChannelBackend
 
         sig = inspect.signature(SlackChannelBackend.wait_for_reply)
         assert "timeout_seconds" in sig.parameters
 
     def test_irc_wait_for_reply_has_timeout(self) -> None:
         """IRC wait_for_reply accepts timeout_seconds."""
-        from kiss.agents.channels.irc_agent import IRCChannelBackend
+        from kiss.agents.third_party_agents.irc_agent import IRCChannelBackend
 
         sig = inspect.signature(IRCChannelBackend.wait_for_reply)
         assert "timeout_seconds" in sig.parameters
 
     def test_whatsapp_wait_for_reply_has_timeout(self) -> None:
         """WhatsApp wait_for_reply accepts timeout_seconds."""
-        from kiss.agents.channels.whatsapp_agent import WhatsAppChannelBackend
+        from kiss.agents.third_party_agents.whatsapp_agent import WhatsAppChannelBackend
 
         sig = inspect.signature(WhatsAppChannelBackend.wait_for_reply)
         assert "timeout_seconds" in sig.parameters
@@ -56,13 +56,13 @@ class TestWaitForReplyHasTimeout:
 class TestIRCBackendLifecycle:
     def test_irc_has_disconnect_method(self) -> None:
         """IRCChannelBackend has a disconnect() method."""
-        from kiss.agents.channels.irc_agent import IRCChannelBackend
+        from kiss.agents.third_party_agents.irc_agent import IRCChannelBackend
 
         assert hasattr(IRCChannelBackend, "disconnect")
 
     def test_irc_socket_has_timeout(self) -> None:
         """IRC connect sets a socket timeout for the reader loop."""
-        from kiss.agents.channels.irc_agent import IRCChannelBackend
+        from kiss.agents.third_party_agents.irc_agent import IRCChannelBackend
 
         source = inspect.getsource(IRCChannelBackend.connect)
         assert "settimeout" in source
@@ -71,13 +71,13 @@ class TestIRCBackendLifecycle:
 class TestWhatsAppWebhookLifecycle:
     def test_whatsapp_has_disconnect(self) -> None:
         """WhatsAppChannelBackend has disconnect() method."""
-        from kiss.agents.channels.whatsapp_agent import WhatsAppChannelBackend
+        from kiss.agents.third_party_agents.whatsapp_agent import WhatsAppChannelBackend
 
         assert hasattr(WhatsAppChannelBackend, "disconnect")
 
     def test_disconnect_calls_shutdown(self) -> None:
         """disconnect() shuts down the webhook server."""
-        from kiss.agents.channels.whatsapp_agent import WhatsAppChannelBackend
+        from kiss.agents.third_party_agents.whatsapp_agent import WhatsAppChannelBackend
 
         source = inspect.getsource(WhatsAppChannelBackend.disconnect)
         assert "shutdown" in source or "stop_http_server" in source
@@ -142,7 +142,7 @@ class TestNoChdirInEntryPoints:
 
     def test_channel_agents_no_os_chdir(self) -> None:
         """Channel agent CLIs do not use os.chdir()."""
-        from kiss.agents.channels import (
+        from kiss.agents.third_party_agents import (
             discord_agent,
             irc_agent,
             slack_agent,
@@ -157,14 +157,14 @@ class TestNoChdirInEntryPoints:
 class TestWebhookBindFailurePropagated:
     def test_whatsapp_connect_fails_on_bind_error(self) -> None:
         """WhatsApp connect() fails if webhook server cannot bind."""
-        from kiss.agents.channels.whatsapp_agent import WhatsAppChannelBackend
+        from kiss.agents.third_party_agents.whatsapp_agent import WhatsAppChannelBackend
 
         source = inspect.getsource(WhatsAppChannelBackend.connect)
         assert "if not self._start_webhook_server()" in source
 
     def test_start_webhook_returns_bool(self) -> None:
         """_start_webhook_server returns a bool success flag."""
-        from kiss.agents.channels.whatsapp_agent import WhatsAppChannelBackend
+        from kiss.agents.third_party_agents.whatsapp_agent import WhatsAppChannelBackend
 
         source = inspect.getsource(WhatsAppChannelBackend._start_webhook_server)
         assert "return True" in source
@@ -174,10 +174,10 @@ class TestWebhookBindFailurePropagated:
 class TestWebhookDistinctPorts:
     def test_each_backend_has_unique_port(self) -> None:
         """Webhook backends use distinct default ports, not all 8080."""
-        from kiss.agents.channels.line_agent import LineChannelBackend
-        from kiss.agents.channels.synology_chat_agent import SynologyChatChannelBackend
-        from kiss.agents.channels.whatsapp_agent import WhatsAppChannelBackend
-        from kiss.agents.channels.zalo_agent import ZaloChannelBackend
+        from kiss.agents.third_party_agents.line_agent import LineChannelBackend
+        from kiss.agents.third_party_agents.synology_chat_agent import SynologyChatChannelBackend
+        from kiss.agents.third_party_agents.whatsapp_agent import WhatsAppChannelBackend
+        from kiss.agents.third_party_agents.zalo_agent import ZaloChannelBackend
 
         backends = [
             WhatsAppChannelBackend,
@@ -244,7 +244,7 @@ class TestGlobalBudgetReset:
 
     def test_poller_resets_budget_on_start(self) -> None:
         """ChannelRunner resets global budget in run_once()."""
-        from kiss.agents.channels._channel_agent_utils import ChannelRunner
+        from kiss.agents.third_party_agents._channel_agent_utils import ChannelRunner
 
         source = inspect.getsource(ChannelRunner.run_once)
         assert "reset_global_budget" in source

@@ -1,7 +1,7 @@
 """Nextcloud Talk Agent — ChatSorcarAgent extension with Nextcloud Talk API tools.
 
 Provides authenticated access to Nextcloud Talk via username/password.
-Stores config in ``~/.kiss/channels/nextcloud/config.json``.
+Stores config in ``~/.kiss/third_party_agents/nextcloud/config.json``.
 
 Usage::
 
@@ -18,8 +18,8 @@ from typing import Any
 
 import requests
 
-from kiss.agents.channels._backend_utils import wait_for_matching_message
-from kiss.agents.channels._channel_agent_utils import (
+from kiss.agents.third_party_agents._backend_utils import wait_for_matching_message
+from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
     ToolMethodBackend,
@@ -27,7 +27,7 @@ from kiss.agents.channels._channel_agent_utils import (
 )
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
-_NEXTCLOUD_DIR = Path.home() / ".kiss" / "channels" / "nextcloud"
+_NEXTCLOUD_DIR = Path.home() / ".kiss" / "third_party_agents" / "nextcloud"
 _config = ChannelConfig(
     _NEXTCLOUD_DIR,
     (

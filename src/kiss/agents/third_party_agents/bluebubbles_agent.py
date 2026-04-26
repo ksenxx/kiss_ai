@@ -1,7 +1,7 @@
 """BlueBubbles Agent — ChatSorcarAgent extension with BlueBubbles REST API tools.
 
 Provides access to iMessage via the BlueBubbles server running on a local Mac.
-macOS only. Stores config in ``~/.kiss/channels/bluebubbles/config.json``.
+macOS only. Stores config in ``~/.kiss/third_party_agents/bluebubbles/config.json``.
 
 Usage::
 
@@ -19,8 +19,8 @@ from typing import Any
 
 import requests
 
-from kiss.agents.channels._backend_utils import wait_for_matching_message
-from kiss.agents.channels._channel_agent_utils import (
+from kiss.agents.third_party_agents._backend_utils import wait_for_matching_message
+from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
     ToolMethodBackend,
@@ -28,7 +28,7 @@ from kiss.agents.channels._channel_agent_utils import (
 )
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
-_BB_DIR = Path.home() / ".kiss" / "channels" / "bluebubbles"
+_BB_DIR = Path.home() / ".kiss" / "third_party_agents" / "bluebubbles"
 
 _PLATFORM_ERROR = json.dumps(
     {
