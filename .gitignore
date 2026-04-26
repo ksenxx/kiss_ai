@@ -36,5 +36,7 @@ jobs/
 *.fdb_latexmk
 *.synctex.gz
 *.fls
+_minted
+_
 
 
