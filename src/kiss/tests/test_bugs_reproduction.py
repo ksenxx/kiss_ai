@@ -142,32 +142,18 @@ class TestI3SnowflakeTruncation:
 
 
 class TestI4ModelUsageNotRecordedOnFailure:
-    def test_record_model_usage_in_finally_block(self) -> None:
-        """_record_model_usage should be called even when the task is
-        stopped or fails, since tokens were still consumed.
+    def test_record_model_usage_not_in_task_runner(self) -> None:
+        """_record_model_usage must NOT be called from _run_task_inner.
+
+        Model usage counts and last_model_used are updated only when the
+        user selects a model via the model picker (_cmd_select_model).
         """
         from kiss.agents.vscode.server import VSCodeServer
 
         source = inspect.getsource(VSCodeServer._run_task_inner)
-
-        lines = source.split("\n")
-        in_finally = False
-        usage_in_finally = False
-        usage_before_finally = False
-        for line in lines:
-            stripped = line.strip()
-            if stripped.startswith("finally:"):
-                in_finally = True
-            if "_record_model_usage" in stripped:
-                if in_finally:
-                    usage_in_finally = True
-                else:
-                    usage_before_finally = True
-
-        assert usage_in_finally and not usage_before_finally, (
-            "_record_model_usage should be in the finally block so it runs "
-            f"even on failure/stop. in_finally={usage_in_finally}, "
-            f"before_finally={usage_before_finally}"
+        assert "_record_model_usage" not in source, (
+            "_record_model_usage should not be in _run_task_inner; "
+            "model usage is updated only via the model picker"
         )
 
 

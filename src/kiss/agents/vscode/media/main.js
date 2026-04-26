@@ -636,6 +636,8 @@
   const sidebarOverlay = document.getElementById('sidebar-overlay');
   const sidebarClose = document.getElementById('sidebar-close');
   const historySearch = document.getElementById('history-search');
+  const modelSearchClear = document.getElementById('model-search-clear');
+  const historySearchClear = document.getElementById('history-search-clear');
   const historyList = document.getElementById('history-list');
   const autocomplete = document.getElementById('autocomplete');
   const askUserModal = document.getElementById('ask-user-modal');
@@ -2232,23 +2234,6 @@
       case 'task_error':
       case 'task_stopped': {
         const isErr = t === 'task_error';
-        if (ev.tabId === undefined || ev.tabId === activeTabId) {
-          const banner = mkEl('div', 'ev tr err');
-          banner.innerHTML =
-            '<div class="rl fail">' +
-            (isErr ? 'ERROR' : 'STOPPED') +
-            '</div>' +
-            '<div class="tr-content">' +
-            esc(
-              isErr
-                ? ev.text || 'Unknown error'
-                : 'Agent execution stopped by user',
-            ) +
-            '</div>';
-          addCollapse(banner, banner.querySelector('.rl'));
-          O.appendChild(banner);
-          collapseOlderPanels();
-        }
         markTabDone(ev.tabId, true);
         setReady(isErr ? 'Error' : 'Stopped', ev.tabId);
         break;
@@ -2375,21 +2360,6 @@
     events.forEach(ev => {
       const t = ev.type;
       if (t === 'task_done' || t === 'task_error' || t === 'task_stopped') {
-        if (t === 'task_error') {
-          const banner = mkEl('div', 'ev tr err');
-          banner.innerHTML =
-            '<div class="rl fail">ERROR</div><div class="tr-content">' +
-            esc(ev.text || 'Unknown error') +
-            '</div>';
-          addCollapse(banner, banner.querySelector('.rl'));
-          container.appendChild(banner);
-        } else if (t === 'task_stopped') {
-          const banner = mkEl('div', 'ev tr err');
-          banner.innerHTML =
-            '<div class="rl fail">STOPPED</div><div class="tr-content">Agent execution stopped by user</div>';
-          addCollapse(banner, banner.querySelector('.rl'));
-          container.appendChild(banner);
-        }
         return;
       }
       if (t === 'followup_suggestion') {
@@ -2831,6 +2801,12 @@
       e.preventDefault();
     });
     stopBtn.addEventListener('click', () => {
+      if (_demoActive) {
+        if (typeof window._cancelDemoReplay === 'function')
+          window._cancelDemoReplay();
+        _demoActive = false;
+        return;
+      }
       vscode.postMessage({type: 'stop', tabId: activeTabId});
     });
     uploadBtn.addEventListener('click', () => {
@@ -2897,12 +2873,24 @@
       }
       modelDropdown.classList.add('open');
       modelSearch.value = '';
+      if (modelSearchClear) modelSearchClear.style.display = 'none';
       renderModelList('');
       modelSearch.focus();
     });
     modelSearch.addEventListener('input', function () {
       renderModelList(this.value);
+      if (modelSearchClear)
+        modelSearchClear.style.display = this.value ? '' : 'none';
     });
+    if (modelSearchClear) {
+      modelSearchClear.addEventListener('click', e => {
+        e.stopPropagation();
+        modelSearch.value = '';
+        renderModelList('');
+        modelSearchClear.style.display = 'none';
+        modelSearch.focus();
+      });
+    }
     modelSearch.addEventListener('keydown', e => {
       const items = modelList.querySelectorAll('.model-item');
       if (e.key === 'ArrowDown') {
@@ -2966,7 +2954,22 @@
         query: historySearch.value,
         generation: historyGeneration,
       });
+      if (historySearchClear)
+        historySearchClear.style.display = historySearch.value ? '' : 'none';
     });
+    if (historySearchClear) {
+      historySearchClear.addEventListener('click', () => {
+        historySearch.value = '';
+        if (historySearchClear) historySearchClear.style.display = 'none';
+        resetHistoryPagination();
+        vscode.postMessage({
+          type: 'getHistory',
+          query: '',
+          generation: historyGeneration,
+        });
+        historySearch.focus();
+      });
+    }
     historyList.addEventListener('scroll', () => {
       if (historyLoading || !historyHasMore) return;
       if (
@@ -3320,6 +3323,7 @@
   function closeModelDD() {
     modelDropdown.classList.remove('open');
     modelSearch.value = '';
+    if (modelSearchClear) modelSearchClear.style.display = 'none';
     modelDDIdx = -1;
   }
 
@@ -3562,6 +3566,9 @@
       resetOutputState();
       clearUsageMetrics();
     },
+    resetOutputState: function () {
+      resetOutputState();
+    },
     processEvent: processOutputEvent,
     setTaskText: setTaskText,
     updateTabTitle: updateActiveTabTitle,
@@ -3578,6 +3585,9 @@
     collapsePanels: function () {
       collapseAllExceptResult(O);
     },
+    setRunningState: setRunningState,
+    showSpinner: showSpinner,
+    removeSpinner: removeSpinner,
   };
 
   // Start
