@@ -4,3 +4,4 @@
 - Claude Code CLI counts as a valid model provider alongside API keys
 - Pre-existing markdown formatting issues in SYSTEM.md should not block task completion
 - When SYSTEM.md changes, the paper must be updated to match the exact prompt text and bullet structure
+- Extension icon is set to media/thumbnail.jpeg in package.json
