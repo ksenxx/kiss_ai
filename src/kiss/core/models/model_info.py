@@ -553,7 +553,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/qwen/qwen3-30b-a3b-thinking-2507": _mi(131072, 0.08, 0.40),
     "openrouter/qwen/qwen3-32b": _mi(40960, 0.08, 0.24, fc=False),
     "openrouter/qwen/qwen3-8b": _mi(40960, 0.05, 0.40, fc=False),
-    "openrouter/qwen/qwen3-coder": _mi(262144, 0.22, 1.00),
+    "openrouter/qwen/qwen3-coder": _mi(262144, 0.22, 1.80),
     "openrouter/qwen/qwen3-coder-30b-a3b-instruct": _mi(160000, 0.07, 0.27),
     "openrouter/qwen/qwen3-coder-flash": _mi(1000000, 0.195, 0.975),
     "openrouter/qwen/qwen3-coder-next": _mi(262144, 0.14, 0.80),
