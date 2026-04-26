@@ -90,9 +90,9 @@ class TestBug39Fix:
         merge view preparation, guaranteeing it always runs.
         (BUG-61 fix supersedes original BUG-39 ordering.)"""
         src = inspect.getsource(VSCodeServer._run_task_inner)
-        outer_finally = src.find("_record_model_usage")
-        assert outer_finally > 0
-        finally_block = src[outer_finally:]
+        finally_idx = src.find("finally:")
+        assert finally_idx > 0
+        finally_block = src[finally_idx:]
 
         assert "is_running_non_wt = False" in finally_block, (
             "BUG-39: flag clear must be in the finally block"
@@ -533,9 +533,9 @@ class TestRed5Fix:
         is True, then the flag is cleared in a ``finally`` block.
         """
         src = inspect.getsource(VSCodeServer._run_task_inner)
-        outer_finally = src.find("_record_model_usage")
-        assert outer_finally > 0
-        finally_block = src[outer_finally:]
+        finally_idx = src.find("finally:")
+        assert finally_idx > 0
+        finally_block = src[finally_idx:]
 
         flag_pos = finally_block.find("tab.is_running_non_wt = False")
         merge_pos = finally_block.find("_prepare_and_start_merge")

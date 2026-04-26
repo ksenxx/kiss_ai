@@ -110,6 +110,10 @@ class Config(BaseModel):
         default_factory=lambda: os.getenv("MINIMAX_API_KEY", ""),
         description="MiniMax API key (can also be set via MINIMAX_API_KEY env var)",
     )
+    max_budget: float = Field(
+        default=200.0,
+        description="Maximum budget in USD for a single agent run",
+    )
 
 
 DEFAULT_CONFIG: Any = Config()
