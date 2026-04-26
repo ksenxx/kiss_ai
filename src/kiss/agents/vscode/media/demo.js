@@ -241,8 +241,8 @@
       const session = items[i];
       const taskText = session.preview || session.title || 'Untitled';
 
-      // Create a new tab for each task after the first
-      if (i > 0) api.createNewTab();
+      // Hide welcome immediately so it's never visible between tasks
+      api.hideWelcome();
 
       // Step 1: Show task text in the input box
       api.setInput(taskText);
@@ -251,10 +251,14 @@
 
       // Step 2: Clear input and prepare output area
       api.clearInput();
-      api.clearForReplay();
+      if (i === 0) {
+        api.clearForReplay();
+      } else {
+        // Continuation: keep existing output, just reset panel state
+        api.resetOutputState();
+      }
       api.setTaskText(taskText);
       api.updateTabTitle(taskText);
-      api.hideWelcome();
 
       // Step 3: Request events from backend
       const events = await requestEvents(api, session.id);

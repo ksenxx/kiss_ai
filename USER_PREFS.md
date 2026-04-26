@@ -49,6 +49,7 @@
 - When a protocol sends structured data that the receiver writes verbatim (e.g. crontab entries), have the sender supply the exact final string rather than decomposing it into fields that the receiver must reassemble; this eliminates parsing on both sides and keeps the wire format faithful to the target format.
 - When adding new webview features, implement them in separate JS files and expose a minimal API from main.js via a window global object, keeping changes to main.js minimal.
 - When replaying events in demo mode, group events into logical panels and replay each panel as a unit with a brief pause and collapse, rather than replaying events one-by-one with individual delays.
+- Demo mode multi-task replay must be a continuation of the same chat: no new tabs between tasks, hide welcome before the input display pause, and only reset output state (not clear the DOM) for subsequent tasks.
 - When adding related work or citations to a LaTeX paper, validate every citation by checking that the arXiv ID returns HTTP 200 or the URL resolves before inserting it into the bibliography. Compile twice with pdflatex and verify no undefined citation warnings remain.
 - When the paper uses a .bib file with BibTeX, build with the full pdflatex-bibtex-pdflatex-pdflatex cycle rather than just pdflatex twice.
 - When asked to cite recent papers, read the abstracts to judge relevance and verify publication dates before adding to the paper. Prioritize papers with high citation counts and direct topical relevance.

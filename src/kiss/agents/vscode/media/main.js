@@ -3592,6 +3592,9 @@
       resetOutputState();
       clearUsageMetrics();
     },
+    resetOutputState: function () {
+      resetOutputState();
+    },
     processEvent: processOutputEvent,
     setTaskText: setTaskText,
     updateTabTitle: updateActiveTabTitle,
