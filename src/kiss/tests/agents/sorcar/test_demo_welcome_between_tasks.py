@@ -197,6 +197,9 @@ window._demoApi = {
     },
     collapsePanels: function() { _demoCalls.push('collapsePanels'); },
     processEvent: function(ev) { _demoCalls.push('processEvent:' + ev.type); },
+    setRunningState: function(v) { _demoCalls.push('setRunningState:' + v); },
+    showSpinner: function() { _demoCalls.push('showSpinner'); },
+    removeSpinner: function() { _demoCalls.push('removeSpinner'); },
 };
 """
             + "\n"

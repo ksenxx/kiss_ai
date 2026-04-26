@@ -2833,6 +2833,12 @@
       e.preventDefault();
     });
     stopBtn.addEventListener('click', () => {
+      if (_demoActive) {
+        if (typeof window._cancelDemoReplay === 'function')
+          window._cancelDemoReplay();
+        _demoActive = false;
+        return;
+      }
       vscode.postMessage({type: 'stop', tabId: activeTabId});
     });
     uploadBtn.addEventListener('click', () => {
@@ -3611,6 +3617,9 @@
     collapsePanels: function () {
       collapseAllExceptResult(O);
     },
+    setRunningState: setRunningState,
+    showSpinner: showSpinner,
+    removeSpinner: removeSpinner,
   };
 
   // Start

@@ -50,6 +50,7 @@
 - When adding new webview features, implement them in separate JS files and expose a minimal API from main.js via a window global object, keeping changes to main.js minimal.
 - When replaying events in demo mode, group events into logical panels and replay each panel as a unit with a brief pause and collapse, rather than replaying events one-by-one with individual delays.
 - Demo mode multi-task replay must be a continuation of the same chat: no new tabs between tasks, hide welcome before the input display pause, and only reset output state (not clear the DOM) for subsequent tasks.
+- Demo replay must show the stop button and spinner by calling setRunningState(true) and showSpinner() at the start, and restore the send button by calling setRunningState(false) and removeSpinner() at the end. The stop button click handler must detect demo mode and cancel the replay instead of sending a stop message to the backend.
 - When adding related work or citations to a LaTeX paper, validate every citation by checking that the arXiv ID returns HTTP 200 or the URL resolves before inserting it into the bibliography. Compile twice with pdflatex and verify no undefined citation warnings remain.
 - When the paper uses a .bib file with BibTeX, build with the full pdflatex-bibtex-pdflatex-pdflatex cycle rather than just pdflatex twice.
 - When asked to cite recent papers, read the abstracts to judge relevance and verify publication dates before adding to the paper. Prioritize papers with high citation counts and direct topical relevance.

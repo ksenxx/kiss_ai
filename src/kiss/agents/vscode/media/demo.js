@@ -228,6 +228,10 @@
     api.active = true;
     cancelRequested = false;
 
+    // Show stop button and spinner for the duration of the replay
+    api.setRunningState(true);
+    api.showSpinner();
+
     // Filter sessions that have stored events, reverse to oldest-first
     const items = sessions
       .filter(s => {
@@ -297,6 +301,8 @@
       }
     }
 
+    api.setRunningState(false);
+    api.removeSpinner();
     api.active = false;
   };
 
@@ -306,7 +312,11 @@
   window._cancelDemoReplay = function () {
     cancelRequested = true;
     const api = getApi();
-    if (api) api.active = false;
+    if (api) {
+      api.active = false;
+      api.setRunningState(false);
+      api.removeSpinner();
+    }
   };
 
   /**
