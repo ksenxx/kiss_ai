@@ -36,10 +36,6 @@
       "reportMissingImports": "none"
     },
     {
-      "root": "src/kiss/benchmarks/swebench_pro/run.py",
-      "reportMissingImports": "none"
-    },
-    {
       "root": "src/kiss/benchmarks/terminal_bench/agent.py",
       "reportMissingImports": "none"
     },
