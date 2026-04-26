@@ -7,6 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 from kiss.agents.sorcar.web_use_tool import (
+    _BLOCKED_URL_RE,
     _SINGLETON_FILES,
     WebUseTool,
     _activate_app,
@@ -80,6 +81,12 @@ KEY_PAGE = b"""<!DOCTYPE html>
   <div id="key-result"></div>
 </body></html>"""
 
+GOOGLE_AUTH_LINK_PAGE = b"""<!DOCTYPE html>
+<html><head><title>Auth Link Page</title></head>
+<body>
+  <a href="https://accounts.google.com/signin">Sign in with Google</a>
+</body></html>"""
+
 
 @pytest.fixture(scope="module")
 def http_server():
@@ -93,6 +100,7 @@ def http_server():
                 "/empty": EMPTY_PAGE,
                 "/newtab": NEW_TAB_PAGE,
                 "/keytest": KEY_PAGE,
+                "/google-auth-link": GOOGLE_AUTH_LINK_PAGE,
             }
             content = pages.get(self.path, FORM_PAGE)
             self.send_response(200)
@@ -198,6 +206,35 @@ class TestFocusHelpers:
         assert not web_tool._is_alive()
         web_tool._ensure_browser()
         assert web_tool._is_alive()
+
+
+class TestBlockedUrls:
+    """Verify that Google authentication URLs are blocked."""
+
+    def test_blocked_url_regex_matches_accounts_google(self):
+        assert _BLOCKED_URL_RE.search("https://accounts.google.com/signin")
+        assert _BLOCKED_URL_RE.search("https://accounts.google.com/o/oauth2/auth")
+        assert _BLOCKED_URL_RE.search("http://accounts.google.com/")
+        assert _BLOCKED_URL_RE.search("https://ACCOUNTS.GOOGLE.COM/signin")
+
+    def test_blocked_url_regex_does_not_match_other_urls(self):
+        assert not _BLOCKED_URL_RE.search("https://www.google.com/search?q=hello")
+        assert not _BLOCKED_URL_RE.search("https://example.com")
+        assert not _BLOCKED_URL_RE.search("https://github.com/login")
+
+    def test_go_to_url_blocks_google_auth(self, web_tool):
+        result = web_tool.go_to_url("https://accounts.google.com/signin")
+        assert "blocked" in result.lower()
+        assert "accounts.google.com" in result
+
+    def test_go_to_url_blocks_google_oauth(self, web_tool):
+        result = web_tool.go_to_url("https://accounts.google.com/o/oauth2/auth?client_id=xxx")
+        assert "blocked" in result.lower()
+
+    def test_go_to_url_allows_non_google_urls(self, web_tool, http_server):
+        result = web_tool.go_to_url(http_server + "/")
+        assert "blocked" not in result.lower()
+        assert "Test Form" in result
 
 
 if __name__ == "__main__":
