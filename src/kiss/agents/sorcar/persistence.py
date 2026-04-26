@@ -201,7 +201,7 @@ def _load_history(limit: int = 0, offset: int = 0) -> list[_HistoryEntry]:
 
     Args:
         limit: Maximum number of entries to return.
-            0 returns up to 10000 entries (hard cap).
+            0 returns all entries (no cap).
         offset: Number of entries to skip before returning results.
 
     Returns:
@@ -209,7 +209,7 @@ def _load_history(limit: int = 0, offset: int = 0) -> list[_HistoryEntry]:
         ``task``, ``has_events``, ``result``, and ``chat_id`` keys.
     """
     db = _get_db()
-    effective_limit = limit if limit > 0 else 10000
+    effective_limit = limit if limit > 0 else -1
     sql = _HISTORY_SELECT + "ORDER BY timestamp DESC LIMIT ? OFFSET ?"
     rows = db.execute(sql, (effective_limit, offset)).fetchall()
     return [dict(r) for r in rows]

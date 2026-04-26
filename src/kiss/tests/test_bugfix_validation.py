@@ -152,13 +152,14 @@ class TestB14FollowupTaskIdGuard:
                 )
 
 
-class TestB15LoadHistoryCap:
-    def test_default_limit_capped(self) -> None:
-        """_load_history(limit=0) uses a hard cap, not unbounded."""
+class TestB15LoadHistoryNoCap:
+    def test_default_limit_uncapped(self) -> None:
+        """_load_history(limit=0) returns all entries (no hard cap)."""
         from kiss.agents.sorcar.persistence import _load_history
 
         source = inspect.getsource(_load_history)
-        assert "10000" in source, "Should have a hard cap of 10000"
+        assert "10000" not in source, "Should not have a hard cap of 10000"
+        assert "-1" in source, "Should use -1 (no limit) when limit is 0"
 
 
 class TestB16CaseSensitiveGlob:
