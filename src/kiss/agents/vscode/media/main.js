@@ -636,6 +636,8 @@
   const sidebarOverlay = document.getElementById('sidebar-overlay');
   const sidebarClose = document.getElementById('sidebar-close');
   const historySearch = document.getElementById('history-search');
+  const modelSearchClear = document.getElementById('model-search-clear');
+  const historySearchClear = document.getElementById('history-search-clear');
   const historyList = document.getElementById('history-list');
   const autocomplete = document.getElementById('autocomplete');
   const askUserModal = document.getElementById('ask-user-modal');
@@ -2897,12 +2899,24 @@
       }
       modelDropdown.classList.add('open');
       modelSearch.value = '';
+      if (modelSearchClear) modelSearchClear.style.display = 'none';
       renderModelList('');
       modelSearch.focus();
     });
     modelSearch.addEventListener('input', function () {
       renderModelList(this.value);
+      if (modelSearchClear)
+        modelSearchClear.style.display = this.value ? '' : 'none';
     });
+    if (modelSearchClear) {
+      modelSearchClear.addEventListener('click', e => {
+        e.stopPropagation();
+        modelSearch.value = '';
+        renderModelList('');
+        modelSearchClear.style.display = 'none';
+        modelSearch.focus();
+      });
+    }
     modelSearch.addEventListener('keydown', e => {
       const items = modelList.querySelectorAll('.model-item');
       if (e.key === 'ArrowDown') {
@@ -2966,7 +2980,22 @@
         query: historySearch.value,
         generation: historyGeneration,
       });
+      if (historySearchClear)
+        historySearchClear.style.display = historySearch.value ? '' : 'none';
     });
+    if (historySearchClear) {
+      historySearchClear.addEventListener('click', () => {
+        historySearch.value = '';
+        if (historySearchClear) historySearchClear.style.display = 'none';
+        resetHistoryPagination();
+        vscode.postMessage({
+          type: 'getHistory',
+          query: '',
+          generation: historyGeneration,
+        });
+        historySearch.focus();
+      });
+    }
     historyList.addEventListener('scroll', () => {
       if (historyLoading || !historyHasMore) return;
       if (
@@ -3320,6 +3349,7 @@
   function closeModelDD() {
     modelDropdown.classList.remove('open');
     modelSearch.value = '';
+    if (modelSearchClear) modelSearchClear.style.display = 'none';
     modelDDIdx = -1;
   }
 
