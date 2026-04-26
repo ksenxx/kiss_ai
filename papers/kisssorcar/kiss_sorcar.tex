@@ -613,6 +613,30 @@ When the agent needs external knowledge, the prompt prescribes a structured rese
 The login instruction addresses a practical obstacle in web research: many websites require authentication before revealing their content. Rather than silently skipping gated pages or hallucinating their contents, we instruct the agent to ask the user for help with login. The Google exception acknowledges that the agent can search the web without a Google account, and asking the user to log in to Google would provide no benefit while creating unnecessary friction.
 
 %......................................................................
+\subsection{File Browsing Protocol}
+%......................................................................
+
+When a task requires understanding multiple source files before making changes, the prompt prescribes the same two-phase collect-then-synthesize discipline used for web research, but applied to the local file system:
+
+\begin{prompt}
+## Browsing files for a task
+
+- When you need to read files for a task,
+  collect information necessary for the task without much
+  thinking in a new file
+  PWD/tmp/file-information-{unique_id}.md. Then go over
+  information in
+  PWD/tmp/file-information-{unique_id}.md, think deeply on
+  how to complete the task at hand, and complete it.
+\end{prompt}
+
+\noindent This instruction addresses a failure mode distinct from the web research case.  When an agent must read many project files to understand a codebase before making changes, it tends to read a file, form a hypothesis, and immediately begin editing---anchoring on the first few files it encounters and missing relevant context in files it never opens.  Worse, each file read consumes context-window tokens; by the time the agent has read enough files to understand the full picture, it may have already spent most of its context on the raw file contents, leaving little room for reasoning and code generation.
+
+The file browsing protocol counteracts both problems.  By writing a structured summary of each file's relevant information into a temporary markdown file, the agent externalizes its understanding into a compact artifact that persists across context boundaries.  The instruction to collect ``without much thinking'' is deliberate: during the collection phase, the agent should extract and record facts (function signatures, class hierarchies, call sites, invariants) rather than analyze or plan.  Analysis happens in the second phase, when the agent reads its own summary file and reasons about the collected information as a whole.
+
+This two-phase separation provides three benefits.  First, it prevents premature commitment: the agent cannot start editing until it has surveyed the relevant files, reducing the risk of changes that are locally correct but globally inconsistent.  Second, the summary file is typically much smaller than the raw source files, freeing context-window capacity for the subsequent reasoning and editing phases.  Third, the summary file serves as an auditable artifact---the developer can inspect it to verify that the agent considered the right files and extracted the right information before making changes.
+
+%......................................................................
 \subsection{Desktop Application Control}
 %......................................................................
 
