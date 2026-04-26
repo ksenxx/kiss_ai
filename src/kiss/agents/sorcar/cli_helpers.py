@@ -16,6 +16,7 @@ from kiss.agents.sorcar.sorcar_agent import (
     _resolve_task,
     cli_ask_user_question,
 )
+from kiss.core.config import DEFAULT_CONFIG
 
 if TYPE_CHECKING:
     from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
@@ -54,7 +55,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "-e", "--endpoint", type=str, default=None, help="Custom endpoint for local model"
     )
     parser.add_argument(
-        "-b", "--max_budget", type=float, default=100.0, help="Maximum budget in USD"
+        "-b", "--max_budget", type=float, default=DEFAULT_CONFIG.max_budget,
+        help="Maximum budget in USD",
     )
     parser.add_argument("-w", "--work_dir", type=str, default=None, help="Working directory")
     parser.add_argument(
