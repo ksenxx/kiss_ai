@@ -2,7 +2,7 @@
   "name": "kiss-sorcar",
   "displayName": "KISS Sorcar",
   "description": "AI coding assistant powered by KISS Sorcar Agent",
-  "version": "2026.4.15",
+  "version": "2026.4.16",
   "publisher": "ksenxx",
   "repository": {
     "type": "git",
@@ -19,7 +19,7 @@
   "activationEvents": [
     "onStartupFinished"
   ],
-  "icon": "media/icon.png",
+  "icon": "media/thumbnail.jpeg",
   "main": "./out/extension.js",
   "contributes": {
     "viewsContainers": {

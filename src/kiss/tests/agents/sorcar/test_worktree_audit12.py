@@ -304,9 +304,8 @@ class TestBug61NonWtMergeViewRace:
 
         finally_start = None
         for i, line in enumerate(lines):
-            if "finally:" in line and "# Entire cleanup" not in line:
-                continue
-            if "_record_model_usage" in line:
+            stripped = line.strip()
+            if stripped.startswith("finally:"):
                 finally_start = i
                 break
 

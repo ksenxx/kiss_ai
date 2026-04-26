@@ -369,8 +369,8 @@ async function ensureDependenciesImpl(): Promise<void> {
         });
     } else {
       vscode.window.showWarningMessage(
-        'KISS Sorcar: Installation complete, but at least one LLM API key is required. ' +
-          'Set an API key (Anthropic, OpenAI, Gemini, Together AI, or OpenRouter) in your environment or restart VS Code to be prompted again.',
+        'KISS Sorcar: Installation complete, but at least one of Claude Code, ANTHROPIC_API_KEY, or OPENAI_API_KEY is required. ' +
+          'Set an API key in your environment or restart VS Code to be prompted again.',
       );
     }
   }
@@ -1226,26 +1226,13 @@ async function ensureApiKeys(): Promise<boolean> {
       displayName: 'OpenAI API Key',
       placeholder: 'sk-...',
     },
-    {
-      envName: 'GEMINI_API_KEY',
-      displayName: 'Gemini API Key',
-      placeholder: 'AI...',
-    },
-    {
-      envName: 'TOGETHER_API_KEY',
-      displayName: 'Together API Key',
-      placeholder: 'tok-...',
-    },
-    {
-      envName: 'OPENROUTER_API_KEY',
-      displayName: 'OpenRouter API Key',
-      placeholder: 'sk-or-...',
-    },
   ];
 
-  const hasAnyKey = () => keys.some(k => !!process.env[k.envName]);
+  const hasClaudeCli = commandExists('claude');
+  const hasAnyKey = () =>
+    hasClaudeCli || keys.some(k => !!process.env[k.envName]);
 
-  // If at least one key is already set, no prompting needed
+  // If claude CLI or at least one key is already set, no prompting needed
   if (hasAnyKey()) return true;
 
   const markerPath = path.join(LOG_DIR, '.api-keys-prompted');
@@ -1276,7 +1263,7 @@ async function ensureApiKeys(): Promise<boolean> {
 
     // No key provided — warn and offer retry
     const choice = await vscode.window.showWarningMessage(
-      'KISS Sorcar requires at least one LLM API key (Anthropic, OpenAI, Gemini, Together AI, or OpenRouter).',
+      'KISS Sorcar requires Claude Code, ANTHROPIC_API_KEY, or OPENAI_API_KEY to work.',
       'Enter Key',
       'Skip',
     );

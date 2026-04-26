@@ -10,7 +10,7 @@ from typing import Any
 
 import yaml
 
-from kiss.agents.sorcar.persistence import _load_last_model, _save_last_model
+from kiss.agents.sorcar.persistence import _load_last_model
 from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.agents.sorcar.web_use_tool import WebUseTool
 from kiss.core.base import SYSTEM_PROMPT
@@ -151,7 +151,6 @@ class SorcarAgent(RelentlessAgent):
         verbose: bool | None = None,
     ) -> None:
         resolved_model = model_name or _load_last_model() or get_default_model()
-        _save_last_model(resolved_model)
         super()._reset(
             model_name=resolved_model,
             max_sub_sessions=max_sub_sessions,

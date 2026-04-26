@@ -92,6 +92,43 @@ def _flat_to_nested_dict(
     return nested
 
 
+def build_config() -> None:
+    """Parse CLI arguments for Config fields and update DEFAULT_CONFIG.
+
+    Makes all fields in the base :class:`Config` class accessible via
+    command-line flags.  For example ``--max-budget 300.0`` overrides the
+    default ``max_budget``.  Only explicitly provided arguments take effect;
+    omitted flags keep their defaults.
+
+    If ``DEFAULT_CONFIG`` has already been extended by prior
+    :func:`add_config` calls, those extra fields are preserved and also
+    made available on the command line.
+    """
+    current_type = type(config_module.DEFAULT_CONFIG)
+
+    parser = ArgumentParser(description="KISS Configuration")
+    _add_model_arguments(parser, current_type)
+    parsed_args, _ = parser.parse_known_args()
+
+    overrides = _flat_to_nested_dict(vars(parsed_args), current_type)
+
+    if overrides:
+        defaults = config_module.DEFAULT_CONFIG.model_dump()
+
+        def merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+            result = base.copy()
+            for k, v in override.items():
+                if k in result and isinstance(result[k], dict) and isinstance(v, dict):
+                    result[k] = merge(cast(dict[str, Any], result[k]), cast(dict[str, Any], v))
+                else:
+                    result[k] = v
+            return result
+
+        config_module.DEFAULT_CONFIG = current_type.model_validate(
+            merge(defaults, overrides)
+        )
+
+
 def add_config(name: str, config_class: type[BaseModel]) -> None:
     """Build the KISS config, optionally overriding with command-line arguments.
 
