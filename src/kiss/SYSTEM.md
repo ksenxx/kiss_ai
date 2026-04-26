@@ -87,7 +87,7 @@ For simple single-file tasks, skip formal planning and execute directly.
 ## Browsing files for a task
 
 - When you need to read files for a task,
-  collect information necessary for the task without much thinking in a new file PWD/tmp/file-information-{unique_id}.md. Then go over information in
+  collect information including code snippets necessary for the task without much thinking in a new file PWD/tmp/file-information-{unique_id}.md. Then go over information in
   PWD/tmp/file-information-{unique_id}.md, think deeply on how to complete the task at hand, and complete it.
 
 ## Launch desktop apps
