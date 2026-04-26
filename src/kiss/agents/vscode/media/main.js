@@ -956,6 +956,25 @@
     el.querySelector('.arrow').classList.toggle('collapsed');
   }
 
+  /**
+   * Recursively collect text from a DOM node, inserting a space before each
+   * element-node boundary so that adjacent block-level elements (divs, pres)
+   * produce separated words.  Unlike innerText, this works correctly even
+   * when the node is hidden (display:none), where innerText falls back to
+   * textContent and concatenates block children without separators.
+   */
+  function collectText(node) {
+    if (node.nodeType === 3) return node.textContent || '';
+    let out = '';
+    for (let i = 0; i < node.childNodes.length; i++) {
+      const child = node.childNodes[i];
+      const t = collectText(child);
+      if (child.nodeType === 1 && out.length > 0 && t.length > 0) out += ' ';
+      out += t;
+    }
+    return out;
+  }
+
   function collapsePreview(panelEl) {
     const prev = panelEl.querySelector('.collapse-preview');
     if (!prev) return;
@@ -972,7 +991,7 @@
         ch.querySelector('.collapse-chv')
       )
         continue;
-      txt += (ch.innerText || '') + ' ';
+      txt += collectText(ch) + ' ';
     }
     txt = txt.replace(/\s+/g, ' ').trim();
     prev.textContent = txt;
