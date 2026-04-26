@@ -3,7 +3,7 @@
 Provides authenticated access to a Gmail account via OAuth2.
 Handles authentication (reading token from disk or prompting the user
 via the browser), stores the token securely in
-``~/.kiss/channels/gmail/token.json``, and exposes a focused set of
+``~/.kiss/third_party_agents/gmail/token.json``, and exposes a focused set of
 Gmail API tools that give the agent full control over email.
 
 Usage::
@@ -27,15 +27,15 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
-from kiss.agents.channels._backend_utils import is_headless_environment, wait_for_matching_message
-from kiss.agents.channels._channel_agent_utils import (
+from kiss.agents.third_party_agents._backend_utils import is_headless_environment, wait_for_matching_message
+from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ToolMethodBackend,
     channel_main,
 )
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
-_GMAIL_DIR = Path.home() / ".kiss" / "channels" / "gmail"
+_GMAIL_DIR = Path.home() / ".kiss" / "third_party_agents" / "gmail"
 _SCOPES = [
     "https://mail.google.com/",
 ]
@@ -45,7 +45,7 @@ def _token_path() -> Path:
     """Return the path to the stored Gmail OAuth2 token file.
 
     Returns:
-        Path to ``~/.kiss/channels/gmail/token.json``.
+        Path to ``~/.kiss/third_party_agents/gmail/token.json``.
     """
     return _GMAIL_DIR / "token.json"
 
@@ -54,7 +54,7 @@ def _credentials_path() -> Path:
     """Return the path to the OAuth2 client credentials file.
 
     Returns:
-        Path to ``~/.kiss/channels/gmail/credentials.json``.
+        Path to ``~/.kiss/third_party_agents/gmail/credentials.json``.
     """
     return _GMAIL_DIR / "credentials.json"
 
@@ -107,7 +107,7 @@ def _clear_credentials() -> None:
 def _run_oauth_flow() -> Credentials | None:
     """Run the OAuth2 installed-app flow to get new credentials.
 
-    Requires ``~/.kiss/channels/gmail/credentials.json`` to exist
+    Requires ``~/.kiss/third_party_agents/gmail/credentials.json`` to exist
     (downloaded from Google Cloud Console).
 
     In headless/Docker environments, falls back to ``run_console()`` which
@@ -1023,7 +1023,7 @@ class GmailAgent(BaseChannelAgent, ChatSorcarAgent):
 
             Opens a browser window for the user to authorize access.
             Requires credentials.json to exist at
-            ~/.kiss/channels/gmail/credentials.json.
+            ~/.kiss/third_party_agents/gmail/credentials.json.
 
             Returns:
                 Authentication result with email address, or error message.
@@ -1075,7 +1075,7 @@ class GmailAgent(BaseChannelAgent, ChatSorcarAgent):
             3. Go to Credentials > Create Credentials > OAuth client ID.
             4. Choose "Desktop app" as the application type, give it a name.
             5. Download the JSON file and save it to:
-               ~/.kiss/channels/gmail/credentials.json
+               ~/.kiss/third_party_agents/gmail/credentials.json
             6. Call authenticate_gmail() to complete the OAuth consent flow.
             Use ask_user_question() if you need user help with Google account login screens.
 

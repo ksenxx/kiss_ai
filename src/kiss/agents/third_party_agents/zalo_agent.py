@@ -2,7 +2,7 @@
 
 Provides authenticated access to Zalo OA via access token. Covers both
 extensions/zalo/ (OA API) and extensions/zalouser/ (personal). Stores
-config in ``~/.kiss/channels/zalo/config.json``.
+config in ``~/.kiss/third_party_agents/zalo/config.json``.
 
 Usage::
 
@@ -23,12 +23,12 @@ from typing import Any
 
 import requests
 
-from kiss.agents.channels._backend_utils import (
+from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     stop_http_server,
     wait_for_matching_message,
 )
-from kiss.agents.channels._channel_agent_utils import (
+from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
     ToolMethodBackend,
@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_WEBHOOK_PORT = 18082
 
-_ZALO_DIR = Path.home() / ".kiss" / "channels" / "zalo"
+_ZALO_DIR = Path.home() / ".kiss" / "third_party_agents" / "zalo"
 _API_BASE = "https://openapi.zalo.me/v2.0/oa"
 _config = ChannelConfig(_ZALO_DIR, ("access_token",))
 

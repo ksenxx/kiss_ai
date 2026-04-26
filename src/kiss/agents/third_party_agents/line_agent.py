@@ -2,7 +2,7 @@
 
 Provides authenticated access to LINE via channel access token. Uses webhook
 queue pattern for receiving messages. Stores config in
-``~/.kiss/channels/line/config.json``.
+``~/.kiss/third_party_agents/line/config.json``.
 
 Usage::
 
@@ -21,12 +21,12 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.channels._backend_utils import (
+from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     stop_http_server,
     wait_for_matching_message,
 )
-from kiss.agents.channels._channel_agent_utils import (
+from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
     ToolMethodBackend,
@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_WEBHOOK_PORT = 18081
 
-_LINE_DIR = Path.home() / ".kiss" / "channels" / "line"
+_LINE_DIR = Path.home() / ".kiss" / "third_party_agents" / "line"
 _config = ChannelConfig(_LINE_DIR, ("channel_access_token",))
 
 

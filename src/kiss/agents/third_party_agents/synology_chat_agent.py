@@ -1,7 +1,7 @@
 """Synology Chat Agent — ChatSorcarAgent extension with Synology Chat webhook API.
 
 Provides access to Synology Chat via incoming and outgoing webhooks.
-Stores config in ``~/.kiss/channels/synology/config.json``.
+Stores config in ``~/.kiss/third_party_agents/synology/config.json``.
 
 Usage::
 
@@ -23,12 +23,12 @@ from urllib.parse import parse_qs
 
 import requests
 
-from kiss.agents.channels._backend_utils import (
+from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     stop_http_server,
     wait_for_matching_message,
 )
-from kiss.agents.channels._channel_agent_utils import (
+from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
     ToolMethodBackend,
@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_WEBHOOK_PORT = 18083
 
-_SYNOLOGY_DIR = Path.home() / ".kiss" / "channels" / "synology"
+_SYNOLOGY_DIR = Path.home() / ".kiss" / "third_party_agents" / "synology"
 _config = ChannelConfig(_SYNOLOGY_DIR, ("webhook_url",))
 
 
