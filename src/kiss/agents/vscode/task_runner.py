@@ -36,6 +36,7 @@ from kiss.agents.vscode.diff_merge import (
 )
 from kiss.agents.vscode.tab_state import parse_task_tags
 from kiss.core.models.model import Attachment
+from kiss.core.models.model_info import get_available_models
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +152,22 @@ class _TaskRunnerMixin:
         tab_id = cmd.get("tabId", "")
         tab = self._get_tab(tab_id)
         model = cmd.get("model") or tab.selected_model
+
+        available = get_available_models()
+        if not available or (model and model not in available):
+            no_model_msg = (
+                "No model available.  Set at least one API key in the environment."
+            )
+            self.printer.broadcast({
+                "type": "result",
+                "text": no_model_msg,
+                "success": False,
+                "total_tokens": 0,
+                "cost": "$0.0000",
+                "step_count": 0,
+            })
+            return
+
         with self._state_lock:
             if tab.is_merging:
                 self.printer.broadcast(
