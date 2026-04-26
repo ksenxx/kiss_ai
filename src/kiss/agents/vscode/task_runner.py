@@ -244,10 +244,26 @@ class _TaskRunnerMixin:
                 except KeyboardInterrupt:
                     result_summary = "Task stopped by user"
                     task_end_event = {"type": "task_stopped"}
+                    self.printer.broadcast({
+                        "type": "result",
+                        "text": result_summary,
+                        "success": False,
+                        "total_tokens": tab.agent.total_tokens_used,
+                        "cost": f"${tab.agent.budget_used:.4f}",
+                        "step_count": tab.agent.step_count,
+                    })
                     break
-                except Exception as e:  # pragma: no cover
+                except Exception as e:
                     result_summary = f"Task failed: {e}"
                     task_end_event = {"type": "task_error", "text": str(e)}
+                    self.printer.broadcast({
+                        "type": "result",
+                        "text": result_summary,
+                        "success": False,
+                        "total_tokens": tab.agent.total_tokens_used,
+                        "cost": f"${tab.agent.budget_used:.4f}",
+                        "step_count": tab.agent.step_count,
+                    })
                     break
                 finally:
                     tab.task_history_id = tab.agent._last_task_id

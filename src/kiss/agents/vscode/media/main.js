@@ -2234,23 +2234,6 @@
       case 'task_error':
       case 'task_stopped': {
         const isErr = t === 'task_error';
-        if (ev.tabId === undefined || ev.tabId === activeTabId) {
-          const banner = mkEl('div', 'ev tr err');
-          banner.innerHTML =
-            '<div class="rl fail">' +
-            (isErr ? 'ERROR' : 'STOPPED') +
-            '</div>' +
-            '<div class="tr-content">' +
-            esc(
-              isErr
-                ? ev.text || 'Unknown error'
-                : 'Agent execution stopped by user',
-            ) +
-            '</div>';
-          addCollapse(banner, banner.querySelector('.rl'));
-          O.appendChild(banner);
-          collapseOlderPanels();
-        }
         markTabDone(ev.tabId, true);
         setReady(isErr ? 'Error' : 'Stopped', ev.tabId);
         break;
@@ -2377,21 +2360,6 @@
     events.forEach(ev => {
       const t = ev.type;
       if (t === 'task_done' || t === 'task_error' || t === 'task_stopped') {
-        if (t === 'task_error') {
-          const banner = mkEl('div', 'ev tr err');
-          banner.innerHTML =
-            '<div class="rl fail">ERROR</div><div class="tr-content">' +
-            esc(ev.text || 'Unknown error') +
-            '</div>';
-          addCollapse(banner, banner.querySelector('.rl'));
-          container.appendChild(banner);
-        } else if (t === 'task_stopped') {
-          const banner = mkEl('div', 'ev tr err');
-          banner.innerHTML =
-            '<div class="rl fail">STOPPED</div><div class="tr-content">Agent execution stopped by user</div>';
-          addCollapse(banner, banner.querySelector('.rl'));
-          container.appendChild(banner);
-        }
         return;
       }
       if (t === 'followup_suggestion') {
