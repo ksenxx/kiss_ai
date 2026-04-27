@@ -213,15 +213,21 @@ class _TaskRunnerMixin:
         if not use_worktree:
             with self._state_lock:
                 tab.is_running_non_wt = True
-            try:
-                repo = GitWorktreeOps.discover_repo(Path(work_dir))
+                deferred = tab.deferred_snapshot
+            if deferred is not None:
                 pre_head_sha, pre_hunks, pre_untracked, pre_file_hashes = (
-                    self._capture_pre_snapshot(work_dir, repo, tab_id)
+                    deferred
                 )
-            except BaseException:
-                with self._state_lock:
-                    tab.is_running_non_wt = False
-                raise
+            else:
+                try:
+                    repo = GitWorktreeOps.discover_repo(Path(work_dir))
+                    pre_head_sha, pre_hunks, pre_untracked, pre_file_hashes = (
+                        self._capture_pre_snapshot(work_dir, repo, tab_id)
+                    )
+                except BaseException:
+                    with self._state_lock:
+                        tab.is_running_non_wt = False
+                    raise
 
         # BUG-B fix: if this worktree tab has a pending branch from a
         if use_worktree and tab.agent._wt_pending:
@@ -294,7 +300,17 @@ class _TaskRunnerMixin:
                 self.printer.stop_recording()
                 if not use_worktree:
                     try:
-                        if not tab.skip_merge:
+                        if tab.skip_merge:
+                            with self._state_lock:
+                                tab.deferred_snapshot = (
+                                    pre_head_sha,
+                                    pre_hunks,
+                                    pre_untracked,
+                                    pre_file_hashes,
+                                )
+                        else:
+                            with self._state_lock:
+                                tab.deferred_snapshot = None
                             self._prepare_and_start_merge(
                                 work_dir, pre_hunks, pre_untracked, pre_file_hashes,
                                 base_ref=pre_head_sha or "HEAD",
