@@ -65,6 +65,7 @@ class _TabState:
         "is_merging",
         "is_running_non_wt",
         "is_task_active",
+        "skip_merge",
     )
 
     def __init__(self, tab_id: str, default_model: str) -> None:
@@ -79,3 +80,4 @@ class _TabState:
         self.is_merging: bool = False
         self.is_running_non_wt: bool = False
         self.is_task_active: bool = False
+        self.skip_merge: bool = False
