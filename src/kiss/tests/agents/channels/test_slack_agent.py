@@ -17,6 +17,7 @@ from typing import Any, cast
 import pytest
 
 import kiss.agents.sorcar.persistence as th
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.third_party_agents.slack_agent import (
     _SLACK_DIR,
     SlackAgent,
@@ -29,7 +30,6 @@ from kiss.agents.third_party_agents.slack_agent import (
     _token_path,
     main,
 )
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 
 
 def _backup_and_clear() -> str | None:
@@ -279,7 +279,9 @@ _SLACK_TOOL_ERROR_CASES = [
     ("add_reaction", {"channel": "C01234567", "timestamp": "1234.5678", "name": "thumbsup"}),
     ("search_messages", {"query": "test"}),
     ("set_channel_topic", {"channel": "C01234567", "topic": "new topic"}),
-    ("upload_file", {"third_party_agents": "C01234567", "content": "hello", "filename": "test.txt"}),
+    ("upload_file", {
+        "third_party_agents": "C01234567", "content": "hello", "filename": "test.txt",
+    }),
     ("get_channel_info", {"channel": "C01234567"}),
 ]
 

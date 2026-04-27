@@ -120,9 +120,10 @@ class TestAwaitUserResponseNoLock(unittest.TestCase):
     ``_close_tab`` which pops the entry under the lock.
     """
 
-    def test_source_has_no_lock_around_tab_states_get(self) -> None:
-        """Structural: ``_tab_states.get`` is NOT inside a
-        ``with self._state_lock`` block in ``_await_user_response``.
+    def test_source_has_lock_around_tab_states_get(self) -> None:
+        """Structural: ``_tab_states.get`` IS inside a
+        ``with self._state_lock`` block in ``_await_user_response``
+        (confirming the N2 data race fix).
         """
         src = inspect.getsource(_TaskRunnerMixin._await_user_response)
         lines = src.splitlines()
@@ -137,11 +138,10 @@ class TestAwaitUserResponseNoLock(unittest.TestCase):
             "N2: could not find _tab_states.get in _await_user_response"
         )
 
-        # Check that there is NO _state_lock in the preceding lines
+        # Check that _state_lock IS in the preceding lines (fix confirmed)
         preceding = "\n".join(lines[max(0, tab_get_idx - 5):tab_get_idx])
-        assert "_state_lock" not in preceding, (
-            "N2: _tab_states.get should NOT be protected by _state_lock "
-            "(confirming the bug exists)"
+        assert "_state_lock" in preceding, (
+            "N2 fix: _tab_states.get should be protected by _state_lock"
         )
 
     def test_close_tab_mutates_tab_states_under_lock(self) -> None:

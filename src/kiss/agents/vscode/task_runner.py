@@ -213,15 +213,21 @@ class _TaskRunnerMixin:
         if not use_worktree:
             with self._state_lock:
                 tab.is_running_non_wt = True
-            try:
-                repo = GitWorktreeOps.discover_repo(Path(work_dir))
+                deferred = tab.deferred_snapshot
+            if deferred is not None:
                 pre_head_sha, pre_hunks, pre_untracked, pre_file_hashes = (
-                    self._capture_pre_snapshot(work_dir, repo, tab_id)
+                    deferred
                 )
-            except BaseException:
-                with self._state_lock:
-                    tab.is_running_non_wt = False
-                raise
+            else:
+                try:
+                    repo = GitWorktreeOps.discover_repo(Path(work_dir))
+                    pre_head_sha, pre_hunks, pre_untracked, pre_file_hashes = (
+                        self._capture_pre_snapshot(work_dir, repo, tab_id)
+                    )
+                except BaseException:
+                    with self._state_lock:
+                        tab.is_running_non_wt = False
+                    raise
 
         # BUG-B fix: if this worktree tab has a pending branch from a
         if use_worktree and tab.agent._wt_pending:
@@ -261,29 +267,23 @@ class _TaskRunnerMixin:
                 except KeyboardInterrupt:
                     result_summary = "Task stopped by user"
                     task_end_event = {"type": "task_stopped"}
-                    self.printer.broadcast({
-                        "type": "result",
-                        "text": result_summary,
-                        "success": False,
-                        "total_tokens": tab.agent.total_tokens_used,
-                        "cost": f"${tab.agent.budget_used:.4f}",
-                        "step_count": tab.agent.step_count,
-                    })
-                    break
                 except Exception as e:
                     result_summary = f"Task failed: {e}"
                     task_end_event = {"type": "task_error", "text": str(e)}
-                    self.printer.broadcast({
-                        "type": "result",
-                        "text": result_summary,
-                        "success": False,
-                        "total_tokens": tab.agent.total_tokens_used,
-                        "cost": f"${tab.agent.budget_used:.4f}",
-                        "step_count": tab.agent.step_count,
-                    })
-                    break
+                else:
+                    continue
                 finally:
                     tab.task_history_id = tab.agent._last_task_id
+                # Only reached from except handlers (else: continue skips)
+                self.printer.broadcast({
+                    "type": "result",
+                    "text": result_summary,
+                    "success": False,
+                    "total_tokens": tab.agent.total_tokens_used,
+                    "cost": f"${tab.agent.budget_used:.4f}",
+                    "step_count": tab.agent.step_count,
+                })
+                break
         except BaseException:  # pragma: no cover — async interrupt before inner try
             task_end_event = task_end_event or {"type": "task_stopped"}
         finally:
@@ -294,11 +294,22 @@ class _TaskRunnerMixin:
                 self.printer.stop_recording()
                 if not use_worktree:
                     try:
-                        self._prepare_and_start_merge(
-                            work_dir, pre_hunks, pre_untracked, pre_file_hashes,
-                            base_ref=pre_head_sha or "HEAD",
-                            tab_id=tab_id,
-                        )
+                        if tab.skip_merge:
+                            with self._state_lock:
+                                tab.deferred_snapshot = (
+                                    pre_head_sha,
+                                    pre_hunks,
+                                    pre_untracked,
+                                    pre_file_hashes,
+                                )
+                        else:
+                            with self._state_lock:
+                                tab.deferred_snapshot = None
+                            self._prepare_and_start_merge(
+                                work_dir, pre_hunks, pre_untracked, pre_file_hashes,
+                                base_ref=pre_head_sha or "HEAD",
+                                tab_id=tab_id,
+                            )
                     except BaseException:  # pragma: no cover — merge view error handler
                         logger.debug("Merge view error", exc_info=True)
                     finally:
@@ -331,7 +342,7 @@ class _TaskRunnerMixin:
                 )
                 self.printer.broadcast({"type": "tasks_updated"})
                 self.printer.reset()
-                if use_worktree and tab.agent._wt_pending:
+                if use_worktree and tab.agent._wt_pending and not tab.skip_merge:
                     try:
                         self._present_pending_worktree(
                             tab_id, try_merge_review=True,

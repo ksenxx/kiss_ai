@@ -18,13 +18,13 @@ from typing import Any
 
 import requests
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
     ToolMethodBackend,
     channel_main,
 )
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
 _TWITCH_DIR = Path.home() / ".kiss" / "third_party_agents" / "twitch"
 _HELIX_BASE = "https://api.twitch.tv/helix"
@@ -262,8 +262,10 @@ class TwitchChannelBackend(ToolMethodBackend):
             JSON string with matching third_party_agents.
         """
         try:
-            result = self._get("/search/third_party_agents", params={"query": query, "first": limit})
-            return json.dumps({"ok": True, "third_party_agents": result.get("data", [])}, indent=2)[:8000]
+            params = {"query": query, "first": limit}
+            result = self._get("/search/third_party_agents", params=params)
+            data = {"ok": True, "third_party_agents": result.get("data", [])}
+            return json.dumps(data, indent=2)[:8000]
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
