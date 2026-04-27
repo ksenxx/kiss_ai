@@ -26,6 +26,7 @@ from typing import Any, cast
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.third_party_agents._backend_utils import wait_for_matching_message
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
@@ -35,7 +36,6 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     load_json_config,
     save_json_config,
 )
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +132,8 @@ class SlackChannelBackend(ToolMethodBackend):
         if not token:
             self._connection_info = (
                 "No Slack token found. Please store a bot token first.\n"
-                "Run: uv run python -m kiss.agents.third_party_agents.slack_agent --task 'check auth'\n"
+                "Run: uv run python -m kiss.agents.third_party_agents"
+                ".slack_agent --task 'check auth'\n"
                 "Or manually save token to ~/.kiss/third_party_agents/slack/token.json"
             )
             return False
@@ -777,7 +778,9 @@ class SlackChannelBackend(ToolMethodBackend):
         except SlackApiError as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    def upload_file(self, third_party_agents: str, content: str, filename: str, title: str = "") -> str:
+    def upload_file(
+        self, third_party_agents: str, content: str, filename: str, title: str = "",
+    ) -> str:
         """Upload text content as a file to Slack third_party_agents.
 
         Args:
@@ -964,7 +967,8 @@ class SlackAgent(BaseChannelAgent, ChatSorcarAgent):
             Navigates to the Slack API portal. Use your browser tools (go_to_url,
             click, type_text) to complete the following steps autonomously:
             1. Create a new app ("From scratch"), give it a name, select a workspace.
-            2. Go to "OAuth & Permissions", add bot scopes (third_party_agents:read, chat:write, etc.).
+            2. Go to "OAuth & Permissions", add bot scopes
+               (third_party_agents:read, chat:write, etc.).
             3. Click "Install to Workspace" and approve the installation.
             4. Copy the "Bot User OAuth Token" (starts with xoxb-).
             5. Call authenticate_slack(token=<the token>).

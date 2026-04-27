@@ -3113,9 +3113,17 @@
         curTab.taskQueue.push({
           prompt: prompt,
           model: selectedModel,
-          attachments: attachments.map(a => ({name: a.name, mimeType: a.type, data: a.data})),
-          useWorktree: !!(worktreeToggleBtn && worktreeToggleBtn.classList.contains('active')),
-          useParallel: !!(parallelToggleBtn && parallelToggleBtn.classList.contains('active')),
+          attachments: attachments.map(a => ({
+            name: a.name,
+            mimeType: a.type,
+            data: a.data,
+          })),
+          useWorktree: !!(
+            worktreeToggleBtn && worktreeToggleBtn.classList.contains('active')
+          ),
+          useParallel: !!(
+            parallelToggleBtn && parallelToggleBtn.classList.contains('active')
+          ),
           workDir: curTab.workDir || '',
         });
         // Tell backend to skip merge/diff for the currently running task

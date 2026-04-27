@@ -88,10 +88,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
             resolveMap.set(tabId, resolve);
           }
           setTimeout(() => {
-            if (
-              tabId !== undefined &&
-              resolveMap.get(tabId) === resolve
-            ) {
+            if (tabId !== undefined && resolveMap.get(tabId) === resolve) {
               resolveMap.delete(tabId);
               resolve();
             }
