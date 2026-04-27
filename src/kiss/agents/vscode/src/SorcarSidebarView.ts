@@ -477,11 +477,25 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     useParallel?: boolean,
     tabId?: string,
     workDir?: string,
+    skipMerge?: boolean,
+    reuseProcess?: boolean,
   ): void {
     const effectiveWorkDir = workDir || this._getWorkDir();
-    const proc = tabId
-      ? this._createTaskProcess(tabId)
-      : this._createTaskProcess(this._activeTabId || '__default__');
+    const effectiveTabId = tabId || this._activeTabId || '__default__';
+
+    // Reuse existing process for queued tasks to preserve deferred_snapshot
+    let proc: AgentProcess;
+    if (reuseProcess) {
+      const existing = this._taskProcesses.get(effectiveTabId);
+      if (existing && existing.isAlive) {
+        proc = existing;
+      } else {
+        proc = this._createTaskProcess(effectiveTabId);
+      }
+    } else {
+      proc = this._createTaskProcess(effectiveTabId);
+    }
+
     const started = proc.start(effectiveWorkDir);
     if (!started) {
       if (tabId !== undefined) this._runningTabs.delete(tabId);
@@ -500,6 +514,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       useWorktree,
       useParallel,
       tabId,
+      skipMerge,
     });
   }
 
@@ -565,6 +580,8 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           message.useParallel,
           tabId,
           effectiveWorkDir,
+          message.skipMerge,
+          message.reuseProcess,
         );
         break;
       }

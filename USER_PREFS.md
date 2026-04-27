@@ -11,11 +11,12 @@
 - All markdown files must pass mdformat check; run mdformat on files after content changes
 - Database queries should not have arbitrary hard caps; use unbounded queries when no limit is specified
 - Code listings in the paper should not have line numbers unless explicitly requested
-- NEVER navigate to Google authentication URLs (accounts.google.com, any Google sign-in or OAuth page) when using web browsing tools; this is enforced in code via _BLOCKED_URL_RE in web_use_tool.py
+- NEVER navigate to Google authentication URLs (accounts.google.com, any Google sign-in or OAuth page) when using web browsing tools; this is enforced in code via \_BLOCKED_URL_RE in web_use_tool.py
 - When verifying citations, check arXiv paper titles against bib entries, verify non-arXiv URLs return HTTP 200, and confirm conference paper venues and years against official proceedings
 - Chat input must never be disabled while a task is running; new tasks are queued locally and auto-submitted when the running task finishes
 - When tasks are queued, merge/diff review and autocommit prompts must be deferred until the last queued task completes; intermediate tasks skip merge via the backend skip_merge flag
 - When merge is skipped for a queued task, the pre-task file snapshot must NOT be recaptured for subsequent queued tasks; the original baseline from the first task is preserved via tab.deferred_snapshot
+- Queued tasks must reuse the existing backend process (reuseProcess flag) to preserve deferred_snapshot across tasks; skipMerge flag must be passed in the run command so each process gets it directly
 - When fixing structural tests that check source code patterns, read the actual source first to understand the current code structure before updating test assertions
 - Test commands that pass model names to the server must use valid model names or empty strings to avoid early-return from the model availability check
 - When updating README model lists, read the actual MODEL_INFO data to get precise model names instead of guessing; group by vendor and list only non-dated aliases
