@@ -3168,14 +3168,9 @@
     if (!tab || !tab.taskQueue || tab.taskQueue.length === 0) return;
     const task = tab.taskQueue.shift();
     updateQueueIndicator();
-    // If there are still more queued tasks, tell backend to skip merge
-    // for this task too. If this is the last task, allow merge to run.
+    // If there are still more queued tasks, skip merge for this task.
+    // If this is the last task, allow merge to run.
     const hasMoreQueued = tab.taskQueue.length > 0;
-    vscode.postMessage({
-      type: 'setSkipMerge',
-      tabId: tab.id,
-      skip: hasMoreQueued,
-    });
     const msg = {
       type: 'submit',
       prompt: task.prompt,
@@ -3184,6 +3179,8 @@
       attachments: task.attachments || [],
       useWorktree: !!task.useWorktree,
       useParallel: !!task.useParallel,
+      skipMerge: hasMoreQueued,
+      reuseProcess: true,
     };
     if (task.workDir) msg.workDir = task.workDir;
     vscode.postMessage(msg);

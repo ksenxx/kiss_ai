@@ -31,6 +31,8 @@ export type FromWebviewMessage =
       useParallel?: boolean;
       tabId?: string;
       workDir?: string;
+      skipMerge?: boolean;
+      reuseProcess?: boolean;
     }
   | {type: 'stop'; tabId?: string}
   | {type: 'selectModel'; model: string; tabId?: string}
@@ -219,4 +221,5 @@ export interface AgentCommand {
   direction?: 'prev' | 'next';
   tabId?: string;
   skip?: boolean;
+  skipMerge?: boolean;
 }

@@ -82,6 +82,9 @@ class _CommandsMixin:
                 })
                 self.printer.broadcast({"type": "status", "running": True, "tabId": tab_id})
                 return
+            # Set skip_merge from the run command (for queued tasks)
+            if "skipMerge" in cmd:
+                tab.skip_merge = bool(cmd["skipMerge"])
             tab.stop_event = threading.Event()
             tab.user_answer_queue = queue.Queue(maxsize=1)
             thread = threading.Thread(
