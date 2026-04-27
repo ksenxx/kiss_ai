@@ -223,6 +223,39 @@ class _MergeFlowMixin:
                 files.append(path)
         return files
 
+    def _broadcast_autocommit_done(
+        self,
+        tab_id: str,
+        *,
+        success: bool,
+        committed: bool,
+        message: str,
+        commit_message: str | None = None,
+    ) -> dict[str, Any]:
+        """Broadcast an ``autocommit_done`` event and return it.
+
+        Args:
+            tab_id: Frontend tab identifier.
+            success: Whether the action succeeded.
+            committed: Whether a commit was actually created.
+            message: Human-readable status message.
+            commit_message: Full commit message (only when committed).
+
+        Returns:
+            The event dict (for optional persistence).
+        """
+        event: dict[str, Any] = {
+            "type": "autocommit_done",
+            "success": success,
+            "committed": committed,
+            "message": message,
+            "tabId": tab_id,
+        }
+        if commit_message is not None:
+            event["commitMessage"] = commit_message
+        self.printer.broadcast(event)
+        return event
+
     def _handle_autocommit_action(
         self, action: str, tab_id: str = "",
     ) -> None:
@@ -235,33 +268,24 @@ class _MergeFlowMixin:
                 ``autocommit_done`` event).
         """
         if action == "skip":
-            self.printer.broadcast({
-                "type": "autocommit_done",
-                "success": True,
-                "committed": False,
-                "message": "Left changes uncommitted.",
-                "tabId": tab_id,
-            })
+            self._broadcast_autocommit_done(
+                tab_id, success=True, committed=False,
+                message="Left changes uncommitted.",
+            )
             return
         if action != "commit":
-            self.printer.broadcast({
-                "type": "autocommit_done",
-                "success": False,
-                "committed": False,
-                "message": f"Unknown autocommit action: {action}",
-                "tabId": tab_id,
-            })
+            self._broadcast_autocommit_done(
+                tab_id, success=False, committed=False,
+                message=f"Unknown autocommit action: {action}",
+            )
             return
         try:
             repo = GitWorktreeOps.discover_repo(Path(self.work_dir))
             if repo is None:
-                self.printer.broadcast({
-                    "type": "autocommit_done",
-                    "success": False,
-                    "committed": False,
-                    "message": "Not a git repository.",
-                    "tabId": tab_id,
-                })
+                self._broadcast_autocommit_done(
+                    tab_id, success=False, committed=False,
+                    message="Not a git repository.",
+                )
                 return
             with repo_lock(repo):
                 self.printer.broadcast({
@@ -272,13 +296,10 @@ class _MergeFlowMixin:
                 _git(self.work_dir, "add", "-A")
                 diff = _git(self.work_dir, "diff", "--cached")
                 if not diff.stdout.strip():
-                    self.printer.broadcast({
-                        "type": "autocommit_done",
-                        "success": True,
-                        "committed": False,
-                        "message": "Nothing to commit.",
-                        "tabId": tab_id,
-                    })
+                    self._broadcast_autocommit_done(
+                        tab_id, success=True, committed=False,
+                        message="Nothing to commit.",
+                    )
                     return
                 self.printer.broadcast({
                     "type": "autocommit_progress",
@@ -294,15 +315,11 @@ class _MergeFlowMixin:
                 ok = GitWorktreeOps.commit_staged(repo, msg)
             if ok:
                 subject = msg.splitlines()[0] if msg.splitlines() else msg
-                done_event: dict[str, Any] = {
-                    "type": "autocommit_done",
-                    "success": True,
-                    "committed": True,
-                    "message": f"Committed: {subject}",
-                    "commitMessage": msg,
-                    "tabId": tab_id,
-                }
-                self.printer.broadcast(done_event)
+                done_event = self._broadcast_autocommit_done(
+                    tab_id, success=True, committed=True,
+                    message=f"Committed: {subject}",
+                    commit_message=msg,
+                )
                 # Persist to task history so the commit shows up in
                 # session replay ("the report").
                 if tab_id:
@@ -316,22 +333,16 @@ class _MergeFlowMixin:
                     if task_id is not None:
                         _append_chat_event(done_event, task_id=task_id)
             else:
-                self.printer.broadcast({
-                    "type": "autocommit_done",
-                    "success": False,
-                    "committed": False,
-                    "message": "git commit failed (pre-commit hook?).",
-                    "tabId": tab_id,
-                })
+                self._broadcast_autocommit_done(
+                    tab_id, success=False, committed=False,
+                    message="git commit failed (pre-commit hook?).",
+                )
         except Exception as e:  # pragma: no cover — unexpected git/LLM error
             logger.debug("Autocommit action failed", exc_info=True)
-            self.printer.broadcast({
-                "type": "autocommit_done",
-                "success": False,
-                "committed": False,
-                "message": str(e),
-                "tabId": tab_id,
-            })
+            self._broadcast_autocommit_done(
+                tab_id, success=False, committed=False,
+                message=str(e),
+            )
 
     def _emit_pending_worktree(self, tab_id: str = "") -> None:
         """Emit merge review or ``worktree_done`` for a pending worktree branch.

@@ -533,7 +533,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/perplexity/sonar-pro-search": _mi(200000, 3.00, 15.00, fc=False),
     "openrouter/perplexity/sonar-reasoning-pro": _mi(128000, 2.00, 8.00, fc=False),
     "openrouter/prime-intellect/intellect-3": _mi(131072, 0.20, 1.10, fc=False),
-    "openrouter/qwen/qwen-2.5-72b-instruct": _mi(32768, 0.12, 0.39),
+    "openrouter/qwen/qwen-2.5-72b-instruct": _mi(32768, 0.36, 0.40),
     "openrouter/qwen/qwen-2.5-7b-instruct": _mi(32768, 0.04, 0.10, fc=False),
     "openrouter/qwen/qwen-2.5-coder-32b-instruct": _mi(32768, 0.66, 1.00, fc=False),
     "openrouter/qwen/qwen-max": _mi(32768, 1.04, 4.16, fc=False),
@@ -576,6 +576,11 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/qwen/qwen3.5-9b": _mi(262144, 0.10, 0.15),
     "openrouter/qwen/qwen3.5-flash-02-23": _mi(1000000, 0.065, 0.26),
     "openrouter/qwen/qwen3.5-plus-02-15": _mi(1000000, 0.26, 1.56),
+    "openrouter/qwen/qwen3.5-plus-20260420": _mi(1000000, 0.40, 2.40),  # NEW
+    "openrouter/qwen/qwen3.6-27b": _mi(262144, 0.195, 1.56),  # NEW
+    "openrouter/qwen/qwen3.6-35b-a3b": _mi(262144, 0.161, 0.965, fc=False),  # NEW
+    "openrouter/qwen/qwen3.6-flash": _mi(1000000, 0.25, 1.50),  # NEW
+    "openrouter/qwen/qwen3.6-max-preview": _mi(262144, 1.30, 7.80),  # NEW
     "openrouter/qwen/qwen3.6-plus": _mi(1000000, 0.325, 1.95),
     "openrouter/qwen/qwq-32b": _mi(131072, 0.15, 0.58, fc=False),
     "openrouter/rekaai/reka-edge": _mi(16384, 0.10, 0.10),

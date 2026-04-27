@@ -700,7 +700,7 @@ class TestServerWorktreeWorkflow:
             "workDir": str(self.repo),
             "tabId": "0",
             "useWorktree": True,
-            "model": "test-model",
+            "model": "",
         })
 
         wt_events = [e for e in events if e["type"] == "worktree_done"]
@@ -720,7 +720,7 @@ class TestServerWorktreeWorkflow:
             "workDir": str(self.repo),
             "tabId": "0",
             "useWorktree": True,
-            "model": "test-model",
+            "model": "",
         })
 
         stopped_events = [e for e in events if e["type"] == "task_stopped"]
@@ -759,7 +759,7 @@ class TestServerWorktreeWorkflow:
             "workDir": str(self.repo),
             "tabId": "0",
             "useWorktree": True,
-            "model": "test-model",
+            "model": "",
         })
 
         merge_events = [e for e in events if e["type"] == "merge_data"]
@@ -805,7 +805,7 @@ class TestServerWorktreeWorkflow:
             "workDir": str(self.repo),
             "tabId": "0",
             "useWorktree": True,
-            "model": "test-model",
+            "model": "",
         })
 
         merge_events = [e for e in events if e["type"] == "merge_data"]

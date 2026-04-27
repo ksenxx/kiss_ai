@@ -20,6 +20,7 @@ from typing import Any
 
 import requests
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.third_party_agents._backend_utils import wait_for_matching_message
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
@@ -27,7 +28,6 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ToolMethodBackend,
     channel_main,
 )
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
 _TLON_DIR = Path.home() / ".kiss" / "third_party_agents" / "tlon"
 _config = ChannelConfig(_TLON_DIR, ("ship_url", "code"))

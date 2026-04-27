@@ -17,13 +17,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
     ToolMethodBackend,
     channel_main,
 )
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
 _IMESSAGE_DIR = Path.home() / ".kiss" / "third_party_agents" / "imessage"
 _config = ChannelConfig(_IMESSAGE_DIR, ())

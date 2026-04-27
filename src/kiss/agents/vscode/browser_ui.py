@@ -136,9 +136,10 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
         self._steps_offsets: dict[str, int] = {}
         self._recordings: dict[str, list[dict[str, Any]]] = {}
 
-    def _offset_key(self) -> str:
-        """Return the thread-local tab key for per-tab usage offsets.
+    def _tab_key(self) -> str:
+        """Return the thread-local tab key for per-tab state lookups.
 
+        Used for per-tab usage offsets, recordings, and bash state.
         Falls back to the empty string for threads without a tab_id
         (e.g. unit tests that do not set ``_thread_local.tab_id``).
         """
@@ -152,29 +153,29 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
         different tabs never clobber each other's accumulated tokens
         (A7 fix).
         """
-        return self._tokens_offsets.get(self._offset_key(), 0)
+        return self._tokens_offsets.get(self._tab_key(), 0)
 
     @tokens_offset.setter
     def tokens_offset(self, value: int) -> None:
-        self._tokens_offsets[self._offset_key()] = value
+        self._tokens_offsets[self._tab_key()] = value
 
     @property
     def budget_offset(self) -> float:
         """Per-tab dollar-budget offset used when broadcasting ``usage_info``."""
-        return self._budget_offsets.get(self._offset_key(), 0.0)
+        return self._budget_offsets.get(self._tab_key(), 0.0)
 
     @budget_offset.setter
     def budget_offset(self, value: float) -> None:
-        self._budget_offsets[self._offset_key()] = value
+        self._budget_offsets[self._tab_key()] = value
 
     @property
     def steps_offset(self) -> int:
         """Per-tab step-count offset used when broadcasting ``usage_info``."""
-        return self._steps_offsets.get(self._offset_key(), 0)
+        return self._steps_offsets.get(self._tab_key(), 0)
 
     @steps_offset.setter
     def steps_offset(self, value: int) -> None:
-        self._steps_offsets[self._offset_key()] = value
+        self._steps_offsets[self._tab_key()] = value
 
     def cleanup_tab(self, tab_id: str) -> None:
         """Remove all per-tab state for *tab_id* to free memory.
@@ -236,18 +237,9 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
                     return
                 self.broadcast({"type": "system_output", "text": text})
 
-    def _recording_key(self) -> str:
-        """Return the per-tab key for the current thread's recording.
-
-        Uses thread-local ``tab_id`` so each task thread records into
-        its own list.  Falls back to ``""`` for callers that don't set
-        a tab_id (e.g. unit tests).
-        """
-        return getattr(self._thread_local, "tab_id", None) or ""
-
     def start_recording(self) -> None:
         """Start recording broadcast events for the current tab."""
-        key = self._recording_key()
+        key = self._tab_key()
         with self._lock:
             self._recordings[key] = []
 
@@ -270,7 +262,7 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
         Returns:
             List of display-relevant events with consecutive deltas merged.
         """
-        key = self._recording_key()
+        key = self._tab_key()
         with self._lock:
             raw = self._recordings.pop(key, [])
         return self._filter_and_coalesce(raw)
@@ -284,7 +276,7 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
         Returns:
             List of display-relevant events with consecutive deltas merged.
         """
-        key = self._recording_key()
+        key = self._tab_key()
         with self._lock:
             rec = self._recordings.get(key)
             raw = list(rec) if rec is not None else []

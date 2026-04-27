@@ -565,7 +565,7 @@ class TestRecordingIsolation(unittest.TestCase):
 
         printer = BaseBrowserPrinter()
         printer.start_recording()
-        key = printer._recording_key()
+        key = printer._tab_key()
         assert key in printer._recordings
         printer.stop_recording()
         assert key not in printer._recordings

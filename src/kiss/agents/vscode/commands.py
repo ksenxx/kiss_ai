@@ -82,6 +82,9 @@ class _CommandsMixin:
                 })
                 self.printer.broadcast({"type": "status", "running": True, "tabId": tab_id})
                 return
+            # Set skip_merge from the run command (for queued tasks)
+            if "skipMerge" in cmd:
+                tab.skip_merge = bool(cmd["skipMerge"])
             tab.stop_event = threading.Event()
             tab.user_answer_queue = queue.Queue(maxsize=1)
             thread = threading.Thread(
@@ -243,6 +246,19 @@ class _CommandsMixin:
             cmd.get("action", ""), cmd.get("tabId", ""),
         )
 
+    def _cmd_set_skip_merge(self, cmd: dict[str, Any]) -> None:
+        """Set the skip_merge flag on a tab.
+
+        When skip_merge is True, the task completion flow will skip the
+        merge review and autocommit prompt.  Used by the frontend to
+        defer merge/diff until all queued tasks have finished.
+        """
+        tab_id = cmd.get("tabId", "")
+        skip = bool(cmd.get("skip", False))
+        tab = self._get_tab(tab_id)
+        with self._state_lock:
+            tab.skip_merge = skip
+
     _HANDLERS: dict[str, Any] = {
         "run": _cmd_run,
         "stop": _cmd_stop,
@@ -263,4 +279,5 @@ class _CommandsMixin:
         "generateCommitMessage": _cmd_generate_commit_message,
         "worktreeAction": _cmd_worktree_action,
         "autocommitAction": _cmd_autocommit_action,
+        "setSkipMerge": _cmd_set_skip_merge,
     }

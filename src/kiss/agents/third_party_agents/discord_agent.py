@@ -20,6 +20,7 @@ from typing import Any
 
 import requests
 
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.third_party_agents._backend_utils import wait_for_matching_message
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
@@ -27,7 +28,6 @@ from kiss.agents.third_party_agents._channel_agent_utils import (
     ToolMethodBackend,
     channel_main,
 )
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
 _DISCORD_DIR = Path.home() / ".kiss" / "third_party_agents" / "discord"
 _API_BASE = "https://discord.com/api/v10"
@@ -228,7 +228,8 @@ class DiscordChannelBackend(ToolMethodBackend):
                 for c in result
                 if not channel_type or str(c.get("type", "")) == channel_type
             ]
-            return json.dumps({"ok": True, "third_party_agents": third_party_agents}, indent=2)[:8000]
+            payload = {"ok": True, "third_party_agents": third_party_agents}
+            return json.dumps(payload, indent=2)[:8000]
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 

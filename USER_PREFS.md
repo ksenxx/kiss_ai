@@ -1,14 +1,7 @@
-- Write integration tests first before implementing fixes
-- When modifying error handling, ensure errors are surfaced in the result panel (not just inline banners)
-- Frontend DependencyInstaller only prompts for Anthropic and OpenAI API keys on first install
-- Claude Code CLI counts as a valid model provider alongside API keys
-- When SYSTEM.md changes, the paper must be updated to match the exact prompt text and bullet structure
-- SYSTEM.md lines must be at most 100 characters wide and must pass mdformat
-- Extension icon is set to media/thumbnail.jpeg in package.json
-- Keep the media directory clean: remove unused image files from the extension
-- Build the paper with pdflatex -shell-escape flag since minted package requires it
-- The paper uses minted package with Pygments Markdown lexer for prompt syntax highlighting
-- All markdown files must pass mdformat check; run mdformat on files after content changes
-- Database queries should not have arbitrary hard caps; use unbounded queries when no limit is specified
-- Code listings in the paper should not have line numbers unless explicitly requested
-- NEVER navigate to Google authentication URLs (accounts.google.com, any Google sign-in or OAuth page) when using web browsing tools; this is enforced in code via _BLOCKED_URL_RE in web_use_tool.py
+## User Preferences and Invariants
+
+- Use `uv run check --full` to lint, typecheck, and format code before finishing
+- Python line length limit is 100 characters
+- Import blocks must be sorted (ruff I001 rule)
+- VS Code extension uses prettier for formatting JS/TS files
+- Markdown files are formatted with mdformat
