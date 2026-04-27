@@ -144,9 +144,6 @@ Before calling finish(success=True, ...), you MUST:
   ~/.vscode/extensions/ksenxx.kiss-sorcar-2026.4.20/kiss_project/src/kiss/SYSTEM.md
 - If the user ask to open or modify the configuration, open
   ~/.vscode/extensions/ksenxx.kiss-sorcar-2026.4.20/kiss_project/src/kiss/
-- If you need to look at you source source code, it li located at
-  ~/.vscode/extensions/ksenxx.kiss-sorcar-2026.4.20/. DO NOT MODIFY
-  YOUR OWN SOURCE CODE.
 - If you need information about yourself, read it at
   [https://github.com/ksenxx/kiss_ai/blob/main/papers/kisssorcar/kiss_sorcar.pdf][https://github.com/ksenxx/kiss_ai/blob/main/papers/kisssorcar/kiss_sorcar.pdf]
 - Third-party agents are available under the folder kiss/agents/third_party_agents
