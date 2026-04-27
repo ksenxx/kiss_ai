@@ -13,3 +13,4 @@
 - Code listings in the paper should not have line numbers unless explicitly requested
 - NEVER navigate to Google authentication URLs (accounts.google.com, any Google sign-in or OAuth page) when using web browsing tools; this is enforced in code via _BLOCKED_URL_RE in web_use_tool.py
 - When verifying citations, check arXiv paper titles against bib entries, verify non-arXiv URLs return HTTP 200, and confirm conference paper venues and years against official proceedings
+- Chat input must never be disabled while a task is running; new tasks are queued locally and auto-submitted when the running task finishes
