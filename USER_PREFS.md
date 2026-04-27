@@ -17,6 +17,6 @@
 - When tasks are queued, merge/diff review and autocommit prompts must be deferred until the last queued task completes; intermediate tasks skip merge via the backend skip_merge flag
 - When merge is skipped for a queued task, the pre-task file snapshot must NOT be recaptured for subsequent queued tasks; the original baseline from the first task is preserved via tab.deferred_snapshot
 - Queued tasks must reuse the existing backend process (reuseProcess flag) to preserve deferred_snapshot across tasks; skipMerge flag must be passed in the run command so each process gets it directly
-- When fixing structural tests that check source code patterns, read the actual source first to understand the current code structure before updating test assertions
+- When fixing structural tests that check source code patterns, read the actual source first to understand the current code structure before updating test assertions; expand search windows when refactoring moves code further from its original position
 - Test commands that pass model names to the server must use valid model names or empty strings to avoid early-return from the model availability check
 - When updating README model lists, read the actual MODEL_INFO data to get precise model names instead of guessing; group by vendor and list only non-dated aliases

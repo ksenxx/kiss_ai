@@ -267,29 +267,23 @@ class _TaskRunnerMixin:
                 except KeyboardInterrupt:
                     result_summary = "Task stopped by user"
                     task_end_event = {"type": "task_stopped"}
-                    self.printer.broadcast({
-                        "type": "result",
-                        "text": result_summary,
-                        "success": False,
-                        "total_tokens": tab.agent.total_tokens_used,
-                        "cost": f"${tab.agent.budget_used:.4f}",
-                        "step_count": tab.agent.step_count,
-                    })
-                    break
                 except Exception as e:
                     result_summary = f"Task failed: {e}"
                     task_end_event = {"type": "task_error", "text": str(e)}
-                    self.printer.broadcast({
-                        "type": "result",
-                        "text": result_summary,
-                        "success": False,
-                        "total_tokens": tab.agent.total_tokens_used,
-                        "cost": f"${tab.agent.budget_used:.4f}",
-                        "step_count": tab.agent.step_count,
-                    })
-                    break
+                else:
+                    continue
                 finally:
                     tab.task_history_id = tab.agent._last_task_id
+                # Only reached from except handlers (else: continue skips)
+                self.printer.broadcast({
+                    "type": "result",
+                    "text": result_summary,
+                    "success": False,
+                    "total_tokens": tab.agent.total_tokens_used,
+                    "cost": f"${tab.agent.budget_used:.4f}",
+                    "step_count": tab.agent.step_count,
+                })
+                break
         except BaseException:  # pragma: no cover — async interrupt before inner try
             task_end_event = task_end_event or {"type": "task_stopped"}
         finally:

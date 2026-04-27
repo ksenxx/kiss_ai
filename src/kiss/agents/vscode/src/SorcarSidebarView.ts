@@ -59,6 +59,48 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _preMergeOpenFiles: Map<string, Set<string>> = new Map();
   private _restoreChain: Promise<void> = Promise.resolve();
 
+  /**
+   * Show a notification-progress dialog with a timeout-based auto-resolve.
+   *
+   * Stores the progress reporter and resolve callback in the given maps
+   * so that incoming backend events can update the message or complete
+   * the dialog.  If no completion event arrives within *timeoutMs* the
+   * dialog is automatically dismissed.
+   */
+  private _showActionProgress(
+    title: string,
+    tabId: string | undefined,
+    progressMap: Map<string, vscode.Progress<{message?: string}>>,
+    resolveMap: Map<string, () => void>,
+    timeoutMs: number = 120_000,
+  ): void {
+    vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title,
+      },
+      progress => {
+        if (tabId !== undefined) {
+          progressMap.set(tabId, progress);
+        }
+        return new Promise<void>(resolve => {
+          if (tabId !== undefined) {
+            resolveMap.set(tabId, resolve);
+          }
+          setTimeout(() => {
+            if (
+              tabId !== undefined &&
+              resolveMap.get(tabId) === resolve
+            ) {
+              resolveMap.delete(tabId);
+              resolve();
+            }
+          }, timeoutMs);
+        });
+      },
+    );
+  }
+
   /** Resolve all pending worktree/autocommit action promises and clear maps. */
   private _resolveAllWorktreeActions(): void {
     for (const resolve of this._worktreeActionResolves.values()) resolve();
@@ -805,31 +847,11 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
             : wtAction === 'discard'
               ? 'Discarding worktree…'
               : 'Processing worktree action…';
-        const worktreeTimeout = 120_000;
-        vscode.window.withProgress(
-          {
-            location: vscode.ProgressLocation.Notification,
-            title: progressTitle,
-          },
-          progress => {
-            if (wtTabId !== undefined) {
-              this._worktreeProgresses.set(wtTabId, progress);
-            }
-            return new Promise<void>(resolve => {
-              if (wtTabId !== undefined) {
-                this._worktreeActionResolves.set(wtTabId, resolve);
-              }
-              setTimeout(() => {
-                if (
-                  wtTabId !== undefined &&
-                  this._worktreeActionResolves.get(wtTabId) === resolve
-                ) {
-                  this._worktreeActionResolves.delete(wtTabId);
-                  resolve();
-                }
-              }, worktreeTimeout);
-            });
-          },
+        this._showActionProgress(
+          progressTitle,
+          wtTabId,
+          this._worktreeProgresses,
+          this._worktreeActionResolves,
         );
         const wtProc = wtTabId
           ? this._getTabProcess(wtTabId)
@@ -846,31 +868,11 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         const acAction = message.action;
         const acTabId = message.tabId;
         if (acAction === 'commit') {
-          const autocommitTimeout = 120_000;
-          vscode.window.withProgress(
-            {
-              location: vscode.ProgressLocation.Notification,
-              title: 'Auto-committing…',
-            },
-            progress => {
-              if (acTabId !== undefined) {
-                this._autocommitProgresses.set(acTabId, progress);
-              }
-              return new Promise<void>(resolve => {
-                if (acTabId !== undefined) {
-                  this._autocommitActionResolves.set(acTabId, resolve);
-                }
-                setTimeout(() => {
-                  if (
-                    acTabId !== undefined &&
-                    this._autocommitActionResolves.get(acTabId) === resolve
-                  ) {
-                    this._autocommitActionResolves.delete(acTabId);
-                    resolve();
-                  }
-                }, autocommitTimeout);
-              });
-            },
+          this._showActionProgress(
+            'Auto-committing…',
+            acTabId,
+            this._autocommitProgresses,
+            this._autocommitActionResolves,
           );
         }
         const acProc = acTabId
