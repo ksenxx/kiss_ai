@@ -15,3 +15,4 @@
 - When verifying citations, check arXiv paper titles against bib entries, verify non-arXiv URLs return HTTP 200, and confirm conference paper venues and years against official proceedings
 - Chat input must never be disabled while a task is running; new tasks are queued locally and auto-submitted when the running task finishes
 - When tasks are queued, merge/diff review and autocommit prompts must be deferred until the last queued task completes; intermediate tasks skip merge via the backend skip_merge flag
+- When merge is skipped for a queued task, the pre-task file snapshot must NOT be recaptured for subsequent queued tasks; the original baseline from the first task is preserved via tab.deferred_snapshot

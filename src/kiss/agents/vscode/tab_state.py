@@ -66,6 +66,7 @@ class _TabState:
         "is_running_non_wt",
         "is_task_active",
         "skip_merge",
+        "deferred_snapshot",
     )
 
     def __init__(self, tab_id: str, default_model: str) -> None:
@@ -81,3 +82,12 @@ class _TabState:
         self.is_running_non_wt: bool = False
         self.is_task_active: bool = False
         self.skip_merge: bool = False
+        self.deferred_snapshot: (
+            tuple[
+                str | None,
+                dict[str, list[tuple[int, int, int, int]]],
+                set[str],
+                dict[str, str] | None,
+            ]
+            | None
+        ) = None
