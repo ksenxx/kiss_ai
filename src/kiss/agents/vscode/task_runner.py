@@ -294,11 +294,12 @@ class _TaskRunnerMixin:
                 self.printer.stop_recording()
                 if not use_worktree:
                     try:
-                        self._prepare_and_start_merge(
-                            work_dir, pre_hunks, pre_untracked, pre_file_hashes,
-                            base_ref=pre_head_sha or "HEAD",
-                            tab_id=tab_id,
-                        )
+                        if not tab.skip_merge:
+                            self._prepare_and_start_merge(
+                                work_dir, pre_hunks, pre_untracked, pre_file_hashes,
+                                base_ref=pre_head_sha or "HEAD",
+                                tab_id=tab_id,
+                            )
                     except BaseException:  # pragma: no cover — merge view error handler
                         logger.debug("Merge view error", exc_info=True)
                     finally:
@@ -331,7 +332,7 @@ class _TaskRunnerMixin:
                 )
                 self.printer.broadcast({"type": "tasks_updated"})
                 self.printer.reset()
-                if use_worktree and tab.agent._wt_pending:
+                if use_worktree and tab.agent._wt_pending and not tab.skip_merge:
                     try:
                         self._present_pending_worktree(
                             tab_id, try_merge_review=True,

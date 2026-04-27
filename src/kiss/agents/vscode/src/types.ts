@@ -59,6 +59,7 @@ export type FromWebviewMessage =
   | {type: 'getInputHistory'}
   | {type: 'worktreeAction'; action: 'merge' | 'discard'; tabId?: string}
   | {type: 'autocommitAction'; action: 'commit' | 'skip'; tabId?: string}
+  | {type: 'setSkipMerge'; tabId?: string; skip: boolean}
   | {type: 'resolveDroppedPaths'; uris: string[]}
   | {type: 'webviewFocusChanged'; focused: boolean}
   | {
@@ -196,7 +197,8 @@ export interface AgentCommand {
     | 'getInputHistory'
     | 'worktreeAction'
     | 'autocommitAction'
-    | 'getAdjacentTask';
+    | 'getAdjacentTask'
+    | 'setSkipMerge';
   prompt?: string;
   model?: string;
   workDir?: string;
@@ -216,4 +218,5 @@ export interface AgentCommand {
   task?: string;
   direction?: 'prev' | 'next';
   tabId?: string;
+  skip?: boolean;
 }

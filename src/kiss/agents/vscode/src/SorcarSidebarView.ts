@@ -867,6 +867,19 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         break;
       }
 
+      case 'setSkipMerge': {
+        const smTabId = message.tabId;
+        const smProc = smTabId
+          ? this._getTabProcess(smTabId)
+          : this._getServiceProcess();
+        smProc.sendCommand({
+          type: 'setSkipMerge',
+          tabId: smTabId,
+          skip: message.skip,
+        });
+        break;
+      }
+
       case 'resolveDroppedPaths': {
         const workDir = this._getWorkDir();
         const paths = (message.uris || [])

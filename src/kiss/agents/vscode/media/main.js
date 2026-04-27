@@ -3118,6 +3118,13 @@
           useParallel: !!(parallelToggleBtn && parallelToggleBtn.classList.contains('active')),
           workDir: curTab.workDir || '',
         });
+        // Tell backend to skip merge/diff for the currently running task
+        // since there are now queued tasks that should run first.
+        vscode.postMessage({
+          type: 'setSkipMerge',
+          tabId: activeTabId,
+          skip: true,
+        });
         inp.value = '';
         inp.style.height = 'auto';
         attachments = [];
@@ -3161,6 +3168,14 @@
     if (!tab || !tab.taskQueue || tab.taskQueue.length === 0) return;
     const task = tab.taskQueue.shift();
     updateQueueIndicator();
+    // If there are still more queued tasks, tell backend to skip merge
+    // for this task too. If this is the last task, allow merge to run.
+    const hasMoreQueued = tab.taskQueue.length > 0;
+    vscode.postMessage({
+      type: 'setSkipMerge',
+      tabId: tab.id,
+      skip: hasMoreQueued,
+    });
     const msg = {
       type: 'submit',
       prompt: task.prompt,
