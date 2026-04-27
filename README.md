@@ -71,8 +71,7 @@ sorcar -f prompt # use contents of a file to send task
 
 sorcar -t 'Can you send the message "Hello from Sorcar!" to ksen via the desktop slack app?'
 
-sorcar -t 'Can you write a thorough and precise plan in PLAN.md to simplify the project code?'
-sorcar -t 'I see some issues and bugs in PLAN.md.  Can you fix them?'  # lie to the agent to force improve the plan
+sorcar -t 'Can you show me the detailed step-by-step workflow of gepa.py?'
 ```
 
 ## 🤖 Models Supported
