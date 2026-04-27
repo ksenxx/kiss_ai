@@ -142,6 +142,11 @@ export class AgentProcess extends EventEmitter {
     this.tabId = tabId;
   }
 
+  /** True when the underlying child process is still alive. */
+  get isAlive(): boolean {
+    return this.process !== null;
+  }
+
   /**
    * Start the Python backend process.
    */

@@ -59,6 +59,45 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _preMergeOpenFiles: Map<string, Set<string>> = new Map();
   private _restoreChain: Promise<void> = Promise.resolve();
 
+  /**
+   * Show a notification-progress dialog with a timeout-based auto-resolve.
+   *
+   * Stores the progress reporter and resolve callback in the given maps
+   * so that incoming backend events can update the message or complete
+   * the dialog.  If no completion event arrives within *timeoutMs* the
+   * dialog is automatically dismissed.
+   */
+  private _showActionProgress(
+    title: string,
+    tabId: string | undefined,
+    progressMap: Map<string, vscode.Progress<{message?: string}>>,
+    resolveMap: Map<string, () => void>,
+    timeoutMs: number = 120_000,
+  ): void {
+    vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title,
+      },
+      progress => {
+        if (tabId !== undefined) {
+          progressMap.set(tabId, progress);
+        }
+        return new Promise<void>(resolve => {
+          if (tabId !== undefined) {
+            resolveMap.set(tabId, resolve);
+          }
+          setTimeout(() => {
+            if (tabId !== undefined && resolveMap.get(tabId) === resolve) {
+              resolveMap.delete(tabId);
+              resolve();
+            }
+          }, timeoutMs);
+        });
+      },
+    );
+  }
+
   /** Resolve all pending worktree/autocommit action promises and clear maps. */
   private _resolveAllWorktreeActions(): void {
     for (const resolve of this._worktreeActionResolves.values()) resolve();
@@ -477,11 +516,25 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     useParallel?: boolean,
     tabId?: string,
     workDir?: string,
+    skipMerge?: boolean,
+    reuseProcess?: boolean,
   ): void {
     const effectiveWorkDir = workDir || this._getWorkDir();
-    const proc = tabId
-      ? this._createTaskProcess(tabId)
-      : this._createTaskProcess(this._activeTabId || '__default__');
+    const effectiveTabId = tabId || this._activeTabId || '__default__';
+
+    // Reuse existing process for queued tasks to preserve deferred_snapshot
+    let proc: AgentProcess;
+    if (reuseProcess) {
+      const existing = this._taskProcesses.get(effectiveTabId);
+      if (existing && existing.isAlive) {
+        proc = existing;
+      } else {
+        proc = this._createTaskProcess(effectiveTabId);
+      }
+    } else {
+      proc = this._createTaskProcess(effectiveTabId);
+    }
+
     const started = proc.start(effectiveWorkDir);
     if (!started) {
       if (tabId !== undefined) this._runningTabs.delete(tabId);
@@ -500,6 +553,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       useWorktree,
       useParallel,
       tabId,
+      skipMerge,
     });
   }
 
@@ -565,6 +619,8 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           message.useParallel,
           tabId,
           effectiveWorkDir,
+          message.skipMerge,
+          message.reuseProcess,
         );
         break;
       }
@@ -788,31 +844,11 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
             : wtAction === 'discard'
               ? 'Discarding worktree…'
               : 'Processing worktree action…';
-        const worktreeTimeout = 120_000;
-        vscode.window.withProgress(
-          {
-            location: vscode.ProgressLocation.Notification,
-            title: progressTitle,
-          },
-          progress => {
-            if (wtTabId !== undefined) {
-              this._worktreeProgresses.set(wtTabId, progress);
-            }
-            return new Promise<void>(resolve => {
-              if (wtTabId !== undefined) {
-                this._worktreeActionResolves.set(wtTabId, resolve);
-              }
-              setTimeout(() => {
-                if (
-                  wtTabId !== undefined &&
-                  this._worktreeActionResolves.get(wtTabId) === resolve
-                ) {
-                  this._worktreeActionResolves.delete(wtTabId);
-                  resolve();
-                }
-              }, worktreeTimeout);
-            });
-          },
+        this._showActionProgress(
+          progressTitle,
+          wtTabId,
+          this._worktreeProgresses,
+          this._worktreeActionResolves,
         );
         const wtProc = wtTabId
           ? this._getTabProcess(wtTabId)
@@ -829,31 +865,11 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         const acAction = message.action;
         const acTabId = message.tabId;
         if (acAction === 'commit') {
-          const autocommitTimeout = 120_000;
-          vscode.window.withProgress(
-            {
-              location: vscode.ProgressLocation.Notification,
-              title: 'Auto-committing…',
-            },
-            progress => {
-              if (acTabId !== undefined) {
-                this._autocommitProgresses.set(acTabId, progress);
-              }
-              return new Promise<void>(resolve => {
-                if (acTabId !== undefined) {
-                  this._autocommitActionResolves.set(acTabId, resolve);
-                }
-                setTimeout(() => {
-                  if (
-                    acTabId !== undefined &&
-                    this._autocommitActionResolves.get(acTabId) === resolve
-                  ) {
-                    this._autocommitActionResolves.delete(acTabId);
-                    resolve();
-                  }
-                }, autocommitTimeout);
-              });
-            },
+          this._showActionProgress(
+            'Auto-committing…',
+            acTabId,
+            this._autocommitProgresses,
+            this._autocommitActionResolves,
           );
         }
         const acProc = acTabId
@@ -863,6 +879,19 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           type: 'autocommitAction',
           action: acAction,
           tabId: acTabId,
+        });
+        break;
+      }
+
+      case 'setSkipMerge': {
+        const smTabId = message.tabId;
+        const smProc = smTabId
+          ? this._getTabProcess(smTabId)
+          : this._getServiceProcess();
+        smProc.sendCommand({
+          type: 'setSkipMerge',
+          tabId: smTabId,
+          skip: message.skip,
         });
         break;
       }
