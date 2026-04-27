@@ -16,3 +16,5 @@
 - Chat input must never be disabled while a task is running; new tasks are queued locally and auto-submitted when the running task finishes
 - When tasks are queued, merge/diff review and autocommit prompts must be deferred until the last queued task completes; intermediate tasks skip merge via the backend skip_merge flag
 - When merge is skipped for a queued task, the pre-task file snapshot must NOT be recaptured for subsequent queued tasks; the original baseline from the first task is preserved via tab.deferred_snapshot
+- When fixing structural tests that check source code patterns, read the actual source first to understand the current code structure before updating test assertions
+- Test commands that pass model names to the server must use valid model names or empty strings to avoid early-return from the model availability check

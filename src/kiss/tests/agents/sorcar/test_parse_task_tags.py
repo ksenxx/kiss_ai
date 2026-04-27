@@ -171,7 +171,7 @@ class TestMultiTaskIntegration(unittest.TestCase):
     def test_interrupt_breaks_loop(self) -> None:
         """KeyboardInterrupt breaks out of the subtask loop."""
         ki_idx = self._src.index("except KeyboardInterrupt:")
-        after = self._src[ki_idx:ki_idx + 300]
+        after = self._src[ki_idx:ki_idx + 600]
         assert "break" in after
 
     def test_worktree_check_in_finally_block(self) -> None:

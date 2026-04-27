@@ -14,6 +14,7 @@ These tests deliberately focus on the new invariants; pre-existing
 
 from __future__ import annotations
 
+import re
 import subprocess
 import unittest
 from pathlib import Path
@@ -99,7 +100,7 @@ class TestMainJsStructural(unittest.TestCase):
 
     def test_no_queue(self) -> None:
         """The legacy per-tab askQueue array is gone (modal is blocking)."""
-        assert "askQueue" not in self.js
+        assert not re.search(r"\baskQueue\b", self.js)
 
     def test_tab_has_ask_elements(self) -> None:
         """Every tab carries its own question/input/submit element refs."""

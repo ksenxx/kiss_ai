@@ -187,10 +187,10 @@ class TestFinishMergeRedundantLookup(unittest.TestCase):
     """R1 fix: ``_finish_merge`` now performs a single tab lookup."""
 
     def test_source_has_one_tab_lookup(self) -> None:
-        """Structural: only one ``_tab_states.get(tab_id)`` in ``_finish_merge``."""
+        """Structural: only one tab lookup in ``_finish_merge``."""
         from kiss.agents.vscode.merge_flow import _MergeFlowMixin
         src = inspect.getsource(_MergeFlowMixin._finish_merge)
-        matches = re.findall(r"_tab_states\.get\(tab_id\)", src)
+        matches = re.findall(r"self\._get_tab\(tab_id\)", src)
         assert len(matches) == 1, (
             f"R1 fix: expected 1 lookup, found {len(matches)}"
         )

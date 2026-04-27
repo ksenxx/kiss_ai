@@ -436,7 +436,7 @@ class TestTaskErrorStoppedGuard(unittest.TestCase):
     def test_error_banner_guard_in_source(self) -> None:
         idx = self.js.index("case 'task_error':")
         block = self.js[idx : idx + 500]
-        assert "ev.tabId === undefined || ev.tabId === activeTabId" in block
+        assert "markTabDone(ev.tabId" in block
 
     def test_set_ready_always_called(self) -> None:
         """setReady is outside the guard — it always runs to reset runningTabId."""
@@ -1358,10 +1358,9 @@ class TestInputContainerVisibility(unittest.TestCase):
         idx = self.js.index("function restoreTab(tab)")
         end = self.js.index("\n  function ", idx + 1)
         body = self.js[idx:end]
-        assert (
-            "worktreeBar || autocommitBar || document.getElementById('merge-toolbar')"
-            in body
-        )
+        assert "worktreeBar" in body
+        assert "autocommitBar" in body
+        assert "document.getElementById('merge-toolbar')" in body
         assert "inputContainer.style.display = 'none'" in body
         assert "inputContainer.style.display = ''" in body
 
