@@ -43,6 +43,9 @@
 - KISS Sorcar website should keep the top logo horizontally aligned to the same content width as the main UI screenshot, use compact spacing, and maintain high text contrast
 - KISS Sorcar website should look refined and modern without generic AI-generated SaaS styling
 - USER_PREFS.md is gitignored and automatically copied to/from worktrees during task execution
+- The kiss-web remote server runs as a daemon service: macOS uses a LaunchAgent plist at ~/Library/LaunchAgents/com.kiss.web-server.plist with KeepAlive and RunAtLoad; Linux uses a systemd user service at ~/.config/systemd/user/kiss-web.service with Restart=always and lingering enabled
+- Daemon logs are at ~/.kiss/kiss-web-stdout.log and ~/.kiss/kiss-web-stderr.log
+- install.sh has 10 steps; step 10 sets up and starts the kiss-web daemon
 - Only list Koushik Sen as the author on the website
 - Website section order: Install → Features → Architecture → Models → Video → Author
 - GitHub Pages deployments can error silently; always check build status via gh api and verify live content after pushing

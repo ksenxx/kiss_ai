@@ -209,7 +209,7 @@ find_code_cli() {
     echo ""
 
     # --- 1. git ---------------------------------------------------------------
-    echo ">>> [1/9] Checking git..."
+    echo ">>> [1/10] Checking git..."
     if ! command -v git &>/dev/null; then
         install_git
     fi
@@ -217,7 +217,7 @@ find_code_cli() {
     echo ""
 
     # --- 2. uv ----------------------------------------------------------------
-    echo ">>> [2/9] Installing uv..."
+    echo ">>> [2/10] Installing uv..."
     if ! command -v uv &>/dev/null; then
         install_uv
     fi
@@ -225,7 +225,7 @@ find_code_cli() {
     echo ""
 
     # --- 3. Node.js -----------------------------------------------------------
-    echo ">>> [3/9] Installing Node.js..."
+    echo ">>> [3/10] Installing Node.js..."
     if ! command -v node &>/dev/null; then
         install_node || true
     fi
@@ -237,7 +237,7 @@ find_code_cli() {
     echo ""
 
     # --- 4. VS Code -----------------------------------------------------------
-    echo ">>> [4/9] Installing VS Code..."
+    echo ">>> [4/10] Installing VS Code..."
     if ! find_code_cli; then
         install_code_cli || true
         find_code_cli || true
@@ -250,7 +250,7 @@ find_code_cli() {
     echo ""
 
     # --- 5. Python environment ------------------------------------------------
-    echo ">>> [5/9] Setting up Python environment..."
+    echo ">>> [5/10] Setting up Python environment..."
     cd "$PROJECT_DIR"
     if [ ! -d "$PROJECT_DIR/.venv" ]; then
         echo "   Creating virtual environment with Python 3.13..."
@@ -269,12 +269,12 @@ find_code_cli() {
     echo ""
 
     # --- 6. Playwright Chromium -----------------------------------------------
-    echo ">>> [6/9] Installing Playwright Chromium..."
+    echo ">>> [6/10] Installing Playwright Chromium..."
     uv run playwright install chromium
     echo ""
 
     # --- 7. cloudflared (for remote web server tunnel) -------------------------
-    echo ">>> [7/9] Installing cloudflared..."
+    echo ">>> [7/10] Installing cloudflared..."
     if ! command -v cloudflared &>/dev/null; then
         case "$OS" in
             Darwin)
@@ -318,7 +318,7 @@ find_code_cli() {
     echo ""
 
     # --- 8. Build VS Code extension ------------------------------------------
-    echo ">>> [8/9] Building VS Code extension..."
+    echo ">>> [8/10] Building VS Code extension..."
     VSCODE_EXT_DIR="$PROJECT_DIR/src/kiss/agents/vscode"
     VSIX="$VSCODE_EXT_DIR/kiss-sorcar.vsix"
     if [ -f "$VSIX" ]; then
@@ -337,7 +337,7 @@ find_code_cli() {
     echo ""
 
     # --- 9. Install VS Code extension ----------------------------------------
-    echo ">>> [9/9] Installing VS Code extension..."
+    echo ">>> [9/10] Installing VS Code extension..."
     if [ -f "$VSIX" ]; then
         if find_code_cli && [ -n "$CODE_CLI" ]; then
             "$CODE_CLI" --install-extension "$VSIX" --force 2>&1
@@ -348,6 +348,92 @@ find_code_cli() {
         fi
     else
         echo "   WARNING: VSIX not found — skipping extension install"
+    fi
+    echo ""
+
+    # --- 10. Start kiss-web daemon service ------------------------------------
+    echo ">>> [10/10] Setting up kiss-web daemon service..."
+    KISS_WEB_BIN="$PROJECT_DIR/.venv/bin/kiss-web"
+    if [ -x "$KISS_WEB_BIN" ]; then
+        case "$OS" in
+            Darwin)
+                PLIST_LABEL="com.kiss.web-server"
+                PLIST_DIR="$HOME/Library/LaunchAgents"
+                PLIST_FILE="$PLIST_DIR/${PLIST_LABEL}.plist"
+                mkdir -p "$PLIST_DIR"
+                # Unload existing service if present
+                launchctl bootout "gui/$(id -u)/$PLIST_LABEL" 2>/dev/null || true
+                cat > "$PLIST_FILE" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${PLIST_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${KISS_WEB_BIN}</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>${PROJECT_DIR}</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>${LOG_DIR}/kiss-web-stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>${LOG_DIR}/kiss-web-stderr.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>${BIN_DIR}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>
+PLIST
+                launchctl bootstrap "gui/$(id -u)" "$PLIST_FILE" 2>/dev/null || \
+                    launchctl load -w "$PLIST_FILE" 2>/dev/null || true
+                echo "   macOS LaunchAgent installed: $PLIST_FILE"
+                echo "   kiss-web will start on login and restart if killed"
+                echo "   Logs: ${LOG_DIR}/kiss-web-stdout.log, ${LOG_DIR}/kiss-web-stderr.log"
+                ;;
+            Linux)
+                SYSTEMD_DIR="$HOME/.config/systemd/user"
+                SERVICE_FILE="$SYSTEMD_DIR/kiss-web.service"
+                mkdir -p "$SYSTEMD_DIR"
+                cat > "$SERVICE_FILE" <<SERVICE
+[Unit]
+Description=KISS Sorcar Remote Web Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${KISS_WEB_BIN}
+WorkingDirectory=${PROJECT_DIR}
+Restart=always
+RestartSec=5
+Environment=PATH=${BIN_DIR}:/usr/local/bin:/usr/bin:/bin
+StandardOutput=append:${LOG_DIR}/kiss-web-stdout.log
+StandardError=append:${LOG_DIR}/kiss-web-stderr.log
+
+[Install]
+WantedBy=default.target
+SERVICE
+                systemctl --user daemon-reload
+                systemctl --user enable --now kiss-web
+                # Enable lingering so user services run without active login session
+                loginctl enable-linger "$(whoami)" 2>/dev/null || true
+                echo "   systemd user service installed: $SERVICE_FILE"
+                echo "   kiss-web will start on boot and restart if killed"
+                echo "   Logs: ${LOG_DIR}/kiss-web-stdout.log, ${LOG_DIR}/kiss-web-stderr.log"
+                echo "   Status: systemctl --user status kiss-web"
+                ;;
+        esac
+    else
+        echo "   WARNING: kiss-web binary not found — skipping daemon setup"
     fi
     echo ""
 
