@@ -363,7 +363,7 @@
       addBtn.addEventListener('click', () => {
         createNewTab();
       });
-      tabBar.insertBefore(addBtn, document.getElementById('history-btn'));
+      tabBar.insertBefore(addBtn, document.getElementById('config-btn'));
     }
 
     // Scroll the active tab into view
@@ -643,6 +643,13 @@
   const autocomplete = document.getElementById('autocomplete');
   const askUserModal = document.getElementById('ask-user-modal');
   const askUserSlot = document.getElementById('ask-user-slot');
+
+  // Config sidebar elements
+  const configBtn = document.getElementById('config-btn');
+  const configSidebar = document.getElementById('config-sidebar');
+  const configSidebarOverlay = document.getElementById('config-sidebar-overlay');
+  const configSidebarClose = document.getElementById('config-sidebar-close');
+  const cfgSaveBtn = document.getElementById('cfg-save-btn');
   const autocommitBtn = document.getElementById('autocommit-btn');
   const waitSpinner = document.getElementById('wait-spinner');
   const ghostOverlay = document.getElementById('ghost-overlay');
@@ -1797,6 +1804,9 @@
           modelName.textContent = ev.selected;
         }
         renderModelList('');
+        break;
+      case 'configData':
+        populateConfigForm(ev.config || {});
         break;
       case 'history':
         renderHistory(ev.sessions || [], ev.offset || 0, ev.generation || 0);
@@ -2956,6 +2966,20 @@
     });
     sidebarClose.addEventListener('click', closeSidebar);
     sidebarOverlay.addEventListener('click', closeSidebar);
+    configBtn.addEventListener('click', () => {
+      if (configSidebar.classList.contains('open')) {
+        closeConfigSidebar();
+      } else {
+        openConfigSidebar();
+      }
+    });
+    configSidebarClose.addEventListener('click', closeConfigSidebar);
+    configSidebarOverlay.addEventListener('click', closeConfigSidebar);
+    cfgSaveBtn.addEventListener('click', () => {
+      const data = collectConfigForm();
+      vscode.postMessage({type: 'saveConfig', ...data});
+      closeConfigSidebar();
+    });
     historySearch.addEventListener('input', () => {
       resetHistoryPagination();
       vscode.postMessage({
@@ -3503,6 +3527,48 @@
     sidebar.classList.remove('open');
     sidebarOverlay.classList.remove('open');
     historyBtn.classList.remove('open');
+  }
+
+  function openConfigSidebar() {
+    closeConfigSidebar();
+    closeSidebar();
+    vscode.postMessage({type: 'getConfig'});
+    configSidebar.classList.add('open');
+    configSidebarOverlay.classList.add('open');
+    configBtn.classList.add('open');
+  }
+  function closeConfigSidebar() {
+    configSidebar.classList.remove('open');
+    configSidebarOverlay.classList.remove('open');
+    configBtn.classList.remove('open');
+  }
+  function populateConfigForm(cfg) {
+    const el = (id) => document.getElementById(id);
+    el('cfg-max-budget').value = cfg.max_budget != null ? cfg.max_budget : 100;
+    el('cfg-custom-endpoint').value = cfg.custom_endpoint || '';
+    el('cfg-custom-api-key').value = cfg.custom_api_key || '';
+    el('cfg-use-web-browser').checked = cfg.use_web_browser !== false;
+    el('cfg-remote-password').value = cfg.remote_password || '';
+    // API key fields are always blank on load (not stored in config.json)
+    const keyIds = ['GEMINI_API_KEY','OPENAI_API_KEY','ANTHROPIC_API_KEY','TOGETHER_API_KEY','OPENROUTER_API_KEY','MINIMAX_API_KEY'];
+    keyIds.forEach(k => { el('cfg-key-' + k).value = ''; });
+  }
+  function collectConfigForm() {
+    const el = (id) => document.getElementById(id);
+    const cfg = {
+      max_budget: parseFloat(el('cfg-max-budget').value) || 100,
+      custom_endpoint: el('cfg-custom-endpoint').value.trim(),
+      custom_api_key: el('cfg-custom-api-key').value.trim(),
+      use_web_browser: el('cfg-use-web-browser').checked,
+      remote_password: el('cfg-remote-password').value.trim(),
+    };
+    const apiKeys = {};
+    const keyIds = ['GEMINI_API_KEY','OPENAI_API_KEY','ANTHROPIC_API_KEY','TOGETHER_API_KEY','OPENROUTER_API_KEY','MINIMAX_API_KEY'];
+    keyIds.forEach(k => {
+      const v = el('cfg-key-' + k).value.trim();
+      if (v) apiKeys[k] = v;
+    });
+    return {config: cfg, apiKeys};
   }
 
   function getAtCtx() {

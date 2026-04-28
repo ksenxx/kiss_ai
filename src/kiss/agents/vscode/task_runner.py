@@ -248,6 +248,12 @@ class _TaskRunnerMixin:
             self.printer._persist_agents[tab_id] = tab.agent
             tab.task_history_id = None
             subtasks = parse_task_tags(prompt)
+            from kiss.agents.vscode.vscode_config import load_config as _load_cfg
+
+            _vcfg = _load_cfg()
+            _cfg_budget = float(_vcfg.get("max_budget", 100))
+            _cfg_web = _vcfg.get("use_web_browser", True)
+
             for task_prompt in subtasks:
                 try:
                     tab.agent.run(
@@ -260,6 +266,8 @@ class _TaskRunnerMixin:
                         ask_user_question_callback=self._ask_user_question,
                         is_parallel=tab.use_parallel,
                         use_worktree=use_worktree,
+                        max_budget=_cfg_budget,
+                        web_tools=_cfg_web,
                         _skip_persistence=True,
                     )
                     result_summary = self._extract_result_summary() or "No summary available"

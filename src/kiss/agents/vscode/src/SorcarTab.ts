@@ -77,7 +77,11 @@ export function buildChatHtml(
 </head>
 <body>
   <div id="app">
-    <div id="tab-bar"><div id="tab-list"></div><button id="history-btn">
+    <div id="tab-bar"><div id="tab-list"></div><button id="config-btn" title="Configuration">
+              <svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/>
+              </svg>
+            </button><button id="history-btn">
               <svg class="history-chevron" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
                 <polyline points="15 18 9 12 15 6"/>
               </svg>
@@ -186,6 +190,53 @@ export function buildChatHtml(
       </div>
     </div>
     <div id="sidebar-overlay"></div>
+
+    <div id="config-sidebar">
+      <button id="config-sidebar-close">&times;</button>
+      <div class="sidebar-section">
+        <div class="sidebar-hdr">Sorcar Configuration</div>
+        <div id="config-form">
+          <label class="config-label">Max budget per task ($)
+            <input type="number" id="cfg-max-budget" min="0" step="1" value="100">
+          </label>
+          <label class="config-label">Custom endpoint (local model)
+            <input type="text" id="cfg-custom-endpoint" placeholder="http://localhost:8080/v1">
+          </label>
+          <label class="config-label">Custom API key
+            <input type="password" id="cfg-custom-api-key" placeholder="Optional API key for custom endpoint">
+          </label>
+          <label class="config-label config-checkbox">
+            <input type="checkbox" id="cfg-use-web-browser" checked>
+            Use web browser
+          </label>
+          <label class="config-label">Remote password
+            <input type="password" id="cfg-remote-password" placeholder="Remote access password">
+          </label>
+          <div class="config-divider"></div>
+          <div class="sidebar-hdr" style="margin-top:8px;">API Keys</div>
+          <label class="config-label">Gemini API Key
+            <input type="password" id="cfg-key-GEMINI_API_KEY" placeholder="Enter Gemini API key">
+          </label>
+          <label class="config-label">OpenAI API Key
+            <input type="password" id="cfg-key-OPENAI_API_KEY" placeholder="Enter OpenAI API key">
+          </label>
+          <label class="config-label">Anthropic API Key
+            <input type="password" id="cfg-key-ANTHROPIC_API_KEY" placeholder="Enter Anthropic API key">
+          </label>
+          <label class="config-label">Together API Key
+            <input type="password" id="cfg-key-TOGETHER_API_KEY" placeholder="Enter Together API key">
+          </label>
+          <label class="config-label">OpenRouter API Key
+            <input type="password" id="cfg-key-OPENROUTER_API_KEY" placeholder="Enter OpenRouter API key">
+          </label>
+          <label class="config-label">MiniMax API Key
+            <input type="password" id="cfg-key-MINIMAX_API_KEY" placeholder="Enter MiniMax API key">
+          </label>
+          <button id="cfg-save-btn" class="config-save-btn">Save Configuration</button>
+        </div>
+      </div>
+    </div>
+    <div id="config-sidebar-overlay"></div>
 
     <div id="ask-user-modal" style="display:none;">
       <div class="modal-content">

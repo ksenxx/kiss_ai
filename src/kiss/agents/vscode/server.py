@@ -172,6 +172,15 @@ class VSCodeServer(
                 price = float(info.input_price_per_1M) + float(info.output_price_per_1M)
                 sort_keys[name] = (vendor_order, -price)
         models_list.sort(key=lambda m: sort_keys[m["name"]])
+
+        # Add custom endpoint model if configured
+        from kiss.agents.vscode.vscode_config import get_custom_model_entry, load_config
+
+        cfg = load_config()
+        custom = get_custom_model_entry(cfg)
+        if custom:
+            models_list.insert(0, custom)
+
         self.printer.broadcast({
             "type": "models",
             "models": models_list,

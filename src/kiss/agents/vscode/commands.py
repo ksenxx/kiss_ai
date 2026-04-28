@@ -246,6 +246,38 @@ class _CommandsMixin:
             cmd.get("action", ""), cmd.get("tabId", ""),
         )
 
+    def _cmd_get_config(self, cmd: dict[str, Any]) -> None:
+        """Send the current configuration to the frontend."""
+        from kiss.agents.vscode.vscode_config import load_config
+
+        cfg = load_config()
+        self.printer.broadcast({"type": "configData", "config": cfg})
+
+    def _cmd_save_config(self, cmd: dict[str, Any]) -> None:
+        """Save configuration and API keys from the frontend."""
+        from kiss.agents.vscode.vscode_config import (
+            apply_config_to_env,
+            load_config,
+            save_api_key_to_shell,
+            save_config,
+        )
+
+        cfg = cmd.get("config", {})
+        save_config(cfg)
+        apply_config_to_env(cfg)
+
+        api_keys = cmd.get("apiKeys", {})
+        for key_name, key_value in api_keys.items():
+            if key_value:
+                save_api_key_to_shell(key_name, key_value)
+
+        # Refresh models list so custom endpoint and new API keys show up
+        self._get_models()
+
+        # Reload config to verify
+        new_cfg = load_config()
+        self.printer.broadcast({"type": "configData", "config": new_cfg})
+
     def _cmd_set_skip_merge(self, cmd: dict[str, Any]) -> None:
         """Set the skip_merge flag on a tab.
 
@@ -280,4 +312,6 @@ class _CommandsMixin:
         "worktreeAction": _cmd_worktree_action,
         "autocommitAction": _cmd_autocommit_action,
         "setSkipMerge": _cmd_set_skip_merge,
+        "getConfig": _cmd_get_config,
+        "saveConfig": _cmd_save_config,
     }

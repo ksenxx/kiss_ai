@@ -111,6 +111,82 @@ body {
 #tab-bar > #history-btn.open .history-chevron {
   transform: rotate(-90deg);
 }
+#tab-bar > #config-btn {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: var(--dim);
+  cursor: pointer;
+  padding: 5px 6px;
+  display: flex;
+  align-items: center;
+  font-size: var(--fs-base);
+  transition: color 0.15s;
+}
+#tab-bar > #config-btn:hover { color: var(--fg); }
+#tab-bar > #config-btn.open { color: var(--accent); }
+
+/* ── Config Sidebar ─────────────────────────────────── */
+#config-sidebar {
+  position: fixed;
+  right: 0; top: 0; bottom: 0;
+  width: min(420px, 75vw);
+  background: var(--bg2);
+  border-left: 1px solid var(--border);
+  transform: translateX(100%);
+  transition: transform 0.2s ease;
+  z-index: 200;
+  padding: 16px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+#config-sidebar.open { transform: translateX(0); }
+
+#config-sidebar-overlay {
+  position: fixed; inset: 0; background: rgb(0 0 0 / 50%);
+  z-index: 199; opacity: 0; pointer-events: none; transition: opacity 0.2s ease;
+}
+#config-sidebar-overlay.open { opacity: 1; pointer-events: auto; }
+
+#config-sidebar-close {
+  position: absolute; top: 12px; right: 12px; background: none; border: none;
+  color: color-mix(in srgb, var(--fg) 50%, transparent); font-size: var(--fs-2xl); cursor: pointer; padding: 4px 8px; border-radius: 4px;
+}
+#config-sidebar-close:hover { color: color-mix(in srgb, var(--fg) 83%, transparent); background: color-mix(in srgb, var(--fg) 8%, transparent); }
+
+.config-label {
+  display: block;
+  font-size: var(--fs-sm);
+  color: var(--dim);
+  margin-bottom: 12px;
+}
+.config-label input[type="text"],
+.config-label input[type="password"],
+.config-label input[type="number"] {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+  padding: 6px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--fg);
+  font-size: var(--fs-sm);
+  font-family: inherit;
+  box-sizing: border-box;
+}
+.config-label input:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+.config-checkbox { display: flex; align-items: center; gap: 8px; flex-direction: row; }
+.config-checkbox input[type="checkbox"] { margin: 0; width: auto; }
+.config-divider { border-top: 1px solid var(--border); margin: 12px 0; }
+.config-save-btn {
+  display: block; width: 100%; padding: 8px; margin-top: 8px;
+  background: var(--accent); color: #fff; border: none; border-radius: 4px;
+  cursor: pointer; font-size: var(--fs-sm); font-weight: 600;
+}
+.config-save-btn:hover { opacity: 0.9; }
+
 #tab-list::-webkit-scrollbar { display: none; }
 
 .chat-tab {

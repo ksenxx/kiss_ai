@@ -896,6 +896,18 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         break;
       }
 
+      case 'getConfig':
+        this._getServiceProcess().sendCommand({type: 'getConfig'});
+        break;
+
+      case 'saveConfig':
+        this._getServiceProcess().sendCommand({
+          type: 'saveConfig',
+          config: message.config,
+          apiKeys: message.apiKeys,
+        });
+        break;
+
       case 'resolveDroppedPaths': {
         const workDir = this._getWorkDir();
         const paths = (message.uris || [])
