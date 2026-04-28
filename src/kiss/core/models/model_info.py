@@ -145,11 +145,19 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "codex-mini-latest": _mi(200000, 1.50, 6.00),
     "computer-use-preview": _mi(128000, 3.00, 12.00),
     "computer-use-preview-2025-03-11": _mi(128000, 3.00, 12.00),
+    "deepcogito/cogito-v1-preview-llama-70B": _mi(131072, 0.00, 0.00),  # NEW: needs pricing
+    "deepcogito/cogito-v1-preview-llama-70B-Turbo": _mi(131072, 0.00, 0.00),  # NEW: needs pricing
+    "deepcogito/cogito-v1-preview-llama-8B": _mi(131072, 0.00, 0.00),  # NEW: needs pricing
+    "deepcogito/cogito-v1-preview-qwen-14B": _mi(131072, 0.00, 0.00),  # NEW: needs pricing
+    "deepcogito/cogito-v1-preview-qwen-32B": _mi(131072, 0.00, 0.00),  # NEW: needs pricing
     "deepcogito/cogito-v2-1-671b": _mi(163840, 1.25, 1.25, fc=False),
+    "deepseek-ai/deepseek-coder-33b-instruct": _mi(16384, 0.80, 0.80),  # NEW
     "deepseek-ai/DeepSeek-R1": _mi(163840, 3.00, 7.00, fc=False),
     "deepseek-ai/DeepSeek-R1-0528": _mi(163840, 3.00, 7.00),
     "deepseek-ai/DeepSeek-R1-0528-tput": _mi(163840, 3.00, 7.00),
     "deepseek-ai/DeepSeek-R1-Distill-Llama-70B": _mi(131072, 2.00, 2.00),
+    "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B": _mi(131072, 0.18, 0.18),  # NEW
+    "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B": _mi(131072, 1.60, 1.60),  # NEW
     "deepseek-ai/DeepSeek-V3-0324": _mi(163840, 1.25, 1.25),
     "deepseek-ai/DeepSeek-V3.1": _mi(131072, 0.60, 1.70, fc=False),
     "deepseek-ai/DeepSeek-V4-Pro": _mi(512000, 2.10, 4.40),  # NEW
@@ -165,8 +173,10 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "gemini-3-flash-preview": _mi(1048576, 0.50, 3.00),
     "gemini-3-pro-preview": _mi(1048576, 2.00, 12.00),
     "gemini-3.1-flash-lite-preview": _mi(1048576, 0.25, 1.50),
+    "gemini-3.1-flash-tts-preview": _mi(8192, 0.00, 0.00),  # NEW: needs pricing
     "gemini-3.1-pro-preview": _mi(1048576, 2.00, 12.00),
     "gemini-embedding-001": _emb(2048, 0.15),
+    "gemini-embedding-2": _mi(8192, 0.00, 0.00),  # NEW: needs pricing
     "gemini-embedding-2-preview": _emb(8192, 0.00),
     "google/gemma-2-27b-it": _mi(8192, 0.80, 0.80),
     "google/gemma-3n-E4B-it": _mi(32768, 0.06, 0.12, fc=False),
@@ -239,11 +249,15 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "gpt-5.4-pro-2026-03-05": _mi(1050000, 30.00, 180.00),
     "gpt-5.5": _mi(1050000, 5.00, 30.00),  # NEW
     "gpt-5.5-2026-04-23": _mi(1050000, 5.00, 30.00),  # NEW
+    "gpt-5.5-pro": _mi(1050000, 30.00, 180.00),  # NEW
+    "gpt-5.5-pro-2026-04-23": _mi(1050000, 30.00, 180.00),  # NEW
     "gpt-audio": _mi(128000, 2.50, 10.00, fc=False),
     "gpt-audio-mini": _mi(128000, 0.60, 2.40, fc=False),
     "gpt-image-1": _mi(32768, 5.00, 40.00, fc=False),
     "gpt-image-1-mini": _mi(32768, 1.50, 12.00, fc=False),
     "gpt-image-1.5": _mi(32768, 5.00, 40.00, fc=False),
+    "gpt-image-2": _mi(0, 0.00, 0.00),  # NEW: needs pricing
+    "gpt-image-2-2026-04-21": _mi(0, 0.00, 0.00),  # NEW: needs pricing
     "gpt-realtime": _mi(128000, 4.00, 16.00, fc=False),
     "gpt-realtime-mini": _mi(128000, 0.60, 2.40, fc=False),
     "intfloat/multilingual-e5-large-instruct": _emb(514, 0.02),
@@ -367,7 +381,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/deepseek/deepseek-v4-flash": _mi(1048576, 0.14, 0.28),  # NEW
     "openrouter/deepseek/deepseek-v4-pro": _mi(1048576, 0.435, 0.87, fc=False),  # NEW
     "openrouter/essentialai/rnj-1-instruct": _mi(32768, 0.15, 0.15, fc=False),
-    "openrouter/google/gemini-2.0-flash-001": _mi(1000000, 0.10, 0.40),
+    "openrouter/google/gemini-2.0-flash-001": _mi(1048576, 0.10, 0.40),
     "openrouter/google/gemini-2.0-flash-lite-001": _mi(1048576, 0.075, 0.30),
     "openrouter/google/gemini-2.5-flash": _mi(1048576, 0.30, 2.50),
     "openrouter/google/gemini-2.5-flash-image": _mi(32768, 0.30, 2.50, fc=False, gen=False),
@@ -394,6 +408,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/gryphe/mythomax-l2-13b": _mi(4096, 0.06, 0.06, fc=False),
     "openrouter/ibm-granite/granite-4.0-h-micro": _mi(131000, 0.02, 0.11, fc=False),
     "openrouter/inception/mercury-2": _mi(128000, 0.25, 0.75),
+    "openrouter/inclusionai/ling-2.6-flash": _mi(262144, 0.08, 0.24),  # NEW
     "openrouter/inflection/inflection-3-pi": _mi(8000, 2.50, 10.00, fc=False),
     "openrouter/inflection/inflection-3-productivity": _mi(8000, 2.50, 10.00, fc=False),
     "openrouter/kwaipilot/kat-coder-pro-v2": _mi(256000, 0.30, 1.20),
@@ -434,7 +449,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/mistralai/mistral-large-2512": _mi(262144, 0.50, 1.50, fc=False),
     "openrouter/mistralai/mistral-medium-3": _mi(131072, 0.40, 2.00, fc=False),
     "openrouter/mistralai/mistral-medium-3.1": _mi(131072, 0.40, 2.00, fc=False),
-    "openrouter/mistralai/mistral-nemo": _mi(131072, 0.01, 0.03, fc=False),
+    "openrouter/mistralai/mistral-nemo": _mi(131072, 0.02, 0.04, fc=False),
     "openrouter/mistralai/mistral-saba": _mi(32768, 0.20, 0.60, fc=False),
     "openrouter/mistralai/mistral-small-24b-instruct-2501": _mi(32768, 0.05, 0.08, fc=False),
     "openrouter/mistralai/mistral-small-2603": _mi(262144, 0.15, 0.60),
@@ -577,10 +592,10 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/qwen/qwen3.5-flash-02-23": _mi(1000000, 0.065, 0.26),
     "openrouter/qwen/qwen3.5-plus-02-15": _mi(1000000, 0.26, 1.56),
     "openrouter/qwen/qwen3.5-plus-20260420": _mi(1000000, 0.40, 2.40),  # NEW
-    "openrouter/qwen/qwen3.6-27b": _mi(262144, 0.195, 1.56),  # NEW
+    "openrouter/qwen/qwen3.6-27b": _mi(256000, 0.325, 3.25),  # NEW
     "openrouter/qwen/qwen3.6-35b-a3b": _mi(262144, 0.161, 0.965, fc=False),  # NEW
     "openrouter/qwen/qwen3.6-flash": _mi(1000000, 0.25, 1.50),  # NEW
-    "openrouter/qwen/qwen3.6-max-preview": _mi(262144, 1.30, 7.80),  # NEW
+    "openrouter/qwen/qwen3.6-max-preview": _mi(262144, 1.04, 6.24),  # NEW
     "openrouter/qwen/qwen3.6-plus": _mi(1000000, 0.325, 1.95),
     "openrouter/qwen/qwq-32b": _mi(131072, 0.15, 0.58, fc=False),
     "openrouter/rekaai/reka-edge": _mi(16384, 0.10, 0.10),
@@ -630,12 +645,21 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/z-ai/glm-5-turbo": _mi(202752, 1.20, 4.00),
     "openrouter/z-ai/glm-5.1": _mi(202752, 1.05, 3.50),
     "openrouter/z-ai/glm-5v-turbo": _mi(202752, 1.20, 4.00),
+    "openrouter/~anthropic/claude-haiku-latest": _mi(200000, 1.00, 5.00),  # NEW
     "openrouter/~anthropic/claude-opus-latest": _mi(1000000, 5.00, 25.00),
+    "openrouter/~anthropic/claude-sonnet-latest": _mi(1000000, 3.00, 15.00),  # NEW
+    "openrouter/~google/gemini-flash-latest": _mi(1048576, 0.50, 3.00),  # NEW
+    "openrouter/~google/gemini-pro-latest": _mi(1048576, 2.00, 12.00),  # NEW
+    "openrouter/~moonshotai/kimi-latest": _mi(256000, 0.745, 4.655),  # NEW
+    "openrouter/~openai/gpt-latest": _mi(1050000, 5.00, 30.00),  # NEW
+    "openrouter/~openai/gpt-mini-latest": _mi(400000, 0.75, 4.50),  # NEW
+    "Qwen/Qwen2-1.5B-Instruct": _mi(32768, 0.02, 0.02),  # NEW
     "Qwen/Qwen2-VL-72B-Instruct": _mi(32768, 1.20, 1.20),
     "Qwen/Qwen2.5-14B-Instruct": _mi(32768, 0.80, 0.80),
     "Qwen/Qwen2.5-72B-Instruct": _mi(32768, 1.20, 1.20),
     "Qwen/Qwen2.5-72B-Instruct-Turbo": _mi(131072, 1.20, 1.20),
     "Qwen/Qwen2.5-7B-Instruct-Turbo": _mi(32768, 0.30, 0.30, fc=False),
+    "Qwen/Qwen2.5-Coder-32B-Instruct": _mi(16384, 0.80, 0.80),  # NEW
     "Qwen/Qwen2.5-VL-72B-Instruct": _mi(32768, 1.95, 8.00),
     "Qwen/Qwen3-235B-A22B-Instruct-2507-tput": _mi(262144, 0.20, 0.60, fc=False),
     "Qwen/Qwen3-235B-A22B-Thinking-2507": _mi(262144, 0.65, 3.00, fc=False),
@@ -647,6 +671,8 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "Qwen/Qwen3-VL-8B-Instruct": _mi(262144, 0.18, 0.68, fc=False),
     "Qwen/Qwen3.5-397B-A17B": _mi(262144, 0.60, 3.60, fc=False),
     "Qwen/Qwen3.5-9B": _mi(262144, 0.10, 0.15),
+    "Qwen/Qwen3.6-Plus": _mi(1000000, 0.50, 3.00),  # NEW
+    "Qwen/QwQ-32B": _mi(131072, 1.20, 1.20),  # NEW
     "text-embedding-004": _emb(2048, 0.00),
     "text-embedding-3-large": _emb(8191, 0.13),
     "text-embedding-3-small": _emb(8191, 0.02),
