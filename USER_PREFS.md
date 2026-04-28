@@ -25,3 +25,4 @@
 - Budget enforcement tests should verify end-to-end that KISSError propagates to the result panel as a result event with success False
 - Feature integration tests using real HTTP should use ThreadingHTTPServer with OpenAI-compatible protocol handlers
 - When overriding BaseHTTPRequestHandler.log_message, the parameter must be named "format" (not "fmt") to satisfy pyright
+- Installation instructions in README should use a curl one-liner pointing to scripts/install.sh rather than multi-step git clone
