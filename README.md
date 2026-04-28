@@ -4,11 +4,15 @@
 
 # When Simplicity Becomes Your Superpower: Meet KISS Sorcar, a General-purpose and Software engineering AI Assistant and IDE
 
-[![Version](https://img.shields.io/badge/version-2026.4.24-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
+[![Version](https://img.shields.io/badge/version-2026.4.25-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
+[![Website](https://img.shields.io/badge/website-kisssorcar.github.io-1976d2?style=flat-square)](https://kisssorcar.github.io/)
+[![arXiv](https://img.shields.io/badge/arXiv-2604.23822-b31b1b?style=flat-square)](https://arxiv.org/abs/2604.23822)
 
 *"Everything should be made as simple as possible, but not simpler." — Albert Einstein*
+
+**Website:** [https://kisssorcar.github.io/](https://kisssorcar.github.io/) · **Paper:** [arXiv:2604.23822](https://arxiv.org/abs/2604.23822)
 
 </div>
 
@@ -26,6 +30,7 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 - [Models Supported](#-models-supported)
 - [Contributing](#-contributing)
 - [License](#-license)
+- [Citation](#-citation)
 - [Authors](#%EF%B8%8F-authors)
 
 </details>
@@ -36,6 +41,8 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 **KISS Sorcar** (named after [P.C. Sorcar, the legendary Bengali magician](https://en.wikipedia.org/wiki/P._C._Sorcar), evoking the idea of an agent that performs feats that appear magical yet are grounded in disciplined engineering) is a **general-purpose assistant** and **integrated development environment** (IDE) built on top of the **KISS Agent Framework**, a stupidly-simple agentic framework. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours**. KISS Sorcar is implemented as a **Visual Studio Code extension** that runs **locally**. It has **full browser** support (using open-source Chromium browser and Playwright), **multimodal** support, **Docker container** support, and OpenClaw like features (whose functionality will be posted later in the social media). The good part is that KISS Sorcar is **completely free** and **open-source**; all one needs is a model API key from a major LLM provider, such as Anthropic (highly recommended). A paper on KISS Sorcar can be found at [papers/kisssorcar/kiss_sorcar.pdf](papers/kisssorcar/kiss_sorcar.pdf). The sorcar.db\* files have been released to illustrate how KISS Sorcar was used to write the paper. Copy them to ~/.kiss/ folder (after backing them up), restart vscode, and load an item from the history. You can also load an item after setting the demo mode on.
 
 **KISS Sorcar scored 62.2% on Terminal Bench 2.0, beating both Cursor agent (61.7%) and Claude Code (58%).**
+
+> **Built on time-tested, robust software engineering principles.** Both KISS Sorcar and the KISS Agent Framework are grounded in disciplined engineering practice — *read before writing, test before fixing, plan before executing, verify before finishing*. These principles are encoded directly into the agent's system prompt, enabling KISS Sorcar to write code that is **simple, elegant, maintainable, and bug-free**.
 
 An old video on KISS Sorcar can be found at [https://www.youtube.com/watch?v=xnYxWvRqACE](https://www.youtube.com/watch?v=xnYxWvRqACE). We **no longer** recommend to explicitly create a plan in KISS Sorcar. See the paper for details.
 
@@ -137,6 +144,22 @@ Contributions in the form of issues are welcome! KISS Sorcar should be able to t
 ## 📄 License
 
 Apache-2.0
+
+## 📚 Citation
+
+If you use KISS Sorcar in your research, please cite:
+
+```bibtex
+@misc{sen2026kisssorcar,
+  title         = {KISS Sorcar: A Stupidly-Simple General-Purpose and Software Engineering AI Assistant},
+  author        = {Sen, Koushik},
+  year          = {2026},
+  eprint        = {2604.23822},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.SE},
+  url           = {https://arxiv.org/abs/2604.23822}
+}
+```
 
 ## ✍️ Authors
 
