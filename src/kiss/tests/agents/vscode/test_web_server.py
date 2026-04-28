@@ -18,7 +18,12 @@ from unittest import IsolatedAsyncioTestCase
 from websockets.asyncio.client import connect
 
 from kiss.agents.vscode.vscode_config import CONFIG_PATH, save_config
-from kiss.agents.vscode.web_server import RemoteAccessServer, WebPrinter, _build_html
+from kiss.agents.vscode.web_server import (
+    RemoteAccessServer,
+    WebPrinter,
+    _build_html,
+    _translate_webview_command,
+)
 
 
 class TestBuildHtml(unittest.TestCase):
@@ -63,6 +68,44 @@ class TestBuildHtml(unittest.TestCase):
         html = _build_html()
         self.assertNotIn("acquireVsCodeApi()", html.split("acquireVsCodeApi")[0])
         self.assertNotIn("webview.cspSource", html)
+
+
+class TestTranslateWebviewCommand(unittest.TestCase):
+    """Test the command translation from webview format to backend format."""
+
+    def test_user_action_done_translated(self) -> None:
+        """userActionDone becomes userAnswer with answer='done'."""
+        result = _translate_webview_command({"type": "userActionDone"})
+        self.assertEqual(result["type"], "userAnswer")
+        self.assertEqual(result["answer"], "done")
+
+    def test_resume_session_id_becomes_chat_id(self) -> None:
+        """resumeSession 'id' field is renamed to 'chatId'."""
+        result = _translate_webview_command({
+            "type": "resumeSession", "id": 42, "tabId": "t1",
+        })
+        self.assertEqual(result["type"], "resumeSession")
+        self.assertEqual(result["chatId"], 42)
+        self.assertNotIn("id", result)
+        self.assertEqual(result["tabId"], "t1")
+
+    def test_resume_session_with_chat_id_unchanged(self) -> None:
+        """resumeSession with chatId already set is not modified."""
+        cmd = {"type": "resumeSession", "chatId": 42, "tabId": "t1"}
+        result = _translate_webview_command(cmd)
+        self.assertEqual(result["chatId"], 42)
+
+    def test_passthrough_commands_unchanged(self) -> None:
+        """Commands not needing translation pass through unchanged."""
+        for cmd in [
+            {"type": "getModels"},
+            {"type": "stop", "tabId": "t1"},
+            {"type": "selectModel", "model": "m", "tabId": "t1"},
+            {"type": "newChat", "tabId": "t1"},
+            {"type": "getHistory", "query": "test"},
+        ]:
+            result = _translate_webview_command(cmd)
+            self.assertEqual(result, cmd)
 
 
 class TestWebPrinter(unittest.TestCase):
@@ -302,7 +345,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
             self.assertEqual(resp["selected"], "gemini-2.5-pro")
 
     async def test_ws_ready_command(self) -> None:
-        """The 'ready' command returns models, inputHistory, configData, and focusInput."""
+        """The 'ready' command returns models, inputHistory, configData, welcome, focusInput."""
         async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
@@ -314,15 +357,16 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                 "restoredTabs": [],
             }))
             # Collect all responses — expect models, inputHistory,
-            # configData, and focusInput (order may vary)
+            # configData, welcome_suggestions, and focusInput (order may vary)
             received_types: set[str] = set()
-            for _ in range(4):
+            for _ in range(5):
                 raw = await asyncio.wait_for(ws.recv(), timeout=5)
                 ev = json.loads(raw)
                 received_types.add(ev["type"])
             self.assertIn("models", received_types)
             self.assertIn("inputHistory", received_types)
             self.assertIn("configData", received_types)
+            self.assertIn("welcome_suggestions", received_types)
             self.assertIn("focusInput", received_types)
 
     async def test_ws_ready_does_not_produce_unknown_error(self) -> None:
@@ -336,7 +380,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                 "tabId": "t-ready",
             }))
             events: list[dict[str, Any]] = []
-            for _ in range(4):
+            for _ in range(5):
                 raw = await asyncio.wait_for(ws.recv(), timeout=5)
                 events.append(json.loads(raw))
             for ev in events:
@@ -378,6 +422,266 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                     err.get("text", ""),
                     "submit command should be translated to run, not error",
                 )
+
+    async def test_ws_user_action_done(self) -> None:
+        """userActionDone is translated to userAnswer (no Unknown command error)."""
+        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+
+            await ws.send(json.dumps({"type": "userActionDone"}))
+            # userAnswer without an active task just drops the answer.
+            # Verify no "Unknown command" error by sending a follow-up.
+            await ws.send(json.dumps({"type": "getModels"}))
+            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            self.assertEqual(resp["type"], "models")
+
+    async def test_ws_resume_session_translates_id(self) -> None:
+        """resumeSession translates the webview 'id' field to 'chatId'."""
+        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+
+            # Send resumeSession with 'id' (webview format) instead of
+            # 'chatId' (backend format).  A non-existent id produces no
+            # broadcast (empty session), but crucially no Unknown command
+            # error.  Verify by sending a follow-up command.
+            await ws.send(json.dumps({
+                "type": "resumeSession",
+                "id": 999999,
+                "tabId": "resume-tab",
+            }))
+            await ws.send(json.dumps({"type": "getModels"}))
+            # Drain responses — the first may be task_events from
+            # resumeSession or models from getModels.
+            events: list[dict[str, Any]] = []
+            deadline = asyncio.get_event_loop().time() + 5
+            while asyncio.get_event_loop().time() < deadline:
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=2)
+                    ev = json.loads(raw)
+                    events.append(ev)
+                    if ev.get("type") == "models":
+                        break
+                except TimeoutError:
+                    break
+            # Must not have an "Unknown command: resumeSession" error
+            for ev in events:
+                if ev.get("type") == "error":
+                    self.assertNotIn(
+                        "Unknown command", ev.get("text", ""),
+                    )
+
+    async def test_ws_get_welcome_suggestions(self) -> None:
+        """getWelcomeSuggestions returns a welcome_suggestions event."""
+        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+
+            await ws.send(json.dumps({"type": "getWelcomeSuggestions"}))
+            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            self.assertEqual(resp["type"], "welcome_suggestions")
+            self.assertIn("suggestions", resp)
+            self.assertIsInstance(resp["suggestions"], list)
+
+    async def test_ws_get_files(self) -> None:
+        """getFiles command returns a files event."""
+        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+
+            await ws.send(json.dumps({"type": "getFiles", "prefix": ""}))
+            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            self.assertEqual(resp["type"], "files")
+            self.assertIn("files", resp)
+
+    async def test_ws_get_adjacent_task(self) -> None:
+        """getAdjacentTask returns an adjacent_task_events event."""
+        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+
+            await ws.send(json.dumps({
+                "type": "getAdjacentTask",
+                "tabId": "adj-tab",
+                "task": "test",
+                "direction": "prev",
+            }))
+            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            self.assertEqual(resp["type"], "adjacent_task_events")
+
+    async def test_ws_save_config(self) -> None:
+        """saveConfig command updates config and returns configData."""
+        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+
+            await ws.send(json.dumps({
+                "type": "saveConfig",
+                "config": {"max_budget": 50},
+                "apiKeys": {},
+            }))
+            # saveConfig broadcasts models and configData
+            received_types: set[str] = set()
+            for _ in range(2):
+                raw = await asyncio.wait_for(ws.recv(), timeout=5)
+                ev = json.loads(raw)
+                received_types.add(ev["type"])
+            self.assertIn("configData", received_types)
+
+    async def test_ws_set_skip_merge(self) -> None:
+        """setSkipMerge command does not produce an error."""
+        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+
+            await ws.send(json.dumps({
+                "type": "setSkipMerge",
+                "tabId": "skip-tab",
+                "skip": True,
+            }))
+            # setSkipMerge doesn't broadcast — verify no error
+            await ws.send(json.dumps({"type": "getModels"}))
+            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            self.assertEqual(resp["type"], "models")
+
+    async def test_ws_stop_no_error(self) -> None:
+        """stop command with no running task does not produce an error."""
+        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+
+            await ws.send(json.dumps({"type": "stop", "tabId": "no-task"}))
+            # stop without a running task is a no-op — verify no error
+            await ws.send(json.dumps({"type": "getModels"}))
+            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            self.assertEqual(resp["type"], "models")
+
+    async def test_ws_merge_action_all_done(self) -> None:
+        """mergeAction with all-done does not crash."""
+        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+
+            await ws.send(json.dumps({
+                "type": "mergeAction",
+                "action": "all-done",
+                "tabId": "merge-tab",
+            }))
+            # Verify no crash by sending a follow-up and draining
+            await ws.send(json.dumps({"type": "getModels"}))
+            events: list[dict[str, Any]] = []
+            deadline = asyncio.get_event_loop().time() + 5
+            while asyncio.get_event_loop().time() < deadline:
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=2)
+                    ev = json.loads(raw)
+                    events.append(ev)
+                    if ev.get("type") == "models":
+                        break
+                except TimeoutError:
+                    break
+            self.assertTrue(
+                any(e["type"] == "models" for e in events),
+                f"Expected models response, got: {[e['type'] for e in events]}",
+            )
+
+    async def test_ws_record_file_usage(self) -> None:
+        """recordFileUsage command does not produce an error."""
+        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+
+            await ws.send(json.dumps({
+                "type": "recordFileUsage",
+                "path": "/tmp/test.py",
+            }))
+            await ws.send(json.dumps({"type": "getModels"}))
+            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            self.assertEqual(resp["type"], "models")
+
+    async def test_ws_generate_commit_message(self) -> None:
+        """generateCommitMessage command does not produce Unknown command error."""
+        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+
+            await ws.send(json.dumps({"type": "generateCommitMessage"}))
+            # The command runs async and may produce a commitMessage or
+            # nothing (no git diff). Verify no Unknown command error.
+            await ws.send(json.dumps({"type": "getModels"}))
+            events: list[dict[str, Any]] = []
+            deadline = asyncio.get_event_loop().time() + 5
+            while asyncio.get_event_loop().time() < deadline:
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=2)
+                    ev = json.loads(raw)
+                    events.append(ev)
+                    if ev.get("type") == "models":
+                        break
+                except TimeoutError:
+                    break
+            # No "Unknown command: generateCommitMessage" error
+            for ev in events:
+                if ev.get("type") == "error":
+                    self.assertNotIn("Unknown command", ev.get("text", ""))
+
+    async def test_ws_all_webview_commands_no_unknown_error(self) -> None:
+        """No webview command from FromWebviewMessage produces 'Unknown command'."""
+        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+
+            # All FromWebviewMessage types with minimal required fields
+            commands = [
+                {"type": "ready", "tabId": "t"},
+                {"type": "getModels"},
+                {"type": "getHistory"},
+                {"type": "getFiles", "prefix": ""},
+                {"type": "getInputHistory"},
+                {"type": "getConfig"},
+                {"type": "getWelcomeSuggestions"},
+                {"type": "getAdjacentTask", "tabId": "t", "task": "x",
+                 "direction": "prev"},
+                {"type": "selectModel", "model": "gemini-2.5-pro", "tabId": "t"},
+                {"type": "newChat", "tabId": "all-t"},
+                {"type": "closeTab", "tabId": "all-t"},
+                {"type": "userActionDone"},
+                {"type": "resumeSession", "id": 1, "tabId": "t"},
+                {"type": "stop", "tabId": "t"},
+                {"type": "recordFileUsage", "path": "/tmp/x"},
+                {"type": "mergeAction", "action": "all-done", "tabId": "t"},
+                {"type": "setSkipMerge", "tabId": "t", "skip": False},
+                {"type": "saveConfig", "config": {}, "apiKeys": {}},
+                # VS Code-only (should be silently ignored)
+                {"type": "openFile", "path": "/tmp/x"},
+                {"type": "focusEditor"},
+                {"type": "closeSecondaryBar"},
+                {"type": "webviewFocusChanged", "focused": True},
+                {"type": "resolveDroppedPaths", "uris": []},
+                {"type": "runPrompt"},
+            ]
+            for cmd in commands:
+                await ws.send(json.dumps(cmd))
+
+            # Drain all messages, check none is an Unknown command error
+            events: list[dict[str, Any]] = []
+            deadline = asyncio.get_event_loop().time() + 10
+            while asyncio.get_event_loop().time() < deadline:
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=2)
+                    events.append(json.loads(raw))
+                except TimeoutError:
+                    break
+            unknown_errors = [
+                e for e in events
+                if e.get("type") == "error"
+                and "Unknown command" in e.get("text", "")
+            ]
+            self.assertEqual(
+                unknown_errors, [],
+                f"Got Unknown command errors: {unknown_errors}",
+            )
 
     async def test_ws_submit_emits_task_text_and_status(self) -> None:
         """The 'submit' command emits setTaskText and status running=True."""

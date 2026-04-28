@@ -27,7 +27,7 @@
 - Budget enforcement tests should verify end-to-end that KISSError propagates to the result panel as a result event with success False
 - RelentlessAgent must pass remaining budget (not full budget) to each sub-session KISSAgent and check budget before starting new sub-sessions
 - Feature integration tests using real HTTP should use ThreadingHTTPServer with OpenAI-compatible protocol handlers
-- The web server's WebSocket handler must translate webview-only commands (ready, submit) that the TypeScript extension normally intercepts, since there is no TypeScript middleman in the standalone web server flow
+- The web server's WebSocket handler must translate webview-only commands (ready, submit, userActionDone, resumeSession id→chatId, getWelcomeSuggestions) that the TypeScript extension normally intercepts, since there is no TypeScript middleman in the standalone web server flow
 - When overriding BaseHTTPRequestHandler.log_message, the parameter must be named "format" (not "fmt") to satisfy pyright
 - Installation instructions in README should use a curl one-liner pointing to scripts/install.sh rather than multi-step git clone
 - Install scripts should prefer git clone when git is available, falling back to curl/zip download otherwise

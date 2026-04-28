@@ -56,8 +56,9 @@ _VSCODE_ONLY_COMMANDS = frozenset({
     "openFile",
     "resolveDroppedPaths",
     "runPrompt",
-    "getWelcomeSuggestions",
 })
+
+SAMPLE_TASKS_PATH = Path(__file__).parent / "SAMPLE_TASKS.json"
 
 
 # ---------------------------------------------------------------------------
@@ -547,6 +548,37 @@ def _http_response(status: int, content_type: str, body: bytes) -> Response:
     )
 
 
+def _translate_webview_command(cmd: dict[str, Any]) -> dict[str, Any]:
+    """Translate a webview message into a backend command.
+
+    The VS Code TypeScript extension (``SorcarSidebarView``) intercepts
+    messages from the webview and rewrites several of them before
+    forwarding to the Python backend.  This function performs the same
+    translations so the standalone web server can relay messages
+    directly.
+
+    Translations applied:
+
+    * ``userActionDone`` → ``userAnswer`` with ``answer="done"``
+    * ``resumeSession`` → renames ``id`` field to ``chatId``
+
+    Args:
+        cmd: Raw command dictionary from the browser WebSocket.
+
+    Returns:
+        The (possibly modified) command dictionary ready for
+        ``VSCodeServer._handle_command``.
+    """
+    cmd_type = cmd.get("type", "")
+    if cmd_type == "userActionDone":
+        return {"type": "userAnswer", "answer": "done", "tabId": cmd.get("tabId", "")}
+    if cmd_type == "resumeSession" and "id" in cmd and "chatId" not in cmd:
+        out = dict(cmd)
+        out["chatId"] = out.pop("id")
+        return out
+    return cmd
+
+
 # ---------------------------------------------------------------------------
 # RemoteAccessServer
 # ---------------------------------------------------------------------------
@@ -677,6 +709,13 @@ class RemoteAccessServer:
                 if cmd_type == "submit":
                     await self._handle_submit(cmd)
                     continue
+                if cmd_type == "getWelcomeSuggestions":
+                    self._handle_welcome_suggestions()
+                    continue
+                # Translate webview-only fields that the TypeScript
+                # extension normally rewrites before they reach the
+                # Python backend.
+                cmd = _translate_webview_command(cmd)
                 loop = asyncio.get_event_loop()
                 await loop.run_in_executor(
                     None, self._vscode_server._handle_command, cmd
@@ -689,6 +728,19 @@ class RemoteAccessServer:
             self._printer.remove_client(websocket)
 
     # -- Webview command translators -----------------------------------------
+
+    def _handle_welcome_suggestions(self) -> None:
+        """Broadcast welcome task suggestions from ``SAMPLE_TASKS.json``.
+
+        Reads the sample tasks file shipped with the extension and
+        broadcasts a ``welcome_suggestions`` event.  Falls back to an
+        empty list if the file is missing or malformed.
+        """
+        try:
+            data = json.loads(SAMPLE_TASKS_PATH.read_text())
+        except Exception:
+            data = []
+        self._printer.broadcast({"type": "welcome_suggestions", "suggestions": data})
 
     async def _handle_ready(
         self, cmd: dict[str, Any], websocket: ServerConnection,
@@ -721,6 +773,7 @@ class RemoteAccessServer:
             self._vscode_server._handle_command,
             {"type": "getConfig"},
         )
+        self._handle_welcome_suggestions()
         # Send focusInput event back to the client
         try:
             await websocket.send(
