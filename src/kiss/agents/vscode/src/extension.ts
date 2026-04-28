@@ -254,6 +254,28 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   });
 
+  // Widen the secondary sidebar on first activation so the chat panel
+  // has enough room.  Each increaseViewSize call adds ~50 CSS-px;
+  // 3 calls ≈ 150 px ≈ 50 % wider than the ~300 px default.
+  if (!context.globalState.get<boolean>('sidebarWidened')) {
+    sidebarView!.onFirstResolve(() => {
+      setTimeout(async () => {
+        await vscode.commands.executeCommand(
+          'workbench.action.focusAuxiliaryBar',
+        );
+        for (let i = 0; i < 3; i++) {
+          await vscode.commands.executeCommand(
+            'workbench.action.increaseViewSize',
+          );
+        }
+        await vscode.commands.executeCommand(
+          'workbench.action.focusFirstEditorGroup',
+        );
+        await context.globalState.update('sidebarWidened', true);
+      }, 500);
+    });
+  }
+
   // Auto-install dependencies in background
   ensureDependencies().catch(err => {
     const msg = err instanceof Error ? err.message : String(err);

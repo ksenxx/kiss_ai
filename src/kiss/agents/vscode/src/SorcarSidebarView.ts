@@ -58,6 +58,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _disposed: boolean = false;
   private _preMergeOpenFiles: Map<string, Set<string>> = new Map();
   private _restoreChain: Promise<void> = Promise.resolve();
+  private _onFirstResolve: (() => void) | undefined;
 
   /**
    * Show a notification-progress dialog with a timeout-based auto-resolve.
@@ -106,6 +107,16 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     for (const resolve of this._autocommitActionResolves.values()) resolve();
     this._autocommitActionResolves.clear();
     this._autocommitProgresses.clear();
+  }
+
+  /**
+   * Register a one-time callback invoked when the webview view is first resolved.
+   *
+   * Used by the extension entry point to widen the secondary sidebar on
+   * first activation.
+   */
+  public onFirstResolve(cb: () => void): void {
+    this._onFirstResolve = cb;
   }
 
   constructor(extensionUri: vscode.Uri) {
@@ -371,6 +382,12 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       this._disposed = true;
       this._resolveAllWorktreeActions();
     });
+
+    if (this._onFirstResolve) {
+      const cb = this._onFirstResolve;
+      this._onFirstResolve = undefined;
+      cb();
+    }
   }
 
   /** Whether the underlying webview is currently visible. */
