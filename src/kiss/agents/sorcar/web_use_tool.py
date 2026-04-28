@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import atexit
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -85,6 +86,32 @@ _BLOCKED_URL_MSG = (
     "Navigation blocked: Google authentication URLs are not allowed. "
     "Refusing to visit {url}."
 )
+
+
+def _is_profile_in_use(profile_dir: str) -> bool:
+    """Check whether a Chromium profile directory is locked by a running process.
+
+    Chromium creates a ``SingletonLock`` symlink whose target is
+    ``hostname-pid`` when a profile is opened.  If the symlink exists and
+    the referenced PID is alive, the profile is considered in use.
+
+    Args:
+        profile_dir: Path to the Chromium user-data directory.
+
+    Returns:
+        True if the profile is currently locked by a live process.
+    """
+    lock_path = Path(profile_dir) / "SingletonLock"
+    if not lock_path.is_symlink():
+        return False
+    try:
+        target = os.readlink(str(lock_path))
+        pid_str = target.rsplit("-", 1)[-1]
+        pid = int(pid_str)
+        os.kill(pid, 0)
+        return True
+    except (OSError, ValueError, IndexError):
+        return False
 
 
 def _number_interactive_elements(snapshot: str) -> tuple[str, list[dict[str, str]]]:
@@ -223,32 +250,63 @@ class WebUseTool:
         finally:
             _activate_app(prev_app)
 
-    def _clean_singleton_locks(self) -> None:
+    def _clean_singleton_locks(self, profile_dir: str | None = None) -> None:
         """Remove stale Singleton* files from a previously crashed Chromium.
 
         Chromium writes Singleton{Lock,Cookie,Socket} when a persistent profile
         is opened. If the process dies without cleaning up, the next launch
         may fail or crash. Safe to call unconditionally — live Chromium
         recreates the files during startup.
+
+        Args:
+            profile_dir: Directory to clean.  Falls back to ``self.user_data_dir``
+                when *None*.
         """
-        if not self.user_data_dir:
+        target = profile_dir or self.user_data_dir
+        if not target:
             return
         for name in _SINGLETON_FILES:
-            path = Path(self.user_data_dir) / name
+            path = Path(target) / name
             try:
                 if path.is_symlink() or path.exists():
                     path.unlink()
             except OSError:  # pragma: no cover — race with another launch
                 logger.debug("Exception caught", exc_info=True)
 
+    def _resolve_user_data_dir(self) -> str | None:
+        """Return a profile directory not locked by another Chromium process.
+
+        If ``self.user_data_dir`` is ``None``, returns ``None`` (non-persistent).
+        If the configured directory is already locked by a live Chromium,
+        numbered variants (``<dir>_1``, ``<dir>_2``, …) are tried until a
+        free one is found.
+
+        Returns:
+            An available profile directory path, or ``None`` to fall back to
+            a non-persistent (temporary) context.
+        """
+        if not self.user_data_dir:
+            return None
+        if not _is_profile_in_use(self.user_data_dir):
+            return self.user_data_dir
+        for i in range(1, 100):
+            candidate = f"{self.user_data_dir}_{i}"
+            if not _is_profile_in_use(candidate):
+                return candidate
+        return None  # pragma: no cover — 100 concurrent instances is unlikely
+
     def _launch_browser(self, launcher: Any, kwargs: dict[str, Any]) -> None:
-        if self.user_data_dir:
-            Path(self.user_data_dir).mkdir(parents=True, exist_ok=True)
-            self._clean_singleton_locks()
+        effective_dir = self._resolve_user_data_dir()
+        if effective_dir:
+            Path(effective_dir).mkdir(parents=True, exist_ok=True)
+            self._clean_singleton_locks(effective_dir)
             self._context = launcher.launch_persistent_context(
-                self.user_data_dir, **kwargs, **self._context_args()
+                effective_dir, **kwargs, **self._context_args()
             )
-            self._page = self._context.pages[0] if self._context.pages else self._context.new_page()
+            self._page = (
+                self._context.pages[0] if self._context.pages
+                else self._context.new_page()
+            )
         else:
             self._browser = launcher.launch(**kwargs)
             self._context = self._browser.new_context(**self._context_args())

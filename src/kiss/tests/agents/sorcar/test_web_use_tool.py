@@ -3,6 +3,7 @@
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 
@@ -12,6 +13,7 @@ from kiss.agents.sorcar.web_use_tool import (
     WebUseTool,
     _activate_app,
     _get_frontmost_app,
+    _is_profile_in_use,
 )
 
 FORM_PAGE = b"""<!DOCTYPE html>
@@ -235,6 +237,122 @@ class TestBlockedUrls:
         result = web_tool.go_to_url(http_server + "/")
         assert "blocked" not in result.lower()
         assert "Test Form" in result
+
+
+class TestConcurrentProfileAccess:
+    """Two WebUseTool instances sharing the same user_data_dir must not collide.
+
+    Reproduces the "Something went wrong when opening your profile" error that
+    occurs when multiple tasks (e.g. local extension + remote web server) try to
+    use Chromium with the same profile directory simultaneously.
+    """
+
+    def test_second_instance_uses_different_profile(self, http_server, tmp_path):
+        """When the profile is locked by one instance, a second must auto-select a variant.
+
+        Each tool runs in its own thread (realistic: real tasks come from
+        separate extension/web-server threads). Thread A locks the profile,
+        signals readiness, then thread B launches and must detect the lock
+        and use a numbered variant instead of crashing with the Chromium
+        profile error.
+        """
+        profile_dir = str(tmp_path / "shared_profile")
+
+        a_ready = threading.Event()
+        b_done = threading.Event()
+        results: dict[str, str] = {}
+        errors: dict[str, Exception] = {}
+
+        def _run_a() -> None:
+            tool = WebUseTool(user_data_dir=profile_dir, headless=True)
+            try:
+                results["a"] = tool.go_to_url(http_server + "/")
+                a_ready.set()
+                b_done.wait(timeout=60)
+            except Exception as exc:
+                errors["a"] = exc
+                a_ready.set()
+            finally:
+                tool.close()
+
+        def _run_b() -> None:
+            a_ready.wait(timeout=60)
+            tool = WebUseTool(user_data_dir=profile_dir, headless=True)
+            try:
+                results["b"] = tool.go_to_url(http_server + "/")
+            except Exception as exc:
+                errors["b"] = exc
+            finally:
+                tool.close()
+                b_done.set()
+
+        t1 = threading.Thread(target=_run_a)
+        t2 = threading.Thread(target=_run_b)
+        t1.start()
+        t2.start()
+        t2.join(timeout=90)
+        b_done.set()  # unblock t1 if t2 failed
+        t1.join(timeout=30)
+
+        assert not errors, f"Thread errors: {errors}"
+        assert "Test Form" in results["a"]
+        assert "Test Form" in results["b"]
+
+    def test_is_profile_in_use_no_lock(self, tmp_path):
+        """Profile without SingletonLock is not in use."""
+        assert not _is_profile_in_use(str(tmp_path))
+
+    def test_is_profile_in_use_stale_lock(self, tmp_path):
+        """Profile with SingletonLock pointing to a dead PID is not in use."""
+        (tmp_path / "SingletonLock").symlink_to("hostname-999999999")
+        assert not _is_profile_in_use(str(tmp_path))
+
+    def test_is_profile_in_use_live_lock(self, tmp_path):
+        """Profile with SingletonLock pointing to this process is in use."""
+        import os
+
+        (tmp_path / "SingletonLock").symlink_to(f"hostname-{os.getpid()}")
+        assert _is_profile_in_use(str(tmp_path))
+
+    def test_resolve_skips_locked_profiles(self, tmp_path):
+        """_resolve_user_data_dir skips the configured dir when it's locked."""
+        import os
+
+        profile = str(tmp_path / "profile")
+        Path(profile).mkdir()
+        (Path(profile) / "SingletonLock").symlink_to(f"hostname-{os.getpid()}")
+
+        tool = WebUseTool(user_data_dir=profile, headless=True)
+        try:
+            resolved = tool._resolve_user_data_dir()
+            assert resolved == f"{profile}_1"
+        finally:
+            tool.close()
+
+    def test_resolve_skips_multiple_locked(self, tmp_path):
+        """_resolve_user_data_dir skips numbered variants that are also locked."""
+        import os
+
+        profile = str(tmp_path / "profile")
+        for suffix in ["", "_1", "_2"]:
+            d = Path(f"{profile}{suffix}")
+            d.mkdir(parents=True)
+            (d / "SingletonLock").symlink_to(f"hostname-{os.getpid()}")
+
+        tool = WebUseTool(user_data_dir=profile, headless=True)
+        try:
+            resolved = tool._resolve_user_data_dir()
+            assert resolved == f"{profile}_3"
+        finally:
+            tool.close()
+
+    def test_resolve_returns_none_for_no_dir(self):
+        """_resolve_user_data_dir returns None when user_data_dir is None."""
+        tool = WebUseTool(user_data_dir=None, headless=True)
+        try:
+            assert tool._resolve_user_data_dir() is None
+        finally:
+            tool.close()
 
 
 if __name__ == "__main__":

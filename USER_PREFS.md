@@ -32,6 +32,7 @@
 - All 30 FromWebviewMessage types from types.ts must be accounted for in the web server: either intercepted, translated, passed through to backend handlers, or listed in VSCODE_ONLY_COMMANDS
 - mergeAction commands (accept, reject, prev, next, accept-file, reject-file, accept-all, reject-all) must be handled server-side in web_server.py via _WebMergeState since there is no TypeScript MergeManager in the standalone web server; only all-done passes through to the backend
 - merge_data events must be augmented with base_text and current_text file contents for web clients so the browser can render diffs
+- Multiple concurrent WebUseTool instances must use separate Chromium profile directories to avoid profile lock contention; the tool auto-resolves to numbered variants when the default profile is locked
 - When overriding BaseHTTPRequestHandler.log_message, the parameter must be named "format" (not "fmt") to satisfy pyright
 - Installation instructions in README should use a curl one-liner pointing to scripts/install.sh rather than multi-step git clone
 - Install scripts should prefer git clone when git is available, falling back to curl/zip download otherwise
