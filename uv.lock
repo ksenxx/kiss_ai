@@ -1351,6 +1351,7 @@ name = "kiss-agent-framework"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
+    { name = "cryptography" },
     { name = "docker" },
     { name = "flask" },
     { name = "google-api-python-client" },
@@ -1418,6 +1419,7 @@ sorcar = [
 [package.metadata]
 requires-dist = [
     { name = "anthropic", specifier = ">=0.40.0" },
+    { name = "cryptography", specifier = ">=44.0.0" },
     { name = "docker", specifier = ">=7.0.0" },
     { name = "flask", specifier = ">=3.0.0" },
     { name = "google-api-python-client", specifier = ">=2.100.0" },

@@ -51,6 +51,7 @@ dependencies = [
     "requests>=2.28.0",
     "harbor>=0.3.0",
     "websockets>=15.0",
+    "cryptography>=44.0.0",
 ]
 
 [build-system]
