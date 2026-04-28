@@ -17,3 +17,5 @@
 - Integration tests should use real objects; use env var redirection and module-level constant redirection for test isolation instead of mocking functions
 - Config panel API key fields should be populated from environment values, not left blank
 - For VS Code server integration tests, redirect sys.stdout to StringIO to capture broadcast events
+- First-time extension state is tracked via globalState in VS Code extension context
+- Secondary sidebar should be wider than default for chat readability
