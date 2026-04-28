@@ -13,3 +13,5 @@
 - Tab bar button order: tabs, +, config, history
 - New message types in the VS Code extension must be added to FromWebviewMessage, AgentCommand, and/or ToWebviewMessage in types.ts
 - VS Code extension also uses stylelint for CSS linting; run auto-fix if needed
+- Integration tests should use real objects; use env var redirection and module-level constant redirection for test isolation instead of mocking functions
+- For VS Code server integration tests, redirect sys.stdout to StringIO to capture broadcast events
