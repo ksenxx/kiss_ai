@@ -221,6 +221,59 @@ _VSCODE_ONLY_COMMANDS = frozenset({
 SAMPLE_TASKS_PATH = Path(__file__).parent / "SAMPLE_TASKS.json"
 
 _TLS_DIR = Path.home() / ".kiss" / "tls"
+_URL_FILE = Path.home() / ".kiss" / "remote-url.json"
+
+
+def _save_url_file(local_url: str, tunnel_url: str | None = None) -> None:
+    """Write the active server URLs to ``~/.kiss/remote-url.json``.
+
+    Creates the parent directory if needed.  The file is read by
+    ``kiss-web --url`` so users can discover the remote URL without
+    digging through log files.
+
+    Args:
+        local_url: The local ``https://localhost:PORT`` URL.
+        tunnel_url: The Cloudflare tunnel URL, or None.
+    """
+    data: dict[str, str] = {"local": local_url}
+    if tunnel_url:
+        data["tunnel"] = tunnel_url
+    _URL_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _URL_FILE.write_text(json.dumps(data, indent=2) + "\n")
+
+
+def _remove_url_file() -> None:
+    """Delete ``~/.kiss/remote-url.json`` if it exists."""
+    try:
+        _URL_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _print_url() -> None:
+    """Print the active remote URL from ``~/.kiss/remote-url.json``.
+
+    Prints the tunnel URL if available, otherwise the local URL.
+    Exits with code 1 if the server is not running or the file is
+    missing.
+    """
+    if not _URL_FILE.is_file():
+        print("KISS Sorcar web server is not running.", file=sys.stderr)
+        sys.exit(1)
+    try:
+        data = json.loads(_URL_FILE.read_text())
+    except (json.JSONDecodeError, OSError):
+        print("KISS Sorcar web server is not running.", file=sys.stderr)
+        sys.exit(1)
+    tunnel = data.get("tunnel")
+    local = data.get("local", "")
+    if tunnel:
+        print(tunnel)
+    elif local:
+        print(local)
+    else:
+        print("No URL available.", file=sys.stderr)
+        sys.exit(1)
 
 
 def _generate_self_signed_cert(
@@ -1381,6 +1434,7 @@ class RemoteAccessServer:
             except subprocess.TimeoutExpired:
                 self._tunnel_proc.kill()
             self._tunnel_proc = None
+        _remove_url_file()
 
     # -- Server lifecycle ---------------------------------------------------
 
@@ -1413,6 +1467,8 @@ class RemoteAccessServer:
                     "Warning: cloudflared tunnel failed to start",
                     file=sys.stderr,
                 )
+
+        _save_url_file(local_url, tunnel_url)
 
         await self._ws_server.serve_forever()
 
@@ -1461,6 +1517,10 @@ def main() -> None:  # pragma: no cover — CLI entry point
     import argparse
 
     parser = argparse.ArgumentParser(description="KISS Sorcar Remote Access Server")
+    parser.add_argument(
+        "--url", action="store_true",
+        help="Print the active remote URL and exit",
+    )
     parser.add_argument("--host", default="0.0.0.0", help="Bind address")
     parser.add_argument("--port", type=int, default=8787, help="Port number")
     parser.add_argument(
@@ -1483,6 +1543,10 @@ def main() -> None:  # pragma: no cover — CLI entry point
     parser.add_argument("--certfile", default=None, help="Path to PEM certificate file")
     parser.add_argument("--keyfile", default=None, help="Path to PEM private key file")
     args = parser.parse_args()
+
+    if args.url:
+        _print_url()
+        return
 
     # Resolve tunnel token: CLI flag > env var > config file
     tunnel_token = args.tunnel_token
