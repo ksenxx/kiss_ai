@@ -2861,9 +2861,25 @@
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         sendMessage();
+        return;
       }
       // Any other key clears ghost
       if (e.key !== 'Tab') clearGhost();
+    });
+    // Fallback for mobile virtual keyboards that don't fire keydown for Enter.
+    // Track Shift state so Shift+Enter still inserts a newline on desktop.
+    let _shiftHeld = false;
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Shift') _shiftHeld = true;
+    });
+    document.addEventListener('keyup', e => {
+      if (e.key === 'Shift') _shiftHeld = false;
+    });
+    inp.addEventListener('beforeinput', e => {
+      if (e.inputType === 'insertLineBreak' && !_shiftHeld) {
+        e.preventDefault();
+        sendMessage();
+      }
     });
     inp.addEventListener('input', () => {
       inp.style.height = 'auto';

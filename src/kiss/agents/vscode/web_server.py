@@ -520,7 +520,8 @@ def _build_html() -> str:
           <div id="input-text-wrap">
             <div id="ghost-overlay"></div>
             <textarea id="task-input"
-             placeholder="Ask anything... (@ for files)" rows="1"></textarea>
+             placeholder="Ask anything... (@ for files)" rows="1"
+             enterkeyhint="send"></textarea>
             <button id="input-clear-btn" style="display:none;">&times;</button>
           </div>
         </div>
