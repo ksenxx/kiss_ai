@@ -31,3 +31,5 @@
 - Website style should not look AI-generated; avoid purple accents, emoji icons, gradient glows, and generic SaaS template patterns
 - Website should use a white background
 - Only list Koushik Sen as the author on the website
+- Website section order: Install → Features → Architecture → Models → Video → Author
+- GitHub Pages deployments can error silently; always check build status via gh api and verify live content after pushing
