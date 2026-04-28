@@ -42,6 +42,8 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 
 **KISS Sorcar scored 62.2% on Terminal Bench 2.0, beating both Cursor agent (61.7%) and Claude Code (58%).**
 
+> **Built on time-tested, robust software engineering principles.** Both KISS Sorcar and the KISS Agent Framework are grounded in disciplined engineering practice — *read before writing, test before fixing, plan before executing, verify before finishing*. These principles are encoded directly into the agent's system prompt, enabling KISS Sorcar to write code that is **simple, elegant, maintainable, and bug-free**.
+
 An old video on KISS Sorcar can be found at [https://www.youtube.com/watch?v=xnYxWvRqACE](https://www.youtube.com/watch?v=xnYxWvRqACE). We **no longer** recommend to explicitly create a plan in KISS Sorcar. See the paper for details.
 
 <scriptsize>Note that **Sorcar** also means government in Bengali.</scriptsize>
