@@ -209,7 +209,7 @@ find_code_cli() {
     echo ""
 
     # --- 1. git ---------------------------------------------------------------
-    echo ">>> [1/8] Checking git..."
+    echo ">>> [1/9] Checking git..."
     if ! command -v git &>/dev/null; then
         install_git
     fi
@@ -217,7 +217,7 @@ find_code_cli() {
     echo ""
 
     # --- 2. uv ----------------------------------------------------------------
-    echo ">>> [2/8] Installing uv..."
+    echo ">>> [2/9] Installing uv..."
     if ! command -v uv &>/dev/null; then
         install_uv
     fi
@@ -225,7 +225,7 @@ find_code_cli() {
     echo ""
 
     # --- 3. Node.js -----------------------------------------------------------
-    echo ">>> [3/8] Installing Node.js..."
+    echo ">>> [3/9] Installing Node.js..."
     if ! command -v node &>/dev/null; then
         install_node || true
     fi
@@ -237,7 +237,7 @@ find_code_cli() {
     echo ""
 
     # --- 4. VS Code -----------------------------------------------------------
-    echo ">>> [4/8] Installing VS Code..."
+    echo ">>> [4/9] Installing VS Code..."
     if ! find_code_cli; then
         install_code_cli || true
         find_code_cli || true
@@ -250,7 +250,7 @@ find_code_cli() {
     echo ""
 
     # --- 5. Python environment ------------------------------------------------
-    echo ">>> [5/8] Setting up Python environment..."
+    echo ">>> [5/9] Setting up Python environment..."
     cd "$PROJECT_DIR"
     if [ ! -d "$PROJECT_DIR/.venv" ]; then
         echo "   Creating virtual environment with Python 3.13..."
@@ -259,7 +259,7 @@ find_code_cli() {
     uv sync
 
     # Symlink entry-point scripts into bin
-    for script in sorcar check generate-api-docs; do
+    for script in sorcar check generate-api-docs kiss-web; do
         if [ -f "$PROJECT_DIR/.venv/bin/$script" ]; then
             ln -sf "$PROJECT_DIR/.venv/bin/$script" "$BIN_DIR/$script"
         fi
@@ -269,12 +269,56 @@ find_code_cli() {
     echo ""
 
     # --- 6. Playwright Chromium -----------------------------------------------
-    echo ">>> [6/8] Installing Playwright Chromium..."
+    echo ">>> [6/9] Installing Playwright Chromium..."
     uv run playwright install chromium
     echo ""
 
-    # --- 7. Build VS Code extension ------------------------------------------
-    echo ">>> [7/8] Building VS Code extension..."
+    # --- 7. cloudflared (for remote web server tunnel) -------------------------
+    echo ">>> [7/9] Installing cloudflared..."
+    if ! command -v cloudflared &>/dev/null; then
+        case "$OS" in
+            Darwin)
+                if command -v brew &>/dev/null; then
+                    brew install cloudflared
+                else
+                    CF_ARCH=""
+                    case "$ARCH" in
+                        x86_64)         CF_ARCH="amd64" ;;
+                        aarch64|arm64)  CF_ARCH="arm64" ;;
+                    esac
+                    CF_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-${CF_ARCH}.tgz"
+                    if curl -fsSL "$CF_URL" | tar xz -C "$BIN_DIR"; then
+                        echo "   cloudflared installed to $BIN_DIR"
+                    else
+                        echo "   WARNING: Failed to download cloudflared from $CF_URL"
+                    fi
+                fi
+                ;;
+            Linux)
+                CF_ARCH=""
+                case "$ARCH" in
+                    x86_64)         CF_ARCH="amd64" ;;
+                    aarch64|arm64)  CF_ARCH="arm64" ;;
+                esac
+                CF_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}"
+                if curl -fsSL -o "$BIN_DIR/cloudflared" "$CF_URL"; then
+                    chmod +x "$BIN_DIR/cloudflared"
+                    echo "   cloudflared installed to $BIN_DIR"
+                else
+                    echo "   WARNING: Failed to download cloudflared from $CF_URL"
+                fi
+                ;;
+        esac
+    fi
+    if command -v cloudflared &>/dev/null; then
+        echo "   $(cloudflared --version) ready"
+    else
+        echo "   WARNING: cloudflared not installed — kiss-web --tunnel will be unavailable"
+    fi
+    echo ""
+
+    # --- 8. Build VS Code extension ------------------------------------------
+    echo ">>> [8/9] Building VS Code extension..."
     VSCODE_EXT_DIR="$PROJECT_DIR/src/kiss/agents/vscode"
     VSIX="$VSCODE_EXT_DIR/kiss-sorcar.vsix"
     if [ -f "$VSIX" ]; then
@@ -292,8 +336,8 @@ find_code_cli() {
     fi
     echo ""
 
-    # --- 8. Install VS Code extension ----------------------------------------
-    echo ">>> [8/8] Installing VS Code extension..."
+    # --- 9. Install VS Code extension ----------------------------------------
+    echo ">>> [9/9] Installing VS Code extension..."
     if [ -f "$VSIX" ]; then
         if find_code_cli && [ -n "$CODE_CLI" ]; then
             "$CODE_CLI" --install-extension "$VSIX" --force 2>&1
