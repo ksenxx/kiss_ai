@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import ssl
 import tempfile
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from typing import Any
 from unittest import IsolatedAsyncioTestCase
 
@@ -22,6 +25,8 @@ from kiss.agents.vscode.web_server import (
     RemoteAccessServer,
     WebPrinter,
     _build_html,
+    _create_ssl_context,
+    _generate_self_signed_cert,
     _translate_webview_command,
 )
 
@@ -1312,6 +1317,137 @@ class TestRemoteAccessServerMerge(IsolatedAsyncioTestCase):
             with open(self._test_file) as f:
                 content = f.read()
             self.assertEqual(content, "line1\nline2\nline3\n")
+
+
+class TestGenerateSelfSignedCert(unittest.TestCase):
+    """Test self-signed certificate generation."""
+
+    def test_generates_cert_and_key_files(self) -> None:
+        """Generated cert and key files are valid PEM and loadable by ssl."""
+        import ssl as _ssl
+
+        with tempfile.TemporaryDirectory() as td:
+            cert_path = Path(td) / "sub" / "cert.pem"
+            key_path = Path(td) / "sub" / "key.pem"
+            _generate_self_signed_cert(cert_path, key_path)
+
+            self.assertTrue(cert_path.is_file())
+            self.assertTrue(key_path.is_file())
+            self.assertIn(b"BEGIN CERTIFICATE", cert_path.read_bytes())
+            self.assertIn(b"BEGIN RSA PRIVATE KEY", key_path.read_bytes())
+
+            # Verify ssl module can load them
+            ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(str(cert_path), str(key_path))
+
+
+class TestCreateSslContext(unittest.TestCase):
+    """Test SSL context creation."""
+
+    def test_auto_generates_cert_when_no_paths(self) -> None:
+        """_create_ssl_context without args auto-generates certs."""
+        import ssl as _ssl
+
+        ctx = _create_ssl_context()
+        self.assertIsInstance(ctx, _ssl.SSLContext)
+
+    def test_loads_provided_cert(self) -> None:
+        """_create_ssl_context with explicit cert/key loads them."""
+        import ssl as _ssl
+
+        with tempfile.TemporaryDirectory() as td:
+            cert_path = Path(td) / "cert.pem"
+            key_path = Path(td) / "key.pem"
+            _generate_self_signed_cert(cert_path, key_path)
+
+            ctx = _create_ssl_context(str(cert_path), str(key_path))
+            self.assertIsInstance(ctx, _ssl.SSLContext)
+
+
+class TestRemoteAccessServerTLS(IsolatedAsyncioTestCase):
+    """Test HTTPS and WSS with TLS enabled."""
+
+    async def asyncSetUp(self) -> None:
+        self.port = _find_free_port()
+        self._orig_config = None
+        if CONFIG_PATH.exists():
+            self._orig_config = CONFIG_PATH.read_text()
+        save_config({"remote_password": ""})
+
+        self._tmpdir = tempfile.mkdtemp()
+        self._cert_dir = tempfile.mkdtemp()
+        self._certfile = os.path.join(self._cert_dir, "cert.pem")
+        self._keyfile = os.path.join(self._cert_dir, "key.pem")
+        _generate_self_signed_cert(Path(self._certfile), Path(self._keyfile))
+
+        self.server = RemoteAccessServer(
+            host="127.0.0.1",
+            port=self.port,
+            work_dir=self._tmpdir,
+            tls=True,
+            certfile=self._certfile,
+            keyfile=self._keyfile,
+        )
+        await self.server.start_async()
+
+    async def asyncTearDown(self) -> None:
+        await self.server.stop_async()
+        if self._orig_config is not None:
+            CONFIG_PATH.write_text(self._orig_config)
+        elif CONFIG_PATH.exists():
+            CONFIG_PATH.unlink()
+
+    def _make_ssl_client_ctx(self) -> ssl.SSLContext:
+        """Build an SSL context that trusts the test self-signed cert."""
+        import ssl as _ssl
+
+        ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
+        ctx.load_verify_locations(self._certfile)
+        return ctx
+
+    async def test_https_serves_html(self) -> None:
+        """GET / over HTTPS returns the Sorcar HTML page."""
+        import ssl as _ssl
+        import urllib.request
+
+        ctx = _ssl.create_default_context(cafile=self._certfile)
+        url = f"https://127.0.0.1:{self.port}/"
+
+        def _fetch() -> tuple[int, str]:
+            # Use localhost in SNI but connect to 127.0.0.1
+            resp = urllib.request.urlopen(url, timeout=5, context=ctx)
+            return resp.status, resp.read().decode()
+
+        status, body = await asyncio.get_event_loop().run_in_executor(
+            None, _fetch,
+        )
+        self.assertEqual(status, 200)
+        self.assertIn("<title>KISS Sorcar</title>", body)
+
+    async def test_wss_auth_and_command(self) -> None:
+        """WSS connection authenticates and receives models."""
+        ssl_ctx = self._make_ssl_client_ctx()
+        async with connect(
+            f"wss://127.0.0.1:{self.port}/ws",
+            ssl=ssl_ctx,
+        ) as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            self.assertEqual(resp["type"], "auth_ok")
+
+            await ws.send(json.dumps({"type": "getModels"}))
+            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            self.assertEqual(resp["type"], "models")
+            self.assertIn("models", resp)
+
+    async def test_plain_ws_rejected(self) -> None:
+        """Plain ws:// connection to a TLS server should fail."""
+        with self.assertRaises(Exception):
+            async with connect(
+                f"ws://127.0.0.1:{self.port}/ws",
+            ) as ws:
+                await ws.send(json.dumps({"type": "auth", "password": ""}))
+                await asyncio.wait_for(ws.recv(), timeout=3)
 
 
 if __name__ == "__main__":

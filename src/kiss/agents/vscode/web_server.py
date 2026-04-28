@@ -22,10 +22,12 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 import logging
 import mimetypes
 import os
+import ssl
 import subprocess
 import sys
 import threading
@@ -205,6 +207,104 @@ _VSCODE_ONLY_COMMANDS = frozenset({
 })
 
 SAMPLE_TASKS_PATH = Path(__file__).parent / "SAMPLE_TASKS.json"
+
+_TLS_DIR = Path.home() / ".kiss" / "tls"
+
+
+def _generate_self_signed_cert(
+    cert_path: Path,
+    key_path: Path,
+) -> None:
+    """Generate a self-signed TLS certificate and private key.
+
+    Creates an RSA 2048-bit key and a self-signed X.509 certificate
+    valid for 365 days, covering ``localhost``, ``127.0.0.1``, ``::1``,
+    and all ``*.local`` names.  Parent directories are created as needed.
+
+    Args:
+        cert_path: Where to write the PEM-encoded certificate.
+        key_path: Where to write the PEM-encoded private key.
+    """
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+    subject = issuer = x509.Name([
+        x509.NameAttribute(NameOID.COMMON_NAME, "KISS Sorcar"),
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "KISS Sorcar"),
+    ])
+
+    now = datetime.datetime.now(datetime.UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now)
+        .not_valid_after(now + datetime.timedelta(days=365))
+        .add_extension(
+            x509.SubjectAlternativeName([
+                x509.DNSName("localhost"),
+                x509.DNSName("*.local"),
+                x509.IPAddress(
+                    __import__("ipaddress").IPv4Address("127.0.0.1")
+                ),
+                x509.IPAddress(
+                    __import__("ipaddress").IPv6Address("::1")
+                ),
+            ]),
+            critical=False,
+        )
+        .sign(key, hashes.SHA256())
+    )
+
+    cert_path.parent.mkdir(parents=True, exist_ok=True)
+    key_path.parent.mkdir(parents=True, exist_ok=True)
+
+    key_path.write_bytes(
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL,
+            serialization.NoEncryption(),
+        )
+    )
+    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+
+
+def _create_ssl_context(
+    certfile: str | None = None,
+    keyfile: str | None = None,
+) -> ssl.SSLContext:
+    """Create an SSL context for the HTTPS/WSS server.
+
+    If *certfile* and *keyfile* are provided, loads them directly.
+    Otherwise auto-generates a self-signed certificate in
+    ``~/.kiss/tls/`` and uses that.
+
+    Args:
+        certfile: Path to PEM certificate file, or None for auto-gen.
+        keyfile: Path to PEM private key file, or None for auto-gen.
+
+    Returns:
+        A configured ``ssl.SSLContext`` ready for ``websockets.serve()``.
+    """
+    if certfile and keyfile:
+        cert_path = Path(certfile)
+        key_path = Path(keyfile)
+    else:
+        cert_path = _TLS_DIR / "cert.pem"
+        key_path = _TLS_DIR / "key.pem"
+        if not cert_path.is_file() or not key_path.is_file():
+            logger.info("Generating self-signed TLS certificate in %s", _TLS_DIR)
+            _generate_self_signed_cert(cert_path, key_path)
+
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(str(cert_path), str(key_path))
+    return ctx
 
 
 # ---------------------------------------------------------------------------
@@ -782,11 +882,18 @@ class RemoteAccessServer:
     so the server is reachable from the public internet without manual
     port-forwarding or DNS setup.
 
+    When *tls* is True, the server uses HTTPS and WSS to encrypt all
+    LAN traffic.  If *certfile*/*keyfile* are not provided, a
+    self-signed certificate is auto-generated in ``~/.kiss/tls/``.
+
     Args:
         host: Bind address (default ``"0.0.0.0"`` for all interfaces).
         port: TCP port for both HTTP and WebSocket (default ``8787``).
         use_tunnel: If True, start a ``cloudflared`` tunnel on launch.
         work_dir: Working directory for the agent (default cwd).
+        tls: If True, serve over HTTPS/WSS with TLS encryption.
+        certfile: Path to a PEM certificate file for TLS.
+        keyfile: Path to a PEM private key file for TLS.
     """
 
     def __init__(
@@ -795,10 +902,17 @@ class RemoteAccessServer:
         port: int = 8787,
         use_tunnel: bool = False,
         work_dir: str | None = None,
+        tls: bool = False,
+        certfile: str | None = None,
+        keyfile: str | None = None,
     ) -> None:
         self.host = host
         self.port = port
         self.use_tunnel = use_tunnel
+        self._ssl_context: ssl.SSLContext | None = None
+
+        if tls or certfile or keyfile:
+            self._ssl_context = _create_ssl_context(certfile, keyfile)
 
         if work_dir:
             os.environ["KISS_WORKDIR"] = work_dir
@@ -1195,9 +1309,11 @@ class RemoteAccessServer:
             self.host,
             self.port,
             process_request=self._process_request,
+            ssl=self._ssl_context,
         )
 
-        local_url = f"http://localhost:{self.port}"
+        scheme = "https" if self._ssl_context else "http"
+        local_url = f"{scheme}://localhost:{self.port}"
         print(f"KISS Sorcar remote access: {local_url}", file=sys.stderr)
 
         tunnel_url: str | None = None
@@ -1241,6 +1357,7 @@ class RemoteAccessServer:
             self.host,
             self.port,
             process_request=self._process_request,
+            ssl=self._ssl_context,
         )
 
     async def stop_async(self) -> None:
@@ -1263,6 +1380,12 @@ def main() -> None:  # pragma: no cover — CLI entry point
     parser.add_argument("--port", type=int, default=8787, help="Port number")
     parser.add_argument("--tunnel", action="store_true", help="Start cloudflared tunnel")
     parser.add_argument("--workdir", default=None, help="Working directory")
+    parser.add_argument(
+        "--tls", action="store_true",
+        help="Enable HTTPS/WSS (auto-generates self-signed cert if --certfile not given)",
+    )
+    parser.add_argument("--certfile", default=None, help="Path to PEM certificate file")
+    parser.add_argument("--keyfile", default=None, help="Path to PEM private key file")
     args = parser.parse_args()
 
     server = RemoteAccessServer(
@@ -1270,6 +1393,9 @@ def main() -> None:  # pragma: no cover — CLI entry point
         port=args.port,
         use_tunnel=args.tunnel,
         work_dir=args.workdir,
+        tls=args.tls,
+        certfile=args.certfile,
+        keyfile=args.keyfile,
     )
     server.start()
 
