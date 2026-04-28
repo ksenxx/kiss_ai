@@ -27,3 +27,11 @@
 - When overriding BaseHTTPRequestHandler.log_message, the parameter must be named "format" (not "fmt") to satisfy pyright
 - Installation instructions in README should use a curl one-liner pointing to scripts/install.sh rather than multi-step git clone
 - Install scripts should prefer git clone when git is available, falling back to curl/zip download otherwise
+- KISS Sorcar website is hosted at kiss-sorcar.github.io/kisssorcar.github.io via the kiss-sorcar/kisssorcar.github.io GitHub repo; the gh CLI is authenticated as kiss-sorcar
+- Website style should not look AI-generated; avoid purple accents, emoji icons, gradient glows, and generic SaaS template patterns
+- Website should use a white background
+- KISS Sorcar website should keep the top logo horizontally aligned to the same content width as the main UI screenshot, use compact spacing, and maintain high text contrast
+- KISS Sorcar website should look refined and modern without generic AI-generated SaaS styling
+- Only list Koushik Sen as the author on the website
+- Website section order: Install → Features → Architecture → Models → Video → Author
+- GitHub Pages deployments can error silently; always check build status via gh api and verify live content after pushing
