@@ -5,3 +5,5 @@
 - Import blocks must be sorted (ruff I001 rule)
 - VS Code extension uses prettier for formatting JS/TS files
 - Markdown files are formatted with mdformat
+- For long-running evaluations, use background processes with output redirected to log files and poll periodically
+- GEPA evaluation scripts and results are stored in PWD/tmp/
