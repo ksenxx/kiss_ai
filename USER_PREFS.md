@@ -19,3 +19,4 @@
 - For VS Code server integration tests, redirect sys.stdout to StringIO to capture broadcast events
 - First-time extension state is tracked via globalState in VS Code extension context
 - Secondary sidebar should be wider than default for chat readability
+- When the SYSTEM.md Sorcar-specific instructions change, update the corresponding prompt block and discussion text in the paper at papers/kisssorcar/kiss_sorcar.tex, then rebuild with pdflatex
