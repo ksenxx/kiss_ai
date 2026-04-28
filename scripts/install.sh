@@ -1,8 +1,12 @@
 cd
-curl -L -o main.zip https://github.com/ksenxx/kiss_ai/archive/refs/heads/main.zip
-unzip main.zip
-rm main.zip
-mv kiss_ai-main ~/kiss_ai
+if command -v git &> /dev/null; then
+  git clone https://github.com/ksenxx/kiss_ai.git ~/kiss_ai
+else
+  curl -L -o main.zip https://github.com/ksenxx/kiss_ai/archive/refs/heads/main.zip
+  unzip main.zip
+  rm main.zip
+  mv kiss_ai-main ~/kiss_ai
+fi
 cd ~/kiss_ai
 ./install.sh
 source ~/.zshrc
