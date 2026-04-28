@@ -10,6 +10,7 @@
 - VS Code extension config is stored in ~/.kiss/config.json (non-API-key settings)
 - API keys are saved to shell RC files and refreshed via os.environ
 - New vscode extension features should go in src/kiss/agents/vscode/ with minimal changes to existing files
+- VS Code extension tests belong in src/kiss/tests/ (not the top-level tests/ directory)
 - Tab bar button order: tabs, +, config, history
 - New message types in the VS Code extension must be added to FromWebviewMessage, AgentCommand, and/or ToWebviewMessage in types.ts
 - VS Code extension also uses stylelint for CSS linting; run auto-fix if needed
