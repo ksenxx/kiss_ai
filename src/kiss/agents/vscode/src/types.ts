@@ -69,6 +69,12 @@ export type FromWebviewMessage =
       tabId?: string;
       task: string;
       direction: 'prev' | 'next';
+    }
+  | {type: 'getConfig'}
+  | {
+      type: 'saveConfig';
+      config: Record<string, unknown>;
+      apiKeys: Record<string, string>;
     };
 
 /** Messages from extension to webview (matches browser event protocol) */
@@ -200,7 +206,9 @@ export interface AgentCommand {
     | 'worktreeAction'
     | 'autocommitAction'
     | 'getAdjacentTask'
-    | 'setSkipMerge';
+    | 'setSkipMerge'
+    | 'getConfig'
+    | 'saveConfig';
   prompt?: string;
   model?: string;
   workDir?: string;
@@ -222,4 +230,6 @@ export interface AgentCommand {
   tabId?: string;
   skip?: boolean;
   skipMerge?: boolean;
+  config?: Record<string, unknown>;
+  apiKeys?: Record<string, string>;
 }

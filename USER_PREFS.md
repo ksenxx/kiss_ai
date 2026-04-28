@@ -7,3 +7,23 @@
 - Markdown files are formatted with mdformat
 - For long-running evaluations, use background processes with output redirected to log files and poll periodically
 - GEPA evaluation scripts and results are stored in PWD/tmp/
+- VS Code extension config is stored in ~/.kiss/config.json (non-API-key settings)
+- API keys are saved to shell RC files and refreshed via os.environ
+- New vscode extension features should go in src/kiss/agents/vscode/ with minimal changes to existing files
+- VS Code extension tests belong in src/kiss/tests/ (not the top-level tests/ directory)
+- Tab bar button order: tabs, +, config, history
+- New message types in the VS Code extension must be added to FromWebviewMessage, AgentCommand, and/or ToWebviewMessage in types.ts
+- VS Code extension also uses stylelint for CSS linting; run auto-fix if needed
+- Integration tests should use real objects; use env var redirection and module-level constant redirection for test isolation instead of mocking functions
+- Config panel API key fields should be populated from environment values, not left blank
+- For VS Code server integration tests, redirect sys.stdout to StringIO to capture broadcast events
+- First-time extension state is tracked via globalState in VS Code extension context
+- Secondary sidebar should be wider than default for chat readability
+- When the SYSTEM.md Sorcar-specific instructions change, update the corresponding prompt block and discussion text in the paper at papers/kisssorcar/kiss_sorcar.tex, then rebuild with pdflatex
+- When new VS Code sidebar message types are added, also update the known set in test_sidebar_has_no_unknown_message_types
+- Docker-based integration tests depend on live Gemini API availability and may fail with 429 rate-limit errors due to API quota exhaustion
+- Budget enforcement tests should verify end-to-end that KISSError propagates to the result panel as a result event with success False
+- Feature integration tests using real HTTP should use ThreadingHTTPServer with OpenAI-compatible protocol handlers
+- When overriding BaseHTTPRequestHandler.log_message, the parameter must be named "format" (not "fmt") to satisfy pyright
+- Installation instructions in README should use a curl one-liner pointing to scripts/install.sh rather than multi-step git clone
+- Install scripts should prefer git clone when git is available, falling back to curl/zip download otherwise
