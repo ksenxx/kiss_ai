@@ -22,9 +22,9 @@ from websockets.asyncio.client import connect
 
 from kiss.agents.vscode.vscode_config import CONFIG_PATH, save_config
 from kiss.agents.vscode.web_server import (
+    _URL_FILE,
     RemoteAccessServer,
     WebPrinter,
-    _URL_FILE,
     _build_html,
     _create_ssl_context,
     _generate_self_signed_cert,

@@ -2092,7 +2092,7 @@
         break;
       case 'merge_data': {
         const mdEl = mkEl('div', 'ev merge-info');
-        var mergeHtml =
+        let mergeHtml =
           '<div class="merge-info-hdr" style="color:var(--yellow);font-weight:600;font-size:var(--fs-base);margin-bottom:4px">' +
           '\u2731 Reviewing ' +
           (ev.hunk_count || 0) +
@@ -2100,38 +2100,42 @@
           '<div class="merge-info-body" style="font-size:var(--fs-md);color:var(--dim)">Red = old lines, Green = new lines. ' +
           'Use the merge toolbar to accept or reject changes.</div>';
         // Render inline diff for web clients (when file contents are present)
-        var mergeFiles = (ev.data && ev.data.files) || [];
-        for (var mfi = 0; mfi < mergeFiles.length; mfi++) {
-          var mf = mergeFiles[mfi];
+        const mergeFiles = (ev.data && ev.data.files) || [];
+        for (let mfi = 0; mfi < mergeFiles.length; mfi++) {
+          const mf = mergeFiles[mfi];
           if (mf.base_text !== undefined && mf.current_text !== undefined) {
-            mergeHtml += '<div class="merge-file-diff" style="margin-top:8px;">';
+            mergeHtml +=
+              '<div class="merge-file-diff" style="margin-top:8px;">';
             mergeHtml +=
               '<div style="font-weight:600;color:var(--vscode-textLink-foreground);margin-bottom:4px;">' +
               (mf.name || 'unknown') +
               '</div>';
-            mergeHtml += '<pre style="font-size:12px;line-height:1.4;overflow-x:auto;background:var(--vscode-input-background);padding:8px;border-radius:4px;margin:0;">';
-            var baseLines = (mf.base_text || '').split('\n');
-            var curLines = (mf.current_text || '').split('\n');
-            var hunks = mf.hunks || [];
+            mergeHtml +=
+              '<pre style="font-size:12px;line-height:1.4;overflow-x:auto;background:var(--vscode-input-background);padding:8px;border-radius:4px;margin:0;">';
+            const baseLines = (mf.base_text || '').split('\n');
+            const curLines = (mf.current_text || '').split('\n');
+            const hunks = mf.hunks || [];
             // Build a unified diff view
-            var curIdx = 0;
-            for (var mhi = 0; mhi < hunks.length; mhi++) {
-              var h = hunks[mhi];
+            let curIdx = 0;
+            for (let mhi = 0; mhi < hunks.length; mhi++) {
+              const h = hunks[mhi];
               // Context lines before hunk
               while (curIdx < h.cs) {
                 mergeHtml +=
-                  '<span style="color:var(--dim);">' + esc(' ' + curLines[curIdx]) + '</span>\n';
+                  '<span style="color:var(--dim);">' +
+                  esc(' ' + curLines[curIdx]) +
+                  '</span>\n';
                 curIdx++;
               }
               // Old (base) lines - red
-              for (var bi = h.bs; bi < h.bs + h.bc; bi++) {
+              for (let bi = h.bs; bi < h.bs + h.bc; bi++) {
                 mergeHtml +=
                   '<span style="color:#f44;background:rgba(255,60,60,0.15);">-' +
                   esc(baseLines[bi] || '') +
                   '</span>\n';
               }
               // New (current) lines - green
-              for (var ci = h.cs; ci < h.cs + h.cc; ci++) {
+              for (let ci = h.cs; ci < h.cs + h.cc; ci++) {
                 mergeHtml +=
                   '<span style="color:#4c4;background:rgba(60,255,60,0.15);">+' +
                   esc(curLines[ci] || '') +
@@ -2142,7 +2146,9 @@
             // Remaining context
             while (curIdx < curLines.length) {
               mergeHtml +=
-                '<span style="color:var(--dim);">' + esc(' ' + curLines[curIdx]) + '</span>\n';
+                '<span style="color:var(--dim);">' +
+                esc(' ' + curLines[curIdx]) +
+                '</span>\n';
               curIdx++;
             }
             mergeHtml += '</pre></div>';
@@ -2197,7 +2203,7 @@
         break;
       case 'merge_nav': {
         // Update merge toolbar with remaining hunk count
-        var mergeTitle = document.querySelector('.merge-toolbar-title');
+        const mergeTitle = document.querySelector('.merge-toolbar-title');
         if (mergeTitle && ev.remaining !== undefined) {
           mergeTitle.textContent =
             'Review Changes (' + ev.remaining + '/' + ev.total + ' remaining)';
