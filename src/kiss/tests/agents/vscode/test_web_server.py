@@ -301,6 +301,120 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
             self.assertEqual(resp["type"], "models")
             self.assertEqual(resp["selected"], "gemini-2.5-pro")
 
+    async def test_ws_ready_command(self) -> None:
+        """The 'ready' command returns models, inputHistory, configData, and focusInput."""
+        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            self.assertEqual(resp["type"], "auth_ok")
+
+            await ws.send(json.dumps({
+                "type": "ready",
+                "tabId": "ready-tab",
+                "restoredTabs": [],
+            }))
+            # Collect all responses — expect models, inputHistory,
+            # configData, and focusInput (order may vary)
+            received_types: set[str] = set()
+            for _ in range(4):
+                raw = await asyncio.wait_for(ws.recv(), timeout=5)
+                ev = json.loads(raw)
+                received_types.add(ev["type"])
+            self.assertIn("models", received_types)
+            self.assertIn("inputHistory", received_types)
+            self.assertIn("configData", received_types)
+            self.assertIn("focusInput", received_types)
+
+    async def test_ws_ready_does_not_produce_unknown_error(self) -> None:
+        """The 'ready' command must NOT produce an 'Unknown command' error."""
+        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+
+            await ws.send(json.dumps({
+                "type": "ready",
+                "tabId": "t-ready",
+            }))
+            events: list[dict[str, Any]] = []
+            for _ in range(4):
+                raw = await asyncio.wait_for(ws.recv(), timeout=5)
+                events.append(json.loads(raw))
+            for ev in events:
+                if ev.get("type") == "error":
+                    self.fail(f"ready command produced error: {ev}")
+
+    async def test_ws_submit_does_not_produce_unknown_error(self) -> None:
+        """The 'submit' command must NOT produce an 'Unknown command' error."""
+        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+
+            await ws.send(json.dumps({
+                "type": "submit",
+                "prompt": "hello",
+                "model": "gemini-2.5-pro",
+                "tabId": "submit-tab",
+                "attachments": [],
+            }))
+            # Collect events; the first should be setTaskText and status
+            events: list[dict[str, Any]] = []
+            deadline = asyncio.get_event_loop().time() + 10
+            while asyncio.get_event_loop().time() < deadline:
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=3)
+                    ev = json.loads(raw)
+                    events.append(ev)
+                    # Stop once we see status running=False or result
+                    if ev.get("type") == "status" and not ev.get("running"):
+                        break
+                    if ev.get("type") == "result":
+                        break
+                except TimeoutError:
+                    break
+            error_events = [e for e in events if e.get("type") == "error"]
+            for err in error_events:
+                self.assertNotIn(
+                    "Unknown command: submit",
+                    err.get("text", ""),
+                    "submit command should be translated to run, not error",
+                )
+
+    async def test_ws_submit_emits_task_text_and_status(self) -> None:
+        """The 'submit' command emits setTaskText and status running=True."""
+        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+
+            await ws.send(json.dumps({
+                "type": "submit",
+                "prompt": "test task",
+                "model": "gemini-2.5-pro",
+                "tabId": "submit-tab-2",
+                "attachments": [],
+            }))
+            events: list[dict[str, Any]] = []
+            deadline = asyncio.get_event_loop().time() + 10
+            while asyncio.get_event_loop().time() < deadline:
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=3)
+                    ev = json.loads(raw)
+                    events.append(ev)
+                    if ev.get("type") == "status" and not ev.get("running"):
+                        break
+                    if ev.get("type") == "result":
+                        break
+                except TimeoutError:
+                    break
+            event_types = [e["type"] for e in events]
+            self.assertIn("setTaskText", event_types)
+            self.assertIn("status", event_types)
+            # setTaskText should come before or at the same time as status running=True
+            task_text_events = [e for e in events if e.get("type") == "setTaskText"]
+            self.assertTrue(
+                any(e.get("text") == "test task" for e in task_text_events),
+                f"Expected setTaskText with 'test task', got: {task_text_events}",
+            )
+
 
 class TestRemoteAccessServerAuth(IsolatedAsyncioTestCase):
     """Test WebSocket password authentication."""

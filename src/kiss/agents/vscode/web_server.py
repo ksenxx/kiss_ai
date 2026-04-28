@@ -671,6 +671,12 @@ class RemoteAccessServer:
                 cmd_type = cmd.get("type", "")
                 if cmd_type in _VSCODE_ONLY_COMMANDS:
                     continue  # silently ignore VS Code-only commands
+                if cmd_type == "ready":
+                    await self._handle_ready(cmd, websocket)
+                    continue
+                if cmd_type == "submit":
+                    await self._handle_submit(cmd)
+                    continue
                 loop = asyncio.get_event_loop()
                 await loop.run_in_executor(
                     None, self._vscode_server._handle_command, cmd
@@ -681,6 +687,91 @@ class RemoteAccessServer:
             logger.debug("WS handler error", exc_info=True)
         finally:
             self._printer.remove_client(websocket)
+
+    # -- Webview command translators -----------------------------------------
+
+    async def _handle_ready(
+        self, cmd: dict[str, Any], websocket: ServerConnection,
+    ) -> None:
+        """Translate the webview ``ready`` command into backend commands.
+
+        The VS Code TypeScript extension intercepts ``ready`` and fans
+        it out into ``getModels``, ``getInputHistory``, ``getConfig``,
+        plus session replay for restored tabs.  The web server must do
+        the same translation since there is no TypeScript middleman.
+
+        Args:
+            cmd: The ``ready`` message from the browser.
+            websocket: The client connection (for direct replies).
+        """
+        tab_id = cmd.get("tabId", "")
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None,
+            self._vscode_server._handle_command,
+            {"type": "getModels"},
+        )
+        await loop.run_in_executor(
+            None,
+            self._vscode_server._handle_command,
+            {"type": "getInputHistory"},
+        )
+        await loop.run_in_executor(
+            None,
+            self._vscode_server._handle_command,
+            {"type": "getConfig"},
+        )
+        # Send focusInput event back to the client
+        try:
+            await websocket.send(
+                json.dumps({"type": "focusInput", "tabId": tab_id})
+            )
+        except Exception:
+            pass
+        # Replay restored tabs
+        restored = cmd.get("restoredTabs") or []
+        for rt in restored:
+            chat_id = rt.get("chatId", "")
+            rt_tab = rt.get("tabId", "")
+            if chat_id:
+                await loop.run_in_executor(
+                    None,
+                    self._vscode_server._handle_command,
+                    {"type": "resumeSession", "chatId": chat_id, "tabId": rt_tab},
+                )
+
+    async def _handle_submit(self, cmd: dict[str, Any]) -> None:
+        """Translate the webview ``submit`` command into a backend ``run``.
+
+        The VS Code TypeScript extension transforms ``submit`` into a
+        ``run`` command after resolving paths and tracking running tabs.
+        The web server performs the same translation.
+
+        Args:
+            cmd: The ``submit`` message from the browser.
+        """
+        tab_id = cmd.get("tabId", "")
+        prompt = cmd.get("prompt", "")
+        # Emit status events that the TypeScript extension normally sends
+        self._printer.broadcast({"type": "setTaskText", "text": prompt, "tabId": tab_id})
+        self._printer.broadcast({"type": "status", "running": True, "tabId": tab_id})
+        # Translate submit → run
+        run_cmd: dict[str, Any] = {
+            "type": "run",
+            "prompt": prompt,
+            "model": cmd.get("model", ""),
+            "workDir": cmd.get("workDir", self._vscode_server.work_dir),
+            "tabId": tab_id,
+            "attachments": cmd.get("attachments"),
+            "useWorktree": cmd.get("useWorktree", False),
+            "useParallel": cmd.get("useParallel", False),
+        }
+        if "skipMerge" in cmd:
+            run_cmd["skipMerge"] = cmd["skipMerge"]
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None, self._vscode_server._handle_command, run_cmd,
+        )
 
     # -- Tunnel management --------------------------------------------------
 
