@@ -43,3 +43,4 @@
 - Only list Koushik Sen as the author on the website
 - Website section order: Install → Features → Architecture → Models → Video → Author
 - GitHub Pages deployments can error silently; always check build status via gh api and verify live content after pushing
+- The KISS Sorcar website (kisssorcar.github.io) may have duplicate text across hero and features sections; always search the entire file for text to remove
