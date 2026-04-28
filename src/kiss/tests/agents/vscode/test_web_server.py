@@ -24,9 +24,13 @@ from kiss.agents.vscode.vscode_config import CONFIG_PATH, save_config
 from kiss.agents.vscode.web_server import (
     RemoteAccessServer,
     WebPrinter,
+    _URL_FILE,
     _build_html,
     _create_ssl_context,
     _generate_self_signed_cert,
+    _print_url,
+    _remove_url_file,
+    _save_url_file,
     _translate_webview_command,
 )
 
@@ -1448,6 +1452,85 @@ class TestRemoteAccessServerTLS(IsolatedAsyncioTestCase):
             ) as ws:
                 await ws.send(json.dumps({"type": "auth", "password": ""}))
                 await asyncio.wait_for(ws.recv(), timeout=3)
+
+
+class TestUrlFile(unittest.TestCase):
+    """Test URL file save/remove/print helpers."""
+
+    def setUp(self) -> None:
+        # Back up any existing URL file
+        self._backup: bytes | None = None
+        if _URL_FILE.is_file():
+            self._backup = _URL_FILE.read_bytes()
+
+    def tearDown(self) -> None:
+        # Restore original URL file
+        if self._backup is not None:
+            _URL_FILE.write_bytes(self._backup)
+        else:
+            _URL_FILE.unlink(missing_ok=True)
+
+    def test_save_url_file_local_only(self) -> None:
+        """Saving with local URL only writes valid JSON."""
+        _save_url_file("https://localhost:8787")
+        data = json.loads(_URL_FILE.read_text())
+        self.assertEqual(data["local"], "https://localhost:8787")
+        self.assertNotIn("tunnel", data)
+
+    def test_save_url_file_with_tunnel(self) -> None:
+        """Saving with both local and tunnel URLs writes both."""
+        _save_url_file("https://localhost:8787", "https://abc.trycloudflare.com")
+        data = json.loads(_URL_FILE.read_text())
+        self.assertEqual(data["local"], "https://localhost:8787")
+        self.assertEqual(data["tunnel"], "https://abc.trycloudflare.com")
+
+    def test_remove_url_file(self) -> None:
+        """Removing the URL file deletes it."""
+        _save_url_file("https://localhost:8787")
+        self.assertTrue(_URL_FILE.is_file())
+        _remove_url_file()
+        self.assertFalse(_URL_FILE.is_file())
+
+    def test_remove_url_file_missing(self) -> None:
+        """Removing when file doesn't exist is a no-op."""
+        _URL_FILE.unlink(missing_ok=True)
+        _remove_url_file()  # should not raise
+        self.assertFalse(_URL_FILE.is_file())
+
+    def test_print_url_tunnel(self) -> None:
+        """When tunnel URL exists, _print_url prints it."""
+        _save_url_file("https://localhost:8787", "https://abc.trycloudflare.com")
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            _print_url()
+        self.assertEqual(buf.getvalue().strip(), "https://abc.trycloudflare.com")
+
+    def test_print_url_local_only(self) -> None:
+        """When no tunnel URL, _print_url prints local URL."""
+        _save_url_file("https://localhost:8787")
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            _print_url()
+        self.assertEqual(buf.getvalue().strip(), "https://localhost:8787")
+
+    def test_print_url_no_file(self) -> None:
+        """When no URL file exists, _print_url exits with code 1."""
+        _URL_FILE.unlink(missing_ok=True)
+        with self.assertRaises(SystemExit) as ctx:
+            _print_url()
+        self.assertEqual(ctx.exception.code, 1)
+
+    def test_print_url_corrupt_file(self) -> None:
+        """When URL file is corrupt, _print_url exits with code 1."""
+        _URL_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _URL_FILE.write_text("not json")
+        with self.assertRaises(SystemExit) as ctx:
+            _print_url()
+        self.assertEqual(ctx.exception.code, 1)
 
 
 if __name__ == "__main__":
