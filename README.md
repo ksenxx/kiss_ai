@@ -47,6 +47,9 @@ An old video on KISS Sorcar can be found at [https://www.youtube.com/watch?v=xnY
 git clone https://github.com/ksenxx/kiss_ai.git
 cd kiss_ai
 ./install.sh
+source ~/.zshrc
+code
+# make sure that you have one of Claude Code, ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY. OPENROUTER_API_KEY, or TOGETHER_API_KEY
 ```
 
 ## KISS Sorcar Extension Installation
