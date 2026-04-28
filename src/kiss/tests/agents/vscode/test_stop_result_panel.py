@@ -223,5 +223,87 @@ class TestStoppedTaskEmitsResultEvent(TestCase):
         assert result_events[0].get("success") is not False
 
 
+class TestBudgetExceededResultPanel(TestCase):
+    """When the agent's cost exceeds the user-configured max budget,
+    the task must stop and a ``result`` event with ``success=False``
+    containing 'budget exceeded' must appear in the broadcast stream
+    so the frontend displays it in the result panel."""
+
+    def test_budget_exceeded_produces_result_event(self) -> None:
+        """Simulate an agent that raises KISSError for budget exceeded
+        and verify a ``result`` event with success=False and 'budget
+        exceeded' in the text is broadcast to the result panel."""
+        from kiss.core.kiss_error import KISSError
+
+        server = _make_server()
+        events: list[dict[str, Any]] = []
+        lock = threading.Lock()
+
+        orig_broadcast = server.printer.broadcast
+
+        def capture(e: dict[str, Any]) -> None:
+            with lock:
+                events.append(dict(e))
+            orig_broadcast(e)
+
+        server.printer.broadcast = capture  # type: ignore[assignment]
+
+        tab_id = "budget-test-1"
+        tab = server._get_tab(tab_id)
+
+        def fake_run(**kwargs: Any) -> None:
+            # Simulate the agent accumulating cost beyond the $1 budget
+            tab.agent.total_tokens_used = 50000
+            tab.agent.budget_used = 1.05
+            tab.agent.step_count = 42
+            raise KISSError("Agent budget-test budget exceeded.")
+
+        tab.agent.run = fake_run  # type: ignore[assignment]
+
+        stop_event = threading.Event()
+        tab.stop_event = stop_event
+        tab.user_answer_queue = queue.Queue()
+
+        task_thread = threading.Thread(
+            target=server._run_task,
+            args=({"type": "run", "prompt": "test task", "tabId": tab_id},),
+            daemon=True,
+        )
+        tab.task_thread = task_thread
+        task_thread.start()
+        task_thread.join(timeout=10)
+
+        with lock:
+            result_events = [e for e in events if e.get("type") == "result"]
+            error_events = [e for e in events if e.get("type") == "task_error"]
+
+        assert len(result_events) >= 1, (
+            f"Expected at least one result event, got {len(result_events)}. "
+            f"All events: {[e.get('type') for e in events]}"
+        )
+        result_ev = result_events[-1]
+        assert result_ev.get("success") is False, (
+            f"Result event should have success=False, got {result_ev.get('success')}"
+        )
+        assert "budget exceeded" in (result_ev.get("text") or "").lower(), (
+            f"Result text should mention 'budget exceeded', got: {result_ev.get('text')}"
+        )
+        # Should include token/cost/step info
+        assert result_ev.get("total_tokens") == 50000, (
+            f"Expected total_tokens=50000, got {result_ev.get('total_tokens')}"
+        )
+        assert "$1.05" in str(result_ev.get("cost", "")), (
+            f"Expected cost containing '$1.05', got {result_ev.get('cost')}"
+        )
+        assert result_ev.get("step_count") == 42, (
+            f"Expected step_count=42, got {result_ev.get('step_count')}"
+        )
+
+        # The task_error event should also be broadcast
+        assert len(error_events) >= 1, (
+            f"Expected task_error event. Events: {[e.get('type') for e in events]}"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

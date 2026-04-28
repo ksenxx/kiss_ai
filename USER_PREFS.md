@@ -22,3 +22,4 @@
 - When the SYSTEM.md Sorcar-specific instructions change, update the corresponding prompt block and discussion text in the paper at papers/kisssorcar/kiss_sorcar.tex, then rebuild with pdflatex
 - When new VS Code sidebar message types are added, also update the known set in test_sidebar_has_no_unknown_message_types
 - Docker-based integration tests depend on live Gemini API availability and may fail with 429 rate-limit errors due to API quota exhaustion
+- Budget enforcement tests should verify end-to-end that KISSError propagates to the result panel as a result event with success False
