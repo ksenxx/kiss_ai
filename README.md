@@ -111,9 +111,9 @@ uv run kiss-web --port 9000 --tunnel --workdir ~/projects/myapp
 **Accessing from a remote device:**
 
 1. On your server machine, run `uv run kiss-web --tunnel`.
-2. Copy the `https://*.trycloudflare.com` URL printed to the terminal.
-3. Open that URL in any browser on your remote device.
-4. Enter the remote password if one is configured.
+1. Copy the `https://*.trycloudflare.com` URL printed to the terminal.
+1. Open that URL in any browser on your remote device.
+1. Enter the remote password if one is configured.
 
 For LAN-only access (without a tunnel), open `http://<server-ip>:8787` from any device on the same network.
 
