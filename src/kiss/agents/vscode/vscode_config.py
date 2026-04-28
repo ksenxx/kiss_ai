@@ -37,6 +37,18 @@ API_KEY_ENV_VARS: dict[str, str] = {
 }
 
 
+def get_current_api_keys() -> dict[str, str]:
+    """Return the current API key values from the environment.
+
+    Reads each key listed in :data:`API_KEY_ENV_VARS` from ``os.environ``,
+    returning an empty string for keys that are not set.
+
+    Returns:
+        A dict mapping each API key name to its current value (or ``""``).
+    """
+    return {k: os.environ.get(k, "") for k in API_KEY_ENV_VARS}
+
+
 def load_config() -> dict[str, Any]:
     """Load configuration from ``~/.kiss/config.json``.
 

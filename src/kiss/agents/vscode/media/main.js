@@ -1808,7 +1808,7 @@
         renderModelList('');
         break;
       case 'configData':
-        populateConfigForm(ev.config || {});
+        populateConfigForm(ev.config || {}, ev.apiKeys || {});
         break;
       case 'history':
         renderHistory(ev.sessions || [], ev.offset || 0, ev.generation || 0);
@@ -3544,14 +3544,14 @@
     configSidebarOverlay.classList.remove('open');
     configBtn.classList.remove('open');
   }
-  function populateConfigForm(cfg) {
+  function populateConfigForm(cfg, apiKeys) {
     const el = id => document.getElementById(id);
     el('cfg-max-budget').value = cfg.max_budget != null ? cfg.max_budget : 100;
     el('cfg-custom-endpoint').value = cfg.custom_endpoint || '';
     el('cfg-custom-api-key').value = cfg.custom_api_key || '';
     el('cfg-use-web-browser').checked = cfg.use_web_browser !== false;
     el('cfg-remote-password').value = cfg.remote_password || '';
-    // API key fields are always blank on load (not stored in config.json)
+    // Populate API key fields from current environment values
     const keyIds = [
       'GEMINI_API_KEY',
       'OPENAI_API_KEY',
@@ -3561,7 +3561,7 @@
       'MINIMAX_API_KEY',
     ];
     keyIds.forEach(k => {
-      el('cfg-key-' + k).value = '';
+      el('cfg-key-' + k).value = (apiKeys && apiKeys[k]) || '';
     });
   }
   function collectConfigForm() {

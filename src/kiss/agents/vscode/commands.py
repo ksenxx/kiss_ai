@@ -248,10 +248,11 @@ class _CommandsMixin:
 
     def _cmd_get_config(self, cmd: dict[str, Any]) -> None:
         """Send the current configuration to the frontend."""
-        from kiss.agents.vscode.vscode_config import load_config
+        from kiss.agents.vscode.vscode_config import get_current_api_keys, load_config
 
         cfg = load_config()
-        self.printer.broadcast({"type": "configData", "config": cfg})
+        api_keys = get_current_api_keys()
+        self.printer.broadcast({"type": "configData", "config": cfg, "apiKeys": api_keys})
 
     def _cmd_save_config(self, cmd: dict[str, Any]) -> None:
         """Save configuration and API keys from the frontend."""

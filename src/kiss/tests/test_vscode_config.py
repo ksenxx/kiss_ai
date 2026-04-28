@@ -626,6 +626,101 @@ class TestEndToEndFlows:
 # ---------------------------------------------------------------------------
 
 
+class TestGetCurrentApiKeys:
+    """Test get_current_api_keys reads from environment / DEFAULT_CONFIG."""
+
+    def test_returns_keys_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Keys present in os.environ are returned."""
+        from kiss.agents.vscode.vscode_config import get_current_api_keys
+
+        monkeypatch.setenv("GEMINI_API_KEY", "gem-from-env")
+        monkeypatch.setenv("OPENAI_API_KEY", "oai-from-env")
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        keys = get_current_api_keys()
+        assert keys["GEMINI_API_KEY"] == "gem-from-env"
+        assert keys["OPENAI_API_KEY"] == "oai-from-env"
+        assert keys["ANTHROPIC_API_KEY"] == ""
+
+    def test_returns_empty_when_no_keys(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """All keys empty when none are set."""
+        from kiss.agents.vscode.vscode_config import get_current_api_keys
+
+        for k in API_KEY_ENV_VARS:
+            monkeypatch.delenv(k, raising=False)
+        keys = get_current_api_keys()
+        assert all(v == "" for v in keys.values())
+        assert set(keys.keys()) == set(API_KEY_ENV_VARS.keys())
+
+    def test_all_keys_present(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """All expected API key names are included in the result."""
+        from kiss.agents.vscode.vscode_config import get_current_api_keys
+
+        keys = get_current_api_keys()
+        assert set(keys.keys()) == set(API_KEY_ENV_VARS.keys())
+
+
+class TestGetConfigIncludesApiKeys:
+    """Test that getConfig command includes current API keys in the response."""
+
+    def test_get_config_includes_api_keys(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """getConfig broadcast includes apiKeys with current env values."""
+        from kiss.agents.vscode.server import VSCodeServer
+
+        monkeypatch.setenv("GEMINI_API_KEY", "gem-test-val")
+        monkeypatch.setenv("OPENAI_API_KEY", "oai-test-val")
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+        captured = io.StringIO()
+        monkeypatch.setattr(sys, "stdout", captured)
+        server = VSCodeServer()
+        server._handle_command({"type": "getConfig"})
+        events = [
+            json.loads(line)
+            for line in captured.getvalue().strip().split("\n")
+            if line.strip()
+        ]
+        cfg_events = [e for e in events if e["type"] == "configData"]
+        assert len(cfg_events) == 1
+        assert "apiKeys" in cfg_events[0]
+        assert cfg_events[0]["apiKeys"]["GEMINI_API_KEY"] == "gem-test-val"
+        assert cfg_events[0]["apiKeys"]["OPENAI_API_KEY"] == "oai-test-val"
+        assert cfg_events[0]["apiKeys"]["ANTHROPIC_API_KEY"] == ""
+
+    def test_get_config_api_keys_after_save(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """After saving an API key, getConfig returns the updated value."""
+        from kiss.agents.vscode.server import VSCodeServer
+
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        monkeypatch.delenv("TOGETHER_API_KEY", raising=False)
+
+        captured = io.StringIO()
+        monkeypatch.setattr(sys, "stdout", captured)
+        server = VSCodeServer()
+        # Save an API key
+        server._handle_command({
+            "type": "saveConfig",
+            "config": {"max_budget": 100},
+            "apiKeys": {"TOGETHER_API_KEY": "tog-key-saved"},
+        })
+        # Reset captured output
+        captured.truncate(0)
+        captured.seek(0)
+        # Now getConfig should include the saved key
+        server._handle_command({"type": "getConfig"})
+        events = [
+            json.loads(line)
+            for line in captured.getvalue().strip().split("\n")
+            if line.strip()
+        ]
+        cfg_events = [e for e in events if e["type"] == "configData"]
+        assert len(cfg_events) == 1
+        assert cfg_events[0]["apiKeys"]["TOGETHER_API_KEY"] == "tog-key-saved"
+
+
 class TestApiKeyEnvVarsConstant:
     """Verify the API_KEY_ENV_VARS mapping is correct."""
 
