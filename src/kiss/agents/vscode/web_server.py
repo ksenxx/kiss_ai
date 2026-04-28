@@ -1378,11 +1378,14 @@ def main() -> None:  # pragma: no cover — CLI entry point
     parser = argparse.ArgumentParser(description="KISS Sorcar Remote Access Server")
     parser.add_argument("--host", default="0.0.0.0", help="Bind address")
     parser.add_argument("--port", type=int, default=8787, help="Port number")
-    parser.add_argument("--tunnel", action="store_true", help="Start cloudflared tunnel")
+    parser.add_argument(
+        "--tunnel", action=argparse.BooleanOptionalAction, default=True,
+        help="Start cloudflared tunnel (default: on, use --no-tunnel to disable)",
+    )
     parser.add_argument("--workdir", default=None, help="Working directory")
     parser.add_argument(
-        "--tls", action="store_true",
-        help="Enable HTTPS/WSS (auto-generates self-signed cert if --certfile not given)",
+        "--tls", action=argparse.BooleanOptionalAction, default=True,
+        help="Enable HTTPS/WSS (default: on, use --no-tls to disable)",
     )
     parser.add_argument("--certfile", default=None, help="Path to PEM certificate file")
     parser.add_argument("--keyfile", default=None, help="Path to PEM private key file")
