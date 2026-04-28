@@ -7,6 +7,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -426,7 +427,7 @@ class TestCommandHandlerIntegration:
 
     def _capture_broadcasts(
         self, monkeypatch: pytest.MonkeyPatch,
-    ) -> tuple["_ServerAndCapture", io.StringIO]:
+    ) -> tuple[Any, io.StringIO]:
         """Create a real VSCodeServer with stdout redirected to StringIO."""
         from kiss.agents.vscode.server import VSCodeServer
 

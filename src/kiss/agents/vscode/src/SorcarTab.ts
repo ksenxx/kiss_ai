@@ -45,6 +45,7 @@ export function buildChatHtml(
   selectedModel: string,
 ): string {
   const nonce = getNonce();
+  const version = getVersion();
 
   const styleUri = webview.asWebviewUri(
     vscode.Uri.joinPath(extensionUri, 'media', 'main.css'),
@@ -194,7 +195,7 @@ export function buildChatHtml(
     <div id="config-sidebar">
       <button id="config-sidebar-close">&times;</button>
       <div class="sidebar-section">
-        <div class="sidebar-hdr">Sorcar Configuration</div>
+        <div class="sidebar-hdr">Sorcar Configuration${version ? ' ' + version : ''}</div>
         <div id="config-form">
           <label class="config-label">Max budget per task ($)
             <input type="number" id="cfg-max-budget" min="0" step="1" value="100">
