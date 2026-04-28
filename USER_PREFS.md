@@ -27,6 +27,7 @@
 - Budget enforcement tests should verify end-to-end that KISSError propagates to the result panel as a result event with success False
 - RelentlessAgent must pass remaining budget (not full budget) to each sub-session KISSAgent and check budget before starting new sub-sessions
 - Feature integration tests using real HTTP should use ThreadingHTTPServer with OpenAI-compatible protocol handlers
+- When adding new model constructor parameters, ensure all factory helpers and the model() dispatch chain pass them through
 - The web server's WebSocket handler must translate webview-only commands (ready, submit, userActionDone, resumeSession id→chatId, getWelcomeSuggestions) that the TypeScript extension normally intercepts, since there is no TypeScript middleman in the standalone web server flow
 - All 30 FromWebviewMessage types from types.ts must be accounted for in the web server: either intercepted, translated, passed through to backend handlers, or listed in VSCODE_ONLY_COMMANDS
 - When overriding BaseHTTPRequestHandler.log_message, the parameter must be named "format" (not "fmt") to satisfy pyright

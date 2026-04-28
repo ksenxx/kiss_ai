@@ -106,6 +106,7 @@ def _openai_compatible(
     api_key: str,
     model_config: dict[str, Any] | None,
     token_callback: TokenCallback | None,
+    thinking_callback: ThinkingCallback | None = None,
 ) -> Model:
     from kiss.core.models import OpenAICompatibleModel
 
@@ -117,6 +118,7 @@ def _openai_compatible(
         api_key=api_key,
         model_config=model_config,
         token_callback=token_callback,
+        thinking_callback=thinking_callback,
     )
 
 
@@ -795,6 +797,7 @@ def model(
             api_key,
             filtered or None,
             token_callback,
+            thinking_callback,
         )
     keys = config_module.DEFAULT_CONFIG
     if model_name.startswith("openrouter/"):
@@ -804,6 +807,7 @@ def model(
             keys.OPENROUTER_API_KEY,
             model_config,
             token_callback,
+            thinking_callback,
         )
     if model_name == "text-embedding-004":
         from kiss.core.models import GeminiModel
@@ -825,6 +829,7 @@ def model(
             keys.OPENAI_API_KEY,
             model_config,
             token_callback,
+            thinking_callback,
         )
     if model_name.startswith(_TOGETHER_PREFIXES):
         return _openai_compatible(
@@ -833,6 +838,7 @@ def model(
             keys.TOGETHER_API_KEY,
             model_config,
             token_callback,
+            thinking_callback,
         )
     if model_name.startswith("claude-"):
         from kiss.core.models import AnthropicModel
@@ -867,6 +873,7 @@ def model(
             keys.MINIMAX_API_KEY,
             model_config,
             token_callback,
+            thinking_callback,
         )
     if model_name.startswith("cc/"):
         from kiss.core.models import ClaudeCodeModel

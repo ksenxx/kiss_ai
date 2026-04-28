@@ -17,6 +17,7 @@ from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import (
     Attachment,
     Model,
+    ThinkingCallback,
     TokenCallback,
     _build_text_based_tools_prompt,
     _parse_text_based_tool_calls,
@@ -109,6 +110,7 @@ class OpenAICompatibleModel(Model):
         api_key: str,
         model_config: dict[str, Any] | None = None,
         token_callback: TokenCallback | None = None,
+        thinking_callback: ThinkingCallback | None = None,
     ):
         """Initialize an OpenAI-compatible model.
 
@@ -118,8 +120,15 @@ class OpenAICompatibleModel(Model):
             api_key: API key for authentication.
             model_config: Optional dictionary of model configuration parameters.
             token_callback: Optional callback invoked with each streamed text token.
+            thinking_callback: Optional callback invoked with ``True`` when a
+                thinking block starts and ``False`` when it ends.
         """
-        super().__init__(model_name, model_config=model_config, token_callback=token_callback)
+        super().__init__(
+            model_name,
+            model_config=model_config,
+            token_callback=token_callback,
+            thinking_callback=thinking_callback,
+        )
         self.base_url = base_url
         self.api_key = api_key
         self._api_model_name = (
@@ -323,6 +332,7 @@ class OpenAICompatibleModel(Model):
         content = ""
         response = None
         last_chunk = None
+        in_reasoning = False
         for chunk in self.client.chat.completions.create(**kwargs):
             last_chunk = chunk
             if chunk.choices:
@@ -330,12 +340,20 @@ class OpenAICompatibleModel(Model):
                 if delta:
                     reasoning = getattr(delta, "reasoning_content", None)
                     if reasoning:
+                        if not in_reasoning:
+                            in_reasoning = True
+                            self._invoke_thinking_callback(True)
                         self._invoke_token_callback(reasoning)
                     if delta.content:
+                        if in_reasoning:
+                            in_reasoning = False
+                            self._invoke_thinking_callback(False)
                         content += delta.content
                         self._invoke_token_callback(delta.content)
             if chunk.usage is not None:
                 response = chunk
+        if in_reasoning:
+            self._invoke_thinking_callback(False)
         response = self._finalize_stream_response(response, last_chunk)
         return content, response
 
@@ -402,6 +420,7 @@ class OpenAICompatibleModel(Model):
             tool_calls_accum: dict[int, dict[str, str]] = {}
             response = None
             last_chunk = None
+            in_reasoning = False
             for chunk in self.client.chat.completions.create(**kwargs):
                 last_chunk = chunk
                 if chunk.choices:
@@ -409,11 +428,20 @@ class OpenAICompatibleModel(Model):
                     if delta:
                         reasoning = getattr(delta, "reasoning_content", None)
                         if reasoning:
+                            if not in_reasoning:
+                                in_reasoning = True
+                                self._invoke_thinking_callback(True)
                             self._invoke_token_callback(reasoning)
                         if delta.content:
+                            if in_reasoning:
+                                in_reasoning = False
+                                self._invoke_thinking_callback(False)
                             content += delta.content
                             self._invoke_token_callback(delta.content)
                         if delta.tool_calls:
+                            if in_reasoning:
+                                in_reasoning = False
+                                self._invoke_thinking_callback(False)
                             for tc_delta in delta.tool_calls:
                                 idx = tc_delta.index
                                 if idx not in tool_calls_accum:
@@ -433,6 +461,8 @@ class OpenAICompatibleModel(Model):
                                         )
                 if chunk.usage is not None:
                     response = chunk
+            if in_reasoning:
+                self._invoke_thinking_callback(False)
             response = self._finalize_stream_response(response, last_chunk)
             function_calls, raw_tool_calls = self._parse_tool_call_accum(tool_calls_accum)
         else:
