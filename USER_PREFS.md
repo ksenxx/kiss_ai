@@ -25,6 +25,7 @@
 - Remote access web server lives in src/kiss/agents/vscode/web_server.py; tests in src/kiss/tests/agents/vscode/test_web_server.py; CLI entry point is `kiss-web`
 - In async test cases using websockets server, HTTP requests must be made via run_in_executor to avoid blocking the event loop
 - Budget enforcement tests should verify end-to-end that KISSError propagates to the result panel as a result event with success False
+- RelentlessAgent must pass remaining budget (not full budget) to each sub-session KISSAgent and check budget before starting new sub-sessions
 - Feature integration tests using real HTTP should use ThreadingHTTPServer with OpenAI-compatible protocol handlers
 - When overriding BaseHTTPRequestHandler.log_message, the parameter must be named "format" (not "fmt") to satisfy pyright
 - Installation instructions in README should use a curl one-liner pointing to scripts/install.sh rather than multi-step git clone
