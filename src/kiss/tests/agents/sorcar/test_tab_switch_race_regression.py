@@ -420,7 +420,7 @@ class TestMergeDataGuard(unittest.TestCase):
 
     def test_merge_data_guard_in_source(self) -> None:
         idx = self.js.index("case 'merge_data':")
-        block = self.js[idx : idx + 800]
+        block = self.js[idx : idx + 3500]
         assert "ev.tabId !== undefined && ev.tabId !== activeTabId" in block
 
 

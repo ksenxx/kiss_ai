@@ -258,8 +258,8 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "gpt-image-1": _mi(32768, 5.00, 40.00, fc=False),
     "gpt-image-1-mini": _mi(32768, 1.50, 12.00, fc=False),
     "gpt-image-1.5": _mi(32768, 5.00, 40.00, fc=False),
-    "gpt-image-2": _mi(0, 0.00, 0.00),  # NEW: needs pricing
-    "gpt-image-2-2026-04-21": _mi(0, 0.00, 0.00),  # NEW: needs pricing
+    "gpt-image-2": _mi(32768, 5.00, 30.00, fc=False),
+    "gpt-image-2-2026-04-21": _mi(32768, 5.00, 30.00, fc=False),
     "gpt-realtime": _mi(128000, 4.00, 16.00, fc=False),
     "gpt-realtime-mini": _mi(128000, 0.60, 2.40, fc=False),
     "intfloat/multilingual-e5-large-instruct": _emb(514, 0.02),
