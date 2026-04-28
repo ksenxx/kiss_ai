@@ -7,16 +7,28 @@ WebSocket (for bidirectional command/event communication) on a single
 port.
 
 Authentication uses the ``remote_password`` setting from
-``~/.kiss/config.json``.  An optional ``cloudflared`` quick-tunnel can
+``~/.kiss/config.json``.  An optional ``cloudflared`` tunnel can
 expose the server through Cloudflare so devices outside the LAN can
 connect without manual port-forwarding.
 
+By default (no token), a **quick-tunnel** is used, which assigns a
+random ``*.trycloudflare.com`` URL that changes on every restart.  To
+get a **fixed** (non-dynamic) URL, create a named tunnel in the
+`Cloudflare Zero Trust dashboard <https://one.dash.cloudflare.com/>`_,
+copy its token, and pass it via ``--tunnel-token``, the
+``CLOUDFLARE_TUNNEL_TOKEN`` environment variable, or the
+``tunnel_token`` key in ``~/.kiss/config.json``.
+
 Usage::
 
-    from kiss.agents.vscode.web_server import RemoteAccessServer
-
+    # Quick tunnel (random URL, changes on restart):
     server = RemoteAccessServer(port=8787, use_tunnel=True)
-    server.start()   # blocks until Ctrl-C
+    server.start()
+
+    # Named tunnel (fixed URL):
+    server = RemoteAccessServer(port=8787, use_tunnel=True,
+                                tunnel_token="eyJ...")
+    server.start()
 """
 
 from __future__ import annotations
@@ -878,9 +890,13 @@ class RemoteAccessServer:
     """Web server providing remote browser access to KISS Sorcar.
 
     Serves the Sorcar chat webview over HTTP and bridges commands/events
-    over WebSocket.  Optionally starts a ``cloudflared`` quick-tunnel
-    so the server is reachable from the public internet without manual
+    over WebSocket.  Optionally starts a ``cloudflared`` tunnel so the
+    server is reachable from the public internet without manual
     port-forwarding or DNS setup.
+
+    When *tunnel_token* is provided, a **named tunnel** is used, giving
+    a fixed URL that persists across restarts.  Without a token, a
+    quick-tunnel is created with a random ``*.trycloudflare.com`` URL.
 
     When *tls* is True, the server uses HTTPS and WSS to encrypt all
     LAN traffic.  If *certfile*/*keyfile* are not provided, a
@@ -890,6 +906,9 @@ class RemoteAccessServer:
         host: Bind address (default ``"0.0.0.0"`` for all interfaces).
         port: TCP port for both HTTP and WebSocket (default ``8787``).
         use_tunnel: If True, start a ``cloudflared`` tunnel on launch.
+        tunnel_token: Cloudflare named-tunnel token for a fixed URL.
+            When set, ``cloudflared tunnel run --token <TOKEN>`` is
+            used instead of a quick-tunnel.
         work_dir: Working directory for the agent (default cwd).
         tls: If True, serve over HTTPS/WSS with TLS encryption.
         certfile: Path to a PEM certificate file for TLS.
@@ -901,6 +920,7 @@ class RemoteAccessServer:
         host: str = "0.0.0.0",
         port: int = 8787,
         use_tunnel: bool = False,
+        tunnel_token: str | None = None,
         work_dir: str | None = None,
         tls: bool = False,
         certfile: str | None = None,
@@ -909,6 +929,7 @@ class RemoteAccessServer:
         self.host = host
         self.port = port
         self.use_tunnel = use_tunnel
+        self.tunnel_token = tunnel_token
         self._ssl_context: ssl.SSLContext | None = None
 
         if tls or certfile or keyfile:
@@ -1251,7 +1272,19 @@ class RemoteAccessServer:
     # -- Tunnel management --------------------------------------------------
 
     def _start_tunnel(self) -> str | None:
-        """Start a ``cloudflared`` quick-tunnel and return the public URL.
+        """Start a ``cloudflared`` tunnel and return the public URL.
+
+        When :attr:`tunnel_token` is set, a **named tunnel** is started
+        with ``cloudflared tunnel run --token <TOKEN>``.  The URL is
+        pre-configured in the Cloudflare Zero Trust dashboard so it
+        stays fixed across restarts.  The method reads the connector ID
+        from the process output and returns the configured hostname (or
+        a confirmation string when the hostname cannot be determined
+        from logs).
+
+        When no token is set, a **quick-tunnel** is started with
+        ``cloudflared tunnel --url``, which assigns a random
+        ``*.trycloudflare.com`` URL.
 
         The tunnel process is stored in ``_tunnel_proc`` and must be
         terminated via :meth:`_stop_tunnel`.
@@ -1260,31 +1293,82 @@ class RemoteAccessServer:
             The public ``https://`` URL, or None if tunnel start fails.
         """
         try:
-            self._tunnel_proc = subprocess.Popen(
-                [
-                    "cloudflared",
-                    "tunnel",
-                    "--url",
-                    f"http://localhost:{self.port}",
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            # cloudflared prints the URL to stderr
-            import re
-
-            for line in iter(self._tunnel_proc.stderr.readline, ""):  # type: ignore[union-attr]
-                match = re.search(r"(https://[^\s]+\.trycloudflare\.com)", line)
-                if match:
-                    return match.group(1)
-                # Stop waiting after the process exits
-                if self._tunnel_proc.poll() is not None:
-                    break
+            if self.tunnel_token:
+                return self._start_named_tunnel()
+            return self._start_quick_tunnel()
         except FileNotFoundError:
             logger.warning("cloudflared not found — tunnel not started")
         except Exception:
             logger.debug("Failed to start tunnel", exc_info=True)
+        return None
+
+    def _start_quick_tunnel(self) -> str | None:
+        """Start a quick-tunnel (random ``*.trycloudflare.com`` URL).
+
+        Returns:
+            The public ``https://`` URL, or None on failure.
+        """
+        import re
+
+        self._tunnel_proc = subprocess.Popen(
+            [
+                "cloudflared",
+                "tunnel",
+                "--url",
+                f"http://localhost:{self.port}",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for line in iter(self._tunnel_proc.stderr.readline, ""):  # type: ignore[union-attr]
+            match = re.search(r"(https://[^\s]+\.trycloudflare\.com)", line)
+            if match:
+                return match.group(1)
+            if self._tunnel_proc.poll() is not None:
+                break
+        return None
+
+    def _start_named_tunnel(self) -> str | None:
+        """Start a named tunnel using :attr:`tunnel_token`.
+
+        The tunnel hostname is configured in the Cloudflare Zero Trust
+        dashboard.  ``cloudflared`` logs the registered hostname(s) to
+        stderr during startup; this method captures that output to
+        return the URL.
+
+        Returns:
+            The public ``https://`` URL, or None on failure.
+        """
+        import re
+
+        self._tunnel_proc = subprocess.Popen(
+            ["cloudflared", "tunnel", "run", "--token", self.tunnel_token or ""],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for line in iter(self._tunnel_proc.stderr.readline, ""):  # type: ignore[union-attr]
+            # Named tunnels log the ingress hostname, e.g.:
+            #   "... Connection ... registered connIndex=0 ..."
+            #   "... config ... hostname=myapp.example.com ..."
+            match = re.search(r"https?://([^\s/]+)", line)
+            if match:
+                hostname = match.group(1)
+                # Ignore localhost/internal URLs
+                if "localhost" not in hostname and "127.0.0.1" not in hostname:
+                    url = f"https://{hostname}"
+                    return url
+            # Also look for explicit "Registered tunnel connection" as
+            # a sign the tunnel is live (hostname may not appear in logs
+            # for connector-protocol tunnels).
+            if "Registered tunnel connection" in line or "Connection registered" in line:
+                # Tunnel is running; the hostname is configured in the
+                # dashboard, not echoed.  Return a sentinel so the
+                # caller knows the tunnel started successfully.
+                return "(named tunnel running — URL configured in Cloudflare dashboard)"
+            if self._tunnel_proc.poll() is not None:
+                break
         return None
 
     def _stop_tunnel(self) -> None:
@@ -1382,6 +1466,14 @@ def main() -> None:  # pragma: no cover — CLI entry point
         "--tunnel", action=argparse.BooleanOptionalAction, default=True,
         help="Start cloudflared tunnel (default: on, use --no-tunnel to disable)",
     )
+    parser.add_argument(
+        "--tunnel-token", default=None,
+        help=(
+            "Cloudflare named-tunnel token for a fixed URL. "
+            "Also reads from CLOUDFLARE_TUNNEL_TOKEN env var or "
+            "tunnel_token in ~/.kiss/config.json."
+        ),
+    )
     parser.add_argument("--workdir", default=None, help="Working directory")
     parser.add_argument(
         "--tls", action=argparse.BooleanOptionalAction, default=True,
@@ -1391,10 +1483,19 @@ def main() -> None:  # pragma: no cover — CLI entry point
     parser.add_argument("--keyfile", default=None, help="Path to PEM private key file")
     args = parser.parse_args()
 
+    # Resolve tunnel token: CLI flag > env var > config file
+    tunnel_token = args.tunnel_token
+    if not tunnel_token:
+        tunnel_token = os.environ.get("CLOUDFLARE_TUNNEL_TOKEN")
+    if not tunnel_token:
+        cfg = load_config()
+        tunnel_token = cfg.get("tunnel_token")
+
     server = RemoteAccessServer(
         host=args.host,
         port=args.port,
         use_tunnel=args.tunnel,
+        tunnel_token=tunnel_token or None,
         work_dir=args.workdir,
         tls=args.tls,
         certfile=args.certfile,
