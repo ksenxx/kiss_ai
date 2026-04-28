@@ -1078,5 +1078,241 @@ class _FakeModelServer:
             self._httpd.shutdown()
 
 
+class TestRemoteAccessServerMerge(IsolatedAsyncioTestCase):
+    """Test merge/diff button functionality in the web server.
+
+    Sets up a git repo with a modified file and starts a merge session
+    to verify that merge toolbar buttons work correctly.
+    """
+
+    async def asyncSetUp(self) -> None:
+        import os
+        import subprocess
+
+        self.port = _find_free_port()
+        self._orig_config = None
+        if CONFIG_PATH.exists():
+            self._orig_config = CONFIG_PATH.read_text()
+        save_config({"remote_password": ""})
+
+        # Create a git repo with a file, commit, then modify
+        self._tmpdir = tempfile.mkdtemp()
+        subprocess.run(
+            ["git", "init", self._tmpdir],
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", self._tmpdir, "config", "user.email", "t@t.com"],
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", self._tmpdir, "config", "user.name", "T"],
+            capture_output=True,
+            check=True,
+        )
+        self._test_file = os.path.join(self._tmpdir, "test.py")
+        with open(self._test_file, "w") as f:
+            f.write("line1\nline2\nline3\n")
+        subprocess.run(
+            ["git", "-C", self._tmpdir, "add", "-A"],
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", self._tmpdir, "commit", "-m", "initial"],
+            capture_output=True,
+            check=True,
+        )
+        # Simulate agent changes
+        with open(self._test_file, "w") as f:
+            f.write("line1\nmodified_line2\nline3\nnew_line4\n")
+
+        self.server = RemoteAccessServer(
+            host="127.0.0.1",
+            port=self.port,
+            work_dir=self._tmpdir,
+        )
+        await self.server.start_async()
+
+    async def asyncTearDown(self) -> None:
+        await self.server.stop_async()
+        if self._orig_config is not None:
+            CONFIG_PATH.write_text(self._orig_config)
+        elif CONFIG_PATH.exists():
+            CONFIG_PATH.unlink()
+
+    async def _auth(self, ws: Any) -> None:
+        """Authenticate a WebSocket connection."""
+        await ws.send(json.dumps({"type": "auth", "password": ""}))
+        resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+        assert resp["type"] == "auth_ok"
+
+    async def _trigger_merge(self, tab_id: str) -> None:
+        """Start a merge session for the test git repo."""
+        loop = asyncio.get_event_loop()
+        started = await loop.run_in_executor(
+            None,
+            lambda: self.server._vscode_server._prepare_and_start_merge(
+                self._tmpdir, tab_id=tab_id,
+            ),
+        )
+        assert started, "Merge session must start (there are uncommitted changes)"
+
+    async def _collect_until(
+        self,
+        ws: Any,
+        target_type: str,
+        timeout: float = 5,
+    ) -> list[dict[str, Any]]:
+        """Collect WS events until one with the target type arrives."""
+        events: list[dict[str, Any]] = []
+        deadline = asyncio.get_event_loop().time() + timeout
+        while asyncio.get_event_loop().time() < deadline:
+            try:
+                raw = await asyncio.wait_for(ws.recv(), timeout=2)
+                ev = json.loads(raw)
+                events.append(ev)
+                if ev.get("type") == target_type:
+                    break
+            except TimeoutError:
+                break
+        return events
+
+    async def test_merge_accept_all_completes_merge(self) -> None:
+        """mergeAction accept-all should complete the merge and broadcast merge_ended."""
+        tab_id = "merge-accept-tab"
+        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+            await self._auth(ws)
+            await self._trigger_merge(tab_id)
+
+            # Receive merge_data and merge_started
+            events = await self._collect_until(ws, "merge_started")
+            types = [e["type"] for e in events]
+            self.assertIn("merge_data", types)
+            self.assertIn("merge_started", types)
+
+            # Send accept-all
+            await ws.send(json.dumps({
+                "type": "mergeAction",
+                "action": "accept-all",
+                "tabId": tab_id,
+            }))
+
+            # Should receive merge_ended
+            events = await self._collect_until(ws, "merge_ended", timeout=5)
+            ended = [e for e in events if e.get("type") == "merge_ended"]
+            self.assertTrue(
+                len(ended) > 0,
+                "merge_ended should be broadcast after accept-all",
+            )
+
+    async def test_merge_reject_all_reverts_files(self) -> None:
+        """mergeAction reject-all should revert files to base and complete merge."""
+        tab_id = "merge-reject-tab"
+        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+            await self._auth(ws)
+            await self._trigger_merge(tab_id)
+            events = await self._collect_until(ws, "merge_started")
+
+            # Remember the original (base) content
+            # The base is "line1\nline2\nline3\n"
+            # The current (agent) content is "line1\nmodified_line2\nline3\nnew_line4\n"
+
+            # Send reject-all
+            await ws.send(json.dumps({
+                "type": "mergeAction",
+                "action": "reject-all",
+                "tabId": tab_id,
+            }))
+
+            events = await self._collect_until(ws, "merge_ended", timeout=5)
+            ended = [e for e in events if e.get("type") == "merge_ended"]
+            self.assertTrue(len(ended) > 0, "merge_ended should be broadcast")
+
+            # The file should be reverted to base content
+            with open(self._test_file) as f:
+                content = f.read()
+            self.assertEqual(content, "line1\nline2\nline3\n")
+
+    async def test_merge_data_includes_file_contents(self) -> None:
+        """merge_data event should include base_text and current_text for web clients."""
+        tab_id = "merge-contents-tab"
+        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+            await self._auth(ws)
+            await self._trigger_merge(tab_id)
+
+            events = await self._collect_until(ws, "merge_started")
+            md_events = [e for e in events if e.get("type") == "merge_data"]
+            self.assertTrue(len(md_events) > 0)
+
+            md = md_events[0]
+            files = md["data"]["files"]
+            self.assertTrue(len(files) > 0)
+            # Each file should have base_text and current_text
+            for f in files:
+                self.assertIn("base_text", f, "merge_data files must include base_text")
+                self.assertIn(
+                    "current_text", f, "merge_data files must include current_text"
+                )
+
+    async def test_merge_accept_individual_hunk(self) -> None:
+        """mergeAction accept should mark one hunk and eventually complete."""
+        tab_id = "merge-single-accept-tab"
+        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+            await self._auth(ws)
+            await self._trigger_merge(tab_id)
+            events = await self._collect_until(ws, "merge_started")
+
+            md_events = [e for e in events if e.get("type") == "merge_data"]
+            total_hunks = md_events[0]["hunk_count"]
+
+            # Accept all hunks one by one
+            for _ in range(total_hunks):
+                await ws.send(json.dumps({
+                    "type": "mergeAction",
+                    "action": "accept",
+                    "tabId": tab_id,
+                }))
+
+            events = await self._collect_until(ws, "merge_ended", timeout=5)
+            ended = [e for e in events if e.get("type") == "merge_ended"]
+            self.assertTrue(len(ended) > 0, "merge should complete after all hunks accepted")
+
+            # Content should be preserved (agent's changes kept)
+            with open(self._test_file) as f:
+                content = f.read()
+            self.assertEqual(content, "line1\nmodified_line2\nline3\nnew_line4\n")
+
+    async def test_merge_reject_individual_hunk(self) -> None:
+        """mergeAction reject should revert hunks one by one."""
+        tab_id = "merge-single-reject-tab"
+        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+            await self._auth(ws)
+            await self._trigger_merge(tab_id)
+            events = await self._collect_until(ws, "merge_started")
+
+            md_events = [e for e in events if e.get("type") == "merge_data"]
+            total_hunks = md_events[0]["hunk_count"]
+
+            # Reject all hunks one by one
+            for _ in range(total_hunks):
+                await ws.send(json.dumps({
+                    "type": "mergeAction",
+                    "action": "reject",
+                    "tabId": tab_id,
+                }))
+
+            events = await self._collect_until(ws, "merge_ended", timeout=5)
+            ended = [e for e in events if e.get("type") == "merge_ended"]
+            self.assertTrue(len(ended) > 0)
+
+            # Content should be reverted to base
+            with open(self._test_file) as f:
+                content = f.read()
+            self.assertEqual(content, "line1\nline2\nline3\n")
+
+
 if __name__ == "__main__":
     unittest.main()

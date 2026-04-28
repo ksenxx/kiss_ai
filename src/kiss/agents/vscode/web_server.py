@@ -29,6 +29,7 @@ import os
 import subprocess
 import sys
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,151 @@ __all__ = ["RemoteAccessServer", "WebPrinter"]
 logger = logging.getLogger(__name__)
 
 MEDIA_DIR = Path(__file__).parent / "media"
+
+
+# ---------------------------------------------------------------------------
+# Server-side merge state for web clients
+# ---------------------------------------------------------------------------
+
+
+class _WebMergeState:
+    """Tracks merge review state for a single tab in the web server.
+
+    In VS Code, the TypeScript ``MergeManager`` handles per-hunk
+    accept/reject by modifying files through the editor API.  Since the
+    standalone web server has no editor, this class provides equivalent
+    functionality by tracking hunk resolution state and modifying files
+    on disk directly.
+
+    Args:
+        merge_data: The ``data`` dict from a ``merge_data`` event,
+            containing a ``files`` list with ``name``, ``base``,
+            ``current``, and ``hunks`` entries.
+    """
+
+    def __init__(self, merge_data: dict[str, Any]) -> None:
+        self.files: list[dict[str, Any]] = merge_data.get("files", [])
+        # Flat list of (file_idx, hunk_idx) for navigation
+        self._all_hunks: list[tuple[int, int]] = []
+        for fi, f in enumerate(self.files):
+            for hi in range(len(f.get("hunks", []))):
+                self._all_hunks.append((fi, hi))
+        self._pos = 0  # index into _all_hunks
+        self._resolved: set[tuple[int, int]] = set()
+
+    @property
+    def total_hunks(self) -> int:
+        """Total number of hunks across all files."""
+        return len(self._all_hunks)
+
+    @property
+    def remaining(self) -> int:
+        """Number of unresolved hunks."""
+        return self.total_hunks - len(self._resolved)
+
+    @property
+    def all_resolved(self) -> bool:
+        """True when every hunk has been accepted or rejected."""
+        return len(self._resolved) >= self.total_hunks
+
+    def current(self) -> tuple[int, int] | None:
+        """Return (file_idx, hunk_idx) for the current position, or None."""
+        if not self._all_hunks:
+            return None
+        if self._pos >= len(self._all_hunks):
+            self._pos = len(self._all_hunks) - 1
+        return self._all_hunks[self._pos]
+
+    def mark_resolved(self, fi: int, hi: int) -> None:
+        """Mark a hunk as resolved."""
+        self._resolved.add((fi, hi))
+
+    def advance(self) -> None:
+        """Move to the next unresolved hunk."""
+        if self.all_resolved:
+            return
+        start = self._pos
+        for _ in range(len(self._all_hunks)):
+            self._pos = (self._pos + 1) % len(self._all_hunks)
+            if self._all_hunks[self._pos] not in self._resolved:
+                return
+        self._pos = start
+
+    def go_prev(self) -> None:
+        """Move to the previous unresolved hunk."""
+        if self.all_resolved:
+            return
+        for _ in range(len(self._all_hunks)):
+            self._pos = (self._pos - 1) % len(self._all_hunks)
+            if self._all_hunks[self._pos] not in self._resolved:
+                return
+
+    def unresolved_in_file(self, fi: int) -> list[int]:
+        """Return hunk indices not yet resolved for file *fi*."""
+        return [
+            hi
+            for ffi, hi in self._all_hunks
+            if ffi == fi and (ffi, hi) not in self._resolved
+        ]
+
+    def all_unresolved(self) -> list[tuple[int, int]]:
+        """Return all (file_idx, hunk_idx) pairs not yet resolved."""
+        return [
+            (fi, hi) for fi, hi in self._all_hunks if (fi, hi) not in self._resolved
+        ]
+
+
+def _reject_hunk_in_file(
+    current_path: str,
+    base_path: str,
+    hunk: dict[str, int],
+) -> None:
+    """Revert a single hunk in the current file to the base version.
+
+    Reads both files, replaces the hunk's lines in the current file
+    with the corresponding lines from the base file, and writes the
+    result back.
+
+    Args:
+        current_path: Path to the file with agent changes.
+        base_path: Path to the pre-task base copy.
+        hunk: Hunk dict with keys ``bs``, ``bc``, ``cs``, ``cc``
+            (0-based line positions).
+    """
+    try:
+        cur_lines = Path(current_path).read_text().splitlines(keepends=True)
+    except OSError:
+        cur_lines = []
+    try:
+        base_lines = Path(base_path).read_text().splitlines(keepends=True)
+    except OSError:
+        base_lines = []
+
+    cs = hunk["cs"]
+    cc = hunk["cc"]
+    bs = hunk["bs"]
+    bc = hunk["bc"]
+
+    # Replace current lines [cs:cs+cc] with base lines [bs:bs+bc]
+    new_lines = cur_lines[:cs] + base_lines[bs : bs + bc] + cur_lines[cs + cc :]
+    Path(current_path).write_text("".join(new_lines))
+
+
+def _reject_all_hunks_in_file(file_data: dict[str, Any]) -> None:
+    """Revert an entire file to its base version.
+
+    Simply copies the base file content over the current file.
+
+    Args:
+        file_data: File entry from merge data with ``base`` and
+            ``current`` path strings.
+    """
+    import shutil
+
+    base = file_data["base"]
+    current = file_data["current"]
+    if Path(base).is_file():
+        shutil.copy2(base, current)
 
 #: Commands that are VS-Code-UI-specific and have no backend handler.
 _VSCODE_ONLY_COMMANDS = frozenset({
@@ -81,13 +227,17 @@ class WebPrinter(BaseBrowserPrinter):
         self._ws_lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._persist_agents: dict[str, Any] = {}
+        self._merge_state_callback: (
+            Callable[[str, dict[str, Any]], None] | None
+        ) = None
 
     def broadcast(self, event: dict[str, Any]) -> None:
         """Send *event* to every connected WebSocket client.
 
         Injects ``tabId`` from thread-local storage (same as
-        ``VSCodePrinter``), records the event for replay, and persists
-        display events to the database.
+        ``VSCodePrinter``), records the event for replay, persists
+        display events to the database, and augments ``merge_data``
+        events with file contents for web-based diff rendering.
 
         Args:
             event: The event dictionary to emit.
@@ -95,6 +245,14 @@ class WebPrinter(BaseBrowserPrinter):
         tab_id = getattr(self._thread_local, "tab_id", None)
         if tab_id is not None and "tabId" not in event:
             event = {**event, "tabId": tab_id}
+
+        # Augment merge_data with file contents for web clients
+        if event.get("type") == "merge_data":
+            event = _augment_merge_data(event)
+            # Register merge state for the web merge manager
+            evt_tab = event.get("tabId", "")
+            if evt_tab and self._merge_state_callback is not None:
+                self._merge_state_callback(evt_tab, event.get("data", {}))
 
         with self._lock:
             self._record_event(event)
@@ -548,6 +706,38 @@ def _http_response(status: int, content_type: str, body: bytes) -> Response:
     )
 
 
+def _augment_merge_data(event: dict[str, Any]) -> dict[str, Any]:
+    """Add ``base_text`` and ``current_text`` to each file in a ``merge_data`` event.
+
+    The browser needs file contents to render diffs.  In VS Code, the
+    ``MergeManager`` reads files through the editor API; in the web
+    server we read them from disk and include the text in the event.
+
+    Args:
+        event: A ``merge_data`` event dict.
+
+    Returns:
+        A copy of the event with file contents added.
+    """
+    event = {**event}
+    data = {**event.get("data", {})}
+    files = []
+    for f in data.get("files", []):
+        f = {**f}
+        try:
+            f["base_text"] = Path(f["base"]).read_text()
+        except (OSError, KeyError):
+            f["base_text"] = ""
+        try:
+            f["current_text"] = Path(f["current"]).read_text()
+        except (OSError, KeyError):
+            f["current_text"] = ""
+        files.append(f)
+    data["files"] = files
+    event["data"] = data
+    return event
+
+
 def _translate_webview_command(cmd: dict[str, Any]) -> dict[str, Any]:
     """Translate a webview message into a backend command.
 
@@ -621,6 +811,8 @@ class RemoteAccessServer:
         self._tunnel_proc: subprocess.Popen[str] | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ws_server: Any = None
+        self._merge_states: dict[str, _WebMergeState] = {}
+        self._printer._merge_state_callback = self._register_merge_state
 
     # -- HTTP handler -------------------------------------------------------
 
@@ -712,6 +904,12 @@ class RemoteAccessServer:
                 if cmd_type == "getWelcomeSuggestions":
                     self._handle_welcome_suggestions()
                     continue
+                if cmd_type == "mergeAction":
+                    action = cmd.get("action", "")
+                    if action != "all-done":
+                        await self._handle_web_merge_action(cmd)
+                        continue
+                    # "all-done" falls through to backend
                 # Translate webview-only fields that the TypeScript
                 # extension normally rewrites before they reach the
                 # Python backend.
@@ -825,6 +1023,116 @@ class RemoteAccessServer:
         await loop.run_in_executor(
             None, self._vscode_server._handle_command, run_cmd,
         )
+
+    def _register_merge_state(
+        self, tab_id: str, merge_data: dict[str, Any],
+    ) -> None:
+        """Register a merge state when a merge_data event is broadcast.
+
+        Called from ``WebPrinter.broadcast()`` so the web server can
+        track active merge sessions and handle ``mergeAction`` commands.
+
+        Args:
+            tab_id: The tab that started the merge.
+            merge_data: The ``data`` field from the ``merge_data`` event.
+        """
+        self._merge_states[tab_id] = _WebMergeState(merge_data)
+
+    # -- Merge action handling for web clients --------------------------------
+
+    async def _handle_web_merge_action(self, cmd: dict[str, Any]) -> None:
+        """Handle merge toolbar actions (accept/reject/navigate) server-side.
+
+        In VS Code, the TypeScript ``MergeManager`` processes these
+        actions.  In the standalone web server, this method provides
+        equivalent functionality by tracking hunk state and modifying
+        files on disk.
+
+        Args:
+            cmd: The ``mergeAction`` command from the browser, with
+                ``action`` and ``tabId`` fields.
+        """
+        action = cmd.get("action", "")
+        tab_id = cmd.get("tabId", "")
+        state = self._merge_states.get(tab_id)
+        if state is None:
+            return  # no active merge for this tab
+
+        if action == "accept":
+            cur = state.current()
+            if cur is not None:
+                state.mark_resolved(*cur)
+                state.advance()
+        elif action == "reject":
+            cur = state.current()
+            if cur is not None:
+                fi, hi = cur
+                fd = state.files[fi]
+                hunk = fd["hunks"][hi]
+                await asyncio.get_event_loop().run_in_executor(
+                    None, _reject_hunk_in_file, fd["current"], fd["base"], hunk,
+                )
+                # Adjust subsequent hunks' cs offsets in the same file
+                delta = hunk["bc"] - hunk["cc"]
+                for later_hi in range(hi + 1, len(fd["hunks"])):
+                    if (fi, later_hi) not in state._resolved:
+                        fd["hunks"][later_hi]["cs"] += delta
+                state.mark_resolved(fi, hi)
+                state.advance()
+        elif action == "prev":
+            state.go_prev()
+        elif action == "next":
+            state.advance()
+        elif action == "accept-file":
+            cur = state.current()
+            if cur is not None:
+                fi = cur[0]
+                for hi in state.unresolved_in_file(fi):
+                    state.mark_resolved(fi, hi)
+                state.advance()
+        elif action == "reject-file":
+            cur = state.current()
+            if cur is not None:
+                fi = cur[0]
+                fd = state.files[fi]
+                await asyncio.get_event_loop().run_in_executor(
+                    None, _reject_all_hunks_in_file, fd,
+                )
+                for hi in state.unresolved_in_file(fi):
+                    state.mark_resolved(fi, hi)
+                state.advance()
+        elif action == "accept-all":
+            for fi, hi in state.all_unresolved():
+                state.mark_resolved(fi, hi)
+        elif action == "reject-all":
+            # Group unresolved hunks by file and reject whole files
+            unresolved_files: set[int] = set()
+            for fi, hi in state.all_unresolved():
+                unresolved_files.add(fi)
+                state.mark_resolved(fi, hi)
+            for fi in unresolved_files:
+                fd = state.files[fi]
+                await asyncio.get_event_loop().run_in_executor(
+                    None, _reject_all_hunks_in_file, fd,
+                )
+
+        # Broadcast navigation update
+        self._printer.broadcast({
+            "type": "merge_nav",
+            "tabId": tab_id,
+            "remaining": state.remaining,
+            "total": state.total_hunks,
+        })
+
+        # When all hunks resolved, finish the merge via backend
+        if state.all_resolved:
+            del self._merge_states[tab_id]
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                None,
+                self._vscode_server._handle_command,
+                {"type": "mergeAction", "action": "all-done", "tabId": tab_id},
+            )
 
     # -- Tunnel management --------------------------------------------------
 
