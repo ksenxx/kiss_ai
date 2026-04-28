@@ -7,8 +7,12 @@
 [![Version](https://img.shields.io/badge/version-2026.4.24-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
+[![Website](https://img.shields.io/badge/website-kisssorcar.github.io-1976d2?style=flat-square)](https://kisssorcar.github.io/)
+[![arXiv](https://img.shields.io/badge/arXiv-2604.23822-b31b1b?style=flat-square)](https://arxiv.org/abs/2604.23822)
 
 *"Everything should be made as simple as possible, but not simpler." — Albert Einstein*
+
+**Website:** [https://kisssorcar.github.io/](https://kisssorcar.github.io/) · **Paper:** [arXiv:2604.23822](https://arxiv.org/abs/2604.23822)
 
 </div>
 
@@ -26,6 +30,7 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 - [Models Supported](#-models-supported)
 - [Contributing](#-contributing)
 - [License](#-license)
+- [Citation](#-citation)
 - [Authors](#%EF%B8%8F-authors)
 
 </details>
@@ -137,6 +142,22 @@ Contributions in the form of issues are welcome! KISS Sorcar should be able to t
 ## 📄 License
 
 Apache-2.0
+
+## 📚 Citation
+
+If you use KISS Sorcar in your research, please cite:
+
+```bibtex
+@misc{sen2026kisssorcar,
+  title         = {KISS Sorcar: A Stupidly-Simple General-Purpose and Software Engineering AI Assistant},
+  author        = {Sen, Koushik},
+  year          = {2026},
+  eprint        = {2604.23822},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.SE},
+  url           = {https://arxiv.org/abs/2604.23822}
+}
+```
 
 ## ✍️ Authors
 
