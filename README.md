@@ -4,7 +4,7 @@
 
 # When Simplicity Becomes Your Superpower: Meet KISS Sorcar, a General-purpose and Software engineering AI Assistant and IDE
 
-[![Version](https://img.shields.io/badge/version-2026.4.25-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
+[![Version](https://img.shields.io/badge/version-2026.4.26-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
 [![Website](https://img.shields.io/badge/website-kisssorcar.github.io-1976d2?style=flat-square)](https://kisssorcar.github.io/)
@@ -27,6 +27,7 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 - [Full Installation](#full-installation)
 - [KISS Sorcar Extension Installation](#kiss-sorcar-extension-installation)
 - [CLI Interface](#cli-interface)
+- [Remote Access](#remote-access)
 - [Models Supported](#-models-supported)
 - [Contributing](#-contributing)
 - [License](#-license)
@@ -42,7 +43,7 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 
 **KISS Sorcar scored 62.2% on Terminal Bench 2.0, beating both Cursor agent (61.7%) and Claude Code (58%).**
 
-> **Built on time-tested, robust software engineering principles.** Both KISS Sorcar and the KISS Agent Framework are grounded in disciplined engineering practice — *read before writing, test before fixing, plan before executing, verify before finishing*. These principles are encoded directly into the agent's system prompt, enabling KISS Sorcar to write code that is **simple, elegant, maintainable, and bug-free**.
+> **Built on time-tested, robust software engineering principles.** Both KISS Sorcar and the KISS Agent Framework are grounded in disciplined engineering practice. These principles are encoded directly into the agent's system prompt, enabling KISS Sorcar to write code that is **simple, elegant, maintainable, and bug-free**.
 
 An old video on KISS Sorcar can be found at [https://www.youtube.com/watch?v=xnYxWvRqACE](https://www.youtube.com/watch?v=xnYxWvRqACE). We **no longer** recommend to explicitly create a plan in KISS Sorcar. See the paper for details.
 
@@ -78,6 +79,43 @@ sorcar -t 'Can you send the message "Hello from Sorcar!" to ksen via the desktop
 
 sorcar -t 'Can you show me the detailed step-by-step workflow of gepa.py?'
 ```
+
+## Remote Access
+
+KISS Sorcar includes a standalone web server that lets you access the full chat interface from any browser — including phones and tablets. The server uses HTTP for the UI and WebSocket for real-time communication, all on a single port.
+
+**Start the remote server:**
+
+```bash
+uv run kiss-web
+```
+
+This starts the server on `http://0.0.0.0:8787`. You can access it from the same machine at `http://localhost:8787`.
+
+**Start with a Cloudflare tunnel (for access from anywhere):**
+
+```bash
+uv run kiss-web --tunnel
+```
+
+This starts a [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/get-started/) quick-tunnel and prints a public `https://*.trycloudflare.com` URL. Open that URL on any device — phone, tablet, or another computer — to use Sorcar remotely. No port-forwarding or DNS setup required. Install `cloudflared` first (`brew install cloudflared` on macOS).
+
+**Example — custom port with tunnel:**
+
+```bash
+uv run kiss-web --port 9000 --tunnel --workdir ~/projects/myapp
+```
+
+**Authentication:** Set a `remote_password` in `~/.kiss/config.json` (or via the Configuration panel in the Sorcar UI). When a password is set, connecting clients are prompted to enter it before they can interact with the agent.
+
+**Accessing from a remote device:**
+
+1. On your server machine, run `uv run kiss-web --tunnel`.
+1. Copy the `https://*.trycloudflare.com` URL printed to the terminal.
+1. Open that URL in any browser on your remote device.
+1. Enter the remote password if one is configured.
+
+For LAN-only access (without a tunnel), open `http://<server-ip>:8787` from any device on the same network.
 
 ## 🤖 Models Supported
 
