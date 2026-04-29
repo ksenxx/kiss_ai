@@ -30,6 +30,7 @@ from kiss.agents.vscode.web_server import (
     _build_html,
     _create_ssl_context,
     _generate_self_signed_cert,
+    _get_local_ips,
     _print_url,
     _remove_url_file,
     _save_url_file,
@@ -1684,6 +1685,122 @@ class TestUrlFile(unittest.TestCase):
         with self.assertRaises(SystemExit) as ctx:
             _print_url()
         self.assertEqual(ctx.exception.code, 1)
+
+
+class TestGetLocalIps(unittest.TestCase):
+    """Test the _get_local_ips() helper."""
+
+    def test_returns_frozenset(self) -> None:
+        """_get_local_ips returns a frozenset of strings."""
+        result = _get_local_ips()
+        self.assertIsInstance(result, frozenset)
+        for addr in result:
+            self.assertIsInstance(addr, str)
+
+    def test_no_loopback(self) -> None:
+        """Returned addresses do not include 127.x.x.x loopback."""
+        result = _get_local_ips()
+        for addr in result:
+            self.assertFalse(addr.startswith("127."), f"Loopback in result: {addr}")
+
+    def test_idempotent(self) -> None:
+        """Consecutive calls with no network change return the same set."""
+        a = _get_local_ips()
+        b = _get_local_ips()
+        self.assertEqual(a, b)
+
+
+class TestIpWatchdog(IsolatedAsyncioTestCase):
+    """Test the IP address change watchdog."""
+
+    async def asyncSetUp(self) -> None:
+        self.port = _find_free_port()
+        self._orig_config = None
+        if CONFIG_PATH.exists():
+            self._orig_config = CONFIG_PATH.read_text()
+        save_config({"remote_password": ""})
+
+        self.server = RemoteAccessServer(
+            host="127.0.0.1",
+            port=self.port,
+            work_dir=tempfile.mkdtemp(),
+        )
+        await self.server.start_async()
+
+    async def asyncTearDown(self) -> None:
+        await self.server.stop_async()
+        if self._orig_config is not None:
+            CONFIG_PATH.write_text(self._orig_config)
+        elif CONFIG_PATH.exists():
+            CONFIG_PATH.unlink()
+
+    async def test_ip_watchdog_task_started(self) -> None:
+        """start_async starts the IP watchdog task."""
+        task = self.server._ip_watchdog_task
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertFalse(task.done())
+
+    async def test_ip_watchdog_cancelled_on_stop(self) -> None:
+        """stop_async cancels the IP watchdog task."""
+        self.assertIsNotNone(self.server._ip_watchdog_task)
+        await self.server.stop_async()
+        self.assertIsNone(self.server._ip_watchdog_task)
+
+    async def test_ip_watchdog_closes_server_on_change(self) -> None:
+        """When IPs change, the watchdog closes the WebSocket server."""
+        # Simulate an IP change by setting _last_ips to something different
+        self.server._last_ips = frozenset({"10.255.255.1"})
+        # Cancel the existing watchdog and start a fresh one with short interval
+        if self.server._ip_watchdog_task is not None:
+            self.server._ip_watchdog_task.cancel()
+            try:
+                await self.server._ip_watchdog_task
+            except asyncio.CancelledError:
+                pass
+
+        # Temporarily override TUNNEL_CHECK_INTERVAL by running a manual check
+        # Instead, directly call the internal logic: we'll start the watchdog
+        # and it should detect the mismatch on the first check cycle.
+        import kiss.agents.vscode.web_server as ws_mod
+
+        original_interval = ws_mod.TUNNEL_CHECK_INTERVAL
+        ws_mod.TUNNEL_CHECK_INTERVAL = 0  # minimal sleep for fast test
+        try:
+            task = asyncio.create_task(self.server._ip_watchdog())
+            # Wait for the watchdog to detect the change and close the server
+            await asyncio.sleep(0.3)
+            self.assertTrue(task.done(), "Watchdog should have returned after IP change")
+        finally:
+            ws_mod.TUNNEL_CHECK_INTERVAL = original_interval
+
+    async def test_ip_watchdog_noop_when_unchanged(self) -> None:
+        """When IPs haven't changed, the watchdog keeps running."""
+        # Ensure _last_ips matches current reality
+        import kiss.agents.vscode.web_server as ws_mod
+
+        self.server._last_ips = _get_local_ips()
+        if self.server._ip_watchdog_task is not None:
+            self.server._ip_watchdog_task.cancel()
+            try:
+                await self.server._ip_watchdog_task
+            except asyncio.CancelledError:
+                pass
+
+        original_interval = ws_mod.TUNNEL_CHECK_INTERVAL
+        ws_mod.TUNNEL_CHECK_INTERVAL = 0  # minimal sleep for fast test
+        try:
+            task = asyncio.create_task(self.server._ip_watchdog())
+            await asyncio.sleep(0.2)
+            # Should still be running (IPs haven't changed)
+            self.assertFalse(task.done(), "Watchdog should keep running when IPs unchanged")
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        finally:
+            ws_mod.TUNNEL_CHECK_INTERVAL = original_interval
 
 
 if __name__ == "__main__":
