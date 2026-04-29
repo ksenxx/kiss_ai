@@ -1895,6 +1895,9 @@
       case 'welcome_suggestions':
         renderWelcomeSuggestions(ev.suggestions);
         break;
+      case 'remote_url':
+        renderRemoteUrl(ev.url);
+        break;
       case 'followup_suggestion': {
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) break;
         const fu = mkEl('div', 'followup-bar');
@@ -2092,13 +2095,69 @@
         break;
       case 'merge_data': {
         const mdEl = mkEl('div', 'ev merge-info');
-        mdEl.innerHTML =
+        let mergeHtml =
           '<div class="merge-info-hdr" style="color:var(--yellow);font-weight:600;font-size:var(--fs-base);margin-bottom:4px">' +
           '\u2731 Reviewing ' +
           (ev.hunk_count || 0) +
           ' change(s)</div>' +
           '<div class="merge-info-body" style="font-size:var(--fs-md);color:var(--dim)">Red = old lines, Green = new lines. ' +
           'Use the merge toolbar to accept or reject changes.</div>';
+        // Render inline diff for web clients (when file contents are present)
+        const mergeFiles = (ev.data && ev.data.files) || [];
+        for (let mfi = 0; mfi < mergeFiles.length; mfi++) {
+          const mf = mergeFiles[mfi];
+          if (mf.base_text !== undefined && mf.current_text !== undefined) {
+            mergeHtml +=
+              '<div class="merge-file-diff" style="margin-top:8px;">';
+            mergeHtml +=
+              '<div style="font-weight:600;color:var(--vscode-textLink-foreground);margin-bottom:4px;">' +
+              (mf.name || 'unknown') +
+              '</div>';
+            mergeHtml +=
+              '<pre style="font-size:12px;line-height:1.4;overflow-x:auto;background:var(--vscode-input-background);padding:8px;border-radius:4px;margin:0;">';
+            const baseLines = (mf.base_text || '').split('\n');
+            const curLines = (mf.current_text || '').split('\n');
+            const hunks = mf.hunks || [];
+            // Build a unified diff view
+            let curIdx = 0;
+            for (let mhi = 0; mhi < hunks.length; mhi++) {
+              const h = hunks[mhi];
+              // Context lines before hunk
+              while (curIdx < h.cs) {
+                mergeHtml +=
+                  '<span style="color:var(--dim);">' +
+                  esc(' ' + curLines[curIdx]) +
+                  '</span>\n';
+                curIdx++;
+              }
+              // Old (base) lines - red
+              for (let bi = h.bs; bi < h.bs + h.bc; bi++) {
+                mergeHtml +=
+                  '<span style="color:#f44;background:rgba(255,60,60,0.15);">-' +
+                  esc(baseLines[bi] || '') +
+                  '</span>\n';
+              }
+              // New (current) lines - green
+              for (let ci = h.cs; ci < h.cs + h.cc; ci++) {
+                mergeHtml +=
+                  '<span style="color:#4c4;background:rgba(60,255,60,0.15);">+' +
+                  esc(curLines[ci] || '') +
+                  '</span>\n';
+              }
+              curIdx = h.cs + h.cc;
+            }
+            // Remaining context
+            while (curIdx < curLines.length) {
+              mergeHtml +=
+                '<span style="color:var(--dim);">' +
+                esc(' ' + curLines[curIdx]) +
+                '</span>\n';
+              curIdx++;
+            }
+            mergeHtml += '</pre></div>';
+          }
+        }
+        mdEl.innerHTML = mergeHtml;
         addCollapse(mdEl, mdEl.querySelector('.merge-info-hdr'));
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
           // Background tab: append to saved output fragment
@@ -2145,6 +2204,15 @@
         hideMergeToolbar();
         updateInputDisabled();
         break;
+      case 'merge_nav': {
+        // Update merge toolbar with remaining hunk count
+        const mergeTitle = document.querySelector('.merge-toolbar-title');
+        if (mergeTitle && ev.remaining !== undefined) {
+          mergeTitle.textContent =
+            'Review Changes (' + ev.remaining + '/' + ev.total + ' remaining)';
+        }
+        break;
+      }
       case 'commitMessage':
         break;
       case 'droppedPaths':
@@ -2347,6 +2415,46 @@
     div.innerHTML = '<strong>Error:</strong> ' + esc(text);
     O.appendChild(div);
     sb();
+  }
+
+  // --- Remote URL (dynamic) ---
+  function renderRemoteUrl(url) {
+    const container = document.getElementById('remote-url');
+    if (!container) return;
+    container.innerHTML = '';
+    if (!url) return;
+    const wrapper = document.createElement('div');
+    wrapper.className = 'remote-url-bar';
+    const link = document.createElement('a');
+    link.href = url;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.textContent = url;
+    link.className = 'remote-url-link';
+    const copyBtn = document.createElement('button');
+    copyBtn.className = 'remote-url-copy';
+    copyBtn.title = 'Copy URL';
+    const copySvg =
+      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>';
+    const checkSvg =
+      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+    copyBtn.innerHTML = copySvg;
+    copyBtn.addEventListener('click', e => {
+      e.preventDefault();
+      navigator.clipboard.writeText(url).then(() => {
+        copyBtn.innerHTML = checkSvg;
+        setTimeout(() => {
+          copyBtn.innerHTML = copySvg;
+        }, 1500);
+      });
+    });
+    const label = document.createElement('span');
+    label.className = 'remote-url-label';
+    label.textContent = 'Web app: ';
+    wrapper.appendChild(label);
+    wrapper.appendChild(link);
+    wrapper.appendChild(copyBtn);
+    container.appendChild(wrapper);
   }
 
   // --- Welcome suggestions (dynamic) ---
@@ -2802,9 +2910,25 @@
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         sendMessage();
+        return;
       }
       // Any other key clears ghost
       if (e.key !== 'Tab') clearGhost();
+    });
+    // Fallback for mobile virtual keyboards that don't fire keydown for Enter.
+    // Track Shift state so Shift+Enter still inserts a newline on desktop.
+    let _shiftHeld = false;
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Shift') _shiftHeld = true;
+    });
+    document.addEventListener('keyup', e => {
+      if (e.key === 'Shift') _shiftHeld = false;
+    });
+    inp.addEventListener('beforeinput', e => {
+      if (e.inputType === 'insertLineBreak' && !_shiftHeld) {
+        e.preventDefault();
+        sendMessage();
+      }
     });
     inp.addEventListener('input', () => {
       inp.style.height = 'auto';

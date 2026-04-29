@@ -118,6 +118,7 @@ class RelentlessAgent(Base):
         self.max_steps = max_steps if max_steps is not None else 100
         self.max_budget = max_budget if max_budget is not None else 200.0
         self.model_name = model_name if model_name is not None else "claude-opus-4-6"
+        self.verbose = verbose
         self.budget_used: float = 0.0
         self.total_tokens_used: int = 0
         self.total_steps: int = 0
@@ -164,6 +165,12 @@ class RelentlessAgent(Base):
         )
         system_prompt = self.system_prompt + important_instructions
         for session in range(self.max_sub_sessions):
+            remaining_budget = self.max_budget - self.budget_used
+            if remaining_budget <= 0:
+                raise KISSError(
+                    f"Agent {self.name} budget exhausted "
+                    f"(${self.budget_used:.4f} / ${self.max_budget:.2f})."
+                )
             if self.printer:
                 self.printer.tokens_offset = self.total_tokens_used  # type: ignore[attr-defined]
                 self.printer.budget_offset = self.budget_used  # type: ignore[attr-defined]
@@ -180,9 +187,10 @@ class RelentlessAgent(Base):
                     system_prompt=system_prompt,
                     tools=all_tools,
                     max_steps=self.max_steps,
-                    max_budget=self.max_budget,
+                    max_budget=remaining_budget,
                     model_config=self.model_config,
                     printer=self.printer,
+                    verbose=self.verbose,
                     attachments=attachments if session == 0 else None,
                 )
             except Exception as exc:
@@ -208,6 +216,9 @@ class RelentlessAgent(Base):
                     trajectory_path.write_text(executor.get_trajectory())
                     _stop_ev = getattr(self.printer, "stop_event", None) if self.printer else None
                     shell_tools = UsefulTools(stop_event=_stop_ev)
+                    summarizer_budget = max(
+                        0.01, self.max_budget - self.budget_used - executor.budget_used
+                    )
                     summarizer_agent = KISSAgent(f"{self.name} Summarizer")
                     summarizer_result = summarizer_agent.run(
                         model_name=self.model_name,
@@ -217,7 +228,7 @@ class RelentlessAgent(Base):
                             "trajectory_file": str(trajectory_path),
                         },
                         max_steps=self.max_steps,
-                        max_budget=self.max_budget,
+                        max_budget=summarizer_budget,
                     )
                     try:
                         parsed = yaml.safe_load(summarizer_result)
