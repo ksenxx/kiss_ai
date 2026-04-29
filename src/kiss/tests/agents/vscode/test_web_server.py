@@ -10,6 +10,7 @@ import asyncio
 import json
 import os
 import ssl
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -23,6 +24,7 @@ from websockets.asyncio.client import connect
 from kiss.agents.vscode.vscode_config import CONFIG_PATH, save_config
 from kiss.agents.vscode.web_server import (
     _URL_FILE,
+    TUNNEL_CHECK_INTERVAL,
     RemoteAccessServer,
     WebPrinter,
     _build_html,
@@ -492,6 +494,55 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
             self.assertEqual(resp["type"], "welcome_suggestions")
             self.assertIn("suggestions", resp)
             self.assertIsInstance(resp["suggestions"], list)
+
+    async def test_ws_remote_url_from_active_url(self) -> None:
+        """remote_url event uses in-memory _active_url even when URL file is missing."""
+        # Set the in-memory URL directly (simulates what _serve_async does)
+        self.server._active_url = "https://test-dynamic.trycloudflare.com"
+        # Ensure the URL file does NOT exist so the fallback is needed
+        _remove_url_file()
+        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+
+            await ws.send(json.dumps({"type": "getWelcomeSuggestions"}))
+            # Collect events — expect welcome_suggestions and remote_url
+            events: list[dict[str, Any]] = []
+            for _ in range(3):
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=3)
+                    events.append(json.loads(raw))
+                except TimeoutError:
+                    break
+            types = [e["type"] for e in events]
+            self.assertIn("remote_url", types)
+            url_ev = next(e for e in events if e["type"] == "remote_url")
+            self.assertEqual(url_ev["url"], "https://test-dynamic.trycloudflare.com")
+
+    async def test_ws_ready_includes_remote_url(self) -> None:
+        """ready command broadcasts remote_url when _active_url is set."""
+        self.server._active_url = "https://ready-test.trycloudflare.com"
+        _remove_url_file()
+        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+
+            await ws.send(json.dumps({
+                "type": "ready",
+                "tabId": "url-tab",
+                "restoredTabs": [],
+            }))
+            events: list[dict[str, Any]] = []
+            for _ in range(8):
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=3)
+                    events.append(json.loads(raw))
+                except TimeoutError:
+                    break
+            types = [e["type"] for e in events]
+            self.assertIn("remote_url", types)
+            url_ev = next(e for e in events if e["type"] == "remote_url")
+            self.assertEqual(url_ev["url"], "https://ready-test.trycloudflare.com")
 
     async def test_ws_get_files(self) -> None:
         """getFiles command returns a files event."""
@@ -1452,6 +1503,108 @@ class TestRemoteAccessServerTLS(IsolatedAsyncioTestCase):
             ) as ws:
                 await ws.send(json.dumps({"type": "auth", "password": ""}))
                 await asyncio.wait_for(ws.recv(), timeout=3)
+
+
+class TestTunnelWatchdog(IsolatedAsyncioTestCase):
+    """Test the tunnel watchdog that restarts dead tunnel processes."""
+
+    async def asyncSetUp(self) -> None:
+        self.port = _find_free_port()
+        self._orig_config = None
+        if CONFIG_PATH.exists():
+            self._orig_config = CONFIG_PATH.read_text()
+        save_config({"remote_password": ""})
+
+        self._backup_url: bytes | None = None
+        if _URL_FILE.is_file():
+            self._backup_url = _URL_FILE.read_bytes()
+
+        self.server = RemoteAccessServer(
+            host="127.0.0.1",
+            port=self.port,
+            work_dir=tempfile.mkdtemp(),
+        )
+        await self.server.start_async()
+
+    async def asyncTearDown(self) -> None:
+        await self.server.stop_async()
+        if self._orig_config is not None:
+            CONFIG_PATH.write_text(self._orig_config)
+        elif CONFIG_PATH.exists():
+            CONFIG_PATH.unlink()
+        if self._backup_url is not None:
+            _URL_FILE.write_bytes(self._backup_url)
+        else:
+            _URL_FILE.unlink(missing_ok=True)
+
+    async def test_watchdog_no_tunnel_proc_is_noop(self) -> None:
+        """When _tunnel_proc is None, _check_and_restart_tunnel is a no-op."""
+        self.server._tunnel_proc = None
+        await self.server._check_and_restart_tunnel()
+        # Should not raise or change anything
+        self.assertIsNone(self.server._tunnel_proc)
+
+    async def test_watchdog_alive_process_not_restarted(self) -> None:
+        """A still-running tunnel process is left alone."""
+        # Start a long-running process
+        proc = subprocess.Popen(
+            ["sleep", "60"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.server._tunnel_proc = proc  # type: ignore[assignment]
+        try:
+            await self.server._check_and_restart_tunnel()
+            # Process should still be the same (alive)
+            self.assertIs(self.server._tunnel_proc, proc)
+            self.assertIsNone(proc.poll())  # still running
+        finally:
+            proc.terminate()
+            proc.wait()
+
+    async def test_watchdog_restarts_dead_process(self) -> None:
+        """A dead tunnel process triggers restart (which fails without cloudflared)."""
+        # Start a process that exits immediately
+        proc = subprocess.Popen(
+            ["true"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        proc.wait()  # ensure it's dead
+        self.server._tunnel_proc = proc  # type: ignore[assignment]
+        self.server.use_tunnel = True
+
+        # _check_and_restart_tunnel will detect the dead process and
+        # try to restart.  Without cloudflared installed in CI, _start_tunnel
+        # returns None, but the dead process should be cleared.
+        await self.server._check_and_restart_tunnel()
+        # The old dead proc should no longer be referenced
+        self.assertIsNot(self.server._tunnel_proc, proc)
+
+    async def test_watchdog_task_runs_and_cancels(self) -> None:
+        """The watchdog task can be started and cancelled cleanly."""
+        self.server._tunnel_proc = None
+        task = asyncio.create_task(self.server._tunnel_watchdog())
+        # Let it run one check cycle (with a very short sleep)
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+    async def test_tunnel_check_interval_is_positive(self) -> None:
+        """TUNNEL_CHECK_INTERVAL is a reasonable positive value."""
+        self.assertGreater(TUNNEL_CHECK_INTERVAL, 0)
+        self.assertLessEqual(TUNNEL_CHECK_INTERVAL, 120)
+
+    async def test_watchdog_cleans_up_on_stop(self) -> None:
+        """stop_async cancels the watchdog task if running."""
+        self.server._watchdog_task = asyncio.create_task(
+            self.server._tunnel_watchdog()
+        )
+        await asyncio.sleep(0.01)
+        self.assertFalse(self.server._watchdog_task.done())
+        await self.server.stop_async()
+        self.assertIsNone(self.server._watchdog_task)
 
 
 class TestUrlFile(unittest.TestCase):
