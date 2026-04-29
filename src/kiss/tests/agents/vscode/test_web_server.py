@@ -495,6 +495,55 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
             self.assertIn("suggestions", resp)
             self.assertIsInstance(resp["suggestions"], list)
 
+    async def test_ws_remote_url_from_active_url(self) -> None:
+        """remote_url event uses in-memory _active_url even when URL file is missing."""
+        # Set the in-memory URL directly (simulates what _serve_async does)
+        self.server._active_url = "https://test-dynamic.trycloudflare.com"
+        # Ensure the URL file does NOT exist so the fallback is needed
+        _remove_url_file()
+        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+
+            await ws.send(json.dumps({"type": "getWelcomeSuggestions"}))
+            # Collect events — expect welcome_suggestions and remote_url
+            events: list[dict[str, Any]] = []
+            for _ in range(3):
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=3)
+                    events.append(json.loads(raw))
+                except TimeoutError:
+                    break
+            types = [e["type"] for e in events]
+            self.assertIn("remote_url", types)
+            url_ev = next(e for e in events if e["type"] == "remote_url")
+            self.assertEqual(url_ev["url"], "https://test-dynamic.trycloudflare.com")
+
+    async def test_ws_ready_includes_remote_url(self) -> None:
+        """ready command broadcasts remote_url when _active_url is set."""
+        self.server._active_url = "https://ready-test.trycloudflare.com"
+        _remove_url_file()
+        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+
+            await ws.send(json.dumps({
+                "type": "ready",
+                "tabId": "url-tab",
+                "restoredTabs": [],
+            }))
+            events: list[dict[str, Any]] = []
+            for _ in range(8):
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=3)
+                    events.append(json.loads(raw))
+                except TimeoutError:
+                    break
+            types = [e["type"] for e in events]
+            self.assertIn("remote_url", types)
+            url_ev = next(e for e in events if e["type"] == "remote_url")
+            self.assertEqual(url_ev["url"], "https://ready-test.trycloudflare.com")
+
     async def test_ws_get_files(self) -> None:
         """getFiles command returns a files event."""
         async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
