@@ -21,7 +21,7 @@
 - **The user cannot see intermediate chat. Show whatever user asks in the
   summary of the 'finish' tool call.**
 - READ large files in chunks.
-- Create temporary files in PWD/tmp.  Cleanup temporary files after the task is done.
+- Create temporary files in PWD/tmp. Cleanup temporary files after the task is done.
 - Use ULTRA thinking ALWAYS.
 - **If you are running out of context length or steps, DO NOT rush to
   complete the task urgently, but continue the task by calling 'finish'**
