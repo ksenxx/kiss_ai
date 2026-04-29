@@ -2,7 +2,7 @@
 
 Validates:
 - The button element exists in the HTML template (SorcarTab.ts).
-- The button is placed to the left of the wait-spinner in #input-actions.
+- The button is placed between parallel-toggle-btn and run-prompt-btn in #model-picker.
 - CSS styles are defined for #autocommit-btn.
 - The JS click handler sends the correct ``autocommitAction`` message.
 - The button is disabled when a task is running (setRunningState).
@@ -64,23 +64,23 @@ class TestAutocommitButtonInTemplate(unittest.TestCase):
         assert match is not None, "autocommit-btn missing data-tooltip"
         assert "commit" in match.group(1).lower()
 
-    def test_button_left_of_spinner(self) -> None:
-        """The autocommit button appears before the wait-spinner in the HTML."""
+    def test_button_between_parallel_and_run_prompt(self) -> None:
+        """The autocommit button is between parallel-toggle-btn and run-prompt-btn."""
         html = _read("src/SorcarTab.ts")
+        parallel_pos = html.index('id="parallel-toggle-btn"')
         btn_pos = html.index('id="autocommit-btn"')
-        spinner_pos = html.index('id="wait-spinner"')
-        assert btn_pos < spinner_pos, (
-            "autocommit-btn should appear before wait-spinner in the HTML"
+        run_pos = html.index('id="run-prompt-btn"')
+        assert parallel_pos < btn_pos < run_pos, (
+            "autocommit-btn should be between parallel-toggle-btn and run-prompt-btn"
         )
 
-    def test_button_inside_input_actions(self) -> None:
-        """The button is a child of the #input-actions div."""
+    def test_button_inside_model_picker(self) -> None:
+        """The button is a child of the #model-picker div."""
         html = _read("src/SorcarTab.ts")
-        # Find the input-actions div opening and closing
-        actions_start = html.index('id="input-actions"')
+        picker_start = html.index('id="model-picker"')
         btn_pos = html.index('id="autocommit-btn"')
-        assert btn_pos > actions_start, (
-            "autocommit-btn should be inside #input-actions"
+        assert btn_pos > picker_start, (
+            "autocommit-btn should be inside #model-picker"
         )
 
     def test_button_has_svg_icon(self) -> None:
