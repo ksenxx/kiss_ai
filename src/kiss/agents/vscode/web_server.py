@@ -549,6 +549,7 @@ def _build_html() -> str:
     body {{ background: var(--vscode-editor-background, #1e1e1e);
             color: var(--vscode-editor-foreground, #cccccc); }}
     :root {{
+      --vscode-font-size: 13px;
       --vscode-editor-background: #1e1e1e;
       --vscode-editor-foreground: #cccccc;
       --vscode-input-background: #3c3c3c;
@@ -567,6 +568,12 @@ def _build_html() -> str:
       --vscode-editorWidget-background: #252526;
       --vscode-editorWidget-border: #454545;
       --vscode-panel-border: #80808059;
+      --vscode-terminal-ansiRed: #f44747;
+      --vscode-terminal-ansiGreen: #6a9955;
+      --vscode-terminal-ansiYellow: #d7ba7d;
+      --vscode-terminal-ansiBlue: #569cd6;
+      --vscode-terminal-ansiMagenta: #c586c0;
+      --vscode-terminal-ansiCyan: #4ec9b0;
     }}
   </style>
 </head>
