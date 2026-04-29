@@ -28,6 +28,7 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 - [KISS Sorcar Extension Installation](#kiss-sorcar-extension-installation)
 - [CLI Interface](#cli-interface)
 - [Remote Access](#remote-access)
+- [Messaging & Third-Party Agents](#-messaging--third-party-agents)
 - [Models Supported](#-models-supported)
 - [Contributing](#-contributing)
 - [License](#-license)
@@ -130,22 +131,22 @@ For LAN-only access (without a tunnel), open `http://<server-ip>:8787` from any 
 - **Anthropic**: claude-opus-4-7, claude-opus-4-6, claude-opus-4-5, claude-opus-4-1, claude-opus-4, claude-sonnet-4-6, claude-sonnet-4-5, claude-sonnet-4, claude-haiku-4-5
 - **Anthropic (Legacy)**: claude-3-5-haiku
 - **Gemini**: gemini-2.5-pro, gemini-2.5-flash, gemini-2.5-flash-image, gemini-2.0-flash, gemini-2.0-flash-lite
-- **Gemini (preview)**: gemini-3-pro-preview, gemini-3-flash-preview, gemini-3.1-pro-preview, gemini-3.1-flash-lite-preview, gemini-2.5-flash-lite
+- **Gemini (preview)**: gemini-3-pro-preview, gemini-3-flash-preview, gemini-3.1-pro-preview, gemini-3.1-flash-lite-preview, gemini-3.1-flash-tts-preview, gemini-2.5-flash-lite
 - **Together AI (Llama)**: Llama-4-Scout/Maverick (with function calling), Llama-3.x series (generation only)
-- **Together AI (Qwen)**: Qwen2.5-72B/14B/7B-Instruct, Qwen2.5-VL-72B, Qwen2-VL-72B, Qwen3-235B series, Qwen3-Coder-480B, Qwen3-Coder-Next, Qwen3-Next-80B, Qwen3-VL-32B/8B, Qwen3.5-397B/9B (with function calling)
+- **Together AI (Qwen)**: Qwen2.5-72B/14B/7B-Instruct, Qwen2.5-VL-72B, Qwen2-VL-72B, Qwen3-235B series, Qwen3-Coder-480B, Qwen3-Coder-Next, Qwen3-Next-80B, Qwen3-VL-32B/8B, Qwen3.5-397B/9B, Qwen3.6-Plus (with function calling)
 - **Together AI (DeepSeek)**: DeepSeek-R1, DeepSeek-R1-0528, DeepSeek-R1-Distill-Llama-70B, DeepSeek-V3-0324, DeepSeek-V3.1, DeepSeek-V4-Pro (with function calling)
 - **Together AI (Kimi/Moonshot)**: Kimi-K2-Instruct, Kimi-K2-Instruct-0905, Kimi-K2-Thinking, Kimi-K2.5, Kimi-K2.6
 - **Together AI (Mistral)**: Ministral-3-14B, Mistral-7B-v0.1/v0.2/v0.3, Mistral-Small-24B, Mixtral-8x7B
 - **Together AI (Z.AI)**: GLM-5, GLM-5.1, GLM-4.5-Air, GLM-4.6, GLM-4.7
 - **Together AI (MiniMax)**: MiniMax-M2.5, MiniMax-M2.7
-- **Together AI (Other)**: Nemotron-Nano-9B, Arcee (trinity-mini), cc (haiku, opus, sonnet), DeepCogito (cogito-v2), google/gemma-2/3n/4, essentialai/rnj-1
-- **OpenRouter**: Access to 330+ models from 50+ providers via unified API:
+- **Together AI (Other)**: Nemotron-Nano-9B, Arcee (trinity-mini), cc (haiku, opus, sonnet), DeepCogito (cogito-v1-preview, cogito-v2-1-671b), google/gemma-2/3n/4, essentialai/rnj-1
+- **OpenRouter**: Access to 340+ models from 55+ providers via unified API:
   - OpenAI (gpt-3.5-turbo, gpt-4, gpt-4-turbo, gpt-4.1, gpt-4o variants, gpt-5/5.1/5.2/5.3/5.4/5.5 and codex variants, o1, o3, o3-pro, o4-mini, codex-mini, gpt-oss, gpt-audio)
   - Anthropic (claude-3-haiku, claude-3.5-haiku/sonnet, claude-3.7-sonnet, claude-sonnet-4/4.5/4.6, claude-haiku-4.5, claude-opus-4/4.1/4.5/4.6/4.6-fast/4.7 with 1M context)
   - Google (gemini-2.0-flash, gemini-2.5-flash/pro, gemini-3-flash/pro-preview, gemini-3.1-pro/flash-lite-preview, gemma-2-27b, gemma-3-4b/12b/27b, gemma-3n-e4b, gemma-4-26b/31b)
   - Meta Llama (llama-3-8b/70b, llama-3.1-8b/70b, llama-3.2-1b/3b/11b-vision, llama-3.3-70b, llama-4-maverick/scout, llama-guard-3/4)
   - DeepSeek (deepseek-chat/v3/v3.1/v3.2/v3.2-speciale/v4-flash/v4-pro, deepseek-r1/r1-0528/r1-distill variants)
-  - Qwen (qwen-2.5-7b/72b, qwen-turbo/plus/max, qwen3-8b/14b/30b/32b/235b, qwen3-coder/coder-plus/coder-next/coder-flash/coder-30b, qwen3-vl variants, qwq-32b, qwen3-next-80b, qwen3-max/max-thinking, qwen3.5-9b/27b/35b/122b/397b/flash/plus, qwen3.6-27b/35b/flash/max/plus)
+  - Qwen (qwen-2.5-7b/72b, qwen-turbo/plus/max, qwen3-8b/14b/30b/32b/235b, qwen3-coder/coder-plus/coder-next/coder-flash/coder-30b, qwen3-vl variants, qwq-32b, qwen3-next-80b, qwen3-max/max-thinking, qwen3.5-9b/27b/35b/122b/397b/flash/plus, qwen3.6-27b/35b/flash/max-preview/plus)
   - Amazon Nova (nova-micro/lite/pro, nova-2-lite, nova-premier)
   - Cohere (command-r, command-r-plus, command-a, command-r7b)
   - X.AI Grok (grok-3/3-mini/3-beta/3-mini-beta, grok-4/4-fast, grok-4.1-fast, grok-4.20/4.20-multi-agent, grok-code-fast-1)
@@ -161,12 +162,12 @@ For LAN-only access (without a tunnel), open `http://<server-ip>:8787` from any 
   - Baidu ERNIE (ernie-4.5 series including VL and thinking variants)
   - Xiaomi (mimo-v2-flash/omni/pro, mimo-v2.5/v2.5-pro)
   - Reka AI (reka-edge, reka-flash-3)
-  - And 25+ more providers (ai21, aion-labs, alfredpros, alibaba, alpindale, anthracite-org, arcee-ai, bytedance, deepcogito, essentialai, ibm-granite, inception, inflection, kwaipilot, liquid, morph, nex-agi, prime-intellect, relace, sao10k, stepfun, tencent, thedrummer, tngtech, upstage, writer, etc.)
+  - And 25+ more providers (ai21, aion-labs, alfredpros, alibaba, alpindale, anthracite-org, arcee-ai, bytedance, deepcogito, essentialai, gryphe, ibm-granite, inception, inclusionai, inflection, kwaipilot, liquid, mancer, morph, nex-agi, prime-intellect, relace, sao10k, stepfun, switchpoint, tencent, thedrummer, tngtech, upstage, writer, etc.)
 
 **Embedding Models** (for RAG and semantic search):
 
 - **OpenAI**: text-embedding-3-small, text-embedding-3-large, text-embedding-ada-002
-- **Google**: text-embedding-004, gemini-embedding-001, gemini-embedding-2-preview
+- **Google**: text-embedding-004, gemini-embedding-001, gemini-embedding-2, gemini-embedding-2-preview
 - **Together AI**: BAAI/bge-base-en-v1.5, intfloat/multilingual-e5-large-instruct
 
 Each model in `MODEL_INFO` includes capability flags:
