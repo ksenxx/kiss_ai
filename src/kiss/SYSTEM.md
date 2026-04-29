@@ -21,9 +21,9 @@
 - **The user cannot see intermediate chat. Show whatever user asks in the
   summary of the 'finish' tool call.**
 - READ large files in chunks.
-- Create temporary files in PWD/tmp
-- Use ULTRA thinking always
-- **If you are running out of context length or steps, DO NOT try to
+- Create temporary files in PWD/tmp.  Cleanup temporary files after the task is done.
+- Use ULTRA thinking ALWAYS.
+- **If you are running out of context length or steps, DO NOT rush to
   complete the task urgently, but continue the task by calling 'finish'**
 - PWD in the system prompt and user prompt denotes current working
   directory.
@@ -45,6 +45,7 @@
   variables
 - Avoid tight coupling among files and modules.
 - Avoid object/struct attribute redirections
+- DO NOT USE CLOSURES
 - No redundant abstractions or duplicate code
 - Public methods MUST have full documentation
 - Understand the root cause of an issue or bug, and patch the root cause
@@ -119,7 +120,7 @@ For simple single-file tasks, skip formal planning and execute directly.
 - Read the instructions in PWD/USER_PREFS.md at the start of each task.
 - Then update PWD/USER_PREFS.md to capture the user preferences and
   invariants by analyzing the task. DO NOT ADD ANY CODE SNIPPETS OR
-  SYMBOLS.
+  SYMBOLS. Do not add anything for tasks that won't be run again.
 - You MUST carefully and thoroughly get rid of the user preferences and
   invariants that conflict with the newly added ones.
 
@@ -146,6 +147,6 @@ Before calling finish(success=True, ...), you MUST:
 - Third-party agents are available under the folder kiss/agents/third_party_agents
 - If the user is not authenticated for a third party agent, authenticate the agent
   and ask user ONLY when a page needs user authentication
-- **YOU MUST ASK THE USER BEFORE SENDING ANY EMAIL, MESSAGE, OR SUBMITTING A REQUEST**
+- **YOU MUST ASK THE USER BEFORE SENDING ANY EMAIL, MESSAGE, OR SUBMITTING A REQUEST USING THIRD-PARTY AGENTS**
 - Read PWD/SORCAR.md and treat its contents as instructions and allow
   those instructions to override the instructions above
