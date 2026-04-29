@@ -1080,6 +1080,7 @@ class RemoteAccessServer:
         self._watchdog_task: asyncio.Task[None] | None = None
         self._merge_states: dict[str, _WebMergeState] = {}
         self._printer._merge_state_callback = self._register_merge_state
+        self._active_url: str | None = None
 
     # -- HTTP handler -------------------------------------------------------
 
@@ -1211,24 +1212,27 @@ class RemoteAccessServer:
     def _handle_remote_url(self) -> None:
         """Broadcast the active remote URL to web clients.
 
-        Reads the URL from ``~/.kiss/remote-url.json`` first.  If the
-        file is missing (e.g. because ``_start_quick_tunnel`` did not
-        capture the URL from stderr), falls back to querying the
+        Uses the in-memory ``_active_url`` first (set during server
+        startup and tunnel restarts).  Falls back to reading
+        ``~/.kiss/remote-url.json``, then to querying the
         ``cloudflared`` metrics API directly.  When the fallback
         succeeds, the URL file is written so subsequent calls are fast.
         """
-        url: str | None = None
-        try:
-            data = json.loads(_URL_FILE.read_text())
-            url = data.get("tunnel") or data.get("local", "")
-        except Exception:
-            pass
+        url: str | None = self._active_url
+
+        if not url:
+            try:
+                data = json.loads(_URL_FILE.read_text())
+                url = data.get("tunnel") or data.get("local", "")
+            except Exception:
+                pass
 
         if not url:
             url = _discover_tunnel_url_from_metrics()
             if url:
                 scheme = "https" if self._ssl_context else "http"
                 _save_url_file(f"{scheme}://localhost:{self.port}", url)
+                self._active_url = url
 
         if url:
             self._printer.broadcast({"type": "remote_url", "url": url})
@@ -1603,9 +1607,11 @@ class RemoteAccessServer:
         if tunnel_url:
             logger.info("Tunnel restarted: %s", tunnel_url)
             _save_url_file(local_url, tunnel_url)
+            self._active_url = tunnel_url
         else:
             logger.warning("Failed to restart tunnel")
             _save_url_file(local_url)
+            self._active_url = local_url
 
     async def _tunnel_watchdog(self) -> None:
         """Periodically monitor the tunnel process and restart if needed.
@@ -1670,6 +1676,7 @@ class RemoteAccessServer:
                 )
 
         _save_url_file(local_url, tunnel_url)
+        self._active_url = tunnel_url or local_url
 
         # Start the tunnel watchdog to auto-restart after sleep/wake
         if self.use_tunnel:
