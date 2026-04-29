@@ -771,12 +771,20 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         break;
       }
 
-      case 'userActionDone':
-        this._getServiceProcess().sendCommand({
-          type: 'userAnswer',
-          answer: 'done',
-        });
+      case 'userActionDone': {
+        const doneTabId = this._activeTabId;
+        const doneProc = doneTabId
+          ? this._taskProcesses.get(doneTabId)
+          : undefined;
+        if (doneProc) {
+          doneProc.sendCommand({
+            type: 'userAnswer',
+            answer: 'done',
+            tabId: doneTabId,
+          });
+        }
         break;
+      }
 
       case 'recordFileUsage':
         if (message.path) {
