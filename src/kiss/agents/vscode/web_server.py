@@ -1737,6 +1737,11 @@ class RemoteAccessServer:
             except TimeoutError:
                 pass
         self._stop_tunnel()
+        # Graceful shutdown: remove URL marker file so kiss-web detection
+        # correctly reports the daemon as stopped.  Crash paths (where
+        # stop_async is not invoked) leave the file in place — this is
+        # handled by _stop_tunnel's "do not delete" policy.
+        _remove_url_file()
 
 
 def main() -> None:  # pragma: no cover — CLI entry point

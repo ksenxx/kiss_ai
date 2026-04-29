@@ -1158,14 +1158,14 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       this._urlFileWatchTimer = undefined;
     }
     this._resolveAllWorktreeActions();
+    for (const mgr of this._mergeManagers.values()) mgr.dispose();
+    this._mergeManagers.clear();
     for (const proc of this._taskProcesses.values()) proc.dispose();
     this._taskProcesses.clear();
     if (this._serviceProcess) {
       this._serviceProcess.dispose();
       this._serviceProcess = null;
     }
-    for (const mgr of this._mergeManagers.values()) mgr.dispose();
-    this._mergeManagers.clear();
     this._onCommitMessage.dispose();
   }
 }
