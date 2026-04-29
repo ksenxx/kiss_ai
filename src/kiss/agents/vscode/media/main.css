@@ -332,6 +332,30 @@ body {
 }
 #welcome h2 { font-size: var(--fs-2xl); font-weight: 600; color: var(--fg); margin-bottom: 3px; letter-spacing: -0.3px; }
 #welcome p { font-size: var(--fs-base); color: var(--dim); margin-bottom: 14px; }
+#remote-url { width: 100%; margin-bottom: 10px; }
+
+.remote-url-bar {
+  display: flex; align-items: center; gap: 6px; justify-content: center;
+  background: color-mix(in srgb, var(--fg) 3%, transparent);
+  border: 1px solid color-mix(in srgb, var(--fg) 8%, transparent);
+  border-radius: 8px; padding: 6px 10px;
+}
+
+.remote-url-link {
+  font-size: var(--fs-sm); color: var(--accent); text-decoration: none;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  user-select: all; cursor: pointer;
+}
+
+.remote-url-link:hover { text-decoration: underline; }
+
+.remote-url-copy {
+  flex-shrink: 0; background: none; border: none; cursor: pointer;
+  color: var(--dim); padding: 2px; display: flex; align-items: center;
+  border-radius: 4px; transition: color 0.15s;
+}
+.remote-url-copy:hover { color: var(--fg); }
+
 #suggestions { display: grid; grid-template-columns: 1fr; gap: 5px; width: 100%; }
 
 .suggestion-chip {

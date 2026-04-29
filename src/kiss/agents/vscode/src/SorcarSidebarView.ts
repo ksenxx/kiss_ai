@@ -6,6 +6,7 @@
 
 import * as vscode from 'vscode';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import {AgentProcess} from './AgentProcess';
 import {MergeManager} from './MergeManager';
@@ -474,6 +475,22 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     }
   }
 
+  private _sendRemoteUrl(): void {
+    const urlFile = path.join(os.homedir(), '.kiss', 'remote-url.json');
+    try {
+      const data = JSON.parse(fs.readFileSync(urlFile, 'utf-8'));
+      const url = data.tunnel || data.local || '';
+      if (url) {
+        this._sendToWebview({
+          type: 'remote_url',
+          url,
+        } as ToWebviewMessage);
+      }
+    } catch {
+      /* server not running – nothing to show */
+    }
+  }
+
   private _getVisibleEditorFile(): string {
     const activeEditor = vscode.window.activeTextEditor;
     if (activeEditor) {
@@ -585,6 +602,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           : this._getServiceProcess();
         readyProc.sendCommand({type: 'getModels'});
         this._sendWelcomeSuggestions();
+        this._sendRemoteUrl();
         readyProc.sendCommand({type: 'getInputHistory'});
         this._sendActiveFileInfo();
         this._sendToWebview({type: 'focusInput'} as ToWebviewMessage);
@@ -779,6 +797,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
       case 'getWelcomeSuggestions':
         this._sendWelcomeSuggestions();
+        this._sendRemoteUrl();
         break;
 
       case 'complete': {

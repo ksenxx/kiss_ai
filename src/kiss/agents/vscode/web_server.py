@@ -1092,6 +1092,7 @@ class RemoteAccessServer:
                     continue
                 if cmd_type == "getWelcomeSuggestions":
                     self._handle_welcome_suggestions()
+                    self._handle_remote_url()
                     continue
                 if cmd_type == "mergeAction":
                     action = cmd.get("action", "")
@@ -1129,6 +1130,16 @@ class RemoteAccessServer:
             data = []
         self._printer.broadcast({"type": "welcome_suggestions", "suggestions": data})
 
+    def _handle_remote_url(self) -> None:
+        """Broadcast the active remote URL to web clients."""
+        try:
+            data = json.loads(_URL_FILE.read_text())
+            url = data.get("tunnel") or data.get("local", "")
+            if url:
+                self._printer.broadcast({"type": "remote_url", "url": url})
+        except Exception:
+            pass
+
     async def _handle_ready(
         self, cmd: dict[str, Any], websocket: ServerConnection,
     ) -> None:
@@ -1161,6 +1172,7 @@ class RemoteAccessServer:
             {"type": "getConfig"},
         )
         self._handle_welcome_suggestions()
+        self._handle_remote_url()
         # Send focusInput event back to the client
         try:
             await websocket.send(

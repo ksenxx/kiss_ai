@@ -1895,6 +1895,9 @@
       case 'welcome_suggestions':
         renderWelcomeSuggestions(ev.suggestions);
         break;
+      case 'remote_url':
+        renderRemoteUrl(ev.url);
+        break;
       case 'followup_suggestion': {
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) break;
         const fu = mkEl('div', 'followup-bar');
@@ -2412,6 +2415,42 @@
     div.innerHTML = '<strong>Error:</strong> ' + esc(text);
     O.appendChild(div);
     sb();
+  }
+
+  // --- Remote URL (dynamic) ---
+  function renderRemoteUrl(url) {
+    const container = document.getElementById('remote-url');
+    if (!container) return;
+    container.innerHTML = '';
+    if (!url) return;
+    const wrapper = document.createElement('div');
+    wrapper.className = 'remote-url-bar';
+    const link = document.createElement('a');
+    link.href = url;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.textContent = url;
+    link.className = 'remote-url-link';
+    const copyBtn = document.createElement('button');
+    copyBtn.className = 'remote-url-copy';
+    copyBtn.title = 'Copy URL';
+    const copySvg =
+      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>';
+    const checkSvg =
+      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+    copyBtn.innerHTML = copySvg;
+    copyBtn.addEventListener('click', e => {
+      e.preventDefault();
+      navigator.clipboard.writeText(url).then(() => {
+        copyBtn.innerHTML = checkSvg;
+        setTimeout(() => {
+          copyBtn.innerHTML = copySvg;
+        }, 1500);
+      });
+    });
+    wrapper.appendChild(link);
+    wrapper.appendChild(copyBtn);
+    container.appendChild(wrapper);
   }
 
   // --- Welcome suggestions (dynamic) ---

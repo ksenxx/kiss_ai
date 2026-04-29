@@ -111,6 +111,7 @@ export function buildChatHtml(
       <div id="welcome">
         <h2>Welcome to KISS Sorcar</h2>
         <p>Your AI assistant. Ask me anything!</p>
+        <div id="remote-url"></div>
         <div id="suggestions"></div>
       </div>
     </div>
