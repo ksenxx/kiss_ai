@@ -475,7 +475,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     }
   }
 
-  private _sendRemoteUrl(): void {
+  private _sendRemoteUrl(retries: number = 3): void {
     const urlFile = path.join(os.homedir(), '.kiss', 'remote-url.json');
     try {
       const data = JSON.parse(fs.readFileSync(urlFile, 'utf-8'));
@@ -485,9 +485,14 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           type: 'remote_url',
           url,
         } as ToWebviewMessage);
+        return;
       }
     } catch {
-      /* server not running – nothing to show */
+      /* file missing or malformed */
+    }
+    // Retry after a delay — the daemon may still be starting the tunnel
+    if (retries > 0) {
+      setTimeout(() => this._sendRemoteUrl(retries - 1), 10_000);
     }
   }
 
