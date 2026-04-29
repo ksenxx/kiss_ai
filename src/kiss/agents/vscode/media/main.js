@@ -2450,7 +2450,7 @@
     });
     const label = document.createElement('span');
     label.className = 'remote-url-label';
-    label.textContent = 'Web app: ';
+    label.textContent = 'Web/mobile app: ';
     wrapper.appendChild(label);
     wrapper.appendChild(link);
     wrapper.appendChild(copyBtn);
