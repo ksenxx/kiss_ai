@@ -224,6 +224,63 @@ _TLS_DIR = Path.home() / ".kiss" / "tls"
 _URL_FILE = Path.home() / ".kiss" / "remote-url.json"
 
 
+def _discover_tunnel_url_from_metrics() -> str | None:
+    """Try to discover the quick-tunnel URL from a running ``cloudflared``.
+
+    Scans running ``cloudflared`` processes for their metrics port, then
+    queries the ``/quicktunnel`` endpoint to get the assigned hostname.
+    This is a fallback for when ``~/.kiss/remote-url.json`` does not
+    exist (e.g. because ``_start_quick_tunnel`` failed to capture the
+    URL from stderr).
+
+    Returns:
+        The ``https://`` tunnel URL, or None if unavailable.
+    """
+    import urllib.request
+
+    try:
+        result = subprocess.run(
+            ["pgrep", "-a", "cloudflared"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return None
+
+    # Look for --metrics port in command lines, or try known default ports
+    metrics_ports: list[int] = []
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        for i, p in enumerate(parts):
+            if p == "--metrics" and i + 1 < len(parts):
+                try:
+                    port = int(parts[i + 1].rsplit(":", 1)[-1])
+                    metrics_ports.append(port)
+                except (ValueError, IndexError):
+                    pass
+
+    # Also try commonly used metrics ports
+    for port in range(20240, 20260):
+        if port not in metrics_ports:
+            metrics_ports.append(port)
+
+    for port in metrics_ports:
+        try:
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/quicktunnel",
+                headers={"User-Agent": "kiss-web"},
+            )
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                data = json.loads(resp.read())
+                hostname = data.get("hostname", "")
+                if hostname:
+                    return f"https://{hostname}"
+        except Exception:
+            continue
+    return None
+
+
 def _save_url_file(local_url: str, tunnel_url: str | None = None) -> None:
     """Write the active server URLs to ``~/.kiss/remote-url.json``.
 
@@ -561,6 +618,7 @@ def _build_html() -> str:
       <div id="welcome">
         <h2>Welcome to KISS Sorcar</h2>
         <p>Your AI assistant. Ask me anything!</p>
+        <div id="remote-url"></div>
         <div id="suggestions"></div>
       </div>
     </div>
@@ -1131,14 +1189,29 @@ class RemoteAccessServer:
         self._printer.broadcast({"type": "welcome_suggestions", "suggestions": data})
 
     def _handle_remote_url(self) -> None:
-        """Broadcast the active remote URL to web clients."""
+        """Broadcast the active remote URL to web clients.
+
+        Reads the URL from ``~/.kiss/remote-url.json`` first.  If the
+        file is missing (e.g. because ``_start_quick_tunnel`` did not
+        capture the URL from stderr), falls back to querying the
+        ``cloudflared`` metrics API directly.  When the fallback
+        succeeds, the URL file is written so subsequent calls are fast.
+        """
+        url: str | None = None
         try:
             data = json.loads(_URL_FILE.read_text())
             url = data.get("tunnel") or data.get("local", "")
-            if url:
-                self._printer.broadcast({"type": "remote_url", "url": url})
         except Exception:
             pass
+
+        if not url:
+            url = _discover_tunnel_url_from_metrics()
+            if url:
+                scheme = "https" if self._ssl_context else "http"
+                _save_url_file(f"{scheme}://localhost:{self.port}", url)
+
+        if url:
+            self._printer.broadcast({"type": "remote_url", "url": url})
 
     async def _handle_ready(
         self, cmd: dict[str, Any], websocket: ServerConnection,
@@ -1371,10 +1444,17 @@ class RemoteAccessServer:
     def _start_quick_tunnel(self) -> str | None:
         """Start a quick-tunnel (random ``*.trycloudflare.com`` URL).
 
+        Starts ``cloudflared tunnel --url`` and attempts to capture the
+        assigned URL.  First tries parsing stderr for up to 30 seconds.
+        If that fails (e.g. output format changed), falls back to
+        querying the ``cloudflared`` metrics API ``/quicktunnel``
+        endpoint.
+
         Returns:
             The public ``https://`` URL, or None on failure.
         """
         import re
+        import time
 
         self._tunnel_proc = subprocess.Popen(
             [
@@ -1387,12 +1467,52 @@ class RemoteAccessServer:
             stderr=subprocess.PIPE,
             text=True,
         )
-        for line in iter(self._tunnel_proc.stderr.readline, ""):  # type: ignore[union-attr]
-            match = re.search(r"(https://[^\s]+\.trycloudflare\.com)", line)
-            if match:
-                return match.group(1)
+
+        # Try to capture the URL from stderr with a timeout.
+        # cloudflared prints the URL during startup, but the format
+        # can vary across versions.  After it finishes printing
+        # startup messages, readline() blocks forever.
+        url: str | None = None
+        deadline = time.monotonic() + 30
+        stderr_fd = self._tunnel_proc.stderr
+        assert stderr_fd is not None  # guaranteed by PIPE
+
+        def _read_stderr() -> str | None:
+            for line in iter(stderr_fd.readline, ""):
+                match = re.search(
+                    r"(https://[^\s]+\.trycloudflare\.com)", line,
+                )
+                if match:
+                    return match.group(1)
+                if self._tunnel_proc is None:
+                    break
+                if self._tunnel_proc.poll() is not None:
+                    break
+            return None
+
+        reader = threading.Thread(target=lambda: None, daemon=True)
+        result_box: list[str | None] = [None]
+
+        def _reader_target() -> None:
+            result_box[0] = _read_stderr()
+
+        reader = threading.Thread(target=_reader_target, daemon=True)
+        reader.start()
+        reader.join(timeout=max(0, deadline - time.monotonic()))
+
+        url = result_box[0]
+        if url:
+            return url
+
+        # Fallback: poll the cloudflared metrics API
+        for _ in range(20):
             if self._tunnel_proc.poll() is not None:
                 break
+            url = _discover_tunnel_url_from_metrics()
+            if url:
+                return url
+            time.sleep(1)
+
         return None
 
     def _start_named_tunnel(self) -> str | None:
