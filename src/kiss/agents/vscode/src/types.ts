@@ -108,11 +108,20 @@ type ToWebviewMessageBody =
       success?: boolean;
       total_tokens?: number;
       cost?: string;
+      step_count?: number;
+    }
+  | {
+      type: 'usage_info';
+      text?: string;
+      total_tokens?: number;
+      cost?: string;
+      total_steps?: number;
     }
   | {type: 'system_prompt'; text: string}
   | {type: 'prompt'; text: string}
   // Lifecycle events
   | {type: 'clear'; chat_id?: number}
+  | {type: 'showWelcome'}
   | {type: 'clearChat'}
   | {type: 'ensureChat'}
   | {type: 'task_done'}
@@ -132,6 +141,11 @@ type ToWebviewMessageBody =
       selected: string;
     }
   | {
+      type: 'configData';
+      config: Record<string, unknown>;
+      apiKeys?: Record<string, string>;
+    }
+  | {
       type: 'history';
       sessions: SessionInfo[];
       offset?: number;
@@ -147,6 +161,7 @@ type ToWebviewMessageBody =
   | {type: 'task_events'; events: unknown[]; task?: string; chat_id?: number}
   | {type: 'ghost'; suggestion: string; query: string}
   | {type: 'merge_data'; data: MergeData; hunk_count: number}
+  | {type: 'merge_nav'; remaining: number; total: number}
   | {type: 'merge_started'}
   | {type: 'merge_ended'}
   | {type: 'commitMessage'; message: string; error?: string}

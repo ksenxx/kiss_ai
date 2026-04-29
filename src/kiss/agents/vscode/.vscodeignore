@@ -1,6 +1,11 @@
 # TypeScript sources (compiled JS is in out/)
 src/**
 
+# Local/generated artifacts
+.DS_Store
+**/.DS_Store
+*.vsix
+
 # Python bytecode
 **/__pycache__/**
 

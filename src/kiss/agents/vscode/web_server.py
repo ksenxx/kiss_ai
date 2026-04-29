@@ -39,6 +39,7 @@ import json
 import logging
 import mimetypes
 import os
+import socket
 import ssl
 import subprocess
 import sys
@@ -315,6 +316,36 @@ def _remove_url_file() -> None:
         _URL_FILE.unlink(missing_ok=True)
     except OSError:
         pass
+
+
+def _get_local_ips() -> frozenset[str]:
+    """Return the current non-loopback IPv4 addresses of the host machine.
+
+    Uses a UDP connect to ``8.8.8.8`` (no packet is actually sent) to
+    discover the default-route IP, plus :func:`socket.getaddrinfo` on
+    the hostname for any additional addresses.
+
+    Returns:
+        A frozen set of IPv4 address strings (e.g.
+        ``frozenset({"192.168.1.42"})``).  Returns an empty set when
+        no non-loopback addresses are found.
+    """
+    ips: set[str] = set()
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.settimeout(1)
+            s.connect(("8.8.8.8", 80))
+            ips.add(s.getsockname()[0])
+    except Exception:
+        pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            addr = str(info[4][0])
+            if not addr.startswith("127."):
+                ips.add(addr)
+    except Exception:
+        pass
+    return frozenset(ips)
 
 
 def _print_url() -> None:
@@ -689,6 +720,17 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
                 <line x1="18" y1="4" x2="18" y2="20"/>
               </svg>
             </button>
+            <button id="autocommit-btn" data-tooltip="Auto commit changes">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round"
+               stroke-linejoin="round">
+                <circle cx="12" cy="12" r="4"/>
+                <line x1="1.05" y1="12" x2="7" y2="12"/>
+                <line x1="17.01" y1="12" x2="22.96" y2="12"/>
+                <line x1="12" y1="1.05" x2="12" y2="7"/>
+                <line x1="12" y1="17.01" x2="12" y2="22.96"/>
+              </svg>
+            </button>
             <button id="run-prompt-btn" data-tooltip="Run current file as prompt"
              disabled>
               <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"
@@ -715,17 +757,6 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
             </div>
           </div>
           <div id="input-actions">
-            <button id="autocommit-btn" data-tooltip="Auto commit changes">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
-               stroke="currentColor" stroke-width="2" stroke-linecap="round"
-               stroke-linejoin="round">
-                <circle cx="12" cy="12" r="4"/>
-                <line x1="1.05" y1="12" x2="7" y2="12"/>
-                <line x1="17.01" y1="12" x2="22.96" y2="12"/>
-                <line x1="12" y1="1.05" x2="12" y2="7"/>
-                <line x1="12" y1="17.01" x2="12" y2="22.96"/>
-              </svg>
-            </button>
             <span id="wait-spinner"></span>
             <button id="send-btn" data-tooltip="Send message">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -1081,6 +1112,8 @@ class RemoteAccessServer:
         self._merge_states: dict[str, _WebMergeState] = {}
         self._printer._merge_state_callback = self._register_merge_state
         self._active_url: str | None = None
+        self._last_ips: frozenset[str] = _get_local_ips()
+        self._ip_watchdog_task: asyncio.Task[None] | None = None
 
     # -- HTTP handler -------------------------------------------------------
 
@@ -1630,6 +1663,37 @@ class RemoteAccessServer:
             except Exception:
                 logger.debug("Tunnel watchdog error", exc_info=True)
 
+    async def _ip_watchdog(self) -> None:
+        """Periodically check for IP address changes and restart the server.
+
+        Detects when the host machine's network addresses change (e.g.
+        WiFi network switch, DHCP lease renewal, VPN connect/disconnect)
+        and initiates a graceful shutdown so the daemon manager
+        (launchd / systemd) can restart the process with the new
+        network configuration.
+
+        Runs alongside the tunnel watchdog and uses the same check
+        interval (:data:`TUNNEL_CHECK_INTERVAL`).
+        """
+        while True:
+            await asyncio.sleep(TUNNEL_CHECK_INTERVAL)
+            try:
+                current_ips = _get_local_ips()
+                if current_ips != self._last_ips:
+                    logger.info(
+                        "IP address changed: %s → %s, restarting server…",
+                        self._last_ips,
+                        current_ips,
+                    )
+                    self._last_ips = current_ips
+                    if self._ws_server is not None:
+                        self._ws_server.close()
+                    return
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug("IP watchdog error", exc_info=True)
+
     def _stop_tunnel(self) -> None:
         """Terminate the ``cloudflared`` tunnel process if running."""
         if self._tunnel_proc is not None:
@@ -1688,6 +1752,10 @@ class RemoteAccessServer:
         if self.use_tunnel:
             self._watchdog_task = asyncio.create_task(self._tunnel_watchdog())
 
+        # Start the IP watchdog to restart on network changes
+        self._last_ips = _get_local_ips()
+        self._ip_watchdog_task = asyncio.create_task(self._ip_watchdog())
+
         await self._ws_server.serve_forever()
 
     def start(self) -> None:
@@ -1721,8 +1789,29 @@ class RemoteAccessServer:
             ping_timeout=_WS_PING_TIMEOUT,
         )
 
+        scheme = "https" if self._ssl_context else "http"
+        local_url = f"{scheme}://localhost:{self.port}"
+        tunnel_url: str | None = None
+        if self.use_tunnel:
+            tunnel_url = await asyncio.get_event_loop().run_in_executor(
+                None, self._start_tunnel,
+            )
+        _save_url_file(local_url, tunnel_url)
+        self._active_url = tunnel_url or local_url
+        if self.use_tunnel:
+            self._watchdog_task = asyncio.create_task(self._tunnel_watchdog())
+        self._last_ips = _get_local_ips()
+        self._ip_watchdog_task = asyncio.create_task(self._ip_watchdog())
+
     async def stop_async(self) -> None:
         """Stop the server gracefully."""
+        if self._ip_watchdog_task is not None:
+            self._ip_watchdog_task.cancel()
+            try:
+                await self._ip_watchdog_task
+            except asyncio.CancelledError:
+                pass
+            self._ip_watchdog_task = None
         if self._watchdog_task is not None:
             self._watchdog_task.cancel()
             try:
@@ -1737,6 +1826,11 @@ class RemoteAccessServer:
             except TimeoutError:
                 pass
         self._stop_tunnel()
+        # Graceful shutdown: remove URL marker file so kiss-web detection
+        # correctly reports the daemon as stopped.  Crash paths (where
+        # stop_async is not invoked) leave the file in place — this is
+        # handled by _stop_tunnel's "do not delete" policy.
+        _remove_url_file()
 
 
 def main() -> None:  # pragma: no cover — CLI entry point

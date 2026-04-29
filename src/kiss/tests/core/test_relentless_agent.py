@@ -155,6 +155,9 @@ class TestRunBranches(unittest.TestCase):
                 verbose=False,
             )
         parsed = yaml.safe_load(result)
+        summary = (parsed or {}).get("summary", "")
+        if "429" in summary or "RESOURCE_EXHAUSTED" in summary:
+            self.skipTest("Gemini API rate-limited (429)")
         self.assertTrue(parsed["success"])
         self.assertIsNone(agent.docker_manager)
 
@@ -199,6 +202,9 @@ class TestDockerStreamCallback(unittest.TestCase):
                 printer=printer,
             )
         parsed = yaml.safe_load(result)
+        summary = (parsed or {}).get("summary", "")
+        if "429" in summary or "RESOURCE_EXHAUSTED" in summary:
+            self.skipTest("Gemini API rate-limited (429)")
         self.assertTrue(parsed["success"])
 
 
