@@ -63,6 +63,16 @@ logger = logging.getLogger(__name__)
 
 MEDIA_DIR = Path(__file__).parent / "media"
 
+#: How often (in seconds) the tunnel watchdog checks process health.
+TUNNEL_CHECK_INTERVAL = 30
+
+#: WebSocket ping interval in seconds.  After sleep/wake, dead
+#: connections are detected within ping_interval + ping_timeout.
+_WS_PING_INTERVAL = 10
+
+#: WebSocket pong timeout in seconds.
+_WS_PING_TIMEOUT = 10
+
 
 # ---------------------------------------------------------------------------
 # Server-side merge state for web clients
@@ -549,6 +559,7 @@ def _build_html() -> str:
     body {{ background: var(--vscode-editor-background, #1e1e1e);
             color: var(--vscode-editor-foreground, #cccccc); }}
     :root {{
+      --vscode-font-size: 13px;
       --vscode-editor-background: #1e1e1e;
       --vscode-editor-foreground: #cccccc;
       --vscode-input-background: #3c3c3c;
@@ -567,6 +578,12 @@ def _build_html() -> str:
       --vscode-editorWidget-background: #252526;
       --vscode-editorWidget-border: #454545;
       --vscode-panel-border: #80808059;
+      --vscode-terminal-ansiRed: #f44747;
+      --vscode-terminal-ansiGreen: #6a9955;
+      --vscode-terminal-ansiYellow: #d7ba7d;
+      --vscode-terminal-ansiBlue: #569cd6;
+      --vscode-terminal-ansiMagenta: #c586c0;
+      --vscode-terminal-ansiCyan: #4ec9b0;
     }}
   </style>
 </head>
@@ -1060,8 +1077,10 @@ class RemoteAccessServer:
         self._tunnel_proc: subprocess.Popen[str] | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ws_server: Any = None
+        self._watchdog_task: asyncio.Task[None] | None = None
         self._merge_states: dict[str, _WebMergeState] = {}
         self._printer._merge_state_callback = self._register_merge_state
+        self._active_url: str | None = None
 
     # -- HTTP handler -------------------------------------------------------
 
@@ -1193,24 +1212,27 @@ class RemoteAccessServer:
     def _handle_remote_url(self) -> None:
         """Broadcast the active remote URL to web clients.
 
-        Reads the URL from ``~/.kiss/remote-url.json`` first.  If the
-        file is missing (e.g. because ``_start_quick_tunnel`` did not
-        capture the URL from stderr), falls back to querying the
+        Uses the in-memory ``_active_url`` first (set during server
+        startup and tunnel restarts).  Falls back to reading
+        ``~/.kiss/remote-url.json``, then to querying the
         ``cloudflared`` metrics API directly.  When the fallback
         succeeds, the URL file is written so subsequent calls are fast.
         """
-        url: str | None = None
-        try:
-            data = json.loads(_URL_FILE.read_text())
-            url = data.get("tunnel") or data.get("local", "")
-        except Exception:
-            pass
+        url: str | None = self._active_url
+
+        if not url:
+            try:
+                data = json.loads(_URL_FILE.read_text())
+                url = data.get("tunnel") or data.get("local", "")
+            except Exception:
+                pass
 
         if not url:
             url = _discover_tunnel_url_from_metrics()
             if url:
                 scheme = "https" if self._ssl_context else "http"
                 _save_url_file(f"{scheme}://localhost:{self.port}", url)
+                self._active_url = url
 
         if url:
             self._printer.broadcast({"type": "remote_url", "url": url})
@@ -1563,6 +1585,51 @@ class RemoteAccessServer:
                 break
         return None
 
+    async def _check_and_restart_tunnel(self) -> None:
+        """Check if the tunnel process is alive and restart if dead.
+
+        Called periodically by :meth:`_tunnel_watchdog`.  When the
+        process has exited (e.g. because macOS killed it during sleep),
+        this method restarts the tunnel and updates the URL file.
+        """
+        if self._tunnel_proc is None:
+            return
+        if self._tunnel_proc.poll() is None:
+            return  # still alive
+        rc = self._tunnel_proc.returncode
+        logger.info("cloudflared tunnel process died (rc=%s), restarting…", rc)
+        self._tunnel_proc = None
+        tunnel_url = await asyncio.get_event_loop().run_in_executor(
+            None, self._start_tunnel,
+        )
+        scheme = "https" if self._ssl_context else "http"
+        local_url = f"{scheme}://localhost:{self.port}"
+        if tunnel_url:
+            logger.info("Tunnel restarted: %s", tunnel_url)
+            _save_url_file(local_url, tunnel_url)
+            self._active_url = tunnel_url
+        else:
+            logger.warning("Failed to restart tunnel")
+            _save_url_file(local_url)
+            self._active_url = local_url
+
+    async def _tunnel_watchdog(self) -> None:
+        """Periodically monitor the tunnel process and restart if needed.
+
+        When the MacBook lid is closed, the system sleeps and the
+        ``cloudflared`` process may be killed by the OS.  This watchdog
+        detects the dead process after wake and restarts the tunnel so
+        remote access is restored automatically.
+        """
+        while True:
+            await asyncio.sleep(TUNNEL_CHECK_INTERVAL)
+            try:
+                await self._check_and_restart_tunnel()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug("Tunnel watchdog error", exc_info=True)
+
     def _stop_tunnel(self) -> None:
         """Terminate the ``cloudflared`` tunnel process if running."""
         if self._tunnel_proc is not None:
@@ -1572,7 +1639,13 @@ class RemoteAccessServer:
             except subprocess.TimeoutExpired:
                 self._tunnel_proc.kill()
             self._tunnel_proc = None
-        _remove_url_file()
+        # Do NOT delete the URL file on shutdown.  A new daemon
+        # instance may have already overwritten it, and deleting it
+        # would race with the new instance's _save_url_file().  Stale
+        # data in the file is harmless — the next instance will
+        # overwrite it — while a missing file causes the VS Code
+        # sidebar to show no URL at all.
+        self._active_url = None
 
     # -- Server lifecycle ---------------------------------------------------
 
@@ -1587,6 +1660,8 @@ class RemoteAccessServer:
             self.port,
             process_request=self._process_request,
             ssl=self._ssl_context,
+            ping_interval=_WS_PING_INTERVAL,
+            ping_timeout=_WS_PING_TIMEOUT,
         )
 
         scheme = "https" if self._ssl_context else "http"
@@ -1607,6 +1682,11 @@ class RemoteAccessServer:
                 )
 
         _save_url_file(local_url, tunnel_url)
+        self._active_url = tunnel_url or local_url
+
+        # Start the tunnel watchdog to auto-restart after sleep/wake
+        if self.use_tunnel:
+            self._watchdog_task = asyncio.create_task(self._tunnel_watchdog())
 
         await self._ws_server.serve_forever()
 
@@ -1637,10 +1717,19 @@ class RemoteAccessServer:
             self.port,
             process_request=self._process_request,
             ssl=self._ssl_context,
+            ping_interval=_WS_PING_INTERVAL,
+            ping_timeout=_WS_PING_TIMEOUT,
         )
 
     async def stop_async(self) -> None:
         """Stop the server gracefully."""
+        if self._watchdog_task is not None:
+            self._watchdog_task.cancel()
+            try:
+                await self._watchdog_task
+            except asyncio.CancelledError:
+                pass
+            self._watchdog_task = None
         if self._ws_server is not None:
             self._ws_server.close()
             try:
