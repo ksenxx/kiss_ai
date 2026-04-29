@@ -1721,6 +1721,18 @@ class RemoteAccessServer:
             ping_timeout=_WS_PING_TIMEOUT,
         )
 
+        scheme = "https" if self._ssl_context else "http"
+        local_url = f"{scheme}://localhost:{self.port}"
+        tunnel_url: str | None = None
+        if self.use_tunnel:
+            tunnel_url = await asyncio.get_event_loop().run_in_executor(
+                None, self._start_tunnel,
+            )
+        _save_url_file(local_url, tunnel_url)
+        self._active_url = tunnel_url or local_url
+        if self.use_tunnel:
+            self._watchdog_task = asyncio.create_task(self._tunnel_watchdog())
+
     async def stop_async(self) -> None:
         """Stop the server gracefully."""
         if self._watchdog_task is not None:
