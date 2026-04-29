@@ -454,7 +454,7 @@ function ensureKissWebDaemon(kissProjectPath: string): void {
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>${binDir}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <string>/opt/homebrew/bin:${binDir}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     </dict>
 </dict>
 </plist>`;

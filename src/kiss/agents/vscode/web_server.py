@@ -1456,13 +1456,17 @@ class RemoteAccessServer:
         import re
         import time
 
+        scheme = "https" if self._ssl_context else "http"
+        cmd = [
+            "cloudflared",
+            "tunnel",
+            "--url",
+            f"{scheme}://localhost:{self.port}",
+        ]
+        if self._ssl_context:
+            cmd.append("--no-tls-verify")
         self._tunnel_proc = subprocess.Popen(
-            [
-                "cloudflared",
-                "tunnel",
-                "--url",
-                f"http://localhost:{self.port}",
-            ],
+            cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
