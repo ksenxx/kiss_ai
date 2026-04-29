@@ -88,6 +88,8 @@ class _TaskRunnerMixin:
                     tab.task_thread = None
                     tab.stop_event = None
                     tab.user_answer_queue = None
+                    tab.is_task_active = False
+                    tab.is_running_non_wt = False
                 self.printer.broadcast({"type": "status", "running": False})
 
     @staticmethod

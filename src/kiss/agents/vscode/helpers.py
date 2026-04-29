@@ -68,7 +68,7 @@ def fast_model_for() -> str:
     if DEFAULT_CONFIG.TOGETHER_API_KEY:
         return "deepseek-ai/DeepSeek-R1-0528"
     if DEFAULT_CONFIG.GEMINI_API_KEY:
-        return "gemini-2.5-pro"
+        return "gemini-2.0-flash"
     if DEFAULT_CONFIG.OPENAI_API_KEY:
         return "gpt-4o"
     return "claude-haiku-4-5"
