@@ -85,14 +85,6 @@ sorcar -t 'Can you show me the detailed step-by-step workflow of gepa.py?'
 
 KISS Sorcar includes a standalone web server that lets you access the full chat interface from any browser — including phones and tablets. The server uses HTTP for the UI and WebSocket for real-time communication, all on a single port.
 
-**Start the remote server:**
-
-```bash
-uv run kiss-web
-```
-
-This starts the server on `http://0.0.0.0:8787`. You can access it from the same machine at `http://localhost:8787`.
-
 **Start with a Cloudflare tunnel (for access from anywhere):**
 
 ```bash
@@ -100,12 +92,6 @@ uv run kiss-web --tunnel
 ```
 
 This starts a [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/get-started/) quick-tunnel and prints a public `https://*.trycloudflare.com` URL. Open that URL on any device — phone, tablet, or another computer — to use Sorcar remotely. No port-forwarding or DNS setup required. Install `cloudflared` first (`brew install cloudflared` on macOS).
-
-**Example — custom port with tunnel:**
-
-```bash
-uv run kiss-web --port 9000 --tunnel --workdir ~/projects/myapp
-```
 
 **Authentication:** Set a `remote_password` in `~/.kiss/config.json` (or via the Configuration panel in the Sorcar UI). When a password is set, connecting clients are prompted to enter it before they can interact with the agent.
 
@@ -116,53 +102,91 @@ uv run kiss-web --port 9000 --tunnel --workdir ~/projects/myapp
 1. Open that URL in any browser on your remote device.
 1. Enter the remote password if one is configured.
 
-For LAN-only access (without a tunnel), open `http://<server-ip>:8787` from any device on the same network.
+## 📬 Messaging & Third-Party Agents
+
+KISS Sorcar can connect to messaging platforms as an always-on agent, responding to messages with the full power of the Sorcar agent. Each platform has a dedicated CLI command:
+
+| Platform | CLI Command | Agent File |
+|---|---|---|
+| Slack | `kiss-slack` | `slack_agent.py` |
+| Gmail | `kiss-gmail` | `gmail_agent.py` |
+| WhatsApp | `kiss-whatsapp` | `whatsapp_agent.py` |
+| Telegram | `kiss-telegram` | `telegram_agent.py` |
+| Discord | `kiss-discord` | `discord_agent.py` |
+| Google Chat | `kiss-gchat` | `googlechat_agent.py` |
+| Signal | `kiss-signal` | `signal_agent.py` |
+| Microsoft Teams | `kiss-msteams` | `msteams_agent.py` |
+| Matrix | `kiss-matrix` | `matrix_agent.py` |
+| Feishu/Lark | `kiss-feishu` | `feishu_agent.py` |
+| LINE | `kiss-line` | `line_agent.py` |
+| Mattermost | `kiss-mattermost` | `mattermost_agent.py` |
+| IRC | `kiss-irc` | `irc_agent.py` |
+| BlueBubbles (iMessage bridge) | `kiss-bluebubbles` | `bluebubbles_agent.py` |
+| iMessage (macOS native) | `kiss-imessage` | `imessage_agent.py` |
+| Nextcloud Talk | `kiss-nextcloud` | `nextcloud_talk_agent.py` |
+| Nostr | `kiss-nostr` | `nostr_agent.py` |
+| Synology Chat | `kiss-synology` | `synology_chat_agent.py` |
+| Tlon (Urbit) | `kiss-tlon` | `tlon_agent.py` |
+| Twitch | `kiss-twitch` | `twitch_agent.py` |
+| Zalo | `kiss-zalo` | `zalo_agent.py` |
+| Phone Control | `kiss-phone` | `phone_control_agent.py` |
+| SMS | `kiss-sms` | `sms_agent.py` |
+
+All messaging agents live under `src/kiss/agents/third_party_agents/`.
 
 ## 🤖 Models Supported
 
-**Supported Models**: The framework includes context length, pricing, and capability flags for:
+**561 models** across 5 providers (OpenAI, Anthropic, Gemini, Together AI, OpenRouter) with built-in pricing, context lengths, and capability flags.
 
 **Generation Models** (text generation with function calling support):
 
-- **OpenAI**: gpt-4.1, gpt-4.1-mini, gpt-4.1-nano, gpt-4o, gpt-4o-mini, gpt-4.5-preview, gpt-4-turbo, gpt-4, gpt-5, gpt-5-mini, gpt-5-nano, gpt-5-pro, gpt-5.1, gpt-5.2, gpt-5.2-pro, gpt-5.3-chat-latest, gpt-5.4, gpt-5.4-mini, gpt-5.4-nano, gpt-5.4-pro, gpt-5.5
+- **OpenAI**: gpt-4.1, gpt-4.1-mini, gpt-4.1-nano, gpt-4o, gpt-4o-mini, gpt-4.5-preview, gpt-4-turbo, gpt-4, gpt-5, gpt-5-mini, gpt-5-nano, gpt-5-pro, gpt-5.1, gpt-5.2, gpt-5.2-pro, gpt-5.3-chat-latest, gpt-5.4, gpt-5.4-mini, gpt-5.4-nano, gpt-5.4-pro, gpt-5.5, gpt-5.5-pro
 - **OpenAI (Codex)**: gpt-5-codex, gpt-5.1-codex, gpt-5.1-codex-max, gpt-5.1-codex-mini, gpt-5.2-codex, gpt-5.3-codex, codex-mini-latest
 - **OpenAI (Reasoning)**: o1, o1-mini, o1-pro, o3, o3-mini, o3-mini-high, o3-pro, o3-deep-research, o4-mini, o4-mini-high, o4-mini-deep-research
+- **OpenAI (Image & Audio)**: gpt-image-1, gpt-image-1-mini, gpt-image-1.5, gpt-image-2, gpt-audio, gpt-audio-mini, gpt-realtime, gpt-realtime-mini, computer-use-preview
 - **OpenAI (Open Source)**: openai/gpt-oss-20b, openai/gpt-oss-120b
 - **Anthropic**: claude-opus-4-7, claude-opus-4-6, claude-opus-4-5, claude-opus-4-1, claude-opus-4, claude-sonnet-4-6, claude-sonnet-4-5, claude-sonnet-4, claude-haiku-4-5
 - **Anthropic (Legacy)**: claude-3-5-haiku
+- **Anthropic (Claude Code)**: cc/haiku, cc/opus, cc/sonnet
 - **Gemini**: gemini-2.5-pro, gemini-2.5-flash, gemini-2.5-flash-image, gemini-2.0-flash, gemini-2.0-flash-lite
-- **Gemini (preview)**: gemini-3-pro-preview, gemini-3-flash-preview, gemini-3.1-pro-preview, gemini-3.1-flash-lite-preview, gemini-3.1-flash-tts-preview, gemini-2.5-flash-lite
+- **Gemini (Preview)**: gemini-3-pro-preview, gemini-3-flash-preview, gemini-3.1-pro-preview, gemini-3.1-flash-lite-preview, gemini-3.1-flash-tts-preview, gemini-2.5-flash-lite
+- **Gemini (Open Models)**: google/gemma-4-31B-it, google/gemma-3n-E4B-it, google/gemma-2-27b-it
 - **Together AI (Llama)**: Llama-4-Scout/Maverick (with function calling), Llama-3.x series (generation only)
-- **Together AI (Qwen)**: Qwen2.5-72B/14B/7B-Instruct, Qwen2.5-VL-72B, Qwen2-VL-72B, Qwen3-235B series, Qwen3-Coder-480B, Qwen3-Coder-Next, Qwen3-Next-80B, Qwen3-VL-32B/8B, Qwen3.5-397B/9B, Qwen3.6-Plus (with function calling)
-- **Together AI (DeepSeek)**: DeepSeek-R1, DeepSeek-R1-0528, DeepSeek-R1-Distill-Llama-70B, DeepSeek-V3-0324, DeepSeek-V3.1, DeepSeek-V4-Pro (with function calling)
+- **Together AI (Qwen)**: Qwen2.5-72B/14B/7B-Instruct, Qwen2.5-VL-72B, Qwen2.5-Coder-32B, Qwen2-VL-72B, QwQ-32B, Qwen3-235B series, Qwen3-Coder-480B, Qwen3-Coder-Next, Qwen3-Next-80B, Qwen3-VL-32B/8B, Qwen3.5-397B/9B, Qwen3.6-Plus (with function calling)
+- **Together AI (DeepSeek)**: DeepSeek-R1, DeepSeek-R1-0528, DeepSeek-R1-Distill-Llama-70B, DeepSeek-R1-Distill-Qwen-1.5B/14B, DeepSeek-V3-0324, DeepSeek-V3.1, DeepSeek-V4-Pro, deepseek-coder-33b-instruct (with function calling)
 - **Together AI (Kimi/Moonshot)**: Kimi-K2-Instruct, Kimi-K2-Instruct-0905, Kimi-K2-Thinking, Kimi-K2.5, Kimi-K2.6
 - **Together AI (Mistral)**: Ministral-3-14B, Mistral-7B-v0.1/v0.2/v0.3, Mistral-Small-24B, Mixtral-8x7B
 - **Together AI (Z.AI)**: GLM-5, GLM-5.1, GLM-4.5-Air, GLM-4.6, GLM-4.7
-- **Together AI (MiniMax)**: MiniMax-M2.5, MiniMax-M2.7
-- **Together AI (Other)**: Nemotron-Nano-9B, Arcee (trinity-mini), cc (haiku, opus, sonnet), DeepCogito (cogito-v1-preview, cogito-v2-1-671b), google/gemma-2/3n/4, essentialai/rnj-1
-- **OpenRouter**: Access to 340+ models from 55+ providers via unified API:
-  - OpenAI (gpt-3.5-turbo, gpt-4, gpt-4-turbo, gpt-4.1, gpt-4o variants, gpt-5/5.1/5.2/5.3/5.4/5.5 and codex variants, o1, o3, o3-pro, o4-mini, codex-mini, gpt-oss, gpt-audio)
-  - Anthropic (claude-3-haiku, claude-3.5-haiku/sonnet, claude-3.7-sonnet, claude-sonnet-4/4.5/4.6, claude-haiku-4.5, claude-opus-4/4.1/4.5/4.6/4.6-fast/4.7 with 1M context)
-  - Google (gemini-2.0-flash, gemini-2.5-flash/pro, gemini-3-flash/pro-preview, gemini-3.1-pro/flash-lite-preview, gemma-2-27b, gemma-3-4b/12b/27b, gemma-3n-e4b, gemma-4-26b/31b)
-  - Meta Llama (llama-3-8b/70b, llama-3.1-8b/70b, llama-3.2-1b/3b/11b-vision, llama-3.3-70b, llama-4-maverick/scout, llama-guard-3/4)
-  - DeepSeek (deepseek-chat/v3/v3.1/v3.2/v3.2-speciale/v4-flash/v4-pro, deepseek-r1/r1-0528/r1-distill variants)
-  - Qwen (qwen-2.5-7b/72b, qwen-turbo/plus/max, qwen3-8b/14b/30b/32b/235b, qwen3-coder/coder-plus/coder-next/coder-flash/coder-30b, qwen3-vl variants, qwq-32b, qwen3-next-80b, qwen3-max/max-thinking, qwen3.5-9b/27b/35b/122b/397b/flash/plus, qwen3.6-27b/35b/flash/max-preview/plus)
+- **Together AI (MiniMax)**: MiniMax-M2.5, MiniMax-M2.7, minimax-m2.5-lightning
+- **Together AI (DeepCogito)**: cogito-v1-preview (llama-70B/8B, qwen-14B/32B), cogito-v2-1-671b
+- **Together AI (NVIDIA)**: Llama-3.1-Nemotron-70B, Nemotron-Nano-9B-v2
+- **Together AI (Other)**: arcee-ai/trinity-mini, essentialai/rnj-1-instruct
+- **OpenRouter**: Access to 338+ models from 55+ providers via unified API:
+  - OpenAI (gpt-3.5-turbo through gpt-5.5, codex variants, o1/o3/o4-mini, gpt-oss, gpt-audio)
+  - Anthropic (claude-3-haiku through claude-opus-4.7 with 1M context)
+  - Google (gemini-2.0-flash through gemini-3.1-pro-preview, gemma-2/3/3n/4)
+  - Meta Llama (llama-3-8b through llama-4-maverick/scout, llama-guard-3/4)
+  - DeepSeek (deepseek-chat/v3/v3.1/v3.2/v3.2-speciale/v4-flash/v4-pro, deepseek-r1 variants)
+  - Qwen (qwen-2.5 through qwen3.6, qwen3-coder variants, qwq-32b, qwen3-vl series)
   - Amazon Nova (nova-micro/lite/pro, nova-2-lite, nova-premier)
   - Cohere (command-r, command-r-plus, command-a, command-r7b)
-  - X.AI Grok (grok-3/3-mini/3-beta/3-mini-beta, grok-4/4-fast, grok-4.1-fast, grok-4.20/4.20-multi-agent, grok-code-fast-1)
+  - X.AI Grok (grok-3/3-mini, grok-4/4-fast, grok-4.1-fast, grok-4.20/4.20-multi-agent, grok-code-fast-1)
   - MiniMax (minimax-01, minimax-m1, minimax-m2/m2.1/m2.5/m2.7/m2-her)
   - ByteDance Seed (seed-1.6, seed-1.6-flash, seed-2.0-lite, seed-2.0-mini)
   - MoonshotAI (kimi-k2, kimi-k2-thinking, kimi-k2.5, kimi-k2.6)
-  - Mistral (codestral, devstral/devstral-medium/devstral-small, mistral-large/medium/small, mixtral-8x7b/8x22b, ministral-3b/8b/14b, pixtral, voxtral)
+  - Mistral (codestral, devstral/devstral-medium/devstral-small, mistral-large/medium/small, mixtral series, ministral-3b/8b/14b, pixtral, voxtral)
   - NVIDIA (llama-3.1-nemotron-70b, llama-3.3-nemotron-super-49b, nemotron-nano-9b-v2/12b-v2-vl, nemotron-3-nano-30b/super-120b)
-  - Z.AI/GLM (glm-5/5-turbo/5.1/5v-turbo, glm-4-32b, glm-4.5/4.5-air/4.5v, glm-4.6/4.6v, glm-4.7/4.7-flash)
+  - Z.AI/GLM (glm-4-32b through glm-5.1, glm-5v-turbo)
   - AllenAI (olmo-3-32b-think, olmo-3.1-32b-instruct)
   - Perplexity (sonar, sonar-pro, sonar-pro-search, sonar-deep-research, sonar-reasoning-pro)
   - NousResearch (hermes-2-pro, hermes-3/4-llama series, hermes-4-70b/405b)
   - Baidu ERNIE (ernie-4.5 series including VL and thinking variants)
   - Xiaomi (mimo-v2-flash/omni/pro, mimo-v2.5/v2.5-pro)
   - Reka AI (reka-edge, reka-flash-3)
-  - And 25+ more providers (ai21, aion-labs, alfredpros, alibaba, alpindale, anthracite-org, arcee-ai, bytedance, deepcogito, essentialai, gryphe, ibm-granite, inception, inclusionai, inflection, kwaipilot, liquid, mancer, morph, nex-agi, prime-intellect, relace, sao10k, stepfun, switchpoint, tencent, thedrummer, tngtech, upstage, writer, etc.)
+  - InclusionAI (ling-2.6-flash)
+  - Arcee AI (coder-large, maestro-reasoning, spotlight, trinity-large-preview/thinking, trinity-mini, virtuoso-large)
+  - And 25+ more providers (ai21, aion-labs, alfredpros, alibaba, alpindale, anthracite-org, bytedance, deepcogito, essentialai, gryphe, ibm-granite, inception, inflection, kwaipilot, liquid, mancer, morph, nex-agi, prime-intellect, relace, sao10k, stepfun, switchpoint, tencent, thedrummer, tngtech, upstage, writer, etc.)
+  - Dynamic latest-model aliases: ~anthropic/claude-{haiku,sonnet,opus}-latest, ~google/gemini-{flash,pro}-latest, ~moonshotai/kimi-latest, ~openai/gpt-{latest,mini-latest}
 
 **Embedding Models** (for RAG and semantic search):
 
