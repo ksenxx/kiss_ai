@@ -70,15 +70,29 @@ def load_config() -> dict[str, Any]:
 def save_config(data: dict[str, Any]) -> None:
     """Save configuration to ``~/.kiss/config.json``.
 
-    Only saves keys present in :data:`DEFAULTS` (API keys are excluded).
+    Merges incoming DEFAULTS keys with the existing file contents so
+    that non-DEFAULTS keys already present (e.g. ``email``,
+    ``tunnel_token``) are preserved.  API keys are never written to
+    the config file.
 
     Args:
         data: Configuration dict.
     """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    to_save = {k: data[k] for k in DEFAULTS if k in data}
+    existing: dict[str, Any] = {}
+    if CONFIG_PATH.exists():
+        try:
+            with open(CONFIG_PATH) as f:
+                stored = json.load(f)
+            if isinstance(stored, dict):
+                existing = stored
+        except (json.JSONDecodeError, OSError):
+            pass
+    for k in DEFAULTS:
+        if k in data:
+            existing[k] = data[k]
     with open(CONFIG_PATH, "w") as f:
-        json.dump(to_save, f, indent=2)
+        json.dump(existing, f, indent=2)
 
 
 def _get_user_shell() -> str:
