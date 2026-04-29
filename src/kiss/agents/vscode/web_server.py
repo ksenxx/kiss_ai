@@ -720,6 +720,17 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
                 <line x1="18" y1="4" x2="18" y2="20"/>
               </svg>
             </button>
+            <button id="autocommit-btn" data-tooltip="Auto commit changes">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round"
+               stroke-linejoin="round">
+                <circle cx="12" cy="12" r="4"/>
+                <line x1="1.05" y1="12" x2="7" y2="12"/>
+                <line x1="17.01" y1="12" x2="22.96" y2="12"/>
+                <line x1="12" y1="1.05" x2="12" y2="7"/>
+                <line x1="12" y1="17.01" x2="12" y2="22.96"/>
+              </svg>
+            </button>
             <button id="run-prompt-btn" data-tooltip="Run current file as prompt"
              disabled>
               <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"
@@ -746,17 +757,6 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
             </div>
           </div>
           <div id="input-actions">
-            <button id="autocommit-btn" data-tooltip="Auto commit changes">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
-               stroke="currentColor" stroke-width="2" stroke-linecap="round"
-               stroke-linejoin="round">
-                <circle cx="12" cy="12" r="4"/>
-                <line x1="1.05" y1="12" x2="7" y2="12"/>
-                <line x1="17.01" y1="12" x2="22.96" y2="12"/>
-                <line x1="12" y1="1.05" x2="12" y2="7"/>
-                <line x1="12" y1="17.01" x2="12" y2="22.96"/>
-              </svg>
-            </button>
             <span id="wait-spinner"></span>
             <button id="send-btn" data-tooltip="Send message">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
