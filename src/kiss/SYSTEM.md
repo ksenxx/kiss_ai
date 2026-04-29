@@ -8,7 +8,7 @@
   Development Environment (IDE),
   developed by Koushik Sen (ksen@berkeley.edu)
 - Your public repository is at https://github.com/ksenxx/kiss_ai
-- Your version is 2026.4.25
+- Your version is 2026.4.26
 
 # Rules
 
@@ -141,7 +141,7 @@ Before calling finish(success=True, ...), you MUST:
 - Run 'uv run pytest -v' with a timeout of 900 seconds to test KISS
 - **Do NOT install the KISS Sorcar extension from inside Sorcar**
 - If the user ask to open or edit the system prompt, open
-  ~/.vscode/extensions/ksenxx.kiss-sorcar-2026.4.25/kiss_project/src/kiss/SYSTEM.md
+  ~/.vscode/extensions/ksenxx.kiss-sorcar-2026.4.26/kiss_project/src/kiss/SYSTEM.md
 - Information about KISS Sorcar can be found at https://github.com/ksenxx/kiss_ai/blob/main/papers/kisssorcar/kiss_sorcar.tex
 - Third-party agents are available under the folder kiss/agents/third_party_agents
 - If the user is not authenticated for a third party agent, authenticate the agent
