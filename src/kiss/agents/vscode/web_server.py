@@ -55,7 +55,7 @@ from websockets.http11 import Request, Response
 from kiss.agents.sorcar.persistence import _append_chat_event
 from kiss.agents.vscode.browser_ui import _DISPLAY_EVENT_TYPES, BaseBrowserPrinter
 from kiss.agents.vscode.server import VSCodeServer
-from kiss.agents.vscode.vscode_config import load_config
+from kiss.agents.vscode.vscode_config import load_config, source_shell_env
 
 __all__ = ["RemoteAccessServer", "WebPrinter"]
 
@@ -1038,6 +1038,8 @@ class RemoteAccessServer:
         certfile: str | None = None,
         keyfile: str | None = None,
     ) -> None:
+        source_shell_env()
+
         self.host = host
         self.port = port
         self.use_tunnel = use_tunnel
