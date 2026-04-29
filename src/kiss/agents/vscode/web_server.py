@@ -1639,13 +1639,13 @@ class RemoteAccessServer:
             except subprocess.TimeoutExpired:
                 self._tunnel_proc.kill()
             self._tunnel_proc = None
-        # Only remove the URL file if this server instance wrote it
-        # (i.e., the server actually started).  Crash-looping daemons
-        # that fail to bind must not delete the file left by a
-        # previously successful daemon.
-        if self._active_url is not None:
-            _remove_url_file()
-            self._active_url = None
+        # Do NOT delete the URL file on shutdown.  A new daemon
+        # instance may have already overwritten it, and deleting it
+        # would race with the new instance's _save_url_file().  Stale
+        # data in the file is harmless — the next instance will
+        # overwrite it — while a missing file causes the VS Code
+        # sidebar to show no URL at all.
+        self._active_url = None
 
     # -- Server lifecycle ---------------------------------------------------
 

@@ -475,8 +475,29 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     }
   }
 
-  private _sendRemoteUrl(retries: number = 3): void {
+  /**
+   * Read ``~/.kiss/remote-url.json`` and post the tunnel/local URL to
+   * the webview.  Retries on failure and falls back to polling with
+   * ``fs.watchFile`` so the URL appears even when the daemon starts
+   * after the sidebar.
+   */
+  private _sendRemoteUrl(retries: number = 6): void {
     const urlFile = path.join(os.homedir(), '.kiss', 'remote-url.json');
+    if (this._tryReadAndSendUrl(urlFile)) return;
+    // Retry after a delay — the daemon may still be starting the tunnel
+    if (retries > 0) {
+      setTimeout(() => this._sendRemoteUrl(retries - 1), 10_000);
+    } else {
+      // All retries exhausted — poll the file for up to 5 minutes
+      this._watchUrlFile(urlFile);
+    }
+  }
+
+  /**
+   * Try to read the URL file and post to the webview.
+   * Returns true if the URL was sent successfully.
+   */
+  private _tryReadAndSendUrl(urlFile: string): boolean {
     try {
       const data = JSON.parse(fs.readFileSync(urlFile, 'utf-8'));
       const url = data.tunnel || data.local || '';
@@ -485,15 +506,30 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           type: 'remote_url',
           url,
         } as ToWebviewMessage);
-        return;
+        return true;
       }
     } catch {
       /* file missing or malformed */
     }
-    // Retry after a delay — the daemon may still be starting the tunnel
-    if (retries > 0) {
-      setTimeout(() => this._sendRemoteUrl(retries - 1), 10_000);
-    }
+    return false;
+  }
+
+  private _urlFileWatchTimer?: ReturnType<typeof setInterval>;
+
+  /**
+   * Poll ``~/.kiss/remote-url.json`` every 10 seconds for up to 5
+   * minutes.  Stops as soon as the URL is successfully sent.
+   */
+  private _watchUrlFile(urlFile: string): void {
+    if (this._urlFileWatchTimer) return;
+    let remaining = 30; // 30 × 10s = 5 minutes
+    this._urlFileWatchTimer = setInterval(() => {
+      remaining--;
+      if (this._tryReadAndSendUrl(urlFile) || remaining <= 0) {
+        clearInterval(this._urlFileWatchTimer!);
+        this._urlFileWatchTimer = undefined;
+      }
+    }, 10_000);
   }
 
   private _getVisibleEditorFile(): string {
@@ -1117,6 +1153,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   /** Cleanup: kill all agent processes and dispose listeners. */
   public dispose(): void {
     this._disposed = true;
+    if (this._urlFileWatchTimer) {
+      clearInterval(this._urlFileWatchTimer);
+      this._urlFileWatchTimer = undefined;
+    }
     this._resolveAllWorktreeActions();
     for (const proc of this._taskProcesses.values()) proc.dispose();
     this._taskProcesses.clear();
