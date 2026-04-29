@@ -8,6 +8,7 @@ is never modified.  After the task the user chooses **merge** or
 from __future__ import annotations
 
 import logging
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -181,6 +182,10 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
     def _finalize_worktree(self) -> bool:
         """Auto-commit, remove worktree, prune.
 
+        Copies ``USER_PREFS.md`` from the worktree back to the repo
+        root before removing the worktree directory, so user preference
+        updates made during the task are preserved.
+
         Returns:
             True if the worktree was cleaned up successfully.  False if
             uncommitted changes remain after the auto-commit attempt
@@ -198,6 +203,10 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                     wt.wt_dir,
                 )
                 return False
+            # Copy USER_PREFS.md back to the repo root before removal
+            wt_prefs = wt.wt_dir / "USER_PREFS.md"
+            if wt_prefs.is_file():
+                shutil.copy2(str(wt_prefs), str(wt.repo_root / "USER_PREFS.md"))
             GitWorktreeOps.remove(wt.repo_root, wt.wt_dir)
         GitWorktreeOps.prune(wt.repo_root)
         return True
@@ -486,6 +495,11 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             wt_dir=wt_dir,
             baseline_commit=baseline_commit,
         )
+
+        # Copy USER_PREFS.md into the worktree so the agent has access
+        user_prefs = repo / "USER_PREFS.md"
+        if user_prefs.is_file():
+            shutil.copy2(str(user_prefs), str(wt_dir / "USER_PREFS.md"))
 
         wt_work_dir = wt_dir / offset
         wt_work_dir.mkdir(parents=True, exist_ok=True)

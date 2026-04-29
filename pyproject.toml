@@ -50,6 +50,8 @@ dependencies = [
     "google-auth-oauthlib>=1.2.0",
     "requests>=2.28.0",
     "harbor>=0.3.0",
+    "websockets>=15.0",
+    "cryptography>=44.0.0",
 ]
 
 [build-system]
@@ -274,6 +276,7 @@ kiss-slack = "kiss.agents.third_party_agents.slack_agent:main"
 kiss-gmail = "kiss.agents.third_party_agents.gmail_agent:main"
 kiss-whatsapp = "kiss.agents.third_party_agents.whatsapp_agent:main"
 kiss-telegram = "kiss.agents.third_party_agents.telegram_agent:main"
+kiss-web = "kiss.agents.vscode.web_server:main"
 kiss-discord = "kiss.agents.third_party_agents.discord_agent:main"
 kiss-gchat = "kiss.agents.third_party_agents.googlechat_agent:main"
 kiss-signal = "kiss.agents.third_party_agents.signal_agent:main"
