@@ -2448,6 +2448,10 @@
         }, 1500);
       });
     });
+    const label = document.createElement('span');
+    label.className = 'remote-url-label';
+    label.textContent = 'Web app: ';
+    wrapper.appendChild(label);
     wrapper.appendChild(link);
     wrapper.appendChild(copyBtn);
     container.appendChild(wrapper);
