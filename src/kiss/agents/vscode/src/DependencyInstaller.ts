@@ -6,6 +6,7 @@
 
 import * as vscode from 'vscode';
 import * as path from 'path';
+import * as os from 'os';
 import * as fs from 'fs';
 import * as https from 'https';
 import {exec, execSync, spawn} from 'child_process';
@@ -324,6 +325,9 @@ async function ensureDependenciesImpl(): Promise<void> {
     installCliScript(kissProjectPath, uvPath);
   }
 
+  // Ensure kiss-web remote access daemon is running
+  ensureKissWebDaemon(kissProjectPath);
+
   // Persist PATH entries to the user's shell rc file so new terminals find
   // installed binaries (uv, node, sorcar, etc.) without manual setup.
   try {
@@ -371,6 +375,182 @@ async function ensureDependenciesImpl(): Promise<void> {
       vscode.window.showWarningMessage(
         'KISS Sorcar: Installation complete, but at least one of Claude Code, ANTHROPIC_API_KEY, or OPENAI_API_KEY is required. ' +
           'Set an API key in your environment or restart VS Code to be prompted again.',
+      );
+    }
+  }
+}
+
+/**
+ * Ensure the kiss-web remote access daemon is running.
+ *
+ * Checks whether the daemon service is already active by testing for
+ * ``~/.kiss/remote-url.json`` (which kiss-web writes on startup) and
+ * verifying the OS-level service status.  If the daemon is not running,
+ * creates the service definition (macOS LaunchAgent or Linux systemd
+ * user service) and starts it.
+ *
+ * On macOS uses ``~/Library/LaunchAgents/com.kiss.web-server.plist``
+ * with ``KeepAlive`` and ``RunAtLoad``.
+ * On Linux uses ``~/.config/systemd/user/kiss-web.service`` with
+ * ``Restart=always`` and enables lingering.
+ *
+ * @param kissProjectPath - Absolute path to the KISS project directory.
+ */
+function ensureKissWebDaemon(kissProjectPath: string): void {
+  if (process.platform === 'win32') return; // Not supported on Windows
+
+  const kissWebBin = path.join(kissProjectPath, '.venv', 'bin', 'kiss-web');
+  if (!fs.existsSync(kissWebBin)) {
+    log(`kiss-web binary not found at ${kissWebBin} — skipping daemon setup`);
+    return;
+  }
+
+  const binDir = path.join(HOME_DIR, '.local', 'bin');
+
+  if (process.platform === 'darwin') {
+    const plistLabel = 'com.kiss.web-server';
+    const plistDir = path.join(HOME_DIR, 'Library', 'LaunchAgents');
+    const plistFile = path.join(plistDir, `${plistLabel}.plist`);
+
+    // Check if service is already loaded and running
+    try {
+      const uid = execSync('id -u', {encoding: 'utf-8'}).trim();
+      const result = execSync(`launchctl print gui/${uid}/${plistLabel} 2>&1`, {
+        encoding: 'utf-8',
+        timeout: 5000,
+      });
+      if (result.includes('state = running')) {
+        log('kiss-web daemon already running (macOS LaunchAgent)');
+        return;
+      }
+    } catch {
+      // Service not loaded — proceed to create/load it
+    }
+
+    log('Setting up kiss-web macOS LaunchAgent...');
+    try {
+      fs.mkdirSync(plistDir, {recursive: true});
+      const plistContent = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${plistLabel}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${kissWebBin}</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>${kissProjectPath}</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>${LOG_DIR}/kiss-web-stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>${LOG_DIR}/kiss-web-stderr.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>${binDir}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>`;
+
+      fs.writeFileSync(plistFile, plistContent);
+
+      // Unload existing service if present, then bootstrap the new one
+      const uid = execSync('id -u', {encoding: 'utf-8'}).trim();
+      try {
+        execSync(`launchctl bootout gui/${uid}/${plistLabel}`, {
+          stdio: 'ignore',
+          timeout: 5000,
+        });
+      } catch {
+        /* not loaded — ok */
+      }
+      try {
+        execSync(`launchctl bootstrap gui/${uid} "${plistFile}"`, {
+          stdio: 'ignore',
+          timeout: 5000,
+        });
+      } catch {
+        // Fall back to older load command
+        execSync(`launchctl load -w "${plistFile}"`, {
+          stdio: 'ignore',
+          timeout: 5000,
+        });
+      }
+      log(`kiss-web macOS LaunchAgent installed and started: ${plistFile}`);
+    } catch (err) {
+      log(
+        `Failed to set up kiss-web daemon (macOS): ${err instanceof Error ? err.message : err}`,
+      );
+    }
+  } else if (process.platform === 'linux') {
+    const systemdDir = path.join(HOME_DIR, '.config', 'systemd', 'user');
+    const serviceFile = path.join(systemdDir, 'kiss-web.service');
+
+    // Check if service is already active
+    try {
+      execSync('systemctl --user is-active kiss-web', {
+        stdio: 'ignore',
+        timeout: 5000,
+      });
+      log('kiss-web daemon already running (systemd user service)');
+      return;
+    } catch {
+      // Service not active — proceed to create/start it
+    }
+
+    log('Setting up kiss-web systemd user service...');
+    try {
+      fs.mkdirSync(systemdDir, {recursive: true});
+      const serviceContent = `[Unit]
+Description=KISS Sorcar Remote Web Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${kissWebBin}
+WorkingDirectory=${kissProjectPath}
+Restart=always
+RestartSec=5
+Environment=PATH=${binDir}:/usr/local/bin:/usr/bin:/bin
+StandardOutput=append:${LOG_DIR}/kiss-web-stdout.log
+StandardError=append:${LOG_DIR}/kiss-web-stderr.log
+
+[Install]
+WantedBy=default.target
+`;
+      fs.writeFileSync(serviceFile, serviceContent);
+      execSync('systemctl --user daemon-reload', {
+        stdio: 'ignore',
+        timeout: 10000,
+      });
+      execSync('systemctl --user enable --now kiss-web', {
+        stdio: 'ignore',
+        timeout: 10000,
+      });
+      // Enable lingering so service runs without active login session
+      const username = os.userInfo().username;
+      try {
+        execSync(`loginctl enable-linger "${username}"`, {
+          stdio: 'ignore',
+          timeout: 5000,
+        });
+      } catch {
+        /* may require elevated privileges — non-fatal */
+      }
+      log(
+        `kiss-web systemd user service installed and started: ${serviceFile}`,
+      );
+    } catch (err) {
+      log(
+        `Failed to set up kiss-web daemon (Linux): ${err instanceof Error ? err.message : err}`,
       );
     }
   }
