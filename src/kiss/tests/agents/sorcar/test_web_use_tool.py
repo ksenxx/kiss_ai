@@ -153,6 +153,57 @@ class TestCrashRecovery:
         assert "Test" in result
         assert web_tool._is_alive()
 
+    def test_on_page_crash_preserves_context(self, web_tool, http_server):
+        """_on_page_crash must keep _context alive for cleanup.
+
+        Before the fix, both page crash and browser close used the same
+        _on_browser_lost handler which cleared _context, making the main
+        browser process unreachable and leaking it.
+        """
+        web_tool.go_to_url(http_server + "/")
+        assert web_tool._is_alive()
+        ctx = web_tool._context
+        brw = web_tool._browser
+
+        # Simulate a renderer crash event (only page dies, browser alive)
+        web_tool._on_page_crash()
+
+        assert web_tool._page is None
+        assert web_tool._context is ctx  # Must be preserved
+        assert web_tool._browser is brw  # Must be preserved
+        assert not web_tool._is_alive()
+
+    def test_page_crash_closes_old_browser(self, web_tool, http_server):
+        """After a page renderer crash, recovery must close the old browser.
+
+        Reproduces the root cause of "Google Chrome for Testing quit
+        unexpectedly": when only the renderer crashes, the old browser
+        process must be terminated during recovery.  Before the fix,
+        _on_browser_lost cleared the context reference, leaking the
+        main browser process.
+        """
+        # Recover from previous test's crash state first
+        web_tool.go_to_url(http_server + "/")
+        assert web_tool._is_alive()
+
+        # Keep a reference to the old browser
+        old_browser = web_tool._browser
+        assert old_browser is not None
+
+        # Simulate a renderer crash (only page dies, browser still running)
+        web_tool._on_page_crash()
+        assert not web_tool._is_alive()
+        # Context still alive — browser process still running
+        assert old_browser.is_connected()
+
+        # Recovery: _ensure_browser should close the old browser, then relaunch
+        result = web_tool.go_to_url(http_server + "/")
+        assert "Test Form" in result
+        assert web_tool._is_alive()
+
+        # The old browser must have been closed (not leaked)
+        assert not old_browser.is_connected()
+
 
 class TestSingletonLockCleanup:
     """Stale Singleton{Lock,Cookie,Socket} from a previously crashed Chromium

@@ -182,10 +182,23 @@ class WebUseTool:
             logger.debug("Exception caught", exc_info=True)
             return False
 
-    def _on_browser_lost(self, _obj: Any = None) -> None:
-        """Drop page/context/browser references after a crash or disconnect.
+    def _on_page_crash(self, _page: Any = None) -> None:
+        """Handle a renderer (page) crash without dropping the browser reference.
 
-        The Playwright driver (`self._playwright`) is kept running so that the
+        When only the page's renderer sub-process dies, the main browser
+        process is still alive.  We clear ``_page`` and ``_elements`` but
+        keep ``_context`` and ``_browser`` so that
+        :meth:`_close_browser_only` can shut down the main process cleanly
+        instead of leaking it.
+        """
+        self._page = None
+        self._elements = []
+
+    def _on_browser_lost(self, _obj: Any = None) -> None:
+        """Drop page/context/browser references after a browser exit or context close.
+
+        Called when the browser main process exits (``context.on("close")``).
+        The Playwright driver (``self._playwright``) is kept running so that the
         next tool call can launch a fresh browser without restarting the driver
         (sync_playwright cannot be restarted in the same process).
         """
@@ -231,6 +244,9 @@ class WebUseTool:
                     "--disable-infobars",
                     "--no-first-run",
                     "--no-default-browser-check",
+                    "--disable-breakpad",
+                    "--noerrdialogs",
+                    "--disable-dev-shm-usage",
                 ],
             }
 
@@ -312,7 +328,7 @@ class WebUseTool:
             self._context = self._browser.new_context(**self._context_args())
             self._page = self._context.new_page()
         self._context.on("close", self._on_browser_lost)
-        self._page.on("crash", self._on_browser_lost)
+        self._page.on("crash", self._on_page_crash)
 
     def _get_ax_tree(self, max_chars: int = 50000) -> str:
         self._ensure_browser()
