@@ -30,6 +30,7 @@ function isValidKissProject(dir: string): boolean {
  * Search order:
  * 1. Environment variable (explicit override, e.g. Docker containers)
  * 2. Configuration setting (kissSorcar.kissProjectPath)
+ * 3. Embedded kiss_project directory bundled with the extension
  */
 export function findKissProject(): string | null {
   // 1. Environment variable (highest priority — explicit user/Docker override)
@@ -41,6 +42,10 @@ export function findKissProject(): string | null {
     .getConfiguration('kissSorcar')
     .get<string>('kissProjectPath');
   if (configPath && isValidKissProject(configPath)) return configPath;
+
+  // 3. Embedded kiss_project bundled inside the extension directory
+  const embeddedPath = path.join(__dirname, '..', 'kiss_project');
+  if (isValidKissProject(embeddedPath)) return embeddedPath;
 
   return null;
 }
