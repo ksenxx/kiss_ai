@@ -73,6 +73,70 @@ _WS_PING_INTERVAL = 10
 #: WebSocket pong timeout in seconds.
 _WS_PING_TIMEOUT = 10
 
+#: HTTP 200 response for HEAD health checks from cloudflared.
+_HEAD_200 = (
+    b"HTTP/1.1 200 OK\r\n"
+    b"Content-Length: 0\r\n"
+    b"Connection: close\r\n"
+    b"\r\n"
+)
+
+
+class _HeadAwareServerConnection(ServerConnection):
+    """``ServerConnection`` subclass that handles HEAD health checks.
+
+    The ``websockets`` library only accepts GET requests (for WebSocket
+    upgrade handshakes).  Cloudflare tunnels send HEAD requests to check
+    origin health.  Without this handler, those HEAD requests cause
+    parse errors, Cloudflare marks the tunnel as unhealthy, and the
+    tunnel URL stops resolving (NXDOMAIN).
+
+    Intercepts incoming data before the websockets parser sees it.  If
+    the first HTTP request line is ``HEAD …``, responds with 200 OK and
+    closes the connection.  All other requests pass through normally.
+    """
+
+    def __init__(
+        self,
+        protocol: Any,
+        server: Any,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(protocol, server, **kwargs)
+        self._head_buffer: bytes = b""
+        self._head_checked: bool = False
+
+    def data_received(self, data: bytes) -> None:
+        """Intercept HEAD requests before the websockets parser.
+
+        Buffers incoming bytes until the first HTTP request line is
+        complete.  If it starts with ``HEAD ``, writes a 200 OK and
+        closes.  Otherwise, feeds all buffered data to the normal
+        websockets pipeline.
+
+        Args:
+            data: Raw bytes from the transport.
+        """
+        if self._head_checked:
+            super().data_received(data)
+            return
+        self._head_buffer += data
+        idx = self._head_buffer.find(b"\r\n")
+        if idx == -1:
+            return  # first line not yet complete
+        self._head_checked = True
+        first_line = self._head_buffer[:idx]
+        if first_line.startswith(b"HEAD "):
+            transport = self.transport
+            if transport is not None:
+                transport.write(_HEAD_200)
+                transport.close()
+            return
+        # Not a HEAD request — replay buffered data through normal path
+        buffered = self._head_buffer
+        self._head_buffer = b""
+        super().data_received(buffered)
+
 
 # ---------------------------------------------------------------------------
 # Server-side merge state for web clients
@@ -1723,6 +1787,7 @@ class RemoteAccessServer:
             ssl=self._ssl_context,
             ping_interval=_WS_PING_INTERVAL,
             ping_timeout=_WS_PING_TIMEOUT,
+            create_connection=_HeadAwareServerConnection,
         )
 
         scheme = "https" if self._ssl_context else "http"
