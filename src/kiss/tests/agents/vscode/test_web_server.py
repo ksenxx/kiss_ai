@@ -1,6 +1,6 @@
 """Integration tests for the KISS Sorcar remote web access server.
 
-Tests cover HTTP serving, WebSocket communication, password authentication,
+Tests cover HTTPS serving, WSS communication, password authentication,
 command dispatch, and event broadcasting through the web server.
 """
 
@@ -159,8 +159,16 @@ def _find_free_port() -> int:
         return port
 
 
+def _no_verify_ssl() -> ssl.SSLContext:
+    """Return an SSL client context that skips certificate verification."""
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
 class TestRemoteAccessServerHTTP(IsolatedAsyncioTestCase):
-    """Test HTTP serving of HTML and static assets."""
+    """Test HTTPS serving of HTML and static assets."""
 
     async def asyncSetUp(self) -> None:
         self.port = _find_free_port()
@@ -185,15 +193,16 @@ class TestRemoteAccessServerHTTP(IsolatedAsyncioTestCase):
             CONFIG_PATH.unlink()
 
     async def _http_get(self, path: str) -> tuple[int, str]:
-        """Make an HTTP GET request in a thread to avoid blocking the loop."""
+        """Make an HTTPS GET request in a thread to avoid blocking the loop."""
         import urllib.error
         import urllib.request
 
-        url = f"http://127.0.0.1:{self.port}{path}"
+        url = f"https://127.0.0.1:{self.port}{path}"
+        ctx = _no_verify_ssl()
 
         def _fetch() -> tuple[int, str]:
             try:
-                resp = urllib.request.urlopen(url, timeout=5)
+                resp = urllib.request.urlopen(url, timeout=5, context=ctx)
                 return resp.status, resp.read().decode()
             except urllib.error.HTTPError as e:
                 return e.code, e.read().decode() if e.fp else ""
@@ -234,7 +243,10 @@ class TestRemoteAccessServerHTTP(IsolatedAsyncioTestCase):
         import http.client
 
         def _head() -> int:
-            conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+            ctx = _no_verify_ssl()
+            conn = http.client.HTTPSConnection(
+                "127.0.0.1", self.port, timeout=5, context=ctx,
+            )
             conn.request("HEAD", "/")
             resp = conn.getresponse()
             status = resp.status
@@ -243,6 +255,25 @@ class TestRemoteAccessServerHTTP(IsolatedAsyncioTestCase):
 
         status = await asyncio.get_event_loop().run_in_executor(None, _head)
         self.assertEqual(status, 200)
+
+    async def test_plain_http_rejected(self) -> None:
+        """Plain HTTP connection to the TLS server should fail."""
+        import urllib.error
+        import urllib.request
+
+        url = f"http://127.0.0.1:{self.port}/"
+
+        def _fetch() -> int:
+            try:
+                urllib.request.urlopen(url, timeout=5)
+                return 200
+            except urllib.error.URLError:
+                return -1
+            except Exception:
+                return -1
+
+        status = await asyncio.get_event_loop().run_in_executor(None, _fetch)
+        self.assertEqual(status, -1)
 
 
 class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
@@ -271,14 +302,14 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_auth_no_password(self) -> None:
         """WebSocket connection with empty password succeeds immediately."""
-        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "auth_ok")
 
     async def test_ws_get_models(self) -> None:
         """getModels command returns a models event over WebSocket."""
-        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "auth_ok")
@@ -291,7 +322,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_get_history(self) -> None:
         """getHistory command returns a history event."""
-        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -302,7 +333,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_get_config(self) -> None:
         """getConfig command returns configuration data."""
-        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -313,7 +344,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_vscode_only_commands_ignored(self) -> None:
         """VS Code-only commands are silently ignored (no error broadcast)."""
-        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -327,7 +358,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_unknown_command_returns_error(self) -> None:
         """Unknown commands produce an error event."""
-        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -338,7 +369,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_new_chat_and_close_tab(self) -> None:
         """newChat and closeTab commands work over WebSocket."""
-        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -356,7 +387,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_select_model(self) -> None:
         """selectModel command updates the selected model."""
-        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -373,7 +404,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_ready_command(self) -> None:
         """The 'ready' command returns models, inputHistory, configData, welcome, focusInput."""
-        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "auth_ok")
@@ -398,7 +429,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_ready_does_not_produce_unknown_error(self) -> None:
         """The 'ready' command must NOT produce an 'Unknown command' error."""
-        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -416,7 +447,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_submit_does_not_produce_unknown_error(self) -> None:
         """The 'submit' command must NOT produce an 'Unknown command' error."""
-        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -452,7 +483,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_user_action_done(self) -> None:
         """userActionDone is translated to userAnswer (no Unknown command error)."""
-        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -465,7 +496,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_resume_session_translates_id(self) -> None:
         """resumeSession translates the webview 'id' field to 'chatId'."""
-        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -501,7 +532,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_get_welcome_suggestions(self) -> None:
         """getWelcomeSuggestions returns a welcome_suggestions event."""
-        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -517,7 +548,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
         self.server._active_url = "https://test-dynamic.trycloudflare.com"
         # Ensure the URL file does NOT exist so the fallback is needed
         _remove_url_file()
-        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -539,7 +570,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
         """ready command broadcasts remote_url when _active_url is set."""
         self.server._active_url = "https://ready-test.trycloudflare.com"
         _remove_url_file()
-        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -562,7 +593,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_get_files(self) -> None:
         """getFiles command returns a files event."""
-        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -573,7 +604,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_get_adjacent_task(self) -> None:
         """getAdjacentTask returns an adjacent_task_events event."""
-        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -588,7 +619,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_save_config(self) -> None:
         """saveConfig command updates config and returns configData."""
-        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -607,7 +638,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_set_skip_merge(self) -> None:
         """setSkipMerge command does not produce an error."""
-        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -623,7 +654,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_stop_no_error(self) -> None:
         """stop command with no running task does not produce an error."""
-        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -635,7 +666,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_merge_action_all_done(self) -> None:
         """mergeAction with all-done does not crash."""
-        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -664,7 +695,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_record_file_usage(self) -> None:
         """recordFileUsage command does not produce an error."""
-        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -678,7 +709,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_generate_commit_message(self) -> None:
         """generateCommitMessage command does not produce Unknown command error."""
-        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -704,7 +735,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_user_answer(self) -> None:
         """userAnswer command does not produce an error (drops silently w/o task)."""
-        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -717,7 +748,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_complete(self) -> None:
         """complete command does not produce an error."""
-        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -741,7 +772,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_worktree_action(self) -> None:
         """worktreeAction command does not produce Unknown command error."""
-        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -767,7 +798,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_autocommit_action(self) -> None:
         """autocommitAction command does not produce Unknown command error."""
-        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -792,7 +823,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_all_webview_commands_no_unknown_error(self) -> None:
         """All 30 FromWebviewMessage types produce no 'Unknown command' error."""
-        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -856,7 +887,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_submit_emits_task_text_and_status(self) -> None:
         """The 'submit' command emits setTaskText and status running=True."""
-        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
@@ -917,14 +948,14 @@ class TestRemoteAccessServerAuth(IsolatedAsyncioTestCase):
 
     async def test_auth_correct_password(self) -> None:
         """Correct password authenticates successfully."""
-        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": "test-secret-123"}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "auth_ok")
 
     async def test_auth_wrong_password_then_correct(self) -> None:
         """Wrong password prompts auth_required, then correct password works."""
-        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": "wrong"}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "auth_required")
@@ -936,7 +967,7 @@ class TestRemoteAccessServerAuth(IsolatedAsyncioTestCase):
 
     async def test_auth_wrong_password_twice_disconnects(self) -> None:
         """Two wrong passwords result in connection close."""
-        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": "wrong"}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "auth_required")
@@ -974,8 +1005,8 @@ class TestRemoteAccessServerMultiClient(IsolatedAsyncioTestCase):
     async def test_broadcast_reaches_all_clients(self) -> None:
         """Events broadcast by the server reach all connected clients."""
         async with (
-            connect(f"ws://127.0.0.1:{self.port}/ws") as ws1,
-            connect(f"ws://127.0.0.1:{self.port}/ws") as ws2,
+            connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws1,
+            connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws2,
         ):
             # Authenticate both
             for ws in [ws1, ws2]:
@@ -1036,7 +1067,7 @@ class TestRemoteAccessServerTask(IsolatedAsyncioTestCase):
 
     async def test_run_task_receives_events(self) -> None:
         """Sending a 'run' command produces task events over WebSocket."""
-        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "auth_ok")
@@ -1259,7 +1290,7 @@ class TestRemoteAccessServerMerge(IsolatedAsyncioTestCase):
     async def test_merge_accept_all_completes_merge(self) -> None:
         """mergeAction accept-all should complete the merge and broadcast merge_ended."""
         tab_id = "merge-accept-tab"
-        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await self._auth(ws)
             await self._trigger_merge(tab_id)
 
@@ -1287,7 +1318,7 @@ class TestRemoteAccessServerMerge(IsolatedAsyncioTestCase):
     async def test_merge_reject_all_reverts_files(self) -> None:
         """mergeAction reject-all should revert files to base and complete merge."""
         tab_id = "merge-reject-tab"
-        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await self._auth(ws)
             await self._trigger_merge(tab_id)
             events = await self._collect_until(ws, "merge_started")
@@ -1315,7 +1346,7 @@ class TestRemoteAccessServerMerge(IsolatedAsyncioTestCase):
     async def test_merge_data_includes_file_contents(self) -> None:
         """merge_data event should include base_text and current_text for web clients."""
         tab_id = "merge-contents-tab"
-        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await self._auth(ws)
             await self._trigger_merge(tab_id)
 
@@ -1336,7 +1367,7 @@ class TestRemoteAccessServerMerge(IsolatedAsyncioTestCase):
     async def test_merge_accept_individual_hunk(self) -> None:
         """mergeAction accept should mark one hunk and eventually complete."""
         tab_id = "merge-single-accept-tab"
-        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await self._auth(ws)
             await self._trigger_merge(tab_id)
             events = await self._collect_until(ws, "merge_started")
@@ -1364,7 +1395,7 @@ class TestRemoteAccessServerMerge(IsolatedAsyncioTestCase):
     async def test_merge_reject_individual_hunk(self) -> None:
         """mergeAction reject should revert hunks one by one."""
         tab_id = "merge-single-reject-tab"
-        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await self._auth(ws)
             await self._trigger_merge(tab_id)
             events = await self._collect_until(ws, "merge_started")
@@ -1436,7 +1467,7 @@ class TestCreateSslContext(unittest.TestCase):
 
 
 class TestRemoteAccessServerTLS(IsolatedAsyncioTestCase):
-    """Test HTTPS and WSS with TLS enabled."""
+    """Test HTTPS/WSS with explicit certificate files."""
 
     async def asyncSetUp(self) -> None:
         self.port = _find_free_port()
@@ -1455,7 +1486,6 @@ class TestRemoteAccessServerTLS(IsolatedAsyncioTestCase):
             host="127.0.0.1",
             port=self.port,
             work_dir=self._tmpdir,
-            tls=True,
             certfile=self._certfile,
             keyfile=self._keyfile,
         )
@@ -1468,16 +1498,8 @@ class TestRemoteAccessServerTLS(IsolatedAsyncioTestCase):
         elif CONFIG_PATH.exists():
             CONFIG_PATH.unlink()
 
-    def _make_ssl_client_ctx(self) -> ssl.SSLContext:
-        """Build an SSL context that trusts the test self-signed cert."""
-        import ssl as _ssl
-
-        ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
-        ctx.load_verify_locations(self._certfile)
-        return ctx
-
-    async def test_https_serves_html(self) -> None:
-        """GET / over HTTPS returns the Sorcar HTML page."""
+    async def test_https_with_explicit_cert(self) -> None:
+        """GET / with explicit cert/key files returns the Sorcar HTML page."""
         import ssl as _ssl
         import urllib.request
 
@@ -1485,7 +1507,6 @@ class TestRemoteAccessServerTLS(IsolatedAsyncioTestCase):
         url = f"https://127.0.0.1:{self.port}/"
 
         def _fetch() -> tuple[int, str]:
-            # Use localhost in SNI but connect to 127.0.0.1
             resp = urllib.request.urlopen(url, timeout=5, context=ctx)
             return resp.status, resp.read().decode()
 
@@ -1495,24 +1516,8 @@ class TestRemoteAccessServerTLS(IsolatedAsyncioTestCase):
         self.assertEqual(status, 200)
         self.assertIn("<title>KISS Sorcar</title>", body)
 
-    async def test_wss_auth_and_command(self) -> None:
-        """WSS connection authenticates and receives models."""
-        ssl_ctx = self._make_ssl_client_ctx()
-        async with connect(
-            f"wss://127.0.0.1:{self.port}/ws",
-            ssl=ssl_ctx,
-        ) as ws:
-            await ws.send(json.dumps({"type": "auth", "password": ""}))
-            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
-            self.assertEqual(resp["type"], "auth_ok")
-
-            await ws.send(json.dumps({"type": "getModels"}))
-            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
-            self.assertEqual(resp["type"], "models")
-            self.assertIn("models", resp)
-
     async def test_plain_ws_rejected(self) -> None:
-        """Plain ws:// connection to a TLS server should fail."""
+        """Plain ws:// connection to the TLS server should fail."""
         with self.assertRaises(Exception):
             async with connect(
                 f"ws://127.0.0.1:{self.port}/ws",

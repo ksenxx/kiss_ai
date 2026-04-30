@@ -1,10 +1,11 @@
 """Standalone web server for remote KISS Sorcar access.
 
-Provides HTTP + WebSocket access to the Sorcar chat interface from any
+Provides HTTPS + WSS access to the Sorcar chat interface from any
 browser, including mobile devices.  Uses the ``websockets`` library to
-serve both HTTP (for the HTML page and static media assets) and
-WebSocket (for bidirectional command/event communication) on a single
-port.
+serve both HTTPS (for the HTML page and static media assets) and
+WSS (for bidirectional command/event communication) on a single port.
+TLS is always enabled; a self-signed certificate is auto-generated in
+``~/.kiss/tls/`` when no explicit certificate is provided.
 
 Authentication uses the ``remote_password`` setting from
 ``~/.kiss/config.json``.  An optional ``cloudflared`` tunnel can
@@ -965,8 +966,7 @@ _WS_SHIM_JS = r"""
   };
 
   function connect() {
-    var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    _ws = new WebSocket(proto + '//' + location.host + '/ws');
+    _ws = new WebSocket('wss://' + location.host + '/ws');
     _authenticated = false;
 
     _ws.onopen = function() {
@@ -1103,28 +1103,25 @@ def _translate_webview_command(cmd: dict[str, Any]) -> dict[str, Any]:
 class RemoteAccessServer:
     """Web server providing remote browser access to KISS Sorcar.
 
-    Serves the Sorcar chat webview over HTTP and bridges commands/events
-    over WebSocket.  Optionally starts a ``cloudflared`` tunnel so the
-    server is reachable from the public internet without manual
-    port-forwarding or DNS setup.
+    Serves the Sorcar chat webview over HTTPS and bridges commands/events
+    over WSS.  TLS is always enabled; a self-signed certificate is
+    auto-generated in ``~/.kiss/tls/`` when *certfile*/*keyfile* are not
+    provided.  Optionally starts a ``cloudflared`` tunnel so the server
+    is reachable from the public internet without manual port-forwarding
+    or DNS setup.
 
     When *tunnel_token* is provided, a **named tunnel** is used, giving
     a fixed URL that persists across restarts.  Without a token, a
     quick-tunnel is created with a random ``*.trycloudflare.com`` URL.
 
-    When *tls* is True, the server uses HTTPS and WSS to encrypt all
-    LAN traffic.  If *certfile*/*keyfile* are not provided, a
-    self-signed certificate is auto-generated in ``~/.kiss/tls/``.
-
     Args:
         host: Bind address (default ``"0.0.0.0"`` for all interfaces).
-        port: TCP port for both HTTP and WebSocket (default ``8787``).
+        port: TCP port for both HTTPS and WSS (default ``8787``).
         use_tunnel: If True, start a ``cloudflared`` tunnel on launch.
         tunnel_token: Cloudflare named-tunnel token for a fixed URL.
             When set, ``cloudflared tunnel run --token <TOKEN>`` is
             used instead of a quick-tunnel.
         work_dir: Working directory for the agent (default cwd).
-        tls: If True, serve over HTTPS/WSS with TLS encryption.
         certfile: Path to a PEM certificate file for TLS.
         keyfile: Path to a PEM private key file for TLS.
     """
@@ -1136,7 +1133,6 @@ class RemoteAccessServer:
         use_tunnel: bool = False,
         tunnel_token: str | None = None,
         work_dir: str | None = None,
-        tls: bool = False,
         certfile: str | None = None,
         keyfile: str | None = None,
     ) -> None:
@@ -1146,10 +1142,7 @@ class RemoteAccessServer:
         self.port = port
         self.use_tunnel = use_tunnel
         self.tunnel_token = tunnel_token
-        self._ssl_context: ssl.SSLContext | None = None
-
-        if tls or certfile or keyfile:
-            self._ssl_context = _create_ssl_context(certfile, keyfile)
+        self._ssl_context: ssl.SSLContext = _create_ssl_context(certfile, keyfile)
 
         if work_dir:
             os.environ["KISS_WORKDIR"] = work_dir
@@ -1317,8 +1310,7 @@ class RemoteAccessServer:
         if not url:
             url = _discover_tunnel_url_from_metrics()
             if url:
-                scheme = "https" if self._ssl_context else "http"
-                _save_url_file(f"{scheme}://localhost:{self.port}", url)
+                _save_url_file(f"https://localhost:{self.port}", url)
                 self._active_url = url
 
         if url:
@@ -1567,15 +1559,13 @@ class RemoteAccessServer:
         import re
         import time
 
-        scheme = "https" if self._ssl_context else "http"
         cmd = [
             "cloudflared",
             "tunnel",
             "--url",
-            f"{scheme}://localhost:{self.port}",
+            f"https://localhost:{self.port}",
+            "--no-tls-verify",
         ]
-        if self._ssl_context:
-            cmd.append("--no-tls-verify")
         self._tunnel_proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -1689,8 +1679,7 @@ class RemoteAccessServer:
         tunnel_url = await asyncio.get_event_loop().run_in_executor(
             None, self._start_tunnel,
         )
-        scheme = "https" if self._ssl_context else "http"
-        local_url = f"{scheme}://localhost:{self.port}"
+        local_url = f"https://localhost:{self.port}"
         if tunnel_url:
             logger.info("Tunnel restarted: %s", tunnel_url)
             _save_url_file(local_url, tunnel_url)
@@ -1790,8 +1779,7 @@ class RemoteAccessServer:
             create_connection=_HeadAwareServerConnection,
         )
 
-        scheme = "https" if self._ssl_context else "http"
-        local_url = f"{scheme}://localhost:{self.port}"
+        local_url = f"https://localhost:{self.port}"
 
         tunnel_url: str | None = None
         if self.use_tunnel:
@@ -1905,10 +1893,6 @@ def main() -> None:  # pragma: no cover — CLI entry point
         ),
     )
     parser.add_argument("--workdir", default=None, help="Working directory")
-    parser.add_argument(
-        "--tls", action=argparse.BooleanOptionalAction, default=True,
-        help="Enable HTTPS/WSS (default: on, use --no-tls to disable)",
-    )
     parser.add_argument("--certfile", default=None, help="Path to PEM certificate file")
     parser.add_argument("--keyfile", default=None, help="Path to PEM private key file")
     args = parser.parse_args()
@@ -1931,7 +1915,6 @@ def main() -> None:  # pragma: no cover — CLI entry point
         use_tunnel=args.tunnel,
         tunnel_token=tunnel_token or None,
         work_dir=args.workdir,
-        tls=args.tls,
         certfile=args.certfile,
         keyfile=args.keyfile,
     )
