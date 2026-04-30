@@ -377,6 +377,14 @@ def find_deprecated_models(
                 has_date = bool(re.search(r"\d{8}$", name))
                 if has_date:  # pragma: no branch
                     deprecated.append({"name": name, "reason": "not in Anthropic API"})
+                else:
+                    # Alias (no date suffix): deprecated only if no dated
+                    # snapshot like {alias}-YYYYMMDD exists in the API.
+                    alias_re = re.compile(rf"^{re.escape(name)}-\d{{8}}$")
+                    if not any(alias_re.match(n) for n in anthropic):
+                        deprecated.append(
+                            {"name": name, "reason": "alias with no snapshot in Anthropic API"}
+                        )
         elif (  # pragma: no branch
             name.startswith("gemini-") and not name.startswith("gemini-embedding")
         ):
