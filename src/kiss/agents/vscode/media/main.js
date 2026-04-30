@@ -902,6 +902,81 @@
       '</span>';
   }
 
+  /** Accept the current ghost text suggestion into the input. */
+  function acceptGhost() {
+    if (!currentGhost) return false;
+    inp.value += currentGhost;
+    if (/\S$/.test(inp.value)) inp.value += ' ';
+    clearGhost();
+    syncClearBtn();
+    inp.style.height = 'auto';
+    inp.style.height = Math.min(inp.scrollHeight, 200) + 'px';
+    return true;
+  }
+
+  /** Cycle to the previous (older) history item. Returns true if acted. */
+  function cycleHistoryUp() {
+    if (histCache.length > 0 && (histIdx >= 0 || !inp.value)) {
+      histIdx = Math.min(histIdx + 1, histCache.length - 1);
+      inp.value = histCache[histIdx];
+      inp.style.height = 'auto';
+      inp.style.height = Math.min(inp.scrollHeight, 200) + 'px';
+      syncClearBtn();
+      clearGhost();
+      return true;
+    }
+    return false;
+  }
+
+  /** Cycle to the next (newer) history item. Returns true if acted. */
+  function cycleHistoryDown() {
+    if (histIdx < 0) return false;
+    histIdx--;
+    inp.value = histIdx >= 0 ? histCache[histIdx] : '';
+    inp.style.height = 'auto';
+    inp.style.height = Math.min(inp.scrollHeight, 200) + 'px';
+    syncClearBtn();
+    clearGhost();
+    return true;
+  }
+
+  // --- Mobile touch gestures ---
+  // Swipe right on input to accept ghost text (replaces Tab key).
+  // Swipe up/down on input to cycle history (replaces ArrowUp/ArrowDown).
+  let _touchStartX = 0;
+  let _touchStartY = 0;
+  const SWIPE_THRESHOLD = 30;
+
+  function handleInputTouchStart(e) {
+    if (e.touches.length === 1) {
+      _touchStartX = e.touches[0].clientX;
+      _touchStartY = e.touches[0].clientY;
+    }
+  }
+
+  function handleInputTouchEnd(e) {
+    if (e.changedTouches.length !== 1) return;
+    const dx = e.changedTouches[0].clientX - _touchStartX;
+    const dy = e.changedTouches[0].clientY - _touchStartY;
+    const absDx = Math.abs(dx);
+    const absDy = Math.abs(dy);
+
+    if (absDx < SWIPE_THRESHOLD && absDy < SWIPE_THRESHOLD) return;
+
+    if (absDx > absDy && dx > SWIPE_THRESHOLD) {
+      // Swipe right: accept ghost text
+      if (acceptGhost()) e.preventDefault();
+    } else if (absDy > absDx) {
+      if (dy < -SWIPE_THRESHOLD && autocomplete.style.display !== 'block') {
+        // Swipe up: previous history item
+        if (cycleHistoryUp()) e.preventDefault();
+      } else if (dy > SWIPE_THRESHOLD) {
+        // Swipe down: next history item
+        if (cycleHistoryDown()) e.preventDefault();
+      }
+    }
+  }
+
   function requestGhost() {
     clearGhost();
     if (isRunning || !inp.value) return;
@@ -2882,33 +2957,19 @@
       // Ghost text accept
       if (e.key === 'Tab' && currentGhost) {
         e.preventDefault();
-        inp.value += currentGhost;
-        if (/\S$/.test(inp.value)) inp.value += ' ';
-        clearGhost();
-        syncClearBtn();
-        inp.style.height = 'auto';
-        inp.style.height = Math.min(inp.scrollHeight, 200) + 'px';
+        acceptGhost();
         return;
       }
       // History cycling (ArrowUp/Down only when textbox is empty and no autocomplete)
       if (e.key === 'ArrowUp' && autocomplete.style.display !== 'block') {
-        if (histCache.length > 0 && (histIdx >= 0 || !inp.value)) {
+        if (cycleHistoryUp()) {
           e.preventDefault();
-          histIdx = Math.min(histIdx + 1, histCache.length - 1);
-          inp.value = histCache[histIdx];
-          inp.style.height = 'auto';
-          inp.style.height = Math.min(inp.scrollHeight, 200) + 'px';
-          syncClearBtn();
           return;
         }
       }
       if (e.key === 'ArrowDown' && histIdx >= 0) {
         e.preventDefault();
-        histIdx--;
-        inp.value = histIdx >= 0 ? histCache[histIdx] : '';
-        inp.style.height = 'auto';
-        inp.style.height = Math.min(inp.scrollHeight, 200) + 'px';
-        syncClearBtn();
+        cycleHistoryDown();
         return;
       }
       if (e.key === 'Enter' && !e.shiftKey) {
@@ -2946,6 +3007,9 @@
       clearGhost();
       hideAC();
     });
+    // Mobile touch gestures on the input textarea
+    inp.addEventListener('touchstart', handleInputTouchStart, {passive: true});
+    inp.addEventListener('touchend', handleInputTouchEnd);
     autocomplete.addEventListener('mousedown', e => {
       e.preventDefault();
     });
