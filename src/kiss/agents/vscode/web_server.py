@@ -570,7 +570,8 @@ def _build_html() -> str:
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="\
+width=device-width,initial-scale=1,maximum-scale=1">
   <link href="/media/main.css" rel="stylesheet">
   <link href="/media/highlight-github-dark.min.css" rel="stylesheet">
   <title>KISS Sorcar</title>
