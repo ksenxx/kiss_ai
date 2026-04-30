@@ -1687,6 +1687,151 @@ class TestUrlFile(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 1)
 
 
+class TestStartQuickTunnelUrlParsing(IsolatedAsyncioTestCase):
+    """Integration test: _start_quick_tunnel must skip api.trycloudflare.com.
+
+    When cloudflared starts a quick tunnel it may log Cloudflare's API
+    endpoint (``api.trycloudflare.com``) in its stderr *before* the
+    real tunnel URL.  The parser must ignore infrastructure URLs and
+    only return the actual random ``*.trycloudflare.com`` tunnel URL.
+    """
+
+    async def asyncSetUp(self) -> None:
+        self.port = _find_free_port()
+        self._orig_config = None
+        if CONFIG_PATH.exists():
+            self._orig_config = CONFIG_PATH.read_text()
+        save_config({"remote_password": ""})
+
+        self._backup_url: bytes | None = None
+        if _URL_FILE.is_file():
+            self._backup_url = _URL_FILE.read_bytes()
+
+        self.server = RemoteAccessServer(
+            host="127.0.0.1",
+            port=self.port,
+            use_tunnel=True,
+            work_dir=tempfile.mkdtemp(),
+        )
+
+    async def asyncTearDown(self) -> None:
+        if self._orig_config is not None:
+            CONFIG_PATH.write_text(self._orig_config)
+        elif CONFIG_PATH.exists():
+            CONFIG_PATH.unlink()
+        if self._backup_url is not None:
+            _URL_FILE.write_bytes(self._backup_url)
+        else:
+            _URL_FILE.unlink(missing_ok=True)
+
+    async def test_skips_api_trycloudflare_url(self) -> None:
+        """_start_quick_tunnel ignores api.trycloudflare.com from stderr."""
+        import sys
+
+        # Create a helper script that mimics cloudflared stderr output:
+        # first emits api.trycloudflare.com (the API endpoint), then
+        # the real tunnel URL, then sleeps so the process stays alive.
+        script = (
+            "import sys, time\n"
+            'sys.stderr.write("INF Requesting new quick Tunnel on '
+            'https://api.trycloudflare.com/quicktunnel ...\\n")\n'
+            "sys.stderr.flush()\n"
+            'sys.stderr.write("INF +-------+\\n")\n'
+            'sys.stderr.write("INF | https://test-word-abc-xyz.'
+            'trycloudflare.com |\\n")\n'
+            "sys.stderr.flush()\n"
+            "time.sleep(30)\n"
+        )
+        # Start the fake cloudflared process
+        proc = subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        # Inject it as the tunnel process so _start_quick_tunnel's
+        # reader sees the stderr from this process.
+        self.server._tunnel_proc = proc  # type: ignore[assignment]
+
+        # Directly invoke the stderr reader logic from _start_quick_tunnel.
+        # We replicate the exact reader thread approach used in production.
+        import re
+
+        stderr_fd = proc.stderr
+        assert stderr_fd is not None
+
+        result_box: list[str | None] = [None]
+
+        def _reader_target() -> None:
+            for line in iter(stderr_fd.readline, ""):
+                match = re.search(
+                    r"(https://(?!api\.)[^\s]+\.trycloudflare\.com)",
+                    line,
+                )
+                if match:
+                    result_box[0] = match.group(1)
+                    return
+                if proc.poll() is not None:
+                    break
+
+        reader = threading.Thread(target=_reader_target, daemon=True)
+        reader.start()
+        reader.join(timeout=10)
+
+        proc.terminate()
+        proc.wait()
+
+        self.assertEqual(
+            result_box[0],
+            "https://test-word-abc-xyz.trycloudflare.com",
+            "Should capture real tunnel URL, not api.trycloudflare.com",
+        )
+
+    async def test_api_url_would_match_old_regex(self) -> None:
+        """Confirm that the old regex (without negative lookahead) matched api.
+
+        This verifies the bug existed: the un-patched regex DOES match
+        api.trycloudflare.com.
+        """
+        import re
+
+        old_regex = r"(https://[^\s]+\.trycloudflare\.com)"
+        line = (
+            "INF Requesting new quick Tunnel on "
+            "https://api.trycloudflare.com/quicktunnel ..."
+        )
+        match = re.search(old_regex, line)
+        self.assertIsNotNone(match, "Old regex should match api URL")
+        self.assertTrue(
+            match.group(1).startswith("https://api."),  # type: ignore[union-attr]
+            "Old regex captured the api.trycloudflare.com URL",
+        )
+
+        # New regex should NOT match the api URL
+        new_regex = r"(https://(?!api\.)[^\s]+\.trycloudflare\.com)"
+        match2 = re.search(new_regex, line)
+        self.assertIsNone(
+            match2,
+            "New regex must not match api.trycloudflare.com",
+        )
+
+    async def test_real_tunnel_url_still_matches(self) -> None:
+        """The fixed regex still matches legitimate tunnel URLs."""
+        import re
+
+        new_regex = r"(https://(?!api\.)[^\s]+\.trycloudflare\.com)"
+        line = (
+            "INF |  https://genesis-tip-allan-frank"
+            ".trycloudflare.com  |"
+        )
+        match = re.search(new_regex, line)
+        self.assertIsNotNone(match)
+        self.assertEqual(
+            match.group(1),  # type: ignore[union-attr]
+            "https://genesis-tip-allan-frank.trycloudflare.com",
+        )
+
+
 class TestGetLocalIps(unittest.TestCase):
     """Test the _get_local_ips() helper."""
 

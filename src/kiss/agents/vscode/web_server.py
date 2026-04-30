@@ -1531,7 +1531,7 @@ class RemoteAccessServer:
         def _read_stderr() -> str | None:
             for line in iter(stderr_fd.readline, ""):
                 match = re.search(
-                    r"(https://[^\s]+\.trycloudflare\.com)", line,
+                    r"(https://(?!api\.)[^\s]+\.trycloudflare\.com)", line,
                 )
                 if match:
                     return match.group(1)
