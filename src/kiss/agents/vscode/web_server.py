@@ -1878,10 +1878,6 @@ def main() -> None:  # pragma: no cover — CLI entry point
         "--url", action="store_true",
         help="Print the active remote URL and exit",
     )
-    parser.add_argument(
-        "--tunnel", action=argparse.BooleanOptionalAction, default=True,
-        help="Start cloudflared tunnel (default: on, use --no-tunnel to disable)",
-    )
     parser.add_argument("--workdir", default=None, help="Working directory")
     args = parser.parse_args()
 
@@ -1896,7 +1892,7 @@ def main() -> None:  # pragma: no cover — CLI entry point
         tunnel_token = cfg.get("tunnel_token")
 
     server = RemoteAccessServer(
-        use_tunnel=args.tunnel,
+        use_tunnel=True,
         tunnel_token=tunnel_token or None,
         work_dir=args.workdir,
     )
