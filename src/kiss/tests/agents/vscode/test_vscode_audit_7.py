@@ -23,6 +23,7 @@ import asyncio
 import json
 import shutil
 import socket
+import ssl
 import tempfile
 import unittest
 from pathlib import Path
@@ -80,12 +81,15 @@ class TestStartAsyncPublishesRemoteUrl(IsolatedAsyncioTestCase):
 
     async def test_start_async_writes_url_file_and_remote_url_event(self) -> None:
         """A real async server publishes local URL metadata and broadcasts it."""
-        expected_url = f"http://localhost:{self.port}"
+        expected_url = f"https://localhost:{self.port}"
         self.assertTrue(_URL_FILE.is_file())
         self.assertEqual(json.loads(_URL_FILE.read_text())["local"], expected_url)
         self.assertEqual(self.server._active_url, expected_url)
 
-        async with connect(f"ws://127.0.0.1:{self.port}/ws") as ws:
+        no_verify = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        no_verify.check_hostname = False
+        no_verify.verify_mode = ssl.CERT_NONE
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=no_verify) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             auth = json.loads(await asyncio.wait_for(ws.recv(), timeout=3))
             self.assertEqual(auth["type"], "auth_ok")

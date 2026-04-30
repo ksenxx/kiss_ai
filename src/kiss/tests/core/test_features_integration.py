@@ -361,6 +361,10 @@ class TestApiKeySetupAndDeletion:
         # Clear all API key env vars for isolation
         for k in API_KEY_ENV_VARS:
             monkeypatch.delenv(k, raising=False)
+        # Snapshot DEFAULT_CONFIG so _refresh_config() side effects are undone.
+        from kiss.core import config as config_module
+
+        monkeypatch.setattr(config_module, "DEFAULT_CONFIG", config_module.DEFAULT_CONFIG)
 
     def test_save_api_key_sets_env_and_rc(self) -> None:
         """Saving a key writes to RC file AND sets os.environ."""
