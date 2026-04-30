@@ -182,11 +182,6 @@ class _WebMergeState:
         """Number of unresolved hunks."""
         return self.total_hunks - len(self._resolved)
 
-    @property
-    def all_resolved(self) -> bool:
-        """True when every hunk has been accepted or rejected."""
-        return len(self._resolved) >= self.total_hunks
-
     def current(self) -> tuple[int, int] | None:
         """Return (file_idx, hunk_idx) for the current position, or None."""
         if not self._all_hunks:
@@ -201,7 +196,7 @@ class _WebMergeState:
 
     def _seek(self, step: int) -> None:
         """Move *step* (+1 or -1) to the next unresolved hunk."""
-        if self.all_resolved:
+        if not self.remaining:
             return
         for _ in range(len(self._all_hunks)):
             self._pos = (self._pos + step) % len(self._all_hunks)
@@ -1203,6 +1198,12 @@ class RemoteAccessServer:
             logger.debug("WS auth failed", exc_info=True)
             return False
 
+    async def _run_cmd(self, cmd: dict[str, Any]) -> None:
+        """Run a backend command in the thread-pool executor."""
+        await asyncio.get_event_loop().run_in_executor(
+            None, self._vscode_server._handle_command, cmd,
+        )
+
     async def _ws_handler(self, websocket: ServerConnection) -> None:
         """Handle a WebSocket client connection.
 
@@ -1232,8 +1233,7 @@ class RemoteAccessServer:
                     await self._handle_submit(cmd)
                     continue
                 if cmd_type == "getWelcomeSuggestions":
-                    self._handle_welcome_suggestions()
-                    self._handle_remote_url()
+                    self._send_welcome_info()
                     continue
                 if cmd_type == "mergeAction":
                     action = cmd.get("action", "")
@@ -1245,10 +1245,7 @@ class RemoteAccessServer:
                 # extension normally rewrites before they reach the
                 # Python backend.
                 cmd = _translate_webview_command(cmd)
-                loop = asyncio.get_event_loop()
-                await loop.run_in_executor(
-                    None, self._vscode_server._handle_command, cmd
-                )
+                await self._run_cmd(cmd)
         except websockets.exceptions.ConnectionClosed:
             pass
         except Exception:
@@ -1298,6 +1295,11 @@ class RemoteAccessServer:
         if url:
             self._printer.broadcast({"type": "remote_url", "url": url})
 
+    def _send_welcome_info(self) -> None:
+        """Broadcast welcome suggestions and the remote URL."""
+        self._handle_welcome_suggestions()
+        self._handle_remote_url()
+
     async def _handle_ready(
         self, cmd: dict[str, Any], websocket: ServerConnection,
     ) -> None:
@@ -1313,13 +1315,9 @@ class RemoteAccessServer:
             websocket: The client connection (for direct replies).
         """
         tab_id = cmd.get("tabId", "")
-        loop = asyncio.get_event_loop()
         for init_cmd in ("getModels", "getInputHistory", "getConfig"):
-            await loop.run_in_executor(
-                None, self._vscode_server._handle_command, {"type": init_cmd},
-            )
-        self._handle_welcome_suggestions()
-        self._handle_remote_url()
+            await self._run_cmd({"type": init_cmd})
+        self._send_welcome_info()
         try:
             await websocket.send(
                 json.dumps({"type": "focusInput", "tabId": tab_id})
@@ -1329,9 +1327,7 @@ class RemoteAccessServer:
         for rt in cmd.get("restoredTabs") or []:
             chat_id = rt.get("chatId", "")
             if chat_id:
-                await loop.run_in_executor(
-                    None,
-                    self._vscode_server._handle_command,
+                await self._run_cmd(
                     {"type": "resumeSession", "chatId": chat_id,
                      "tabId": rt.get("tabId", "")},
                 )
@@ -1364,10 +1360,7 @@ class RemoteAccessServer:
         }
         if "skipMerge" in cmd:
             run_cmd["skipMerge"] = cmd["skipMerge"]
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            None, self._vscode_server._handle_command, run_cmd,
-        )
+        await self._run_cmd(run_cmd)
 
     def _register_merge_state(
         self, tab_id: str, merge_data: dict[str, Any],
@@ -1471,11 +1464,9 @@ class RemoteAccessServer:
         })
 
         # When all hunks resolved, finish the merge via backend
-        if state.all_resolved:
+        if not state.remaining:
             del self._merge_states[tab_id]
-            await loop.run_in_executor(
-                None,
-                self._vscode_server._handle_command,
+            await self._run_cmd(
                 {"type": "mergeAction", "action": "all-done", "tabId": tab_id},
             )
 
@@ -1637,12 +1628,10 @@ class RemoteAccessServer:
         )
         if tunnel_url:
             logger.info("Tunnel restarted: %s", tunnel_url)
-            _save_url_file(self._local_url, tunnel_url)
-            self._active_url = tunnel_url
         else:
             logger.warning("Failed to restart tunnel")
-            _save_url_file(self._local_url)
-            self._active_url = self._local_url
+        _save_url_file(self._local_url, tunnel_url)
+        self._active_url = tunnel_url or self._local_url
 
     async def _ping_one_ws(self, ws: Any) -> None:
         """Send a ping to a single WebSocket client, closing if stale."""
@@ -1751,7 +1740,7 @@ class RemoteAccessServer:
 
         tunnel_url: str | None = None
         if self.use_tunnel:
-            tunnel_url = await asyncio.get_event_loop().run_in_executor(
+            tunnel_url = await self._loop.run_in_executor(  # type: ignore[union-attr]
                 None, self._start_tunnel,
             )
 
