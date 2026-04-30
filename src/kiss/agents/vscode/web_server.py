@@ -40,11 +40,14 @@ import json
 import logging
 import mimetypes
 import os
+import re
+import shutil
 import socket
 import ssl
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -276,12 +279,8 @@ def _reject_all_hunks_in_file(file_data: dict[str, Any]) -> None:
         file_data: File entry from merge data with ``base`` and
             ``current`` path strings.
     """
-    import shutil
-
-    base = file_data["base"]
-    current = file_data["current"]
-    if Path(base).is_file():
-        shutil.copy2(base, current)
+    if Path(file_data["base"]).is_file():
+        shutil.copy2(file_data["base"], file_data["current"])
 
 #: Commands that are VS-Code-UI-specific and have no backend handler.
 _VSCODE_ONLY_COMMANDS = frozenset({
@@ -1156,10 +1155,11 @@ class RemoteAccessServer:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ws_server: Any = None
         self._watchdog_task: asyncio.Task[None] | None = None
+        self._local_url = f"https://localhost:{self.port}"
         self._merge_states: dict[str, _WebMergeState] = {}
         self._printer._merge_state_callback = self._register_merge_state
         self._active_url: str | None = None
-        self._last_ips: frozenset[str] = _get_local_ips()
+        self._last_ips: frozenset[str] = frozenset()
         self._ip_watchdog_task: asyncio.Task[None] | None = None
 
     # -- HTTP handler -------------------------------------------------------
@@ -1310,7 +1310,7 @@ class RemoteAccessServer:
         if not url:
             url = _discover_tunnel_url_from_metrics()
             if url:
-                _save_url_file(f"https://localhost:{self.port}", url)
+                _save_url_file(self._local_url, url)
                 self._active_url = url
 
         if url:
@@ -1435,6 +1435,7 @@ class RemoteAccessServer:
         if state is None:
             return  # no active merge for this tab
 
+        loop = asyncio.get_event_loop()
         if action == "accept":
             cur = state.current()
             if cur is not None:
@@ -1446,7 +1447,7 @@ class RemoteAccessServer:
                 fi, hi = cur
                 fd = state.files[fi]
                 hunk = fd["hunks"][hi]
-                await asyncio.get_event_loop().run_in_executor(
+                await loop.run_in_executor(
                     None, _reject_hunk_in_file, fd["current"], fd["base"], hunk,
                 )
                 # Adjust subsequent hunks' cs offsets in the same file
@@ -1472,7 +1473,7 @@ class RemoteAccessServer:
             if cur is not None:
                 fi = cur[0]
                 fd = state.files[fi]
-                await asyncio.get_event_loop().run_in_executor(
+                await loop.run_in_executor(
                     None, _reject_all_hunks_in_file, fd,
                 )
                 for hi in state.unresolved_in_file(fi):
@@ -1489,7 +1490,7 @@ class RemoteAccessServer:
                 state.mark_resolved(fi, hi)
             for fi in unresolved_files:
                 fd = state.files[fi]
-                await asyncio.get_event_loop().run_in_executor(
+                await loop.run_in_executor(
                     None, _reject_all_hunks_in_file, fd,
                 )
 
@@ -1504,7 +1505,6 @@ class RemoteAccessServer:
         # When all hunks resolved, finish the merge via backend
         if state.all_resolved:
             del self._merge_states[tab_id]
-            loop = asyncio.get_event_loop()
             await loop.run_in_executor(
                 None,
                 self._vscode_server._handle_command,
@@ -1556,18 +1556,14 @@ class RemoteAccessServer:
         Returns:
             The public ``https://`` URL, or None on failure.
         """
-        import re
-        import time
-
-        cmd = [
-            "cloudflared",
-            "tunnel",
-            "--url",
-            f"https://localhost:{self.port}",
-            "--no-tls-verify",
-        ]
         self._tunnel_proc = subprocess.Popen(
-            cmd,
+            [
+                "cloudflared",
+                "tunnel",
+                "--url",
+                self._local_url,
+                "--no-tls-verify",
+            ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -1577,29 +1573,23 @@ class RemoteAccessServer:
         # cloudflared prints the URL during startup, but the format
         # can vary across versions.  After it finishes printing
         # startup messages, readline() blocks forever.
-        url: str | None = None
         deadline = time.monotonic() + 30
         stderr_fd = self._tunnel_proc.stderr
         assert stderr_fd is not None  # guaranteed by PIPE
+        result_box: list[str | None] = [None]
 
-        def _read_stderr() -> str | None:
+        def _reader_target() -> None:
             for line in iter(stderr_fd.readline, ""):
                 match = re.search(
                     r"(https://(?!api\.)[^\s]+\.trycloudflare\.com)", line,
                 )
                 if match:
-                    return match.group(1)
+                    result_box[0] = match.group(1)
+                    return
                 if self._tunnel_proc is None:
                     break
                 if self._tunnel_proc.poll() is not None:
                     break
-            return None
-
-        reader = threading.Thread(target=lambda: None, daemon=True)
-        result_box: list[str | None] = [None]
-
-        def _reader_target() -> None:
-            result_box[0] = _read_stderr()
 
         reader = threading.Thread(target=_reader_target, daemon=True)
         reader.start()
@@ -1631,8 +1621,6 @@ class RemoteAccessServer:
         Returns:
             The public ``https://`` URL, or None on failure.
         """
-        import re
-
         self._tunnel_proc = subprocess.Popen(
             ["cloudflared", "tunnel", "run", "--token", self.tunnel_token or ""],
             stdout=subprocess.PIPE,
@@ -1679,15 +1667,14 @@ class RemoteAccessServer:
         tunnel_url = await asyncio.get_event_loop().run_in_executor(
             None, self._start_tunnel,
         )
-        local_url = f"https://localhost:{self.port}"
         if tunnel_url:
             logger.info("Tunnel restarted: %s", tunnel_url)
-            _save_url_file(local_url, tunnel_url)
+            _save_url_file(self._local_url, tunnel_url)
             self._active_url = tunnel_url
         else:
             logger.warning("Failed to restart tunnel")
-            _save_url_file(local_url)
-            self._active_url = local_url
+            _save_url_file(self._local_url)
+            self._active_url = self._local_url
 
     async def _tunnel_watchdog(self) -> None:
         """Periodically monitor the tunnel process and restart if needed.
@@ -1756,14 +1743,11 @@ class RemoteAccessServer:
 
     # -- Server lifecycle ---------------------------------------------------
 
-    async def _setup_server(self) -> str:
+    async def _setup_server(self) -> None:
         """Shared setup for both blocking and async server start.
 
         Binds the WebSocket server, starts the tunnel (if enabled),
         saves the URL file, and starts watchdog tasks.
-
-        Returns:
-            The local ``scheme://localhost:PORT`` URL string.
         """
         self._loop = asyncio.get_event_loop()
         self._printer._loop = self._loop
@@ -1779,43 +1763,30 @@ class RemoteAccessServer:
             create_connection=_HeadAwareServerConnection,
         )
 
-        local_url = f"https://localhost:{self.port}"
-
         tunnel_url: str | None = None
         if self.use_tunnel:
             tunnel_url = await asyncio.get_event_loop().run_in_executor(
                 None, self._start_tunnel,
             )
-
-        _save_url_file(local_url, tunnel_url)
-        self._active_url = tunnel_url or local_url
-
-        if self.use_tunnel:
             self._watchdog_task = asyncio.create_task(self._tunnel_watchdog())
+
+        _save_url_file(self._local_url, tunnel_url)
+        self._active_url = tunnel_url or self._local_url
 
         self._last_ips = _get_local_ips()
         self._ip_watchdog_task = asyncio.create_task(self._ip_watchdog())
-        return local_url
 
     async def _serve_async(self) -> None:
         """Internal async entry point for the server."""
-        local_url = await self._setup_server()
-        print(f"KISS Sorcar remote access: {local_url}", file=sys.stderr)
+        await self._setup_server()
+        print(f"KISS Sorcar remote access: {self._local_url}", file=sys.stderr)
 
-        tunnel_url = (
-            self._active_url if self._active_url != local_url else None
-        )
         if self.use_tunnel:
+            tunnel_url = self._active_url if self._active_url != self._local_url else None
             if tunnel_url:
-                print(
-                    f"Cloudflare tunnel:         {tunnel_url}",
-                    file=sys.stderr,
-                )
+                print(f"Cloudflare tunnel:         {tunnel_url}", file=sys.stderr)
             else:
-                print(
-                    "Warning: cloudflared tunnel failed to start",
-                    file=sys.stderr,
-                )
+                print("Warning: cloudflared tunnel failed to start", file=sys.stderr)
 
         await self._ws_server.serve_forever()  # type: ignore[union-attr]
 
