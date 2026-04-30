@@ -114,6 +114,24 @@ async function ensureDependenciesImpl(): Promise<void> {
   }
   log(`KISS project: ${kissProjectPath}`);
 
+  // Early exit: when all dependencies are fully installed, the daemon is
+  // running, and no extension update is pending, skip all setup work.
+  // This avoids the 162 MB Playwright re-download, daemon restart, and
+  // CLI script rewrite that previously ran on every VS Code activation.
+  const updateMarker = path.join(LOG_DIR, '.extension-updated');
+  if (
+    findUvPath() &&
+    fs.existsSync(path.join(kissProjectPath, '.venv')) &&
+    isChromiumInstalled() &&
+    isDaemonRunning() &&
+    !fs.existsSync(updateMarker)
+  ) {
+    log('All dependencies satisfied and daemon running — nothing to do');
+    log('=== Dependency check finished ===');
+    loadApiKeysFromShellRc();
+    return;
+  }
+
   let uvPath = findUvPath();
   let venvExists = fs.existsSync(path.join(kissProjectPath, '.venv'));
 
@@ -141,7 +159,7 @@ async function ensureDependenciesImpl(): Promise<void> {
   // Check if build-extension.sh just ran (marker file written by the script).
   // When the marker exists, always show the restart notification — even on
   // the fast path where uv + .venv are already present.
-  const updateMarker = path.join(LOG_DIR, '.extension-updated');
+  // (updateMarker is declared above for the early-exit guard.)
   let showRestartNotification = false;
   if (fs.existsSync(updateMarker)) {
     showRestartNotification = true;
@@ -728,6 +746,21 @@ function playwrightBrowsersPath(): string {
     );
   }
   return path.join(HOME_DIR, '.cache', 'ms-playwright');
+}
+
+/**
+ * Check if the kiss-web daemon is running by probing port 8787.
+ * Returns true if port 8787 has a listener (macOS/Linux only).
+ * On Windows the daemon is not supported, so always returns false.
+ */
+function isDaemonRunning(): boolean {
+  if (process.platform === 'win32') return false;
+  try {
+    execSync('lsof -i :8787 -t', {stdio: 'ignore', timeout: 3000});
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

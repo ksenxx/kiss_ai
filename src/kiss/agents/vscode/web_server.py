@@ -1,10 +1,11 @@
 """Standalone web server for remote KISS Sorcar access.
 
-Provides HTTP + WebSocket access to the Sorcar chat interface from any
+Provides HTTPS + WSS access to the Sorcar chat interface from any
 browser, including mobile devices.  Uses the ``websockets`` library to
-serve both HTTP (for the HTML page and static media assets) and
-WebSocket (for bidirectional command/event communication) on a single
-port.
+serve both HTTPS (for the HTML page and static media assets) and
+WSS (for bidirectional command/event communication) on a single port.
+TLS is always enabled; a self-signed certificate is auto-generated in
+``~/.kiss/tls/`` when no explicit certificate is provided.
 
 Authentication uses the ``remote_password`` setting from
 ``~/.kiss/config.json``.  An optional ``cloudflared`` tunnel can
@@ -15,9 +16,9 @@ By default (no token), a **quick-tunnel** is used, which assigns a
 random ``*.trycloudflare.com`` URL that changes on every restart.  To
 get a **fixed** (non-dynamic) URL, create a named tunnel in the
 `Cloudflare Zero Trust dashboard <https://one.dash.cloudflare.com/>`_,
-copy its token, and pass it via ``--tunnel-token``, the
-``CLOUDFLARE_TUNNEL_TOKEN`` environment variable, or the
-``tunnel_token`` key in ``~/.kiss/config.json``.
+copy its token, and set it via the ``CLOUDFLARE_TUNNEL_TOKEN``
+environment variable or the ``tunnel_token`` key in
+``~/.kiss/config.json``.
 
 Usage::
 
@@ -35,15 +36,20 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import ipaddress
 import json
 import logging
 import mimetypes
 import os
+import re
+import shutil
 import socket
 import ssl
 import subprocess
 import sys
 import threading
+import time
+import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -63,15 +69,77 @@ logger = logging.getLogger(__name__)
 
 MEDIA_DIR = Path(__file__).parent / "media"
 
-#: How often (in seconds) the tunnel watchdog checks process health.
+#: How often (in seconds) the unified watchdog runs.  Each tick checks
+#: tunnel health, IP address changes, and pings WebSocket clients.
 TUNNEL_CHECK_INTERVAL = 30
 
-#: WebSocket ping interval in seconds.  After sleep/wake, dead
-#: connections are detected within ping_interval + ping_timeout.
-_WS_PING_INTERVAL = 10
-
-#: WebSocket pong timeout in seconds.
+#: WebSocket pong timeout in seconds.  Connections that fail to respond
+#: to a ping within this window are closed as stale.
 _WS_PING_TIMEOUT = 10
+
+#: HTTP 200 response for HEAD health checks from cloudflared.
+_HEAD_200 = (
+    b"HTTP/1.1 200 OK\r\n"
+    b"Content-Length: 0\r\n"
+    b"Connection: close\r\n"
+    b"\r\n"
+)
+
+
+class _HeadAwareServerConnection(ServerConnection):
+    """``ServerConnection`` subclass that handles HEAD health checks.
+
+    The ``websockets`` library only accepts GET requests (for WebSocket
+    upgrade handshakes).  Cloudflare tunnels send HEAD requests to check
+    origin health.  Without this handler, those HEAD requests cause
+    parse errors, Cloudflare marks the tunnel as unhealthy, and the
+    tunnel URL stops resolving (NXDOMAIN).
+
+    Intercepts incoming data before the websockets parser sees it.  If
+    the first HTTP request line is ``HEAD …``, responds with 200 OK and
+    closes the connection.  All other requests pass through normally.
+    """
+
+    def __init__(
+        self,
+        protocol: Any,
+        server: Any,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(protocol, server, **kwargs)
+        self._head_buffer: bytes = b""
+        self._head_checked: bool = False
+
+    def data_received(self, data: bytes) -> None:
+        """Intercept HEAD requests before the websockets parser.
+
+        Buffers incoming bytes until the first HTTP request line is
+        complete.  If it starts with ``HEAD ``, writes a 200 OK and
+        closes.  Otherwise, feeds all buffered data to the normal
+        websockets pipeline.
+
+        Args:
+            data: Raw bytes from the transport.
+        """
+        if self._head_checked:
+            super().data_received(data)
+            return
+        self._head_buffer += data
+        idx = self._head_buffer.find(b"\r\n")
+        if idx == -1:
+            return  # first line not yet complete
+        self._head_checked = True
+        first_line = self._head_buffer[:idx]
+        if first_line.startswith(b"HEAD "):
+            transport = self.transport
+            if transport is not None:
+                transport.write(_HEAD_200)
+                transport.close()
+            return
+        # Not a HEAD request — replay buffered data through normal path
+        buffered = self._head_buffer
+        self._head_buffer = b""
+        super().data_received(buffered)
 
 
 # ---------------------------------------------------------------------------
@@ -96,11 +164,11 @@ class _WebMergeState:
 
     def __init__(self, merge_data: dict[str, Any]) -> None:
         self.files: list[dict[str, Any]] = merge_data.get("files", [])
-        # Flat list of (file_idx, hunk_idx) for navigation
-        self._all_hunks: list[tuple[int, int]] = []
-        for fi, f in enumerate(self.files):
-            for hi in range(len(f.get("hunks", []))):
-                self._all_hunks.append((fi, hi))
+        self._all_hunks: list[tuple[int, int]] = [
+            (fi, hi)
+            for fi, f in enumerate(self.files)
+            for hi in range(len(f.get("hunks", [])))
+        ]
         self._pos = 0  # index into _all_hunks
         self._resolved: set[tuple[int, int]] = set()
 
@@ -114,11 +182,6 @@ class _WebMergeState:
         """Number of unresolved hunks."""
         return self.total_hunks - len(self._resolved)
 
-    @property
-    def all_resolved(self) -> bool:
-        """True when every hunk has been accepted or rejected."""
-        return len(self._resolved) >= self.total_hunks
-
     def current(self) -> tuple[int, int] | None:
         """Return (file_idx, hunk_idx) for the current position, or None."""
         if not self._all_hunks:
@@ -131,25 +194,22 @@ class _WebMergeState:
         """Mark a hunk as resolved."""
         self._resolved.add((fi, hi))
 
-    def advance(self) -> None:
-        """Move to the next unresolved hunk."""
-        if self.all_resolved:
+    def _seek(self, step: int) -> None:
+        """Move *step* (+1 or -1) to the next unresolved hunk."""
+        if not self.remaining:
             return
-        start = self._pos
         for _ in range(len(self._all_hunks)):
-            self._pos = (self._pos + 1) % len(self._all_hunks)
+            self._pos = (self._pos + step) % len(self._all_hunks)
             if self._all_hunks[self._pos] not in self._resolved:
                 return
-        self._pos = start
+
+    def advance(self) -> None:
+        """Move to the next unresolved hunk."""
+        self._seek(1)
 
     def go_prev(self) -> None:
         """Move to the previous unresolved hunk."""
-        if self.all_resolved:
-            return
-        for _ in range(len(self._all_hunks)):
-            self._pos = (self._pos - 1) % len(self._all_hunks)
-            if self._all_hunks[self._pos] not in self._resolved:
-                return
+        self._seek(-1)
 
     def unresolved_in_file(self, fi: int) -> list[int]:
         """Return hunk indices not yet resolved for file *fi*."""
@@ -192,13 +252,11 @@ def _reject_hunk_in_file(
     except OSError:
         base_lines = []
 
-    cs = hunk["cs"]
-    cc = hunk["cc"]
-    bs = hunk["bs"]
-    bc = hunk["bc"]
-
-    # Replace current lines [cs:cs+cc] with base lines [bs:bs+bc]
-    new_lines = cur_lines[:cs] + base_lines[bs : bs + bc] + cur_lines[cs + cc :]
+    new_lines = (
+        cur_lines[: hunk["cs"]]
+        + base_lines[hunk["bs"] : hunk["bs"] + hunk["bc"]]
+        + cur_lines[hunk["cs"] + hunk["cc"] :]
+    )
     Path(current_path).write_text("".join(new_lines))
 
 
@@ -211,16 +269,12 @@ def _reject_all_hunks_in_file(file_data: dict[str, Any]) -> None:
         file_data: File entry from merge data with ``base`` and
             ``current`` path strings.
     """
-    import shutil
-
-    base = file_data["base"]
-    current = file_data["current"]
-    if Path(base).is_file():
-        shutil.copy2(base, current)
+    if Path(file_data["base"]).is_file():
+        shutil.copy2(file_data["base"], file_data["current"])
 
 #: Commands that are VS-Code-UI-specific and have no backend handler.
 _VSCODE_ONLY_COMMANDS = frozenset({
-    "closeSecondaryBar",
+
     "focusEditor",
     "webviewFocusChanged",
     "openFile",
@@ -246,8 +300,6 @@ def _discover_tunnel_url_from_metrics() -> str | None:
     Returns:
         The ``https://`` tunnel URL, or None if unavailable.
     """
-    import urllib.request
-
     try:
         result = subprocess.run(
             ["pgrep", "-a", "cloudflared"],
@@ -258,22 +310,18 @@ def _discover_tunnel_url_from_metrics() -> str | None:
     except Exception:
         return None
 
-    # Look for --metrics port in command lines, or try known default ports
-    metrics_ports: list[int] = []
+    # Look for --metrics port in command lines, then try default ports.
+    # Use dict.fromkeys for insertion-ordered dedup.
+    parsed: list[int] = []
     for line in result.stdout.splitlines():
         parts = line.split()
         for i, p in enumerate(parts):
             if p == "--metrics" and i + 1 < len(parts):
                 try:
-                    port = int(parts[i + 1].rsplit(":", 1)[-1])
-                    metrics_ports.append(port)
+                    parsed.append(int(parts[i + 1].rsplit(":", 1)[-1]))
                 except (ValueError, IndexError):
                     pass
-
-    # Also try commonly used metrics ports
-    for port in range(20240, 20260):
-        if port not in metrics_ports:
-            metrics_ports.append(port)
+    metrics_ports = list(dict.fromkeys(parsed + list(range(20240, 20260))))
 
     for port in metrics_ports:
         try:
@@ -284,7 +332,7 @@ def _discover_tunnel_url_from_metrics() -> str | None:
             with urllib.request.urlopen(req, timeout=2) as resp:
                 data = json.loads(resp.read())
                 hostname = data.get("hostname", "")
-                if hostname:
+                if hostname and not hostname.startswith("api."):
                     return f"https://{hostname}"
         except Exception:
             continue
@@ -354,22 +402,15 @@ def _print_url() -> None:
     Exits with code 1 if the server is not running or the file is
     missing.
     """
-    if not _URL_FILE.is_file():
-        print("KISS Sorcar web server is not running.", file=sys.stderr)
-        sys.exit(1)
     try:
-        data = json.loads(_URL_FILE.read_text())
+        data = json.loads(_URL_FILE.read_text()) if _URL_FILE.is_file() else {}
     except (json.JSONDecodeError, OSError):
-        print("KISS Sorcar web server is not running.", file=sys.stderr)
-        sys.exit(1)
-    tunnel = data.get("tunnel")
-    local = data.get("local", "")
-    if tunnel:
-        print(tunnel)
-    elif local:
-        print(local)
+        data = {}
+    url = data.get("tunnel") or data.get("local")
+    if url:
+        print(url)
     else:
-        print("No URL available.", file=sys.stderr)
+        print("KISS Sorcar web server is not running.", file=sys.stderr)
         sys.exit(1)
 
 
@@ -412,20 +453,16 @@ def _generate_self_signed_cert(
             x509.SubjectAlternativeName([
                 x509.DNSName("localhost"),
                 x509.DNSName("*.local"),
-                x509.IPAddress(
-                    __import__("ipaddress").IPv4Address("127.0.0.1")
-                ),
-                x509.IPAddress(
-                    __import__("ipaddress").IPv6Address("::1")
-                ),
+                x509.IPAddress(ipaddress.IPv4Address("127.0.0.1")),
+                x509.IPAddress(ipaddress.IPv6Address("::1")),
             ]),
             critical=False,
         )
         .sign(key, hashes.SHA256())
     )
 
-    cert_path.parent.mkdir(parents=True, exist_ok=True)
-    key_path.parent.mkdir(parents=True, exist_ok=True)
+    for d in {cert_path.parent, key_path.parent}:
+        d.mkdir(parents=True, exist_ok=True)
 
     key_path.write_bytes(
         key.private_bytes(
@@ -855,15 +892,10 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
 
 
 def _read_version() -> str:
-    """Read the KISS project version from ``_version.py``.
-
-    Returns:
-        The version string, or ``""`` if it cannot be read.
-    """
+    """Read the KISS project version from ``_version.py``."""
     try:
         vfile = Path(__file__).parent.parent.parent / "_version.py"
-        text = vfile.read_text()
-        for line in text.splitlines():
+        for line in vfile.read_text().splitlines():
             if line.startswith("__version__"):
                 return line.split("=", 1)[1].strip().strip("\"'")
     except Exception:
@@ -901,8 +933,7 @@ _WS_SHIM_JS = r"""
   };
 
   function connect() {
-    var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    _ws = new WebSocket(proto + '//' + location.host + '/ws');
+    _ws = new WebSocket('wss://' + location.host + '/ws');
     _authenticated = false;
 
     _ws.onopen = function() {
@@ -955,10 +986,9 @@ def _http_response(status: int, content_type: str, body: bytes) -> Response:
     Returns:
         A websockets ``Response`` with Content-Length and Connection headers.
     """
-    reason = "OK" if status == 200 else "Not Found"
     return Response(
         status,
-        reason,
+        "OK" if status == 200 else "Not Found",
         Headers([
             ("Content-Type", content_type),
             ("Content-Length", str(len(body))),
@@ -1039,28 +1069,25 @@ def _translate_webview_command(cmd: dict[str, Any]) -> dict[str, Any]:
 class RemoteAccessServer:
     """Web server providing remote browser access to KISS Sorcar.
 
-    Serves the Sorcar chat webview over HTTP and bridges commands/events
-    over WebSocket.  Optionally starts a ``cloudflared`` tunnel so the
-    server is reachable from the public internet without manual
-    port-forwarding or DNS setup.
+    Serves the Sorcar chat webview over HTTPS and bridges commands/events
+    over WSS.  TLS is always enabled; a self-signed certificate is
+    auto-generated in ``~/.kiss/tls/`` when *certfile*/*keyfile* are not
+    provided.  Optionally starts a ``cloudflared`` tunnel so the server
+    is reachable from the public internet without manual port-forwarding
+    or DNS setup.
 
     When *tunnel_token* is provided, a **named tunnel** is used, giving
     a fixed URL that persists across restarts.  Without a token, a
     quick-tunnel is created with a random ``*.trycloudflare.com`` URL.
 
-    When *tls* is True, the server uses HTTPS and WSS to encrypt all
-    LAN traffic.  If *certfile*/*keyfile* are not provided, a
-    self-signed certificate is auto-generated in ``~/.kiss/tls/``.
-
     Args:
         host: Bind address (default ``"0.0.0.0"`` for all interfaces).
-        port: TCP port for both HTTP and WebSocket (default ``8787``).
+        port: TCP port for both HTTPS and WSS (default ``8787``).
         use_tunnel: If True, start a ``cloudflared`` tunnel on launch.
         tunnel_token: Cloudflare named-tunnel token for a fixed URL.
             When set, ``cloudflared tunnel run --token <TOKEN>`` is
             used instead of a quick-tunnel.
         work_dir: Working directory for the agent (default cwd).
-        tls: If True, serve over HTTPS/WSS with TLS encryption.
         certfile: Path to a PEM certificate file for TLS.
         keyfile: Path to a PEM private key file for TLS.
     """
@@ -1072,7 +1099,6 @@ class RemoteAccessServer:
         use_tunnel: bool = False,
         tunnel_token: str | None = None,
         work_dir: str | None = None,
-        tls: bool = False,
         certfile: str | None = None,
         keyfile: str | None = None,
     ) -> None:
@@ -1082,10 +1108,7 @@ class RemoteAccessServer:
         self.port = port
         self.use_tunnel = use_tunnel
         self.tunnel_token = tunnel_token
-        self._ssl_context: ssl.SSLContext | None = None
-
-        if tls or certfile or keyfile:
-            self._ssl_context = _create_ssl_context(certfile, keyfile)
+        self._ssl_context: ssl.SSLContext = _create_ssl_context(certfile, keyfile)
 
         if work_dir:
             os.environ["KISS_WORKDIR"] = work_dir
@@ -1099,11 +1122,11 @@ class RemoteAccessServer:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ws_server: Any = None
         self._watchdog_task: asyncio.Task[None] | None = None
+        self._local_url = f"https://localhost:{self.port}"
         self._merge_states: dict[str, _WebMergeState] = {}
         self._printer._merge_state_callback = self._register_merge_state
         self._active_url: str | None = None
-        self._last_ips: frozenset[str] = _get_local_ips()
-        self._ip_watchdog_task: asyncio.Task[None] | None = None
+        self._last_ips: frozenset[str] = frozenset()
 
     # -- HTTP handler -------------------------------------------------------
 
@@ -1125,21 +1148,54 @@ class RemoteAccessServer:
         path = request.path
         if path == "/" or path == "":
             return _http_response(200, "text/html; charset=utf-8", self._html_bytes)
+        if path == "/ws":
+            return None  # proceed to WebSocket
         if path.startswith("/media/"):
-            filename = path[7:]
-            filepath = MEDIA_DIR / filename
+            filepath = MEDIA_DIR / path[7:]
             if (
                 filepath.resolve().is_relative_to(MEDIA_DIR.resolve())
                 and filepath.is_file()
             ):
                 ctype = mimetypes.guess_type(str(filepath))[0] or "application/octet-stream"
                 return _http_response(200, ctype, filepath.read_bytes())
-            return _http_response(404, "text/plain", b"Not Found")
-        if path == "/ws":
-            return None  # proceed to WebSocket
         return _http_response(404, "text/plain", b"Not Found")
 
     # -- WebSocket handler --------------------------------------------------
+
+    async def _authenticate_ws(self, websocket: ServerConnection) -> bool:
+        """Authenticate a WebSocket client using the configured password.
+
+        Returns True on success, False (and closes the socket) on failure.
+        """
+        password = load_config().get("remote_password", "")
+        try:
+            raw = await asyncio.wait_for(websocket.recv(), timeout=30)
+            msg = json.loads(raw)
+            if msg.get("type") != "auth":
+                await websocket.close()
+                return False
+            if password and msg.get("password") != password:
+                await websocket.send(json.dumps({"type": "auth_required"}))
+                raw2 = await asyncio.wait_for(websocket.recv(), timeout=60)
+                msg2 = json.loads(raw2)
+                if msg2.get("type") != "auth" or msg2.get("password") != password:
+                    await websocket.send(
+                        json.dumps({"type": "error", "text": "Authentication failed"})
+                    )
+                    await websocket.close()
+                    return False
+            await websocket.send(json.dumps({"type": "auth_ok"}))
+            return True
+        except Exception:
+            logger.debug("WS auth failed", exc_info=True)
+            return False
+
+    async def _run_cmd(self, cmd: dict[str, Any]) -> None:
+        """Run a backend command in the thread-pool executor."""
+        assert self._loop is not None
+        await self._loop.run_in_executor(
+            None, self._vscode_server._handle_command, cmd,
+        )
 
     async def _ws_handler(self, websocket: ServerConnection) -> None:
         """Handle a WebSocket client connection.
@@ -1150,30 +1206,7 @@ class RemoteAccessServer:
         Args:
             websocket: The WebSocket server connection.
         """
-        cfg = load_config()
-        password = cfg.get("remote_password", "")
-
-        # Authentication
-        try:
-            raw = await asyncio.wait_for(websocket.recv(), timeout=30)
-            msg = json.loads(raw)
-            if msg.get("type") != "auth":
-                await websocket.close()
-                return
-            if password and msg.get("password") != password:
-                await websocket.send(json.dumps({"type": "auth_required"}))
-                # Give one more chance
-                raw2 = await asyncio.wait_for(websocket.recv(), timeout=60)
-                msg2 = json.loads(raw2)
-                if msg2.get("type") != "auth" or msg2.get("password") != password:
-                    await websocket.send(
-                        json.dumps({"type": "error", "text": "Authentication failed"})
-                    )
-                    await websocket.close()
-                    return
-            await websocket.send(json.dumps({"type": "auth_ok"}))
-        except Exception:
-            logger.debug("WS auth failed", exc_info=True)
+        if not await self._authenticate_ws(websocket):
             return
 
         self._printer.add_client(websocket)
@@ -1193,8 +1226,7 @@ class RemoteAccessServer:
                     await self._handle_submit(cmd)
                     continue
                 if cmd_type == "getWelcomeSuggestions":
-                    self._handle_welcome_suggestions()
-                    self._handle_remote_url()
+                    self._send_welcome_info()
                     continue
                 if cmd_type == "mergeAction":
                     action = cmd.get("action", "")
@@ -1206,10 +1238,7 @@ class RemoteAccessServer:
                 # extension normally rewrites before they reach the
                 # Python backend.
                 cmd = _translate_webview_command(cmd)
-                loop = asyncio.get_event_loop()
-                await loop.run_in_executor(
-                    None, self._vscode_server._handle_command, cmd
-                )
+                await self._run_cmd(cmd)
         except websockets.exceptions.ConnectionClosed:
             pass
         except Exception:
@@ -1219,44 +1248,35 @@ class RemoteAccessServer:
 
     # -- Webview command translators -----------------------------------------
 
-    def _handle_welcome_suggestions(self) -> None:
-        """Broadcast welcome task suggestions from ``SAMPLE_TASKS.json``.
+    def _send_welcome_info(self) -> None:
+        """Broadcast welcome suggestions and the active remote URL.
 
         Reads the sample tasks file shipped with the extension and
-        broadcasts a ``welcome_suggestions`` event.  Falls back to an
-        empty list if the file is missing or malformed.
+        broadcasts a ``welcome_suggestions`` event (falls back to an
+        empty list if the file is missing).  Then broadcasts the
+        ``remote_url`` event using the in-memory URL, the URL file, or
+        the ``cloudflared`` metrics API as successive fallbacks.
         """
         try:
-            data = json.loads(SAMPLE_TASKS_PATH.read_text())
+            suggestions = json.loads(SAMPLE_TASKS_PATH.read_text())
         except Exception:
-            data = []
-        self._printer.broadcast({"type": "welcome_suggestions", "suggestions": data})
+            suggestions = []
+        self._printer.broadcast({
+            "type": "welcome_suggestions", "suggestions": suggestions,
+        })
 
-    def _handle_remote_url(self) -> None:
-        """Broadcast the active remote URL to web clients.
-
-        Uses the in-memory ``_active_url`` first (set during server
-        startup and tunnel restarts).  Falls back to reading
-        ``~/.kiss/remote-url.json``, then to querying the
-        ``cloudflared`` metrics API directly.  When the fallback
-        succeeds, the URL file is written so subsequent calls are fast.
-        """
         url: str | None = self._active_url
-
         if not url:
             try:
                 data = json.loads(_URL_FILE.read_text())
                 url = data.get("tunnel") or data.get("local", "")
             except Exception:
                 pass
-
         if not url:
             url = _discover_tunnel_url_from_metrics()
             if url:
-                scheme = "https" if self._ssl_context else "http"
-                _save_url_file(f"{scheme}://localhost:{self.port}", url)
+                _save_url_file(self._local_url, url)
                 self._active_url = url
-
         if url:
             self._printer.broadcast({"type": "remote_url", "url": url})
 
@@ -1275,41 +1295,21 @@ class RemoteAccessServer:
             websocket: The client connection (for direct replies).
         """
         tab_id = cmd.get("tabId", "")
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            None,
-            self._vscode_server._handle_command,
-            {"type": "getModels"},
-        )
-        await loop.run_in_executor(
-            None,
-            self._vscode_server._handle_command,
-            {"type": "getInputHistory"},
-        )
-        await loop.run_in_executor(
-            None,
-            self._vscode_server._handle_command,
-            {"type": "getConfig"},
-        )
-        self._handle_welcome_suggestions()
-        self._handle_remote_url()
-        # Send focusInput event back to the client
+        for init_cmd in ("getModels", "getInputHistory", "getConfig"):
+            await self._run_cmd({"type": init_cmd})
+        self._send_welcome_info()
         try:
             await websocket.send(
                 json.dumps({"type": "focusInput", "tabId": tab_id})
             )
         except Exception:
             pass
-        # Replay restored tabs
-        restored = cmd.get("restoredTabs") or []
-        for rt in restored:
+        for rt in cmd.get("restoredTabs") or []:
             chat_id = rt.get("chatId", "")
-            rt_tab = rt.get("tabId", "")
             if chat_id:
-                await loop.run_in_executor(
-                    None,
-                    self._vscode_server._handle_command,
-                    {"type": "resumeSession", "chatId": chat_id, "tabId": rt_tab},
+                await self._run_cmd(
+                    {"type": "resumeSession", "chatId": chat_id,
+                     "tabId": rt.get("tabId", "")},
                 )
 
     async def _handle_submit(self, cmd: dict[str, Any]) -> None:
@@ -1340,10 +1340,7 @@ class RemoteAccessServer:
         }
         if "skipMerge" in cmd:
             run_cmd["skipMerge"] = cmd["skipMerge"]
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            None, self._vscode_server._handle_command, run_cmd,
-        )
+        await self._run_cmd(run_cmd)
 
     def _register_merge_state(
         self, tab_id: str, merge_data: dict[str, Any],
@@ -1379,18 +1376,18 @@ class RemoteAccessServer:
         if state is None:
             return  # no active merge for this tab
 
+        assert self._loop is not None
+        cur = state.current()
         if action == "accept":
-            cur = state.current()
             if cur is not None:
                 state.mark_resolved(*cur)
                 state.advance()
         elif action == "reject":
-            cur = state.current()
             if cur is not None:
                 fi, hi = cur
                 fd = state.files[fi]
                 hunk = fd["hunks"][hi]
-                await asyncio.get_event_loop().run_in_executor(
+                await self._loop.run_in_executor(
                     None, _reject_hunk_in_file, fd["current"], fd["base"], hunk,
                 )
                 # Adjust subsequent hunks' cs offsets in the same file
@@ -1404,21 +1401,14 @@ class RemoteAccessServer:
             state.go_prev()
         elif action == "next":
             state.advance()
-        elif action == "accept-file":
-            cur = state.current()
-            if cur is not None:
-                fi = cur[0]
-                for hi in state.unresolved_in_file(fi):
-                    state.mark_resolved(fi, hi)
-                state.advance()
-        elif action == "reject-file":
-            cur = state.current()
+        elif action in ("accept-file", "reject-file"):
             if cur is not None:
                 fi = cur[0]
                 fd = state.files[fi]
-                await asyncio.get_event_loop().run_in_executor(
-                    None, _reject_all_hunks_in_file, fd,
-                )
+                if action == "reject-file":
+                    await self._loop.run_in_executor(
+                        None, _reject_all_hunks_in_file, fd,
+                    )
                 for hi in state.unresolved_in_file(fi):
                     state.mark_resolved(fi, hi)
                 state.advance()
@@ -1433,7 +1423,7 @@ class RemoteAccessServer:
                 state.mark_resolved(fi, hi)
             for fi in unresolved_files:
                 fd = state.files[fi]
-                await asyncio.get_event_loop().run_in_executor(
+                await self._loop.run_in_executor(
                     None, _reject_all_hunks_in_file, fd,
                 )
 
@@ -1446,12 +1436,9 @@ class RemoteAccessServer:
         })
 
         # When all hunks resolved, finish the merge via backend
-        if state.all_resolved:
+        if not state.remaining:
             del self._merge_states[tab_id]
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(
-                None,
-                self._vscode_server._handle_command,
+            await self._run_cmd(
                 {"type": "mergeAction", "action": "all-done", "tabId": tab_id},
             )
 
@@ -1500,20 +1487,14 @@ class RemoteAccessServer:
         Returns:
             The public ``https://`` URL, or None on failure.
         """
-        import re
-        import time
-
-        scheme = "https" if self._ssl_context else "http"
-        cmd = [
-            "cloudflared",
-            "tunnel",
-            "--url",
-            f"{scheme}://localhost:{self.port}",
-        ]
-        if self._ssl_context:
-            cmd.append("--no-tls-verify")
         self._tunnel_proc = subprocess.Popen(
-            cmd,
+            [
+                "cloudflared",
+                "tunnel",
+                "--url",
+                self._local_url,
+                "--no-tls-verify",
+            ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -1523,33 +1504,26 @@ class RemoteAccessServer:
         # cloudflared prints the URL during startup, but the format
         # can vary across versions.  After it finishes printing
         # startup messages, readline() blocks forever.
-        url: str | None = None
-        deadline = time.monotonic() + 30
         stderr_fd = self._tunnel_proc.stderr
         assert stderr_fd is not None  # guaranteed by PIPE
+        result_box: list[str | None] = [None]
 
-        def _read_stderr() -> str | None:
+        def _reader_target() -> None:
             for line in iter(stderr_fd.readline, ""):
                 match = re.search(
                     r"(https://(?!api\.)[^\s]+\.trycloudflare\.com)", line,
                 )
                 if match:
-                    return match.group(1)
+                    result_box[0] = match.group(1)
+                    return
                 if self._tunnel_proc is None:
                     break
                 if self._tunnel_proc.poll() is not None:
                     break
-            return None
-
-        reader = threading.Thread(target=lambda: None, daemon=True)
-        result_box: list[str | None] = [None]
-
-        def _reader_target() -> None:
-            result_box[0] = _read_stderr()
 
         reader = threading.Thread(target=_reader_target, daemon=True)
         reader.start()
-        reader.join(timeout=max(0, deadline - time.monotonic()))
+        reader.join(timeout=30)
 
         url = result_box[0]
         if url:
@@ -1577,8 +1551,6 @@ class RemoteAccessServer:
         Returns:
             The public ``https://`` URL, or None on failure.
         """
-        import re
-
         self._tunnel_proc = subprocess.Popen(
             ["cloudflared", "tunnel", "run", "--token", self.tunnel_token or ""],
             stdout=subprocess.PIPE,
@@ -1622,51 +1594,53 @@ class RemoteAccessServer:
         rc = self._tunnel_proc.returncode
         logger.info("cloudflared tunnel process died (rc=%s), restarting…", rc)
         self._tunnel_proc = None
-        tunnel_url = await asyncio.get_event_loop().run_in_executor(
+        assert self._loop is not None
+        tunnel_url = await self._loop.run_in_executor(
             None, self._start_tunnel,
         )
-        scheme = "https" if self._ssl_context else "http"
-        local_url = f"{scheme}://localhost:{self.port}"
         if tunnel_url:
             logger.info("Tunnel restarted: %s", tunnel_url)
-            _save_url_file(local_url, tunnel_url)
-            self._active_url = tunnel_url
         else:
             logger.warning("Failed to restart tunnel")
-            _save_url_file(local_url)
-            self._active_url = local_url
+        _save_url_file(self._local_url, tunnel_url)
+        self._active_url = tunnel_url or self._local_url
 
-    async def _tunnel_watchdog(self) -> None:
-        """Periodically monitor the tunnel process and restart if needed.
-
-        When the MacBook lid is closed, the system sleeps and the
-        ``cloudflared`` process may be killed by the OS.  This watchdog
-        detects the dead process after wake and restarts the tunnel so
-        remote access is restored automatically.
-        """
-        while True:
-            await asyncio.sleep(TUNNEL_CHECK_INTERVAL)
+    async def _ping_one_ws(self, ws: Any) -> None:
+        """Send a ping to a single WebSocket client, closing if stale."""
+        try:
+            pong = await ws.ping()
+            await asyncio.wait_for(pong, timeout=_WS_PING_TIMEOUT)
+        except Exception:
             try:
-                await self._check_and_restart_tunnel()
-            except asyncio.CancelledError:
-                raise
+                await ws.close()
             except Exception:
-                logger.debug("Tunnel watchdog error", exc_info=True)
+                pass
 
-    async def _ip_watchdog(self) -> None:
-        """Periodically check for IP address changes and restart the server.
+    async def _watchdog(self) -> None:
+        """Unified periodic watchdog (runs every :data:`TUNNEL_CHECK_INTERVAL`).
 
-        Detects when the host machine's network addresses change (e.g.
-        WiFi network switch, DHCP lease renewal, VPN connect/disconnect)
-        and initiates a graceful shutdown so the daemon manager
-        (launchd / systemd) can restart the process with the new
-        network configuration.
+        Each tick performs three checks:
 
-        Runs alongside the tunnel watchdog and uses the same check
-        interval (:data:`TUNNEL_CHECK_INTERVAL`).
+        1. **Tunnel health** — if the ``cloudflared`` process died
+           (e.g. macOS killed it during sleep), restart it.
+        2. **IP change** — if the host's network addresses changed
+           (WiFi switch, DHCP renewal, VPN), initiate a graceful
+           shutdown so the daemon manager restarts the process.
+        3. **WebSocket ping** — send a ping to every connected client
+           and close connections that fail to respond within
+           :data:`_WS_PING_TIMEOUT` seconds.
         """
         while True:
             await asyncio.sleep(TUNNEL_CHECK_INTERVAL)
+            # 1. Tunnel health
+            if self.use_tunnel:
+                try:
+                    await self._check_and_restart_tunnel()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.debug("Watchdog tunnel check error", exc_info=True)
+            # 2. IP change
             try:
                 current_ips = _get_local_ips()
                 if current_ips != self._last_ips:
@@ -1682,7 +1656,20 @@ class RemoteAccessServer:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.debug("IP watchdog error", exc_info=True)
+                logger.debug("Watchdog IP check error", exc_info=True)
+            # 3. WebSocket ping
+            try:
+                if self._ws_server is not None:
+                    connections = list(self._ws_server.connections)
+                    if connections:
+                        await asyncio.gather(
+                            *[self._ping_one_ws(ws) for ws in connections],
+                            return_exceptions=True,
+                        )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug("Watchdog WS ping error", exc_info=True)
 
     def _stop_tunnel(self) -> None:
         """Terminate the ``cloudflared`` tunnel process if running."""
@@ -1703,14 +1690,11 @@ class RemoteAccessServer:
 
     # -- Server lifecycle ---------------------------------------------------
 
-    async def _setup_server(self) -> str:
+    async def _setup_server(self) -> None:
         """Shared setup for both blocking and async server start.
 
         Binds the WebSocket server, starts the tunnel (if enabled),
         saves the URL file, and starts watchdog tasks.
-
-        Returns:
-            The local ``scheme://localhost:PORT`` URL string.
         """
         self._loop = asyncio.get_event_loop()
         self._printer._loop = self._loop
@@ -1721,49 +1705,31 @@ class RemoteAccessServer:
             self.port,
             process_request=self._process_request,
             ssl=self._ssl_context,
-            ping_interval=_WS_PING_INTERVAL,
-            ping_timeout=_WS_PING_TIMEOUT,
+            ping_interval=None,
+            ping_timeout=None,
+            create_connection=_HeadAwareServerConnection,
         )
-
-        scheme = "https" if self._ssl_context else "http"
-        local_url = f"{scheme}://localhost:{self.port}"
 
         tunnel_url: str | None = None
         if self.use_tunnel:
-            tunnel_url = await asyncio.get_event_loop().run_in_executor(
+            tunnel_url = await self._loop.run_in_executor(  # type: ignore[union-attr]
                 None, self._start_tunnel,
             )
 
-        _save_url_file(local_url, tunnel_url)
-        self._active_url = tunnel_url or local_url
-
-        if self.use_tunnel:
-            self._watchdog_task = asyncio.create_task(self._tunnel_watchdog())
+        _save_url_file(self._local_url, tunnel_url)
+        self._active_url = tunnel_url or self._local_url
 
         self._last_ips = _get_local_ips()
-        self._ip_watchdog_task = asyncio.create_task(self._ip_watchdog())
-        return local_url
+        self._watchdog_task = asyncio.create_task(self._watchdog())
 
     async def _serve_async(self) -> None:
         """Internal async entry point for the server."""
-        local_url = await self._setup_server()
-        print(f"KISS Sorcar remote access: {local_url}", file=sys.stderr)
-
-        tunnel_url = (
-            self._active_url if self._active_url != local_url else None
-        )
-        if self.use_tunnel:
-            if tunnel_url:
-                print(
-                    f"Cloudflare tunnel:         {tunnel_url}",
-                    file=sys.stderr,
-                )
-            else:
-                print(
-                    "Warning: cloudflared tunnel failed to start",
-                    file=sys.stderr,
-                )
-
+        await self._setup_server()
+        print(f"KISS Sorcar remote access: {self._local_url}", file=sys.stderr)
+        if self.use_tunnel and self._active_url != self._local_url:
+            print(f"Cloudflare tunnel:         {self._active_url}", file=sys.stderr)
+        elif self.use_tunnel:
+            print("Warning: cloudflared tunnel failed to start", file=sys.stderr)
         await self._ws_server.serve_forever()  # type: ignore[union-attr]
 
     def start(self) -> None:
@@ -1788,13 +1754,6 @@ class RemoteAccessServer:
 
     async def stop_async(self) -> None:
         """Stop the server gracefully."""
-        if self._ip_watchdog_task is not None:
-            self._ip_watchdog_task.cancel()
-            try:
-                await self._ip_watchdog_task
-            except asyncio.CancelledError:
-                pass
-            self._ip_watchdog_task = None
         if self._watchdog_task is not None:
             self._watchdog_task.cancel()
             try:
@@ -1825,50 +1784,23 @@ def main() -> None:  # pragma: no cover — CLI entry point
         "--url", action="store_true",
         help="Print the active remote URL and exit",
     )
-    parser.add_argument("--host", default="0.0.0.0", help="Bind address")
-    parser.add_argument("--port", type=int, default=8787, help="Port number")
-    parser.add_argument(
-        "--tunnel", action=argparse.BooleanOptionalAction, default=True,
-        help="Start cloudflared tunnel (default: on, use --no-tunnel to disable)",
-    )
-    parser.add_argument(
-        "--tunnel-token", default=None,
-        help=(
-            "Cloudflare named-tunnel token for a fixed URL. "
-            "Also reads from CLOUDFLARE_TUNNEL_TOKEN env var or "
-            "tunnel_token in ~/.kiss/config.json."
-        ),
-    )
     parser.add_argument("--workdir", default=None, help="Working directory")
-    parser.add_argument(
-        "--tls", action=argparse.BooleanOptionalAction, default=True,
-        help="Enable HTTPS/WSS (default: on, use --no-tls to disable)",
-    )
-    parser.add_argument("--certfile", default=None, help="Path to PEM certificate file")
-    parser.add_argument("--keyfile", default=None, help="Path to PEM private key file")
     args = parser.parse_args()
 
     if args.url:
         _print_url()
         return
 
-    # Resolve tunnel token: CLI flag > env var > config file
-    tunnel_token = args.tunnel_token
-    if not tunnel_token:
-        tunnel_token = os.environ.get("CLOUDFLARE_TUNNEL_TOKEN")
+    # Resolve tunnel token: env var > config file
+    tunnel_token = os.environ.get("CLOUDFLARE_TUNNEL_TOKEN")
     if not tunnel_token:
         cfg = load_config()
         tunnel_token = cfg.get("tunnel_token")
 
     server = RemoteAccessServer(
-        host=args.host,
-        port=args.port,
-        use_tunnel=args.tunnel,
+        use_tunnel=True,
         tunnel_token=tunnel_token or None,
         work_dir=args.workdir,
-        tls=args.tls,
-        certfile=args.certfile,
-        keyfile=args.keyfile,
     )
     server.start()
 

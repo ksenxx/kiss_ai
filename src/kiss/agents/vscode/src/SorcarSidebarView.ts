@@ -1034,10 +1034,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         }
         break;
       }
-
-      case 'closeSecondaryBar':
-        vscode.commands.executeCommand('workbench.action.closeAuxiliaryBar');
-        break;
     }
   }
 

@@ -1,13 +1,8 @@
 """Tests for the sorcar-docker integration.
 
-Verifies that when KISS_PROJECT_PATH is set (as in the Docker container),
-the VS Code extension's findKissProject() returns that path instead of
-the embedded kiss_project/ directory inside the extension bundle.
-
-The embedded kiss_project/ is a standalone copy of the source tree without
-a .venv — using it in Docker (where a fully-set-up /home/coder/kiss
-exists) causes the agent process to fail because uv would need to
-recreate the entire environment from scratch.
+Verifies that findKissProject() only uses the env-var and config-setting
+search paths (no workspace upward search, embedded path, or common
+location fallbacks).
 """
 
 import re
@@ -18,41 +13,71 @@ VSCODE_SRC = Path(__file__).resolve().parents[3] / "agents" / "vscode" / "src"
 
 
 class TestFindKissProjectSearchOrder(unittest.TestCase):
-    """The env-var and config checks must come before the embedded path check.
+    """findKissProject() must only check env var and config setting."""
 
-    In Docker, KISS_PROJECT_PATH=/home/coder/kiss points to a fully
-    set-up project with a .venv.  The embedded kiss_project/ inside the
-    extension directory has no .venv and will cause uv to hang or fail.
-    """
-
-    def test_env_var_checked_before_embedded_path(self) -> None:
-        """KISS_PROJECT_PATH must be checked before the embedded kiss_project/."""
+    def test_env_var_check_exists(self) -> None:
+        """KISS_PROJECT_PATH env var must be checked."""
         source = (VSCODE_SRC / "AgentProcess.ts").read_text()
+        assert re.search(
+            r"process\.env\.KISS_PROJECT_PATH", source
+        ), "KISS_PROJECT_PATH check not found in AgentProcess.ts"
 
-        env_match = re.search(r"process\.env\.KISS_PROJECT_PATH", source)
-        assert env_match is not None, "KISS_PROJECT_PATH check not found in AgentProcess.ts"
+    def test_config_setting_check_exists(self) -> None:
+        """kissSorcar.kissProjectPath config setting must be checked."""
+        source = (VSCODE_SRC / "AgentProcess.ts").read_text()
+        assert re.search(
+            r"kissProjectPath", source
+        ), "kissProjectPath config check not found"
 
-        embedded_match = re.search(r"path\.join\(__dirname.*kiss_project", source)
-        assert embedded_match is not None, "embedded kiss_project check not found"
-
-        assert env_match.start() < embedded_match.start(), (
-            "KISS_PROJECT_PATH env-var check must appear before the embedded "
-            "kiss_project/ check in findKissProject() so that Docker containers "
-            "with KISS_PROJECT_PATH set use the fully-configured project path"
+    def test_no_workspace_folder_search(self) -> None:
+        """No upward search from workspace folders."""
+        source = (VSCODE_SRC / "AgentProcess.ts").read_text()
+        # Extract the findKissProject function body
+        fn_match = re.search(
+            r"export function findKissProject\(\)[^{]*\{(.+?)^}",
+            source,
+            re.DOTALL | re.MULTILINE,
+        )
+        assert fn_match is not None
+        fn_body = fn_match.group(1)
+        assert "workspaceFolders" not in fn_body, (
+            "findKissProject() should not search workspace folders"
         )
 
-    def test_config_setting_checked_before_embedded_path(self) -> None:
-        """kissSorcar.kissProjectPath config must be checked before embedded."""
+    def test_no_embedded_path_search(self) -> None:
+        """No embedded kiss_project/ fallback."""
         source = (VSCODE_SRC / "AgentProcess.ts").read_text()
+        fn_match = re.search(
+            r"export function findKissProject\(\)[^{]*\{(.+?)^}",
+            source,
+            re.DOTALL | re.MULTILINE,
+        )
+        assert fn_match is not None
+        fn_body = fn_match.group(1)
+        assert "kiss_project" not in fn_body, (
+            "findKissProject() should not check embedded kiss_project/"
+        )
 
-        config_match = re.search(r"kissProjectPath", source)
-        assert config_match is not None
+    def test_no_common_locations_search(self) -> None:
+        """No common home-directory location fallbacks."""
+        source = (VSCODE_SRC / "AgentProcess.ts").read_text()
+        fn_match = re.search(
+            r"export function findKissProject\(\)[^{]*\{(.+?)^}",
+            source,
+            re.DOTALL | re.MULTILINE,
+        )
+        assert fn_match is not None
+        fn_body = fn_match.group(1)
+        for loc in ["work", "projects", "dev"]:
+            assert f"'{loc}'" not in fn_body, (
+                f"findKissProject() should not check common location '{loc}'"
+            )
 
-        embedded_match = re.search(r"path\.join\(__dirname.*kiss_project", source)
-        assert embedded_match is not None
-
-        assert config_match.start() < embedded_match.start(), (
-            "Configuration setting must be checked before embedded kiss_project/"
+    def test_no_search_upward_function(self) -> None:
+        """searchUpward function should not exist (dead code removed)."""
+        source = (VSCODE_SRC / "AgentProcess.ts").read_text()
+        assert "function searchUpward" not in source, (
+            "searchUpward function should be removed"
         )
 
 
