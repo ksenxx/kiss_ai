@@ -25,65 +25,22 @@ function isValidKissProject(dir: string): boolean {
   }
 }
 
-function searchUpward(startDir: string): string | null {
-  let dir = startDir;
-  for (let i = 0; i < 10; i++) {
-    if (isValidKissProject(dir)) return dir;
-    const parent = path.dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
-  return null;
-}
-
 /**
  * Find the KISS project root directory.
  * Search order:
- * 0. Environment variable (explicit override, e.g. Docker containers)
- * 1. Configuration setting
- * 2. Search up from workspace folders
- * 3. Search up from extension directory
- * 4. Embedded kiss_project/ inside the extension (standalone mode)
- * 5. Common locations
+ * 1. Environment variable (explicit override, e.g. Docker containers)
+ * 2. Configuration setting (kissSorcar.kissProjectPath)
  */
 export function findKissProject(): string | null {
-  // 0. Environment variable (highest priority — explicit user/Docker override)
+  // 1. Environment variable (highest priority — explicit user/Docker override)
   const envPath = process.env.KISS_PROJECT_PATH;
   if (envPath && isValidKissProject(envPath)) return envPath;
 
-  // 1. Check configuration setting
+  // 2. Check configuration setting
   const configPath = vscode.workspace
     .getConfiguration('kissSorcar')
     .get<string>('kissProjectPath');
   if (configPath && isValidKissProject(configPath)) return configPath;
-
-  // 2. Search up from workspace folders
-  const workspaceFolders = vscode.workspace.workspaceFolders;
-  if (workspaceFolders) {
-    for (const folder of workspaceFolders) {
-      const found = searchUpward(folder.uri.fsPath);
-      if (found) return found;
-    }
-  }
-
-  // 3. Search from this file's directory upward
-  const found = searchUpward(__dirname);
-  if (found) return found;
-
-  // 4. Check for embedded kiss_project/ (standalone mode fallback)
-  const embeddedPath = path.join(__dirname, '..', 'kiss_project');
-  if (isValidKissProject(embeddedPath)) return embeddedPath;
-
-  // 5. Common locations
-  const homeDir = process.env.HOME || process.env.USERPROFILE || '';
-  for (const p of [
-    path.join(homeDir, 'work', 'kiss'),
-    path.join(homeDir, 'projects', 'kiss'),
-    path.join(homeDir, 'dev', 'kiss'),
-    path.join(homeDir, 'kiss'),
-  ]) {
-    if (isValidKissProject(p)) return p;
-  }
 
   return null;
 }
