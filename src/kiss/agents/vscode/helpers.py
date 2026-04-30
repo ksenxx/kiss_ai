@@ -62,16 +62,16 @@ def fast_model_for() -> str:
     from kiss.core.config import DEFAULT_CONFIG
 
     if DEFAULT_CONFIG.ANTHROPIC_API_KEY:
-        return "claude-3-5-haiku"
+        return "claude-haiku-4-5"
     if DEFAULT_CONFIG.OPENROUTER_API_KEY:
-        return "openrouter/anthropic/claude-3.5-haiku"
+        return "openrouter/anthropic/claude-haiku-4.5"
     if DEFAULT_CONFIG.TOGETHER_API_KEY:
         return "deepseek-ai/DeepSeek-R1-0528"
     if DEFAULT_CONFIG.GEMINI_API_KEY:
         return "gemini-2.0-flash"
     if DEFAULT_CONFIG.OPENAI_API_KEY:
         return "gpt-4o"
-    return "claude-3-5-haiku"
+    return "claude-haiku-4-5"
 
 
 def generate_commit_message_from_diff(diff_text: str) -> str:
