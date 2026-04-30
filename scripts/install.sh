@@ -1,3 +1,6 @@
+#!/bin/bash
+set -e
+
 cd
 if command -v git &> /dev/null; then
   git clone https://github.com/ksenxx/kiss_ai.git ~/kiss_ai
