@@ -325,8 +325,8 @@ async function ensureDependenciesImpl(): Promise<void> {
     installCliScript(kissProjectPath, uvPath);
   }
 
-  // Ensure kiss-web remote access daemon is running
-  ensureKissWebDaemon(kissProjectPath);
+  // Restart kiss-web daemon so it picks up any code changes (editable install)
+  restartKissWebDaemon(kissProjectPath);
 
   // Persist PATH entries to the user's shell rc file so new terminals find
   // installed binaries (uv, node, sorcar, etc.) without manual setup.
@@ -381,13 +381,12 @@ async function ensureDependenciesImpl(): Promise<void> {
 }
 
 /**
- * Ensure the kiss-web remote access daemon is running.
+ * Restart the kiss-web remote access daemon.
  *
- * Checks whether the daemon service is already active by testing for
- * ``~/.kiss/remote-url.json`` (which kiss-web writes on startup) and
- * verifying the OS-level service status.  If the daemon is not running,
- * creates the service definition (macOS LaunchAgent or Linux systemd
- * user service) and starts it.
+ * Always restarts the daemon so that code changes from an editable install
+ * are picked up (the Python code is loaded at process start time).  Kills
+ * any existing kiss-web and cloudflared processes, waits for port 8787 to
+ * be free, then (re-)creates the service definition and starts it.
  *
  * On macOS uses ``~/Library/LaunchAgents/com.kiss.web-server.plist``
  * with ``KeepAlive`` and ``RunAtLoad``.
@@ -396,7 +395,7 @@ async function ensureDependenciesImpl(): Promise<void> {
  *
  * @param kissProjectPath - Absolute path to the KISS project directory.
  */
-function ensureKissWebDaemon(kissProjectPath: string): void {
+function restartKissWebDaemon(kissProjectPath: string): void {
   if (process.platform === 'win32') return; // Not supported on Windows
 
   const kissWebBin = path.join(kissProjectPath, '.venv', 'bin', 'kiss-web');
@@ -407,27 +406,33 @@ function ensureKissWebDaemon(kissProjectPath: string): void {
 
   const binDir = path.join(HOME_DIR, '.local', 'bin');
 
+  // Kill existing kiss-web and cloudflared processes before restarting
+  for (const procName of ['kiss-web', 'cloudflared']) {
+    try {
+      execSync(`pkill -f "${procName}"`, {stdio: 'ignore', timeout: 5000});
+    } catch {
+      /* no matching process — ok */
+    }
+  }
+
+  // Wait for port 8787 to be free (up to 5 seconds)
+  for (let i = 0; i < 10; i++) {
+    try {
+      execSync('lsof -i :8787 -t', {stdio: 'ignore', timeout: 2000});
+      // Port still in use — wait
+      execSync('sleep 0.5', {timeout: 2000});
+    } catch {
+      // Port is free
+      break;
+    }
+  }
+
   if (process.platform === 'darwin') {
     const plistLabel = 'com.kiss.web-server';
     const plistDir = path.join(HOME_DIR, 'Library', 'LaunchAgents');
     const plistFile = path.join(plistDir, `${plistLabel}.plist`);
 
-    // Check if service is already loaded and running
-    try {
-      const uid = execSync('id -u', {encoding: 'utf-8'}).trim();
-      const result = execSync(`launchctl print gui/${uid}/${plistLabel} 2>&1`, {
-        encoding: 'utf-8',
-        timeout: 5000,
-      });
-      if (result.includes('state = running')) {
-        log('kiss-web daemon already running (macOS LaunchAgent)');
-        return;
-      }
-    } catch {
-      // Service not loaded — proceed to create/load it
-    }
-
-    log('Setting up kiss-web macOS LaunchAgent...');
+    log('Restarting kiss-web macOS LaunchAgent...');
     try {
       fs.mkdirSync(plistDir, {recursive: true});
       const plistContent = `<?xml version="1.0" encoding="UTF-8"?>
@@ -483,29 +488,17 @@ function ensureKissWebDaemon(kissProjectPath: string): void {
           timeout: 5000,
         });
       }
-      log(`kiss-web macOS LaunchAgent installed and started: ${plistFile}`);
+      log(`kiss-web macOS LaunchAgent restarted: ${plistFile}`);
     } catch (err) {
       log(
-        `Failed to set up kiss-web daemon (macOS): ${err instanceof Error ? err.message : err}`,
+        `Failed to restart kiss-web daemon (macOS): ${err instanceof Error ? err.message : err}`,
       );
     }
   } else if (process.platform === 'linux') {
     const systemdDir = path.join(HOME_DIR, '.config', 'systemd', 'user');
     const serviceFile = path.join(systemdDir, 'kiss-web.service');
 
-    // Check if service is already active
-    try {
-      execSync('systemctl --user is-active kiss-web', {
-        stdio: 'ignore',
-        timeout: 5000,
-      });
-      log('kiss-web daemon already running (systemd user service)');
-      return;
-    } catch {
-      // Service not active — proceed to create/start it
-    }
-
-    log('Setting up kiss-web systemd user service...');
+    log('Restarting kiss-web systemd user service...');
     try {
       fs.mkdirSync(systemdDir, {recursive: true});
       const serviceContent = `[Unit]
@@ -531,7 +524,7 @@ WantedBy=default.target
         stdio: 'ignore',
         timeout: 10000,
       });
-      execSync('systemctl --user enable --now kiss-web', {
+      execSync('systemctl --user restart kiss-web', {
         stdio: 'ignore',
         timeout: 10000,
       });
@@ -545,12 +538,10 @@ WantedBy=default.target
       } catch {
         /* may require elevated privileges — non-fatal */
       }
-      log(
-        `kiss-web systemd user service installed and started: ${serviceFile}`,
-      );
+      log(`kiss-web systemd user service restarted: ${serviceFile}`);
     } catch (err) {
       log(
-        `Failed to set up kiss-web daemon (Linux): ${err instanceof Error ? err.message : err}`,
+        `Failed to restart kiss-web daemon (Linux): ${err instanceof Error ? err.message : err}`,
       );
     }
   }
