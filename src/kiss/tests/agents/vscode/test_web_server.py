@@ -229,6 +229,21 @@ class TestRemoteAccessServerHTTP(IsolatedAsyncioTestCase):
         status, _ = await self._http_get("/media/../server.py")
         self.assertEqual(status, 404)
 
+    async def test_head_request_returns_200(self) -> None:
+        """HEAD / returns 200 OK (cloudflared health check)."""
+        import http.client
+
+        def _head() -> int:
+            conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+            conn.request("HEAD", "/")
+            resp = conn.getresponse()
+            status = resp.status
+            conn.close()
+            return status
+
+        status = await asyncio.get_event_loop().run_in_executor(None, _head)
+        self.assertEqual(status, 200)
+
 
 class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
     """Test WebSocket communication without authentication."""
