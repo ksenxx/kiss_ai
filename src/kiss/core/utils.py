@@ -165,3 +165,7 @@ def is_subpath(target: Path, whitelist: list[Path]) -> bool:
     """
     target = Path(target).resolve()
     return any(target.is_relative_to(p) for p in whitelist)
+
+def get_hello_world_string() -> str:
+    """Returns the string 'Hello, World!'."""
+    return "Hello, World!"

@@ -402,11 +402,9 @@
     vscode.postMessage({type: 'closeTab', tabId: tabId});
     if (activeTabId === tabId) {
       if (tabs.length === 0) {
-        // Last tab closed — just close the secondary bar; do not
-        // auto-create a replacement tab.
-        vscode.postMessage({type: 'closeSecondaryBar'});
-        activeTabId = '';
-        persistTabState();
+        // Last tab closed — create a fresh chat instead of closing
+        // the secondary sidebar.
+        createNewTab();
         return;
       }
       // Switch to an adjacent tab

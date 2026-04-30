@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import socket
+import ssl
 import urllib.request
 from unittest import IsolatedAsyncioTestCase
 
@@ -20,6 +21,14 @@ from kiss.agents.vscode.web_server import (
     _remove_url_file,
     _save_url_file,
 )
+
+
+def _no_verify_ssl() -> ssl.SSLContext:
+    """Return an SSL client context that skips certificate verification."""
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
 
 
 class TestDaemonUrlFileLifecycle(IsolatedAsyncioTestCase):
@@ -34,7 +43,6 @@ class TestDaemonUrlFileLifecycle(IsolatedAsyncioTestCase):
             host="127.0.0.1",
             port=0,  # 0 won't work; use a specific port
             use_tunnel=False,
-            tls=False,
         )
         # Use a random high port to avoid conflicts
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -47,13 +55,13 @@ class TestDaemonUrlFileLifecycle(IsolatedAsyncioTestCase):
 
         # The async start doesn't call _save_url_file — it's done in
         # _serve_async.  We simulate the URL file write that happens there.
-        _save_url_file(f"http://localhost:{port}")
+        _save_url_file(f"https://localhost:{port}")
 
         try:
             self.assertTrue(_URL_FILE.is_file())
             data = json.loads(_URL_FILE.read_text())
             self.assertIn("local", data)
-            self.assertEqual(data["local"], f"http://localhost:{port}")
+            self.assertEqual(data["local"], f"https://localhost:{port}")
             self.assertNotIn("tunnel", data)
         finally:
             await server.stop_async()
@@ -78,7 +86,7 @@ class TestDaemonUrlFileLifecycle(IsolatedAsyncioTestCase):
         self.assertTrue(_URL_FILE.is_file())
 
         server = RemoteAccessServer(
-            host="127.0.0.1", port=18799, use_tunnel=False, tls=False
+            host="127.0.0.1", port=18799, use_tunnel=False
         )
         await server.start_async()
         await server.stop_async()
@@ -111,16 +119,19 @@ class TestDaemonDetection(IsolatedAsyncioTestCase):
         sock.close()
 
         server = RemoteAccessServer(
-            host="127.0.0.1", port=port, use_tunnel=False, tls=False
+            host="127.0.0.1", port=port, use_tunnel=False
         )
         await server.start_async()
 
         try:
             # Make an HTTP request to verify the server is responding
             loop = asyncio.get_event_loop()
+            ctx = _no_verify_ssl()
             resp = await loop.run_in_executor(
                 None,
-                lambda: urllib.request.urlopen(f"http://127.0.0.1:{port}/"),
+                lambda: urllib.request.urlopen(
+                    f"https://127.0.0.1:{port}/", context=ctx,
+                ),
             )
             html = resp.read().decode()
             self.assertIn("<title>KISS Sorcar</title>", html)
@@ -136,16 +147,16 @@ class TestDaemonDetection(IsolatedAsyncioTestCase):
         sock_obj.close()
 
         server1 = RemoteAccessServer(
-            host="127.0.0.1", port=port, use_tunnel=False, tls=False
+            host="127.0.0.1", port=port, use_tunnel=False
         )
         await server1.start_async()
-        _save_url_file(f"http://localhost:{port}")
+        _save_url_file(f"https://localhost:{port}")
 
         try:
             # Verify URL file exists — this is what the daemon check uses
             self.assertTrue(_URL_FILE.is_file())
             data = json.loads(_URL_FILE.read_text())
-            self.assertEqual(data["local"], f"http://localhost:{port}")
+            self.assertEqual(data["local"], f"https://localhost:{port}")
         finally:
             await server1.stop_async()
             _remove_url_file()
@@ -169,16 +180,19 @@ class TestDaemonRestart(IsolatedAsyncioTestCase):
 
         # Start the first server instance
         server1 = RemoteAccessServer(
-            host="127.0.0.1", port=port, use_tunnel=False, tls=False
+            host="127.0.0.1", port=port, use_tunnel=False
         )
         await server1.start_async()
-        _save_url_file(f"http://localhost:{port}")
+        _save_url_file(f"https://localhost:{port}")
 
         # Verify it responds
         loop = asyncio.get_event_loop()
+        ctx = _no_verify_ssl()
         resp = await loop.run_in_executor(
             None,
-            lambda: urllib.request.urlopen(f"http://127.0.0.1:{port}/"),
+            lambda: urllib.request.urlopen(
+                f"https://127.0.0.1:{port}/", context=ctx,
+            ),
         )
         self.assertEqual(resp.status, 200)
 
@@ -188,16 +202,19 @@ class TestDaemonRestart(IsolatedAsyncioTestCase):
 
         # Start a second server on the same port (simulates launchctl bootstrap)
         server2 = RemoteAccessServer(
-            host="127.0.0.1", port=port, use_tunnel=False, tls=False
+            host="127.0.0.1", port=port, use_tunnel=False
         )
         await server2.start_async()
-        _save_url_file(f"http://localhost:{port}")
+        _save_url_file(f"https://localhost:{port}")
 
         try:
             # Verify the new server responds
+            ctx2 = _no_verify_ssl()
             resp2 = await loop.run_in_executor(
                 None,
-                lambda: urllib.request.urlopen(f"http://127.0.0.1:{port}/"),
+                lambda: urllib.request.urlopen(
+                    f"https://127.0.0.1:{port}/", context=ctx2,
+                ),
             )
             html = resp2.read().decode()
             self.assertIn("<title>KISS Sorcar</title>", html)
@@ -206,7 +223,7 @@ class TestDaemonRestart(IsolatedAsyncioTestCase):
             # Verify URL file was recreated
             self.assertTrue(_URL_FILE.is_file())
             data = json.loads(_URL_FILE.read_text())
-            self.assertEqual(data["local"], f"http://localhost:{port}")
+            self.assertEqual(data["local"], f"https://localhost:{port}")
         finally:
             await server2.stop_async()
             _remove_url_file()
