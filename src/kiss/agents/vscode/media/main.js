@@ -2896,6 +2896,8 @@
           e.preventDefault();
           histIdx = Math.min(histIdx + 1, histCache.length - 1);
           inp.value = histCache[histIdx];
+          inp.style.height = 'auto';
+          inp.style.height = Math.min(inp.scrollHeight, 200) + 'px';
           syncClearBtn();
           return;
         }
@@ -2904,6 +2906,8 @@
         e.preventDefault();
         histIdx--;
         inp.value = histIdx >= 0 ? histCache[histIdx] : '';
+        inp.style.height = 'auto';
+        inp.style.height = Math.min(inp.scrollHeight, 200) + 'px';
         syncClearBtn();
         return;
       }
