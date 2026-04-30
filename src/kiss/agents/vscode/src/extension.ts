@@ -276,6 +276,15 @@ export function activate(context: vscode.ExtensionContext): void {
     });
   }
 
+  // On first launch after install, auto-open the secondary sidebar chat
+  // and focus the input so the user can start typing immediately.
+  if (!context.globalState.get<boolean>('firstLaunchDone')) {
+    setTimeout(async () => {
+      await sidebarView!.focusChatInput();
+      await context.globalState.update('firstLaunchDone', true);
+    }, 1000);
+  }
+
   // Auto-install dependencies in background
   ensureDependencies().catch(err => {
     const msg = err instanceof Error ? err.message : String(err);

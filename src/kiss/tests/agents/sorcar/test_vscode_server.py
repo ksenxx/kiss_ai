@@ -2391,6 +2391,15 @@ class TestExtensionRegistersSecondaryView(unittest.TestCase):
         body = self._ts[idx:]
         assert "sidebarView?.dispose()" in body
 
+    def test_first_launch_opens_secondary_sidebar(self) -> None:
+        """On first launch, the extension auto-opens the secondary sidebar chat."""
+        assert "firstLaunchDone" in self._ts
+        assert "focusChatInput" in self._ts
+        # The first-launch guard must check globalState and then call focusChatInput
+        idx = self._ts.index("firstLaunchDone")
+        block = self._ts[idx : idx + 400]
+        assert "focusChatInput" in block
+
 
 class TestBuildChatHtmlExported(unittest.TestCase):
     """Verify SorcarTab.ts exports the shared buildChatHtml function."""
