@@ -52,7 +52,7 @@ An old video on KISS Sorcar can be found at [https://www.youtube.com/watch?v=xnY
 ## Full Installation
 
 ```
-curl -fsSL https://github.com/ksenxx/kiss_ai/scripts/install.sh | bash
+curl -fsSL https://github.com/ksenxx/kiss_ai/blob/main/scripts/install.sh | bash
 ```
 
 ## KISS Sorcar Extension Installation
