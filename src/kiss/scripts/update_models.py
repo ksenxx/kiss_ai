@@ -358,8 +358,8 @@ def find_deprecated_models(
     - It's a claude- model not returned by the Anthropic models API and not an
       alias (aliases don't have date suffixes and resolve to snapshot versions).
     - It's a gemini- model not returned by the Gemini models API.
-    - It's an OpenAI model (gpt-/o1-/o3-/o4-/codex-) with a date suffix not
-      returned by the OpenAI models API.
+    - It's an OpenAI model (gpt-/o1-/o3-/o4-/codex-) not returned by the
+      OpenAI models API and not an alias whose dated snapshots still exist.
     """
     from kiss.core.models.model_info import _OPENAI_PREFIXES
 
@@ -395,6 +395,17 @@ def find_deprecated_models(
                 has_date = bool(re.search(r"\d{4}-\d{2}-\d{2}$|\d{8}$", name))
                 if has_date:  # pragma: no branch
                     deprecated.append({"name": name, "reason": "not in OpenAI API"})
+                else:
+                    # Alias (no date suffix): deprecated only if no dated
+                    # snapshot like {alias}-YYYYMMDD or {alias}-YYYY-MM-DD
+                    # exists in the API.
+                    alias_re = re.compile(
+                        rf"^{re.escape(name)}-(\d{{8}}|\d{{4}}-\d{{2}}-\d{{2}})$"
+                    )
+                    if not any(alias_re.match(n) for n in openai):
+                        deprecated.append(
+                            {"name": name, "reason": "alias with no snapshot in OpenAI API"}
+                        )
 
     return deprecated
 
