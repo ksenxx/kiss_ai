@@ -53,8 +53,7 @@ from websockets.asyncio.server import ServerConnection, serve
 from websockets.datastructures import Headers
 from websockets.http11 import Request, Response
 
-from kiss.agents.sorcar.persistence import _append_chat_event
-from kiss.agents.vscode.browser_ui import _DISPLAY_EVENT_TYPES, BaseBrowserPrinter
+from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 from kiss.agents.vscode.server import VSCodeServer
 from kiss.agents.vscode.vscode_config import load_config, source_shell_env
 
@@ -489,7 +488,6 @@ class WebPrinter(BaseBrowserPrinter):
         self._ws_clients: set[ServerConnection] = set()
         self._ws_lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._persist_agents: dict[str, Any] = {}
         self._merge_state_callback: (
             Callable[[str, dict[str, Any]], None] | None
         ) = None
@@ -497,17 +495,16 @@ class WebPrinter(BaseBrowserPrinter):
     def broadcast(self, event: dict[str, Any]) -> None:
         """Send *event* to every connected WebSocket client.
 
-        Injects ``tabId`` from thread-local storage (same as
-        ``VSCodePrinter``), records the event for replay, persists
-        display events to the database, and augments ``merge_data``
-        events with file contents for web-based diff rendering.
+        Injects ``tabId`` from thread-local storage (via
+        ``_inject_tab_id``), records the event for replay, persists
+        display events to the database (via ``_persist_event``), and
+        augments ``merge_data`` events with file contents for web-based
+        diff rendering.
 
         Args:
             event: The event dictionary to emit.
         """
-        tab_id = getattr(self._thread_local, "tab_id", None)
-        if tab_id is not None and "tabId" not in event:
-            event = {**event, "tabId": tab_id}
+        event = self._inject_tab_id(event)
 
         # Augment merge_data with file contents for web clients
         if event.get("type") == "merge_data":
@@ -520,15 +517,7 @@ class WebPrinter(BaseBrowserPrinter):
         with self._lock:
             self._record_event(event)
 
-        # Persist display events to the database
-        if event.get("type") in _DISPLAY_EVENT_TYPES:
-            evt_tab = event.get("tabId")
-            if evt_tab is not None:
-                agent = self._persist_agents.get(evt_tab)
-                if agent is not None:
-                    task_id = agent._last_task_id
-                    if task_id is not None:
-                        _append_chat_event(event, task_id=task_id)
+        self._persist_event(event)
 
         data = json.dumps(event)
         with self._ws_lock:
@@ -1713,8 +1702,15 @@ class RemoteAccessServer:
 
     # -- Server lifecycle ---------------------------------------------------
 
-    async def _serve_async(self) -> None:
-        """Internal async entry point for the server."""
+    async def _setup_server(self) -> str:
+        """Shared setup for both blocking and async server start.
+
+        Binds the WebSocket server, starts the tunnel (if enabled),
+        saves the URL file, and starts watchdog tasks.
+
+        Returns:
+            The local ``scheme://localhost:PORT`` URL string.
+        """
         self._loop = asyncio.get_event_loop()
         self._printer._loop = self._loop
 
@@ -1730,33 +1726,44 @@ class RemoteAccessServer:
 
         scheme = "https" if self._ssl_context else "http"
         local_url = f"{scheme}://localhost:{self.port}"
-        print(f"KISS Sorcar remote access: {local_url}", file=sys.stderr)
 
         tunnel_url: str | None = None
         if self.use_tunnel:
             tunnel_url = await asyncio.get_event_loop().run_in_executor(
-                None, self._start_tunnel
+                None, self._start_tunnel,
             )
+
+        _save_url_file(local_url, tunnel_url)
+        self._active_url = tunnel_url or local_url
+
+        if self.use_tunnel:
+            self._watchdog_task = asyncio.create_task(self._tunnel_watchdog())
+
+        self._last_ips = _get_local_ips()
+        self._ip_watchdog_task = asyncio.create_task(self._ip_watchdog())
+        return local_url
+
+    async def _serve_async(self) -> None:
+        """Internal async entry point for the server."""
+        local_url = await self._setup_server()
+        print(f"KISS Sorcar remote access: {local_url}", file=sys.stderr)
+
+        tunnel_url = (
+            self._active_url if self._active_url != local_url else None
+        )
+        if self.use_tunnel:
             if tunnel_url:
-                print(f"Cloudflare tunnel:         {tunnel_url}", file=sys.stderr)
+                print(
+                    f"Cloudflare tunnel:         {tunnel_url}",
+                    file=sys.stderr,
+                )
             else:
                 print(
                     "Warning: cloudflared tunnel failed to start",
                     file=sys.stderr,
                 )
 
-        _save_url_file(local_url, tunnel_url)
-        self._active_url = tunnel_url or local_url
-
-        # Start the tunnel watchdog to auto-restart after sleep/wake
-        if self.use_tunnel:
-            self._watchdog_task = asyncio.create_task(self._tunnel_watchdog())
-
-        # Start the IP watchdog to restart on network changes
-        self._last_ips = _get_local_ips()
-        self._ip_watchdog_task = asyncio.create_task(self._ip_watchdog())
-
-        await self._ws_server.serve_forever()
+        await self._ws_server.serve_forever()  # type: ignore[union-attr]
 
     def start(self) -> None:
         """Start the server (blocks until interrupted).
@@ -1776,32 +1783,7 @@ class RemoteAccessServer:
         Returns after the server is listening.  The caller must keep
         the event loop running.
         """
-        self._loop = asyncio.get_event_loop()
-        self._printer._loop = self._loop
-
-        self._ws_server = await serve(
-            self._ws_handler,
-            self.host,
-            self.port,
-            process_request=self._process_request,
-            ssl=self._ssl_context,
-            ping_interval=_WS_PING_INTERVAL,
-            ping_timeout=_WS_PING_TIMEOUT,
-        )
-
-        scheme = "https" if self._ssl_context else "http"
-        local_url = f"{scheme}://localhost:{self.port}"
-        tunnel_url: str | None = None
-        if self.use_tunnel:
-            tunnel_url = await asyncio.get_event_loop().run_in_executor(
-                None, self._start_tunnel,
-            )
-        _save_url_file(local_url, tunnel_url)
-        self._active_url = tunnel_url or local_url
-        if self.use_tunnel:
-            self._watchdog_task = asyncio.create_task(self._tunnel_watchdog())
-        self._last_ips = _get_local_ips()
-        self._ip_watchdog_task = asyncio.create_task(self._ip_watchdog())
+        await self._setup_server()
 
     async def stop_async(self) -> None:
         """Stop the server gracefully."""
