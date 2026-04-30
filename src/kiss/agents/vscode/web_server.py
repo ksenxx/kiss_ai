@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import ipaddress
 import json
 import logging
 import mimetypes
@@ -48,6 +49,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -199,25 +201,22 @@ class _WebMergeState:
         """Mark a hunk as resolved."""
         self._resolved.add((fi, hi))
 
-    def advance(self) -> None:
-        """Move to the next unresolved hunk."""
+    def _seek(self, step: int) -> None:
+        """Move *step* (+1 or -1) to the next unresolved hunk."""
         if self.all_resolved:
             return
-        start = self._pos
         for _ in range(len(self._all_hunks)):
-            self._pos = (self._pos + 1) % len(self._all_hunks)
+            self._pos = (self._pos + step) % len(self._all_hunks)
             if self._all_hunks[self._pos] not in self._resolved:
                 return
-        self._pos = start
+
+    def advance(self) -> None:
+        """Move to the next unresolved hunk."""
+        self._seek(1)
 
     def go_prev(self) -> None:
         """Move to the previous unresolved hunk."""
-        if self.all_resolved:
-            return
-        for _ in range(len(self._all_hunks)):
-            self._pos = (self._pos - 1) % len(self._all_hunks)
-            if self._all_hunks[self._pos] not in self._resolved:
-                return
+        self._seek(-1)
 
     def unresolved_in_file(self, fi: int) -> list[int]:
         """Return hunk indices not yet resolved for file *fi*."""
@@ -310,8 +309,6 @@ def _discover_tunnel_url_from_metrics() -> str | None:
     Returns:
         The ``https://`` tunnel URL, or None if unavailable.
     """
-    import urllib.request
-
     try:
         result = subprocess.run(
             ["pgrep", "-a", "cloudflared"],
@@ -418,22 +415,15 @@ def _print_url() -> None:
     Exits with code 1 if the server is not running or the file is
     missing.
     """
-    if not _URL_FILE.is_file():
-        print("KISS Sorcar web server is not running.", file=sys.stderr)
-        sys.exit(1)
     try:
-        data = json.loads(_URL_FILE.read_text())
+        data = json.loads(_URL_FILE.read_text()) if _URL_FILE.is_file() else {}
     except (json.JSONDecodeError, OSError):
-        print("KISS Sorcar web server is not running.", file=sys.stderr)
-        sys.exit(1)
-    tunnel = data.get("tunnel")
-    local = data.get("local", "")
-    if tunnel:
-        print(tunnel)
-    elif local:
-        print(local)
+        data = {}
+    url = data.get("tunnel") or data.get("local")
+    if url:
+        print(url)
     else:
-        print("No URL available.", file=sys.stderr)
+        print("KISS Sorcar web server is not running.", file=sys.stderr)
         sys.exit(1)
 
 
@@ -476,20 +466,16 @@ def _generate_self_signed_cert(
             x509.SubjectAlternativeName([
                 x509.DNSName("localhost"),
                 x509.DNSName("*.local"),
-                x509.IPAddress(
-                    __import__("ipaddress").IPv4Address("127.0.0.1")
-                ),
-                x509.IPAddress(
-                    __import__("ipaddress").IPv6Address("::1")
-                ),
+                x509.IPAddress(ipaddress.IPv4Address("127.0.0.1")),
+                x509.IPAddress(ipaddress.IPv6Address("::1")),
             ]),
             critical=False,
         )
         .sign(key, hashes.SHA256())
     )
 
-    cert_path.parent.mkdir(parents=True, exist_ok=True)
-    key_path.parent.mkdir(parents=True, exist_ok=True)
+    for d in {cert_path.parent, key_path.parent}:
+        d.mkdir(parents=True, exist_ok=True)
 
     key_path.write_bytes(
         key.private_bytes(
@@ -919,15 +905,10 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
 
 
 def _read_version() -> str:
-    """Read the KISS project version from ``_version.py``.
-
-    Returns:
-        The version string, or ``""`` if it cannot be read.
-    """
+    """Read the KISS project version from ``_version.py``."""
     try:
         vfile = Path(__file__).parent.parent.parent / "_version.py"
-        text = vfile.read_text()
-        for line in text.splitlines():
+        for line in vfile.read_text().splitlines():
             if line.startswith("__version__"):
                 return line.split("=", 1)[1].strip().strip("\"'")
     except Exception:
@@ -1018,10 +999,9 @@ def _http_response(status: int, content_type: str, body: bytes) -> Response:
     Returns:
         A websockets ``Response`` with Content-Length and Connection headers.
     """
-    reason = "OK" if status == 200 else "Not Found"
     return Response(
         status,
-        reason,
+        "OK" if status == 200 else "Not Found",
         Headers([
             ("Content-Type", content_type),
             ("Content-Length", str(len(body))),
@@ -1198,6 +1178,34 @@ class RemoteAccessServer:
 
     # -- WebSocket handler --------------------------------------------------
 
+    async def _authenticate_ws(self, websocket: ServerConnection) -> bool:
+        """Authenticate a WebSocket client using the configured password.
+
+        Returns True on success, False (and closes the socket) on failure.
+        """
+        password = load_config().get("remote_password", "")
+        try:
+            raw = await asyncio.wait_for(websocket.recv(), timeout=30)
+            msg = json.loads(raw)
+            if msg.get("type") != "auth":
+                await websocket.close()
+                return False
+            if password and msg.get("password") != password:
+                await websocket.send(json.dumps({"type": "auth_required"}))
+                raw2 = await asyncio.wait_for(websocket.recv(), timeout=60)
+                msg2 = json.loads(raw2)
+                if msg2.get("type") != "auth" or msg2.get("password") != password:
+                    await websocket.send(
+                        json.dumps({"type": "error", "text": "Authentication failed"})
+                    )
+                    await websocket.close()
+                    return False
+            await websocket.send(json.dumps({"type": "auth_ok"}))
+            return True
+        except Exception:
+            logger.debug("WS auth failed", exc_info=True)
+            return False
+
     async def _ws_handler(self, websocket: ServerConnection) -> None:
         """Handle a WebSocket client connection.
 
@@ -1207,30 +1215,7 @@ class RemoteAccessServer:
         Args:
             websocket: The WebSocket server connection.
         """
-        cfg = load_config()
-        password = cfg.get("remote_password", "")
-
-        # Authentication
-        try:
-            raw = await asyncio.wait_for(websocket.recv(), timeout=30)
-            msg = json.loads(raw)
-            if msg.get("type") != "auth":
-                await websocket.close()
-                return
-            if password and msg.get("password") != password:
-                await websocket.send(json.dumps({"type": "auth_required"}))
-                # Give one more chance
-                raw2 = await asyncio.wait_for(websocket.recv(), timeout=60)
-                msg2 = json.loads(raw2)
-                if msg2.get("type") != "auth" or msg2.get("password") != password:
-                    await websocket.send(
-                        json.dumps({"type": "error", "text": "Authentication failed"})
-                    )
-                    await websocket.close()
-                    return
-            await websocket.send(json.dumps({"type": "auth_ok"}))
-        except Exception:
-            logger.debug("WS auth failed", exc_info=True)
+        if not await self._authenticate_ws(websocket):
             return
 
         self._printer.add_client(websocket)
@@ -1332,40 +1317,26 @@ class RemoteAccessServer:
         """
         tab_id = cmd.get("tabId", "")
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            None,
-            self._vscode_server._handle_command,
-            {"type": "getModels"},
-        )
-        await loop.run_in_executor(
-            None,
-            self._vscode_server._handle_command,
-            {"type": "getInputHistory"},
-        )
-        await loop.run_in_executor(
-            None,
-            self._vscode_server._handle_command,
-            {"type": "getConfig"},
-        )
+        for init_cmd in ("getModels", "getInputHistory", "getConfig"):
+            await loop.run_in_executor(
+                None, self._vscode_server._handle_command, {"type": init_cmd},
+            )
         self._handle_welcome_suggestions()
         self._handle_remote_url()
-        # Send focusInput event back to the client
         try:
             await websocket.send(
                 json.dumps({"type": "focusInput", "tabId": tab_id})
             )
         except Exception:
             pass
-        # Replay restored tabs
-        restored = cmd.get("restoredTabs") or []
-        for rt in restored:
+        for rt in cmd.get("restoredTabs") or []:
             chat_id = rt.get("chatId", "")
-            rt_tab = rt.get("tabId", "")
             if chat_id:
                 await loop.run_in_executor(
                     None,
                     self._vscode_server._handle_command,
-                    {"type": "resumeSession", "chatId": chat_id, "tabId": rt_tab},
+                    {"type": "resumeSession", "chatId": chat_id,
+                     "tabId": rt.get("tabId", "")},
                 )
 
     async def _handle_submit(self, cmd: dict[str, Any]) -> None:
@@ -1780,14 +1751,10 @@ class RemoteAccessServer:
         """Internal async entry point for the server."""
         await self._setup_server()
         print(f"KISS Sorcar remote access: {self._local_url}", file=sys.stderr)
-
-        if self.use_tunnel:
-            tunnel_url = self._active_url if self._active_url != self._local_url else None
-            if tunnel_url:
-                print(f"Cloudflare tunnel:         {tunnel_url}", file=sys.stderr)
-            else:
-                print("Warning: cloudflared tunnel failed to start", file=sys.stderr)
-
+        if self.use_tunnel and self._active_url != self._local_url:
+            print(f"Cloudflare tunnel:         {self._active_url}", file=sys.stderr)
+        elif self.use_tunnel:
+            print("Warning: cloudflared tunnel failed to start", file=sys.stderr)
         await self._ws_server.serve_forever()  # type: ignore[union-attr]
 
     def start(self) -> None:
@@ -1812,20 +1779,15 @@ class RemoteAccessServer:
 
     async def stop_async(self) -> None:
         """Stop the server gracefully."""
-        if self._ip_watchdog_task is not None:
-            self._ip_watchdog_task.cancel()
-            try:
-                await self._ip_watchdog_task
-            except asyncio.CancelledError:
-                pass
-            self._ip_watchdog_task = None
-        if self._watchdog_task is not None:
-            self._watchdog_task.cancel()
-            try:
-                await self._watchdog_task
-            except asyncio.CancelledError:
-                pass
-            self._watchdog_task = None
+        for attr in ("_ip_watchdog_task", "_watchdog_task"):
+            task: asyncio.Task[None] | None = getattr(self, attr)
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                setattr(self, attr, None)
         if self._ws_server is not None:
             self._ws_server.close()
             try:
