@@ -164,11 +164,11 @@ class _WebMergeState:
 
     def __init__(self, merge_data: dict[str, Any]) -> None:
         self.files: list[dict[str, Any]] = merge_data.get("files", [])
-        # Flat list of (file_idx, hunk_idx) for navigation
-        self._all_hunks: list[tuple[int, int]] = []
-        for fi, f in enumerate(self.files):
-            for hi in range(len(f.get("hunks", []))):
-                self._all_hunks.append((fi, hi))
+        self._all_hunks: list[tuple[int, int]] = [
+            (fi, hi)
+            for fi, f in enumerate(self.files)
+            for hi in range(len(f.get("hunks", [])))
+        ]
         self._pos = 0  # index into _all_hunks
         self._resolved: set[tuple[int, int]] = set()
 
@@ -252,13 +252,11 @@ def _reject_hunk_in_file(
     except OSError:
         base_lines = []
 
-    cs = hunk["cs"]
-    cc = hunk["cc"]
-    bs = hunk["bs"]
-    bc = hunk["bc"]
-
-    # Replace current lines [cs:cs+cc] with base lines [bs:bs+bc]
-    new_lines = cur_lines[:cs] + base_lines[bs : bs + bc] + cur_lines[cs + cc :]
+    new_lines = (
+        cur_lines[: hunk["cs"]]
+        + base_lines[hunk["bs"] : hunk["bs"] + hunk["bc"]]
+        + cur_lines[hunk["cs"] + hunk["cc"] :]
+    )
     Path(current_path).write_text("".join(new_lines))
 
 
@@ -312,22 +310,18 @@ def _discover_tunnel_url_from_metrics() -> str | None:
     except Exception:
         return None
 
-    # Look for --metrics port in command lines, or try known default ports
-    metrics_ports: list[int] = []
+    # Look for --metrics port in command lines, then try default ports.
+    # Use dict.fromkeys for insertion-ordered dedup.
+    parsed: list[int] = []
     for line in result.stdout.splitlines():
         parts = line.split()
         for i, p in enumerate(parts):
             if p == "--metrics" and i + 1 < len(parts):
                 try:
-                    port = int(parts[i + 1].rsplit(":", 1)[-1])
-                    metrics_ports.append(port)
+                    parsed.append(int(parts[i + 1].rsplit(":", 1)[-1]))
                 except (ValueError, IndexError):
                     pass
-
-    # Also try commonly used metrics ports
-    for port in range(20240, 20260):
-        if port not in metrics_ports:
-            metrics_ports.append(port)
+    metrics_ports = list(dict.fromkeys(parsed + list(range(20240, 20260))))
 
     for port in metrics_ports:
         try:
@@ -1154,18 +1148,16 @@ class RemoteAccessServer:
         path = request.path
         if path == "/" or path == "":
             return _http_response(200, "text/html; charset=utf-8", self._html_bytes)
+        if path == "/ws":
+            return None  # proceed to WebSocket
         if path.startswith("/media/"):
-            filename = path[7:]
-            filepath = MEDIA_DIR / filename
+            filepath = MEDIA_DIR / path[7:]
             if (
                 filepath.resolve().is_relative_to(MEDIA_DIR.resolve())
                 and filepath.is_file()
             ):
                 ctype = mimetypes.guess_type(str(filepath))[0] or "application/octet-stream"
                 return _http_response(200, ctype, filepath.read_bytes())
-            return _http_response(404, "text/plain", b"Not Found")
-        if path == "/ws":
-            return None  # proceed to WebSocket
         return _http_response(404, "text/plain", b"Not Found")
 
     # -- WebSocket handler --------------------------------------------------
@@ -1200,7 +1192,8 @@ class RemoteAccessServer:
 
     async def _run_cmd(self, cmd: dict[str, Any]) -> None:
         """Run a backend command in the thread-pool executor."""
-        await asyncio.get_event_loop().run_in_executor(
+        assert self._loop is not None
+        await self._loop.run_in_executor(
             None, self._vscode_server._handle_command, cmd,
         )
 
@@ -1255,50 +1248,37 @@ class RemoteAccessServer:
 
     # -- Webview command translators -----------------------------------------
 
-    def _handle_welcome_suggestions(self) -> None:
-        """Broadcast welcome task suggestions from ``SAMPLE_TASKS.json``.
+    def _send_welcome_info(self) -> None:
+        """Broadcast welcome suggestions and the active remote URL.
 
         Reads the sample tasks file shipped with the extension and
-        broadcasts a ``welcome_suggestions`` event.  Falls back to an
-        empty list if the file is missing or malformed.
+        broadcasts a ``welcome_suggestions`` event (falls back to an
+        empty list if the file is missing).  Then broadcasts the
+        ``remote_url`` event using the in-memory URL, the URL file, or
+        the ``cloudflared`` metrics API as successive fallbacks.
         """
         try:
-            data = json.loads(SAMPLE_TASKS_PATH.read_text())
+            suggestions = json.loads(SAMPLE_TASKS_PATH.read_text())
         except Exception:
-            data = []
-        self._printer.broadcast({"type": "welcome_suggestions", "suggestions": data})
+            suggestions = []
+        self._printer.broadcast({
+            "type": "welcome_suggestions", "suggestions": suggestions,
+        })
 
-    def _handle_remote_url(self) -> None:
-        """Broadcast the active remote URL to web clients.
-
-        Uses the in-memory ``_active_url`` first (set during server
-        startup and tunnel restarts).  Falls back to reading
-        ``~/.kiss/remote-url.json``, then to querying the
-        ``cloudflared`` metrics API directly.  When the fallback
-        succeeds, the URL file is written so subsequent calls are fast.
-        """
         url: str | None = self._active_url
-
         if not url:
             try:
                 data = json.loads(_URL_FILE.read_text())
                 url = data.get("tunnel") or data.get("local", "")
             except Exception:
                 pass
-
         if not url:
             url = _discover_tunnel_url_from_metrics()
             if url:
                 _save_url_file(self._local_url, url)
                 self._active_url = url
-
         if url:
             self._printer.broadcast({"type": "remote_url", "url": url})
-
-    def _send_welcome_info(self) -> None:
-        """Broadcast welcome suggestions and the remote URL."""
-        self._handle_welcome_suggestions()
-        self._handle_remote_url()
 
     async def _handle_ready(
         self, cmd: dict[str, Any], websocket: ServerConnection,
@@ -1396,19 +1376,18 @@ class RemoteAccessServer:
         if state is None:
             return  # no active merge for this tab
 
-        loop = asyncio.get_event_loop()
+        assert self._loop is not None
+        cur = state.current()
         if action == "accept":
-            cur = state.current()
             if cur is not None:
                 state.mark_resolved(*cur)
                 state.advance()
         elif action == "reject":
-            cur = state.current()
             if cur is not None:
                 fi, hi = cur
                 fd = state.files[fi]
                 hunk = fd["hunks"][hi]
-                await loop.run_in_executor(
+                await self._loop.run_in_executor(
                     None, _reject_hunk_in_file, fd["current"], fd["base"], hunk,
                 )
                 # Adjust subsequent hunks' cs offsets in the same file
@@ -1422,21 +1401,14 @@ class RemoteAccessServer:
             state.go_prev()
         elif action == "next":
             state.advance()
-        elif action == "accept-file":
-            cur = state.current()
-            if cur is not None:
-                fi = cur[0]
-                for hi in state.unresolved_in_file(fi):
-                    state.mark_resolved(fi, hi)
-                state.advance()
-        elif action == "reject-file":
-            cur = state.current()
+        elif action in ("accept-file", "reject-file"):
             if cur is not None:
                 fi = cur[0]
                 fd = state.files[fi]
-                await loop.run_in_executor(
-                    None, _reject_all_hunks_in_file, fd,
-                )
+                if action == "reject-file":
+                    await self._loop.run_in_executor(
+                        None, _reject_all_hunks_in_file, fd,
+                    )
                 for hi in state.unresolved_in_file(fi):
                     state.mark_resolved(fi, hi)
                 state.advance()
@@ -1451,7 +1423,7 @@ class RemoteAccessServer:
                 state.mark_resolved(fi, hi)
             for fi in unresolved_files:
                 fd = state.files[fi]
-                await loop.run_in_executor(
+                await self._loop.run_in_executor(
                     None, _reject_all_hunks_in_file, fd,
                 )
 
@@ -1532,7 +1504,6 @@ class RemoteAccessServer:
         # cloudflared prints the URL during startup, but the format
         # can vary across versions.  After it finishes printing
         # startup messages, readline() blocks forever.
-        deadline = time.monotonic() + 30
         stderr_fd = self._tunnel_proc.stderr
         assert stderr_fd is not None  # guaranteed by PIPE
         result_box: list[str | None] = [None]
@@ -1552,7 +1523,7 @@ class RemoteAccessServer:
 
         reader = threading.Thread(target=_reader_target, daemon=True)
         reader.start()
-        reader.join(timeout=max(0, deadline - time.monotonic()))
+        reader.join(timeout=30)
 
         url = result_box[0]
         if url:
@@ -1623,7 +1594,8 @@ class RemoteAccessServer:
         rc = self._tunnel_proc.returncode
         logger.info("cloudflared tunnel process died (rc=%s), restarting…", rc)
         self._tunnel_proc = None
-        tunnel_url = await asyncio.get_event_loop().run_in_executor(
+        assert self._loop is not None
+        tunnel_url = await self._loop.run_in_executor(
             None, self._start_tunnel,
         )
         if tunnel_url:
