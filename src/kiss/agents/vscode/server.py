@@ -46,7 +46,10 @@ from kiss.agents.vscode.merge_flow import _MergeFlowMixin
 from kiss.agents.vscode.printer import VSCodePrinter
 from kiss.agents.vscode.tab_state import _TabState, parse_task_tags
 from kiss.agents.vscode.task_runner import _TaskRunnerMixin
+from kiss.core import config as config_module
+from kiss.core.models import model_info
 from kiss.core.models.model_info import MODEL_INFO, get_available_models, get_default_model
+from kiss.core.models.openai_auth_routing import codex_subscription_model_sort_order
 
 __all__ = [
     "VSCodePrinter",
@@ -57,6 +60,20 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+
+def _model_dropdown_vendor(name: str) -> tuple[str, float]:
+    if model_info._is_openai_family_model(name):
+        auth_mode = model_info._resolve_openai_auth_mode(
+            name,
+            config_module.DEFAULT_CONFIG.OPENAI_API_KEY,
+        )
+        if auth_mode == "codex":
+            return "OpenAI Codex subscription", 1.0
+        return "OpenAI API", 1.1
+
+    vendor_name, vendor_order = model_vendor(name)
+    return vendor_name, float(vendor_order)
 
 
 class VSCodeServer(
@@ -157,11 +174,11 @@ class VSCodeServer(
         """Send available models list with usage counts and pricing."""
         usage = _load_model_usage()
         models_list: list[dict[str, Any]] = []
-        sort_keys: dict[str, tuple[int, float]] = {}
+        sort_keys: dict[str, tuple[float, float]] = {}
         for name in get_available_models():
             info = MODEL_INFO.get(name)
             if info and info.is_function_calling_supported:
-                vendor_name, vendor_order = model_vendor(name)
+                vendor_name, vendor_order = _model_dropdown_vendor(name)
                 models_list.append({
                     "name": name,
                     "inp": info.input_price_per_1M,
@@ -170,7 +187,13 @@ class VSCodeServer(
                     "vendor": vendor_name,
                 })
                 price = float(info.input_price_per_1M) + float(info.output_price_per_1M)
-                sort_keys[name] = (vendor_order, -price)
+                if vendor_name == "OpenAI Codex subscription":
+                    sort_keys[name] = (
+                        vendor_order,
+                        float(codex_subscription_model_sort_order(name)),
+                    )
+                else:
+                    sort_keys[name] = (vendor_order, -price)
         models_list.sort(key=lambda m: sort_keys[m["name"]])
 
         # Add custom endpoint model if configured

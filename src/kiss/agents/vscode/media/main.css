@@ -202,6 +202,10 @@ body {
   background: var(--accent); color: #fff; border: none; border-radius: 4px;
   cursor: pointer; font-size: var(--fs-sm); font-weight: 600;
 }
+.config-save-btn[hidden] { display: none; }
+.config-save-btn.danger {
+  background: #b23b3b;
+}
 .config-save-btn:hover { opacity: 0.9; }
 
 #tab-list::-webkit-scrollbar { display: none; }

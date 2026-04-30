@@ -655,6 +655,7 @@
   const cfgSaveBtn = document.getElementById('cfg-save-btn');
   const cfgCodexAuthStatus = document.getElementById('cfg-codex-auth-status');
   const cfgCodexLoginBtn = document.getElementById('cfg-codex-login-btn');
+  const cfgCodexLogoutBtn = document.getElementById('cfg-codex-logout-btn');
   const cfgCodexRefreshBtn = document.getElementById('cfg-codex-refresh-btn');
   const autocommitBtn = document.getElementById('autocommit-btn');
   const waitSpinner = document.getElementById('wait-spinner');
@@ -3187,6 +3188,11 @@
         requestCodexAuth('login');
       });
     }
+    if (cfgCodexLogoutBtn) {
+      cfgCodexLogoutBtn.addEventListener('click', () => {
+        requestCodexAuth('logout');
+      });
+    }
     if (cfgCodexRefreshBtn) {
       cfgCodexRefreshBtn.addEventListener('click', () => {
         requestCodexAuth('refresh');
@@ -3596,13 +3602,16 @@
       'div',
       'model-item' + (m.name === selectedModel ? ' active' : ''),
     );
-    const price = '$' + m.inp.toFixed(2) + ' / $' + m.out.toFixed(2);
+    const showPrice = m.vendor !== 'OpenAI Codex subscription';
+    const price =
+      showPrice && Number.isFinite(m.inp) && Number.isFinite(m.out)
+        ? '$' + m.inp.toFixed(2) + ' / $' + m.out.toFixed(2)
+        : '';
     d.innerHTML =
       '<span>' +
       esc(m.name) +
-      '</span><span class="model-cost">' +
-      price +
-      '</span>';
+      '</span>' +
+      (price ? '<span class="model-cost">' + price + '</span>' : '');
     d.addEventListener('click', () => {
       selectModel(m.name);
     });
@@ -3781,7 +3790,6 @@
     vscode.postMessage({
       type: 'codexAuth',
       action: action || 'refresh',
-      model: selectedModel,
     });
   }
 
@@ -3789,20 +3797,32 @@
     if (!cfgCodexAuthStatus) return;
     if (!auth) {
       cfgCodexAuthStatus.textContent = 'Checking Codex subscription status...';
+      if (cfgCodexLoginBtn) cfgCodexLoginBtn.hidden = false;
+      if (cfgCodexLogoutBtn) cfgCodexLogoutBtn.hidden = true;
       return;
     }
-    const bits = [];
+    const loggedIn = Boolean(auth.codex_auth_available);
     if (auth.codex_auth_available) {
-      bits.push('Logged in');
-      if (auth.codex_account_id) bits.push(auth.codex_account_id);
-      bits.push('transport: ' + (auth.codex_transport || 'auto'));
-    } else {
-      bits.push('Not logged in');
+      cfgCodexAuthStatus.textContent = 'Logged in.';
+      if (cfgCodexLoginBtn) cfgCodexLoginBtn.hidden = true;
+      if (cfgCodexLogoutBtn) cfgCodexLogoutBtn.hidden = false;
+      return;
     }
-    if (auth.preferred_auth) bits.push('auth: ' + auth.preferred_auth);
-    if (auth.login_pending) bits.push('login pending');
-    if (auth.login_error) bits.push('error: ' + auth.login_error);
+    const bits = ['Not logged in'];
+    if (auth.login_pending) {
+      bits.push('login pending');
+    }
+    if (auth.login_error) {
+      bits.push('error: ' + auth.login_error);
+    }
+    if (auth.preferred_auth) {
+      bits.push('auth: ' + auth.preferred_auth);
+    } else {
+      bits.push('auth: none');
+    }
     cfgCodexAuthStatus.textContent = bits.join(' · ');
+    if (cfgCodexLoginBtn) cfgCodexLoginBtn.hidden = loggedIn || Boolean(auth.login_pending);
+    if (cfgCodexLogoutBtn) cfgCodexLogoutBtn.hidden = !loggedIn;
   }
 
   function handleCodexAuthEvent(ev) {

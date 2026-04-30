@@ -75,6 +75,11 @@ export type FromWebviewMessage =
       type: 'saveConfig';
       config: Record<string, unknown>;
       apiKeys: Record<string, string>;
+    }
+  | {
+      type: 'codexAuth';
+      action: 'login' | 'refresh' | 'logout' | 'cancelLogin';
+      model?: string;
     };
 
 /** Messages from extension to webview (matches browser event protocol) */

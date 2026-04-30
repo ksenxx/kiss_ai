@@ -18,6 +18,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from kiss.core.models.openai_auth_routing import CODEX_AUTH_DISABLED_FILE
+
 logger = logging.getLogger(__name__)
 
 CONFIG_DIR = Path.home() / ".kiss"
@@ -25,6 +27,7 @@ CONFIG_PATH = CONFIG_DIR / "config.json"
 _oauth_lock = threading.Lock()
 _oauth_pending: dict[str, Any] | None = None
 _oauth_last_error = ""
+_oauth_completed_states: set[str] = set()
 _oauth_callback_server: ThreadingHTTPServer | None = None
 _oauth_callback_thread: threading.Thread | None = None
 
@@ -271,6 +274,17 @@ def _clear_codex_auth_caches() -> None:
         logger.debug("Failed to clear Codex auth caches", exc_info=True)
 
 
+def _set_codex_auth_disabled(disabled: bool) -> None:
+    try:
+        if disabled:
+            CODEX_AUTH_DISABLED_FILE.parent.mkdir(parents=True, exist_ok=True)
+            CODEX_AUTH_DISABLED_FILE.write_text(str(time.time()), encoding="utf-8")
+        elif CODEX_AUTH_DISABLED_FILE.exists():
+            CODEX_AUTH_DISABLED_FILE.unlink()
+    except OSError:
+        logger.debug("Failed to update Codex auth disabled marker", exc_info=True)
+
+
 def _mask_auth_id(value: str | None) -> str:
     if not value:
         return ""
@@ -284,7 +298,7 @@ def get_codex_auth_status(model_name: str = "") -> dict[str, Any]:
     from kiss.core import config as config_module
     from kiss.core.models import model_info
 
-    requested_model = model_name or "gpt-5.5"
+    requested_model = model_name or "gpt-5.4"
     is_openai_model = model_info._is_openai_family_model(requested_model)
     preferred_auth = model_info._resolve_openai_auth_mode(
         requested_model,
@@ -378,10 +392,24 @@ def _ensure_oauth_callback_server() -> tuple[bool, str]:
                     _oauth_last_error = error
                     status_code = 400
                     message = f"OpenAI Codex login failed: {error}"
-                elif not pending or state != pending.get("state"):
-                    _oauth_last_error = "OAuth state mismatch."
-                    status_code = 400
-                    message = "OpenAI Codex login failed: OAuth state mismatch."
+                elif not pending:
+                    if state and state in _oauth_completed_states:
+                        _oauth_last_error = ""
+                    else:
+                        _oauth_last_error = "OAuth callback did not match an active login."
+                        status_code = 400
+                        message = (
+                            "OpenAI Codex login failed: callback did not match "
+                            "an active login."
+                        )
+                elif state != pending.get("state"):
+                    if OpenAICodexOAuthManager().has_credentials():
+                        _oauth_last_error = ""
+                        message = "OpenAI Codex login already completed. You can close this window."
+                    else:
+                        _oauth_last_error = "OAuth state mismatch."
+                        status_code = 400
+                        message = "OpenAI Codex login failed: OAuth state mismatch."
                 elif time.time() > float(pending.get("expires_at", 0)):
                     _oauth_last_error = "OAuth login expired."
                     status_code = 400
@@ -392,9 +420,13 @@ def _ensure_oauth_callback_server() -> tuple[bool, str]:
                     message = "OpenAI Codex login failed: missing code."
                 else:
                     verifier = str(pending.get("code_verifier", ""))
+                    pending_state = str(pending.get("state", ""))
                     token = OpenAICodexOAuthManager().exchange_authorization_code(code, verifier)
                     if token:
                         _oauth_pending = None
+                        if pending_state:
+                            _oauth_completed_states.add(pending_state)
+                        _set_codex_auth_disabled(False)
                         _oauth_last_error = ""
                         _clear_codex_auth_caches()
                     else:
@@ -495,9 +527,11 @@ def logout_codex(model_name: str = "") -> dict[str, Any]:
         manager = OpenAICodexOAuthManager()
         if manager.cache_file.exists():
             manager.cache_file.unlink()
+        manager._credentials = None
     except OSError:
         logger.debug("Failed to remove Codex OAuth cache", exc_info=True)
     except Exception:
         logger.debug("Failed to initialize Codex OAuth manager", exc_info=True)
+    _set_codex_auth_disabled(True)
     _clear_codex_auth_caches()
     return {"status": "ok", "auth": get_codex_auth_status(model_name)}

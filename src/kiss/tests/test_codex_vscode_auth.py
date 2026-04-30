@@ -31,7 +31,7 @@ def test_codex_auth_refresh_broadcasts_status(monkeypatch):
     monkeypatch.setattr("kiss.agents.vscode.vscode_config.get_codex_auth_status", _status)
 
     server = _Server()
-    server._cmd_codex_auth({"type": "codexAuth", "action": "refresh", "model": "gpt-5.5"})
+    server._cmd_codex_auth({"type": "codexAuth", "action": "refresh", "model": "gpt-5.4"})
 
     printer = cast(_Printer, server.printer)
     assert printer.events == [
@@ -39,7 +39,7 @@ def test_codex_auth_refresh_broadcasts_status(monkeypatch):
             "type": "codexAuth",
             "status": "ok",
             "auth": {
-                "model": "gpt-5.5",
+                "model": "gpt-5.4",
                 "codex_auth_available": True,
                 "preferred_auth": "codex",
             },
@@ -58,7 +58,7 @@ def test_codex_auth_login_broadcasts_login_url(monkeypatch):
     monkeypatch.setattr("kiss.agents.vscode.vscode_config.start_codex_login", _login)
 
     server = _Server()
-    server._cmd_codex_auth({"type": "codexAuth", "action": "login", "model": "gpt-5.5"})
+    server._cmd_codex_auth({"type": "codexAuth", "action": "login", "model": "gpt-5.4"})
 
     printer = cast(_Printer, server.printer)
     assert printer.events == [
@@ -66,6 +66,6 @@ def test_codex_auth_login_broadcasts_login_url(monkeypatch):
             "type": "codexAuth",
             "status": "ok",
             "login_url": "https://auth.openai.com/oauth/authorize",
-            "auth": {"model": "gpt-5.5", "login_pending": True},
+            "auth": {"model": "gpt-5.4", "login_pending": True},
         }
     ]

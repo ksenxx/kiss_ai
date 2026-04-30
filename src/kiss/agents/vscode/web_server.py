@@ -821,6 +821,9 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
             <button type="button" id="cfg-codex-login-btn" class="config-save-btn">
               Log in with OpenAI
             </button>
+            <button type="button" id="cfg-codex-logout-btn" class="config-save-btn danger" hidden>
+              Log out
+            </button>
             <button type="button" id="cfg-codex-refresh-btn" class="config-save-btn">
               Refresh Codex status
             </button>

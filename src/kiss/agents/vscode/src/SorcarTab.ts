@@ -226,6 +226,7 @@ export function buildChatHtml(
             <span>OpenAI Codex subscription</span>
             <div id="cfg-codex-auth-status" class="config-auth-status">Checking...</div>
             <button type="button" id="cfg-codex-login-btn" class="config-save-btn">Log in with OpenAI</button>
+            <button type="button" id="cfg-codex-logout-btn" class="config-save-btn danger" hidden>Log out</button>
             <button type="button" id="cfg-codex-refresh-btn" class="config-save-btn">Refresh Codex status</button>
           </div>
           <label class="config-label">Anthropic API Key
