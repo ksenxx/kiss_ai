@@ -55,4 +55,4 @@ class TestFastModelFor:
         from kiss.core import config as _cfg
 
         monkeypatch.setattr(_cfg, "DEFAULT_CONFIG", _cfg.Config())
-        assert fast_model_for() == "gemini-2.5-pro"
+        assert fast_model_for() == "gemini-2.0-flash"
