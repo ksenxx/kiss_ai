@@ -942,7 +942,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                 # VS Code-only (should be silently ignored)
                 {"type": "openFile", "path": "/tmp/x"},
                 {"type": "focusEditor"},
-                {"type": "closeSecondaryBar"},
+
                 {"type": "webviewFocusChanged", "focused": True},
                 {"type": "resolveDroppedPaths", "uris": []},
                 {"type": "runPrompt"},

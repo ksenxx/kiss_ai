@@ -274,7 +274,7 @@ def _reject_all_hunks_in_file(file_data: dict[str, Any]) -> None:
 
 #: Commands that are VS-Code-UI-specific and have no backend handler.
 _VSCODE_ONLY_COMMANDS = frozenset({
-    "closeSecondaryBar",
+
     "focusEditor",
     "webviewFocusChanged",
     "openFile",

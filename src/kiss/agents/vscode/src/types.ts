@@ -57,7 +57,6 @@ export type FromWebviewMessage =
   | {type: 'runPrompt'}
   | {type: 'focusEditor'}
   | {type: 'closeTab'; tabId: string}
-  | {type: 'closeSecondaryBar'}
   | {type: 'getInputHistory'}
   | {type: 'worktreeAction'; action: 'merge' | 'discard'; tabId?: string}
   | {type: 'autocommitAction'; action: 'commit' | 'skip'; tabId?: string}

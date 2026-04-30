@@ -2464,7 +2464,7 @@ class TestSorcarSidebarViewMessageHandling(unittest.TestCase):
             "resumeSession", "getAdjacentTask",
             "complete", "mergeAction", "generateCommitMessage", "runPrompt",
             "worktreeAction", "resolveDroppedPaths", "focusEditor",
-            "closeTab", "closeSecondaryBar", "getWelcomeSuggestions",
+            "closeTab", "getWelcomeSuggestions",
             "webviewFocusChanged", "autocommitAction", "setSkipMerge",
             "getConfig", "saveConfig",
         }
@@ -3286,16 +3286,14 @@ class TestWebviewTabBarJS(unittest.TestCase):
     def test_close_tab_function_exists(self) -> None:
         assert "function closeTab(tabId)" in self._js
 
-    def test_close_last_tab_closes_secondary_bar_only(self) -> None:
-        """Closing the last tab sends closeSecondaryBar but does NOT
-        auto-create a replacement tab."""
+    def test_close_last_tab_creates_new_chat(self) -> None:
+        """Closing the last tab creates a new chat instead of closing
+        the secondary sidebar."""
         idx = self._js.index("function closeTab(tabId)")
         end = self._js.index("\n  function ", idx + 1)
         body = self._js[idx:end]
         assert "tabs.length === 0" in body
-        assert "closeSecondaryBar" in body
-        # Extract the tabs.length===0 branch and assert it does not
-        # invoke createNewTab().
+        # Extract the tabs.length===0 branch.
         zero_idx = body.index("tabs.length === 0")
         brace = body.index("{", zero_idx)
         # Find the matching closing brace.
@@ -3310,8 +3308,12 @@ class TestWebviewTabBarJS(unittest.TestCase):
                     end_branch = i
                     break
         branch = body[brace:end_branch]
-        assert "createNewTab" not in branch, (
-            "closeTab's last-tab branch must not auto-create a new tab; "
+        assert "createNewTab" in branch, (
+            "closeTab's last-tab branch must auto-create a new tab; "
+            f"branch body:\n{branch}"
+        )
+        assert "closeSecondaryBar" not in branch, (
+            "closeTab's last-tab branch must not close the secondary bar; "
             f"branch body:\n{branch}"
         )
 
