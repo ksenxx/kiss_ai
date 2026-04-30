@@ -69,14 +69,12 @@ logger = logging.getLogger(__name__)
 
 MEDIA_DIR = Path(__file__).parent / "media"
 
-#: How often (in seconds) the tunnel watchdog checks process health.
+#: How often (in seconds) the unified watchdog runs.  Each tick checks
+#: tunnel health, IP address changes, and pings WebSocket clients.
 TUNNEL_CHECK_INTERVAL = 30
 
-#: WebSocket ping interval in seconds.  After sleep/wake, dead
-#: connections are detected within ping_interval + ping_timeout.
-_WS_PING_INTERVAL = 10
-
-#: WebSocket pong timeout in seconds.
+#: WebSocket pong timeout in seconds.  Connections that fail to respond
+#: to a ping within this window are closed as stale.
 _WS_PING_TIMEOUT = 10
 
 #: HTTP 200 response for HEAD health checks from cloudflared.
@@ -1140,7 +1138,6 @@ class RemoteAccessServer:
         self._printer._merge_state_callback = self._register_merge_state
         self._active_url: str | None = None
         self._last_ips: frozenset[str] = frozenset()
-        self._ip_watchdog_task: asyncio.Task[None] | None = None
 
     # -- HTTP handler -------------------------------------------------------
 
@@ -1647,37 +1644,42 @@ class RemoteAccessServer:
             _save_url_file(self._local_url)
             self._active_url = self._local_url
 
-    async def _tunnel_watchdog(self) -> None:
-        """Periodically monitor the tunnel process and restart if needed.
-
-        When the MacBook lid is closed, the system sleeps and the
-        ``cloudflared`` process may be killed by the OS.  This watchdog
-        detects the dead process after wake and restarts the tunnel so
-        remote access is restored automatically.
-        """
-        while True:
-            await asyncio.sleep(TUNNEL_CHECK_INTERVAL)
+    async def _ping_one_ws(self, ws: Any) -> None:
+        """Send a ping to a single WebSocket client, closing if stale."""
+        try:
+            pong = await ws.ping()
+            await asyncio.wait_for(pong, timeout=_WS_PING_TIMEOUT)
+        except Exception:
             try:
-                await self._check_and_restart_tunnel()
-            except asyncio.CancelledError:
-                raise
+                await ws.close()
             except Exception:
-                logger.debug("Tunnel watchdog error", exc_info=True)
+                pass
 
-    async def _ip_watchdog(self) -> None:
-        """Periodically check for IP address changes and restart the server.
+    async def _watchdog(self) -> None:
+        """Unified periodic watchdog (runs every :data:`TUNNEL_CHECK_INTERVAL`).
 
-        Detects when the host machine's network addresses change (e.g.
-        WiFi network switch, DHCP lease renewal, VPN connect/disconnect)
-        and initiates a graceful shutdown so the daemon manager
-        (launchd / systemd) can restart the process with the new
-        network configuration.
+        Each tick performs three checks:
 
-        Runs alongside the tunnel watchdog and uses the same check
-        interval (:data:`TUNNEL_CHECK_INTERVAL`).
+        1. **Tunnel health** — if the ``cloudflared`` process died
+           (e.g. macOS killed it during sleep), restart it.
+        2. **IP change** — if the host's network addresses changed
+           (WiFi switch, DHCP renewal, VPN), initiate a graceful
+           shutdown so the daemon manager restarts the process.
+        3. **WebSocket ping** — send a ping to every connected client
+           and close connections that fail to respond within
+           :data:`_WS_PING_TIMEOUT` seconds.
         """
         while True:
             await asyncio.sleep(TUNNEL_CHECK_INTERVAL)
+            # 1. Tunnel health
+            if self.use_tunnel:
+                try:
+                    await self._check_and_restart_tunnel()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.debug("Watchdog tunnel check error", exc_info=True)
+            # 2. IP change
             try:
                 current_ips = _get_local_ips()
                 if current_ips != self._last_ips:
@@ -1693,7 +1695,20 @@ class RemoteAccessServer:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.debug("IP watchdog error", exc_info=True)
+                logger.debug("Watchdog IP check error", exc_info=True)
+            # 3. WebSocket ping
+            try:
+                if self._ws_server is not None:
+                    connections = list(self._ws_server.websockets)
+                    if connections:
+                        await asyncio.gather(
+                            *[self._ping_one_ws(ws) for ws in connections],
+                            return_exceptions=True,
+                        )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug("Watchdog WS ping error", exc_info=True)
 
     def _stop_tunnel(self) -> None:
         """Terminate the ``cloudflared`` tunnel process if running."""
@@ -1729,8 +1744,8 @@ class RemoteAccessServer:
             self.port,
             process_request=self._process_request,
             ssl=self._ssl_context,
-            ping_interval=_WS_PING_INTERVAL,
-            ping_timeout=_WS_PING_TIMEOUT,
+            ping_interval=None,
+            ping_timeout=None,
             create_connection=_HeadAwareServerConnection,
         )
 
@@ -1739,13 +1754,12 @@ class RemoteAccessServer:
             tunnel_url = await asyncio.get_event_loop().run_in_executor(
                 None, self._start_tunnel,
             )
-            self._watchdog_task = asyncio.create_task(self._tunnel_watchdog())
 
         _save_url_file(self._local_url, tunnel_url)
         self._active_url = tunnel_url or self._local_url
 
         self._last_ips = _get_local_ips()
-        self._ip_watchdog_task = asyncio.create_task(self._ip_watchdog())
+        self._watchdog_task = asyncio.create_task(self._watchdog())
 
     async def _serve_async(self) -> None:
         """Internal async entry point for the server."""
@@ -1779,15 +1793,13 @@ class RemoteAccessServer:
 
     async def stop_async(self) -> None:
         """Stop the server gracefully."""
-        for attr in ("_ip_watchdog_task", "_watchdog_task"):
-            task: asyncio.Task[None] | None = getattr(self, attr)
-            if task is not None:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-                setattr(self, attr, None)
+        if self._watchdog_task is not None:
+            self._watchdog_task.cancel()
+            try:
+                await self._watchdog_task
+            except asyncio.CancelledError:
+                pass
+            self._watchdog_task = None
         if self._ws_server is not None:
             self._ws_server.close()
             try:

@@ -1605,7 +1605,7 @@ class TestTunnelWatchdog(IsolatedAsyncioTestCase):
     async def test_watchdog_task_runs_and_cancels(self) -> None:
         """The watchdog task can be started and cancelled cleanly."""
         self.server._tunnel_proc = None
-        task = asyncio.create_task(self.server._tunnel_watchdog())
+        task = asyncio.create_task(self.server._watchdog())
         # Let it run one check cycle (with a very short sleep)
         await asyncio.sleep(0.05)
         task.cancel()
@@ -1620,7 +1620,7 @@ class TestTunnelWatchdog(IsolatedAsyncioTestCase):
     async def test_watchdog_cleans_up_on_stop(self) -> None:
         """stop_async cancels the watchdog task if running."""
         self.server._watchdog_task = asyncio.create_task(
-            self.server._tunnel_watchdog()
+            self.server._watchdog()
         )
         await asyncio.sleep(0.01)
         self.assertFalse(self.server._watchdog_task.done())
@@ -1900,39 +1900,37 @@ class TestIpWatchdog(IsolatedAsyncioTestCase):
             CONFIG_PATH.unlink()
 
     async def test_ip_watchdog_task_started(self) -> None:
-        """start_async starts the IP watchdog task."""
-        task = self.server._ip_watchdog_task
+        """start_async starts the unified watchdog task."""
+        task = self.server._watchdog_task
         self.assertIsNotNone(task)
         assert task is not None
         self.assertFalse(task.done())
 
     async def test_ip_watchdog_cancelled_on_stop(self) -> None:
-        """stop_async cancels the IP watchdog task."""
-        self.assertIsNotNone(self.server._ip_watchdog_task)
+        """stop_async cancels the unified watchdog task."""
+        self.assertIsNotNone(self.server._watchdog_task)
         await self.server.stop_async()
-        self.assertIsNone(self.server._ip_watchdog_task)
+        self.assertIsNone(self.server._watchdog_task)
 
     async def test_ip_watchdog_closes_server_on_change(self) -> None:
         """When IPs change, the watchdog closes the WebSocket server."""
         # Simulate an IP change by setting _last_ips to something different
         self.server._last_ips = frozenset({"10.255.255.1"})
         # Cancel the existing watchdog and start a fresh one with short interval
-        if self.server._ip_watchdog_task is not None:
-            self.server._ip_watchdog_task.cancel()
+        if self.server._watchdog_task is not None:
+            self.server._watchdog_task.cancel()
             try:
-                await self.server._ip_watchdog_task
+                await self.server._watchdog_task
             except asyncio.CancelledError:
                 pass
 
-        # Temporarily override TUNNEL_CHECK_INTERVAL by running a manual check
-        # Instead, directly call the internal logic: we'll start the watchdog
-        # and it should detect the mismatch on the first check cycle.
+        # Temporarily override TUNNEL_CHECK_INTERVAL for fast test.
         import kiss.agents.vscode.web_server as ws_mod
 
         original_interval = ws_mod.TUNNEL_CHECK_INTERVAL
         ws_mod.TUNNEL_CHECK_INTERVAL = 0  # minimal sleep for fast test
         try:
-            task = asyncio.create_task(self.server._ip_watchdog())
+            task = asyncio.create_task(self.server._watchdog())
             # Wait for the watchdog to detect the change and close the server
             await asyncio.sleep(0.3)
             self.assertTrue(task.done(), "Watchdog should have returned after IP change")
@@ -1941,21 +1939,20 @@ class TestIpWatchdog(IsolatedAsyncioTestCase):
 
     async def test_ip_watchdog_noop_when_unchanged(self) -> None:
         """When IPs haven't changed, the watchdog keeps running."""
-        # Ensure _last_ips matches current reality
         import kiss.agents.vscode.web_server as ws_mod
 
         self.server._last_ips = _get_local_ips()
-        if self.server._ip_watchdog_task is not None:
-            self.server._ip_watchdog_task.cancel()
+        if self.server._watchdog_task is not None:
+            self.server._watchdog_task.cancel()
             try:
-                await self.server._ip_watchdog_task
+                await self.server._watchdog_task
             except asyncio.CancelledError:
                 pass
 
         original_interval = ws_mod.TUNNEL_CHECK_INTERVAL
         ws_mod.TUNNEL_CHECK_INTERVAL = 0  # minimal sleep for fast test
         try:
-            task = asyncio.create_task(self.server._ip_watchdog())
+            task = asyncio.create_task(self.server._watchdog())
             await asyncio.sleep(0.2)
             # Should still be running (IPs haven't changed)
             self.assertFalse(task.done(), "Watchdog should keep running when IPs unchanged")
