@@ -1,7 +1,7 @@
 """Tests for the sorcar-docker integration.
 
-Verifies that findKissProject() only uses the env-var and config-setting
-search paths (no workspace upward search, embedded path, or common
+Verifies that findKissProject() uses the env-var, config-setting, and
+embedded kiss_project search paths (no workspace upward search or common
 location fallbacks).
 """
 
@@ -13,7 +13,7 @@ VSCODE_SRC = Path(__file__).resolve().parents[3] / "agents" / "vscode" / "src"
 
 
 class TestFindKissProjectSearchOrder(unittest.TestCase):
-    """findKissProject() must only check env var and config setting."""
+    """findKissProject() must only check env var, config setting, and embedded path."""
 
     def test_env_var_check_exists(self) -> None:
         """KISS_PROJECT_PATH env var must be checked."""
@@ -44,8 +44,8 @@ class TestFindKissProjectSearchOrder(unittest.TestCase):
             "findKissProject() should not search workspace folders"
         )
 
-    def test_no_embedded_path_search(self) -> None:
-        """No embedded kiss_project/ fallback."""
+    def test_embedded_path_search_exists(self) -> None:
+        """Embedded kiss_project/ bundled with the extension is checked."""
         source = (VSCODE_SRC / "AgentProcess.ts").read_text()
         fn_match = re.search(
             r"export function findKissProject\(\)[^{]*\{(.+?)^}",
@@ -54,8 +54,8 @@ class TestFindKissProjectSearchOrder(unittest.TestCase):
         )
         assert fn_match is not None
         fn_body = fn_match.group(1)
-        assert "kiss_project" not in fn_body, (
-            "findKissProject() should not check embedded kiss_project/"
+        assert "kiss_project" in fn_body, (
+            "findKissProject() should check embedded kiss_project/"
         )
 
     def test_no_common_locations_search(self) -> None:
