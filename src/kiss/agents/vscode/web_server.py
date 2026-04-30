@@ -1660,7 +1660,7 @@ class RemoteAccessServer:
             # 3. WebSocket ping
             try:
                 if self._ws_server is not None:
-                    connections = list(self._ws_server.websockets)
+                    connections = list(self._ws_server.connections)
                     if connections:
                         await asyncio.gather(
                             *[self._ping_one_ws(ws) for ws in connections],
