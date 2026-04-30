@@ -16,9 +16,9 @@ By default (no token), a **quick-tunnel** is used, which assigns a
 random ``*.trycloudflare.com`` URL that changes on every restart.  To
 get a **fixed** (non-dynamic) URL, create a named tunnel in the
 `Cloudflare Zero Trust dashboard <https://one.dash.cloudflare.com/>`_,
-copy its token, and pass it via ``--tunnel-token``, the
-``CLOUDFLARE_TUNNEL_TOKEN`` environment variable, or the
-``tunnel_token`` key in ``~/.kiss/config.json``.
+copy its token, and set it via the ``CLOUDFLARE_TUNNEL_TOKEN``
+environment variable or the ``tunnel_token`` key in
+``~/.kiss/config.json``.
 
 Usage::
 
@@ -1878,45 +1878,27 @@ def main() -> None:  # pragma: no cover — CLI entry point
         "--url", action="store_true",
         help="Print the active remote URL and exit",
     )
-    parser.add_argument("--host", default="0.0.0.0", help="Bind address")
-    parser.add_argument("--port", type=int, default=8787, help="Port number")
     parser.add_argument(
         "--tunnel", action=argparse.BooleanOptionalAction, default=True,
         help="Start cloudflared tunnel (default: on, use --no-tunnel to disable)",
     )
-    parser.add_argument(
-        "--tunnel-token", default=None,
-        help=(
-            "Cloudflare named-tunnel token for a fixed URL. "
-            "Also reads from CLOUDFLARE_TUNNEL_TOKEN env var or "
-            "tunnel_token in ~/.kiss/config.json."
-        ),
-    )
     parser.add_argument("--workdir", default=None, help="Working directory")
-    parser.add_argument("--certfile", default=None, help="Path to PEM certificate file")
-    parser.add_argument("--keyfile", default=None, help="Path to PEM private key file")
     args = parser.parse_args()
 
     if args.url:
         _print_url()
         return
 
-    # Resolve tunnel token: CLI flag > env var > config file
-    tunnel_token = args.tunnel_token
-    if not tunnel_token:
-        tunnel_token = os.environ.get("CLOUDFLARE_TUNNEL_TOKEN")
+    # Resolve tunnel token: env var > config file
+    tunnel_token = os.environ.get("CLOUDFLARE_TUNNEL_TOKEN")
     if not tunnel_token:
         cfg = load_config()
         tunnel_token = cfg.get("tunnel_token")
 
     server = RemoteAccessServer(
-        host=args.host,
-        port=args.port,
         use_tunnel=args.tunnel,
         tunnel_token=tunnel_token or None,
         work_dir=args.workdir,
-        certfile=args.certfile,
-        keyfile=args.keyfile,
     )
     server.start()
 
