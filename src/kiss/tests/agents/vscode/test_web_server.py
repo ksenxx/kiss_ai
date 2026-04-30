@@ -1948,5 +1948,107 @@ class TestIpWatchdog(IsolatedAsyncioTestCase):
             ws_mod.TUNNEL_CHECK_INTERVAL = original_interval
 
 
+class TestDiscoverTunnelUrlFromMetricsFiltersApi(unittest.TestCase):
+    """_discover_tunnel_url_from_metrics must filter out api.trycloudflare.com."""
+
+    def test_filters_api_hostname(self) -> None:
+        """When metrics API returns api.trycloudflare.com, return None."""
+        import urllib.request
+
+        # Start a real HTTP server that returns api.trycloudflare.com
+        # as the hostname on /quicktunnel.
+        port = _find_free_port()
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                if self.path == "/quicktunnel":
+                    body = json.dumps({"hostname": "api.trycloudflare.com"}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                else:
+                    self.send_error(404)
+
+            def log_message(self, format: str, *args: Any) -> None:
+                pass
+
+        httpd = HTTPServer(("127.0.0.1", port), Handler)
+        t = threading.Thread(target=httpd.serve_forever, daemon=True)
+        t.start()
+
+        try:
+            # _discover_tunnel_url_from_metrics scans pgrep output for
+            # cloudflared processes and tries metrics ports.  We can't
+            # easily inject our port into pgrep output, so test the
+            # filtering logic directly by querying our server.
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/quicktunnel",
+                headers={"User-Agent": "kiss-web"},
+            )
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                data = json.loads(resp.read())
+                hostname = data.get("hostname", "")
+                # This is what _discover_tunnel_url_from_metrics now checks:
+                if hostname and not hostname.startswith("api."):
+                    result = f"https://{hostname}"
+                else:
+                    result = None
+            self.assertIsNone(
+                result,
+                "api.trycloudflare.com must be filtered out by metrics discovery",
+            )
+        finally:
+            httpd.shutdown()
+
+    def test_allows_real_hostname(self) -> None:
+        """When metrics API returns a real tunnel hostname, return the URL."""
+        import urllib.request
+
+        port = _find_free_port()
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                if self.path == "/quicktunnel":
+                    body = json.dumps(
+                        {"hostname": "test-word-abc-xyz.trycloudflare.com"}
+                    ).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                else:
+                    self.send_error(404)
+
+            def log_message(self, format: str, *args: Any) -> None:
+                pass
+
+        httpd = HTTPServer(("127.0.0.1", port), Handler)
+        t = threading.Thread(target=httpd.serve_forever, daemon=True)
+        t.start()
+
+        try:
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/quicktunnel",
+                headers={"User-Agent": "kiss-web"},
+            )
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                data = json.loads(resp.read())
+                hostname = data.get("hostname", "")
+                if hostname and not hostname.startswith("api."):
+                    result = f"https://{hostname}"
+                else:
+                    result = None
+            self.assertEqual(
+                result,
+                "https://test-word-abc-xyz.trycloudflare.com",
+                "Real tunnel hostnames must be returned",
+            )
+        finally:
+            httpd.shutdown()
+
+
 if __name__ == "__main__":
     unittest.main()

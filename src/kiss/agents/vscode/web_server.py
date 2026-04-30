@@ -284,7 +284,7 @@ def _discover_tunnel_url_from_metrics() -> str | None:
             with urllib.request.urlopen(req, timeout=2) as resp:
                 data = json.loads(resp.read())
                 hostname = data.get("hostname", "")
-                if hostname:
+                if hostname and not hostname.startswith("api."):
                     return f"https://{hostname}"
         except Exception:
             continue
