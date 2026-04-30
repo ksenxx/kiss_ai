@@ -11,8 +11,7 @@ import sys
 import threading
 from typing import Any
 
-from kiss.agents.sorcar.persistence import _append_chat_event
-from kiss.agents.vscode.browser_ui import _DISPLAY_EVENT_TYPES, BaseBrowserPrinter
+from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 
 
 class VSCodePrinter(BaseBrowserPrinter):
@@ -27,7 +26,6 @@ class VSCodePrinter(BaseBrowserPrinter):
     def __init__(self) -> None:
         super().__init__()
         self._stdout_lock = threading.Lock()
-        self._persist_agents: dict[str, Any] = {}
 
     def broadcast(self, event: dict[str, Any]) -> None:
         """Write event as a JSON line to stdout, record it, and persist to DB.
@@ -36,9 +34,9 @@ class VSCodePrinter(BaseBrowserPrinter):
         frontend can route events to the correct chat tab.
 
         Display events are persisted to the database via
-        ``_append_chat_event`` as they are created, provided a
-        per-tab agent with a valid ``_last_task_id`` is registered
-        in ``_persist_agents``.
+        ``_persist_event`` (inherited from ``BaseBrowserPrinter``),
+        provided a per-tab agent with a valid ``_last_task_id`` is
+        registered in ``_persist_agents``.
 
         The ``_record_event`` call and the stdout write are performed
         inside a single ``_lock`` critical section so recording order
@@ -50,19 +48,10 @@ class VSCodePrinter(BaseBrowserPrinter):
         Args:
             event: The event dictionary to emit.
         """
-        tab_id = getattr(self._thread_local, "tab_id", None)
-        if tab_id is not None and "tabId" not in event:
-            event = {**event, "tabId": tab_id}
+        event = self._inject_tab_id(event)
         with self._lock:
             self._record_event(event)
             with self._stdout_lock:
                 sys.stdout.write(json.dumps(event) + "\n")
                 sys.stdout.flush()
-        if event.get("type") in _DISPLAY_EVENT_TYPES:
-            evt_tab = event.get("tabId")
-            if evt_tab is not None:
-                agent = self._persist_agents.get(evt_tab)
-                if agent is not None:
-                    task_id = agent._last_task_id
-                    if task_id is not None:
-                        _append_chat_event(event, task_id=task_id)
+        self._persist_event(event)

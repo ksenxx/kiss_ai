@@ -4,6 +4,7 @@ import threading
 import time
 from typing import Any
 
+from kiss.agents.sorcar.persistence import _append_chat_event
 from kiss.core.printer import (
     Printer,
     StreamEventParser,
@@ -135,6 +136,7 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
         self._budget_offsets: dict[str, float] = {}
         self._steps_offsets: dict[str, int] = {}
         self._recordings: dict[str, list[dict[str, Any]]] = {}
+        self._persist_agents: dict[str, Any] = {}
 
     def _tab_key(self) -> str:
         """Return the thread-local tab key for per-tab state lookups.
@@ -144,6 +146,48 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
         (e.g. unit tests that do not set ``_thread_local.tab_id``).
         """
         return getattr(self._thread_local, "tab_id", None) or ""
+
+    def _inject_tab_id(self, event: dict[str, Any]) -> dict[str, Any]:
+        """Return *event* with ``tabId`` injected from thread-local storage.
+
+        If the current thread has a ``tab_id`` set and the event does
+        not already contain a ``tabId`` key, returns a shallow copy of
+        *event* with ``tabId`` added.  Otherwise returns *event* as-is.
+
+        Args:
+            event: The event dictionary.
+
+        Returns:
+            The (possibly augmented) event dictionary.
+        """
+        tab_id = getattr(self._thread_local, "tab_id", None)
+        if tab_id is not None and "tabId" not in event:
+            return {**event, "tabId": tab_id}
+        return event
+
+    def _persist_event(self, event: dict[str, Any]) -> None:
+        """Persist a display event to the database if applicable.
+
+        Checks whether *event* is a display event type, looks up the
+        per-tab agent from ``_persist_agents``, and appends the event
+        to the database via ``_append_chat_event`` when a valid
+        ``_last_task_id`` is present.
+
+        Args:
+            event: The event dictionary (must already have ``tabId``
+                injected).
+        """
+        if event.get("type") not in _DISPLAY_EVENT_TYPES:
+            return
+        evt_tab = event.get("tabId")
+        if evt_tab is None:
+            return
+        agent = self._persist_agents.get(evt_tab)
+        if agent is None:
+            return
+        task_id = agent._last_task_id
+        if task_id is not None:
+            _append_chat_event(event, task_id=task_id)
 
     @property
     def tokens_offset(self) -> int:
