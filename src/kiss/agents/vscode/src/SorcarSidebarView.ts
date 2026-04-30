@@ -993,6 +993,14 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         });
         break;
 
+      case 'codexAuth':
+        this._getServiceProcess().sendCommand({
+          type: 'codexAuth',
+          action: message.action,
+          model: message.model,
+        });
+        break;
+
       case 'resolveDroppedPaths': {
         const workDir = this._getWorkDir();
         const paths = (message.uris || [])

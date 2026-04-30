@@ -279,6 +279,27 @@ class _CommandsMixin:
         new_cfg = load_config()
         self.printer.broadcast({"type": "configData", "config": new_cfg})
 
+    def _cmd_codex_auth(self, cmd: dict[str, Any]) -> None:
+        """Handle OpenAI Codex subscription auth actions."""
+        from kiss.agents.vscode.vscode_config import (
+            cancel_codex_login,
+            get_codex_auth_status,
+            logout_codex,
+            start_codex_login,
+        )
+
+        action = str(cmd.get("action", "refresh")).strip()
+        model_name = str(cmd.get("model", "")).strip()
+        if action == "login":
+            result = start_codex_login(model_name)
+        elif action == "cancelLogin":
+            result = cancel_codex_login(model_name)
+        elif action == "logout":
+            result = logout_codex(model_name)
+        else:
+            result = {"status": "ok", "auth": get_codex_auth_status(model_name)}
+        self.printer.broadcast({"type": "codexAuth", **result})
+
     def _cmd_set_skip_merge(self, cmd: dict[str, Any]) -> None:
         """Set the skip_merge flag on a tab.
 
@@ -315,4 +336,5 @@ class _CommandsMixin:
         "setSkipMerge": _cmd_set_skip_merge,
         "getConfig": _cmd_get_config,
         "saveConfig": _cmd_save_config,
+        "codexAuth": _cmd_codex_auth,
     }

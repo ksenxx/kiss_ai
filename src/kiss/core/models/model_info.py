@@ -11,6 +11,10 @@ FLAKY MODEL MARKERS:
 - Models with comments like "SLOW" may timeout on some requests
 """
 
+import os
+import shutil
+import subprocess
+from functools import lru_cache
 from typing import Any
 
 from kiss.core import config as config_module
@@ -80,7 +84,53 @@ def _emb(ctx: int, inp: float) -> ModelInfo:
     return ModelInfo(ctx, inp, 0.0, False, True, False)
 
 
-_OPENAI_PREFIXES = ("gpt", "text-embedding", "o1", "o3", "o4", "codex", "computer-use")
+_OPENAI_PREFIXES = (
+    "chatgpt",
+    "gpt",
+    "text-embedding",
+    "o1",
+    "o3",
+    "o4",
+    "codex",
+    "computer-use",
+)
+_CODEX_PROVIDER_MODELS = frozenset(
+    {
+        "gpt-5.5",
+        "gpt-5.4",
+        "gpt-5.4-mini",
+        "gpt-5.3-codex",
+        "gpt-5.3-codex-spark",
+        "gpt-5.2-codex",
+        "gpt-5.1-codex-max",
+        "gpt-5.2",
+        "gpt-5.1-codex-mini",
+    }
+)
+_CODEX_SUBSCRIPTION_MODELS = frozenset(
+    {
+        "chatgpt-4o-latest",
+        "codex-mini-latest",
+        "computer-use-preview",
+        "gpt-5",
+        "gpt-5.5",
+        "gpt-5.4",
+        "gpt-5.4-mini",
+        "gpt-5-chat-latest",
+        "gpt-5-codex",
+        "gpt-5-mini",
+        "gpt-5-nano",
+        "gpt-5.1",
+        "gpt-5.1-chat-latest",
+        "gpt-5.1-codex",
+        "gpt-5.1-codex-max",
+        "gpt-5.1-codex-mini",
+        "gpt-5.2",
+        "gpt-5.2-codex",
+        "gpt-5.3-codex",
+        "gpt-5.3-codex-spark",
+    }
+)
 _TOGETHER_PREFIXES = (
     "meta-llama/",
     "Qwen/",
@@ -120,6 +170,131 @@ def _openai_compatible(
         token_callback=token_callback,
         thinking_callback=thinking_callback,
     )
+
+
+def _is_openai_family_model(model_name: str) -> bool:
+    return model_name.startswith(_OPENAI_PREFIXES) and not model_name.startswith("openai/gpt-oss")
+
+
+def _is_codex_subscription_model(model_name: str) -> bool:
+    """Return True when model_name is known to be available through Codex auth."""
+    return model_name in _CODEX_SUBSCRIPTION_MODELS
+
+
+def is_codex_provider_model(model_name: str) -> bool:
+    """Return True when model_name belongs to the explicit Codex UI provider catalog."""
+    return model_name in _CODEX_PROVIDER_MODELS
+
+
+def _codex_cli(
+    model_name: str,
+    model_config: dict[str, Any] | None,
+    token_callback: TokenCallback | None,
+    thinking_callback: ThinkingCallback | None = None,
+) -> Model:
+    from kiss.core.models import CodexCliModel
+
+    if CodexCliModel is None:  # pragma: no cover - optional adapter import
+        raise KISSError("Codex CLI adapter is unavailable.")
+    return CodexCliModel(  # type: ignore[no-any-return]
+        model_name=model_name,
+        model_config=model_config,
+        token_callback=token_callback,
+        thinking_callback=thinking_callback,
+    )
+
+
+def _codex_native(
+    model_name: str,
+    model_config: dict[str, Any] | None,
+    token_callback: TokenCallback | None,
+    thinking_callback: ThinkingCallback | None = None,
+) -> Model:
+    from kiss.core.models import CodexNativeModel
+
+    if CodexNativeModel is None:  # pragma: no cover - optional adapter import
+        raise KISSError("Codex native adapter is unavailable.")
+    return CodexNativeModel(  # type: ignore[no-any-return]
+        model_name=model_name,
+        model_config=model_config,
+        token_callback=token_callback,
+        thinking_callback=thinking_callback,
+    )
+
+
+@lru_cache(maxsize=1)
+def _is_codex_cli_auth_available() -> bool:
+    """Return True when Codex CLI is installed and has an authenticated login."""
+    if os.environ.get("KISS_DISABLE_CODEX_AUTH") == "1":
+        return False
+    codex_path = shutil.which("codex")
+    if not codex_path:
+        return False
+    try:
+        result = subprocess.run(
+            [codex_path, "login", "status"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if result.returncode != 0:
+        return False
+    status_text = f"{result.stdout}\n{result.stderr}".lower()
+    return "logged in" in status_text
+
+
+@lru_cache(maxsize=1)
+def _is_codex_native_auth_available() -> bool:
+    """Return True when native Codex OAuth credentials are locally available."""
+    if os.environ.get("KISS_DISABLE_CODEX_AUTH") == "1":
+        return False
+    try:
+        from kiss.core.models.codex_oauth import OpenAICodexOAuthManager
+
+        return OpenAICodexOAuthManager().has_credentials()
+    except Exception:
+        return False
+
+
+def _is_codex_auth_available() -> bool:
+    """Return True when either native OAuth or Codex CLI auth is available."""
+    return _is_codex_native_auth_available() or _is_codex_cli_auth_available()
+
+
+def _resolve_codex_transport() -> str:
+    """Resolve Codex transport backend: native first, CLI fallback."""
+    forced = os.environ.get("KISS_CODEX_TRANSPORT", "").strip().lower()
+    if forced in {"native", "oauth", "direct"}:
+        return "native" if _is_codex_native_auth_available() else "cli"
+    if forced in {"cli", "exec", "subprocess"}:
+        return "cli"
+    if _is_codex_native_auth_available():
+        return "native"
+    return "cli"
+
+
+def _resolve_openai_auth_mode(model_name: str, openai_api_key: str) -> str:
+    """Resolve platform API key auth vs ChatGPT/Codex subscription auth."""
+    forced = os.environ.get("KISS_OPENAI_AUTH", "").strip().lower()
+    if forced in {"api", "api_key", "platform"}:
+        return "api"
+    if forced in {"codex", "subscription", "chatgpt"}:
+        if _is_codex_auth_available() and _is_codex_subscription_model(model_name):
+            return "codex"
+        return "api"
+
+    codex_auth = _is_codex_auth_available()
+    supports_codex = _is_codex_subscription_model(model_name)
+    if codex_auth and supports_codex:
+        return "codex"
+    if openai_api_key:
+        return "api"
+    if codex_auth and supports_codex:
+        return "codex"
+    return "api"
 
 
 MODEL_INFO: dict[str, ModelInfo] = {
@@ -241,6 +416,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "gpt-5.2-pro-2025-12-11": _mi(400000, 21.00, 168.00),
     "gpt-5.3-chat-latest": _mi(400000, 1.75, 14.00),
     "gpt-5.3-codex": _mi(400000, 1.75, 14.00),
+    "gpt-5.3-codex-spark": _mi(400000, 1.75, 14.00),
     "gpt-5.4": _mi(1050000, 2.50, 15.00),
     "gpt-5.4-2026-03-05": _mi(1050000, 2.50, 15.00),
     "gpt-5.4-mini": _mi(400000, 0.75, 4.50),
@@ -732,7 +908,7 @@ def _strip_provider_prefix(model_name: str) -> str:
     """Strip harbor-style provider prefixes that duplicate KISS's own routing.
 
     Harbor (and other frameworks) pass model names as ``provider/model``
-    (e.g. ``openai/gpt-5.4``, ``anthropic/claude-opus-4-6``,
+    (e.g. ``openai/gpt-5.5``, ``anthropic/claude-opus-4-6``,
     ``google/gemini-2.5-pro``).  KISS already routes by the model name
     itself (``gpt-*`` → OpenAI, ``claude-*`` → Anthropic, etc.), so the
     provider prefix is redundant and must be stripped.
@@ -771,7 +947,7 @@ def model(
     Args:
         model_name: The name of the model (with provider prefix if applicable).
             Accepts harbor-style ``provider/model`` names (e.g.
-            ``openai/gpt-5.4``, ``anthropic/claude-opus-4-6``) — the
+            ``openai/gpt-5.5``, ``anthropic/claude-opus-4-6``) — the
             redundant provider prefix is stripped automatically.
         model_config: Optional dictionary of model configuration parameters.
             If it contains "base_url", routing is bypassed and an OpenAICompatibleModel
@@ -822,7 +998,24 @@ def model(
             model_config=model_config,
             token_callback=token_callback,
         )
-    if model_name.startswith(_OPENAI_PREFIXES) and not model_name.startswith("openai/gpt-oss"):
+    if _is_openai_family_model(model_name):
+        auth_mode = _resolve_openai_auth_mode(model_name, keys.OPENAI_API_KEY)
+        if auth_mode == "codex":
+            transport = _resolve_codex_transport()
+            if transport == "native" and _is_codex_native_auth_available():
+                return _codex_native(
+                    model_name,
+                    model_config,
+                    token_callback,
+                    thinking_callback,
+                )
+            if _is_codex_cli_auth_available():
+                return _codex_cli(
+                    model_name,
+                    model_config,
+                    token_callback,
+                    thinking_callback,
+                )
         return _openai_compatible(
             model_name,
             "https://api.openai.com/v1",
@@ -922,8 +1115,11 @@ def get_available_models() -> list[str]:
         if not api_key:
             if name == "text-embedding-004":  # pragma: no cover – embedding model filtered above
                 api_key = keys.GEMINI_API_KEY
-            elif name.startswith(_OPENAI_PREFIXES) and not name.startswith("openai/gpt-oss"):
-                api_key = keys.OPENAI_API_KEY
+            elif _is_openai_family_model(name):
+                if keys.OPENAI_API_KEY or (
+                    _is_codex_auth_available() and _is_codex_subscription_model(name)
+                ):
+                    api_key = "available"
             elif name.startswith(_TOGETHER_PREFIXES):
                 api_key = keys.TOGETHER_API_KEY
         if api_key:
@@ -945,7 +1141,9 @@ def get_default_model() -> str:
     if keys.GEMINI_API_KEY:
         return "gemini-3.1-pro-preview"
     if keys.OPENAI_API_KEY:
-        return "gpt-5.4"
+        return "gpt-5.5"
+    if _is_codex_auth_available():
+        return "gpt-5.5"
     if keys.TOGETHER_API_KEY:
         return "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8"
     return "claude-opus-4-6"

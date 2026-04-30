@@ -16,6 +16,7 @@
   let isRunning = false;
   let selectedModel = 'claude-opus-4-6';
   let allModels = [];
+  let lastCodexAuth = null;
   let modelDDIdx = -1;
   let attachments = [];
   let _scrollLock = false;
@@ -652,6 +653,9 @@
   );
   const configSidebarClose = document.getElementById('config-sidebar-close');
   const cfgSaveBtn = document.getElementById('cfg-save-btn');
+  const cfgCodexAuthStatus = document.getElementById('cfg-codex-auth-status');
+  const cfgCodexLoginBtn = document.getElementById('cfg-codex-login-btn');
+  const cfgCodexRefreshBtn = document.getElementById('cfg-codex-refresh-btn');
   const autocommitBtn = document.getElementById('autocommit-btn');
   const waitSpinner = document.getElementById('wait-spinner');
   const ghostOverlay = document.getElementById('ghost-overlay');
@@ -1884,6 +1888,10 @@
         break;
       case 'configData':
         populateConfigForm(ev.config || {}, ev.apiKeys || {});
+        requestCodexAuth('refresh');
+        break;
+      case 'codexAuth':
+        handleCodexAuthEvent(ev);
         break;
       case 'history':
         renderHistory(ev.sessions || [], ev.offset || 0, ev.generation || 0);
@@ -3174,6 +3182,16 @@
       vscode.postMessage({type: 'saveConfig', ...data});
       closeConfigSidebar();
     });
+    if (cfgCodexLoginBtn) {
+      cfgCodexLoginBtn.addEventListener('click', () => {
+        requestCodexAuth('login');
+      });
+    }
+    if (cfgCodexRefreshBtn) {
+      cfgCodexRefreshBtn.addEventListener('click', () => {
+        requestCodexAuth('refresh');
+      });
+    }
     historySearch.addEventListener('input', () => {
       resetHistoryPagination();
       vscode.postMessage({
@@ -3730,6 +3748,7 @@
     configSidebar.classList.add('open');
     configSidebarOverlay.classList.add('open');
     configBtn.classList.add('open');
+    requestCodexAuth('refresh');
   }
   function closeConfigSidebar() {
     configSidebar.classList.remove('open');
@@ -3755,6 +3774,50 @@
     keyIds.forEach(k => {
       el('cfg-key-' + k).value = (apiKeys && apiKeys[k]) || '';
     });
+    renderCodexAuth(lastCodexAuth);
+  }
+
+  function requestCodexAuth(action) {
+    vscode.postMessage({
+      type: 'codexAuth',
+      action: action || 'refresh',
+      model: selectedModel,
+    });
+  }
+
+  function renderCodexAuth(auth) {
+    if (!cfgCodexAuthStatus) return;
+    if (!auth) {
+      cfgCodexAuthStatus.textContent = 'Checking Codex subscription status...';
+      return;
+    }
+    const bits = [];
+    if (auth.codex_auth_available) {
+      bits.push('Logged in');
+      if (auth.codex_account_id) bits.push(auth.codex_account_id);
+      bits.push('transport: ' + (auth.codex_transport || 'auto'));
+    } else {
+      bits.push('Not logged in');
+    }
+    if (auth.preferred_auth) bits.push('auth: ' + auth.preferred_auth);
+    if (auth.login_pending) bits.push('login pending');
+    if (auth.login_error) bits.push('error: ' + auth.login_error);
+    cfgCodexAuthStatus.textContent = bits.join(' · ');
+  }
+
+  function handleCodexAuthEvent(ev) {
+    lastCodexAuth = ev.auth || lastCodexAuth;
+    renderCodexAuth(lastCodexAuth);
+    if (ev.status === 'error' && ev.error) {
+      addLine('Error: ' + ev.error, true);
+    }
+    if (ev.login_url) {
+      try {
+        window.open(ev.login_url, '_blank', 'noopener');
+      } catch (_) {
+        cfgCodexAuthStatus.textContent = ev.login_url;
+      }
+    }
   }
   function collectConfigForm() {
     const el = id => document.getElementById(id);

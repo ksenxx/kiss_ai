@@ -12,6 +12,8 @@ __all__ = [
     "Model",
     "AnthropicModel",
     "ClaudeCodeModel",
+    "CodexCliModel",
+    "CodexNativeModel",
     "OpenAICompatibleModel",
     "GeminiModel",
 ]
@@ -19,6 +21,8 @@ __all__ = [
 _LAZY_IMPORTS = {
     "AnthropicModel": "kiss.core.models.anthropic_model",
     "ClaudeCodeModel": "kiss.core.models.claude_code_model",
+    "CodexCliModel": "kiss.core.models.codex_cli_model",
+    "CodexNativeModel": "kiss.core.models.codex_native_model",
     "OpenAICompatibleModel": "kiss.core.models.openai_compatible_model",
     "GeminiModel": "kiss.core.models.gemini_model",
 }

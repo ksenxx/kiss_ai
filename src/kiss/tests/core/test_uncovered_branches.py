@@ -208,12 +208,15 @@ class TestGetAvailableModels:
         result = get_most_expensive_model()
         assert isinstance(result, str)
 
-    def test_get_default_model_priority(self) -> None:
+    def test_get_default_model_priority(self, monkeypatch) -> None:
         """Test that get_default_model picks the right model per API key priority."""
         import os
 
         from kiss.core import config as config_module
+        from kiss.core.models import model_info
         from kiss.core.models.model_info import get_default_model
+
+        monkeypatch.setattr(model_info, "_is_codex_auth_available", lambda: False)
 
         env_keys = [
             "ANTHROPIC_API_KEY",
@@ -235,7 +238,7 @@ class TestGetAvailableModels:
 
             os.environ["OPENAI_API_KEY"] = "t"
             config_module.DEFAULT_CONFIG = config_module.Config()
-            assert get_default_model() == "gpt-5.4"
+            assert get_default_model() == "gpt-5.5"
 
             os.environ["GEMINI_API_KEY"] = "t"
             config_module.DEFAULT_CONFIG = config_module.Config()

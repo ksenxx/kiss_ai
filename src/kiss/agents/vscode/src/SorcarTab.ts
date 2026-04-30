@@ -222,6 +222,12 @@ export function buildChatHtml(
           <label class="config-label">OpenAI API Key
             <input type="password" id="cfg-key-OPENAI_API_KEY" placeholder="Enter OpenAI API key">
           </label>
+          <div class="config-label">
+            <span>OpenAI Codex subscription</span>
+            <div id="cfg-codex-auth-status" class="config-auth-status">Checking...</div>
+            <button type="button" id="cfg-codex-login-btn" class="config-save-btn">Log in with OpenAI</button>
+            <button type="button" id="cfg-codex-refresh-btn" class="config-save-btn">Refresh Codex status</button>
+          </div>
           <label class="config-label">Anthropic API Key
             <input type="password" id="cfg-key-ANTHROPIC_API_KEY" placeholder="Enter Anthropic API key">
           </label>

@@ -146,6 +146,13 @@ type ToWebviewMessageBody =
       apiKeys?: Record<string, string>;
     }
   | {
+      type: 'codexAuth';
+      status?: string;
+      error?: string;
+      login_url?: string;
+      auth?: Record<string, unknown>;
+    }
+  | {
       type: 'history';
       sessions: SessionInfo[];
       offset?: number;
@@ -224,7 +231,8 @@ export interface AgentCommand {
     | 'getAdjacentTask'
     | 'setSkipMerge'
     | 'getConfig'
-    | 'saveConfig';
+    | 'saveConfig'
+    | 'codexAuth';
   prompt?: string;
   model?: string;
   workDir?: string;
@@ -238,7 +246,16 @@ export interface AgentCommand {
   path?: string;
   chatId?: number | string;
   activeFileContent?: string;
-  action?: 'merge' | 'discard' | 'all-done' | 'commit' | 'skip';
+  action?:
+    | 'merge'
+    | 'discard'
+    | 'all-done'
+    | 'commit'
+    | 'skip'
+    | 'login'
+    | 'refresh'
+    | 'logout'
+    | 'cancelLogin';
   useWorktree?: boolean;
   useParallel?: boolean;
   task?: string;

@@ -10,6 +10,11 @@ import json
 import logging
 import os
 import subprocess
+import threading
+import time
+import urllib.parse
+import webbrowser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +22,11 @@ logger = logging.getLogger(__name__)
 
 CONFIG_DIR = Path.home() / ".kiss"
 CONFIG_PATH = CONFIG_DIR / "config.json"
+_oauth_lock = threading.Lock()
+_oauth_pending: dict[str, Any] | None = None
+_oauth_last_error = ""
+_oauth_callback_server: ThreadingHTTPServer | None = None
+_oauth_callback_thread: threading.Thread | None = None
 
 DEFAULTS: dict[str, Any] = {
     "max_budget": 100,
@@ -249,3 +259,245 @@ def source_shell_env() -> None:
     except (subprocess.TimeoutExpired, OSError):
         logger.debug("Failed to source shell env", exc_info=True)
     _refresh_config()
+
+
+def _clear_codex_auth_caches() -> None:
+    try:
+        from kiss.core.models import model_info
+
+        model_info._is_codex_cli_auth_available.cache_clear()
+        model_info._is_codex_native_auth_available.cache_clear()
+    except Exception:
+        logger.debug("Failed to clear Codex auth caches", exc_info=True)
+
+
+def _mask_auth_id(value: str | None) -> str:
+    if not value:
+        return ""
+    if len(value) <= 8:
+        return value
+    return f"{value[:4]}...{value[-4:]}"
+
+
+def get_codex_auth_status(model_name: str = "") -> dict[str, Any]:
+    """Return OpenAI/Codex subscription auth status for the config UI."""
+    from kiss.core import config as config_module
+    from kiss.core.models import model_info
+
+    requested_model = model_name or "gpt-5.5"
+    is_openai_model = model_info._is_openai_family_model(requested_model)
+    preferred_auth = model_info._resolve_openai_auth_mode(
+        requested_model,
+        config_module.DEFAULT_CONFIG.OPENAI_API_KEY,
+    )
+    codex_account_id = ""
+    codex_cache_file = ""
+    codex_source_file = ""
+    try:
+        from kiss.core.models.codex_oauth import (
+            CODEX_OAUTH_CALLBACK_PORT,
+            OpenAICodexOAuthManager,
+        )
+
+        manager = OpenAICodexOAuthManager()
+        codex_account_id = manager.get_account_id() or ""
+        codex_cache_file = str(manager.cache_file)
+        codex_source_file = str(manager.source_file)
+        callback_port = CODEX_OAUTH_CALLBACK_PORT
+    except Exception:
+        callback_port = 1455
+
+    with _oauth_lock:
+        login_pending = _oauth_pending is not None
+        login_error = _oauth_last_error
+
+    return {
+        "model": requested_model,
+        "is_openai_model": is_openai_model,
+        "preferred_auth": preferred_auth,
+        "codex_subscription_model": model_info._is_codex_subscription_model(requested_model),
+        "openai_api_key_configured": bool(config_module.DEFAULT_CONFIG.OPENAI_API_KEY),
+        "codex_auth_available": model_info._is_codex_auth_available(),
+        "codex_native_available": model_info._is_codex_native_auth_available(),
+        "codex_cli_available": model_info._is_codex_cli_auth_available(),
+        "codex_transport": model_info._resolve_codex_transport(),
+        "login_pending": login_pending,
+        "login_error": login_error,
+        "oauth_callback_port": callback_port,
+        "forced_auth": os.environ.get("KISS_OPENAI_AUTH", "").strip().lower() or "auto",
+        "forced_transport": os.environ.get("KISS_CODEX_TRANSPORT", "").strip().lower() or "auto",
+        "codex_account_id": _mask_auth_id(codex_account_id),
+        "codex_cache_file": codex_cache_file,
+        "codex_source_file": codex_source_file,
+    }
+
+
+def _shutdown_oauth_callback_server() -> None:
+    global _oauth_callback_server, _oauth_callback_thread
+    server = _oauth_callback_server
+    _oauth_callback_server = None
+    _oauth_callback_thread = None
+    if server is not None:
+        try:
+            server.shutdown()
+            server.server_close()
+        except OSError:
+            logger.debug("Failed to stop Codex OAuth callback server", exc_info=True)
+
+
+def _ensure_oauth_callback_server() -> tuple[bool, str]:
+    global _oauth_callback_server, _oauth_callback_thread, _oauth_pending, _oauth_last_error
+    if _oauth_callback_server is not None:
+        return True, ""
+
+    try:
+        from kiss.core.models.codex_oauth import (
+            CODEX_OAUTH_CALLBACK_PORT,
+            OpenAICodexOAuthManager,
+        )
+    except ImportError as exc:
+        return False, str(exc)
+
+    class _OAuthCallbackHandler(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: Any) -> None:
+            return
+
+        def do_GET(self) -> None:
+            global _oauth_pending, _oauth_last_error
+            parsed = urllib.parse.urlparse(self.path)
+            params = urllib.parse.parse_qs(parsed.query)
+            code = params.get("code", [""])[0]
+            state = params.get("state", [""])[0]
+            error = params.get("error", [""])[0]
+
+            status_code = 200
+            message = "OpenAI Codex login completed. You can close this window."
+            with _oauth_lock:
+                pending = _oauth_pending
+                if error:
+                    _oauth_last_error = error
+                    status_code = 400
+                    message = f"OpenAI Codex login failed: {error}"
+                elif not pending or state != pending.get("state"):
+                    _oauth_last_error = "OAuth state mismatch."
+                    status_code = 400
+                    message = "OpenAI Codex login failed: OAuth state mismatch."
+                elif time.time() > float(pending.get("expires_at", 0)):
+                    _oauth_last_error = "OAuth login expired."
+                    status_code = 400
+                    message = "OpenAI Codex login failed: login expired."
+                elif not code:
+                    _oauth_last_error = "OAuth callback did not include a code."
+                    status_code = 400
+                    message = "OpenAI Codex login failed: missing code."
+                else:
+                    verifier = str(pending.get("code_verifier", ""))
+                    token = OpenAICodexOAuthManager().exchange_authorization_code(code, verifier)
+                    if token:
+                        _oauth_pending = None
+                        _oauth_last_error = ""
+                        _clear_codex_auth_caches()
+                    else:
+                        _oauth_last_error = "Token exchange failed."
+                        status_code = 400
+                        message = "OpenAI Codex login failed: token exchange failed."
+
+            body = (
+                "<!doctype html><html><body>"
+                f"<p>{message}</p>"
+                "</body></html>"
+            ).encode()
+            self.send_response(status_code)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    try:
+        server = ThreadingHTTPServer(
+            ("127.0.0.1", CODEX_OAUTH_CALLBACK_PORT),
+            _OAuthCallbackHandler,
+        )
+    except OSError as exc:
+        return False, str(exc)
+
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    _oauth_callback_server = server
+    _oauth_callback_thread = thread
+    return True, ""
+
+
+def start_codex_login(model_name: str = "") -> dict[str, Any]:
+    """Start OpenAI Codex OAuth login and return a browser URL."""
+    global _oauth_pending, _oauth_last_error
+    try:
+        from kiss.core.models.codex_oauth import (
+            CODEX_OAUTH_REDIRECT_URI,
+            build_authorization_url,
+            generate_code_challenge,
+            generate_code_verifier,
+            generate_oauth_state,
+        )
+    except ImportError as exc:
+        return {"status": "error", "error": str(exc), "auth": get_codex_auth_status(model_name)}
+
+    verifier = generate_code_verifier()
+    state = generate_oauth_state()
+    login_url = build_authorization_url(
+        generate_code_challenge(verifier),
+        state,
+        originator="kiss-ai",
+        redirect_uri=CODEX_OAUTH_REDIRECT_URI,
+    )
+    with _oauth_lock:
+        _oauth_pending = {
+            "state": state,
+            "code_verifier": verifier,
+            "created_at": time.time(),
+            "expires_at": time.time() + 300.0,
+        }
+        _oauth_last_error = ""
+
+    started, error = _ensure_oauth_callback_server()
+    if not started:
+        with _oauth_lock:
+            _oauth_pending = None
+            _oauth_last_error = error
+        return {"status": "error", "error": error, "auth": get_codex_auth_status(model_name)}
+
+    try:
+        webbrowser.open(login_url)
+    except Exception:
+        logger.debug("Failed to open Codex OAuth URL", exc_info=True)
+    return {
+        "status": "ok",
+        "login_url": login_url,
+        "auth": get_codex_auth_status(model_name),
+    }
+
+
+def cancel_codex_login(model_name: str = "") -> dict[str, Any]:
+    """Cancel a pending OpenAI Codex OAuth login."""
+    global _oauth_pending, _oauth_last_error
+    with _oauth_lock:
+        _oauth_pending = None
+        _oauth_last_error = ""
+    _shutdown_oauth_callback_server()
+    return {"status": "ok", "auth": get_codex_auth_status(model_name)}
+
+
+def logout_codex(model_name: str = "") -> dict[str, Any]:
+    """Remove KISS-managed Codex OAuth cache and refresh auth status."""
+    try:
+        from kiss.core.models.codex_oauth import OpenAICodexOAuthManager
+
+        manager = OpenAICodexOAuthManager()
+        if manager.cache_file.exists():
+            manager.cache_file.unlink()
+    except OSError:
+        logger.debug("Failed to remove Codex OAuth cache", exc_info=True)
+    except Exception:
+        logger.debug("Failed to initialize Codex OAuth manager", exc_info=True)
+    _clear_codex_auth_caches()
+    return {"status": "ok", "auth": get_codex_auth_status(model_name)}

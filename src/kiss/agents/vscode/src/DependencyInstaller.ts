@@ -78,7 +78,7 @@ export function getDefaultModel(): string {
   if (process.env.OPENROUTER_API_KEY)
     return 'openrouter/anthropic/claude-opus-4.6';
   if (process.env.GEMINI_API_KEY) return 'gemini-3.1-pro-preview';
-  if (process.env.OPENAI_API_KEY) return 'gpt-5.4';
+  if (process.env.OPENAI_API_KEY) return 'gpt-5.5';
   if (process.env.TOGETHER_API_KEY)
     return 'Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8';
   return 'claude-opus-4-6';

@@ -187,6 +187,15 @@ body {
 .config-checkbox { display: flex; align-items: center; gap: 8px; flex-direction: row; }
 .config-checkbox input[type="checkbox"] { margin: 0; width: auto; }
 .config-divider { border-top: 1px solid var(--border); margin: 12px 0; }
+.config-auth-status {
+  margin-top: 4px;
+  padding: 6px 8px;
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--fg);
+  line-height: 1.35;
+}
 
 .config-save-btn {
   display: block; width: 100%; padding: 8px; margin-top: 8px;
