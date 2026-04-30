@@ -33,6 +33,10 @@ def _isolate_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     don't touch real user files.  Does NOT replace any functions — the
     real ``_shell_rc_path`` is used, reading ``Path.home()`` (which
     respects the monkeypatched HOME env var).
+
+    Also snapshots all API key env vars so that ``save_api_key_to_shell``
+    (which writes directly to ``os.environ``) does not leak test values
+    into later tests.
     """
     fake_home = tmp_path / "home"
     fake_home.mkdir()
@@ -44,6 +48,17 @@ def _isolate_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         "kiss.agents.vscode.vscode_config.CONFIG_PATH",
         fake_home / ".kiss" / "config.json",
     )
+    # Snapshot all API key env vars so monkeypatch restores them on teardown.
+    for key in API_KEY_ENV_VARS:
+        val = os.environ.get(key)
+        if val is not None:
+            monkeypatch.setenv(key, val)
+        else:
+            monkeypatch.delenv(key, raising=False)
+    # Snapshot DEFAULT_CONFIG so _refresh_config() side effects are undone.
+    from kiss.core import config as config_module
+
+    monkeypatch.setattr(config_module, "DEFAULT_CONFIG", config_module.DEFAULT_CONFIG)
 
 
 # ---------------------------------------------------------------------------

@@ -115,5 +115,89 @@ class TestConcurrencyGuard(unittest.TestCase):
         )
 
 
+class TestEarlyExitGuard(unittest.TestCase):
+    """ensureDependenciesImpl should return immediately when all dependencies
+    are fully installed and the daemon is running, avoiding heavyweight
+    operations (Playwright download, daemon restart, CLI rewrite) on every
+    VS Code activation."""
+
+    def test_early_exit_checks_all_four_conditions(self) -> None:
+        """The early-exit guard must check uv, .venv, Chromium, and daemon."""
+        for condition in ["findUvPath()", ".venv", "isChromiumInstalled()", "isDaemonRunning()"]:
+            assert condition in INSTALLER_SOURCE, (
+                f"Early-exit guard must check {condition}"
+            )
+
+    def test_early_exit_checks_update_marker(self) -> None:
+        """The early-exit guard must not trigger when the extension-updated
+        marker exists, so that code changes from build-extension.sh are
+        picked up via the normal restart path."""
+        # Find the early-exit block (before the main uvPath / venvExists logic)
+        guard_match = re.search(
+            r"isDaemonRunning\(\).*?!fs\.existsSync\(updateMarker\)",
+            INSTALLER_SOURCE,
+            re.DOTALL,
+        )
+        assert guard_match is not None, (
+            "Early-exit guard must check that the .extension-updated marker "
+            "does NOT exist before returning early"
+        )
+
+    def test_early_exit_loads_api_keys(self) -> None:
+        """The early-exit path must still call loadApiKeysFromShellRc so that
+        API keys from ~/.zshrc are available when VS Code is launched from
+        macOS Dock/Spotlight."""
+        # Find the early-exit block and verify loadApiKeysFromShellRc is called
+        nothing_match = re.search(
+            r"nothing to do.*?loadApiKeysFromShellRc\(\)",
+            INSTALLER_SOURCE,
+            re.DOTALL,
+        )
+        assert nothing_match is not None, (
+            "Early-exit path must call loadApiKeysFromShellRc() to populate "
+            "API keys for macOS Dock launches"
+        )
+
+    def test_early_exit_returns_before_playwright_install(self) -> None:
+        """The early-exit must happen before any playwright install command."""
+        guard_pos = INSTALLER_SOURCE.find("nothing to do")
+        assert guard_pos > 0, "Early-exit log message not found"
+        playwright_pos = INSTALLER_SOURCE.find("playwright', 'install', 'chromium'")
+        assert playwright_pos > 0, "Playwright install command not found"
+        assert guard_pos < playwright_pos, (
+            "Early-exit guard must appear before the Playwright install command"
+        )
+
+    def test_early_exit_returns_before_restart_daemon(self) -> None:
+        """The early-exit must happen before restartKissWebDaemon."""
+        guard_pos = INSTALLER_SOURCE.find("nothing to do")
+        assert guard_pos > 0
+        daemon_pos = INSTALLER_SOURCE.find("restartKissWebDaemon(kissProjectPath)")
+        assert daemon_pos > 0, "restartKissWebDaemon call not found"
+        assert guard_pos < daemon_pos, (
+            "Early-exit guard must appear before the restartKissWebDaemon call"
+        )
+
+
+class TestIsDaemonRunning(unittest.TestCase):
+    """isDaemonRunning function should exist and check port 8787."""
+
+    def test_is_daemon_running_exists(self) -> None:
+        """isDaemonRunning function must be defined."""
+        assert "function isDaemonRunning()" in INSTALLER_SOURCE
+
+    def test_checks_port_8787(self) -> None:
+        """isDaemonRunning must probe port 8787."""
+        func_match = re.search(
+            r"function isDaemonRunning\(\).*?\n\}",
+            INSTALLER_SOURCE,
+            re.DOTALL,
+        )
+        assert func_match is not None
+        assert "8787" in func_match.group(0), (
+            "isDaemonRunning must check port 8787"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
