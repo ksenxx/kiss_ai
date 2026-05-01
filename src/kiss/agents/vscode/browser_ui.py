@@ -7,7 +7,6 @@ from typing import Any
 from kiss.agents.sorcar.persistence import _append_chat_event
 from kiss.core.printer import (
     Printer,
-    StreamEventParser,
     extract_extras,
     extract_path_and_lang,
     parse_result_yaml,
@@ -72,41 +71,25 @@ class _BashState:
         self.streamed: bool = False
 
 
-class BaseBrowserPrinter(StreamEventParser, Printer):
+class BaseBrowserPrinter(Printer):
     """Base printer for browser-based UIs.
 
-    Stream-parsing state (``_current_block_type``, ``_tool_name``,
-    ``_tool_json_buffer``) is stored in thread-local storage so
-    concurrent task threads cannot corrupt each other's in-flight
-    parsing.  Recording and bash buffering are per-tab (keyed by
-    ``tab_id``) so one task's ``stop_recording()`` or ``reset()``
-    does not destroy another tab's state.
+    The current block type (``_current_block_type``) is stored in
+    thread-local storage so concurrent task threads can each route
+    their streamed tokens to the correct (thinking vs text) panel
+    without corrupting each other.  Recording and bash buffering are
+    per-tab (keyed by ``tab_id``) so one task's ``stop_recording()``
+    or ``reset()`` does not destroy another tab's state.
     """
 
 
     @property
-    def _current_block_type(self) -> str:  # type: ignore[override]
+    def _current_block_type(self) -> str:
         return getattr(self._thread_local, "_cbt", "")
 
     @_current_block_type.setter
     def _current_block_type(self, value: str) -> None:
         self._thread_local._cbt = value
-
-    @property
-    def _tool_name(self) -> str:  # type: ignore[override]
-        return getattr(self._thread_local, "_tn", "")
-
-    @_tool_name.setter
-    def _tool_name(self, value: str) -> None:
-        self._thread_local._tn = value
-
-    @property
-    def _tool_json_buffer(self) -> str:  # type: ignore[override]
-        return getattr(self._thread_local, "_tjb", "")
-
-    @_tool_json_buffer.setter
-    def _tool_json_buffer(self, value: str) -> None:
-        self._thread_local._tjb = value
 
     @property
     def _bash_state(self) -> _BashState:
@@ -128,7 +111,6 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
 
     def __init__(self) -> None:
         self._thread_local = threading.local()
-        StreamEventParser.__init__(self)
         self._lock = threading.Lock()
         self._bash_lock = threading.Lock()
         self._bash_states: dict[str, _BashState] = {}
@@ -243,8 +225,8 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
             self._steps_offsets.pop(key, None)
 
     def reset(self) -> None:
-        """Reset internal streaming and tool-parsing state for a new turn."""
-        self.reset_stream_state()
+        """Reset internal streaming state for a new turn."""
+        self._current_block_type = ""
         with self._bash_lock:
             self._bash_state.generation += 1
             self._bash_state.buffer.clear()
@@ -380,13 +362,13 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
 
         Args:
             content: The content to display.
-            type: Content type (e.g. "text", "prompt", "stream_event",
-                "tool_call", "tool_result", "result", "message").
+            type: Content type (e.g. "text", "prompt", "tool_call",
+                "tool_result", "result", "message").
             **kwargs: Additional options such as tool_input, is_error, cost,
                 total_tokens.
 
         Returns:
-            str: Extracted text from stream events, or empty string.
+            str: Always the empty string.
         """
         self._check_stop()
         if type == "text":
@@ -403,8 +385,6 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
         if type in ("system_prompt", "prompt"):
             self.broadcast({"type": type, "text": str(content)})
             return ""
-        if type == "stream_event":
-            return self.parse_stream_event(content)
         if type == "message":
             self._handle_message(content, **kwargs)
             return ""
@@ -542,18 +522,6 @@ class BaseBrowserPrinter(StreamEventParser, Printer):
         if extras:
             event["extras"] = extras
         self.broadcast(event)
-
-    def _on_thinking_start(self) -> None:
-        self.broadcast({"type": "thinking_start"})
-
-    def _on_thinking_end(self) -> None:
-        self.broadcast({"type": "thinking_end"})
-
-    def _on_tool_use_end(self, name: str, tool_input: dict) -> None:
-        self._format_tool_call(name, tool_input)
-
-    def _on_text_block_end(self) -> None:
-        self.broadcast({"type": "text_end"})
 
     def _handle_message(self, message: Any, **kwargs: Any) -> None:
         if hasattr(message, "subtype") and hasattr(message, "data"):
