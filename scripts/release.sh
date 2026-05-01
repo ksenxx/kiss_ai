@@ -244,7 +244,10 @@ publish_vscode_extension() {
 
     print_step "Publishing VS Code extension..."
     cd "$VSCODE_EXT_DIR"
-    npx @vscode/vsce publish --packagePath "kiss-sorcar.vsix" --pat "$VSCE_PAT"
+    npx @vscode/vsce publish \
+        --packagePath "kiss-sorcar.vsix" \
+        --pat "$VSCE_PAT" \
+        --allow-proposed-apis contribSourceControlInputBoxMenu
     cd - > /dev/null
 
     print_info "Successfully published VS Code extension v$version"
