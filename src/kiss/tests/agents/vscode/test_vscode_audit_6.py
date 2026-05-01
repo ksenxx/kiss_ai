@@ -10,7 +10,7 @@ B2 fix: ``is_task_active`` is now cleared in ``_run_task``'s finally
     ``_capture_pre_snapshot`` raised before the inner try/finally,
     ``is_task_active`` stayed True permanently.
 
-B3 fix: ``fast_model_for()`` now returns ``gemini-2.0-flash`` for
+B3 fix: ``get_fast_model()`` now returns ``gemini-2.0-flash`` for
     Gemini (a genuinely cheap/fast model) instead of ``gemini-2.5-pro``
     (an expensive reasoning model).
 
@@ -31,7 +31,6 @@ from typing import Any
 from unittest import TestCase
 
 from kiss.agents.vscode.commands import _CommandsMixin
-from kiss.agents.vscode.helpers import fast_model_for
 from kiss.agents.vscode.server import VSCodeServer
 from kiss.agents.vscode.task_runner import _TaskRunnerMixin
 from kiss.agents.vscode.vscode_config import (
@@ -39,6 +38,7 @@ from kiss.agents.vscode.vscode_config import (
     load_config,
     save_config,
 )
+from kiss.core.models.model_info import get_fast_model
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -202,12 +202,12 @@ class TestIsTaskActiveClearedOnSnapshotFailure(TestCase):
 
 
 # ===================================================================
-# B3 — fast_model_for returns expensive model for Gemini
+# B3 — get_fast_model returns expensive model for Gemini
 # ===================================================================
 
 
 class TestFastModelForReturnsActuallyFastModels(TestCase):
-    """B3 FIX: ``fast_model_for()`` now returns genuinely cheap/fast
+    """B3 FIX: ``get_fast_model()`` now returns genuinely cheap/fast
     models for each provider.  Previously, the Gemini branch returned
     ``gemini-2.5-pro`` which is one of the most expensive models.
     """
@@ -227,7 +227,7 @@ class TestFastModelForReturnsActuallyFastModels(TestCase):
             config_module.DEFAULT_CONFIG.GEMINI_API_KEY = "test-key"
             config_module.DEFAULT_CONFIG.OPENAI_API_KEY = ""
 
-            result = fast_model_for()
+            result = get_fast_model()
             assert "flash" in result.lower() or "2.0" in result, (
                 f"B3 FIX: Gemini fast model should be a flash variant, "
                 f"got '{result}'"
@@ -241,9 +241,9 @@ class TestFastModelForReturnsActuallyFastModels(TestCase):
 
     def test_docstring_consistency(self) -> None:
         """The function's docstring should match actual behavior."""
-        doc = fast_model_for.__doc__ or ""
+        doc = get_fast_model.__doc__ or ""
         assert "cheap" in doc.lower() or "fast" in doc.lower(), (
-            "fast_model_for docstring should mention cheap/fast"
+            "get_fast_model docstring should mention cheap/fast"
         )
 
 
