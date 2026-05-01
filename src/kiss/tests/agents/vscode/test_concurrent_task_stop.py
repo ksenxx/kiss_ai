@@ -10,9 +10,9 @@ Covers both directions:
 
 Root causes fixed:
 
-1. Stream state (``_current_block_type``, ``_tool_name``,
-   ``_tool_json_buffer``) and recording (``_recording``) were shared
-   instance attributes.  Now thread-local / per-tab.
+1. Stream state (``_current_block_type``) and recording
+   (``_recording``) were shared instance attributes.  Now thread-local
+   / per-tab.
 
 2. Bash buffering state (``_bash_state``) was a single shared instance.
    Two concurrent tabs shared ``buffer``, ``streamed``, ``generation``,
@@ -78,45 +78,6 @@ class TestStreamStateIsolation(unittest.TestCase):
         assert results["B_block_type"] == "thinking", (
             f"Task B's block type should still be 'thinking', got '{results['B_block_type']}'"
         )
-
-    def test_reset_does_not_corrupt_tool_json_buffer(self) -> None:
-        """When task A calls reset(), task B's _tool_json_buffer is preserved."""
-        printer = BaseBrowserPrinter()
-        barrier = threading.Barrier(2, timeout=5)
-        barrier2 = threading.Barrier(2, timeout=5)
-        results: dict[str, str] = {}
-
-        def wt_task() -> None:
-            printer._thread_local.tab_id = "B"
-            printer._tool_json_buffer = '{"file_path": "/tmp/foo.py"'
-            printer._tool_name = "Read"
-            barrier.wait()
-            barrier2.wait()
-            results["B_tool_json"] = printer._tool_json_buffer
-            results["B_tool_name"] = printer._tool_name
-
-        def non_wt_task() -> None:
-            printer._thread_local.tab_id = "A"
-            printer._tool_json_buffer = '{"command": "ls"}'
-            printer._tool_name = "Bash"
-            barrier.wait()
-            printer.reset()
-            results["A_tool_json"] = printer._tool_json_buffer
-            results["A_tool_name"] = printer._tool_name
-            barrier2.wait()
-
-        t_wt = threading.Thread(target=wt_task, daemon=True)
-        t_nwt = threading.Thread(target=non_wt_task, daemon=True)
-        t_wt.start()
-        t_nwt.start()
-        t_wt.join(timeout=5)
-        t_nwt.join(timeout=5)
-
-        assert results["A_tool_json"] == ""
-        assert results["A_tool_name"] == ""
-        assert results["B_tool_json"] == '{"file_path": "/tmp/foo.py"'
-        assert results["B_tool_name"] == "Read"
-
 
 class TestRecordingIsolation(unittest.TestCase):
     """Recording must be per-tab so one task's stop doesn't lose another's events."""
@@ -321,46 +282,6 @@ class TestStopWtPreservesNonWtStreamState(unittest.TestCase):
             f"Non-wt task's block type should still be 'thinking', "
             f"got '{results['nwt_block_type']}'"
         )
-
-    def test_reset_on_wt_does_not_corrupt_non_wt_tool_buffer(self) -> None:
-        """When the wt task calls reset(), the non-wt task's tool_json_buffer
-        and tool_name are preserved."""
-        printer = BaseBrowserPrinter()
-        barrier = threading.Barrier(2, timeout=5)
-        barrier2 = threading.Barrier(2, timeout=5)
-        results: dict[str, str] = {}
-
-        def non_wt_task() -> None:
-            printer._thread_local.tab_id = "nwt"
-            printer._tool_json_buffer = '{"command": "uv run pytest"}'
-            printer._tool_name = "Bash"
-            barrier.wait()
-            barrier2.wait()
-            results["nwt_tool_json"] = printer._tool_json_buffer
-            results["nwt_tool_name"] = printer._tool_name
-
-        def wt_task() -> None:
-            printer._thread_local.tab_id = "wt"
-            printer._tool_json_buffer = '{"file_path": "/tmp/x.py"}'
-            printer._tool_name = "Write"
-            barrier.wait()
-            printer.reset()
-            results["wt_tool_json"] = printer._tool_json_buffer
-            results["wt_tool_name"] = printer._tool_name
-            barrier2.wait()
-
-        t_nwt = threading.Thread(target=non_wt_task, daemon=True)
-        t_wt = threading.Thread(target=wt_task, daemon=True)
-        t_nwt.start()
-        t_wt.start()
-        t_nwt.join(timeout=5)
-        t_wt.join(timeout=5)
-
-        assert results["wt_tool_json"] == ""
-        assert results["wt_tool_name"] == ""
-        assert results["nwt_tool_json"] == '{"command": "uv run pytest"}'
-        assert results["nwt_tool_name"] == "Bash"
-
 
 class TestStopWtPreservesNonWtRecording(unittest.TestCase):
     """Reverse direction: stopping a worktree task's recording must not
