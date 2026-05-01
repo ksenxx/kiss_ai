@@ -20,6 +20,9 @@
     "onStartupFinished"
   ],
   "icon": "media/thumbnail.jpeg",
+  "enabledApiProposals": [
+    "contribSourceControlInputBoxMenu"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "viewsContainers": {
@@ -144,6 +147,12 @@
           "command": "kissSorcar.generateCommitMessage",
           "when": "scmProvider == git",
           "group": "navigation"
+        }
+      ],
+      "scm/inputBox": [
+        {
+          "command": "kissSorcar.generateCommitMessage",
+          "when": "scmProvider == git"
         }
       ],
       "commandPalette": [

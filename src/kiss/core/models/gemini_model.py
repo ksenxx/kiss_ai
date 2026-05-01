@@ -14,7 +14,7 @@ from google import genai
 from google.genai import types
 
 from kiss.core.kiss_error import KISSError
-from kiss.core.models.model import Attachment, Model, TokenCallback
+from kiss.core.models.model import Attachment, Model, ThinkingCallback, TokenCallback
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +27,7 @@ class GeminiModel(Model):
         api_key: str,
         model_config: dict[str, Any] | None = None,
         token_callback: TokenCallback | None = None,
+        thinking_callback: ThinkingCallback | None = None,
     ):
         """Initialize a GeminiModel instance.
 
@@ -35,8 +36,15 @@ class GeminiModel(Model):
             api_key: The Google API key for authentication.
             model_config: Optional dictionary of model configuration parameters.
             token_callback: Optional callback invoked with each streamed text token.
+            thinking_callback: Optional callback invoked with ``True`` when a
+                thinking block starts and ``False`` when it ends.
         """
-        super().__init__(model_name, model_config=model_config, token_callback=token_callback)
+        super().__init__(
+            model_name,
+            model_config=model_config,
+            token_callback=token_callback,
+            thinking_callback=thinking_callback,
+        )
         self.api_key = api_key
         self._thought_signatures: dict[str, bytes] = {}
 
