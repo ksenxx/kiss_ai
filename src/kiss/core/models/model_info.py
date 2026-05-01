@@ -128,7 +128,6 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "cc/haiku": _mi(200000, 0.00, 0.00),
     "cc/opus": _mi(200000, 0.00, 0.00),
     "cc/sonnet": _mi(200000, 0.00, 0.00),
-    "claude-3-5-haiku": _mi(200000, 0.80, 4.00),
     "claude-haiku-4-5": _mi(200000, 1.00, 5.00),
     "claude-haiku-4-5-20251001": _mi(200000, 1.00, 5.00),
     "claude-opus-4": _mi(200000, 15.00, 75.00),
@@ -144,7 +143,6 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "claude-sonnet-4-5": _mi(200000, 3.00, 15.00),
     "claude-sonnet-4-5-20250929": _mi(200000, 3.00, 15.00),
     "claude-sonnet-4-6": _mi(200000, 3.00, 15.00),
-    "codex-mini-latest": _mi(200000, 1.50, 6.00),
     "computer-use-preview": _mi(128000, 3.00, 12.00),
     "computer-use-preview-2025-03-11": _mi(128000, 3.00, 12.00),
     "deepcogito/cogito-v1-preview-llama-70B": _mi(131072, 0.00, 0.00),  # NEW: needs pricing
@@ -188,34 +186,25 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "gpt-3.5-turbo-1106": _mi(16385, 1.00, 2.00),
     "gpt-3.5-turbo-16k": _mi(16385, 3.00, 4.00),
     "gpt-4": _mi(8192, 30.00, 60.00),
-    "gpt-4-0125-preview": _mi(128000, 10.00, 30.00),
-    "gpt-4-0314": _mi(8191, 30.00, 60.00),
     "gpt-4-0613": _mi(8192, 30.00, 60.00),
-    "gpt-4-1106-preview": _mi(128000, 10.00, 30.00),
     "gpt-4-turbo": _mi(128000, 10.00, 30.00),
     "gpt-4-turbo-2024-04-09": _mi(128000, 10.00, 30.00),
-    "gpt-4-turbo-preview": _mi(128000, 10.00, 30.00),
     "gpt-4.1": _mi(128000, 2.00, 8.00),
     "gpt-4.1-2025-04-14": _mi(1047576, 2.00, 8.00),
     "gpt-4.1-mini": _mi(128000, 0.40, 1.60),
     "gpt-4.1-mini-2025-04-14": _mi(1047576, 0.40, 1.60),
     "gpt-4.1-nano": _mi(128000, 0.10, 0.40, fc=False),
     "gpt-4.1-nano-2025-04-14": _mi(1047576, 0.10, 0.40),
-    "gpt-4.5-preview": _mi(128000, 2.50, 10.00),
     "gpt-4o": _mi(128000, 2.50, 10.00),
     "gpt-4o-2024-05-13": _mi(128000, 5.00, 15.00),
     "gpt-4o-2024-08-06": _mi(128000, 2.50, 10.00),
     "gpt-4o-2024-11-20": _mi(128000, 2.50, 10.00),
     "gpt-4o-mini": _mi(128000, 0.15, 0.60),
     "gpt-4o-mini-2024-07-18": _mi(128000, 0.15, 0.60),
-    "gpt-4o-mini-audio-preview": _mi(128000, 0.15, 0.60, fc=False),
-    "gpt-4o-mini-realtime-preview": _mi(128000, 0.60, 2.40, fc=False),
     "gpt-4o-mini-search-preview": _mi(128000, 0.15, 0.60),
     "gpt-4o-mini-search-preview-2025-03-11": _mi(128000, 0.15, 0.60),
-    "gpt-4o-realtime-preview": _mi(128000, 5.00, 20.00, fc=False),
     "gpt-4o-search-preview": _mi(128000, 2.50, 10.00),
     "gpt-4o-search-preview-2025-03-11": _mi(128000, 2.50, 10.00),
-    "gpt-4o-transcribe-diarize": _mi(128000, 2.50, 10.00, fc=False),
     "gpt-5": _mi(400000, 1.25, 10.00),
     "gpt-5-2025-08-07": _mi(400000, 1.25, 10.00),
     "gpt-5-chat-latest": _mi(400000, 1.25, 10.00),
@@ -226,7 +215,6 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "gpt-5-nano-2025-08-07": _mi(400000, 0.05, 0.40),
     "gpt-5-pro": _mi(400000, 15.00, 120.00),
     "gpt-5-pro-2025-10-06": _mi(400000, 15.00, 120.00),
-    "gpt-5-search-api": _mi(400000, 1.25, 10.00),
     "gpt-5.1": _mi(400000, 1.25, 10.00),
     "gpt-5.1-2025-11-13": _mi(400000, 1.25, 10.00),
     "gpt-5.1-chat-latest": _mi(400000, 1.25, 10.00),
@@ -253,15 +241,11 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "gpt-5.5-2026-04-23": _mi(1050000, 5.00, 30.00),  # NEW
     "gpt-5.5-pro": _mi(1050000, 30.00, 180.00),  # NEW
     "gpt-5.5-pro-2026-04-23": _mi(1050000, 30.00, 180.00),  # NEW
-    "gpt-audio": _mi(128000, 2.50, 10.00, fc=False),
-    "gpt-audio-mini": _mi(128000, 0.60, 2.40, fc=False),
     "gpt-image-1": _mi(32768, 5.00, 40.00, fc=False),
     "gpt-image-1-mini": _mi(32768, 1.50, 12.00, fc=False),
     "gpt-image-1.5": _mi(32768, 5.00, 40.00, fc=False),
     "gpt-image-2": _mi(32768, 5.00, 30.00, fc=False),
     "gpt-image-2-2026-04-21": _mi(32768, 5.00, 30.00, fc=False),
-    "gpt-realtime": _mi(128000, 4.00, 16.00, fc=False),
-    "gpt-realtime-mini": _mi(128000, 0.60, 2.40, fc=False),
     "intfloat/multilingual-e5-large-instruct": _emb(514, 0.02),
     "meta-llama/Llama-3-70b-chat-hf": _mi(8192, 0.88, 0.88, fc=False),
     "meta-llama/Llama-3-8b-chat-hf": _mi(8192, 0.20, 0.20),
@@ -298,7 +282,6 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "nvidia/NVIDIA-Nemotron-Nano-9B-v2": _mi(131072, 0.06, 0.25),
     "o1": _mi(200000, 15.00, 60.00, fc=False),
     "o1-2024-12-17": _mi(200000, 15.00, 60.00),
-    "o1-mini": _mi(128000, 1.10, 4.40, fc=False),
     "o1-pro": _mi(200000, 150.00, 600.00, fc=False),
     "o1-pro-2025-03-19": _mi(200000, 150.00, 600.00),
     "o3": _mi(200000, 2.00, 8.00),
@@ -307,14 +290,12 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "o3-deep-research-2025-06-26": _mi(200000, 10.00, 40.00),
     "o3-mini": _mi(200000, 1.10, 4.40, fc=False),
     "o3-mini-2025-01-31": _mi(200000, 1.10, 4.40),
-    "o3-mini-high": _mi(200000, 1.10, 4.40),
     "o3-pro": _mi(200000, 20.00, 80.00, fc=False),
     "o3-pro-2025-06-10": _mi(200000, 20.00, 80.00),
     "o4-mini": _mi(200000, 1.10, 4.40),
     "o4-mini-2025-04-16": _mi(200000, 1.10, 4.40),
     "o4-mini-deep-research": _mi(200000, 2.00, 8.00, fc=False),
     "o4-mini-deep-research-2025-06-26": _mi(200000, 2.00, 8.00),
-    "o4-mini-high": _mi(200000, 1.10, 4.40),
     "openai/gpt-oss-120b": _mi(131072, 0.15, 0.60, fc=False),
     "openai/gpt-oss-20b": _mi(131072, 0.05, 0.20, fc=False),
     "openrouter/ai21/jamba-large-1.7": _mi(256000, 2.00, 8.00, fc=False),
@@ -383,7 +364,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/deepseek/deepseek-v4-flash": _mi(1048576, 0.14, 0.28),  # NEW
     "openrouter/deepseek/deepseek-v4-pro": _mi(1048576, 0.435, 0.87, fc=False),  # NEW
     "openrouter/essentialai/rnj-1-instruct": _mi(32768, 0.15, 0.15, fc=False),
-    "openrouter/google/gemini-2.0-flash-001": _mi(1048576, 0.10, 0.40),
+    "openrouter/google/gemini-2.0-flash-001": _mi(1000000, 0.10, 0.40),
     "openrouter/google/gemini-2.0-flash-lite-001": _mi(1048576, 0.075, 0.30),
     "openrouter/google/gemini-2.5-flash": _mi(1048576, 0.30, 2.50),
     "openrouter/google/gemini-2.5-flash-image": _mi(32768, 0.30, 2.50, fc=False, gen=False),
@@ -409,6 +390,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/google/lyria-3-pro-preview": _mi(1048576, 0.00, 0.00),
     "openrouter/gryphe/mythomax-l2-13b": _mi(4096, 0.06, 0.06, fc=False),
     "openrouter/ibm-granite/granite-4.0-h-micro": _mi(131000, 0.02, 0.11, fc=False),
+    "openrouter/ibm-granite/granite-4.1-8b": _mi(131072, 0.05, 0.10),  # NEW
     "openrouter/inception/mercury-2": _mi(128000, 0.25, 0.75),
     "openrouter/inclusionai/ling-2.6-flash": _mi(262144, 0.08, 0.24),  # NEW
     "openrouter/inflection/inflection-3-pi": _mi(8000, 2.50, 10.00, fc=False),
@@ -451,13 +433,12 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/mistralai/mistral-large-2512": _mi(262144, 0.50, 1.50, fc=False),
     "openrouter/mistralai/mistral-medium-3": _mi(131072, 0.40, 2.00, fc=False),
     "openrouter/mistralai/mistral-medium-3.1": _mi(131072, 0.40, 2.00, fc=False),
-    "openrouter/mistralai/mistral-nemo": _mi(131072, 0.02, 0.04, fc=False),
+    "openrouter/mistralai/mistral-nemo": _mi(131072, 0.02, 0.03, fc=False),
     "openrouter/mistralai/mistral-saba": _mi(32768, 0.20, 0.60, fc=False),
     "openrouter/mistralai/mistral-small-24b-instruct-2501": _mi(32768, 0.05, 0.08, fc=False),
     "openrouter/mistralai/mistral-small-2603": _mi(262144, 0.15, 0.60),
     "openrouter/mistralai/mistral-small-3.1-24b-instruct": _mi(128000, 0.35, 0.56, fc=False),
     "openrouter/mistralai/mistral-small-3.2-24b-instruct": _mi(128000, 0.075, 0.20, fc=False),
-    "openrouter/mistralai/mistral-small-creative": _mi(32768, 0.10, 0.30, fc=False),
     "openrouter/mistralai/mixtral-8x22b-instruct": _mi(65536, 2.00, 6.00, fc=False),
     "openrouter/mistralai/mixtral-8x7b-instruct": _mi(32768, 0.54, 0.54, fc=False),
     "openrouter/mistralai/pixtral-large-2411": _mi(131072, 2.00, 6.00, fc=False),
@@ -466,7 +447,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/moonshotai/kimi-k2-0905": _mi(262144, 0.40, 2.00, fc=False),
     "openrouter/moonshotai/kimi-k2-thinking": _mi(262144, 0.60, 2.50, fc=False),
     "openrouter/moonshotai/kimi-k2.5": _mi(262144, 0.44, 2.00),
-    "openrouter/moonshotai/kimi-k2.6": _mi(256000, 0.745, 4.655),
+    "openrouter/moonshotai/kimi-k2.6": _mi(262142, 0.74, 3.49),
     "openrouter/morph/morph-v3-fast": _mi(81920, 0.80, 1.20, fc=False),
     "openrouter/morph/morph-v3-large": _mi(262144, 0.90, 1.90, fc=False),
     "openrouter/nex-agi/deepseek-v3.1-nex-n1": _mi(131072, 0.135, 0.50, fc=False),
@@ -531,7 +512,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/openai/gpt-5.5-pro": _mi(1050000, 30.00, 180.00),  # NEW
     "openrouter/openai/gpt-audio": _mi(128000, 2.50, 10.00, fc=False),
     "openrouter/openai/gpt-audio-mini": _mi(128000, 0.60, 2.40, fc=False),
-    "openrouter/openai/gpt-oss-120b": _mi(131072, 0.039, 0.19, fc=False),
+    "openrouter/openai/gpt-oss-120b": _mi(131072, 0.039, 0.18, fc=False),
     "openrouter/openai/gpt-oss-20b": _mi(131072, 0.03, 0.14, fc=False),
     "openrouter/openai/gpt-oss-safeguard-20b": _mi(131072, 0.075, 0.30, fc=False),
     "openrouter/openai/o1": _mi(200000, 15.00, 60.00, fc=False),
@@ -573,7 +554,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/qwen/qwen3-coder": _mi(262144, 0.22, 1.80),
     "openrouter/qwen/qwen3-coder-30b-a3b-instruct": _mi(160000, 0.07, 0.27),
     "openrouter/qwen/qwen3-coder-flash": _mi(1000000, 0.195, 0.975),
-    "openrouter/qwen/qwen3-coder-next": _mi(262144, 0.14, 0.80),
+    "openrouter/qwen/qwen3-coder-next": _mi(262144, 0.12, 0.80),
     "openrouter/qwen/qwen3-coder-plus": _mi(1000000, 0.65, 3.25, fc=False),
     "openrouter/qwen/qwen3-max": _mi(262144, 0.78, 3.90),
     "openrouter/qwen/qwen3-max-thinking": _mi(262144, 0.78, 3.90, fc=False),
@@ -599,7 +580,6 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/qwen/qwen3.6-flash": _mi(1000000, 0.25, 1.50),  # NEW
     "openrouter/qwen/qwen3.6-max-preview": _mi(262144, 1.04, 6.24),  # NEW
     "openrouter/qwen/qwen3.6-plus": _mi(1000000, 0.325, 1.95),
-    "openrouter/qwen/qwq-32b": _mi(131072, 0.15, 0.58, fc=False),
     "openrouter/rekaai/reka-edge": _mi(16384, 0.10, 0.10),
     "openrouter/rekaai/reka-flash-3": _mi(65536, 0.10, 0.20),
     "openrouter/relace/relace-apply-3": _mi(256000, 0.85, 1.25, fc=False),
@@ -627,8 +607,9 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/x-ai/grok-4": _mi(256000, 3.00, 15.00),
     "openrouter/x-ai/grok-4-fast": _mi(2000000, 0.20, 0.50),
     "openrouter/x-ai/grok-4.1-fast": _mi(2000000, 0.20, 0.50),
-    "openrouter/x-ai/grok-4.20": _mi(2000000, 2.00, 6.00),
+    "openrouter/x-ai/grok-4.20": _mi(2000000, 1.25, 2.50),
     "openrouter/x-ai/grok-4.20-multi-agent": _mi(2000000, 2.00, 6.00),
+    "openrouter/x-ai/grok-4.3": _mi(1000000, 1.25, 2.50),  # NEW
     "openrouter/x-ai/grok-code-fast-1": _mi(256000, 0.20, 1.50),
     "openrouter/xiaomi/mimo-v2-flash": _mi(262144, 0.09, 0.29, fc=False),
     "openrouter/xiaomi/mimo-v2-omni": _mi(262144, 0.40, 2.00),
@@ -652,7 +633,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/~anthropic/claude-sonnet-latest": _mi(1000000, 3.00, 15.00),  # NEW
     "openrouter/~google/gemini-flash-latest": _mi(1048576, 0.50, 3.00),  # NEW
     "openrouter/~google/gemini-pro-latest": _mi(1048576, 2.00, 12.00),  # NEW
-    "openrouter/~moonshotai/kimi-latest": _mi(256000, 0.745, 4.655),  # NEW
+    "openrouter/~moonshotai/kimi-latest": _mi(262142, 0.74, 3.49),  # NEW
     "openrouter/~openai/gpt-latest": _mi(1050000, 5.00, 30.00),  # NEW
     "openrouter/~openai/gpt-mini-latest": _mi(400000, 0.75, 4.50),  # NEW
     "Qwen/Qwen2-1.5B-Instruct": _mi(32768, 0.02, 0.02),  # NEW
@@ -675,7 +656,6 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "Qwen/Qwen3.5-9B": _mi(262144, 0.10, 0.15),
     "Qwen/Qwen3.6-Plus": _mi(1000000, 0.50, 3.00),  # NEW
     "Qwen/QwQ-32B": _mi(131072, 1.20, 1.20),  # NEW
-    "text-embedding-004": _emb(2048, 0.00),
     "text-embedding-3-large": _emb(8191, 0.13),
     "text-embedding-3-small": _emb(8191, 0.02),
     "text-embedding-ada-002": _emb(8191, 0.10),
