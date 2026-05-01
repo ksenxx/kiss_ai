@@ -105,8 +105,6 @@ _elements['worktree-toggle-btn'] = _makeEl('button');
 _elements['parallel-toggle-btn'] = _makeEl('button');
 _elements['clear-btn'] = _makeEl('span');
 _elements['ghost-text'] = _makeEl('div');
-_elements['run-prompt-btn'] = _makeEl('button');
-
 var _savedState = null;
 var _postedMessages = [];
 
