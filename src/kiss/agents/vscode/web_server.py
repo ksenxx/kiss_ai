@@ -77,6 +77,16 @@ TUNNEL_CHECK_INTERVAL = 30
 #: to a ping within this window are closed as stale.
 _WS_PING_TIMEOUT = 10
 
+#: Number of consecutive watchdog ticks the ``cloudflared`` tunnel may
+#: have zero ready edge connections before the watchdog force-restarts
+#: it.  Cloudflare occasionally drops a quick-tunnel's registration
+#: (the local subprocess stays alive but the public hostname stops
+#: resolving).  At ``TUNNEL_CHECK_INTERVAL=30`` this allows ~90s of
+#: zero edge connections before forcing a restart, which is generous
+#: enough to ride out transient connection blips during initial
+#: startup or network flaps.
+_TUNNEL_UNHEALTHY_LIMIT = 3
+
 #: HTTP 200 response for HEAD health checks from cloudflared.
 _HEAD_200 = (
     b"HTTP/1.1 200 OK\r\n"
@@ -336,6 +346,62 @@ def _discover_tunnel_url_from_metrics() -> str | None:
         except Exception:
             continue
     return None
+
+
+def _pick_free_local_port() -> int:
+    """Return a currently free TCP port on 127.0.0.1.
+
+    Used to pre-assign a fixed ``--metrics`` port to ``cloudflared``
+    so the watchdog can probe the same port reliably across restarts.
+    There is a small TOCTOU window between releasing the socket and
+    cloudflared binding it, but the only consequence is that
+    cloudflared may fail to bind, which the watchdog will detect via
+    the missing metrics endpoint and recover from on the next cycle.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        port: int = s.getsockname()[1]
+    return port
+
+
+def _probe_tunnel_ready(metrics_port: int) -> bool:
+    """Return True if ``cloudflared`` has at least one live edge connection.
+
+    Queries the ``cloudflared`` ``/ready`` metrics endpoint and parses
+    the JSON ``readyConnections`` field.  Cloudflare's edge can
+    deregister a quick-tunnel while the local ``cloudflared``
+    subprocess is still alive (e.g. after the laptop sleeps for a long
+    time, or when Cloudflare rotates a flaky quick-tunnel).  When that
+    happens the subprocess keeps retrying ``register_connection`` and
+    never reaches a ready state, so the public ``*.trycloudflare.com``
+    hostname stops resolving (NXDOMAIN) but the watchdog's
+    ``proc.poll()`` check still reports the tunnel as alive.  A zero
+    ``readyConnections`` reading is the canonical signal for this
+    "process alive but tunnel deregistered" failure mode.
+
+    Args:
+        metrics_port: The port on which ``cloudflared`` is serving its
+            metrics HTTP endpoint (passed via ``--metrics``).
+
+    Returns:
+        True if the endpoint reports at least one ready connection.
+        False on any error (timeout, connection refused, parse error,
+        zero connections), so the caller can treat it as "unhealthy"
+        and increment its consecutive-failure counter.
+    """
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{metrics_port}/ready",
+            headers={"User-Agent": "kiss-web"},
+        )
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            data = json.loads(resp.read())
+    except Exception:
+        return False
+    try:
+        return int(data.get("readyConnections", 0)) > 0
+    except (TypeError, ValueError):
+        return False
 
 
 def _save_url_file(local_url: str, tunnel_url: str | None = None) -> None:
@@ -1112,6 +1178,14 @@ class RemoteAccessServer:
 
         self._html_bytes = _build_html().encode("utf-8")
         self._tunnel_proc: subprocess.Popen[str] | None = None
+        #: Port assigned to ``cloudflared --metrics`` so the watchdog
+        #: can probe ``/ready`` and detect edge deregistrations.
+        self._tunnel_metrics_port: int | None = None
+        #: Number of consecutive watchdog ticks the tunnel has had
+        #: zero ready edge connections.  When this reaches
+        #: :data:`_TUNNEL_UNHEALTHY_LIMIT`, the watchdog force-restarts
+        #: the ``cloudflared`` subprocess.
+        self._tunnel_unhealthy_ticks = 0
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ws_server: Any = None
         self._watchdog_task: asyncio.Task[None] | None = None
@@ -1480,10 +1554,13 @@ class RemoteAccessServer:
         Returns:
             The public ``https://`` URL, or None on failure.
         """
+        self._tunnel_metrics_port = _pick_free_local_port()
         self._tunnel_proc = subprocess.Popen(
             [
                 "cloudflared",
                 "tunnel",
+                "--metrics",
+                f"127.0.0.1:{self._tunnel_metrics_port}",
                 "--url",
                 self._local_url,
                 "--no-tls-verify",
@@ -1544,8 +1621,17 @@ class RemoteAccessServer:
         Returns:
             The public ``https://`` URL, or None on failure.
         """
+        self._tunnel_metrics_port = _pick_free_local_port()
         self._tunnel_proc = subprocess.Popen(
-            ["cloudflared", "tunnel", "run", "--token", self.tunnel_token or ""],
+            [
+                "cloudflared",
+                "tunnel",
+                "--metrics",
+                f"127.0.0.1:{self._tunnel_metrics_port}",
+                "run",
+                "--token",
+                self.tunnel_token or "",
+            ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -1574,19 +1660,78 @@ class RemoteAccessServer:
         return None
 
     async def _check_and_restart_tunnel(self) -> None:
-        """Check if the tunnel process is alive and restart if dead.
+        """Check tunnel health and restart if dead or deregistered.
 
-        Called periodically by :meth:`_tunnel_watchdog`.  When the
-        process has exited (e.g. because macOS killed it during sleep),
-        this method restarts the tunnel and updates the URL file.
+        Called periodically by :meth:`_watchdog`.  Detects two failure
+        modes:
+
+        1. **Process dead** — ``cloudflared`` exited (e.g. because
+           macOS killed it during sleep).  Detected via ``poll()``.
+        2. **Process alive but tunnel deregistered** — Cloudflare's
+           edge has dropped this quick-tunnel's registration so the
+           public hostname stops resolving (NXDOMAIN), but the local
+           subprocess keeps retrying ``register_connection`` and
+           never reconnects.  Detected by polling the ``cloudflared``
+           ``/ready`` metrics endpoint for ``readyConnections > 0``.
+           After :data:`_TUNNEL_UNHEALTHY_LIMIT` consecutive ticks of
+           zero ready connections, the subprocess is force-terminated
+           and a fresh tunnel is started, which triggers a new
+           ``*.trycloudflare.com`` URL.
         """
         if self._tunnel_proc is None:
             return
-        if self._tunnel_proc.poll() is None:
-            return  # still alive
-        rc = self._tunnel_proc.returncode
-        logger.info("cloudflared tunnel process died (rc=%s), restarting…", rc)
-        self._tunnel_proc = None
+        if self._tunnel_proc.poll() is not None:
+            rc = self._tunnel_proc.returncode
+            logger.info(
+                "cloudflared tunnel process died (rc=%s), restarting…", rc,
+            )
+            self._tunnel_proc = None
+            self._tunnel_metrics_port = None
+            self._tunnel_unhealthy_ticks = 0
+            await self._restart_tunnel_url()
+            return
+        # Process is alive.  Probe the metrics endpoint to confirm the
+        # tunnel is actually registered with Cloudflare's edge.  Skip
+        # this check if no metrics port has been recorded (e.g. legacy
+        # subprocess started without --metrics, or the tunnel is still
+        # in its very first startup window where readyConnections may
+        # be 0 transiently).
+        if self._tunnel_metrics_port is None:
+            return
+        assert self._loop is not None
+        healthy = await self._loop.run_in_executor(
+            None, _probe_tunnel_ready, self._tunnel_metrics_port,
+        )
+        if healthy:
+            self._tunnel_unhealthy_ticks = 0
+            return
+        self._tunnel_unhealthy_ticks += 1
+        logger.info(
+            "cloudflared tunnel reports zero ready edge connections "
+            "(tick %d/%d on metrics port %d)",
+            self._tunnel_unhealthy_ticks,
+            _TUNNEL_UNHEALTHY_LIMIT,
+            self._tunnel_metrics_port,
+        )
+        if self._tunnel_unhealthy_ticks < _TUNNEL_UNHEALTHY_LIMIT:
+            return
+        logger.warning(
+            "cloudflared tunnel appears deregistered from Cloudflare's "
+            "edge (readyConnections=0 for %d ticks); force-restarting",
+            self._tunnel_unhealthy_ticks,
+        )
+        self._tunnel_unhealthy_ticks = 0
+        self._terminate_tunnel_proc()
+        await self._restart_tunnel_url()
+
+    async def _restart_tunnel_url(self) -> None:
+        """Start a fresh tunnel and refresh ``~/.kiss/remote-url.json``.
+
+        Helper shared by both restart paths in
+        :meth:`_check_and_restart_tunnel` (process-died and
+        edge-deregistered).  Always rewrites the URL file even when
+        the new tunnel fails to start, so stale data does not linger.
+        """
         assert self._loop is not None
         tunnel_url = await self._loop.run_in_executor(
             None, self._start_tunnel,
@@ -1597,6 +1742,26 @@ class RemoteAccessServer:
             logger.warning("Failed to restart tunnel")
         _save_url_file(self._local_url, tunnel_url)
         self._active_url = tunnel_url or self._local_url
+
+    def _terminate_tunnel_proc(self) -> None:
+        """Terminate ``self._tunnel_proc`` without touching the URL file.
+
+        Used by :meth:`_check_and_restart_tunnel` when the subprocess
+        is alive but has been deregistered by Cloudflare's edge.
+        Unlike :meth:`_stop_tunnel`, this leaves ``_active_url`` in
+        place so that ``~/.kiss/remote-url.json`` is not removed before
+        the replacement tunnel writes its own URL.
+        """
+        proc = self._tunnel_proc
+        if proc is None:
+            return
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        self._tunnel_proc = None
+        self._tunnel_metrics_port = None
 
     async def _ping_one_ws(self, ws: Any) -> None:
         """Send a ping to a single WebSocket client, closing if stale."""
@@ -1666,13 +1831,8 @@ class RemoteAccessServer:
 
     def _stop_tunnel(self) -> None:
         """Terminate the ``cloudflared`` tunnel process if running."""
-        if self._tunnel_proc is not None:
-            self._tunnel_proc.terminate()
-            try:
-                self._tunnel_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self._tunnel_proc.kill()
-            self._tunnel_proc = None
+        self._terminate_tunnel_proc()
+        self._tunnel_unhealthy_ticks = 0
         # Do NOT delete the URL file on shutdown.  A new daemon
         # instance may have already overwritten it, and deleting it
         # would race with the new instance's _save_url_file().  Stale
