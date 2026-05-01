@@ -244,24 +244,39 @@ class AnthropicModel(Model):
         """
         with self.client.messages.stream(**kwargs) as stream:
             if self.token_callback is not None:
+                # ``in_thinking`` tracks whether the current content block
+                # is a thinking block.  ``thinking_started`` tracks whether
+                # ``thinking_callback(True)`` has actually been invoked for
+                # the current block — deferred until the first non-empty
+                # ``thinking_delta`` arrives so adaptive thinking blocks
+                # with only signature deltas (claude-opus-4-7) do not show
+                # an empty "Thinking" panel in the UI.
                 in_thinking = False
+                thinking_started = False
                 for event in stream:
                     if event.type == "content_block_start":
                         block = getattr(event, "content_block", None)
                         if block and getattr(block, "type", "") == "thinking":
                             in_thinking = True
-                            self._invoke_thinking_callback(True)
+                            thinking_started = False
                     elif event.type == "content_block_delta":
                         delta = event.delta
                         delta_type = getattr(delta, "type", "")
                         if delta_type == "thinking_delta":
-                            self._invoke_token_callback(getattr(delta, "thinking", ""))
+                            text = getattr(delta, "thinking", "")
+                            if text:
+                                if in_thinking and not thinking_started:
+                                    self._invoke_thinking_callback(True)
+                                    thinking_started = True
+                                self._invoke_token_callback(text)
                         elif delta_type == "text_delta":
                             self._invoke_token_callback(getattr(delta, "text", ""))
                     elif event.type == "content_block_stop":
                         if in_thinking:
                             in_thinking = False
-                            self._invoke_thinking_callback(False)
+                            if thinking_started:
+                                self._invoke_thinking_callback(False)
+                                thinking_started = False
             return stream.get_final_message()
 
     def generate(self) -> tuple[str, Any]:  # pragma: no cover – API call
