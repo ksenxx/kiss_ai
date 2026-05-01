@@ -11,7 +11,6 @@ from rich.text import Text
 
 from kiss.core.printer import (
     Printer,
-    StreamEventParser,
     extract_extras,
     extract_path_and_lang,
     parse_result_yaml,
@@ -19,19 +18,19 @@ from kiss.core.printer import (
 )
 
 
-class ConsolePrinter(StreamEventParser, Printer):
+class ConsolePrinter(Printer):
     def __init__(self, file: Any = None) -> None:
-        StreamEventParser.__init__(self)
         self._console = Console(highlight=False, file=file)
         self._file = file or sys.stdout
         self._mid_line = False
         self._bash_streamed = False
+        self._current_block_type = ""
 
     def reset(self) -> None:
-        """Reset internal streaming and tool-parsing state for a new turn."""
+        """Reset internal streaming state for a new turn."""
         self._mid_line = False
         self._bash_streamed = False
-        self.reset_stream_state()
+        self._current_block_type = ""
 
     @staticmethod
     def _format_result_content(raw: str) -> Group | Markdown:
@@ -63,13 +62,13 @@ class ConsolePrinter(StreamEventParser, Printer):
 
         Args:
             content: The content to display.
-            type: Content type (e.g. "text", "prompt", "stream_event",
-                "tool_call", "tool_result", "result", "message").
+            type: Content type (e.g. "text", "prompt", "tool_call",
+                "tool_result", "result", "message").
             **kwargs: Additional options such as tool_input, is_error, cost,
                 total_tokens.
 
         Returns:
-            str: Extracted text from stream events, or empty string.
+            str: Always the empty string.
         """
         if type == "text":
             self._flush_newline()
@@ -97,8 +96,6 @@ class ConsolePrinter(StreamEventParser, Printer):
                 )
             )
             return ""
-        if type == "stream_event":
-            return self.parse_stream_event(content)
         if type == "message":
             self._handle_message(content, **kwargs)
             return ""
@@ -155,12 +152,14 @@ class ConsolePrinter(StreamEventParser, Printer):
         Args:
             is_start: ``True`` when a thinking block starts, ``False`` when it ends.
         """
+        self._flush_newline()
         if is_start:
             self._current_block_type = "thinking"
-            self._on_thinking_start()
+            self._console.rule("Thinking", style="dim cyan", align="center")
         else:
             self._current_block_type = ""
-            self._on_thinking_end()
+            self._console.rule(style="dim cyan")
+        self._console.print()
 
     def _format_tool_call(self, name: str, tool_input: dict[str, Any]) -> None:
         file_path, lang = extract_path_and_lang(tool_input)
@@ -207,31 +206,6 @@ class ConsolePrinter(StreamEventParser, Printer):
                 self._file.flush()
         self._bash_streamed = False
         self._console.rule(style="red")
-
-    def _on_thinking_start(self) -> None:
-        self._flush_newline()
-        self._console.rule("Thinking", style="dim cyan", align="center")
-        self._console.print()
-
-    def _on_thinking_end(self) -> None:
-        self._flush_newline()
-        self._console.rule(style="dim cyan")
-        self._console.print()
-
-    def _on_tool_use_start(self, name: str) -> None:
-        self._flush_newline()
-        self._console.print(f"[bold blue]{name}[/bold blue] ", end="")
-        self._mid_line = True
-
-    def _on_tool_json_delta(self, partial: str) -> None:
-        self._stream_delta(partial, style="dim")
-
-    def _on_tool_use_end(self, name: str, tool_input: dict) -> None:
-        self._flush_newline()
-        self._format_tool_call(name, tool_input)
-
-    def _on_text_block_end(self) -> None:
-        self._flush_newline()
 
     def _handle_message(self, message: Any, **kwargs: Any) -> None:
         if hasattr(message, "subtype") and hasattr(message, "data"):
