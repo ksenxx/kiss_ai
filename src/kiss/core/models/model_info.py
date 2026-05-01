@@ -914,6 +914,28 @@ def get_available_models() -> list[str]:
     return sorted(result)
 
 
+def get_fast_model() -> str:
+    """Return a cheap/fast model based on which API keys are available.
+
+    Priority: Anthropic/OpenRouter/Together → Gemini → OpenAI.
+
+    Returns:
+        A fast model name for the first available provider.
+    """
+    keys = config_module.DEFAULT_CONFIG
+    if keys.ANTHROPIC_API_KEY:
+        return "claude-haiku-4-5"
+    if keys.OPENROUTER_API_KEY:
+        return "openrouter/anthropic/claude-haiku-4.5"
+    if keys.TOGETHER_API_KEY:
+        return "deepseek-ai/DeepSeek-R1-0528"
+    if keys.GEMINI_API_KEY:
+        return "gemini-2.0-flash"
+    if keys.OPENAI_API_KEY:
+        return "gpt-4o"
+    return "claude-haiku-4-5"
+
+
 def get_default_model() -> str:
     """Return the best default model based on which API keys are configured.
 

@@ -37,7 +37,6 @@ from kiss.agents.vscode.diff_merge import (  # noqa: F401 (re-export for tests)
     _merge_data_dir,
 )
 from kiss.agents.vscode.helpers import (
-    fast_model_for,
     generate_commit_message_from_diff,
     generate_followup_text,
     model_vendor,
@@ -46,7 +45,12 @@ from kiss.agents.vscode.merge_flow import _MergeFlowMixin
 from kiss.agents.vscode.printer import VSCodePrinter
 from kiss.agents.vscode.tab_state import _TabState, parse_task_tags
 from kiss.agents.vscode.task_runner import _TaskRunnerMixin
-from kiss.core.models.model_info import MODEL_INFO, get_available_models, get_default_model
+from kiss.core.models.model_info import (
+    MODEL_INFO,
+    get_fast_model,
+    get_available_models,
+    get_default_model,
+)
 
 __all__ = [
     "VSCodePrinter",
@@ -346,7 +350,7 @@ class VSCodeServer(
                 self.printer._thread_local.tab_id = owner_tab
             try:
                 suggestion = generate_followup_text(
-                    task, result, fast_model_for()
+                    task, result, get_fast_model()
                 )
                 if suggestion:  # pragma: no cover — requires LLM API call
                     event: dict[str, object] = {

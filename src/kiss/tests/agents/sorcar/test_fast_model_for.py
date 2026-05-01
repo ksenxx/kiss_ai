@@ -1,14 +1,14 @@
-"""Unit tests for fast_model_for() API-key-based fast model selection."""
+"""Unit tests for get_fast_model() API-key-based fast model selection."""
 
 from __future__ import annotations
 
 import pytest
 
-from kiss.agents.vscode.helpers import fast_model_for
+from kiss.core.models.model_info import get_fast_model
 
 
 class TestFastModelFor:
-    """Verify fast_model_for() selects the correct fast model per available API key."""
+    """Verify get_fast_model() selects the correct fast model per available API key."""
 
     @pytest.fixture(autouse=True)
     def _clear_api_keys(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -34,19 +34,19 @@ class TestFastModelFor:
 
     def test_openrouter_key_returns_openrouter_model(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._set_key(monkeypatch, "OPENROUTER_API_KEY")
-        assert fast_model_for() == "openrouter/anthropic/claude-haiku-4.5"
+        assert get_fast_model() == "openrouter/anthropic/claude-haiku-4.5"
 
     def test_together_key_returns_together_model(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._set_key(monkeypatch, "TOGETHER_API_KEY")
-        assert fast_model_for() == "deepseek-ai/DeepSeek-R1-0528"
+        assert get_fast_model() == "deepseek-ai/DeepSeek-R1-0528"
 
     def test_openai_key_returns_gpt4o(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._set_key(monkeypatch, "OPENAI_API_KEY")
-        assert fast_model_for() == "gpt-4o"
+        assert get_fast_model() == "gpt-4o"
 
     def test_no_keys_returns_haiku_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """When no API keys are set, falls back to claude-haiku-4-5."""
-        assert fast_model_for() == "claude-haiku-4-5"
+        assert get_fast_model() == "claude-haiku-4-5"
 
     def test_priority_gemini_over_openai(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Gemini key takes priority over OpenAI key."""
@@ -55,4 +55,4 @@ class TestFastModelFor:
         from kiss.core import config as _cfg
 
         monkeypatch.setattr(_cfg, "DEFAULT_CONFIG", _cfg.Config())
-        assert fast_model_for() == "gemini-2.0-flash"
+        assert get_fast_model() == "gemini-2.0-flash"
