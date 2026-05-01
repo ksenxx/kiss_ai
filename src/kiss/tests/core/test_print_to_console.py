@@ -17,21 +17,6 @@ def _make() -> tuple[ConsolePrinter, io.StringIO]:
     return ConsolePrinter(file=buf), buf
 
 
-class TestPrintStreamEvent(unittest.TestCase):
-    def _event(self, evt_dict):
-        return SimpleNamespace(event=evt_dict)
-
-
-    def test_unknown_delta_type(self):
-        p, buf = _make()
-        p._current_block_type = "text"
-        result = p.print(self._event({
-            "type": "content_block_delta",
-            "delta": {"type": "unknown_delta"},
-        }), type="stream_event")
-        assert result == ""
-
-
 class TestPrintMessageSystem(unittest.TestCase):
     def test_other_subtype_ignored(self):
         p, buf = _make()
@@ -59,26 +44,19 @@ class TestPrintMessageDispatch(unittest.TestCase):
         assert buf.getvalue() == ""
 
 
-class TestStreamingFlow(unittest.TestCase):
-    """Test the full streaming flow: block_start -> token_callback -> block_stop."""
-
-    def _event(self, evt_dict):
-        return SimpleNamespace(event=evt_dict)
+class TestThinkingCallbackFlow(unittest.TestCase):
+    """thinking_callback(True) -> token_callback -> thinking_callback(False) flow."""
 
     def test_full_thinking_flow(self):
         p, buf = _make()
-        p.print(self._event({
-            "type": "content_block_start",
-            "content_block": {"type": "thinking"},
-        }), type="stream_event")
-
+        p.thinking_callback(True)
         p.token_callback("I think")
-
-        p.print(self._event({"type": "content_block_stop"}), type="stream_event")
+        p.thinking_callback(False)
 
         out = buf.getvalue()
         assert "Thinking" in out
         assert "I think" in out
+
 
 class TestBashStreamDedup(unittest.TestCase):
     """Test that tool_result doesn't repeat bash_stream output."""

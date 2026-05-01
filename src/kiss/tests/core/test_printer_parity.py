@@ -26,10 +26,6 @@ def _drain(browser: BaseBrowserPrinter) -> list[dict]:
     return browser.stop_recording()
 
 
-def _event(evt_dict):
-    return SimpleNamespace(event=evt_dict)
-
-
 class TestPrintReturnValueParity:
     """Both printers must return the same string from print() for every type."""
 
@@ -41,17 +37,6 @@ class TestPrintReturnValueParity:
         console, _, browser = _make_printers()
         r1 = console.print("x", type="nonexistent_type")
         r2 = browser.print("x", type="nonexistent_type")
-        assert r1 == r2 == ""
-
-
-class TestStreamEventReturnParity:
-    """Both printers must return the same extracted text from stream events."""
-
-    def test_unknown_event_type(self):
-        console, _, browser = _make_printers()
-        ev = _event({"type": "message_start"})
-        r1 = console.print(ev, type="stream_event")
-        r2 = browser.print(ev, type="stream_event")
         assert r1 == r2 == ""
 
 
@@ -171,7 +156,8 @@ class TestTokenCallbackParity:
 
 
 class TestFullAgentSequenceParity:
-    """Simulate a full agent execution and verify both printers get the same content."""
+    """Simulate a full agent execution via callbacks/print() and verify
+    both printers produce the same content."""
 
     def test_full_sequence(self):
         console, buf, browser = _make_printers()
@@ -180,50 +166,12 @@ class TestFullAgentSequenceParity:
             p.print("Fix the bug in app.py", type="prompt")
 
         for p in (console, browser):
-            p.print(_event({
-                "type": "content_block_start",
-                "content_block": {"type": "thinking"},
-            }), type="stream_event")
-        for p in (console, browser):
-            p.print(_event({
-                "type": "content_block_delta",
-                "delta": {"type": "thinking_delta", "thinking": "I should read the file first"},
-            }), type="stream_event")
-        for p in (console, browser):
-            p.print(_event({"type": "content_block_stop"}), type="stream_event")
+            p.thinking_callback(True)
+            p.token_callback("I should read the file first")
+            p.thinking_callback(False)
 
         for p in (console, browser):
-            p.print(_event({
-                "type": "content_block_start",
-                "content_block": {"type": "text"},
-            }), type="stream_event")
-        texts = []
-        for p in (console, browser):
-            texts.append(p.print(_event({
-                "type": "content_block_delta",
-                "delta": {"type": "text_delta", "text": "I'll fix the bug"},
-            }), type="stream_event"))
-        assert texts[0] == texts[1] == "I'll fix the bug"
-        for p in (console, browser):
-            p.print(_event({"type": "content_block_stop"}), type="stream_event")
-
-        for p in (console, browser):
-            p.print(_event({
-                "type": "content_block_start",
-                "content_block": {"type": "tool_use", "name": "Read"},
-            }), type="stream_event")
-        for p in (console, browser):
-            p.print(_event({
-                "type": "content_block_delta",
-                "delta": {"type": "input_json_delta", "partial_json": '{"file_path":'},
-            }), type="stream_event")
-        for p in (console, browser):
-            p.print(_event({
-                "type": "content_block_delta",
-                "delta": {"type": "input_json_delta", "partial_json": ' "app.py"}'},
-            }), type="stream_event")
-        for p in (console, browser):
-            p.print(_event({"type": "content_block_stop"}), type="stream_event")
+            p.token_callback("I'll fix the bug")
 
         ti = {"file_path": "app.py", "content": "fixed code"}
         for p in (console, browser):
@@ -241,16 +189,25 @@ class TestFullAgentSequenceParity:
         assert "Edit" in out
         assert "app.py" in out
         assert "Bug fixed" in out
+        assert "Thinking" in out
+        assert "I should read the file first" in out
+        assert "I'll fix the bug" in out
 
         events = _drain(browser)
         types = [e["type"] for e in events]
         assert "prompt" in types
         assert "thinking_start" in types
+        assert "thinking_delta" in types
         assert "thinking_end" in types
-        assert "text_end" in types
+        assert "text_delta" in types
         assert "tool_call" in types
         assert "tool_result" in types
         assert "result" in types
+
+        td = [e for e in events if e["type"] == "thinking_delta"]
+        assert any("I should read the file first" in e["text"] for e in td)
+        td2 = [e for e in events if e["type"] == "text_delta"]
+        assert any("I'll fix the bug" in e["text"] for e in td2)
 
         tc = [e for e in events if e["type"] == "tool_call"]
         assert any(e["name"] == "Edit" for e in tc)
