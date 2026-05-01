@@ -2484,6 +2484,11 @@
     if (!url) return;
     const wrapper = document.createElement('div');
     wrapper.className = 'remote-url-bar';
+    const label = document.createElement('div');
+    label.className = 'remote-url-label';
+    label.textContent = 'Web/mobile app';
+    const row = document.createElement('div');
+    row.className = 'remote-url-row';
     const link = document.createElement('a');
     link.href = url;
     link.target = '_blank';
@@ -2507,12 +2512,10 @@
         }, 1500);
       });
     });
-    const label = document.createElement('span');
-    label.className = 'remote-url-label';
-    label.textContent = 'Web/mobile app: ';
+    row.appendChild(link);
+    row.appendChild(copyBtn);
     wrapper.appendChild(label);
-    wrapper.appendChild(link);
-    wrapper.appendChild(copyBtn);
+    wrapper.appendChild(row);
     container.appendChild(wrapper);
   }
 
