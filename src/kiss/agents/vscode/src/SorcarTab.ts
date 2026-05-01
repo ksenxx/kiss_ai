@@ -111,7 +111,6 @@ export function buildChatHtml(
       <div id="welcome">
         <h2>Welcome to KISS Sorcar</h2>
         <p>Your AI assistant. Ask me anything!</p>
-        <div id="remote-url"></div>
         <div id="suggestions"></div>
       </div>
     </div>
@@ -193,6 +192,7 @@ export function buildChatHtml(
       <button id="config-sidebar-close">&times;</button>
       <div class="sidebar-section">
         <div class="sidebar-hdr">Sorcar Configuration${version ? ' ' + version : ''}</div>
+        <div id="remote-url"></div>
         <div id="config-form">
           <label class="config-label">Max budget per task ($)
             <input type="number" id="cfg-max-budget" min="0" step="1" value="100">

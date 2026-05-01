@@ -758,7 +758,6 @@ width=device-width,initial-scale=1,maximum-scale=1">
       <div id="welcome">
         <h2>Welcome to KISS Sorcar</h2>
         <p>Your AI assistant. Ask me anything!</p>
-        <div id="remote-url"></div>
         <div id="suggestions"></div>
       </div>
     </div>
@@ -881,6 +880,7 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
       <button id="config-sidebar-close">&times;</button>
       <div class="sidebar-section">
         <div class="sidebar-hdr">Sorcar Configuration{' ' + version if version else ''}</div>
+        <div id="remote-url"></div>
         <div id="config-form">
           <label class="config-label">Max budget per task ($)
             <input type="number" id="cfg-max-budget" min="0" step="1" value="100">
