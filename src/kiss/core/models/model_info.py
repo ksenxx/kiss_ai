@@ -925,14 +925,14 @@ def get_fast_model() -> str:
     keys = config_module.DEFAULT_CONFIG
     if keys.ANTHROPIC_API_KEY:
         return "claude-haiku-4-5"
+    if keys.OPENAI_API_KEY:
+        return "gpt-4o"
+    if keys.GEMINI_API_KEY:
+        return "gemini-2.0-flash"
     if keys.OPENROUTER_API_KEY:
         return "openrouter/anthropic/claude-haiku-4.5"
     if keys.TOGETHER_API_KEY:
         return "deepseek-ai/DeepSeek-R1-0528"
-    if keys.GEMINI_API_KEY:
-        return "gemini-2.0-flash"
-    if keys.OPENAI_API_KEY:
-        return "gpt-4o"
     return "claude-haiku-4-5"
 
 
@@ -944,13 +944,13 @@ def get_default_model() -> str:
     """
     keys = config_module.DEFAULT_CONFIG
     if keys.ANTHROPIC_API_KEY:
-        return "claude-opus-4-6"
-    if keys.OPENROUTER_API_KEY:
-        return "openrouter/anthropic/claude-opus-4.6"
+        return "claude-opus-4-7"
+    if keys.OPENAI_API_KEY:
+        return "gpt-5.5"
     if keys.GEMINI_API_KEY:
         return "gemini-3.1-pro-preview"
-    if keys.OPENAI_API_KEY:
-        return "gpt-5.4"
+    if keys.OPENROUTER_API_KEY:
+        return "openrouter/anthropic/claude-opus-4.7"
     if keys.TOGETHER_API_KEY:
         return "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8"
     return "claude-opus-4-6"
