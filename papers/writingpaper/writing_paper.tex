@@ -201,7 +201,7 @@ The afternoon brought a long spell-checking session.  Four consecutive attempts 
 
 The user updated the system prompt again and asked the agent to synchronize the paper (task~167), then to discover all inconsistencies (task~169).  Two tasks checked citations for AI slop---fabricated references that LLMs sometimes invent (tasks~170--171).
 
-After the user made manual edits, the agent checked grammar and spelling (tasks~182--183) and built the paper (tasks~185--186).
+Between agent sessions, the user edited the \LaTeX{} source directly on two occasions.  First, the user manually corrected four spelling errors that the agent had introduced: ``Assitant'' $\to$ ``Assistant'' in the title, ``Farmework'' $\to$ ``Framework'' in the architecture section, and ``hish'' $\to$ ``high'' and ``comapred'' $\to$ ``compared'' in the evaluation discussion.  Second, the user inserted a paragraph into the case-study section describing a workflow pattern discovered during development: ask the agent to generate a detailed, step-by-step description of a buggy workflow, then ask it to fix the buggy steps in natural language.  These edits were captured automatically in git ``baseline from dirty state'' commits when the next agent session began.  The agent then checked grammar and spelling of the manual edits (tasks~182--183) and built the paper (tasks~185--186).
 
 %----------------------------------------------------------------------
 \subsection{Phase 5: Refinement and Citation Hygiene (April 25--26)}
@@ -295,6 +295,8 @@ The record reveals several recurring patterns in the human--AI collaboration.
 \paragraph{Citation hygiene as a distinct phase.}  The user devoted multiple tasks to verifying citations: checking for AI slop (fabricated references), validating existence via internet search, correcting years and URLs, and adding missing references.  This suggests that LLM-generated citations require a dedicated verification pass, not merely a final proofread.
 
 \paragraph{Bug discovery as a side effect.}  Two bugs in KISS Sorcar itself were discovered during the paper-writing process.  In both cases, the user asked the agent to reproduce the bug with an integration test and then fix it.  The paper-writing task thus served as a continuous stress test of the tool.
+
+\paragraph{Occasional direct editing.}  Although the user delegated nearly all \LaTeX{} editing to the agent, the git history reveals two occasions on which the user edited the source file by hand: once to fix four spelling errors and once to insert a paragraph describing a workflow insight.  Both edits were small, targeted, and faster to type than to describe in a prompt.  The ``baseline from dirty state'' commits preserved these edits automatically, and the user subsequently asked the agent to polish the grammar around them.  Direct editing and agent-mediated editing coexisted without friction.
 
 \paragraph{Retry and refinement.}  Several tasks were submitted multiple times---spelling checks four times, builds two or three times in succession.  Some retries were caused by timeouts or budget exhaustion; others by the user's dissatisfaction with the result.  The agent's stateless-per-task design meant that each retry was independent.
 
