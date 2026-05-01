@@ -340,10 +340,18 @@ body {
 #remote-url { width: 100%; margin-bottom: 10px; }
 
 .remote-url-bar {
-  display: flex; align-items: center; gap: 6px; justify-content: center;
+  display: flex; flex-direction: column; align-items: stretch; gap: 4px;
   background: color-mix(in srgb, var(--fg) 3%, transparent);
   border: 1px solid color-mix(in srgb, var(--fg) 8%, transparent);
   border-radius: 8px; padding: 6px 10px;
+}
+
+.remote-url-label {
+  font-size: var(--fs-sm); color: var(--dim);
+}
+
+.remote-url-row {
+  display: flex; align-items: center; gap: 6px; min-width: 0;
 }
 
 .remote-url-link {
