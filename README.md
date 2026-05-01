@@ -39,7 +39,7 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 # Introduction to KISS Sorcar
 
 ![KISS Sorcar](assets/KISS-Sorcar-UI.png)
-**KISS Sorcar** (named after [P.C. Sorcar, the legendary Bengali magician](https://en.wikipedia.org/wiki/P._C._Sorcar), evoking the idea of an agent that performs feats that appear magical yet are grounded in disciplined engineering) is a **general-purpose assistant** and **integrated development environment** (IDE) built on top of the **KISS Agent Framework**, a stupidly-simple agentic framework. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours**. KISS Sorcar is implemented as a **Visual Studio Code extension** that runs **locally**. It has **full browser** support (using open-source Chromium browser and Playwright), **multimodal** support, **Docker container** support, and OpenClaw like features (whose functionality will be posted later in the social media). The good part is that KISS Sorcar is **completely free** and **open-source**; all one needs is a model API key from a major LLM provider, such as Anthropic (highly recommended). A paper on KISS Sorcar can be found at [papers/kisssorcar/kiss_sorcar.pdf](papers/kisssorcar/kiss_sorcar.pdf). The sorcar.db\* files have been released to illustrate how KISS Sorcar was used to write the paper. Copy them to ~/.kiss/ folder (after backing them up), restart vscode, and load an item from the history. You can also load an item after setting the demo mode on.
+**KISS Sorcar** (named after [P.C. Sorcar, the legendary Bengali magician](https://en.wikipedia.org/wiki/P._C._Sorcar), evoking the idea of an agent that performs feats that appear magical yet are grounded in disciplined engineering) is a **general-purpose assistant** and **integrated development environment** (IDE) built on top of the **KISS Agent Framework**, a stupidly-simple agentic framework. It **codes really well** and **works pretty fast**. The agent can **run relentlessly for hours**. KISS Sorcar is implemented as a **Visual Studio Code extension** that runs **locally**. It has **full browser** support (using open-source Chromium browser and Playwright), **multimodal** support, **Docker container** support, and OpenClaw like features (whose functionality will be posted later in the social media). The good part is that KISS Sorcar is **completely free** and **open-source**; all one needs is a model API key from a major LLM provider, such as Anthropic (highly recommended). A paper on KISS Sorcar can be found at [papers/kisssorcar/kiss_sorcar.pdf](papers/kisssorcar/kiss_sorcar.pdf).
 
 **KISS Sorcar scored 62.2% on Terminal Bench 2.0, beating both Cursor agent (61.7%) and Claude Code (58%).**
 
@@ -79,38 +79,6 @@ sorcar -t 'Can you send the message "Hello from Sorcar!" to ksen via the desktop
 
 sorcar -t 'Can you show me the detailed step-by-step workflow of gepa.py?'
 ```
-
-## 📬 Messaging & Third-Party Agents
-
-KISS Sorcar can connect to messaging platforms as an always-on agent, responding to messages with the full power of the Sorcar agent. Each platform has a dedicated CLI command:
-
-| Platform | CLI Command | Agent File |
-|---|---|---|
-| Slack | `kiss-slack` | `slack_agent.py` |
-| Gmail | `kiss-gmail` | `gmail_agent.py` |
-| WhatsApp | `kiss-whatsapp` | `whatsapp_agent.py` |
-| Telegram | `kiss-telegram` | `telegram_agent.py` |
-| Discord | `kiss-discord` | `discord_agent.py` |
-| Google Chat | `kiss-gchat` | `googlechat_agent.py` |
-| Signal | `kiss-signal` | `signal_agent.py` |
-| Microsoft Teams | `kiss-msteams` | `msteams_agent.py` |
-| Matrix | `kiss-matrix` | `matrix_agent.py` |
-| Feishu/Lark | `kiss-feishu` | `feishu_agent.py` |
-| LINE | `kiss-line` | `line_agent.py` |
-| Mattermost | `kiss-mattermost` | `mattermost_agent.py` |
-| IRC | `kiss-irc` | `irc_agent.py` |
-| BlueBubbles (iMessage bridge) | `kiss-bluebubbles` | `bluebubbles_agent.py` |
-| iMessage (macOS native) | `kiss-imessage` | `imessage_agent.py` |
-| Nextcloud Talk | `kiss-nextcloud` | `nextcloud_talk_agent.py` |
-| Nostr | `kiss-nostr` | `nostr_agent.py` |
-| Synology Chat | `kiss-synology` | `synology_chat_agent.py` |
-| Tlon (Urbit) | `kiss-tlon` | `tlon_agent.py` |
-| Twitch | `kiss-twitch` | `twitch_agent.py` |
-| Zalo | `kiss-zalo` | `zalo_agent.py` |
-| Phone Control | `kiss-phone` | `phone_control_agent.py` |
-| SMS | `kiss-sms` | `sms_agent.py` |
-
-All messaging agents live under `src/kiss/agents/third_party_agents/`.
 
 ## 🤖 Models Supported
 
