@@ -2,7 +2,7 @@
   "name": "kiss-sorcar",
   "displayName": "KISS Sorcar",
   "description": "AI coding assistant powered by KISS Sorcar Agent",
-  "version": "2026.4.36",
+  "version": "2026.4.37",
   "publisher": "ksenxx",
   "repository": {
     "type": "git",
@@ -20,6 +20,9 @@
     "onStartupFinished"
   ],
   "icon": "media/thumbnail.jpeg",
+  "enabledApiProposals": [
+    "contribSourceControlInputBoxMenu"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "viewsContainers": {
@@ -144,6 +147,12 @@
           "command": "kissSorcar.generateCommitMessage",
           "when": "scmProvider == git",
           "group": "navigation"
+        }
+      ],
+      "scm/inputBox": [
+        {
+          "command": "kissSorcar.generateCommitMessage",
+          "when": "scmProvider == git"
         }
       ],
       "commandPalette": [

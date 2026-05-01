@@ -297,7 +297,7 @@ class TestMainCssFilePicker(unittest.TestCase):
 
 
 class TestGenerateCommitMessage(unittest.TestCase):
-    """Test generateCommitMessage uses fast_model_for via _generate_commit_message_llm."""
+    """Test generateCommitMessage uses get_fast_model via _generate_commit_message_llm."""
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()

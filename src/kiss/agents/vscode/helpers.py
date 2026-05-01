@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from kiss.core.models.model_info import _OPENAI_PREFIXES
+from kiss.core.models.model_info import _OPENAI_PREFIXES, get_fast_model
 
 logger = logging.getLogger(__name__)
 
@@ -51,29 +51,6 @@ def model_vendor(name: str) -> tuple[str, int]:
     return "Together AI", 5
 
 
-def fast_model_for() -> str:
-    """Return a cheap/fast model based on which API keys are available.
-
-    Priority: Anthropic/OpenRouter/Together → Gemini → OpenAI.
-
-    Returns:
-        A fast model name for the first available provider.
-    """
-    from kiss.core.config import DEFAULT_CONFIG
-
-    if DEFAULT_CONFIG.ANTHROPIC_API_KEY:
-        return "claude-haiku-4-5"
-    if DEFAULT_CONFIG.OPENROUTER_API_KEY:
-        return "openrouter/anthropic/claude-haiku-4.5"
-    if DEFAULT_CONFIG.TOGETHER_API_KEY:
-        return "deepseek-ai/DeepSeek-R1-0528"
-    if DEFAULT_CONFIG.GEMINI_API_KEY:
-        return "gemini-2.0-flash"
-    if DEFAULT_CONFIG.OPENAI_API_KEY:
-        return "gpt-4o"
-    return "claude-haiku-4-5"
-
-
 def generate_commit_message_from_diff(diff_text: str) -> str:
     """Generate a git commit message from a diff via LLM.
 
@@ -95,7 +72,7 @@ def generate_commit_message_from_diff(diff_text: str) -> str:
     try:
         agent = KISSAgent("Commit Message Generator")
         raw = agent.run(
-            model_name=fast_model_for(),
+            model_name=get_fast_model(),
             prompt_template=(
                 "Generate a concise git commit message for these "
                 "changes. Use conventional commit format with a "
