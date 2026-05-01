@@ -54,7 +54,6 @@ export type FromWebviewMessage =
   | {type: 'mergeAction'; action: string; tabId?: string}
   | {type: 'newChat'; tabId?: string}
   | {type: 'generateCommitMessage'}
-  | {type: 'runPrompt'}
   | {type: 'focusEditor'}
   | {type: 'closeTab'; tabId: string}
   | {type: 'getInputHistory'}
@@ -164,7 +163,6 @@ type ToWebviewMessageBody =
   | {type: 'merge_started'}
   | {type: 'merge_ended'}
   | {type: 'commitMessage'; message: string; error?: string}
-  | {type: 'activeFileInfo'; isPrompt: boolean; filename: string; path: string}
   | {type: 'inputHistory'; tasks: string[]}
   | {type: 'setTaskText'; text: string}
   | {type: 'appendToInput'; text: string}

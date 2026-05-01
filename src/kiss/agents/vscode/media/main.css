@@ -798,16 +798,7 @@ body {
 }
 #parallel-toggle-btn.active:hover { color: var(--accent); }
 
-#run-prompt-btn {
-  background: none; border: none;
-  color: color-mix(in srgb, var(--fg) 50%, transparent); cursor: pointer;
-  padding: 4px; transition: color 0.15s, opacity 0.15s;
-  display: flex; align-items: center;
-}
 #upload-btn:disabled, #worktree-toggle-btn:disabled, #parallel-toggle-btn:disabled { opacity: 0.3; cursor: not-allowed; }
-#run-prompt-btn:not(:disabled) { color: color-mix(in srgb, var(--green) 72%, transparent); }
-#run-prompt-btn:not(:disabled):hover { color: color-mix(in srgb, var(--green) 91%, transparent); }
-#run-prompt-btn:disabled { opacity: 0.15; cursor: not-allowed; }
 
 #demo-toggle-btn {
   background: none; border: none;

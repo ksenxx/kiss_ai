@@ -630,7 +630,6 @@
 
   const statusText = document.getElementById('status-text');
   const historyBtn = document.getElementById('history-btn');
-  const runPromptBtn = document.getElementById('run-prompt-btn');
   const sidebar = document.getElementById('sidebar');
   const sidebarOverlay = document.getElementById('sidebar-overlay');
   const sidebarClose = document.getElementById('sidebar-close');
@@ -2153,19 +2152,7 @@
           updateGhost(ev.suggestion);
         }
         break;
-      case 'activeFileInfo':
-        if (runPromptBtn) {
-          if (!isRunning && ev.isPrompt) {
-            runPromptBtn.disabled = false;
-            runPromptBtn.dataset.tooltip = 'Run prompt: ' + ev.filename;
-          } else {
-            runPromptBtn.disabled = true;
-            runPromptBtn.dataset.tooltip = ev.isPrompt
-              ? 'Run current file as prompt'
-              : 'Run current file as prompt (no prompt detected)';
-          }
-        }
-        break;
+
       case 'merge_data': {
         const mdEl = mkEl('div', 'ev merge-info');
         let mergeHtml =
@@ -2427,7 +2414,6 @@
     if (worktreeToggleBtn) worktreeToggleBtn.disabled = running;
     if (parallelToggleBtn) parallelToggleBtn.disabled = running;
     if (demoToggleBtn) demoToggleBtn.disabled = running;
-    if (runPromptBtn && running) runPromptBtn.disabled = true;
     if (modelBtn) {
       modelBtn.disabled = running;
       if (running) closeModelDD();
@@ -3135,12 +3121,6 @@
         hideAC();
       }
     });
-    if (runPromptBtn) {
-      runPromptBtn.addEventListener('click', () => {
-        if (runPromptBtn.disabled || isRunning) return;
-        vscode.postMessage({type: 'runPrompt'});
-      });
-    }
     historyBtn.addEventListener('click', () => {
       if (sidebar.classList.contains('open')) {
         closeSidebar();
