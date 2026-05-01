@@ -48,11 +48,11 @@ class TestFastModelFor:
         """When no API keys are set, falls back to claude-haiku-4-5."""
         assert get_fast_model() == "claude-haiku-4-5"
 
-    def test_priority_gemini_over_openai(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Gemini key takes priority over OpenAI key."""
+    def test_priority_openai_over_gemini(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """OpenAI key takes priority over Gemini key."""
         self._set_key(monkeypatch, "GEMINI_API_KEY")
         monkeypatch.setenv("OPENAI_API_KEY", "test-key")
         from kiss.core import config as _cfg
 
         monkeypatch.setattr(_cfg, "DEFAULT_CONFIG", _cfg.Config())
-        assert get_fast_model() == "gemini-2.0-flash"
+        assert get_fast_model() == "gpt-4o"

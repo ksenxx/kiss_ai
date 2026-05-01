@@ -47,9 +47,9 @@ from kiss.agents.vscode.tab_state import _TabState, parse_task_tags
 from kiss.agents.vscode.task_runner import _TaskRunnerMixin
 from kiss.core.models.model_info import (
     MODEL_INFO,
-    get_fast_model,
     get_available_models,
     get_default_model,
+    get_fast_model,
 )
 
 __all__ = [

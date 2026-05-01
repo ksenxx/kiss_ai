@@ -917,7 +917,7 @@ def get_available_models() -> list[str]:
 def get_fast_model() -> str:
     """Return a cheap/fast model based on which API keys are available.
 
-    Priority: Anthropic/OpenRouter/Together → Gemini → OpenAI.
+    Priority: Anthropic → OpenAI → Gemini → OpenRouter → Together.
 
     Returns:
         A fast model name for the first available provider.
@@ -939,7 +939,7 @@ def get_fast_model() -> str:
 def get_default_model() -> str:
     """Return the best default model based on which API keys are configured.
 
-    Priority order: Anthropic > OpenRouter > Gemini > OpenAI > Together AI.
+    Priority order: Anthropic > OpenAI > Gemini > OpenRouter > Together AI.
     Falls back to ``"claude-opus-4-6"`` if no keys are set.
     """
     keys = config_module.DEFAULT_CONFIG
