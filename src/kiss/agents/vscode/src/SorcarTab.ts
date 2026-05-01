@@ -145,11 +145,7 @@ export function buildChatHtml(
             <button id="autocommit-btn" data-tooltip="Auto commit changes">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><line x1="1.05" y1="12" x2="7" y2="12"/><line x1="17.01" y1="12" x2="22.96" y2="12"/><line x1="12" y1="1.05" x2="12" y2="7"/><line x1="12" y1="17.01" x2="12" y2="22.96"/></svg>
             </button>
-            <button id="run-prompt-btn" data-tooltip="Run current file as prompt" disabled>
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none">
-                <polygon points="5,3 19,12 5,21"/>
-              </svg>
-            </button>
+
             <button id="demo-toggle-btn" data-tooltip="Toggle demo mode">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>

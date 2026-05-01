@@ -945,7 +945,6 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
                 {"type": "webviewFocusChanged", "focused": True},
                 {"type": "resolveDroppedPaths", "uris": []},
-                {"type": "runPrompt"},
             ]
             for cmd in commands:
                 await ws.send(json.dumps(cmd))

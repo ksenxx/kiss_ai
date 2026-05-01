@@ -96,7 +96,6 @@ class TestCreateNewTabDoesNotBlockInput(unittest.TestCase):
             var uploadBtn = { disabled: false };
             var worktreeToggleBtn = { disabled: false };
             var parallelToggleBtn = { disabled: false };
-            var runPromptBtn = { disabled: false };
             var modelBtn = { disabled: false };
             var tabs = [];
             var activeTabId = '';
@@ -133,7 +132,6 @@ class TestCreateNewTabDoesNotBlockInput(unittest.TestCase):
                 uploadBtn.disabled = running;
                 worktreeToggleBtn.disabled = running;
                 parallelToggleBtn.disabled = running;
-                if (running) runPromptBtn.disabled = true;
                 modelBtn.disabled = running;
                 updateInputDisabled();
                 if (running) startTimer();

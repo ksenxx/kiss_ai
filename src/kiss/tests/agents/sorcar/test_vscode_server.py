@@ -2151,7 +2151,7 @@ class TestRunningStateDisablesButtons(unittest.TestCase):
     """Verify setRunningState disables the correct buttons when running.
 
     When the agent is running, 'Attach files', 'Use worktree',
-    'Use parallelism', and 'Run current file as prompt' must be disabled.
+    and 'Use parallelism' must be disabled.
     'Task history' and 'New chat' must NOT be disabled.
     """
 
@@ -2174,10 +2174,6 @@ class TestRunningStateDisablesButtons(unittest.TestCase):
     def test_parallel_btn_disabled_when_running(self) -> None:
         assert "if (parallelToggleBtn) parallelToggleBtn.disabled = running" in self.js
 
-    def test_run_prompt_btn_disabled_when_running(self) -> None:
-        assert "if (runPromptBtn && running) runPromptBtn.disabled = true" in self.js
-
-
     def test_history_btn_not_disabled_when_running(self) -> None:
         assert "historyBtn.disabled" not in self.js
 
@@ -2193,9 +2189,6 @@ class TestRunningStateDisablesButtons(unittest.TestCase):
 
     def test_css_parallel_btn_disabled_style(self) -> None:
         assert "#parallel-toggle-btn:disabled" in self.css
-
-    def test_css_run_prompt_btn_disabled_style(self) -> None:
-        assert "#run-prompt-btn:disabled" in self.css
 
     def test_css_no_history_btn_disabled_style(self) -> None:
         assert "#history-btn:disabled" not in self.css
@@ -2353,9 +2346,6 @@ class TestSorcarSidebarViewTS(unittest.TestCase):
     def test_opens_files_in_view_column_one(self) -> None:
         assert "viewColumn: vscode.ViewColumn.One" in self._ts
 
-    def test_sends_active_file_info(self) -> None:
-        assert "_sendActiveFileInfo" in self._ts
-
 
 class TestExtensionRegistersSecondaryView(unittest.TestCase):
     """Verify extension.ts registers the SorcarSidebarView provider."""
@@ -2457,7 +2447,7 @@ class TestSorcarSidebarViewMessageHandling(unittest.TestCase):
             "newChat", "getInputHistory", "getHistory", "getFiles",
             "userAnswer", "userActionDone", "recordFileUsage", "openFile",
             "resumeSession", "getAdjacentTask",
-            "complete", "mergeAction", "generateCommitMessage", "runPrompt",
+            "complete", "mergeAction", "generateCommitMessage",
             "worktreeAction", "resolveDroppedPaths", "focusEditor",
         }
         missing = required - sidebar_cases
@@ -2471,7 +2461,7 @@ class TestSorcarSidebarViewMessageHandling(unittest.TestCase):
             "newChat", "getInputHistory", "getHistory", "getFiles",
             "userAnswer", "userActionDone", "recordFileUsage", "openFile",
             "resumeSession", "getAdjacentTask",
-            "complete", "mergeAction", "generateCommitMessage", "runPrompt",
+            "complete", "mergeAction", "generateCommitMessage",
             "worktreeAction", "resolveDroppedPaths", "focusEditor",
             "closeTab", "getWelcomeSuggestions",
             "webviewFocusChanged", "autocommitAction", "setSkipMerge",
@@ -2864,16 +2854,6 @@ class TestSorcarSidebarViewAgentEventHandling(unittest.TestCase):
         assert "msg.type === 'status'" in body
         assert "this._runningTabs" in body
 
-    def test_sends_active_file_info_on_stop(self) -> None:
-        """When status running=false, sends active file info."""
-        body = self._get_message_handler_body()
-        assert "_sendActiveFileInfo()" in body
-
-    def test_active_file_info_sent_on_stop(self) -> None:
-        """When status running=false, sends active file info."""
-        body = self._get_message_handler_body()
-        assert "_sendActiveFileInfo()" in body
-
 
 class TestSorcarSidebarViewReadyHandler(unittest.TestCase):
     """Verify the 'ready' message handler sends all initialization messages."""
@@ -2901,10 +2881,6 @@ class TestSorcarSidebarViewReadyHandler(unittest.TestCase):
         block = self._get_ready_block()
         assert "'getInputHistory'" in block
 
-    def test_sends_active_file_info(self) -> None:
-        block = self._get_ready_block()
-        assert "_sendActiveFileInfo()" in block
-
     def test_sends_focus_input(self) -> None:
         block = self._get_ready_block()
         assert "'focusInput'" in block
@@ -2928,11 +2904,6 @@ class TestSorcarSidebarViewVisibilityHandler(unittest.TestCase):
         idx = self._ts.index("onDidChangeVisibility")
         block = self._ts[idx : idx + 200]
         assert "'getInputHistory'" in block
-
-    def test_visibility_sends_active_file_info(self) -> None:
-        idx = self._ts.index("onDidChangeVisibility")
-        block = self._ts[idx : idx + 200]
-        assert "_sendActiveFileInfo()" in block
 
 
 class TestSorcarSidebarViewDisposeHandler(unittest.TestCase):
@@ -2974,47 +2945,6 @@ class TestSorcarSidebarViewDisposeHandler(unittest.TestCase):
         end = self._ts.index("\n  }", idx) + 4
         body = self._ts[idx:end]
         assert "!this._disposed" in body
-
-
-class TestSorcarSidebarViewRunPrompt(unittest.TestCase):
-    """Verify the sidebar handles runPrompt for .md files."""
-
-    _ts: str = ""
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        base = Path(__file__).resolve().parents[4] / "kiss" / "agents" / "vscode"
-        cls._ts = (base / "src" / "SorcarSidebarView.ts").read_text()
-
-    def test_run_prompt_case_exists(self) -> None:
-        assert "case 'runPrompt':" in self._ts
-
-    def test_run_prompt_checks_md_extension(self) -> None:
-        import re
-
-        m = re.search(r"case\s+'runPrompt':", self._ts)
-        assert m
-        end = self._ts.index("break;", m.end())
-        block = self._ts[m.start() : end]
-        assert ".md'" in block
-
-    def test_run_prompt_reads_content(self) -> None:
-        import re
-
-        m = re.search(r"case\s+'runPrompt':", self._ts)
-        assert m
-        end = self._ts.index("break;", m.end())
-        block = self._ts[m.start() : end]
-        assert "getText()" in block
-
-    def test_run_prompt_calls_start_task(self) -> None:
-        import re
-
-        m = re.search(r"case\s+'runPrompt':", self._ts)
-        assert m
-        end = self._ts.index("break;", m.end())
-        block = self._ts[m.start() : end]
-        assert "_startTask(" in block
 
 
 class TestSorcarSidebarViewResolveDroppedPaths(unittest.TestCase):
@@ -3626,12 +3556,6 @@ class TestSidebarViewBehavior(unittest.TestCase):
         end = self._sidebar_ts.index("break;", idx) + len("break;")
         block = self._sidebar_ts[idx:end]
         assert "'focusInput'" in block
-
-    def test_sends_active_file_info_on_ready(self) -> None:
-        idx = self._sidebar_ts.index("case 'ready':")
-        end = self._sidebar_ts.index("break;", idx) + len("break;")
-        block = self._sidebar_ts[idx:end]
-        assert "_sendActiveFileInfo()" in block
 
     def test_requests_models_on_ready(self) -> None:
         idx = self._sidebar_ts.index("case 'ready':")

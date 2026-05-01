@@ -334,7 +334,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           if (statusTabId !== undefined) this._runningTabs.add(statusTabId);
         } else {
           if (statusTabId !== undefined) this._runningTabs.delete(statusTabId);
-          this._sendActiveFileInfo();
           if (this._commitPendingTabs.size > 0) {
             this._onCommitMessage.fire({message: '', error: 'Process stopped'});
           }
@@ -375,7 +374,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       if (webviewView.visible) {
         const proc = this._getServiceProcess();
         proc.sendCommand({type: 'getInputHistory'});
-        this._sendActiveFileInfo();
       }
     });
 
@@ -546,17 +544,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     return '';
   }
 
-  private _sendActiveFileInfo(): void {
-    const fpath = this._getVisibleEditorFile();
-    const isPrompt = !!fpath && fpath.toLowerCase().endsWith('.md');
-    this._sendToWebview({
-      type: 'activeFileInfo',
-      isPrompt,
-      filename: isPrompt ? path.basename(fpath) : '',
-      path: fpath,
-    } as ToWebviewMessage);
-  }
-
   private async _openWorktreeInScm(worktreeDir: string): Promise<void> {
     try {
       const gitExt = vscode.extensions.getExtension('vscode.git');
@@ -645,7 +632,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         this._sendWelcomeSuggestions();
         this._sendRemoteUrl();
         readyProc.sendCommand({type: 'getInputHistory'});
-        this._sendActiveFileInfo();
         this._sendToWebview({type: 'focusInput'} as ToWebviewMessage);
         // Auto-reload events for restored tabs that had active sessions
         const restoredTabs = message.restoredTabs;
@@ -896,29 +882,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       case 'generateCommitMessage':
         void this.generateCommitMessage();
         break;
-
-      case 'runPrompt': {
-        // runPrompt doesn't have a tabId from the webview; allow if any tab is free
-        if (this._runningTabs.size > 0) return;
-        const promptPath = this._getVisibleEditorFile();
-        if (!promptPath || !promptPath.toLowerCase().endsWith('.md')) return;
-        const promptDoc = vscode.workspace.textDocuments.find(
-          d => d.uri.fsPath === promptPath,
-        );
-        if (!promptDoc) return;
-        const content = promptDoc.getText();
-        if (!content.trim()) return;
-        this._startTask(
-          content,
-          this._selectedModel,
-          promptPath,
-          undefined,
-          undefined,
-          undefined,
-          this._activeTabId || undefined,
-        );
-        break;
-      }
 
       case 'worktreeAction': {
         const wtAction = message.action;

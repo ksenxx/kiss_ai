@@ -2,7 +2,7 @@
 
 Validates:
 - The button element exists in the HTML template (SorcarTab.ts).
-- The button is placed between parallel-toggle-btn and run-prompt-btn in #model-picker.
+- The button is placed between parallel-toggle-btn and demo-toggle-btn in #model-picker.
 - CSS styles are defined for #autocommit-btn.
 - The JS click handler sends the correct ``autocommitAction`` message.
 - The button is disabled when a task is running (setRunningState).
@@ -64,14 +64,14 @@ class TestAutocommitButtonInTemplate(unittest.TestCase):
         assert match is not None, "autocommit-btn missing data-tooltip"
         assert "commit" in match.group(1).lower()
 
-    def test_button_between_parallel_and_run_prompt(self) -> None:
-        """The autocommit button is between parallel-toggle-btn and run-prompt-btn."""
+    def test_button_between_parallel_and_demo(self) -> None:
+        """The autocommit button is between parallel-toggle-btn and demo-toggle-btn."""
         html = _read("src/SorcarTab.ts")
         parallel_pos = html.index('id="parallel-toggle-btn"')
         btn_pos = html.index('id="autocommit-btn"')
-        run_pos = html.index('id="run-prompt-btn"')
-        assert parallel_pos < btn_pos < run_pos, (
-            "autocommit-btn should be between parallel-toggle-btn and run-prompt-btn"
+        demo_pos = html.index('id="demo-toggle-btn"')
+        assert parallel_pos < btn_pos < demo_pos, (
+            "autocommit-btn should be between parallel-toggle-btn and demo-toggle-btn"
         )
 
     def test_button_inside_model_picker(self) -> None:
