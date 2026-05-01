@@ -821,6 +821,7 @@ def model(
             api_key=keys.GEMINI_API_KEY,
             model_config=model_config,
             token_callback=token_callback,
+            thinking_callback=thinking_callback,
         )
     if model_name.startswith(_OPENAI_PREFIXES) and not model_name.startswith("openai/gpt-oss"):
         return _openai_compatible(
@@ -852,6 +853,7 @@ def model(
             api_key=keys.ANTHROPIC_API_KEY,
             model_config=model_config,
             token_callback=token_callback,
+            thinking_callback=thinking_callback,
         )
     if model_name.startswith("gemini-"):
         from kiss.core.models import GeminiModel
@@ -865,6 +867,7 @@ def model(
             api_key=keys.GEMINI_API_KEY,
             model_config=model_config,
             token_callback=token_callback,
+            thinking_callback=thinking_callback,
         )
     if model_name.startswith("minimax-"):
         return _openai_compatible(

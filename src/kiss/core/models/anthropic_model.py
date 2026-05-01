@@ -12,7 +12,13 @@ from typing import Any
 from anthropic import Anthropic
 
 from kiss.core.kiss_error import KISSError
-from kiss.core.models.model import Attachment, Model, TokenCallback, transcribe_audio
+from kiss.core.models.model import (
+    Attachment,
+    Model,
+    ThinkingCallback,
+    TokenCallback,
+    transcribe_audio,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +32,7 @@ class AnthropicModel(Model):
         api_key: str,
         model_config: dict[str, Any] | None = None,
         token_callback: TokenCallback | None = None,
+        thinking_callback: ThinkingCallback | None = None,
     ):
         """Initialize an AnthropicModel instance.
 
@@ -34,8 +41,15 @@ class AnthropicModel(Model):
             api_key: The Anthropic API key for authentication.
             model_config: Optional dictionary of model configuration parameters.
             token_callback: Optional callback invoked with each streamed text token.
+            thinking_callback: Optional callback invoked with ``True`` when a
+                thinking block starts and ``False`` when it ends.
         """
-        super().__init__(model_name, model_config=model_config, token_callback=token_callback)
+        super().__init__(
+            model_name,
+            model_config=model_config,
+            token_callback=token_callback,
+            thinking_callback=thinking_callback,
+        )
         self.api_key = api_key
 
     def initialize(self, prompt: str, attachments: list[Attachment] | None = None) -> None:
@@ -230,14 +244,24 @@ class AnthropicModel(Model):
         """
         with self.client.messages.stream(**kwargs) as stream:
             if self.token_callback is not None:
+                in_thinking = False
                 for event in stream:
-                    if event.type == "content_block_delta":
+                    if event.type == "content_block_start":
+                        block = getattr(event, "content_block", None)
+                        if block and getattr(block, "type", "") == "thinking":
+                            in_thinking = True
+                            self._invoke_thinking_callback(True)
+                    elif event.type == "content_block_delta":
                         delta = event.delta
                         delta_type = getattr(delta, "type", "")
                         if delta_type == "thinking_delta":
                             self._invoke_token_callback(getattr(delta, "thinking", ""))
                         elif delta_type == "text_delta":
                             self._invoke_token_callback(getattr(delta, "text", ""))
+                    elif event.type == "content_block_stop":
+                        if in_thinking:
+                            in_thinking = False
+                            self._invoke_thinking_callback(False)
             return stream.get_final_message()
 
     def generate(self) -> tuple[str, Any]:  # pragma: no cover – API call
