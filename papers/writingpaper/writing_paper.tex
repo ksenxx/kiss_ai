@@ -27,7 +27,7 @@ Koushik Sen \\ EECS Department, UC Berkeley\\ \texttt{ksen@berkeley.edu} \\
 \maketitle
 
 \begin{abstract}
-We describe, step by step, how KISS Sorcar---an AI coding assistant built on the KISS Agent Framework---was used to write its own research paper.  The process spanned nine days (April~22--30, 2026) and comprised over one hundred user-issued tasks, each recorded in a SQLite database alongside the full git history of every resulting change.  The record reveals a distinctive human--AI collaboration pattern: the human author steered the paper at the level of intent (``add a section on evaluation,'' ``switch to active voice,'' ``cite recent papers''), while the agent executed each directive---editing \LaTeX{}, searching the web for citations, compiling with \texttt{pdflatex}, checking spelling, and fixing its own bugs when the diff/merge interface failed.  The entire process also doubled as a stress test of the tool itself, since every agent-introduced defect immediately impaired the agent's own ability to work.  We present the complete chronological record, organized into seven phases, and draw lessons about the practical dynamics of AI-assisted academic writing.
+We describe, step by step, how KISS Sorcar---an AI coding assistant built on the KISS Agent Framework---was used to write its own research paper.  The process spanned nine days and comprised over one hundred user-issued tasks, each recorded in a SQLite database alongside the full git history of every resulting change.  The record reveals a distinctive human--AI collaboration pattern: the human author steered the paper at the level of intent (``add a section on evaluation,'' ``switch to active voice,'' ``cite recent papers''), while the agent executed each directive---editing \LaTeX{}, searching the web for citations, compiling with \texttt{pdflatex}, checking spelling, and fixing its own bugs when the diff/merge interface failed.  The entire process also doubled as a stress test of the tool itself, since every agent-introduced defect immediately impaired the agent's own ability to work.  We present the complete chronological record, organized into seven phases, and draw lessons about the practical dynamics of AI-assisted academic writing.
 \end{abstract}
 
 %----------------------------------------------------------------------
@@ -37,7 +37,7 @@ We describe, step by step, how KISS Sorcar---an AI coding assistant built on the
 
 KISS Sorcar is an open-source AI assistant and integrated development environment (IDE) built on the KISS Agent Framework~\cite{sen2026kiss}.  It operates inside Visual Studio Code, accepts natural-language tasks, and executes them through a layered agent hierarchy that manages budget tracking, automatic continuation, coding tools, persistent chat, and git worktree isolation.
 
-During April 2026, the first author used KISS Sorcar to write the research paper that describes KISS Sorcar itself.  Every task the user issued was recorded in a SQLite database (\texttt{sorcar.db}), and every change the agent made was committed to git.  This paper reconstructs that process from the raw record.  Three copies of the database survive---at \texttt{\textasciitilde/sorcar.db}, \texttt{\textasciitilde/.kiss/sorcar.db}, and \texttt{PWD/sorcar.db}---along with 82 git commits that touch the paper's \LaTeX{} source.
+The first author used KISS Sorcar to write the research paper that describes KISS Sorcar itself.  Every task the user issued was recorded in a SQLite database (\texttt{sorcar.db}), and every change the agent made was committed to git.  This paper reconstructs that process from the raw record.  Three copies of the database survive---at \texttt{\textasciitilde/sorcar.db}, \texttt{\textasciitilde/.kiss/sorcar.db}, and \texttt{PWD/sorcar.db}---along with 82 git commits that touch the paper's \LaTeX{} source.
 
 The record shows that the human author never typed \LaTeX{} from scratch.  Instead, the author directed the agent through short, imperative sentences: compile the paper, add related work, switch to active voice, cite a specific URL, check spelling.  The agent, in turn, read source files, searched the web, edited \LaTeX{}, ran \texttt{pdflatex} and \texttt{bibtex}, and presented diffs for the author to accept or reject.  When the agent introduced bugs---as it did on at least two occasions---the author's next task was to fix those bugs, and the agent fixed them by writing integration tests first.
 
@@ -65,18 +65,18 @@ Every file the agent modifies is presented in a diff/merge UI.  The user can acc
 \label{sec:chronology}
 %----------------------------------------------------------------------
 
-The paper-writing process began on April~22, 2026, and continued through April~30.  We divide it into seven phases.
+The paper-writing process spanned nine calendar days.  We divide it into seven phases.
 
 %----------------------------------------------------------------------
-\subsection{Phase 1: Scaffolding and First Compilation (April 22--23, 00:00--01:30)}
+\subsection{Phase 1: Scaffolding and First Compilation}
 \label{sec:phase1}
 %----------------------------------------------------------------------
 
-The paper's \LaTeX{} source first appeared in the repository on April~21 as part of a squashed commit (commit \texttt{9df20f7b}) that added the NeurIPS~2026 submission template, a checklist file, and a 612-line draft of \texttt{kiss\_sorcar.tex}.  This initial draft was itself generated by KISS Sorcar.
+The paper's \LaTeX{} source first appeared in the repository as part of a squashed commit that added the NeurIPS~2026 submission template, a checklist file, and a 612-line draft of \texttt{kiss\_sorcar.tex}.  This initial draft was itself generated by KISS Sorcar.
 
-On April~22, a second squashed commit (\texttt{fd2580a0}) added formatted prompt blocks---converting the inline prose descriptions of agent prompts into explicitly formatted \texttt{Verbatim} environments using the \texttt{fancyvrb} package.  This commit added roughly 300 lines.
+A second squashed commit added formatted prompt blocks---converting the inline prose descriptions of agent prompts into explicitly formatted \texttt{Verbatim} environments using the \texttt{fancyvrb} package.  This commit added roughly 300 lines.
 
-The user's first recorded paper-specific task appeared on April~23 at 00:50:
+The user's first recorded paper-specific task was:
 
 \begin{quote}
 \textit{``Can you compile the paper \texttt{\$PWD/papers/kiss\_sorcar.tex} using pdflatex?  I just installed mactex in the system.''}
@@ -100,14 +100,14 @@ Two tasks followed in quick succession, both demanding a thorough related-work s
 \textit{``You MUST discuss related work and cite recent papers published after August 2025.  Make sure that the papers have high citation counts.  Read the papers to judge relevance.''}
 \end{quote}
 
-The agent searched the web, retrieved papers, verified their existence, and added citations.  The resulting git commits (\texttt{207151d2} and \texttt{6110bddc}) show the related-work section expanding with comprehensive literature coverage.
+The agent searched the web, retrieved papers, verified their existence, and added citations.  The resulting commits show the related-work section expanding with comprehensive literature coverage.
 
 %----------------------------------------------------------------------
-\subsection{Phase 2: Structural Rewriting (April 23, Morning)}
+\subsection{Phase 2: Structural Rewriting}
 \label{sec:phase2}
 %----------------------------------------------------------------------
 
-The morning of April~23 brought a burst of structural changes.  The user noticed that the implementation had changed and told the agent:
+The next morning brought a burst of structural changes.  The user noticed that the implementation had changed and told the agent:
 
 \begin{quote}
 \textit{``Note that the implementation has changed, specifically that of \texttt{relentless\_agent.py}.  Update the paper accordingly.''}
@@ -121,7 +121,7 @@ The user issued two critical style directives:
 \textit{``Instead of writing the paper in the passive voice, write it as `we'.''}
 \end{quote}
 
-This produced commit \texttt{01f1ac6d}: ``docs: refactor paper to use active voice with `we' as subject.''  The user also renamed ``Stateful Sorcar Agent'' to ``Chat Sorcar Agent'' (commit \texttt{96326399}).
+This produced a commit titled ``docs: refactor paper to use active voice with `we' as subject.''  The user also renamed ``Stateful Sorcar Agent'' to ``Chat Sorcar Agent.''
 
 The user then asked for a new section on the VS Code extension's unique features, instructing the agent to search the internet for comparison:
 
@@ -129,7 +129,7 @@ The user then asked for a new section on the VS Code extension's unique features
 \textit{``Can you add a section in the paper on the VS Code extension named KISS Sorcar about its unique features that are not present in other IDEs or assistants?''}
 \end{quote}
 
-The agent searched the web, compared features with Copilot, Cursor, and Devin, and wrote Section~5 of the paper (commit \texttt{7bb062f7}).
+The agent searched the web, compared features with Copilot, Cursor, and Devin, and wrote Section~5 of the paper.
 
 After the user updated the system prompt, the agent was told to synchronize:
 
@@ -138,7 +138,7 @@ After the user updated the system prompt, the agent was told to synchronize:
 \end{quote}
 
 %----------------------------------------------------------------------
-\subsection{Phase 3: Evaluation and Metrics (April 23, Afternoon)}
+\subsection{Phase 3: Evaluation and Metrics}
 \label{sec:phase3}
 %----------------------------------------------------------------------
 
@@ -164,14 +164,14 @@ The day ended with a style directive:
 \textit{``Can you rewrite the paper by strictly following the Strunk and White styling guide?''}
 \end{quote}
 
-This produced a substantial rewrite (commit \texttt{20bb75bf}).
+This produced a substantial rewrite.
 
 %----------------------------------------------------------------------
-\subsection{Phase 4: Citations, Formatting, and File Organization (April 24)}
+\subsection{Phase 4: Citations, Formatting, and File Organization}
 \label{sec:phase4}
 %----------------------------------------------------------------------
 
-April~24 was the most active day.  It began with a second bug fix: the diff/merge UI had not appeared when the agent edited the paper.  The user wrote:
+The next day was the most active.  It began with a second bug fix: the diff/merge UI had not appeared when the agent edited the paper.  The user wrote:
 
 \begin{quote}
 \textit{``Look at the last task.  You updated \texttt{kiss\_sorcar.tex}, but the diff/merge UI didn't show up.  Reproduce this bug by writing an integration test and fix.''}
@@ -203,37 +203,37 @@ The user updated the system prompt again and asked the agent to synchronize the 
 
 Between agent sessions, the user edited the \LaTeX{} source directly on two occasions.  Both episodes illuminate the boundary between what is faster to type and what is faster to delegate.
 
-The first manual edit was a paragraph insertion.  The user had just reviewed the ``Painless Software Engineering'' case study section (Section~\ref{sec:log}, tasks~140, 142), which described a real development session in which the worktree merge workflow was first understood and then redesigned through conversational prompts.  The user realized that the section lacked a framing observation: the underlying pattern---ask the agent to generate a detailed, step-by-step description of a buggy workflow, then ask it to fix the buggy steps in natural language---was general and worth stating explicitly.  Rather than formulate a prompt to describe this edit, the user opened the file and typed seven lines directly into line~1399.  Git captured the insertion in a ``baseline from dirty state'' commit (\texttt{05c356e5}, April~24 at 12:11).  The manually typed paragraph contained a minor grammar error (``ask KISS Sorcar change some buggy step'' instead of ``ask KISS Sorcar \emph{to} change some buggy step''), which the agent later corrected during a grammar-check pass (commit \texttt{52113720}, task~183).
+The first manual edit was a paragraph insertion.  The user had just reviewed the ``Painless Software Engineering'' case study section (Section~\ref{sec:log}, tasks~140, 142), which described a real development session in which the worktree merge workflow was first understood and then redesigned through conversational prompts.  The user realized that the section lacked a framing observation: the underlying pattern---ask the agent to generate a detailed, step-by-step description of a buggy workflow, then ask it to fix the buggy steps in natural language---was general and worth stating explicitly.  Rather than formulate a prompt to describe this edit, the user opened the file and typed seven lines directly into line~1399.  Git captured the insertion in a ``baseline from dirty state'' commit.  The manually typed paragraph contained a minor grammar error (``ask KISS Sorcar change some buggy step'' instead of ``ask KISS Sorcar \emph{to} change some buggy step''), which the agent later corrected during a grammar-check pass (task~183).
 
-The second manual edit was four spelling corrections, and it arose from frustration.  Tasks~147--150 were four consecutive attempts to spell-check the paper; each either timed out or exceeded its budget before completing the fix.  After the fourth failure, the user opened the file and corrected the four typos directly: ``Assitant'' $\to$ ``Assistant'' in the title, ``Farmework'' $\to$ ``Framework'' in the architecture section, and ``hish'' $\to$ ``high'' and ``comapred'' $\to$ ``compared'' in the evaluation discussion.  All four errors had been introduced by the agent in earlier editing sessions.  When the next agent session began thirty minutes later, the worktree isolation mechanism detected the uncommitted changes and created a baseline commit (\texttt{4a239b18}, 12:48).  Task~151 (``Fix the 4 typos found'') then produced an empty diff: the user had already applied exactly the changes the agent would have made.
+The second manual edit was four spelling corrections, and it arose from frustration.  Tasks~147--150 were four consecutive attempts to spell-check the paper; each either timed out or exceeded its budget before completing the fix.  After the fourth failure, the user opened the file and corrected the four typos directly: ``Assitant'' $\to$ ``Assistant'' in the title, ``Farmework'' $\to$ ``Framework'' in the architecture section, and ``hish'' $\to$ ``high'' and ``comapred'' $\to$ ``compared'' in the evaluation discussion.  All four errors had been introduced by the agent in earlier editing sessions.  When the next agent session began thirty minutes later, the worktree isolation mechanism detected the uncommitted changes and created a baseline commit.  Task~151 (``Fix the 4 typos found'') then produced an empty diff: the user had already applied exactly the changes the agent would have made.
 
 The ``baseline from dirty state'' mechanism deserves a brief note.  Whenever a new agent session starts, KISS Sorcar checks whether the working tree contains uncommitted changes.  If it does, the system creates an automatic baseline commit before the agent begins its own work.  This means the user can edit any file at any time---between tasks, during a coffee break, even while the agent is running on a different worktree---and the edits will be preserved in git without the user needing to commit manually.  The mechanism enabled the seamless coexistence of manual and agent-mediated editing observed here.
 
 After the manual edits, the agent checked grammar and spelling (tasks~182--183) and built the paper (tasks~185--186).
 
 %----------------------------------------------------------------------
-\subsection{Phase 5: Refinement and Citation Hygiene (April 25--26)}
+\subsection{Phase 5: Refinement and Citation Hygiene}
 \label{sec:phase5}
 %----------------------------------------------------------------------
 
-On April~25, the user built the paper, reviewed the generated PDF across all 23 pages (task~194), and asked the agent to cite specific frontier models---RLM~5.1, KIMI~K2.5, Composer~2.0, Anthropic Opus~4.6---and LiveCodeBench (tasks~198--199).
+The user built the paper, reviewed the generated PDF across all 23 pages (task~194), and asked the agent to cite specific frontier models---RLM~5.1, KIMI~K2.5, Composer~2.0, Anthropic Opus~4.6---and LiveCodeBench (tasks~198--199).
 
-On April~26, the user reformatted the paper so that each paragraph occupied a single line (task~224) and configured VS Code to wrap \texttt{.tex} files (task~225).  Multiple rounds of system prompt synchronization followed (tasks~226--227, 233, 261, 274), each triggered by the user updating \texttt{SYSTEM.md} and asking the agent to propagate the changes.
+The next day, the user reformatted the paper so that each paragraph occupied a single line (task~224) and configured VS Code to wrap \texttt{.tex} files (task~225).  Multiple rounds of system prompt synchronization followed (tasks~226--227, 233, 261, 274), each triggered by the user updating \texttt{SYSTEM.md} and asking the agent to propagate the changes.
 
-The user asked for syntax-highlighted code listings (tasks~245--248).  The agent first used the \texttt{minted} package, which requires \texttt{--shell-escape} and the \texttt{pygments} Python library.  When the PDF showed \texttt{<MINTED>} placeholders instead of highlighted code (task~257), the user directed the agent to abandon \texttt{minted} and use \texttt{listings} with a \texttt{verbatim} fallback (task~264).  The agent replaced \texttt{minted} with \texttt{lstnewenvironment} (commit \texttt{a7925570}).
+The user asked for syntax-highlighted code listings (tasks~245--248).  The agent first used the \texttt{minted} package, which requires \texttt{--shell-escape} and the \texttt{pygments} Python library.  When the PDF showed \texttt{<MINTED>} placeholders instead of highlighted code (task~257), the user directed the agent to abandon \texttt{minted} and use \texttt{listings} with a \texttt{verbatim} fallback (task~264).  The agent replaced \texttt{minted} with \texttt{lstnewenvironment}.
 
-The user then reported 74 undefined citations (task~265) and asked the agent to validate all citations using internet search (task~266).  The agent corrected paper years, fixed repository URLs (commit \texttt{1b93dc7e}), and escaped underscores in \LaTeX{} prose (commit \texttt{b7fa72aa}).
+The user then reported 74 undefined citations (task~265) and asked the agent to validate all citations using internet search (task~266).  The agent corrected paper years, fixed repository URLs, and escaped underscores in \LaTeX{} prose.
 
 Finally, the user asked the agent to read the paper and check for inconsistencies (task~270).
 
 %----------------------------------------------------------------------
-\subsection{Phase 6: System Prompt Updates and the Website (April 27--28)}
+\subsection{Phase 6: System Prompt Updates and the Website}
 \label{sec:phase6}
 %----------------------------------------------------------------------
 
-On April~27, the user built the paper again (task~302) and ran GEPA experiments on HotpotQA (task~293)---work related to the broader project but not the paper itself.
+The user built the paper again (task~302) and ran GEPA experiments on HotpotQA (task~293)---work related to the broader project but not the paper itself.
 
-On April~28, the user updated the system prompt's Sorcar-specific instructions and asked the agent to synchronize the paper and build it (task~312).  The user then shifted to outreach:
+The next day, the user updated the system prompt's Sorcar-specific instructions and asked the agent to synchronize the paper and build it (task~312).  The user then shifted to outreach:
 
 \begin{quote}
 \textit{``Can you create a nice, simple, elegant website for KISS Sorcar at kisssorcar.github.io and upload it?''}
@@ -242,11 +242,11 @@ On April~28, the user updated the system prompt's Sorcar-specific instructions a
 The agent created the website, and the user iterated on its design over eight tasks (320--342)---adjusting the background color, logo size, layout, content order, and styling.  The user asked the agent to add the website link and paper citation to \texttt{README.md} (task~340) and to emphasize disciplined engineering practices on both the website and the README (task~342).
 
 %----------------------------------------------------------------------
-\subsection{Phase 7: Final Polish and Lecture Slides (April 29--30)}
+\subsection{Phase 7: Final Polish and Lecture Slides}
 \label{sec:phase7}
 %----------------------------------------------------------------------
 
-On April~29, the user integrated a message into the paper's abstract, introduction, and conclusion (task~418) and added all authors from \texttt{README.md} to the website (task~420).
+In the final sessions, the user integrated a message into the paper's abstract, introduction, and conclusion (task~418) and added all authors from \texttt{README.md} to the website (task~420).
 
 The user then asked the agent to prepare PowerPoint lecture slides based on the paper:
 
@@ -256,7 +256,7 @@ The user then asked the agent to prepare PowerPoint lecture slides based on the 
 
 The agent generated the slides using \texttt{python-pptx}.  The user refined them over several tasks---fixing code formatting on specific slides (tasks~436, 439, 440) and adding a features slide drawn from the website (task~437).
 
-By April~30, the paper had reached its final form: 893 lines of \LaTeX{}, a 23-page PDF, and a companion website at \texttt{kisssorcar.github.io}.
+By the ninth day, the paper had reached its final form: 893 lines of \LaTeX{}, a 23-page PDF, and a companion website at \texttt{kisssorcar.github.io}.
 
 %----------------------------------------------------------------------
 \section{Quantitative Summary}
@@ -273,7 +273,7 @@ Table~\ref{tab:summary} summarizes the paper-writing process.
 \toprule
 \textbf{Metric} & \textbf{Count} \\
 \midrule
-Calendar days (April 22--30) & 9 \\
+Calendar days & 9 \\
 Distinct paper-related user tasks & $\sim$100 \\
 Git commits touching the paper & 82 \\
 Final paper length (lines of \LaTeX{}) & 893 \\
@@ -336,124 +336,124 @@ What makes the pattern noteworthy is that it ran in both directions.  The agent 
 
 Table~\ref{tab:log} lists every paper-related task the user issued, in chronological order.  Tasks marked with an asterisk (*) were retries of a failed or timed-out attempt.
 
-\begin{longtable}{rp{0.15\textwidth}p{0.72\textwidth}}
+\begin{longtable}{rp{0.87\textwidth}}
 \caption{Complete chronological log of paper-related tasks.} \label{tab:log} \\
 \toprule
-\textbf{ID} & \textbf{Date/Time} & \textbf{Task (abbreviated)} \\
+\textbf{ID} & \textbf{Task (abbreviated)} \\
 \midrule
 \endfirsthead
 \toprule
-\textbf{ID} & \textbf{Date/Time} & \textbf{Task (abbreviated)} \\
+\textbf{ID} & \textbf{Task (abbreviated)} \\
 \midrule
 \endhead
 \midrule
-\multicolumn{3}{r}{\textit{Continued on next page}} \\
+\multicolumn{2}{r}{\textit{Continued on next page}} \\
 \bottomrule
 \endfoot
 \bottomrule
 \endlastfoot
-49 & Apr 23, 00:50 & Compile the paper using pdflatex (mactex just installed). \\
-50 & Apr 23, 00:53 & Show each SYSTEM.md instruction and explain its rationale in the paper. \\
-51 & Apr 23, 00:58 & Add more related work; use internet search; validate citations. \\
-52 & Apr 23, 01:04 & Discuss related work; cite recent papers after Aug 2025; verify citation counts. \\
-74 & Apr 23, 09:28 & Implementation of relentless\_agent.py changed; update paper. \\
-75 & Apr 23, 09:37 & In Section 4, explain each instruction in detail with motivation. \\
-77 & Apr 23, 11:29 & Look at the last commit and update the paper. \\
-78 & Apr 23, 11:31 & Build the paper. \\
-79 & Apr 23, 11:33 & Switch from passive voice to ``we.'' \\
-80 & Apr 23, 11:41 & Build the paper. \\
-82 & Apr 23, 11:59 & Add section on VS Code extension's unique features; search internet. \\
-84 & Apr 23, 12:20 & System prompt updated significantly; update paper and build. \\
-96 & Apr 23, 17:23 & Go over changes and cite sources precisely. \\
-97 & Apr 23, 17:29 & Add section on Terminal Bench 2.0; use preliminary results from jobs/. \\
-98 & Apr 23, 17:37 & Write the introduction nicely with proper citations. \\
-100 & Apr 23, 17:46 & Add lines of code (excluding comments and blanks) to paper. \\
-101 & Apr 23, 17:49 & Add LOC only for KissAgent, SorcarAgent, ChatSorcarAgent, WorktreeSorcarAgent. \\
-102 & Apr 23, 18:49 & Make the sections coherent. \\
-104 & Apr 23, 19:03 & Bug: auto-committed changes not in report. Write test and fix. \\
-106 & Apr 23, 20:30 & Rewrite paper following Strunk and White. \\
-109 & Apr 24, 05:25 & Bug: diff/merge UI didn't appear. Reproduce with test and fix. \\
-111 & Apr 24, 05:39 & Build the paper. \\
-112 & Apr 24, 05:44 & Update Terminal Bench 2.0 evaluation with latest 5 runs. \\
-113 & Apr 24, 05:52 & Cross-check Cursor Composer 2 score; cite their arxiv paper. \\
-115 & Apr 24, 06:22 & Cite Claude Code, OpenAI Codex, and OpenClaw. \\
-116 & Apr 24, 07:17 & Build the paper.* \\
-117 & Apr 24, 07:18 & Build the paper.* \\
-118 & Apr 24, 07:19 & Move epigraph from preamble to after \texttt{\textbackslash begin\{document\}}. \\
-119 & Apr 24, 07:27 & Cite cheating-agents blog and corresponding paper. \\
-121 & Apr 24, 07:44 & Build the paper. \\
-122 & Apr 24, 07:47 & Remove NeurIPS checklist and checklist.tex. \\
-123 & Apr 24, 08:06 & Write abstract from introduction's key points. \\
-125 & Apr 24, 08:42 & Create kiss\_sorcar.bib and use BibTeX. \\
-126 & Apr 24, 08:48 & Move paper files to kisssorcar/ subdirectory; update .gitignore. \\
-127 & Apr 24, 08:51 & Fix .gitignore rules for .aux, .out, .bbl, .blg. \\
-128 & Apr 24, 08:57 & Update conclusion with Terminal Bench 2.0 evaluation results. \\
-131 & Apr 24, 09:23 & Include screenshot of KISS Sorcar UI in paper. \\
-136 & Apr 24, 10:01 & Add citations for GEPA, AlphaEvolve, OpenEvolve. \\
-140 & Apr 24, 10:32 & Add case study from Dropbox history showing workflow modification. \\
-142 & Apr 24, 11:23 & Add ``Painless Software Engineering'' section from worktree history. \\
-147 & Apr 24, 12:11 & Check spelling.* \\
-148 & Apr 24, 12:13 & Check spelling.* \\
-149 & Apr 24, 12:13 & Check spelling.* \\
-150 & Apr 24, 12:22 & Check spelling. \\
-151 & Apr 24, 12:23 & Fix the 4 typos found. \\
-152 & Apr 24, 12:23 & Compile to verify typo fixes. \\
-167 & Apr 24, 13:39 & SYSTEM.md updated; update paper. \\
-169 & Apr 24, 13:57 & Discover all inconsistencies and fix them. \\
-170 & Apr 24, 14:03 & Check all citations for AI slop. \\
-171 & Apr 24, 14:09 & Check all citations for AI slop.* \\
-173 & Apr 24, 14:21 & Build the paper.* \\
-174 & Apr 24, 14:31 & Build the paper.* \\
-175 & Apr 24, 14:32 & Build the paper.* \\
-176 & Apr 24, 14:33 & Build the paper. \\
-182 & Apr 24, 15:48 & Check grammar and spelling of manual edits. \\
-183 & Apr 24, 15:50 & Check and fix grammar and spelling of manual edits. \\
-185 & Apr 24, 15:52 & Did you build the paper? \\
-186 & Apr 24, 15:56 & Build the paper. \\
-192 & Apr 24, 23:41 & Build the paper. \\
-193 & Apr 25, 09:17 & Build the paper. \\
-194 & Apr 25, 09:19 & Review PDF for formatting, layout, or citation issues (23 pages). \\
-195 & Apr 25, 09:33 & Build the paper. \\
-197 & Apr 25, 09:39 & Build the paper. \\
-198 & Apr 25, 11:00 & Cite RLM 5.1, KIMI K2.5, Composer 2.0, Anthropic Opus 4.6. \\
-199 & Apr 25, 11:09 & Cite LiveCodeBench. \\
-205 & Apr 25, 18:30 & Build the paper. \\
-206 & Apr 25, 18:37 & Build the paper.* \\
-213 & Apr 25, 19:26 & Build the paper. \\
-215 & Apr 25, 20:31 & Build the paper. \\
-224 & Apr 26, 01:45 & Reflow paragraphs to single lines; do not change content. \\
-225 & Apr 26, 01:47 & Configure VS Code to wrap .tex files. \\
-226 & Apr 26, 01:51 & Add discussion of SYSTEM.md hunk to paper. \\
-227 & Apr 26, 01:55 & Sorcar-Specific Overrides updated; update paper. \\
-229 & Apr 26, 02:01 & Build the paper. \\
-233 & Apr 26, 02:26 & Self-Improvement Loop changed in SYSTEM.md; update paper. \\
-234 & Apr 26, 02:35 & Build the paper. \\
-242 & Apr 26, 02:56 & Build the paper.* \\
-243 & Apr 26, 02:58 & Build the paper. \\
-245 & Apr 26, 03:32 & Include syntax-highlighted code for simple agent in Section 2.1. \\
-246 & Apr 26, 03:35 & Syntax-highlight all prompts.* \\
-247 & Apr 26, 03:37 & Syntax-highlight all prompts using coding package.* \\
-248 & Apr 26, 03:39 & Syntax-highlight all prompts; search internet. \\
-249 & Apr 26, 03:53 & Build the paper. \\
-256 & Apr 26, 04:40 & Remove line numbers from code listing. \\
-257 & Apr 26, 04:43 & PDF shows \texttt{<MINTED>} instead of prompts. \\
-261 & Apr 26, 05:54 & Update paper with updated Sorcar-specific instructions. \\
-262 & Apr 26, 05:59 & Build the paper. \\
-264 & Apr 26, 10:41 & Do not use minted; leave prompts verbatim. \\
-265 & Apr 26, 10:44 & Fix 74 undefined citations. \\
-266 & Apr 26, 10:46 & Check if all citations are valid; use internet. \\
-270 & Apr 26, 22:29 & Read paper and check for inconsistencies. \\
-271 & Apr 26, 22:30 & Build the paper. \\
-274 & Apr 26, 22:34 & Sorcar-specific instructions updated; update paper. \\
-275 & Apr 26, 22:35 & Build the paper. \\
-302 & Apr 27, 08:05 & Build the paper. \\
-312 & Apr 28, 07:36 & Sorcar-specific instructions changed; update paper and build. \\
-418 & Apr 29, 09:06 & Integrate message in abstract, intro, and conclusion; build. \\
-432 & Apr 29, 11:37 & Prepare PowerPoint lecture slides from paper. \\
-436 & Apr 29, 13:26 & Fix code formatting on slide 9. \\
-437 & Apr 29, 13:40 & Add features slide from website. \\
-439 & Apr 29, 13:50 & Fix code formatting on slide 9.* \\
-440 & Apr 29, 13:51 & Fix code formatting on slide 10. \\
+49 & Compile the paper using pdflatex (mactex just installed). \\
+50 & Show each SYSTEM.md instruction and explain its rationale in the paper. \\
+51 & Add more related work; use internet search; validate citations. \\
+52 & Discuss related work; cite recent papers after Aug 2025; verify citation counts. \\
+74 & Implementation of relentless\_agent.py changed; update paper. \\
+75 & In Section 4, explain each instruction in detail with motivation. \\
+77 & Look at the last commit and update the paper. \\
+78 & Build the paper. \\
+79 & Switch from passive voice to ``we.'' \\
+80 & Build the paper. \\
+82 & Add section on VS Code extension's unique features; search internet. \\
+84 & System prompt updated significantly; update paper and build. \\
+96 & Go over changes and cite sources precisely. \\
+97 & Add section on Terminal Bench 2.0; use preliminary results from jobs/. \\
+98 & Write the introduction nicely with proper citations. \\
+100 & Add lines of code (excluding comments and blanks) to paper. \\
+101 & Add LOC only for KissAgent, SorcarAgent, ChatSorcarAgent, WorktreeSorcarAgent. \\
+102 & Make the sections coherent. \\
+104 & Bug: auto-committed changes not in report. Write test and fix. \\
+106 & Rewrite paper following Strunk and White. \\
+109 & Bug: diff/merge UI didn't appear. Reproduce with test and fix. \\
+111 & Build the paper. \\
+112 & Update Terminal Bench 2.0 evaluation with latest 5 runs. \\
+113 & Cross-check Cursor Composer 2 score; cite their arxiv paper. \\
+115 & Cite Claude Code, OpenAI Codex, and OpenClaw. \\
+116 & Build the paper.* \\
+117 & Build the paper.* \\
+118 & Move epigraph from preamble to after \texttt{\textbackslash begin\{document\}}. \\
+119 & Cite cheating-agents blog and corresponding paper. \\
+121 & Build the paper. \\
+122 & Remove NeurIPS checklist and checklist.tex. \\
+123 & Write abstract from introduction's key points. \\
+125 & Create kiss\_sorcar.bib and use BibTeX. \\
+126 & Move paper files to kisssorcar/ subdirectory; update .gitignore. \\
+127 & Fix .gitignore rules for .aux, .out, .bbl, .blg. \\
+128 & Update conclusion with Terminal Bench 2.0 evaluation results. \\
+131 & Include screenshot of KISS Sorcar UI in paper. \\
+136 & Add citations for GEPA, AlphaEvolve, OpenEvolve. \\
+140 & Add case study from Dropbox history showing workflow modification. \\
+142 & Add ``Painless Software Engineering'' section from worktree history. \\
+147 & Check spelling.* \\
+148 & Check spelling.* \\
+149 & Check spelling.* \\
+150 & Check spelling. \\
+151 & Fix the 4 typos found. \\
+152 & Compile to verify typo fixes. \\
+167 & SYSTEM.md updated; update paper. \\
+169 & Discover all inconsistencies and fix them. \\
+170 & Check all citations for AI slop. \\
+171 & Check all citations for AI slop.* \\
+173 & Build the paper.* \\
+174 & Build the paper.* \\
+175 & Build the paper.* \\
+176 & Build the paper. \\
+182 & Check grammar and spelling of manual edits. \\
+183 & Check and fix grammar and spelling of manual edits. \\
+185 & Did you build the paper? \\
+186 & Build the paper. \\
+192 & Build the paper. \\
+193 & Build the paper. \\
+194 & Review PDF for formatting, layout, or citation issues (23 pages). \\
+195 & Build the paper. \\
+197 & Build the paper. \\
+198 & Cite RLM 5.1, KIMI K2.5, Composer 2.0, Anthropic Opus 4.6. \\
+199 & Cite LiveCodeBench. \\
+205 & Build the paper. \\
+206 & Build the paper.* \\
+213 & Build the paper. \\
+215 & Build the paper. \\
+224 & Reflow paragraphs to single lines; do not change content. \\
+225 & Configure VS Code to wrap .tex files. \\
+226 & Add discussion of SYSTEM.md hunk to paper. \\
+227 & Sorcar-Specific Overrides updated; update paper. \\
+229 & Build the paper. \\
+233 & Self-Improvement Loop changed in SYSTEM.md; update paper. \\
+234 & Build the paper. \\
+242 & Build the paper.* \\
+243 & Build the paper. \\
+245 & Include syntax-highlighted code for simple agent in Section 2.1. \\
+246 & Syntax-highlight all prompts.* \\
+247 & Syntax-highlight all prompts using coding package.* \\
+248 & Syntax-highlight all prompts; search internet. \\
+249 & Build the paper. \\
+256 & Remove line numbers from code listing. \\
+257 & PDF shows \texttt{<MINTED>} instead of prompts. \\
+261 & Update paper with updated Sorcar-specific instructions. \\
+262 & Build the paper. \\
+264 & Do not use minted; leave prompts verbatim. \\
+265 & Fix 74 undefined citations. \\
+266 & Check if all citations are valid; use internet. \\
+270 & Read paper and check for inconsistencies. \\
+271 & Build the paper. \\
+274 & Sorcar-specific instructions updated; update paper. \\
+275 & Build the paper. \\
+302 & Build the paper. \\
+312 & Sorcar-specific instructions changed; update paper and build. \\
+418 & Integrate message in abstract, intro, and conclusion; build. \\
+432 & Prepare PowerPoint lecture slides from paper. \\
+436 & Fix code formatting on slide 9. \\
+437 & Add features slide from website. \\
+439 & Fix code formatting on slide 9.* \\
+440 & Fix code formatting on slide 10. \\
 \end{longtable}
 
 %----------------------------------------------------------------------
