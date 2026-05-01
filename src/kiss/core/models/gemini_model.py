@@ -47,6 +47,7 @@ class GeminiModel(Model):
         )
         self.api_key = api_key
         self._thought_signatures: dict[str, bytes] = {}
+        self._in_thinking_stream: bool = False
 
     def reset_conversation(self) -> None:
         """Reset conversation state including thought signatures."""
@@ -208,9 +209,38 @@ class GeminiModel(Model):
         )
 
     def _stream_parts(self, parts: list[Any]) -> None:
+        """Stream parts, routing thinking tokens through the thinking callback.
+
+        Tracks thinking state across calls so that multiple chunks of thinking
+        parts produce a single ``thinking_callback(True)`` … ``thinking_callback(False)``
+        boundary pair.
+
+        Args:
+            parts: Gemini response parts from a single streaming chunk.
+        """
         for part in parts:
-            if part.text:
-                self._invoke_token_callback(part.text)
+            if not part.text:
+                continue
+            is_thought = getattr(part, "thought", None) is True
+            if is_thought:
+                if not self._in_thinking_stream:
+                    self._in_thinking_stream = True
+                    self._invoke_thinking_callback(True)
+            else:
+                if self._in_thinking_stream:
+                    self._in_thinking_stream = False
+                    self._invoke_thinking_callback(False)
+            self._invoke_token_callback(part.text)
+
+    def _end_thinking_stream(self) -> None:
+        """Close an open thinking block after streaming completes.
+
+        Must be called after a streaming loop finishes to ensure the
+        thinking panel is closed if the last streamed part was a thought.
+        """
+        if self._in_thinking_stream:
+            self._in_thinking_stream = False
+            self._invoke_thinking_callback(False)
 
     def generate(self) -> tuple[str, Any]:  # pragma: no cover – API call
         """Generates content from prompt without tools.
@@ -231,6 +261,7 @@ class GeminiModel(Model):
                 if chunk.text:
                     content += chunk.text
                 response = chunk
+            self._end_thinking_stream()
             if response is None:
                 response = self.client.models.generate_content(
                     model=self.model_name, contents=contents, config=config
@@ -287,6 +318,7 @@ class GeminiModel(Model):
                 parts = self._parts_from_response(chunk)
                 self._stream_parts(parts)
                 all_parts.extend(parts)
+            self._end_thinking_stream()
             if response is None:
                 response = self.client.models.generate_content(
                     model=self.model_name, contents=contents, config=config
