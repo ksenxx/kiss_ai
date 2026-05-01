@@ -36,6 +36,70 @@ if ! command -v curl &>/dev/null; then
 fi
 
 # ---------------------------------------------------------------------------
+# Helper: ensure Xcode Command Line Tools are installed (macOS only)
+#
+# Tries a non-interactive `softwareupdate` install first. If that does not
+# complete successfully, falls back to the GUI installer triggered by
+# `xcode-select --install` and waits for the user to press a key once the
+# install dialog finishes.
+# ---------------------------------------------------------------------------
+ensure_xcode_clt() {
+    [ "$OS" = "Darwin" ] || return 0
+
+    if xcode-select -p &>/dev/null && [ -e "$(xcode-select -p)/usr/bin/git" ]; then
+        echo "   Xcode Command Line Tools already installed at $(xcode-select -p)"
+        return 0
+    fi
+
+    echo "   Xcode Command Line Tools not found — attempting non-interactive install..."
+
+    # softwareupdate trick: a sentinel file makes the CLT package appear in
+    # the softwareupdate catalog, then install it by its label.
+    local SENTINEL=/tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+    sudo touch "$SENTINEL" 2>/dev/null || true
+    local PROD
+    PROD="$(softwareupdate -l 2>/dev/null \
+        | awk '/^[[:space:]]*\*.*Command Line Tools/ {
+                 sub(/^[[:space:]]*\*[[:space:]]*(Label:[[:space:]]*)?/, "");
+                 print
+             }' \
+        | tail -n1)"
+    if [ -n "$PROD" ]; then
+        echo "   Installing: $PROD"
+        sudo softwareupdate -i "$PROD" --verbose 2>&1 || true
+    else
+        echo "   No Command Line Tools package found in softwareupdate catalog."
+    fi
+    sudo rm -f "$SENTINEL" 2>/dev/null || true
+
+    if xcode-select -p &>/dev/null && [ -e "$(xcode-select -p)/usr/bin/git" ]; then
+        echo "   Xcode Command Line Tools installed at $(xcode-select -p)"
+        return 0
+    fi
+
+    # Fallback: trigger the GUI installer and wait for the user.
+    echo "   Non-interactive install did not complete. Triggering GUI installer..."
+    xcode-select --install 2>&1 || true
+    echo ""
+    echo "   A dialog has appeared to install the Xcode Command Line Tools."
+    echo "   Complete the installation in that dialog, then return to this terminal."
+    # Read from the controlling terminal so this works inside `{ ... } | tee`.
+    if [ -r /dev/tty ]; then
+        read -n 1 -s -r -p "   Press any key to continue with the rest of installation..." </dev/tty
+    else
+        read -n 1 -s -r -p "   Press any key to continue with the rest of installation..."
+    fi
+    echo ""
+
+    if xcode-select -p &>/dev/null && [ -e "$(xcode-select -p)/usr/bin/git" ]; then
+        echo "   Xcode Command Line Tools installed at $(xcode-select -p)"
+    else
+        echo "   ERROR: Xcode Command Line Tools still not detected. Aborting."
+        exit 1
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Helper: install git
 # ---------------------------------------------------------------------------
 install_git() {
@@ -207,6 +271,13 @@ find_code_cli() {
     echo "Directory: $PROJECT_DIR"
     echo "OS: $OS ($ARCH)"
     echo ""
+
+    # --- 0. Xcode Command Line Tools (macOS only) ----------------------------
+    if [ "$OS" = "Darwin" ]; then
+        echo ">>> Checking Xcode Command Line Tools..."
+        ensure_xcode_clt
+        echo ""
+    fi
 
     # --- 1. git ---------------------------------------------------------------
     echo ">>> [1/10] Checking git..."
