@@ -716,16 +716,6 @@ body {
 
 #input-actions { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
 
-#autocommit-btn {
-  background: none; border: none;
-  color: color-mix(in srgb, var(--fg) 50%, transparent); cursor: pointer;
-  padding: 4px; transition: color 0.15s, opacity 0.15s;
-  display: flex; align-items: center;
-}
-#autocommit-btn:hover:not(:disabled) { color: color-mix(in srgb, var(--green) 80%, transparent); }
-#autocommit-btn:disabled { opacity: 0.3; cursor: not-allowed; }
-#autocommit-btn svg { width: 12px; height: 12px; }
-
 #send-btn {
   background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); border: none;
   border-radius: 50%; width: 28px; height: 28px; cursor: pointer;
