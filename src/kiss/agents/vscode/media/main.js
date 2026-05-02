@@ -3835,7 +3835,7 @@
         delBtn.className = 'sidebar-item-delete';
         delBtn.dataset.tooltip = 'Delete task';
         delBtn.innerHTML =
-          '<svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M5.5 5.5a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm-7-1a1 1 0 0 1 1-1h8a1 1 0 0 1 1 1H14a.5.5 0 0 1 0 1h-.5l-.8 8.4A2 2 0 0 1 10.71 15H5.29a2 2 0 0 1-1.99-1.8L2.5 4.8H2a.5.5 0 0 1 0-1h1.5zM3.51 5.5l.79 8.2a1 1 0 0 0 .99.8h5.42a1 1 0 0 0 .99-.8l.79-8.2H3.51zM6 2.5a.5.5 0 0 0-.5.5h5a.5.5 0 0 0-.5-.5H6z"/></svg>';
+          '<svg width="11" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>';
 
         const confirmWrap = document.createElement('span');
         confirmWrap.className = 'sidebar-item-confirm';
