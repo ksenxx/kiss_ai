@@ -205,7 +205,7 @@ export function buildChatHtml(
             <input type="text" id="cfg-custom-endpoint" placeholder="http://localhost:8080/v1">
           </label>
           <label class="config-label">Custom API key
-            <input type="password" id="cfg-custom-api-key" placeholder="Optional API key for custom endpoint">
+            <input type="text" id="cfg-custom-api-key" placeholder="Optional API key for custom endpoint">
           </label>
           <label class="config-label config-checkbox">
             <input type="checkbox" id="cfg-use-web-browser" checked>
@@ -217,22 +217,22 @@ export function buildChatHtml(
           <div class="config-divider"></div>
           <div class="sidebar-hdr" style="margin-top:8px;">API Keys</div>
           <label class="config-label">Gemini API Key
-            <input type="password" id="cfg-key-GEMINI_API_KEY" placeholder="Enter Gemini API key">
+            <input type="text" id="cfg-key-GEMINI_API_KEY" placeholder="Enter Gemini API key">
           </label>
           <label class="config-label">OpenAI API Key
-            <input type="password" id="cfg-key-OPENAI_API_KEY" placeholder="Enter OpenAI API key">
+            <input type="text" id="cfg-key-OPENAI_API_KEY" placeholder="Enter OpenAI API key">
           </label>
           <label class="config-label">Anthropic API Key
-            <input type="password" id="cfg-key-ANTHROPIC_API_KEY" placeholder="Enter Anthropic API key">
+            <input type="text" id="cfg-key-ANTHROPIC_API_KEY" placeholder="Enter Anthropic API key">
           </label>
           <label class="config-label">Together API Key
-            <input type="password" id="cfg-key-TOGETHER_API_KEY" placeholder="Enter Together API key">
+            <input type="text" id="cfg-key-TOGETHER_API_KEY" placeholder="Enter Together API key">
           </label>
           <label class="config-label">OpenRouter API Key
-            <input type="password" id="cfg-key-OPENROUTER_API_KEY" placeholder="Enter OpenRouter API key">
+            <input type="text" id="cfg-key-OPENROUTER_API_KEY" placeholder="Enter OpenRouter API key">
           </label>
           <label class="config-label">MiniMax API Key
-            <input type="password" id="cfg-key-MINIMAX_API_KEY" placeholder="Enter MiniMax API key">
+            <input type="text" id="cfg-key-MINIMAX_API_KEY" placeholder="Enter MiniMax API key">
           </label>
           <button id="cfg-save-btn" class="config-save-btn">Save Configuration</button>
         </div>
