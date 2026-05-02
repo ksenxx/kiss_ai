@@ -289,12 +289,25 @@ class VSCodeServer(
         task, no in-progress merge, no pending worktree, no carried-over
         warnings) to guard against here.
 
+        Re-reads the last user-picked model from the database so the new
+        tab uses the correct model even when the in-memory default has
+        drifted (e.g. after switching between tabs with different models).
+
         Args:
             tab_id: The frontend tab identifier (a freshly-minted uuid).
         """
+        persisted = _load_last_model()
+        if persisted:
+            self._default_model = persisted
         tab = self._get_tab(tab_id)
+        with self._state_lock:
+            tab.selected_model = self._default_model
         tab.agent.new_chat()
-        self.printer.broadcast({"type": "showWelcome", "tabId": tab_id})
+        self.printer.broadcast({
+            "type": "showWelcome",
+            "tabId": tab_id,
+            "model": self._default_model,
+        })
 
     def _replay_session(self, chat_id: str, tab_id: str = "") -> None:
         """Replay recorded chat events for a previous chat session.

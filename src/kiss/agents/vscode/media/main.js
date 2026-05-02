@@ -1998,6 +1998,14 @@
           return t.id === swTabId;
         });
         if (swTab) {
+          // Update model picker to last user-picked model from DB
+          if (ev.model) {
+            swTab.selectedModel = ev.model;
+            if (swTabId === activeTabId) {
+              selectedModel = ev.model;
+              if (modelName) modelName.textContent = ev.model;
+            }
+          }
           if (swTabId === activeTabId) {
             clearOutput();
             resetOutputState();
