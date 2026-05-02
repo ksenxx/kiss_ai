@@ -207,6 +207,7 @@ class VSCodeServer(
             task = str(entry.get("task", ""))
             has_events = bool(entry.get("has_events", False))
             chat_id = str(entry.get("chat_id", "") or "")
+            result = str(entry.get("result", "") or "")
             sessions.append({
                 "id": chat_id,
                 "task_id": entry.get("id"),
@@ -214,6 +215,10 @@ class VSCodeServer(
                 "timestamp": entry.get("timestamp", 0),
                 "preview": task,
                 "has_events": has_events,
+                "failed": (
+                    result.startswith("Task failed")
+                    or result == "Agent Failed Abruptly"
+                ),
             })
         self.printer.broadcast({
             "type": "history", "sessions": sessions,

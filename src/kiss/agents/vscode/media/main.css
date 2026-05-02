@@ -1084,6 +1084,12 @@ body.remote-chat #welcome > #input-area {
   flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
+.sidebar-item-failed {
+  flex-shrink: 0; width: 8px; height: 8px; border-radius: 50%;
+  background: #d32f2f; margin-right: 8px;
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 15%);
+}
+
 .sidebar-item-delete {
   flex-shrink: 0; border: none; cursor: pointer; padding: 2px 0; margin-left: 2px;
   border-radius: 3px; line-height: 1; display: flex; align-items: center;
