@@ -91,7 +91,7 @@
       outputFragment: null,
       taskPanelHTML: '',
       taskPanelVisible: false,
-      panelsExpanded: false,
+      panelsExpandedMap: {},
       statusTextContent: 'Ready',
       statusTextColor: 'var(--green)',
       statusTokensText: '',
@@ -222,7 +222,7 @@
       else taskPanel.classList.remove('visible');
     }
     currentTaskName = tab.taskPanelHTML || '';
-    updateChevronIcon(!!tab.panelsExpanded);
+    updateChevronIcon(!!tab.panelsExpandedMap[currentTaskName]);
     if (statusText) {
       statusText.textContent = tab.statusTextContent || 'Ready';
       statusText.style.color = tab.statusTextColor || 'var(--green)';
@@ -389,7 +389,10 @@
       stopTimer();
       removeSpinner();
     }
-    applyChevronState(!!tab.panelsExpanded);
+    applyChevronState(
+      !!tab.panelsExpandedMap[currentTaskName],
+      currentTaskName,
+    );
     focusInputWithRetry();
   }
 
@@ -418,7 +421,10 @@
         stopTimer();
         removeSpinner();
       }
-      applyChevronState(!!newTab.panelsExpanded);
+      applyChevronState(
+        !!newTab.panelsExpandedMap[currentTaskName],
+        currentTaskName,
+      );
       focusInputWithRetry();
     }
     renderTabBar();
@@ -677,24 +683,58 @@
   }
 
   /**
-   * Apply the chevron expand/collapse state to panels in the tab.
+   * Return the task name currently visible in the viewport.
+   * Uses the same heuristic as updateVisibleTask: the first
+   * .adjacent-task whose bounds straddle the 30%-from-top line wins;
+   * if none match, the current (main) task is visible.
+   */
+  function getVisibleTaskName() {
+    const adjacentTasks = O.querySelectorAll('.adjacent-task[data-task]');
+    if (!adjacentTasks.length) return currentTaskName;
+    const outputRect = O.getBoundingClientRect();
+    const checkY = outputRect.top + outputRect.height * 0.3;
+    for (let i = 0; i < adjacentTasks.length; i++) {
+      const rect = adjacentTasks[i].getBoundingClientRect();
+      if (rect.top <= checkY && rect.bottom > checkY) {
+        return adjacentTasks[i].dataset.task || currentTaskName;
+      }
+    }
+    return currentTaskName;
+  }
+
+  /**
+   * Apply the chevron expand/collapse state to panels belonging to
+   * a specific task.
+   * @param {boolean} expanded - true = expand, false = collapse
+   * @param {string} taskName - the task whose panels to affect;
+   *   panels belonging to other tasks are left untouched.
+   *   If empty/falsy, affects only the current (main) task panels.
+   *
    * - expanded=false (chevron right, default): hide every .collapsible
-   *   panel in #output (display:none via .chv-hidden) except result panels
-   *   (.rc) and panels belonging to the currently running task.
-   * - expanded=true (chevron down): reveal every hidden panel and expand
-   *   every .collapsible panel in #output except those belonging to the
-   *   currently running task.
+   *   panel that belongs to the specified task (display:none via
+   *   .chv-hidden) except result panels (.rc) and panels belonging
+   *   to the currently running task.
+   * - expanded=true (chevron down): reveal every hidden panel belonging
+   *   to the specified task and expand every .collapsible panel except
+   *   those belonging to the currently running task.
    * Running task panels are direct children of #output (not inside
    *   .adjacent-task) while a task is running; adjacent-task containers
    *   hold previously-completed tasks.
    */
-  function applyChevronState(expanded) {
+  function applyChevronState(expanded, taskName) {
     if (!O) return;
     const panels = O.querySelectorAll('.collapsible');
     for (let i = 0; i < panels.length; i++) {
       const p = panels[i];
-      const inAdjacent = !!p.closest('.adjacent-task');
+      const adjacentContainer = p.closest('.adjacent-task');
+      const inAdjacent = !!adjacentContainer;
       const inRunning = isRunning && !inAdjacent;
+      // Determine which task this panel belongs to
+      const panelTask = inAdjacent
+        ? adjacentContainer.dataset.task || ''
+        : currentTaskName;
+      // Skip panels that don't belong to the target task
+      if (taskName && panelTask !== taskName) continue;
       if (!expanded) {
         if (inRunning || p.classList.contains('rc')) {
           p.classList.remove('chv-hidden');
@@ -723,10 +763,12 @@
       const tab = tabs.find(t => {
         return t.id === activeTabId;
       });
-      const expanded = tab ? !tab.panelsExpanded : true;
-      if (tab) tab.panelsExpanded = expanded;
+      const visibleTask = getVisibleTaskName();
+      const wasExpanded = tab ? !!tab.panelsExpandedMap[visibleTask] : false;
+      const expanded = !wasExpanded;
+      if (tab) tab.panelsExpandedMap[visibleTask] = expanded;
       updateChevronIcon(expanded);
-      applyChevronState(expanded);
+      applyChevronState(expanded, visibleTask);
     });
   }
 
@@ -849,7 +891,7 @@
     const tab = tabs.find(x => {
       return x.id === activeTabId;
     });
-    if (tab) applyChevronState(!!tab.panelsExpanded);
+    if (tab) applyChevronState(!!tab.panelsExpandedMap[task], task);
   }
 
   function clearOutput() {
@@ -1553,7 +1595,8 @@
     const tab = tabs.find(x => {
       return x.id === activeTabId;
     });
-    if (tab && !tab.panelsExpanded && !_demoActive) applyChevronState(false);
+    if (tab && !tab.panelsExpandedMap[currentTaskName] && !_demoActive)
+      applyChevronState(false, currentTaskName);
   }
 
   /**
@@ -1759,6 +1802,11 @@
       }
     }
     setTaskText(visibleTask);
+    // Sync chevron icon to the visible task's expanded state
+    const vTab = tabs.find(t => {
+      return t.id === activeTabId;
+    });
+    if (vTab) updateChevronIcon(!!vTab.panelsExpandedMap[visibleTask]);
     // Update header metrics to match the visible task
     if (visibleContainer) {
       // Scrolled to an adjacent task — show its metrics
@@ -2643,7 +2691,11 @@
     const tab = tabs.find(x => {
       return x.id === activeTabId;
     });
-    if (tab) applyChevronState(!!tab.panelsExpanded);
+    if (tab)
+      applyChevronState(
+        !!tab.panelsExpandedMap[currentTaskName],
+        currentTaskName,
+      );
     sb();
   }
 
