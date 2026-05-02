@@ -22,6 +22,7 @@ from typing import Any
 
 from kiss.agents.sorcar.persistence import (
     _append_chat_event,
+    _delete_task,
     _get_adjacent_task_by_chat_id,
     _load_history,
     _load_last_model,
@@ -205,6 +206,7 @@ class VSCodeServer(
             chat_id = str(entry.get("chat_id", "") or "")
             sessions.append({
                 "id": chat_id,
+                "task_id": entry.get("id"),
                 "title": task[:50] + "..." if len(task) > 50 else task,
                 "timestamp": entry.get("timestamp", 0),
                 "preview": task,
@@ -214,6 +216,18 @@ class VSCodeServer(
             "type": "history", "sessions": sessions,
             "offset": offset, "generation": generation,
         })
+
+    def _handle_delete_task(self, task_id: int) -> None:
+        """Delete a task from the database and refresh the history panel.
+
+        Removes the task and its associated events, then broadcasts
+        an updated history list to the frontend.
+
+        Args:
+            task_id: The primary key of the task_history row to delete.
+        """
+        _delete_task(task_id)
+        self._get_history(None)
 
     def _get_input_history(self) -> None:
         """Send deduplicated task texts for arrow-key cycling.

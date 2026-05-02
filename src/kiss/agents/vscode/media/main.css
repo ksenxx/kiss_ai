@@ -1041,7 +1041,23 @@ body {
   margin-bottom: 4px; cursor: pointer; font-size: var(--fs-base);
   color: var(--fg); overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; transition: all 0.15s; font-weight: 500;
+  display: flex; align-items: center;
 }
+
+.sidebar-item-text {
+  flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.sidebar-item-delete {
+  flex-shrink: 0; background: none; border: none; color: inherit;
+  cursor: pointer; font-size: 12px; padding: 2px 4px; margin-left: 4px;
+  border-radius: 4px; opacity: 0; transition: opacity 0.15s;
+  line-height: 1;
+}
+
+.sidebar-item:hover .sidebar-item-delete { opacity: 0.6; }
+
+.sidebar-item-delete:hover { opacity: 1 !important; background: rgb(0 0 0 / 15%); }
 
 .sidebar-item:hover {
   filter: brightness(0.9); border-color: color-mix(in srgb, var(--fg) 15%, transparent);

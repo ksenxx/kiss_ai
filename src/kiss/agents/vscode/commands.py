@@ -64,6 +64,7 @@ class _CommandsMixin:
         def _handle_autocommit_action(
             self, action: str, tab_id: str = "",
         ) -> None: ...
+        def _handle_delete_task(self, task_id: int) -> None: ...
 
 
     def _cmd_run(self, cmd: dict[str, Any]) -> None:
@@ -114,6 +115,12 @@ class _CommandsMixin:
     def _cmd_get_history(self, cmd: dict[str, Any]) -> None:
         """Send conversation history."""
         self._get_history(cmd.get("query"), cmd.get("offset", 0), cmd.get("generation", 0))
+
+    def _cmd_delete_task(self, cmd: dict[str, Any]) -> None:
+        """Delete a task from the database and refresh history."""
+        task_id = cmd.get("taskId")
+        if task_id is not None:
+            self._handle_delete_task(int(task_id))
 
     def _cmd_get_files(self, cmd: dict[str, Any]) -> None:
         """Send file list for autocomplete."""
@@ -298,6 +305,7 @@ class _CommandsMixin:
         "getModels": _cmd_get_models,
         "selectModel": _cmd_select_model,
         "getHistory": _cmd_get_history,
+        "deleteTask": _cmd_delete_task,
         "getFiles": _cmd_get_files,
         "refreshFiles": _cmd_refresh_files,
         "recordFileUsage": _cmd_record_file_usage,
