@@ -22,8 +22,10 @@ from typing import Any
 
 from kiss.agents.sorcar.persistence import (
     _append_chat_event,
+    _chat_has_tasks,
     _delete_task,
     _get_adjacent_task_by_chat_id,
+    _get_task_chat_id,
     _load_history,
     _load_last_model,
     _load_latest_chat_events_by_chat_id,
@@ -218,15 +220,41 @@ class VSCodeServer(
         })
 
     def _handle_delete_task(self, task_id: int) -> None:
-        """Delete a task and its associated events from the database.
+        """Delete a task and its associated events from the database
+        and broadcast a ``taskDeleted`` event so any open chat tab
+        that displays this task or its chat can prune its UI.
 
-        The frontend optimistically removes the item from the UI on click,
-        so no history refresh broadcast is needed here.
+        The history sidebar is removed optimistically by the
+        frontend on click, but open tabs that show the deleted task
+        (as the current task or as an adjacent-task block from
+        scroll-loaded chat history) need to react too.  We therefore
+        look up the task's chat_id *before* deleting, and after
+        deletion broadcast::
+
+            {
+                "type": "taskDeleted",
+                "taskId": <int>,
+                "chatId": <str>,
+                "chatHasMoreTasks": <bool>,
+            }
+
+        ``chatHasMoreTasks`` lets the frontend decide whether to
+        merely remove a single ``.adjacent-task`` block or close the
+        whole tab (when the chat is now empty).
 
         Args:
-            task_id: The primary key of the task_history row to delete.
+            task_id: The primary key of the task_history row to
+                delete.
         """
-        _delete_task(task_id)
+        chat_id = _get_task_chat_id(task_id)
+        if not _delete_task(task_id):
+            return
+        self.printer.broadcast({
+            "type": "taskDeleted",
+            "taskId": task_id,
+            "chatId": chat_id,
+            "chatHasMoreTasks": _chat_has_tasks(chat_id),
+        })
 
     def _get_input_history(self) -> None:
         """Send deduplicated task texts for arrow-key cycling.
@@ -346,6 +374,7 @@ class VSCodeServer(
             "type": "task_events",
             "events": result["events"],
             "task": result["task"],
+            "task_id": result.get("task_id"),
             "chat_id": chat_id,
             "extra": result.get("extra", ""),
             "tabId": tab_id,
@@ -415,6 +444,7 @@ class VSCodeServer(
             "type": "adjacent_task_events",
             "direction": direction,
             "task": result["task"] if result else "",
+            "task_id": result["task_id"] if result else None,
             "events": result["events"] if result else [],
             "tabId": tab_id,
         }

@@ -196,6 +196,42 @@ def _allocate_chat_id() -> str:
     return uuid.uuid4().hex
 
 
+def _get_task_chat_id(task_id: int) -> str:
+    """Return the chat_id of the task with the given row id, or ``""``.
+
+    Args:
+        task_id: The primary key of the task_history row.
+
+    Returns:
+        The chat_id string, or ``""`` if the row is not found or its
+        chat_id column is empty.
+    """
+    db = _get_db()
+    row = db.execute(
+        "SELECT chat_id FROM task_history WHERE id = ?", (task_id,),
+    ).fetchone()
+    return str(row["chat_id"]) if row and row["chat_id"] else ""
+
+
+def _chat_has_tasks(chat_id: str) -> bool:
+    """Return True if the given chat_id has at least one task row.
+
+    Args:
+        chat_id: The chat session identifier string.
+
+    Returns:
+        True when at least one ``task_history`` row carries this
+        ``chat_id``, otherwise False.  Returns False for ``""``.
+    """
+    if not chat_id:
+        return False
+    db = _get_db()
+    row = db.execute(
+        "SELECT 1 FROM task_history WHERE chat_id = ? LIMIT 1", (chat_id,),
+    ).fetchone()
+    return row is not None
+
+
 def _delete_task(task_id: int) -> bool:
     """Delete a task and its associated events from the database.
 
@@ -494,9 +530,10 @@ def _load_latest_chat_events_by_chat_id(
         chat_id: The string chat session identifier.
 
     Returns:
-        A dict with ``task`` (str), ``events`` (list of event dicts),
-        ``chat_id`` (str), and ``extra`` (str, JSON metadata),
-        or ``None`` if chat_id is ``""`` or has no tasks.
+        A dict with ``task`` (str), ``task_id`` (int), ``events``
+        (list of event dicts), ``chat_id`` (str), and ``extra`` (str,
+        JSON metadata), or ``None`` if chat_id is ``""`` or has no
+        tasks.
     """
     if not chat_id:
         return None
@@ -523,7 +560,13 @@ def _load_latest_chat_events_by_chat_id(
             events.append(ev)
         except (json.JSONDecodeError, TypeError):
             logger.debug("Exception caught", exc_info=True)
-    return {"task": task, "events": events, "chat_id": chat_id, "extra": extra_str}
+    return {
+        "task": task,
+        "task_id": task_id,
+        "events": events,
+        "chat_id": chat_id,
+        "extra": extra_str,
+    }
 
 
 def _get_adjacent_task_by_chat_id(
@@ -539,8 +582,8 @@ def _get_adjacent_task_by_chat_id(
             later task in the same chat session.
 
     Returns:
-        A dict with ``task`` (str) and ``events`` (list of event dicts),
-        or ``None`` if no adjacent task exists.
+        A dict with ``task`` (str), ``task_id`` (int) and ``events``
+        (list of event dicts), or ``None`` if no adjacent task exists.
     """
     if not chat_id or not current_task:
         return None
@@ -587,7 +630,7 @@ def _get_adjacent_task_by_chat_id(
             events.append(ev)
         except (json.JSONDecodeError, TypeError):
             logger.debug("Exception caught", exc_info=True)
-    return {"task": adj_task, "events": events}
+    return {"task": adj_task, "task_id": adj_id, "events": events}
 
 
 def _load_chat_context(chat_id: str) -> list[_HistoryEntry]:

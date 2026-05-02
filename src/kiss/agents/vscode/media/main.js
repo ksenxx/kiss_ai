@@ -87,6 +87,11 @@
       id: _id,
       title: title || 'new chat',
       backendChatId: '',
+      // task_id (DB row id) of the task currently displayed as the
+      // header / current task in this tab.  null when unknown (fresh
+      // tab before any chat is loaded).  Used by the 'taskDeleted'
+      // handler to close tabs whose current task was deleted.
+      currentTaskId: null,
       isRunning: false,
       outputFragment: null,
       taskPanelHTML: '',
@@ -908,7 +913,7 @@
     if (el && el.parentNode) el.parentNode.removeChild(el);
   }
 
-  function renderAdjacentTask(direction, task, events) {
+  function renderAdjacentTask(direction, task, events, taskId) {
     removeAdjacentLoader();
     adjacentLoading = false;
 
@@ -921,6 +926,11 @@
     // Create a container for the adjacent task
     const container = mkEl('div', 'adjacent-task');
     container.dataset.task = task;
+    // Stamp the row id so a 'taskDeleted' broadcast from the backend
+    // can locate and remove this exact block via
+    //   .adjacent-task[data-task-id="<id>"]
+    if (taskId !== undefined && taskId !== null && taskId !== '')
+      container.dataset.taskId = String(taskId);
 
     // Replay events into the container (save/restore header metrics so
     // adjacent-task replay doesn't overwrite the current task's values)
@@ -2115,6 +2125,50 @@
         vscode.postMessage({type: 'getInputHistory'});
         break;
 
+      case 'taskDeleted': {
+        // Backend deleted a task from the history table.  For every
+        // open tab that displays the deleted task or its chat:
+        //   * remove any .adjacent-task[data-task-id="<id>"] block
+        //     (whether it lives in the active output area O or in
+        //     this tab's detached outputFragment),
+        //   * close the tab if its current (header) task was the
+        //     deleted one, or if the chat now has no remaining
+        //     tasks left in the database.
+        const tdChatId = ev.chatId;
+        const tdTaskId = ev.taskId;
+        const tdHasMore = !!ev.chatHasMoreTasks;
+        if (tdTaskId === undefined || tdTaskId === null) break;
+        const tdSelector =
+          '.adjacent-task[data-task-id="' + String(tdTaskId) + '"]';
+        // Iterate over a snapshot since closeTab() mutates `tabs`.
+        const tdSnapshot = tabs.slice();
+        tdSnapshot.forEach(t => {
+          if (!t || t.backendChatId !== tdChatId) return;
+          // Remove the matching adjacent-task block from active DOM
+          // when this is the active tab.
+          if (t.id === activeTabId && O) {
+            const liveBlock = O.querySelector(tdSelector);
+            if (liveBlock && liveBlock.parentNode)
+              liveBlock.parentNode.removeChild(liveBlock);
+          }
+          // Remove the matching adjacent-task block from the saved
+          // outputFragment (used by inactive tabs to hold their DOM).
+          if (t.outputFragment) {
+            const fragBlock = t.outputFragment.querySelector(tdSelector);
+            if (fragBlock && fragBlock.parentNode)
+              fragBlock.parentNode.removeChild(fragBlock);
+          }
+          // Close the tab when the deleted task was the tab's current
+          // (header) task, or when the underlying chat is now empty.
+          const isCurrent =
+            t.currentTaskId !== undefined &&
+            t.currentTaskId !== null &&
+            String(t.currentTaskId) === String(tdTaskId);
+          if (isCurrent || !tdHasMore) closeTab(t.id);
+        });
+        break;
+      }
+
       case 'task_events': {
         const teTabId = ev.tabId || activeTabId;
         const teTab = tabs.find(t => {
@@ -2124,6 +2178,10 @@
           teTab.backendChatId = ev.chat_id;
           persistTabState();
         }
+        // Track the task_id of the currently displayed task so a later
+        // 'taskDeleted' broadcast can decide whether to close this tab.
+        if (teTab && ev.task_id !== undefined && ev.task_id !== null)
+          teTab.currentTaskId = ev.task_id;
         // Non-active tab: render into a document fragment without touching the DOM
         if (teTabId !== activeTabId && teTab) {
           const taskTitle = (ev.task || '').trim();
@@ -2227,7 +2285,7 @@
       }
       case 'adjacent_task_events':
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) break;
-        renderAdjacentTask(ev.direction, ev.task, ev.events || []);
+        renderAdjacentTask(ev.direction, ev.task, ev.events || [], ev.task_id);
         break;
       case 'setTaskText': {
         const stt = (ev.text || '').trim();
