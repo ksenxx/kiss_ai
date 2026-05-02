@@ -453,6 +453,17 @@ class VSCodeServer(
     def _generate_commit_message(self) -> None:
         """Generate a git commit message from current changes."""
         try:
+            from pathlib import Path
+
+            from kiss.agents.sorcar.git_worktree import GitWorktreeOps
+
+            if GitWorktreeOps.discover_repo(Path(self.work_dir)) is None:
+                self.printer.broadcast({
+                    "type": "commitMessage",
+                    "message": "",
+                    "error": "Not a git repository.",
+                })
+                return
             cached_result = _git(self.work_dir, "diff", "--cached")
             diff_text = cached_result.stdout.strip()
             if not diff_text:  # pragma: no branch — LLM API required for else
