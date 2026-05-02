@@ -20,6 +20,7 @@ from kiss.agents.sorcar.persistence import (
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 
+MAX_TASKS = 10
 
 class ChatSorcarAgent(SorcarAgent):
     """SorcarAgent with chat-session state management.
@@ -80,6 +81,8 @@ class ChatSorcarAgent(SorcarAgent):
         if not chat_context:
             return "# Task\n" + prompt
         parts = ["## Previous tasks and results from the chat session for reference\n"]
+        if len(chat_context) > MAX_TASKS:
+            del chat_context[2:2 + len(chat_context) - MAX_TASKS]
         for i, entry in enumerate(chat_context, 1):
             parts.append(f"### Task {i}\n{entry['task']}")
             if entry.get("result"):
