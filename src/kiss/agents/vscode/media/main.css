@@ -1050,14 +1050,12 @@ body {
 
 .sidebar-item-delete {
   flex-shrink: 0; background: none; border: none; color: inherit;
-  cursor: pointer; font-size: 12px; padding: 2px 4px; margin-left: 4px;
-  border-radius: 4px; opacity: 0; transition: opacity 0.15s;
-  line-height: 1;
+  cursor: pointer; padding: 2px 4px; margin-left: 4px;
+  border-radius: 4px; opacity: 0.5; transition: opacity 0.15s;
+  line-height: 1; display: flex; align-items: center;
 }
 
-.sidebar-item:hover .sidebar-item-delete { opacity: 0.6; }
-
-.sidebar-item-delete:hover { opacity: 1 !important; background: rgb(0 0 0 / 15%); }
+.sidebar-item-delete:hover { opacity: 1; background: rgb(0 0 0 / 15%); }
 
 .sidebar-item:hover {
   filter: brightness(0.9); border-color: color-mix(in srgb, var(--fg) 15%, transparent);

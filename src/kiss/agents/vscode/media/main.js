@@ -3676,7 +3676,8 @@
         const delBtn = document.createElement('button');
         delBtn.className = 'sidebar-item-delete';
         delBtn.title = 'Delete task';
-        delBtn.innerHTML = '&#x2715;';
+        delBtn.innerHTML =
+          '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M5.5 5.5a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm-7-1a1 1 0 0 1 1-1h8a1 1 0 0 1 1 1H14a.5.5 0 0 1 0 1h-.5l-.8 8.4A2 2 0 0 1 10.71 15H5.29a2 2 0 0 1-1.99-1.8L2.5 4.8H2a.5.5 0 0 1 0-1h1.5zM3.51 5.5l.79 8.2a1 1 0 0 0 .99.8h5.42a1 1 0 0 0 .99-.8l.79-8.2H3.51zM6 2.5a.5.5 0 0 0-.5.5h5a.5.5 0 0 0-.5-.5H6z"/></svg>';
         delBtn.addEventListener('click', e => {
           e.stopPropagation();
           vscode.postMessage({type: 'deleteTask', taskId: s.task_id});
