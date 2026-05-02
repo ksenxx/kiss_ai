@@ -51,6 +51,7 @@ import threading
 import time
 import urllib.request
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -436,6 +437,106 @@ def _probe_tunnel_ready(metrics_port: int) -> bool:
         return int(data.get("readyConnections", 0)) > 0
     except (TypeError, ValueError):
         return False
+
+
+def _stderr_reader_loop(
+    stderr: Any,
+    parse: Callable[[str], str | None],
+    result: list[str | None],
+    proc: subprocess.Popen[str],
+) -> None:
+    """Read *stderr* lines until *parse* returns a URL or *proc* exits.
+
+    Stores the discovered URL in ``result[0]``.  Top-level helper so
+    :func:`_read_url_from_stderr` does not need a closure.
+
+    Args:
+        stderr: A line-buffered text-mode file-like object.
+        parse: Callback invoked on each line; returns a URL string when
+            recognised, otherwise ``None``.
+        result: Single-element list used to communicate the URL back
+            to the caller across the thread boundary.
+        proc: The subprocess being read; the loop stops when it exits.
+    """
+    for line in iter(stderr.readline, ""):
+        url = parse(line)
+        if url is not None:
+            result[0] = url
+            return
+        if proc.poll() is not None:
+            return
+
+
+def _read_url_from_stderr(
+    proc: subprocess.Popen[str],
+    parse: Callable[[str], str | None],
+    timeout: float = 30.0,
+) -> str | None:
+    """Read *proc*'s stderr until *parse* finds a URL or *timeout* elapses.
+
+    The reader runs in a daemon thread so this call is bounded even
+    when ``cloudflared`` keeps streaming non-matching log lines after
+    startup.
+
+    Args:
+        proc: A subprocess started with ``stderr=subprocess.PIPE`` and
+            ``text=True``.
+        parse: Per-line URL extractor; returns the URL string or
+            ``None``.
+        timeout: Maximum seconds to wait before giving up.
+
+    Returns:
+        The first URL returned by *parse*, or ``None`` if *proc* exits
+        or the timeout elapses without a match.
+    """
+    stderr = proc.stderr
+    assert stderr is not None  # guaranteed by PIPE
+    result: list[str | None] = [None]
+    reader = threading.Thread(
+        target=_stderr_reader_loop,
+        args=(stderr, parse, result, proc),
+        daemon=True,
+    )
+    reader.start()
+    reader.join(timeout=timeout)
+    return result[0]
+
+
+def _parse_quick_tunnel_url(line: str) -> str | None:
+    """Return the ``*.trycloudflare.com`` URL from a quick-tunnel log line.
+
+    Skips ``api.trycloudflare.com`` (Cloudflare's API endpoint, which
+    cloudflared logs before the real tunnel URL).
+    """
+    match = re.search(
+        r"(https://(?!api\.)[^\s]+\.trycloudflare\.com)", line,
+    )
+    return match.group(1) if match else None
+
+
+def _parse_named_tunnel_url(line: str, configured_url: str | None) -> str | None:
+    """Return the public URL of a named tunnel from a log *line*.
+
+    Returns any non-local ``https?://…`` hostname directly.  When a
+    "Registered tunnel connection"/"Connection registered" line
+    appears, returns *configured_url* (or a sentinel string when no
+    URL was pre-configured).  Returns ``None`` on lines that do not
+    match either pattern.
+    """
+    match = re.search(r"https?://([^\s/]+)", line)
+    if match:
+        host = match.group(1)
+        if "localhost" not in host and "127.0.0.1" not in host:
+            return f"https://{host}"
+    if (
+        "Registered tunnel connection" in line
+        or "Connection registered" in line
+    ):
+        return configured_url or (
+            "(named tunnel running — URL configured in Cloudflare "
+            "dashboard)"
+        )
+    return None
 
 
 def _save_url_file(local_url: str, tunnel_url: str | None = None) -> None:
@@ -1584,26 +1685,44 @@ class RemoteAccessServer:
 
     # -- Tunnel management --------------------------------------------------
 
+    def _spawn_cloudflared(self, args: list[str]) -> None:
+        """Spawn ``cloudflared`` with *args* and a free ``--metrics`` port.
+
+        Records the subprocess in :attr:`_tunnel_proc`, the metrics
+        port in :attr:`_tunnel_metrics_port`, and the start time in
+        :attr:`_tunnel_started_at`.  The full argv is
+        ``cloudflared tunnel --metrics 127.0.0.1:PORT`` followed by
+        *args* (e.g. ``["--url", LOCAL, "--no-tls-verify"]`` for a
+        quick tunnel or ``["run", "--token", TOKEN]`` for a named
+        tunnel).
+        """
+        self._tunnel_metrics_port = _pick_free_local_port()
+        self._tunnel_proc = subprocess.Popen(
+            [
+                "cloudflared", "tunnel",
+                "--metrics", f"127.0.0.1:{self._tunnel_metrics_port}",
+                *args,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self._tunnel_started_at = time.monotonic()
+
     def _start_tunnel(self) -> str | None:
         """Start a ``cloudflared`` tunnel and return the public URL.
 
         When :attr:`tunnel_token` is set, a **named tunnel** is started
-        with ``cloudflared tunnel run --token <TOKEN>``.  The URL is
-        pre-configured in the Cloudflare Zero Trust dashboard so it
-        stays fixed across restarts.  The method reads the connector ID
-        from the process output and returns the configured hostname (or
-        a confirmation string when the hostname cannot be determined
-        from logs).
-
-        When no token is set, a **quick-tunnel** is started with
-        ``cloudflared tunnel --url``, which assigns a random
-        ``*.trycloudflare.com`` URL.
-
-        The tunnel process is stored in ``_tunnel_proc`` and must be
-        terminated via :meth:`_stop_tunnel`.
+        (fixed URL configured in the Cloudflare Zero Trust dashboard).
+        Otherwise a **quick-tunnel** is started with a random
+        ``*.trycloudflare.com`` URL.  The subprocess is stored in
+        :attr:`_tunnel_proc` and must be terminated via
+        :meth:`_stop_tunnel`.
 
         Returns:
-            The public ``https://`` URL, or None if tunnel start fails.
+            The public ``https://`` URL, or ``None`` if tunnel start
+            fails (e.g. cloudflared missing, rate-limited, exited
+            before registering).
         """
         try:
             if self.tunnel_token:
@@ -1618,62 +1737,24 @@ class RemoteAccessServer:
     def _start_quick_tunnel(self) -> str | None:
         """Start a quick-tunnel (random ``*.trycloudflare.com`` URL).
 
-        Starts ``cloudflared tunnel --url`` and attempts to capture the
-        assigned URL.  First tries parsing stderr for up to 30 seconds.
-        If that fails (e.g. output format changed), falls back to
-        querying the ``cloudflared`` metrics API ``/quicktunnel``
-        endpoint.
+        Spawns ``cloudflared tunnel --url`` and parses its stderr for
+        the assigned URL.  If the URL never appears in stderr (e.g.
+        log format changed across cloudflared versions), falls back to
+        the cloudflared metrics ``/quicktunnel`` endpoint.
 
         Returns:
-            The public ``https://`` URL, or None on failure.
+            The public ``https://`` URL, or ``None`` on failure.
         """
-        self._tunnel_metrics_port = _pick_free_local_port()
-        self._tunnel_proc = subprocess.Popen(
-            [
-                "cloudflared",
-                "tunnel",
-                "--metrics",
-                f"127.0.0.1:{self._tunnel_metrics_port}",
-                "--url",
-                self._local_url,
-                "--no-tls-verify",
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
+        self._spawn_cloudflared(
+            ["--url", self._local_url, "--no-tls-verify"],
         )
-        self._tunnel_started_at = time.monotonic()
-
-        # Try to capture the URL from stderr with a timeout.
-        # cloudflared prints the URL during startup, but the format
-        # can vary across versions.  After it finishes printing
-        # startup messages, readline() blocks forever.
-        stderr_fd = self._tunnel_proc.stderr
-        assert stderr_fd is not None  # guaranteed by PIPE
-        result_box: list[str | None] = [None]
-
-        def _reader_target() -> None:
-            for line in iter(stderr_fd.readline, ""):
-                match = re.search(
-                    r"(https://(?!api\.)[^\s]+\.trycloudflare\.com)", line,
-                )
-                if match:
-                    result_box[0] = match.group(1)
-                    return
-                if self._tunnel_proc is None:
-                    break
-                if self._tunnel_proc.poll() is not None:
-                    break
-
-        reader = threading.Thread(target=_reader_target, daemon=True)
-        reader.start()
-        reader.join(timeout=30)
-
-        url = result_box[0]
+        assert self._tunnel_proc is not None
+        url = _read_url_from_stderr(
+            self._tunnel_proc, _parse_quick_tunnel_url, timeout=30,
+        )
         if url:
             return url
-
-        # Fallback: poll the cloudflared metrics API
+        # Fallback: poll the cloudflared metrics API.
         for _ in range(20):
             if self._tunnel_proc.poll() is not None:
                 break
@@ -1681,7 +1762,6 @@ class RemoteAccessServer:
             if url:
                 return url
             time.sleep(1)
-
         return None
 
     def _start_named_tunnel(self) -> str | None:
@@ -1689,64 +1769,24 @@ class RemoteAccessServer:
 
         The tunnel hostname is configured in the Cloudflare Zero Trust
         dashboard separately from the token.  Some ``cloudflared``
-        builds echo the public hostname during startup (e.g.
-        ``Connection https://myapp.example.com registered``) and some
-        do not.  This method, in order of preference:
-
-        1. Parses any non-local ``https?://…`` URL from cloudflared's
-           stderr.
-        2. Returns :attr:`tunnel_url` once a "Registered tunnel
-           connection"/"Connection registered" line is seen, when the
-           caller pre-configured the URL.
-        3. Falls back to a sentinel string indicating the tunnel is
-           up but the URL is not known.
+        builds echo the public hostname during startup (which
+        :func:`_parse_named_tunnel_url` extracts) and some do not.
+        When no hostname appears in logs but the tunnel reports a
+        registered connection, :attr:`tunnel_url` is returned (or a
+        sentinel string when no URL was pre-configured).
 
         Returns:
             The discovered or configured ``https://`` URL, the legacy
-            sentinel string when the tunnel registers without a URL,
-            or ``None`` if the subprocess exits before registering.
+            sentinel string, or ``None`` if the subprocess exits
+            before registering.
         """
-        self._tunnel_metrics_port = _pick_free_local_port()
-        self._tunnel_proc = subprocess.Popen(
-            [
-                "cloudflared",
-                "tunnel",
-                "--metrics",
-                f"127.0.0.1:{self._tunnel_metrics_port}",
-                "run",
-                "--token",
-                self.tunnel_token or "",
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
+        self._spawn_cloudflared(["run", "--token", self.tunnel_token or ""])
+        assert self._tunnel_proc is not None
+        return _read_url_from_stderr(
+            self._tunnel_proc,
+            partial(_parse_named_tunnel_url, configured_url=self.tunnel_url),
+            timeout=30,
         )
-        self._tunnel_started_at = time.monotonic()
-        for line in iter(self._tunnel_proc.stderr.readline, ""):  # type: ignore[union-attr]
-            # Try to extract the public hostname directly from any
-            # ``https?://...`` token in the log line, ignoring local
-            # addresses.
-            match = re.search(r"https?://([^\s/]+)", line)
-            if match:
-                hostname = match.group(1)
-                if "localhost" not in hostname and "127.0.0.1" not in hostname:
-                    return f"https://{hostname}"
-            # Otherwise watch for any sign the tunnel registered with
-            # Cloudflare's edge and use the configured URL (or a
-            # sentinel for backward compatibility).
-            if (
-                "Registered tunnel connection" in line
-                or "Connection registered" in line
-            ):
-                if self.tunnel_url:
-                    return self.tunnel_url
-                return (
-                    "(named tunnel running — URL configured in Cloudflare "
-                    "dashboard)"
-                )
-            if self._tunnel_proc.poll() is not None:
-                break
-        return None
 
     async def _check_and_restart_tunnel(self) -> None:
         """Check tunnel health and restart if dead or deregistered.
@@ -1754,62 +1794,49 @@ class RemoteAccessServer:
         Called periodically by :meth:`_watchdog`.  Detects two failure
         modes:
 
-        1. **Process dead** — ``cloudflared`` exited (e.g. because
-           macOS killed it during sleep).  Detected via ``poll()``.
+        1. **Process dead** — ``cloudflared`` exited (e.g. macOS
+           killed it during sleep).  Detected via ``poll()``.
         2. **Process alive but tunnel deregistered** — Cloudflare's
-           edge has dropped this quick-tunnel's registration so the
-           public hostname stops resolving (NXDOMAIN), but the local
-           subprocess keeps retrying ``register_connection`` and
-           never reconnects.  Detected by polling the ``cloudflared``
-           ``/ready`` metrics endpoint for ``readyConnections > 0``.
-           After :data:`_TUNNEL_UNHEALTHY_LIMIT` consecutive ticks of
-           zero ready connections, the subprocess is force-terminated
-           and a fresh tunnel is started, which triggers a new
-           ``*.trycloudflare.com`` URL.
+           edge dropped this tunnel's registration so the public
+           hostname stops resolving (NXDOMAIN), but the local
+           subprocess keeps retrying ``register_connection``.
+           Detected by polling the ``/ready`` metrics endpoint for
+           ``readyConnections > 0``; after :data:`_TUNNEL_UNHEALTHY_LIMIT`
+           consecutive zero-ticks the subprocess is force-terminated.
 
-        Failed restarts schedule an exponentially-growing backoff via
-        :attr:`_tunnel_next_retry` so the watchdog stops hammering
-        Cloudflare when rate-limited (e.g. trycloudflare.com 429).
-        During the first :data:`_TUNNEL_STARTUP_GRACE` seconds after
-        the subprocess starts, the metrics-based health check is
-        skipped because ``readyConnections=0`` is expected while the
-        tunnel registers with the edge.
+        During the first :data:`_TUNNEL_STARTUP_GRACE` seconds the
+        metrics check is skipped (``readyConnections=0`` is expected
+        while the tunnel is registering).  Failed (re)starts schedule
+        an exponentially-growing backoff via :attr:`_tunnel_next_retry`
+        so the watchdog stops hammering Cloudflare when rate-limited.
         """
         now = time.monotonic()
-        # Process is missing — try to (re)start unless still in backoff.
-        if self._tunnel_proc is None:
-            if now < self._tunnel_next_retry:
-                return
-            await self._restart_tunnel_url()
-            return
-        # Process has died.
-        if self._tunnel_proc.poll() is not None:
-            rc = self._tunnel_proc.returncode
+        proc = self._tunnel_proc
+
+        # Detect a dead subprocess and clear it so the restart path
+        # below behaves the same as the process-missing case.
+        if proc is not None and proc.poll() is not None:
             logger.info(
-                "cloudflared tunnel process died (rc=%s), restarting…", rc,
+                "cloudflared tunnel process died (rc=%s), restarting…",
+                proc.returncode,
             )
-            self._tunnel_proc = None
-            self._tunnel_metrics_port = None
-            self._tunnel_unhealthy_ticks = 0
-            self._tunnel_started_at = None
-            if now < self._tunnel_next_retry:
-                return
-            await self._restart_tunnel_url()
+            self._terminate_tunnel_proc()
+            proc = None
+
+        if proc is None:
+            if now >= self._tunnel_next_retry:
+                await self._restart_tunnel_url()
             return
-        # Process is alive.  Skip the metrics-based health check during
-        # the startup grace window so a still-registering tunnel is not
-        # killed prematurely.
+
+        # Process is alive — skip metrics check during startup grace.
         if (
             self._tunnel_started_at is not None
             and now - self._tunnel_started_at < _TUNNEL_STARTUP_GRACE
         ):
             return
-        # Probe the metrics endpoint to confirm the tunnel is actually
-        # registered with Cloudflare's edge.  Skip this check if no
-        # metrics port has been recorded (e.g. legacy subprocess
-        # started without --metrics).
         if self._tunnel_metrics_port is None:
             return
+
         assert self._loop is not None
         healthy = await self._loop.run_in_executor(
             None, _probe_tunnel_ready, self._tunnel_metrics_port,
@@ -1817,6 +1844,7 @@ class RemoteAccessServer:
         if healthy:
             self._tunnel_unhealthy_ticks = 0
             return
+
         self._tunnel_unhealthy_ticks += 1
         logger.info(
             "cloudflared tunnel reports zero ready edge connections "
@@ -1827,24 +1855,23 @@ class RemoteAccessServer:
         )
         if self._tunnel_unhealthy_ticks < _TUNNEL_UNHEALTHY_LIMIT:
             return
+
         logger.warning(
             "cloudflared tunnel appears deregistered from Cloudflare's "
             "edge (readyConnections=0 for %d ticks); force-restarting",
             self._tunnel_unhealthy_ticks,
         )
-        self._tunnel_unhealthy_ticks = 0
         self._terminate_tunnel_proc()
-        if now < self._tunnel_next_retry:
-            return
-        await self._restart_tunnel_url()
+        if now >= self._tunnel_next_retry:
+            await self._restart_tunnel_url()
 
     async def _restart_tunnel_url(self) -> None:
         """Start a fresh tunnel and refresh ``~/.kiss/remote-url.json``.
 
-        Helper shared by both restart paths in
-        :meth:`_check_and_restart_tunnel` (process-died and
-        edge-deregistered).  Always rewrites the URL file even when
-        the new tunnel fails to start, so stale data does not linger.
+        Always rewrites the URL file (even on failure, so stale data
+        does not linger), updates :attr:`_active_url`, and broadcasts
+        ``remote_url`` to connected clients.  On failure schedules an
+        exponential backoff via :attr:`_tunnel_next_retry`.
         """
         assert self._loop is not None
         tunnel_url = await self._loop.run_in_executor(
@@ -1870,25 +1897,25 @@ class RemoteAccessServer:
         )
 
     def _terminate_tunnel_proc(self) -> None:
-        """Terminate ``self._tunnel_proc`` without touching the URL file.
+        """Terminate ``_tunnel_proc`` and reset per-process state.
 
-        Used by :meth:`_check_and_restart_tunnel` when the subprocess
-        is alive but has been deregistered by Cloudflare's edge.
-        Unlike :meth:`_stop_tunnel`, this leaves ``_active_url`` in
-        place so that ``~/.kiss/remote-url.json`` is not removed before
-        the replacement tunnel writes its own URL.
+        Resets :attr:`_tunnel_proc`, :attr:`_tunnel_metrics_port`,
+        :attr:`_tunnel_started_at`, and :attr:`_tunnel_unhealthy_ticks`
+        so the next restart starts cleanly.  Leaves
+        :attr:`_active_url` and the URL file alone so the file is not
+        removed before a replacement tunnel writes its own URL.
         """
         proc = self._tunnel_proc
-        if proc is None:
-            return
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        if proc is not None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
         self._tunnel_proc = None
         self._tunnel_metrics_port = None
         self._tunnel_started_at = None
+        self._tunnel_unhealthy_ticks = 0
 
     async def _ping_one_ws(self, ws: Any) -> None:
         """Send a ping to a single WebSocket client, closing if stale."""
@@ -1957,18 +1984,18 @@ class RemoteAccessServer:
                 logger.debug("Watchdog WS ping error", exc_info=True)
 
     def _stop_tunnel(self) -> None:
-        """Terminate the ``cloudflared`` tunnel process if running."""
+        """Terminate the tunnel process and reset all tunnel state.
+
+        Calls :meth:`_terminate_tunnel_proc` (which resets per-process
+        state), then clears the backoff counters and active URL.  Does
+        not delete ``~/.kiss/remote-url.json`` because a replacement
+        daemon may have already overwritten it; removing it would
+        race with the new instance's ``_save_url_file`` and cause the
+        VS Code sidebar to show no URL.
+        """
         self._terminate_tunnel_proc()
-        self._tunnel_unhealthy_ticks = 0
-        self._tunnel_started_at = None
         self._tunnel_failure_count = 0
         self._tunnel_next_retry = 0.0
-        # Do NOT delete the URL file on shutdown.  A new daemon
-        # instance may have already overwritten it, and deleting it
-        # would race with the new instance's _save_url_file().  Stale
-        # data in the file is harmless — the next instance will
-        # overwrite it — while a missing file causes the VS Code
-        # sidebar to show no URL at all.
         self._active_url = None
 
     # -- Server lifecycle ---------------------------------------------------
