@@ -20,6 +20,13 @@ logger = logging.getLogger(__name__)
 
 _SINGLETON_FILES = ("SingletonLock", "SingletonCookie", "SingletonSocket")
 
+_ACCOUNTS_GOOGLE_URL_RE = re.compile(r"^https?://accounts\.google\.com/")
+
+
+def _abort_route(route: Any) -> None:
+    """Abort a Playwright route request (used to block accounts.google.com)."""
+    route.abort()
+
 
 def _get_frontmost_app() -> str | None:
     """Return the name of the frontmost macOS application, or None on failure."""
@@ -79,13 +86,6 @@ INTERACTIVE_ROLES = {
 _ROLE_LINE_RE = re.compile(r"^(\s*)-\s+([\w]+)\s*(.*)")
 
 _SCROLL_DELTA = {"down": (0, 300), "up": (0, -300), "right": (300, 0), "left": (-300, 0)}
-
-_BLOCKED_URL_RE = re.compile(r"https?://accounts\.google\.com", re.IGNORECASE)
-
-_BLOCKED_URL_MSG = (
-    "Navigation blocked: Google authentication URLs are not allowed. "
-    "Refusing to visit {url}."
-)
 
 
 def _is_profile_in_use(profile_dir: str) -> bool:
@@ -319,6 +319,7 @@ class WebUseTool:
             self._context = launcher.launch_persistent_context(
                 effective_dir, **kwargs, **self._context_args()
             )
+            self._context.route(_ACCOUNTS_GOOGLE_URL_RE, _abort_route)
             self._page = (
                 self._context.pages[0] if self._context.pages
                 else self._context.new_page()
@@ -416,9 +417,6 @@ class WebUseTool:
                     return self._get_ax_tree()
                 return f"Error: Tab index {idx} out of range (0-{len(pages) - 1})."
 
-            if _BLOCKED_URL_RE.search(url):
-                return _BLOCKED_URL_MSG.format(url=url)
-
             self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
             self._wait_for_stable()
             return self._get_ax_tree()
@@ -453,10 +451,6 @@ class WebUseTool:
             if len(self._context.pages) > pages_before:
                 self._check_for_new_tab()
                 self._wait_for_stable()
-            if _BLOCKED_URL_RE.search(self._page.url):
-                self._page.go_back()
-                self._wait_for_stable()
-                return _BLOCKED_URL_MSG.format(url=self._page.url)
             return self._get_ax_tree()
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)
