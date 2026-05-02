@@ -777,6 +777,14 @@ body {
 #upload-btn:hover { color: color-mix(in srgb, var(--fg) 70%, transparent); border-color: color-mix(in srgb, var(--fg) 16%, transparent); background: color-mix(in srgb, var(--fg) 5%, transparent); }
 #upload-btn svg { width: 11px; height: 11px; }
 
+#menu-btn {
+  background: none; border: none;
+  color: color-mix(in srgb, var(--fg) 50%, transparent); cursor: pointer;
+  padding: 4px; transition: color 0.15s, opacity 0.15s;
+  display: flex; align-items: center;
+}
+#menu-btn:hover { color: color-mix(in srgb, var(--fg) 66%, transparent); }
+
 #worktree-toggle-btn {
   background: none; border: none;
   color: color-mix(in srgb, var(--fg) 50%, transparent); cursor: pointer;
