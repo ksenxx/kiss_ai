@@ -95,14 +95,13 @@ For simple single-file tasks, skip formal planning and execute directly.
 ## Use web tools when you need to:
 
 - When you need to collect knowledge from the internet, visit **AT LEAST
-  30 WEB SITES** (increment a counter after you visit each website) and
-  collect information necessary for the task without
+  30 WEB SITES** (use a counter to keep track of the number of websites 
+  you visited) and collect information necessary for the task without
   much thinking in a new file PWD/tmp/information-{unique_id}.md. Then
   go over information in PWD/tmp/information-{unique_id}.md, think
   deeply on how to complete the task at hand, and complete it.
 - If you need to login to an website while browsing for information, you
-  MUST ask the user to to help you with login. You **MUST NOT** ask the
-  user to login to Google.
+  MUST ask the user to to help you with login. 
 
 ## Browsing files for a task
 
