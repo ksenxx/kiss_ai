@@ -1,6 +1,6 @@
 """Tests for preview model handling in update_models.py compute_changes."""
 
-from kiss.scripts.update_models import compute_changes
+from kiss.scripts.update_models import _add_codex_candidates, compute_changes
 
 
 def _make_current() -> dict[str, dict]:
@@ -122,6 +122,107 @@ def test_existing_model_not_duplicated():
     new_names = [m["name"] for m in new_models]
     assert "openrouter/google/gemini-2.5-flash" not in new_names
     assert len(updates) == 0
+
+
+def test_codex_candidates_added_for_gpt5_plus_models():
+    """Every GPT-5+ model from OpenAI should produce a codex/ counterpart."""
+    current = _make_current()
+    openai = {
+        "gpt-5": {"source": "openai"},
+        "gpt-5-codex": {"source": "openai"},
+        "gpt-5.1-codex-max": {"source": "openai"},
+        "gpt-5.5": {"source": "openai"},
+        "gpt-6": {"source": "openai"},
+    }
+    _, new_models = compute_changes(current, {}, {}, {}, {}, openai)
+    names = {m["name"] for m in new_models}
+    for expected in (
+        "codex/gpt-5",
+        "codex/gpt-5-codex",
+        "codex/gpt-5.1-codex-max",
+        "codex/gpt-5.5",
+        "codex/gpt-6",
+    ):
+        assert expected in names
+    for nm in new_models:
+        if nm["name"].startswith("codex/"):
+            assert nm["input_price_per_1M"] == 0.0
+            assert nm["output_price_per_1M"] == 0.0
+            assert nm["source"] == "codex"
+            assert nm["needs_pricing"] is False
+            assert nm["gen"] is True
+            assert nm["fc"] is True
+            assert nm["emb"] is False
+            assert nm["context_length"] >= 400000
+
+
+def test_codex_candidate_uses_openrouter_context_when_available():
+    """Context length for codex/<name> should come from OpenRouter when present."""
+    current: dict[str, dict] = {}
+    openai = {"gpt-5.5": {"source": "openai"}}
+    openrouter = {
+        "openrouter/openai/gpt-5.5": {
+            "context_length": 1050000,
+            "input_price_per_1M": 5.0,
+            "output_price_per_1M": 30.0,
+            "source": "openrouter",
+        },
+    }
+    new_models: list[dict] = []
+    _add_codex_candidates(openai, current, openrouter, new_models)
+    [entry] = [m for m in new_models if m["name"] == "codex/gpt-5.5"]
+    assert entry["context_length"] == 1050000
+
+
+def test_codex_candidate_skips_pre_gpt5_models():
+    """Old GPT families must not get codex/ entries."""
+    current: dict[str, dict] = {}
+    openai = {
+        "gpt-3.5-turbo": {"source": "openai"},
+        "gpt-4": {"source": "openai"},
+        "gpt-4o": {"source": "openai"},
+        "gpt-4.1-mini": {"source": "openai"},
+        "gpt-4-turbo-2024-04-09": {"source": "openai"},
+    }
+    new_models: list[dict] = []
+    _add_codex_candidates(openai, current, {}, new_models)
+    assert new_models == []
+
+
+def test_codex_candidate_skips_dated_snapshots_and_multimodal():
+    """Date-suffixed snapshots and image/audio variants must be skipped."""
+    current: dict[str, dict] = {}
+    openai = {
+        "gpt-5-2025-08-07": {"source": "openai"},
+        "gpt-5.1-2025-11-13": {"source": "openai"},
+        "gpt-5-image": {"source": "openai"},
+        "gpt-5-audio-preview": {"source": "openai"},
+        "gpt-5-search-preview": {"source": "openai"},
+        "gpt-5-mini-tts": {"source": "openai"},
+    }
+    new_models: list[dict] = []
+    _add_codex_candidates(openai, current, {}, new_models)
+    assert new_models == []
+
+
+def test_codex_candidate_not_added_when_already_present():
+    """codex/<name> already in current MODEL_INFO must not be re-added."""
+    current = {
+        "codex/gpt-5": {
+            "context_length": 400000,
+            "input_price_per_1M": 0.0,
+            "output_price_per_1M": 0.0,
+            "fc": True,
+            "emb": False,
+            "gen": True,
+        },
+    }
+    openai = {"gpt-5": {"source": "openai"}, "gpt-5.5": {"source": "openai"}}
+    new_models: list[dict] = []
+    _add_codex_candidates(openai, current, {}, new_models)
+    names = {m["name"] for m in new_models}
+    assert "codex/gpt-5" not in names
+    assert "codex/gpt-5.5" in names
 
 
 def test_openrouter_preview_zero_context_not_added():

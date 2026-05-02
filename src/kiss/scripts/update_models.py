@@ -424,6 +424,69 @@ _VENDOR_OR_PREFIX: dict[str, str] = {
     "gemini": "openrouter/google/",
 }
 
+# OpenAI GPT models usable with the codex CLI's ``-m`` flag. Codex needs
+# tool-use + reasoning, which is reliably available only on gpt-5 and newer
+# (gpt-5, gpt-5-codex, gpt-5.1-codex-max, gpt-6, gpt-10, ...). Older
+# families (gpt-3.5, gpt-4, gpt-4o, gpt-4.1) are excluded.
+_CODEX_GPT_PATTERN = re.compile(r"^gpt-([5-9]|\d{2,})(\.\d+)?(-.*)?$")
+_CODEX_GPT_SKIP_FRAGMENTS = (
+    "image",
+    "audio",
+    "tts",
+    "search",
+    "transcribe",
+    "whisper",
+    "embedding",
+)
+_CODEX_GPT_DATE_SUFFIX = re.compile(r"-(\d{8}|\d{4}-\d{2}-\d{2})$")
+
+
+def _add_codex_candidates(
+    openai: dict[str, dict],
+    current: dict[str, dict],
+    openrouter: dict[str, dict],
+    new_models: list[dict],
+) -> None:
+    """Add ``codex/<gpt-model>`` entries for every OpenAI GPT-5+ model.
+
+    The codex CLI accepts any model name via ``-m`` and is billed via the
+    user's ChatGPT subscription, so all such entries get $0/0 pricing.
+    Context length is taken from the matching OpenRouter entry when
+    available, falling back to 400000 (the default for codex/* models).
+
+    Date-suffixed snapshots (e.g. ``gpt-5-2025-08-07``) are skipped because
+    the un-suffixed alias already covers them. Multimodal/embedding/search
+    variants are filtered out because they are not useful with codex.
+    """
+    for name in openai:  # pragma: no branch
+        if not _CODEX_GPT_PATTERN.match(name):  # pragma: no branch
+            continue
+        if any(s in name for s in _CODEX_GPT_SKIP_FRAGMENTS):  # pragma: no branch
+            continue
+        if _CODEX_GPT_DATE_SUFFIX.search(name):  # pragma: no branch
+            continue
+        codex_name = f"codex/{name}"
+        if codex_name in current:  # pragma: no branch
+            continue
+        or_info = _lookup_openrouter_pricing(name, "openai", openrouter)
+        ctx = or_info["context_length"] if or_info and or_info.get("context_length") else 400000
+        new_models.append(
+            {
+                "name": codex_name,
+                "context_length": ctx,
+                "input_price_per_1M": 0.0,
+                "output_price_per_1M": 0.0,
+                "source": "codex",
+                "needs_pricing": False,
+                # codex/* are billed via ChatGPT subscription. Capability
+                # testing is skipped in main() because it requires the codex
+                # CLI/UI binary to be installed.
+                "gen": True,
+                "fc": True,
+                "emb": False,
+            }
+        )
+
 
 def _lookup_openrouter_pricing(
     model_name: str,
@@ -596,6 +659,8 @@ def compute_changes(
                     "needs_pricing": inp == 0,
                 }
             )
+
+    _add_codex_candidates(openai, current, openrouter, new_models)
 
     from kiss.core.models.model_info import _OPENAI_PREFIXES
 
@@ -904,6 +969,12 @@ def main() -> None:
     if new_models and not args.skip_test:  # pragma: no branch
         print(f"\n[5/6] Testing {len(new_models)} new models...")
         for nm in new_models:  # pragma: no branch
+            # codex/* entries already have gen/fc/emb defaults set by
+            # _add_codex_candidates and are billed via ChatGPT subscription.
+            # Skipping their capability tests keeps the script usable on
+            # machines without the codex CLI.
+            if nm["name"].startswith("codex/"):  # pragma: no branch
+                continue
             caps = test_model_capabilities(nm["name"], verbose=args.verbose)
             nm["gen"] = caps["gen"]
             nm["emb"] = caps["emb"]
