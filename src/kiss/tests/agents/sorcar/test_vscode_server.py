@@ -1924,7 +1924,9 @@ class TestCollapseAllExceptResultJS(unittest.TestCase):
 
     def test_called_in_render_adjacent_task(self) -> None:
         """renderAdjacentTask delegates to replayEventsInto which collapses."""
-        idx = self._js.index("function renderAdjacentTask(direction, task, events)")
+        idx = self._js.index(
+            "function renderAdjacentTask(direction, task, events, taskId)"
+        )
         end = self._js.index("\n  function ", idx + 10)
         block = self._js[idx:end]
         assert "replayEventsInto(container, events)" in block

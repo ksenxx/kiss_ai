@@ -102,6 +102,12 @@ class TestCreateNewTabDoesNotBlockInput(unittest.TestCase):
             var _idCounter = 0;
             var _postedMessages = [];
             var vscode = { postMessage: function(m) { _postedMessages.push(m); } };
+            // createNewTab inspects document.body.classList for a
+            // 'remote-chat' marker (used by the standalone web webview);
+            // in this VS Code-extension simulation the marker is absent.
+            var document = {
+                body: { classList: { contains: function() { return false; } } },
+            };
 
             function clearGhost() {}
             function hideAC() {}
