@@ -4,16 +4,39 @@ import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from kiss.agents.sorcar.web_use_tool import (
+    _ACCOUNTS_GOOGLE_URL_RE,
     _SINGLETON_FILES,
     WebUseTool,
+    _abort_route,
     _activate_app,
     _get_frontmost_app,
     _is_profile_in_use,
 )
+
+
+class _FailureCollector:
+    """Callable that records (url, errorText) for requestfailed events."""
+
+    def __init__(self) -> None:
+        self.failures: list[tuple[str, str | None]] = []
+
+    def __call__(self, request: Any) -> None:
+        self.failures.append((request.url, request.failure))
+
+
+class _AbortCallTracker:
+    """Stand-in for a Playwright Route that records abort() calls."""
+
+    def __init__(self) -> None:
+        self.aborted = 0
+
+    def abort(self) -> None:
+        self.aborted += 1
 
 FORM_PAGE = b"""<!DOCTYPE html>
 <html><head><title>Test Form</title></head>
@@ -366,6 +389,147 @@ class TestConcurrentProfileAccess:
             assert tool._resolve_user_data_dir() is None
         finally:
             tool.close()
+
+
+class TestAccountsGoogleUrlRegex:
+    """Pure unit tests for the accounts.google.com URL regex."""
+
+    def test_matches_https_root(self):
+        assert _ACCOUNTS_GOOGLE_URL_RE.match("https://accounts.google.com/")
+
+    def test_matches_http_root(self):
+        assert _ACCOUNTS_GOOGLE_URL_RE.match("http://accounts.google.com/")
+
+    def test_matches_signin_path(self):
+        assert _ACCOUNTS_GOOGLE_URL_RE.match(
+            "https://accounts.google.com/signin/v2/identifier"
+        )
+
+    def test_matches_oauth_path(self):
+        assert _ACCOUNTS_GOOGLE_URL_RE.match(
+            "https://accounts.google.com/o/oauth2/v2/auth?foo=bar"
+        )
+
+    def test_rejects_other_google_host(self):
+        assert not _ACCOUNTS_GOOGLE_URL_RE.match("https://www.google.com/")
+
+    def test_rejects_subdomain_prefix(self):
+        assert not _ACCOUNTS_GOOGLE_URL_RE.match("https://myaccounts.google.com/")
+
+    def test_rejects_homograph_suffix(self):
+        # Must not match accounts.google.com.evil.com
+        assert not _ACCOUNTS_GOOGLE_URL_RE.match(
+            "https://accounts.google.com.evil.com/"
+        )
+
+    def test_rejects_ftp_scheme(self):
+        assert not _ACCOUNTS_GOOGLE_URL_RE.match("ftp://accounts.google.com/")
+
+
+class TestAbortRoute:
+    """Unit tests for the _abort_route helper."""
+
+    def test_calls_route_abort_once(self):
+        tracker = _AbortCallTracker()
+        _abort_route(tracker)
+        assert tracker.aborted == 1
+
+
+def _run_block_test(profile: str, http_url: str, out: dict) -> None:
+    """Worker for test_request_to_accounts_google_is_aborted.
+
+    Runs in its own thread so it gets a fresh asyncio thread-local state,
+    which is required because the module-scoped ``web_tool`` fixture parks
+    a Playwright greenlet on the main thread that leaves
+    ``asyncio._running_loop`` set, causing a fresh
+    ``sync_playwright().start()`` on the main thread to fail with
+    "Playwright Sync API inside the asyncio loop".
+    """
+    tool = WebUseTool(user_data_dir=profile, headless=True)
+    try:
+        tool.go_to_url(http_url + "/")
+        out["alive_before"] = tool._is_alive()
+
+        collector = _FailureCollector()
+        tool._context.on("requestfailed", collector)
+
+        result = tool.go_to_url("https://accounts.google.com/signin")
+        out["result_type"] = type(result).__name__
+        tool._page.wait_for_timeout(500)
+        out["failures"] = list(collector.failures)
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = repr(exc)
+    finally:
+        tool.close()
+
+
+def _run_other_host_test(profile: str, http_url: str, out: dict) -> None:
+    """Worker for test_other_hosts_are_not_blocked (runs in its own thread)."""
+    tool = WebUseTool(user_data_dir=profile, headless=True)
+    try:
+        out["body"] = tool.go_to_url(http_url + "/")
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = repr(exc)
+    finally:
+        tool.close()
+
+
+class TestAccountsGoogleRouteBlocking:
+    """Verify the route registered in _launch_browser blocks accounts.google.com.
+
+    These integration tests launch a real persistent-context browser
+    (the only path where the route is currently registered) and confirm
+    that any request to accounts.google.com is aborted before it leaves
+    the browser.
+
+    They run in a worker thread because the module-scoped ``web_tool``
+    fixture leaves a Playwright greenlet parked on the main thread, which
+    makes the next ``sync_playwright().start()`` on that thread raise.
+    """
+
+    def test_request_to_accounts_google_is_aborted(self, tmp_path, http_server):
+        profile = str(tmp_path / "profile")
+        out: dict = {}
+        t = threading.Thread(
+            target=_run_block_test, args=(profile, http_server, out)
+        )
+        t.start()
+        t.join(timeout=120)
+        assert not t.is_alive(), "worker thread hung"
+        assert "error" not in out, f"worker raised: {out.get('error')}"
+        assert out["alive_before"] is True
+        assert out["result_type"] is not None
+
+        matches = [
+            (url, err)
+            for url, err in out["failures"]
+            if "accounts.google.com" in url
+        ]
+        assert matches, (
+            "No requestfailed event captured for accounts.google.com; "
+            f"all failures: {out['failures']}"
+        )
+        # Playwright's route.abort() default reason produces ERR_FAILED
+        # (not ERR_NAME_NOT_RESOLVED, which would indicate the request
+        # actually went out).
+        url, err = matches[0]
+        assert err is not None
+        assert "ERR_FAILED" in err or "ABORTED" in err, (
+            f"Expected an aborted-request error, got: {err!r}"
+        )
+
+    def test_other_hosts_are_not_blocked(self, tmp_path, http_server):
+        """Sanity check: requests to other hosts must still succeed."""
+        profile = str(tmp_path / "profile2")
+        out: dict = {}
+        t = threading.Thread(
+            target=_run_other_host_test, args=(profile, http_server, out)
+        )
+        t.start()
+        t.join(timeout=120)
+        assert not t.is_alive(), "worker thread hung"
+        assert "error" not in out, f"worker raised: {out.get('error')}"
+        assert "Test Form" in out["body"]
 
 
 if __name__ == "__main__":
