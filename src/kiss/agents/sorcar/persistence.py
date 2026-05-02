@@ -196,6 +196,31 @@ def _allocate_chat_id() -> str:
     return uuid.uuid4().hex
 
 
+def _delete_task(task_id: int) -> bool:
+    """Delete a task and its associated events from the database.
+
+    Removes the events table rows that reference the given task_id,
+    then removes the task_history row itself.
+
+    Args:
+        task_id: The primary key of the task_history row to delete.
+
+    Returns:
+        True if the task existed and was deleted, False otherwise.
+    """
+    db = _get_db()
+    with _db_lock:
+        row = db.execute(
+            "SELECT id FROM task_history WHERE id = ?", (task_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        db.execute("DELETE FROM events WHERE task_id = ?", (task_id,))
+        db.execute("DELETE FROM task_history WHERE id = ?", (task_id,))
+        db.commit()
+        return True
+
+
 def _load_history(limit: int = 0, offset: int = 0) -> list[_HistoryEntry]:
     """Load task history entries (most-recent-first). Thread-safe.
 

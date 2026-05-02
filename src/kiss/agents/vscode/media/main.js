@@ -3663,10 +3663,27 @@
       const div = document.createElement('div');
       div.className = 'sidebar-item';
       const itemText = s.title || s.preview || 'Untitled';
-      div.textContent = itemText;
       div.dataset.tooltip = s.preview || itemText;
       div.style.backgroundColor = chatIdBgColor(String(s.id));
       div.style.color = '#1a1a1a';
+
+      const textSpan = document.createElement('span');
+      textSpan.className = 'sidebar-item-text';
+      textSpan.textContent = itemText;
+      div.appendChild(textSpan);
+
+      if (s.task_id) {
+        const delBtn = document.createElement('button');
+        delBtn.className = 'sidebar-item-delete';
+        delBtn.title = 'Delete task';
+        delBtn.innerHTML = '&#x2715;';
+        delBtn.addEventListener('click', e => {
+          e.stopPropagation();
+          vscode.postMessage({type: 'deleteTask', taskId: s.task_id});
+        });
+        div.appendChild(delBtn);
+      }
+
       div.addEventListener('click', () => {
         if (demoMode && typeof window._startDemoReplay === 'function') {
           closeSidebar();

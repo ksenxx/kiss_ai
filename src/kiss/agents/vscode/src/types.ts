@@ -14,6 +14,7 @@ export interface Attachment {
 /** Session/conversation info */
 export interface SessionInfo {
   id: number;
+  task_id?: number;
   title: string;
   timestamp: number;
   preview: string;
@@ -38,6 +39,7 @@ export type FromWebviewMessage =
   | {type: 'selectModel'; model: string; tabId?: string}
   | {type: 'getModels'}
   | {type: 'getHistory'; query?: string; offset?: number; generation?: number}
+  | {type: 'deleteTask'; taskId: number}
   | {type: 'getFiles'; prefix: string}
   | {type: 'userAnswer'; answer: string; tabId?: string}
   | {type: 'userActionDone'}
@@ -205,6 +207,7 @@ export interface AgentCommand {
     | 'getModels'
     | 'selectModel'
     | 'getHistory'
+    | 'deleteTask'
     | 'getFiles'
     | 'userAnswer'
     | 'recordFileUsage'
@@ -234,6 +237,7 @@ export interface AgentCommand {
   answer?: string;
   path?: string;
   chatId?: number | string;
+  taskId?: number;
   activeFileContent?: string;
   action?: 'merge' | 'discard' | 'all-done' | 'commit' | 'skip';
   useWorktree?: boolean;
