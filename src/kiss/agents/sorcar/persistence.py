@@ -27,7 +27,7 @@ def _default_kiss_dir() -> Path:
 _KISS_DIR = _default_kiss_dir()
 _DB_PATH = _KISS_DIR / "sorcar.db"
 
-_MAX_FILE_USAGE_ENTRIES = 1000
+_MAX_FILE_USAGE_ENTRIES = 10000
 
 
 def _ensure_kiss_dir() -> None:
