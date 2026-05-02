@@ -20,6 +20,13 @@ logger = logging.getLogger(__name__)
 
 _SINGLETON_FILES = ("SingletonLock", "SingletonCookie", "SingletonSocket")
 
+_ACCOUNTS_GOOGLE_URL_RE = re.compile(r"^https?://accounts\.google\.com/")
+
+
+def _abort_route(route: Any) -> None:
+    """Abort a Playwright route request (used to block accounts.google.com)."""
+    route.abort()
+
 
 def _get_frontmost_app() -> str | None:
     """Return the name of the frontmost macOS application, or None on failure."""
@@ -312,6 +319,7 @@ class WebUseTool:
             self._context = launcher.launch_persistent_context(
                 effective_dir, **kwargs, **self._context_args()
             )
+            self._context.route(_ACCOUNTS_GOOGLE_URL_RE, _abort_route)
             self._page = (
                 self._context.pages[0] if self._context.pages
                 else self._context.new_page()
