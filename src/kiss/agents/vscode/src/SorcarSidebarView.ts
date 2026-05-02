@@ -57,6 +57,8 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     vscode.Progress<{message?: string}>
   > = new Map();
   private _disposed: boolean = false;
+  /** Last remote URL sent to the webview — avoids redundant messages. */
+  private _lastSentUrl: string = '';
   private _preMergeOpenFiles: Map<string, Set<string>> = new Map();
   private _restoreChain: Promise<void> = Promise.resolve();
   private _onFirstResolve: (() => void) | undefined;
@@ -475,58 +477,47 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
   /**
    * Read ``~/.kiss/remote-url.json`` and post the tunnel/local URL to
-   * the webview.  Retries on failure and falls back to polling with
-   * ``fs.watchFile`` so the URL appears even when the daemon starts
-   * after the sidebar.
+   * the webview.  Also starts a persistent file watcher that re-sends
+   * the URL whenever the file changes (e.g. after a daemon restart
+   * creates a new tunnel with a different URL).
    */
-  private _sendRemoteUrl(retries: number = 6): void {
+  private _sendRemoteUrl(): void {
     const urlFile = path.join(os.homedir(), '.kiss', 'remote-url.json');
-    if (this._tryReadAndSendUrl(urlFile)) return;
-    // Retry after a delay — the daemon may still be starting the tunnel
-    if (retries > 0) {
-      setTimeout(() => this._sendRemoteUrl(retries - 1), 10_000);
-    } else {
-      // All retries exhausted — poll the file for up to 5 minutes
-      this._watchUrlFile(urlFile);
-    }
+    this._tryReadAndSendUrl(urlFile);
+    this._watchUrlFile(urlFile);
   }
 
   /**
    * Try to read the URL file and post to the webview.
-   * Returns true if the URL was sent successfully.
+   * Only sends if the URL differs from the last one sent.
    */
-  private _tryReadAndSendUrl(urlFile: string): boolean {
+  private _tryReadAndSendUrl(urlFile: string): void {
     try {
       const data = JSON.parse(fs.readFileSync(urlFile, 'utf-8'));
       const url = data.tunnel || data.local || '';
-      if (url) {
+      if (url && url !== this._lastSentUrl) {
+        this._lastSentUrl = url;
         this._sendToWebview({
           type: 'remote_url',
           url,
         } as ToWebviewMessage);
-        return true;
       }
     } catch {
       /* file missing or malformed */
     }
-    return false;
   }
 
   private _urlFileWatchTimer?: ReturnType<typeof setInterval>;
 
   /**
-   * Poll ``~/.kiss/remote-url.json`` every 10 seconds for up to 5
-   * minutes.  Stops as soon as the URL is successfully sent.
+   * Persistently poll ``~/.kiss/remote-url.json`` every 10 seconds.
+   * Re-sends the URL to the webview whenever the file content changes
+   * (e.g. after a daemon restart assigns a new tunnel URL).
    */
   private _watchUrlFile(urlFile: string): void {
     if (this._urlFileWatchTimer) return;
-    let remaining = 30; // 30 × 10s = 5 minutes
     this._urlFileWatchTimer = setInterval(() => {
-      remaining--;
-      if (this._tryReadAndSendUrl(urlFile) || remaining <= 0) {
-        clearInterval(this._urlFileWatchTimer!);
-        this._urlFileWatchTimer = undefined;
-      }
+      this._tryReadAndSendUrl(urlFile);
     }, 10_000);
   }
 
