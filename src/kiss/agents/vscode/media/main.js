@@ -3681,6 +3681,7 @@
         delBtn.addEventListener('click', e => {
           e.stopPropagation();
           vscode.postMessage({type: 'deleteTask', taskId: s.task_id});
+          div.remove();
         });
         div.appendChild(delBtn);
       }

@@ -218,16 +218,15 @@ class VSCodeServer(
         })
 
     def _handle_delete_task(self, task_id: int) -> None:
-        """Delete a task from the database and refresh the history panel.
+        """Delete a task and its associated events from the database.
 
-        Removes the task and its associated events, then broadcasts
-        an updated history list to the frontend.
+        The frontend optimistically removes the item from the UI on click,
+        so no history refresh broadcast is needed here.
 
         Args:
             task_id: The primary key of the task_history row to delete.
         """
         _delete_task(task_id)
-        self._get_history(None)
 
     def _get_input_history(self) -> None:
         """Send deduplicated task texts for arrow-key cycling.
