@@ -1048,7 +1048,7 @@ body.remote-chat #welcome > #input-area {
 }
 
 .sidebar-item-delete {
-  flex-shrink: 0; border: none; cursor: pointer; padding: 2px; margin-left: 4px;
+  flex-shrink: 0; border: none; cursor: pointer; padding: 2px 0; margin-left: 2px;
   border-radius: 3px; line-height: 1; display: flex; align-items: center;
   color: #000; opacity: 0.45;
   background: none;
