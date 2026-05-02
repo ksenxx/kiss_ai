@@ -216,6 +216,9 @@ class TestModelInfoEntries:
         assert "codex/gpt-5.1-codex-mini" in MODEL_INFO
         assert "codex/gpt-5.2-codex" in MODEL_INFO
         assert "codex/gpt-5.3-codex" in MODEL_INFO
+        assert "codex/gpt-5.5" in MODEL_INFO
+        assert "codex/gpt-5.5-codex" in MODEL_INFO
+        assert "codex/gpt-5.5-pro" in MODEL_INFO
 
     def test_codex_models_support_function_calling(self) -> None:
         for name in (
@@ -227,6 +230,9 @@ class TestModelInfoEntries:
             "codex/gpt-5.1-codex-mini",
             "codex/gpt-5.2-codex",
             "codex/gpt-5.3-codex",
+            "codex/gpt-5.5",
+            "codex/gpt-5.5-codex",
+            "codex/gpt-5.5-pro",
         ):
             assert MODEL_INFO[name].is_function_calling_supported
 
