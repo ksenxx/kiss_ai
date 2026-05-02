@@ -843,7 +843,7 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
                   <line x1="8" y1="21" x2="16" y2="21"/>
                   <line x1="12" y1="17" x2="12" y2="21"/>
                 </svg>
-                <span>Toggle demo mode</span>
+                <span>Demo mode</span>
               </button>
             </div>
             <div id="model-dropdown">
