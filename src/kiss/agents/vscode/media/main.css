@@ -1057,6 +1057,23 @@ body {
 
 .sidebar-item-delete:hover { opacity: 1; background: rgb(0 0 0 / 15%); }
 
+.sidebar-item-confirm {
+  display: flex; align-items: center; gap: 2px; flex-shrink: 0; margin-left: 4px;
+}
+
+.sidebar-confirm-yes,
+.sidebar-confirm-no {
+  background: none; border: none; cursor: pointer; padding: 2px 4px;
+  border-radius: 4px; line-height: 1; display: flex; align-items: center;
+  transition: opacity 0.15s, background 0.15s;
+}
+
+.sidebar-confirm-yes { color: var(--green); opacity: 0.7; }
+.sidebar-confirm-yes:hover { opacity: 1; background: rgb(0 0 0 / 15%); }
+
+.sidebar-confirm-no { color: var(--red); opacity: 0.7; }
+.sidebar-confirm-no:hover { opacity: 1; background: rgb(0 0 0 / 15%); }
+
 .sidebar-item:hover {
   filter: brightness(0.9); border-color: color-mix(in srgb, var(--fg) 15%, transparent);
 }

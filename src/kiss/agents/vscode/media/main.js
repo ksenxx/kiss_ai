@@ -3678,12 +3678,46 @@
         delBtn.title = 'Delete task';
         delBtn.innerHTML =
           '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M5.5 5.5a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm-7-1a1 1 0 0 1 1-1h8a1 1 0 0 1 1 1H14a.5.5 0 0 1 0 1h-.5l-.8 8.4A2 2 0 0 1 10.71 15H5.29a2 2 0 0 1-1.99-1.8L2.5 4.8H2a.5.5 0 0 1 0-1h1.5zM3.51 5.5l.79 8.2a1 1 0 0 0 .99.8h5.42a1 1 0 0 0 .99-.8l.79-8.2H3.51zM6 2.5a.5.5 0 0 0-.5.5h5a.5.5 0 0 0-.5-.5H6z"/></svg>';
+
+        const confirmWrap = document.createElement('span');
+        confirmWrap.className = 'sidebar-item-confirm';
+        confirmWrap.style.display = 'none';
+
+        const confirmBtn = document.createElement('button');
+        confirmBtn.className = 'sidebar-confirm-yes';
+        confirmBtn.title = 'Confirm delete';
+        confirmBtn.innerHTML =
+          '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 1 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0z"/></svg>';
+
+        const cancelBtn = document.createElement('button');
+        cancelBtn.className = 'sidebar-confirm-no';
+        cancelBtn.title = 'Cancel';
+        cancelBtn.innerHTML =
+          '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M3.72 3.72a.75.75 0 0 1 1.06 0L8 6.94l3.22-3.22a.75.75 0 1 1 1.06 1.06L9.06 8l3.22 3.22a.75.75 0 1 1-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 0 1-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 0 1 0-1.06z"/></svg>';
+
+        confirmWrap.appendChild(confirmBtn);
+        confirmWrap.appendChild(cancelBtn);
+
         delBtn.addEventListener('click', e => {
+          e.stopPropagation();
+          delBtn.style.display = 'none';
+          confirmWrap.style.display = '';
+        });
+
+        confirmBtn.addEventListener('click', e => {
           e.stopPropagation();
           vscode.postMessage({type: 'deleteTask', taskId: s.task_id});
           div.remove();
         });
+
+        cancelBtn.addEventListener('click', e => {
+          e.stopPropagation();
+          confirmWrap.style.display = 'none';
+          delBtn.style.display = '';
+        });
+
         div.appendChild(delBtn);
+        div.appendChild(confirmWrap);
       }
 
       div.addEventListener('click', () => {
