@@ -3086,6 +3086,11 @@
           menuDropdown.classList.remove('open');
         }
       });
+      menuDropdown.addEventListener('click', e => {
+        if (e.target.closest('.menu-item')) {
+          menuDropdown.classList.remove('open');
+        }
+      });
     }
 
     if (worktreeToggleBtn) {
