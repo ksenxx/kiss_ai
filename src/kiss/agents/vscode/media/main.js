@@ -553,6 +553,7 @@
       stopTimer();
       removeSpinner();
     }
+    vscode.postMessage({type: 'newChat', tabId: tab.id});
     vscode.postMessage({type: 'getWelcomeSuggestions'});
     focusInputWithRetry();
   }
