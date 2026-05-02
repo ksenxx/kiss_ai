@@ -1756,6 +1756,9 @@ class RemoteAccessServer:
             logger.warning("Failed to restart tunnel")
         _save_url_file(self._local_url, tunnel_url)
         self._active_url = tunnel_url or self._local_url
+        self._printer.broadcast(
+            {"type": "remote_url", "url": self._active_url},
+        )
 
     def _terminate_tunnel_proc(self) -> None:
         """Terminate ``self._tunnel_proc`` without touching the URL file.
