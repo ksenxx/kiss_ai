@@ -109,6 +109,7 @@ class TestCreateNewTabDoesNotBlockInput(unittest.TestCase):
                 body: { classList: { contains: function() { return false; } } },
             };
 
+            function trimOldestTabs() {}
             function clearGhost() {}
             function hideAC() {}
             function closeModelDD() {}
