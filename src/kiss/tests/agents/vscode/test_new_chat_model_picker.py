@@ -1,14 +1,17 @@
 """Integration test: new chat model picker shows last user-picked model.
 
-Bug: When a new chat is opened, the model picker shows the model from the
+Bug: When a new chat tab is opened, the model picker shows the model from the
 currently active tab instead of the last model explicitly picked by the user
-(saved in the database). This happens because the frontend copies the JS
-global ``selectedModel`` (which tracks the current tab) into the new tab,
-and the backend's ``showWelcome`` event did not include the correct model.
+(saved in the database).
 
-Fix: ``_new_chat`` re-reads the last-picked model from the database and
-includes it in the ``showWelcome`` event. The frontend ``showWelcome``
-handler updates the model picker accordingly.
+Root cause: ``createNewTab()`` in main.js never sent a ``newChat`` command to
+the backend, so the backend's ``_new_chat()`` (which reads the DB model and
+sends it back in a ``showWelcome`` event) was never invoked.
+
+Fix: ``createNewTab()`` now posts ``{type: 'newChat', tabId: tab.id}`` so the
+backend reads the last-picked model from the database and includes it in the
+``showWelcome`` event. The frontend ``showWelcome`` handler updates the model
+picker accordingly.
 """
 
 from __future__ import annotations
@@ -184,8 +187,35 @@ class TestNewChatModelPicker:
         assert tab.selected_model == "model-B"
 
 
-class TestShowWelcomeHandlerUpdatesModel:
-    """Frontend showWelcome handler must update model picker from ev.model."""
+class TestFrontendSendsNewChatCommand:
+    """Frontend createNewTab() must post a newChat command to the backend."""
+
+    def test_create_new_tab_posts_new_chat(self) -> None:
+        """createNewTab() in main.js must include vscode.postMessage({type: 'newChat', ...})."""
+        source = MAIN_JS.read_text()
+
+        # Find the createNewTab function body
+        m = re.search(r"function\s+createNewTab\s*\(\s*\)", source)
+        assert m is not None, "createNewTab function not found in main.js"
+
+        # Extract function body by counting braces
+        start = source.index("{", m.start())
+        depth = 0
+        end = start
+        for i in range(start, len(source)):
+            if source[i] == "{":
+                depth += 1
+            elif source[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        body = source[start:end]
+
+        assert "newChat" in body, (
+            "createNewTab() must post a 'newChat' command to trigger "
+            "backend model lookup from DB"
+        )
 
     def test_show_welcome_handler_uses_ev_model(self) -> None:
         """The showWelcome case in main.js must set selectedModel from ev.model."""
