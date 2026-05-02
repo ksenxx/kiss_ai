@@ -561,22 +561,6 @@
     }
     vscode.postMessage({type: 'newChat', tabId: tab.id});
     vscode.postMessage({type: 'getWelcomeSuggestions'});
-    // In the remote chat webview only one tab is shown at a time.
-    // After creating the new tab, close every other tab so the tab
-    // bar always contains exactly the freshly created chat.  Outside
-    // the remote webview (VS Code extension) tabs are preserved.
-    if (document.body.classList.contains('remote-chat')) {
-      const otherIds = tabs
-        .filter(t => {
-          return t.id !== tab.id;
-        })
-        .map(t => {
-          return t.id;
-        });
-      otherIds.forEach(id => {
-        closeTab(id);
-      });
-    }
     focusInputWithRetry();
   }
 
@@ -634,24 +618,6 @@
         // Tab IDs restored from persisted state
       } else {
         activeTabId = tabs[0].id;
-      }
-      // In the remote chat webview only one tab is shown at a time;
-      // collapse any restored multi-tab state down to just the active
-      // tab so reloading the page never resurfaces multiple tabs.
-      // Also notify the backend so the now-orphaned per-tab agent
-      // processes are released, and rewrite vscode.setState so the
-      // pruned list is what's reloaded next time.
-      if (document.body.classList.contains('remote-chat') && tabs.length > 1) {
-        const dropped = tabs.filter(t => {
-          return t.id !== activeTabId;
-        });
-        tabs = tabs.filter(t => {
-          return t.id === activeTabId;
-        });
-        dropped.forEach(t => {
-          vscode.postMessage({type: 'closeTab', tabId: t.id});
-        });
-        persistTabState();
       }
     } else {
       const initial = makeTab('new chat');
