@@ -237,6 +237,7 @@
       } else {
         welcome.style.display = 'none';
       }
+      refreshWelcomeLayout();
     }
     // Restore per-tab state
     selectedModel = tab.selectedModel || 'claude-opus-4-6';
@@ -670,6 +671,33 @@
   const statusTokens = document.getElementById('status-tokens');
   const statusBudget = document.getElementById('status-budget');
   const statusSteps = document.getElementById('status-steps');
+
+  // In the remote chat webview (body.remote-chat) the welcome page hides
+  // the SAMPLE_TASKS suggestions and shows the input textbox + buttons
+  // centered inside #welcome.  We achieve the centering by physically
+  // moving #input-area into #welcome while welcome is visible, and back
+  // to its original position (between #output and #sidebar inside #app)
+  // when a task starts and welcome is hidden.  Outside the remote
+  // webview this helper is a no-op so the VS Code extension layout is
+  // unchanged.
+  function refreshWelcomeLayout() {
+    if (!document.body.classList.contains('remote-chat')) return;
+    const ia = document.getElementById('input-area');
+    const app = document.getElementById('app');
+    if (!ia || !app || !welcome) return;
+    const visible = welcome.style.display !== 'none' && O.contains(welcome);
+    if (visible) {
+      if (ia.parentNode !== welcome) welcome.appendChild(ia);
+    } else if (ia.parentNode === welcome) {
+      const sbar = document.getElementById('sidebar');
+      if (sbar) app.insertBefore(ia, sbar);
+      else app.appendChild(ia);
+    }
+  }
+
+  // Apply the centered remote welcome layout on initial load (welcome
+  // is visible by default in the static HTML).
+  refreshWelcomeLayout();
 
   function setTaskText(text) {
     if (!taskPanel || !taskPanelText) return;
@@ -2013,6 +2041,7 @@
             if (welcome) {
               welcome.style.display = '';
               O.appendChild(welcome);
+              refreshWelcomeLayout();
             }
           } else {
             swTab.outputFragment = null;
@@ -2117,7 +2146,10 @@
           currentTaskName = ev.task;
           resetAdjacentState(); // sets oldest/newest to currentTaskName
           setTaskText(ev.task);
-          if (welcome) welcome.style.display = 'none';
+          if (welcome) {
+            welcome.style.display = 'none';
+            refreshWelcomeLayout();
+          }
           updateActiveTabTitle(ev.task);
         }
         if (ev.extra) {
@@ -2166,7 +2198,10 @@
           if (stt) {
             currentTaskName = stt;
             resetAdjacentState();
-            if (welcome) welcome.style.display = 'none';
+            if (welcome) {
+              welcome.style.display = 'none';
+              refreshWelcomeLayout();
+            }
             updateActiveTabTitle(stt);
           }
           setTaskText(ev.text || '');
@@ -4065,7 +4100,10 @@
     setTaskText: setTaskText,
     updateTabTitle: updateActiveTabTitle,
     hideWelcome: function () {
-      if (welcome) welcome.style.display = 'none';
+      if (welcome) {
+        welcome.style.display = 'none';
+        refreshWelcomeLayout();
+      }
     },
     scrollToBottom: sb,
     getActiveTabId: function () {

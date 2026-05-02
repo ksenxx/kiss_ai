@@ -291,8 +291,6 @@ _VSCODE_ONLY_COMMANDS = frozenset({
     "resolveDroppedPaths",
 })
 
-SAMPLE_TASKS_PATH = Path(__file__).parent / "SAMPLE_TASKS.json"
-
 _TLS_DIR = Path.home() / ".kiss" / "tls"
 _URL_FILE = Path.home() / ".kiss" / "remote-url.json"
 
@@ -710,7 +708,7 @@ width=device-width,initial-scale=1,maximum-scale=1">
     }}
   </style>
 </head>
-<body>
+<body class="remote-chat">
   <div id="app">
     <div id="tab-bar"><div id="tab-list"></div><button id="config-btn" title="Configuration">
               <svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -1332,18 +1330,15 @@ class RemoteAccessServer:
     def _send_welcome_info(self) -> None:
         """Broadcast welcome suggestions and the active remote URL.
 
-        Reads the sample tasks file shipped with the extension and
-        broadcasts a ``welcome_suggestions`` event (falls back to an
-        empty list if the file is missing).  Then broadcasts the
+        Broadcasts a ``welcome_suggestions`` event with an empty list
+        because the remote chat webview deliberately suppresses sample
+        task suggestions on the welcome page (the centered input
+        textbox is the only welcome-page UI).  Then broadcasts the
         ``remote_url`` event using the in-memory URL, the URL file, or
         the ``cloudflared`` metrics API as successive fallbacks.
         """
-        try:
-            suggestions = json.loads(SAMPLE_TASKS_PATH.read_text())
-        except Exception:
-            suggestions = []
         self._printer.broadcast({
-            "type": "welcome_suggestions", "suggestions": suggestions,
+            "type": "welcome_suggestions", "suggestions": [],
         })
 
         url: str | None = self._active_url

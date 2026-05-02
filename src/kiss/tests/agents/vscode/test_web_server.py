@@ -28,7 +28,6 @@ from kiss.agents.vscode.vscode_config import CONFIG_PATH, save_config
 from kiss.agents.vscode.web_server import (
     _TUNNEL_UNHEALTHY_LIMIT,
     _URL_FILE,
-    SAMPLE_TASKS_PATH,
     TUNNEL_CHECK_INTERVAL,
     RemoteAccessServer,
     WebPrinter,
@@ -93,6 +92,18 @@ class TestBuildHtml(unittest.TestCase):
         html = _build_html()
         self.assertNotIn("acquireVsCodeApi()", html.split("acquireVsCodeApi")[0])
         self.assertNotIn("webview.cspSource", html)
+
+    def test_body_has_remote_chat_class(self) -> None:
+        """Body carries ``remote-chat`` class so CSS/JS can branch on remote.
+
+        The remote-chat layout hides SAMPLE_TASKS suggestions on the
+        welcome page and centers the input textbox + buttons inside
+        ``#welcome``.  The frontend (``main.js`` and ``main.css``)
+        relies on ``body.remote-chat`` to enable that layout only for
+        the remote webview, not the bundled VS Code extension webview.
+        """
+        html = _build_html()
+        self.assertIn('<body class="remote-chat">', html)
 
 
 class TestTranslateWebviewCommand(unittest.TestCase):
@@ -4465,8 +4476,8 @@ class TestStopTunnelKillPath(IsolatedAsyncioTestCase):
         self.assertIsNotNone(proc.returncode)
 
 
-class TestWelcomeInfoMissingSampleTasks(IsolatedAsyncioTestCase):
-    """Test _send_welcome_info when SAMPLE_TASKS_PATH is missing (1262-1263)."""
+class TestRemoteWelcomeSuggestionsEmpty(IsolatedAsyncioTestCase):
+    """The remote chat webview must never expose SAMPLE_TASKS suggestions."""
 
     async def asyncSetUp(self) -> None:
         self.port = _find_free_port()
@@ -4487,21 +4498,7 @@ class TestWelcomeInfoMissingSampleTasks(IsolatedAsyncioTestCase):
         )
         await self.server.start_async()
 
-        # Temporarily move SAMPLE_TASKS_PATH
-        self._sample_backup: bytes | None = None
-        if SAMPLE_TASKS_PATH.is_file():
-            self._sample_backup = SAMPLE_TASKS_PATH.read_bytes()
-            SAMPLE_TASKS_PATH.rename(SAMPLE_TASKS_PATH.with_suffix(".bak"))
-
     async def asyncTearDown(self) -> None:
-        # Restore SAMPLE_TASKS_PATH
-        if self._sample_backup is not None:
-            bak = SAMPLE_TASKS_PATH.with_suffix(".bak")
-            if bak.exists():
-                bak.rename(SAMPLE_TASKS_PATH)
-            else:
-                SAMPLE_TASKS_PATH.write_bytes(self._sample_backup)
-
         await self.server.stop_async()
         if self._orig_config is not None:
             CONFIG_PATH.write_text(self._orig_config)
@@ -4512,8 +4509,14 @@ class TestWelcomeInfoMissingSampleTasks(IsolatedAsyncioTestCase):
         else:
             _URL_FILE.unlink(missing_ok=True)
 
-    async def test_welcome_info_with_missing_sample_tasks(self) -> None:
-        """welcome_suggestions falls back to empty list when file missing."""
+    async def test_remote_welcome_suggestions_always_empty(self) -> None:
+        """Remote welcome_suggestions event always carries an empty list.
+
+        The remote chat webview deliberately suppresses the
+        SAMPLE_TASKS.json suggestions and centers the input textbox on
+        the welcome page instead, so the backend must broadcast an
+        empty list regardless of whether SAMPLE_TASKS.json exists.
+        """
         async with connect(
             f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl(),
         ) as ws:

@@ -337,6 +337,22 @@ body {
 }
 #welcome h2 { font-size: var(--fs-2xl); font-weight: 600; color: var(--fg); margin-bottom: 3px; letter-spacing: -0.3px; }
 #welcome p { font-size: var(--fs-base); color: var(--dim); margin-bottom: 14px; }
+
+/*
+ * Remote-chat welcome layout: hide the SAMPLE_TASKS suggestions panel
+ * and center the (relocated) input textbox + buttons inside #welcome.
+ * The #input-area element is moved into #welcome by JS while welcome
+ * is visible and moved back to its original position once a task
+ * starts (see refreshWelcomeLayout in main.js).
+ */
+body.remote-chat #welcome { min-height: 100%; box-sizing: border-box; }
+body.remote-chat #welcome > #suggestions { display: none; }
+
+body.remote-chat #welcome > #input-area {
+  width: 100%; max-width: 720px;
+  border-top: none; background: transparent;
+  padding: 0;
+}
 #remote-url { width: 100%; margin-bottom: 10px; }
 
 .remote-url-bar {
