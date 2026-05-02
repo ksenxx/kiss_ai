@@ -833,7 +833,7 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
                   <line x1="12" y1="1.05" x2="12" y2="7"/>
                   <line x1="12" y1="17.01" x2="12" y2="22.96"/>
                 </svg>
-                <span>Auto commit changes</span>
+                <span>Auto commit</span>
               </button>
               <button id="demo-toggle-btn" class="menu-item">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
