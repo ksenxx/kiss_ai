@@ -1052,12 +1052,12 @@ body {
 .sidebar-item-delete {
   flex-shrink: 0; border: none; cursor: pointer; padding: 2px; margin-left: 4px;
   border-radius: 3px; line-height: 1; display: flex; align-items: center;
-  color: var(--fg); opacity: 0.45;
+  color: #000; opacity: 0.45;
   background: none;
   transition: opacity 0.15s, background 0.15s;
 }
 
-.sidebar-item-delete:hover { opacity: 0.9; background: color-mix(in srgb, var(--fg) 10%, transparent); }
+.sidebar-item-delete:hover { opacity: 0.9; background: color-mix(in srgb, #000 10%, transparent); }
 
 .sidebar-item-confirm {
   display: flex; align-items: center; gap: 4px; flex-shrink: 0; margin-left: 6px;
