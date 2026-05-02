@@ -751,13 +751,14 @@ class TestMainCssWorktreeToggle(unittest.TestCase):
         cls.css = (base / "vscode" / "media" / "main.css").read_text()
 
     def test_has_worktree_toggle_btn_base_style(self) -> None:
-        assert "#worktree-toggle-btn" in self.css
+        assert ".menu-item" in self.css
+        assert "#worktree-toggle-btn" not in self.css
 
     def test_has_worktree_toggle_btn_active_style(self) -> None:
-        assert "#worktree-toggle-btn.active" in self.css
+        assert ".menu-item.active" in self.css
 
     def test_active_uses_accent_color(self) -> None:
-        idx = self.css.index("#worktree-toggle-btn.active")
+        idx = self.css.index(".menu-item.active")
         block = self.css[idx : idx + 200]
         assert "accent" in block
 
@@ -775,8 +776,10 @@ class TestSorcarTabWorktreeToggle(unittest.TestCase):
     def test_has_worktree_toggle_btn(self) -> None:
         assert 'id="worktree-toggle-btn"' in self.html
 
-    def test_has_use_worktree_tooltip(self) -> None:
-        assert 'data-tooltip="Use worktree"' in self.html
+    def test_has_use_worktree_menu_label(self) -> None:
+        idx = self.html.index('id="worktree-toggle-btn"')
+        block = self.html[idx : self.html.index("</button>", idx)]
+        assert "Use worktree" in block
 
     def test_button_is_after_upload(self) -> None:
         upload_idx = self.html.index('id="upload-btn"')
@@ -1070,13 +1073,14 @@ class TestMainCssParallelToggle(unittest.TestCase):
         cls.css = (base / "vscode" / "media" / "main.css").read_text()
 
     def test_has_parallel_toggle_btn_base_style(self) -> None:
-        assert "#parallel-toggle-btn" in self.css
+        assert ".menu-item" in self.css
+        assert "#parallel-toggle-btn" not in self.css
 
     def test_has_parallel_toggle_btn_active_style(self) -> None:
-        assert "#parallel-toggle-btn.active" in self.css
+        assert ".menu-item.active" in self.css
 
     def test_active_uses_accent_color(self) -> None:
-        idx = self.css.index("#parallel-toggle-btn.active")
+        idx = self.css.index(".menu-item.active")
         block = self.css[idx : idx + 200]
         assert "accent" in block
 
@@ -1094,8 +1098,10 @@ class TestSorcarTabParallelToggle(unittest.TestCase):
     def test_has_parallel_toggle_btn(self) -> None:
         assert 'id="parallel-toggle-btn"' in self.html
 
-    def test_has_use_parallelism_tooltip(self) -> None:
-        assert 'data-tooltip="Use parallelism"' in self.html
+    def test_has_use_parallelism_menu_label(self) -> None:
+        idx = self.html.index('id="parallel-toggle-btn"')
+        block = self.html[idx : self.html.index("</button>", idx)]
+        assert "Use parallelism" in block
 
     def test_button_is_after_worktree(self) -> None:
         worktree_idx = self.html.index('id="worktree-toggle-btn"')
@@ -2185,10 +2191,12 @@ class TestRunningStateDisablesButtons(unittest.TestCase):
         assert "#upload-btn:disabled" in self.css
 
     def test_css_worktree_btn_disabled_style(self) -> None:
-        assert "#worktree-toggle-btn:disabled" in self.css
+        assert ".menu-item:disabled" in self.css
+        assert "#worktree-toggle-btn:disabled" not in self.css
 
     def test_css_parallel_btn_disabled_style(self) -> None:
-        assert "#parallel-toggle-btn:disabled" in self.css
+        assert ".menu-item:disabled" in self.css
+        assert "#parallel-toggle-btn:disabled" not in self.css
 
     def test_css_no_history_btn_disabled_style(self) -> None:
         assert "#history-btn:disabled" not in self.css
