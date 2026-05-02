@@ -2462,6 +2462,10 @@
     if (worktreeToggleBtn) worktreeToggleBtn.disabled = running;
     if (parallelToggleBtn) parallelToggleBtn.disabled = running;
     if (demoToggleBtn) demoToggleBtn.disabled = running;
+    const mb = document.getElementById('menu-btn');
+    if (mb) mb.disabled = running;
+    const md = document.getElementById('menu-dropdown');
+    if (running && md) md.classList.remove('open');
     if (modelBtn) {
       modelBtn.disabled = running;
       if (running) closeModelDD();
@@ -3069,6 +3073,21 @@
       input.onchange = handleFileSelect;
       input.click();
     });
+    const menuBtn = document.getElementById('menu-btn');
+    const menuDropdown = document.getElementById('menu-dropdown');
+    if (menuBtn && menuDropdown) {
+      menuBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        closeModelDD();
+        menuDropdown.classList.toggle('open');
+      });
+      document.addEventListener('click', e => {
+        if (!menuDropdown.contains(e.target) && e.target !== menuBtn) {
+          menuDropdown.classList.remove('open');
+        }
+      });
+    }
+
     if (worktreeToggleBtn) {
       worktreeToggleBtn.addEventListener('click', () => {
         worktreeToggleBtn.classList.toggle('active');
@@ -3119,6 +3138,7 @@
     modelBtn.addEventListener('click', e => {
       e.stopPropagation();
       if (isRunning) return;
+      if (menuDropdown) menuDropdown.classList.remove('open');
       if (modelDropdown.classList.contains('open')) {
         closeModelDD();
         return;

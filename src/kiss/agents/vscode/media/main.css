@@ -781,57 +781,41 @@ body {
   background: none; border: none;
   color: color-mix(in srgb, var(--fg) 50%, transparent); cursor: pointer;
   padding: 4px; transition: color 0.15s, opacity 0.15s;
-  display: flex; align-items: center;
+  display: flex; align-items: center; position: relative;
 }
-#menu-btn:hover { color: color-mix(in srgb, var(--fg) 66%, transparent); }
+#menu-btn:hover:not(:disabled) { color: color-mix(in srgb, var(--fg) 66%, transparent); }
+#menu-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 
-#worktree-toggle-btn {
+/* Menu dropdown */
+#menu-dropdown {
+  position: absolute; bottom: 100%; left: 0;
+  min-width: 200px;
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 8px;
+  display: none; flex-direction: column; padding: 4px 0;
+  z-index: 100; box-shadow: 0 -4px 20px rgb(0 0 0 / 40%); margin-bottom: 6px;
+}
+#menu-dropdown.open { display: flex; }
+
+.menu-item {
   background: none; border: none;
-  color: color-mix(in srgb, var(--fg) 50%, transparent); cursor: pointer;
-  padding: 4px; transition: color 0.15s, opacity 0.15s;
-  display: flex; align-items: center;
+  color: color-mix(in srgb, var(--fg) 70%, transparent);
+  cursor: pointer; padding: 7px 12px;
+  display: flex; align-items: center; gap: 8px;
+  font-size: var(--fs-base); font-family: inherit;
+  transition: background 0.12s, color 0.12s;
+  white-space: nowrap; text-align: left;
 }
-#worktree-toggle-btn:hover { color: color-mix(in srgb, var(--fg) 66%, transparent); }
+.menu-item:hover:not(:disabled) { background: color-mix(in srgb, var(--fg) 8%, transparent); color: var(--fg); }
+.menu-item:disabled { opacity: 0.35; cursor: not-allowed; }
+.menu-item svg { flex-shrink: 0; opacity: 0.6; }
 
-#worktree-toggle-btn.active {
+.menu-item.active {
   color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-  border-radius: 4px;
 }
-#worktree-toggle-btn.active:hover { color: var(--accent); }
+.menu-item.active svg { opacity: 1; }
+.menu-item.active:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
 
-#parallel-toggle-btn {
-  background: none; border: none;
-  color: color-mix(in srgb, var(--fg) 50%, transparent); cursor: pointer;
-  padding: 4px; transition: color 0.15s, opacity 0.15s;
-  display: flex; align-items: center;
-}
-#parallel-toggle-btn:hover { color: color-mix(in srgb, var(--fg) 66%, transparent); }
-
-#parallel-toggle-btn.active {
-  color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-  border-radius: 4px;
-}
-#parallel-toggle-btn.active:hover { color: var(--accent); }
-
-#upload-btn:disabled, #worktree-toggle-btn:disabled, #parallel-toggle-btn:disabled { opacity: 0.3; cursor: not-allowed; }
-
-#demo-toggle-btn {
-  background: none; border: none;
-  color: color-mix(in srgb, var(--fg) 50%, transparent); cursor: pointer;
-  padding: 4px; transition: color 0.15s, opacity 0.15s;
-  display: flex; align-items: center;
-}
-#demo-toggle-btn:hover { color: color-mix(in srgb, var(--fg) 66%, transparent); }
-
-#demo-toggle-btn.active {
-  color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-  border-radius: 4px;
-}
-#demo-toggle-btn.active:hover { color: var(--accent); }
-#demo-toggle-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+#upload-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 
 #model-dropdown {
   position: absolute; bottom: 100%; left: 0; min-width: min(280px, calc(100vw - 24px)); max-width: min(380px, calc(100vw - 24px));
