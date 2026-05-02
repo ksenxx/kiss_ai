@@ -910,8 +910,10 @@ def get_available_models() -> list[str]:
     }
     import shutil
 
+    from kiss.core.models.codex_model import find_codex_executable
+
     has_claude_cli = shutil.which("claude") is not None
-    has_codex_cli = shutil.which("codex") is not None
+    has_codex_cli = find_codex_executable() is not None
     result = []
     for name, info in MODEL_INFO.items():
         if not info.is_generation_supported:
@@ -951,6 +953,8 @@ def get_fast_model() -> str:
     """
     import shutil
 
+    from kiss.core.models.codex_model import find_codex_executable
+
     keys = config_module.DEFAULT_CONFIG
     if keys.ANTHROPIC_API_KEY:
         return "claude-haiku-4-5"
@@ -964,7 +968,7 @@ def get_fast_model() -> str:
         return "deepseek-ai/DeepSeek-R1-0528"
     if shutil.which("claude") is not None:
         return "cc/haiku"
-    if shutil.which("codex") is not None:
+    if find_codex_executable() is not None:
         return "codex/default"
     return "No model"
 
@@ -976,6 +980,8 @@ def get_default_model() -> str:
     Falls back to ``"claude-opus-4-6"`` if no keys are set.
     """
     import shutil
+
+    from kiss.core.models.codex_model import find_codex_executable
 
     keys = config_module.DEFAULT_CONFIG
     if keys.ANTHROPIC_API_KEY:
@@ -990,7 +996,7 @@ def get_default_model() -> str:
         return "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8"
     if shutil.which("claude") is not None:
         return "cc/opus"
-    if shutil.which("codex") is not None:
+    if find_codex_executable() is not None:
         return "codex/default"
     return "No model"
 

@@ -1,11 +1,19 @@
 """Tests for CodexModel — Codex CLI backend."""
 
 import shutil
+import stat
+from pathlib import Path
 
 import pytest
 
 from kiss.core.kiss_error import KISSError
-from kiss.core.models.codex_model import CodexModel, _find_codex_cli
+from kiss.core.models import codex_model as codex_module
+from kiss.core.models.codex_model import (
+    CodexModel,
+    _find_codex_cli,
+    _find_in_candidate_paths,
+    find_codex_executable,
+)
 from kiss.core.models.model_info import MODEL_INFO, model
 
 _has_codex = shutil.which("codex") is not None
@@ -15,9 +23,121 @@ requires_codex_cli = pytest.mark.skipif(not _has_codex, reason="codex CLI not in
 class TestFindCodexCli:
 
     def test_find_codex_cli_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Hide both the CLI on PATH and any Codex UI installation so the
+        # full fallback chain is exhausted.
         monkeypatch.setattr(shutil, "which", lambda _name: None)
+        monkeypatch.setattr(codex_module, "_UI_CANDIDATE_PATHS", ())
         with pytest.raises(KISSError, match="not found"):
             _find_codex_cli()
+
+
+class TestFindInCandidatePaths:
+    """Tests for ``_find_in_candidate_paths`` using real files."""
+
+    def test_returns_none_when_no_candidate_exists(self, tmp_path: Path) -> None:
+        nonexistent = tmp_path / "missing-codex"
+        assert _find_in_candidate_paths([str(nonexistent)]) is None
+
+    def test_skips_non_executable_files(self, tmp_path: Path) -> None:
+        non_exec = tmp_path / "codex-noexec"
+        non_exec.write_text("#!/bin/sh\necho hi\n")
+        # Explicitly remove all execute bits.
+        non_exec.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        assert _find_in_candidate_paths([str(non_exec)]) is None
+
+    def test_returns_first_executable_match(self, tmp_path: Path) -> None:
+        first = tmp_path / "first-codex"
+        second = tmp_path / "second-codex"
+        for f in (first, second):
+            f.write_text("#!/bin/sh\necho hi\n")
+            f.chmod(0o755)
+        # Order matters: first listed wins.
+        result = _find_in_candidate_paths([str(first), str(second)])
+        assert result == str(first)
+
+    def test_skips_missing_then_finds_existing(self, tmp_path: Path) -> None:
+        missing = tmp_path / "no-such-codex"
+        existing = tmp_path / "real-codex"
+        existing.write_text("#!/bin/sh\necho hi\n")
+        existing.chmod(0o755)
+        result = _find_in_candidate_paths([str(missing), str(existing)])
+        assert result == str(existing)
+
+    def test_expands_user_home(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Pretend $HOME is tmp_path, then reference the binary via "~".
+        monkeypatch.setenv("HOME", str(tmp_path))
+        bin_path = tmp_path / "codex-home"
+        bin_path.write_text("#!/bin/sh\necho hi\n")
+        bin_path.chmod(0o755)
+        result = _find_in_candidate_paths(["~/codex-home"])
+        assert result == str(bin_path)
+
+
+class TestFindCodexExecutable:
+    """Tests for the public ``find_codex_executable`` helper."""
+
+    def test_prefers_path_when_available(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Stage a fake codex on a directory we put on PATH.
+        path_codex = tmp_path / "codex"
+        path_codex.write_text("#!/bin/sh\necho hi\n")
+        path_codex.chmod(0o755)
+        monkeypatch.setenv("PATH", str(tmp_path))
+        # Even if a UI candidate also exists, PATH should win.
+        ui_codex = tmp_path / "ui-codex"
+        ui_codex.write_text("#!/bin/sh\necho hi\n")
+        ui_codex.chmod(0o755)
+        monkeypatch.setattr(codex_module, "_UI_CANDIDATE_PATHS", (str(ui_codex),))
+        assert find_codex_executable() == str(path_codex)
+
+    def test_falls_back_to_ui_when_not_on_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Empty PATH so shutil.which("codex") returns None.
+        empty_dir = tmp_path / "empty"
+        empty_dir.mkdir()
+        monkeypatch.setenv("PATH", str(empty_dir))
+        # A Codex UI-style binary lives elsewhere.
+        ui_codex = tmp_path / "ui-codex"
+        ui_codex.write_text("#!/bin/sh\necho hi\n")
+        ui_codex.chmod(0o755)
+        monkeypatch.setattr(codex_module, "_UI_CANDIDATE_PATHS", (str(ui_codex),))
+        assert find_codex_executable() == str(ui_codex)
+
+    def test_returns_none_when_neither_available(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        empty_dir = tmp_path / "empty"
+        empty_dir.mkdir()
+        monkeypatch.setenv("PATH", str(empty_dir))
+        monkeypatch.setattr(codex_module, "_UI_CANDIDATE_PATHS", ())
+        assert find_codex_executable() is None
+
+
+class TestUiCandidatePaths:
+    """Sanity checks on the hard-coded UI candidate path list."""
+
+    def test_includes_macos_system_app_bundle(self) -> None:
+        assert (
+            "/Applications/Codex.app/Contents/Resources/codex"
+            in codex_module._UI_CANDIDATE_PATHS
+        )
+
+    def test_includes_macos_user_app_bundle(self) -> None:
+        assert (
+            "~/Applications/Codex.app/Contents/Resources/codex"
+            in codex_module._UI_CANDIDATE_PATHS
+        )
+
+    def test_includes_windows_install_path(self) -> None:
+        assert any(
+            "AppData/Local/Programs" in p and p.endswith("codex.exe")
+            for p in codex_module._UI_CANDIDATE_PATHS
+        )
+
+    def test_includes_linux_install_path(self) -> None:
+        assert "/opt/Codex/resources/codex" in codex_module._UI_CANDIDATE_PATHS
 
 
 class TestCliModelName:

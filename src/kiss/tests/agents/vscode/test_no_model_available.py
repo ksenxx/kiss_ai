@@ -46,8 +46,13 @@ class TestNoModelAvailableResultEvent(TestCase):
         # provider lookups in get_available_models) returns None — without
         # this, machines with the Claude Code CLI installed report cc/*
         # models as available even when every API key is empty, which
-        # bypasses the no-model gate this test is exercising.
+        # bypasses the no-model gate this test is exercising.  Likewise,
+        # the Codex backend falls back to the Codex desktop UI's bundled
+        # binary, so we must also clear that candidate-path list.
+        from kiss.core.models import codex_model as codex_module
+
         saved_path = os.environ.get("PATH", "")
+        saved_codex_paths = codex_module._UI_CANDIDATE_PATHS
         try:
             keys.ANTHROPIC_API_KEY = ""
             keys.OPENAI_API_KEY = ""
@@ -56,6 +61,7 @@ class TestNoModelAvailableResultEvent(TestCase):
             keys.OPENROUTER_API_KEY = ""
             keys.MINIMAX_API_KEY = ""
             os.environ["PATH"] = ""
+            codex_module._UI_CANDIDATE_PATHS = ()
 
             server = _make_server()
             events: list[dict[str, Any]] = []
@@ -118,6 +124,7 @@ class TestNoModelAvailableResultEvent(TestCase):
             for attr, val in saved.items():
                 setattr(keys, attr, val)
             os.environ["PATH"] = saved_path
+            codex_module._UI_CANDIDATE_PATHS = saved_codex_paths
 
     def test_with_model_proceeds_normally(self) -> None:
         """When API keys are set, task should proceed to agent.run()."""
