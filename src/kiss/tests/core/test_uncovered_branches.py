@@ -227,7 +227,12 @@ class TestGetAvailableModels:
             for k in env_keys:
                 os.environ.pop(k, None)
             config_module.DEFAULT_CONFIG = config_module.Config()
-            assert get_default_model() == "claude-opus-4-6"
+            import shutil
+
+            if shutil.which("claude") is not None:
+                assert get_default_model() == "cc/opus"
+            else:
+                assert get_default_model() == "claude-opus-4-6"
 
             os.environ["TOGETHER_API_KEY"] = "t"
             config_module.DEFAULT_CONFIG = config_module.Config()

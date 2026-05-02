@@ -22,7 +22,11 @@ from typing import Any
 
 from kiss.agents.sorcar.persistence import (
     _append_chat_event,
+    _chat_has_tasks,
+    _delete_task,
     _get_adjacent_task_by_chat_id,
+    _get_task_chat_id,
+    _load_frequent_tasks,
     _load_history,
     _load_last_model,
     _load_latest_chat_events_by_chat_id,
@@ -203,16 +207,74 @@ class VSCodeServer(
             task = str(entry.get("task", ""))
             has_events = bool(entry.get("has_events", False))
             chat_id = str(entry.get("chat_id", "") or "")
+            result = str(entry.get("result", "") or "")
             sessions.append({
                 "id": chat_id,
+                "task_id": entry.get("id"),
                 "title": task[:50] + "..." if len(task) > 50 else task,
                 "timestamp": entry.get("timestamp", 0),
                 "preview": task,
                 "has_events": has_events,
+                "failed": (
+                    result.startswith("Task failed")
+                    or result == "Agent Failed Abruptly"
+                ),
             })
         self.printer.broadcast({
             "type": "history", "sessions": sessions,
             "offset": offset, "generation": generation,
+        })
+
+    def _handle_delete_task(self, task_id: int) -> None:
+        """Delete a task and its associated events from the database
+        and broadcast a ``taskDeleted`` event so any open chat tab
+        that displays this task or its chat can prune its UI.
+
+        The history sidebar is removed optimistically by the
+        frontend on click, but open tabs that show the deleted task
+        (as the current task or as an adjacent-task block from
+        scroll-loaded chat history) need to react too.  We therefore
+        look up the task's chat_id *before* deleting, and after
+        deletion broadcast::
+
+            {
+                "type": "taskDeleted",
+                "taskId": <int>,
+                "chatId": <str>,
+                "chatHasMoreTasks": <bool>,
+            }
+
+        ``chatHasMoreTasks`` lets the frontend decide whether to
+        merely remove a single ``.adjacent-task`` block or close the
+        whole tab (when the chat is now empty).
+
+        Args:
+            task_id: The primary key of the task_history row to
+                delete.
+        """
+        chat_id = _get_task_chat_id(task_id)
+        if not _delete_task(task_id):
+            return
+        self.printer.broadcast({
+            "type": "taskDeleted",
+            "taskId": task_id,
+            "chatId": chat_id,
+            "chatHasMoreTasks": _chat_has_tasks(chat_id),
+        })
+
+    def _get_frequent_tasks(self, limit: int = 20) -> None:
+        """Send the top *limit* most-frequent tasks (highest count first).
+
+        Broadcasts a ``frequentTasks`` event whose ``tasks`` field is a
+        list of ``{task, count, timestamp}`` dicts ordered by ``count``
+        descending.
+
+        Args:
+            limit: Maximum number of frequent tasks to return.
+        """
+        self.printer.broadcast({
+            "type": "frequentTasks",
+            "tasks": _load_frequent_tasks(limit=limit),
         })
 
     def _get_input_history(self) -> None:
@@ -276,12 +338,25 @@ class VSCodeServer(
         task, no in-progress merge, no pending worktree, no carried-over
         warnings) to guard against here.
 
+        Re-reads the last user-picked model from the database so the new
+        tab uses the correct model even when the in-memory default has
+        drifted (e.g. after switching between tabs with different models).
+
         Args:
             tab_id: The frontend tab identifier (a freshly-minted uuid).
         """
+        persisted = _load_last_model()
+        if persisted:
+            self._default_model = persisted
         tab = self._get_tab(tab_id)
+        with self._state_lock:
+            tab.selected_model = self._default_model
         tab.agent.new_chat()
-        self.printer.broadcast({"type": "showWelcome", "tabId": tab_id})
+        self.printer.broadcast({
+            "type": "showWelcome",
+            "tabId": tab_id,
+            "model": self._default_model,
+        })
 
     def _replay_session(self, chat_id: str, tab_id: str = "") -> None:
         """Replay recorded chat events for a previous chat session.
@@ -320,6 +395,7 @@ class VSCodeServer(
             "type": "task_events",
             "events": result["events"],
             "task": result["task"],
+            "task_id": result.get("task_id"),
             "chat_id": chat_id,
             "extra": result.get("extra", ""),
             "tabId": tab_id,
@@ -389,6 +465,7 @@ class VSCodeServer(
             "type": "adjacent_task_events",
             "direction": direction,
             "task": result["task"] if result else "",
+            "task_id": result["task_id"] if result else None,
             "events": result["events"] if result else [],
             "tabId": tab_id,
         }
@@ -397,6 +474,17 @@ class VSCodeServer(
     def _generate_commit_message(self) -> None:
         """Generate a git commit message from current changes."""
         try:
+            from pathlib import Path
+
+            from kiss.agents.sorcar.git_worktree import GitWorktreeOps
+
+            if GitWorktreeOps.discover_repo(Path(self.work_dir)) is None:
+                self.printer.broadcast({
+                    "type": "commitMessage",
+                    "message": "",
+                    "error": "Not a git repository.",
+                })
+                return
             cached_result = _git(self.work_dir, "diff", "--cached")
             diff_text = cached_result.stdout.strip()
             if not diff_text:  # pragma: no branch — LLM API required for else

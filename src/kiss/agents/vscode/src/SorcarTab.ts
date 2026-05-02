@@ -82,6 +82,10 @@ export function buildChatHtml(
               <svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/>
               </svg>
+            </button><button id="frequent-btn" title="Frequent tasks">
+              <svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="20 12 18 7 14 17 10 5 6 14 4 12"/>
+              </svg>
             </button><button id="history-btn">
               <svg class="history-chevron" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
                 <polyline points="15 18 9 12 15 6"/>
@@ -111,7 +115,6 @@ export function buildChatHtml(
       <div id="welcome">
         <h2>Welcome to KISS Sorcar</h2>
         <p>Your AI assistant. Ask me anything!</p>
-        <div id="remote-url"></div>
         <div id="suggestions"></div>
       </div>
     </div>
@@ -136,23 +139,27 @@ export function buildChatHtml(
             <button id="upload-btn" data-tooltip="Attach files">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
             </button>
-            <button id="worktree-toggle-btn" data-tooltip="Use worktree">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 01-9 9"/></svg>
+            <button id="menu-btn" data-tooltip="Advanced options">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
             </button>
-            <button id="parallel-toggle-btn" data-tooltip="Use parallelism">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="4" x2="6" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/><line x1="18" y1="4" x2="18" y2="20"/></svg>
-            </button>
-            <button id="autocommit-btn" data-tooltip="Auto commit changes">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><line x1="1.05" y1="12" x2="7" y2="12"/><line x1="17.01" y1="12" x2="22.96" y2="12"/><line x1="12" y1="1.05" x2="12" y2="7"/><line x1="12" y1="17.01" x2="12" y2="22.96"/></svg>
-            </button>
-
-            <button id="demo-toggle-btn" data-tooltip="Toggle demo mode">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
-                <line x1="8" y1="21" x2="16" y2="21"/>
-                <line x1="12" y1="17" x2="12" y2="21"/>
-              </svg>
-            </button>
+            <div id="menu-dropdown">
+              <button id="worktree-toggle-btn" class="menu-item">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 01-9 9"/></svg>
+                <span>Use worktree</span>
+              </button>
+              <button id="parallel-toggle-btn" class="menu-item">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="4" x2="6" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/><line x1="18" y1="4" x2="18" y2="20"/></svg>
+                <span>Use parallelism</span>
+              </button>
+              <button id="autocommit-btn" class="menu-item">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><line x1="1.05" y1="12" x2="7" y2="12"/><line x1="17.01" y1="12" x2="22.96" y2="12"/><line x1="12" y1="1.05" x2="12" y2="7"/><line x1="12" y1="17.01" x2="12" y2="22.96"/></svg>
+                <span>Auto commit</span>
+              </button>
+              <button id="demo-toggle-btn" class="menu-item">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+                <span>Demo mode</span>
+              </button>
+            </div>
             <div id="model-dropdown">
               <div class="search-wrap">
                 <input type="text" id="model-search" placeholder="Search models...">
@@ -189,10 +196,22 @@ export function buildChatHtml(
     </div>
     <div id="sidebar-overlay"></div>
 
+    <div id="frequent-sidebar">
+      <button id="frequent-sidebar-close">&times;</button>
+      <div class="sidebar-section">
+        <div class="sidebar-hdr">Frequent Tasks</div>
+        <div id="frequent-list">
+          <div class="sidebar-empty">No tasks yet</div>
+        </div>
+      </div>
+    </div>
+    <div id="frequent-sidebar-overlay"></div>
+
     <div id="config-sidebar">
       <button id="config-sidebar-close">&times;</button>
       <div class="sidebar-section">
         <div class="sidebar-hdr">Sorcar Configuration${version ? ' ' + version : ''}</div>
+        <div id="remote-url"></div>
         <div id="config-form">
           <label class="config-label">Max budget per task ($)
             <input type="number" id="cfg-max-budget" min="0" step="1" value="100">
@@ -201,7 +220,7 @@ export function buildChatHtml(
             <input type="text" id="cfg-custom-endpoint" placeholder="http://localhost:8080/v1">
           </label>
           <label class="config-label">Custom API key
-            <input type="password" id="cfg-custom-api-key" placeholder="Optional API key for custom endpoint">
+            <input type="text" id="cfg-custom-api-key" placeholder="Optional API key for custom endpoint">
           </label>
           <label class="config-label config-checkbox">
             <input type="checkbox" id="cfg-use-web-browser" checked>
@@ -213,22 +232,22 @@ export function buildChatHtml(
           <div class="config-divider"></div>
           <div class="sidebar-hdr" style="margin-top:8px;">API Keys</div>
           <label class="config-label">Gemini API Key
-            <input type="password" id="cfg-key-GEMINI_API_KEY" placeholder="Enter Gemini API key">
+            <input type="text" id="cfg-key-GEMINI_API_KEY" placeholder="Enter Gemini API key">
           </label>
           <label class="config-label">OpenAI API Key
-            <input type="password" id="cfg-key-OPENAI_API_KEY" placeholder="Enter OpenAI API key">
+            <input type="text" id="cfg-key-OPENAI_API_KEY" placeholder="Enter OpenAI API key">
           </label>
           <label class="config-label">Anthropic API Key
-            <input type="password" id="cfg-key-ANTHROPIC_API_KEY" placeholder="Enter Anthropic API key">
+            <input type="text" id="cfg-key-ANTHROPIC_API_KEY" placeholder="Enter Anthropic API key">
           </label>
           <label class="config-label">Together API Key
-            <input type="password" id="cfg-key-TOGETHER_API_KEY" placeholder="Enter Together API key">
+            <input type="text" id="cfg-key-TOGETHER_API_KEY" placeholder="Enter Together API key">
           </label>
           <label class="config-label">OpenRouter API Key
-            <input type="password" id="cfg-key-OPENROUTER_API_KEY" placeholder="Enter OpenRouter API key">
+            <input type="text" id="cfg-key-OPENROUTER_API_KEY" placeholder="Enter OpenRouter API key">
           </label>
           <label class="config-label">MiniMax API Key
-            <input type="password" id="cfg-key-MINIMAX_API_KEY" placeholder="Enter MiniMax API key">
+            <input type="text" id="cfg-key-MINIMAX_API_KEY" placeholder="Enter MiniMax API key">
           </label>
           <button id="cfg-save-btn" class="config-save-btn">Save Configuration</button>
         </div>
