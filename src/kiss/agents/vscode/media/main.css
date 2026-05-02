@@ -417,6 +417,7 @@ body {
   font-size: var(--fs-base); line-height: 1.5; color: color-mix(in srgb, var(--fg) 93%, transparent);
   padding: 4px 10px; white-space: pre-wrap; word-break: break-word;
 }
+.txt.md-body { white-space: normal; }
 
 .txt code {
   background: color-mix(in srgb, var(--fg) 8%, transparent); padding: 2px 6px; border-radius: 4px;
