@@ -82,6 +82,10 @@ export function buildChatHtml(
               <svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/>
               </svg>
+            </button><button id="frequent-btn" title="Frequent tasks">
+              <svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="20 12 18 7 14 17 10 5 6 14 4 12"/>
+              </svg>
             </button><button id="history-btn">
               <svg class="history-chevron" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
                 <polyline points="15 18 9 12 15 6"/>
@@ -191,6 +195,17 @@ export function buildChatHtml(
       </div>
     </div>
     <div id="sidebar-overlay"></div>
+
+    <div id="frequent-sidebar">
+      <button id="frequent-sidebar-close">&times;</button>
+      <div class="sidebar-section">
+        <div class="sidebar-hdr">Frequent Tasks</div>
+        <div id="frequent-list">
+          <div class="sidebar-empty">No tasks yet</div>
+        </div>
+      </div>
+    </div>
+    <div id="frequent-sidebar-overlay"></div>
 
     <div id="config-sidebar">
       <button id="config-sidebar-close">&times;</button>

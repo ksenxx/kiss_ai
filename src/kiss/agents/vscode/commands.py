@@ -46,6 +46,7 @@ class _CommandsMixin:
         def _get_history(
             self, query: str | None, offset: int = 0, generation: int = 0
         ) -> None: ...
+        def _get_frequent_tasks(self, limit: int = 20) -> None: ...
         def _get_files(self, prefix: str) -> None: ...
         def _refresh_file_cache(self) -> None: ...
         def _replay_session(self, chat_id: str, tab_id: str = "") -> None: ...
@@ -115,6 +116,10 @@ class _CommandsMixin:
     def _cmd_get_history(self, cmd: dict[str, Any]) -> None:
         """Send conversation history."""
         self._get_history(cmd.get("query"), cmd.get("offset", 0), cmd.get("generation", 0))
+
+    def _cmd_get_frequent_tasks(self, cmd: dict[str, Any]) -> None:
+        """Send the top-N most-frequent tasks (default 20)."""
+        self._get_frequent_tasks(int(cmd.get("limit", 20)))
 
     def _cmd_delete_task(self, cmd: dict[str, Any]) -> None:
         """Delete a task from the database and refresh history."""
@@ -305,6 +310,7 @@ class _CommandsMixin:
         "getModels": _cmd_get_models,
         "selectModel": _cmd_select_model,
         "getHistory": _cmd_get_history,
+        "getFrequentTasks": _cmd_get_frequent_tasks,
         "deleteTask": _cmd_delete_task,
         "getFiles": _cmd_get_files,
         "refreshFiles": _cmd_refresh_files,

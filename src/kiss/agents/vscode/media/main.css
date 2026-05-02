@@ -117,7 +117,8 @@ body {
   transform: rotate(-90deg);
 }
 
-#tab-bar > #config-btn {
+#tab-bar > #config-btn,
+#tab-bar > #frequent-btn {
   flex-shrink: 0;
   background: none;
   border: none;
@@ -129,8 +130,12 @@ body {
   font-size: var(--fs-base);
   transition: color 0.15s;
 }
-#tab-bar > #config-btn:hover { color: var(--fg); }
-#tab-bar > #config-btn.open { color: var(--accent); }
+
+#tab-bar > #config-btn:hover,
+#tab-bar > #frequent-btn:hover { color: var(--fg); }
+
+#tab-bar > #config-btn.open,
+#tab-bar > #frequent-btn.open { color: var(--accent); }
 
 /* ── Config Sidebar ─────────────────────────────────── */
 #config-sidebar {
@@ -970,7 +975,8 @@ body.remote-chat #welcome > #input-area {
 }
 
 /* ── Sidebar ────────────────────────────────────────── */
-#sidebar {
+#sidebar,
+#frequent-sidebar {
   position: fixed;
   right: 0;
   top: 0;
@@ -986,19 +992,50 @@ body.remote-chat #welcome > #input-area {
   display: flex;
   flex-direction: column;
 }
-#sidebar.open { transform: translateX(0); }
 
-#sidebar-overlay {
+#sidebar.open,
+#frequent-sidebar.open { transform: translateX(0); }
+
+#sidebar-overlay,
+#frequent-sidebar-overlay {
   position: fixed; inset: 0; background: rgb(0 0 0 / 50%);
   z-index: 199; opacity: 0; pointer-events: none; transition: opacity 0.2s ease;
 }
-#sidebar-overlay.open { opacity: 1; pointer-events: auto; }
 
-#sidebar-close {
+#sidebar-overlay.open,
+#frequent-sidebar-overlay.open { opacity: 1; pointer-events: auto; }
+
+#sidebar-close,
+#frequent-sidebar-close {
   position: absolute; top: 12px; right: 12px; background: none; border: none;
   color: color-mix(in srgb, var(--fg) 50%, transparent); font-size: var(--fs-2xl); cursor: pointer; padding: 4px 8px; border-radius: 4px;
 }
-#sidebar-close:hover { color: color-mix(in srgb, var(--fg) 83%, transparent); background: color-mix(in srgb, var(--fg) 8%, transparent); }
+
+#sidebar-close:hover,
+#frequent-sidebar-close:hover { color: color-mix(in srgb, var(--fg) 83%, transparent); background: color-mix(in srgb, var(--fg) 8%, transparent); }
+
+#frequent-list {
+  flex: 1;
+  overflow-y: auto;
+  margin-top: 8px;
+}
+
+.frequent-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.frequent-item-count {
+  flex-shrink: 0;
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+  color: color-mix(in srgb, #000 65%, transparent);
+  padding: 2px 6px;
+  border-radius: 10px;
+  background: color-mix(in srgb, #000 8%, transparent);
+}
 
 .sidebar-section {
   margin-top: 24px;

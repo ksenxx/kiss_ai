@@ -15,6 +15,7 @@ from kiss.agents.sorcar.persistence import (
     _add_task,
     _load_chat_context,
     _load_task_chat_id,
+    _record_frequent_task,
     _save_task_extra,
     _save_task_result,
 )
@@ -116,6 +117,7 @@ class ChatSorcarAgent(SorcarAgent):
         agent_prompt = self.build_chat_prompt(prompt_template)
         task_id, self._chat_id = _add_task(prompt_template, chat_id=self._chat_id)
         self._last_task_id = task_id
+        _record_frequent_task(prompt_template)
 
         result_summary = ""
         try:

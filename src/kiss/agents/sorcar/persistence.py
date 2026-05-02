@@ -29,6 +29,11 @@ _DB_PATH = _KISS_DIR / "sorcar.db"
 
 _MAX_FILE_USAGE_ENTRIES = 10000
 
+#: Maximum number of rows kept in the ``frequent_tasks`` table.  When a
+#: new task is inserted that exceeds this cap, the row with the lowest
+#: count and oldest timestamp is evicted.
+_MAX_FREQUENT_TASKS = 100
+
 
 def _ensure_kiss_dir() -> None:
     _KISS_DIR.mkdir(parents=True, exist_ok=True)
@@ -89,6 +94,11 @@ def _init_tables(conn: sqlite3.Connection) -> None:
             path TEXT NOT NULL UNIQUE,
             count INTEGER DEFAULT 0,
             last_used REAL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS frequent_tasks (
+            task TEXT PRIMARY KEY,
+            count INTEGER NOT NULL DEFAULT 0,
+            timestamp REAL NOT NULL DEFAULT 0
         );
     """)
     conn.executescript("""
@@ -733,5 +743,71 @@ def _record_file_usage(path: str) -> None:
                 (_MAX_FILE_USAGE_ENTRIES,),
             )
         db.commit()
+
+
+def _record_frequent_task(task: str) -> None:
+    """Increment the run-count of *task* and refresh its timestamp.
+
+    Upserts a row in the ``frequent_tasks`` table so that subsequent
+    calls with the same *task* increment its ``count`` and update its
+    ``timestamp`` to ``time.time()``.
+
+    The table is capped at ``_MAX_FREQUENT_TASKS`` rows.  When inserting
+    a brand-new task would exceed the cap, the row with the lowest
+    ``count`` (and, on a count tie, the oldest ``timestamp``) is
+    evicted before the insert completes.
+
+    Args:
+        task: The task description string.  Empty strings are ignored.
+    """
+    if not task:
+        return
+    db = _get_db()
+    now = time.time()
+    with _db_lock:
+        existing = db.execute(
+            "SELECT 1 FROM frequent_tasks WHERE task = ?", (task,),
+        ).fetchone()
+        if existing is None:
+            row = db.execute("SELECT COUNT(*) FROM frequent_tasks").fetchone()
+            if row[0] >= _MAX_FREQUENT_TASKS:
+                db.execute(
+                    "DELETE FROM frequent_tasks WHERE task = "
+                    "(SELECT task FROM frequent_tasks "
+                    "ORDER BY count ASC, timestamp ASC LIMIT 1)"
+                )
+        db.execute(
+            "INSERT INTO frequent_tasks (task, count, timestamp) "
+            "VALUES (?, 1, ?) "
+            "ON CONFLICT(task) DO UPDATE SET "
+            "count = count + 1, timestamp = ?",
+            (task, now, now),
+        )
+        db.commit()
+
+
+def _load_frequent_tasks(limit: int = 20) -> list[dict[str, object]]:
+    """Return the top *limit* most-frequent tasks (highest count first).
+
+    On a tie in ``count``, the more recently used task (larger
+    ``timestamp``) is returned first.
+
+    Args:
+        limit: Maximum number of rows to return.
+
+    Returns:
+        A list of dicts with keys ``task`` (str), ``count`` (int) and
+        ``timestamp`` (float), ordered by ``count`` descending.
+    """
+    db = _get_db()
+    rows = db.execute(
+        "SELECT task, count, timestamp FROM frequent_tasks "
+        "ORDER BY count DESC, timestamp DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [
+        {"task": r["task"], "count": r["count"], "timestamp": r["timestamp"]}
+        for r in rows
+    ]
 
 

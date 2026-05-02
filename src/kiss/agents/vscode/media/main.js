@@ -662,6 +662,17 @@
   );
   const configSidebarClose = document.getElementById('config-sidebar-close');
   const cfgSaveBtn = document.getElementById('cfg-save-btn');
+
+  // Frequent-tasks sidebar elements
+  const frequentBtn = document.getElementById('frequent-btn');
+  const frequentSidebar = document.getElementById('frequent-sidebar');
+  const frequentSidebarOverlay = document.getElementById(
+    'frequent-sidebar-overlay',
+  );
+  const frequentSidebarClose = document.getElementById(
+    'frequent-sidebar-close',
+  );
+  const frequentList = document.getElementById('frequent-list');
   const autocommitBtn = document.getElementById('autocommit-btn');
   const waitSpinner = document.getElementById('wait-spinner');
   const ghostOverlay = document.getElementById('ghost-overlay');
@@ -1975,6 +1986,9 @@
       case 'history':
         renderHistory(ev.sessions || [], ev.offset || 0, ev.generation || 0);
         break;
+      case 'frequentTasks':
+        renderFrequentTasks(ev.tasks || []);
+        break;
       case 'files':
         renderAutocomplete(ev.files || []);
         break;
@@ -3069,6 +3083,14 @@
         e.preventDefault();
         closeSidebar();
       }
+      if (
+        e.key === 'Escape' &&
+        frequentSidebar &&
+        frequentSidebar.classList.contains('open')
+      ) {
+        e.preventDefault();
+        closeFrequentSidebar();
+      }
     });
     inp.addEventListener('keydown', e => {
       // Autocomplete navigation
@@ -3310,6 +3332,8 @@
       if (sidebar.classList.contains('open')) {
         closeSidebar();
       } else {
+        closeConfigSidebar();
+        closeFrequentSidebar();
         resetHistoryPagination();
         sidebar.classList.add('open');
         sidebarOverlay.classList.add('open');
@@ -3330,6 +3354,21 @@
         openConfigSidebar();
       }
     });
+    if (frequentBtn) {
+      frequentBtn.addEventListener('click', () => {
+        if (frequentSidebar.classList.contains('open')) {
+          closeFrequentSidebar();
+        } else {
+          openFrequentSidebar();
+        }
+      });
+    }
+    if (frequentSidebarClose) {
+      frequentSidebarClose.addEventListener('click', closeFrequentSidebar);
+    }
+    if (frequentSidebarOverlay) {
+      frequentSidebarOverlay.addEventListener('click', closeFrequentSidebar);
+    }
     configSidebarClose.addEventListener('click', closeConfigSidebar);
     configSidebarOverlay.addEventListener('click', closeConfigSidebar);
     cfgSaveBtn.addEventListener('click', () => {
@@ -3940,6 +3979,7 @@
   function openConfigSidebar() {
     closeConfigSidebar();
     closeSidebar();
+    closeFrequentSidebar();
     vscode.postMessage({type: 'getConfig'});
     configSidebar.classList.add('open');
     configSidebarOverlay.classList.add('open');
@@ -3949,6 +3989,59 @@
     configSidebar.classList.remove('open');
     configSidebarOverlay.classList.remove('open');
     configBtn.classList.remove('open');
+  }
+
+  function openFrequentSidebar() {
+    if (!frequentSidebar) return;
+    closeSidebar();
+    closeConfigSidebar();
+    vscode.postMessage({type: 'getFrequentTasks', limit: 20});
+    frequentSidebar.classList.add('open');
+    if (frequentSidebarOverlay) frequentSidebarOverlay.classList.add('open');
+    if (frequentBtn) frequentBtn.classList.add('open');
+  }
+  function closeFrequentSidebar() {
+    if (!frequentSidebar) return;
+    frequentSidebar.classList.remove('open');
+    if (frequentSidebarOverlay) frequentSidebarOverlay.classList.remove('open');
+    if (frequentBtn) frequentBtn.classList.remove('open');
+  }
+
+  function renderFrequentTasks(tasks) {
+    if (!frequentList) return;
+    if (!tasks || tasks.length === 0) {
+      frequentList.innerHTML = '<div class="sidebar-empty">No tasks yet</div>';
+      return;
+    }
+    frequentList.innerHTML = '';
+    tasks.forEach(t => {
+      const div = document.createElement('div');
+      div.className = 'sidebar-item frequent-item';
+      const text = String(t.task || '');
+      div.dataset.tooltip = text;
+      div.style.backgroundColor = chatIdBgColor(text);
+      div.style.color = '#1a1a1a';
+
+      const textSpan = document.createElement('span');
+      textSpan.className = 'sidebar-item-text';
+      textSpan.textContent = text.length > 60 ? text.slice(0, 60) + '…' : text;
+      div.appendChild(textSpan);
+
+      const cnt = document.createElement('span');
+      cnt.className = 'frequent-item-count';
+      cnt.textContent = String(t.count);
+      div.appendChild(cnt);
+
+      div.addEventListener('click', () => {
+        inp.value = text;
+        syncClearBtn();
+        inp.style.height = 'auto';
+        inp.style.height = Math.min(inp.scrollHeight, 200) + 'px';
+        inp.focus();
+        closeFrequentSidebar();
+      });
+      frequentList.appendChild(div);
+    });
   }
   function populateConfigForm(cfg, apiKeys) {
     const el = id => document.getElementById(id);

@@ -26,6 +26,7 @@ from kiss.agents.sorcar.persistence import (
     _delete_task,
     _get_adjacent_task_by_chat_id,
     _get_task_chat_id,
+    _load_frequent_tasks,
     _load_history,
     _load_last_model,
     _load_latest_chat_events_by_chat_id,
@@ -254,6 +255,21 @@ class VSCodeServer(
             "taskId": task_id,
             "chatId": chat_id,
             "chatHasMoreTasks": _chat_has_tasks(chat_id),
+        })
+
+    def _get_frequent_tasks(self, limit: int = 20) -> None:
+        """Send the top *limit* most-frequent tasks (highest count first).
+
+        Broadcasts a ``frequentTasks`` event whose ``tasks`` field is a
+        list of ``{task, count, timestamp}`` dicts ordered by ``count``
+        descending.
+
+        Args:
+            limit: Maximum number of frequent tasks to return.
+        """
+        self.printer.broadcast({
+            "type": "frequentTasks",
+            "tasks": _load_frequent_tasks(limit=limit),
         })
 
     def _get_input_history(self) -> None:

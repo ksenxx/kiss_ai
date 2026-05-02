@@ -727,6 +727,13 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         });
         break;
 
+      case 'getFrequentTasks':
+        this._getServiceProcess().sendCommand({
+          type: 'getFrequentTasks',
+          limit: message.limit,
+        });
+        break;
+
       case 'deleteTask':
         this._getServiceProcess().sendCommand({
           type: 'deleteTask',
