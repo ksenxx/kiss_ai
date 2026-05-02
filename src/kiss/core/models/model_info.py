@@ -128,6 +128,10 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "cc/haiku": _mi(200000, 0.00, 0.00),
     "cc/opus": _mi(200000, 0.00, 0.00),
     "cc/sonnet": _mi(200000, 0.00, 0.00),
+    "codex/default": _mi(400000, 0.00, 0.00),
+    "codex/gpt-5": _mi(400000, 0.00, 0.00),
+    "codex/gpt-5-codex": _mi(400000, 0.00, 0.00),
+    "codex/gpt-5.1-codex": _mi(400000, 0.00, 0.00),
     "claude-haiku-4-5": _mi(200000, 1.00, 5.00),
     "claude-haiku-4-5-20251001": _mi(200000, 1.00, 5.00),
     "claude-opus-4": _mi(200000, 15.00, 75.00),
@@ -803,6 +807,17 @@ def model(
             token_callback=token_callback,
             thinking_callback=thinking_callback,
         )
+    if model_name.startswith("codex/"):
+        from kiss.core.models import CodexModel
+
+        if CodexModel is None:  # pragma: no cover – always available
+            raise KISSError("CodexModel could not be loaded.")
+        return CodexModel(  # type: ignore[no-any-return]
+            model_name=model_name,
+            model_config=model_config,
+            token_callback=token_callback,
+            thinking_callback=thinking_callback,
+        )
     if model_name.startswith(_OPENAI_PREFIXES) and not model_name.startswith("openai/gpt-oss"):
         return _openai_compatible(
             model_name,
@@ -889,12 +904,17 @@ def get_available_models() -> list[str]:
     import shutil
 
     has_claude_cli = shutil.which("claude") is not None
+    has_codex_cli = shutil.which("codex") is not None
     result = []
     for name, info in MODEL_INFO.items():
         if not info.is_generation_supported:
             continue
         if name.startswith("cc/"):
             if has_claude_cli:
+                result.append(name)
+            continue
+        if name.startswith("codex/"):
+            if has_codex_cli:
                 result.append(name)
             continue
         api_key = ""
@@ -937,6 +957,8 @@ def get_fast_model() -> str:
         return "deepseek-ai/DeepSeek-R1-0528"
     if shutil.which("claude") is not None:
         return "cc/haiku"
+    if shutil.which("codex") is not None:
+        return "codex/default"
     return "No model"
 
 
@@ -961,6 +983,8 @@ def get_default_model() -> str:
         return "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8"
     if shutil.which("claude") is not None:
         return "cc/opus"
+    if shutil.which("codex") is not None:
+        return "codex/default"
     return "No model"
 
 
