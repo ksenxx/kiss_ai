@@ -3888,6 +3888,14 @@
       div.style.backgroundColor = chatIdBgColor(String(s.id));
       div.style.color = '#1a1a1a';
 
+      if (s.failed) {
+        const failedDot = document.createElement('span');
+        failedDot.className = 'sidebar-item-failed';
+        failedDot.dataset.tooltip = 'Task failed';
+        failedDot.setAttribute('aria-label', 'Task failed');
+        div.appendChild(failedDot);
+      }
+
       const textSpan = document.createElement('span');
       textSpan.className = 'sidebar-item-text';
       textSpan.textContent = itemText;
