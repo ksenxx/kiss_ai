@@ -18,6 +18,7 @@ DeepSeek R1 in :mod:`kiss.core.models.openai_compatible_model`.
 
 import json
 import logging
+import os
 import shutil
 import subprocess
 from collections.abc import Callable, Iterable
@@ -36,21 +37,73 @@ from kiss.core.models.model import (
 
 logger = logging.getLogger(__name__)
 
+# Known locations where the Codex desktop UI ships a usable ``codex`` binary.
+# When the standalone ``codex`` CLI isn't on ``PATH`` but the user has the
+# Codex UI app installed, we fall back to the binary bundled with the app.
+_UI_CANDIDATE_PATHS: tuple[str, ...] = (
+    # macOS — system-wide and per-user installs
+    "/Applications/Codex.app/Contents/Resources/codex",
+    "~/Applications/Codex.app/Contents/Resources/codex",
+    # Windows — Electron-style install layout
+    "~/AppData/Local/Programs/codex/resources/codex.exe",
+    "~/AppData/Local/Programs/Codex/resources/codex.exe",
+    # Linux — Electron-style install layout
+    "/opt/Codex/resources/codex",
+    "~/.local/share/Codex/resources/codex",
+)
+
+
+def _find_in_candidate_paths(candidate_paths: Iterable[str]) -> str | None:
+    """Return the first executable file found among *candidate_paths*.
+
+    User-home references (``~``) are expanded.  Only files that exist and
+    are executable are considered.
+
+    Args:
+        candidate_paths: Paths to check, in priority order.
+
+    Returns:
+        The expanded absolute path of the first match, or ``None``.
+    """
+    for candidate in candidate_paths:
+        expanded = os.path.expanduser(candidate)
+        if os.path.isfile(expanded) and os.access(expanded, os.X_OK):
+            return expanded
+    return None
+
+
+def find_codex_executable() -> str | None:
+    """Locate a usable ``codex`` binary, searching ``PATH`` then the UI app.
+
+    The standalone ``codex`` CLI (typically installed via Homebrew or npm)
+    is preferred when available on ``PATH``.  If it isn't, but the user
+    has the Codex desktop UI installed, the binary bundled with the app
+    (e.g. ``/Applications/Codex.app/Contents/Resources/codex``) is used as
+    a fallback.
+
+    Returns:
+        Absolute path to the ``codex`` binary, or ``None`` if neither the
+        CLI nor a known Codex UI installation is present.
+    """
+    return shutil.which("codex") or _find_in_candidate_paths(_UI_CANDIDATE_PATHS)
+
 
 def _find_codex_cli() -> str:
-    """Locate the ``codex`` executable on PATH.
+    """Locate the ``codex`` executable, raising if neither CLI nor UI is found.
 
     Returns:
         Absolute path to the ``codex`` binary.
 
     Raises:
-        KISSError: If the ``codex`` CLI is not installed.
+        KISSError: If neither the standalone ``codex`` CLI is on ``PATH``
+            nor the Codex UI app is installed in a known location.
     """
-    path = shutil.which("codex")
+    path = find_codex_executable()
     if path is None:
         raise KISSError(
-            "Codex CLI ('codex') not found on PATH. "
-            "Install it from https://github.com/openai/codex"
+            "Codex binary not found on PATH or in any Codex UI installation. "
+            "Install the Codex CLI (https://github.com/openai/codex) or the "
+            "Codex desktop app."
         )
     return path
 
