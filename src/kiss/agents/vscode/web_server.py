@@ -87,6 +87,42 @@ _WS_PING_TIMEOUT = 10
 #: startup or network flaps.
 _TUNNEL_UNHEALTHY_LIMIT = 3
 
+#: Seconds after a tunnel subprocess starts during which the watchdog
+#: skips the ``readyConnections`` metrics check.  Without this grace
+#: period, the watchdog sees ``readyConnections=0`` while the tunnel
+#: is still registering with Cloudflare's edge, counts those ticks as
+#: unhealthy, and force-restarts a tunnel that would have come up on
+#: its own.  Repeated premature restarts burn through quick-tunnels
+#: and trigger trycloudflare.com 429 rate-limits.
+_TUNNEL_STARTUP_GRACE = 60
+
+#: Initial backoff (seconds) after a failed tunnel start.  Each
+#: subsequent consecutive failure doubles this delay.
+_TUNNEL_BACKOFF_INITIAL = 60
+
+#: Maximum backoff (seconds) between failed tunnel-start attempts.
+_TUNNEL_BACKOFF_MAX = 1800
+
+
+def _tunnel_backoff_delay(failure_count: int) -> int:
+    """Return the backoff delay for *failure_count* consecutive failures.
+
+    The first failure delays by :data:`_TUNNEL_BACKOFF_INITIAL` seconds
+    and each additional failure doubles the delay, capped at
+    :data:`_TUNNEL_BACKOFF_MAX`.  A *failure_count* of zero returns
+    zero (no backoff).
+
+    Args:
+        failure_count: Number of consecutive failures observed.
+
+    Returns:
+        Seconds to wait before the next restart attempt.
+    """
+    if failure_count <= 0:
+        return 0
+    delay: int = _TUNNEL_BACKOFF_INITIAL * (2 ** (failure_count - 1))
+    return min(delay, _TUNNEL_BACKOFF_MAX)
+
 #: HTTP 200 response for HEAD health checks from cloudflared.
 _HEAD_200 = (
     b"HTTP/1.1 200 OK\r\n"
@@ -1151,6 +1187,14 @@ class RemoteAccessServer:
     a fixed URL that persists across restarts.  Without a token, a
     quick-tunnel is created with a random ``*.trycloudflare.com`` URL.
 
+    A named tunnel's public hostname is configured in the Cloudflare
+    Zero Trust dashboard and is **not** embedded in the token, nor
+    echoed by ``cloudflared`` in a parseable form.  To advertise the
+    public URL to clients (in ``~/.kiss/remote-url.json`` and via the
+    ``remote_url`` WebSocket broadcast), the user must supply that URL
+    via *tunnel_url*, the ``CLOUDFLARE_TUNNEL_URL`` env var, or the
+    ``tunnel_url`` key in ``~/.kiss/config.json``.
+
     Args:
         host: Bind address (default ``"0.0.0.0"`` for all interfaces).
         port: TCP port for both HTTPS and WSS (default ``8787``).
@@ -1158,6 +1202,10 @@ class RemoteAccessServer:
         tunnel_token: Cloudflare named-tunnel token for a fixed URL.
             When set, ``cloudflared tunnel run --token <TOKEN>`` is
             used instead of a quick-tunnel.
+        tunnel_url: Public ``https://`` URL of the named tunnel as
+            configured in the Cloudflare dashboard.  Only meaningful
+            when *tunnel_token* is set.  When provided, this URL is
+            returned to clients once the tunnel registers a connection.
         work_dir: Working directory for the agent (default cwd).
         certfile: Path to a PEM certificate file for TLS.
         keyfile: Path to a PEM private key file for TLS.
@@ -1169,6 +1217,7 @@ class RemoteAccessServer:
         port: int = 8787,
         use_tunnel: bool = False,
         tunnel_token: str | None = None,
+        tunnel_url: str | None = None,
         work_dir: str | None = None,
         certfile: str | None = None,
         keyfile: str | None = None,
@@ -1179,6 +1228,7 @@ class RemoteAccessServer:
         self.port = port
         self.use_tunnel = use_tunnel
         self.tunnel_token = tunnel_token
+        self.tunnel_url = tunnel_url
         self._ssl_context: ssl.SSLContext = _create_ssl_context(certfile, keyfile)
 
         if work_dir:
@@ -1198,6 +1248,20 @@ class RemoteAccessServer:
         #: :data:`_TUNNEL_UNHEALTHY_LIMIT`, the watchdog force-restarts
         #: the ``cloudflared`` subprocess.
         self._tunnel_unhealthy_ticks = 0
+        #: Monotonic time the current tunnel subprocess started.  The
+        #: watchdog uses this to skip the metrics-based health check
+        #: during the :data:`_TUNNEL_STARTUP_GRACE` window — otherwise
+        #: ``readyConnections=0`` while the tunnel is still registering
+        #: would count as unhealthy.  ``None`` when no tunnel is running.
+        self._tunnel_started_at: float | None = None
+        #: Number of consecutive failed tunnel-start attempts.  Reset
+        #: to zero on a successful start.
+        self._tunnel_failure_count = 0
+        #: Monotonic time at or after which the watchdog may next
+        #: attempt to (re)start the tunnel.  Set to ``now + delay``
+        #: after a failure to apply exponential backoff and avoid
+        #: hammering Cloudflare when rate-limited.
+        self._tunnel_next_retry = 0.0
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ws_server: Any = None
         self._watchdog_task: asyncio.Task[None] | None = None
@@ -1578,6 +1642,7 @@ class RemoteAccessServer:
             stderr=subprocess.PIPE,
             text=True,
         )
+        self._tunnel_started_at = time.monotonic()
 
         # Try to capture the URL from stderr with a timeout.
         # cloudflared prints the URL during startup, but the format
@@ -1623,12 +1688,23 @@ class RemoteAccessServer:
         """Start a named tunnel using :attr:`tunnel_token`.
 
         The tunnel hostname is configured in the Cloudflare Zero Trust
-        dashboard.  ``cloudflared`` logs the registered hostname(s) to
-        stderr during startup; this method captures that output to
-        return the URL.
+        dashboard separately from the token.  Some ``cloudflared``
+        builds echo the public hostname during startup (e.g.
+        ``Connection https://myapp.example.com registered``) and some
+        do not.  This method, in order of preference:
+
+        1. Parses any non-local ``https?://…`` URL from cloudflared's
+           stderr.
+        2. Returns :attr:`tunnel_url` once a "Registered tunnel
+           connection"/"Connection registered" line is seen, when the
+           caller pre-configured the URL.
+        3. Falls back to a sentinel string indicating the tunnel is
+           up but the URL is not known.
 
         Returns:
-            The public ``https://`` URL, or None on failure.
+            The discovered or configured ``https://`` URL, the legacy
+            sentinel string when the tunnel registers without a URL,
+            or ``None`` if the subprocess exits before registering.
         """
         self._tunnel_metrics_port = _pick_free_local_port()
         self._tunnel_proc = subprocess.Popen(
@@ -1645,25 +1721,29 @@ class RemoteAccessServer:
             stderr=subprocess.PIPE,
             text=True,
         )
+        self._tunnel_started_at = time.monotonic()
         for line in iter(self._tunnel_proc.stderr.readline, ""):  # type: ignore[union-attr]
-            # Named tunnels log the ingress hostname, e.g.:
-            #   "... Connection ... registered connIndex=0 ..."
-            #   "... config ... hostname=myapp.example.com ..."
+            # Try to extract the public hostname directly from any
+            # ``https?://...`` token in the log line, ignoring local
+            # addresses.
             match = re.search(r"https?://([^\s/]+)", line)
             if match:
                 hostname = match.group(1)
-                # Ignore localhost/internal URLs
                 if "localhost" not in hostname and "127.0.0.1" not in hostname:
-                    url = f"https://{hostname}"
-                    return url
-            # Also look for explicit "Registered tunnel connection" as
-            # a sign the tunnel is live (hostname may not appear in logs
-            # for connector-protocol tunnels).
-            if "Registered tunnel connection" in line or "Connection registered" in line:
-                # Tunnel is running; the hostname is configured in the
-                # dashboard, not echoed.  Return a sentinel so the
-                # caller knows the tunnel started successfully.
-                return "(named tunnel running — URL configured in Cloudflare dashboard)"
+                    return f"https://{hostname}"
+            # Otherwise watch for any sign the tunnel registered with
+            # Cloudflare's edge and use the configured URL (or a
+            # sentinel for backward compatibility).
+            if (
+                "Registered tunnel connection" in line
+                or "Connection registered" in line
+            ):
+                if self.tunnel_url:
+                    return self.tunnel_url
+                return (
+                    "(named tunnel running — URL configured in Cloudflare "
+                    "dashboard)"
+                )
             if self._tunnel_proc.poll() is not None:
                 break
         return None
@@ -1686,9 +1766,23 @@ class RemoteAccessServer:
            zero ready connections, the subprocess is force-terminated
            and a fresh tunnel is started, which triggers a new
            ``*.trycloudflare.com`` URL.
+
+        Failed restarts schedule an exponentially-growing backoff via
+        :attr:`_tunnel_next_retry` so the watchdog stops hammering
+        Cloudflare when rate-limited (e.g. trycloudflare.com 429).
+        During the first :data:`_TUNNEL_STARTUP_GRACE` seconds after
+        the subprocess starts, the metrics-based health check is
+        skipped because ``readyConnections=0`` is expected while the
+        tunnel registers with the edge.
         """
+        now = time.monotonic()
+        # Process is missing — try to (re)start unless still in backoff.
         if self._tunnel_proc is None:
+            if now < self._tunnel_next_retry:
+                return
+            await self._restart_tunnel_url()
             return
+        # Process has died.
         if self._tunnel_proc.poll() is not None:
             rc = self._tunnel_proc.returncode
             logger.info(
@@ -1697,14 +1791,23 @@ class RemoteAccessServer:
             self._tunnel_proc = None
             self._tunnel_metrics_port = None
             self._tunnel_unhealthy_ticks = 0
+            self._tunnel_started_at = None
+            if now < self._tunnel_next_retry:
+                return
             await self._restart_tunnel_url()
             return
-        # Process is alive.  Probe the metrics endpoint to confirm the
-        # tunnel is actually registered with Cloudflare's edge.  Skip
-        # this check if no metrics port has been recorded (e.g. legacy
-        # subprocess started without --metrics, or the tunnel is still
-        # in its very first startup window where readyConnections may
-        # be 0 transiently).
+        # Process is alive.  Skip the metrics-based health check during
+        # the startup grace window so a still-registering tunnel is not
+        # killed prematurely.
+        if (
+            self._tunnel_started_at is not None
+            and now - self._tunnel_started_at < _TUNNEL_STARTUP_GRACE
+        ):
+            return
+        # Probe the metrics endpoint to confirm the tunnel is actually
+        # registered with Cloudflare's edge.  Skip this check if no
+        # metrics port has been recorded (e.g. legacy subprocess
+        # started without --metrics).
         if self._tunnel_metrics_port is None:
             return
         assert self._loop is not None
@@ -1731,6 +1834,8 @@ class RemoteAccessServer:
         )
         self._tunnel_unhealthy_ticks = 0
         self._terminate_tunnel_proc()
+        if now < self._tunnel_next_retry:
+            return
         await self._restart_tunnel_url()
 
     async def _restart_tunnel_url(self) -> None:
@@ -1747,8 +1852,17 @@ class RemoteAccessServer:
         )
         if tunnel_url:
             logger.info("Tunnel restarted: %s", tunnel_url)
+            self._tunnel_failure_count = 0
+            self._tunnel_next_retry = 0.0
         else:
-            logger.warning("Failed to restart tunnel")
+            self._tunnel_failure_count += 1
+            delay = _tunnel_backoff_delay(self._tunnel_failure_count)
+            self._tunnel_next_retry = time.monotonic() + delay
+            logger.warning(
+                "Failed to restart tunnel (attempt %d); backing off %ds",
+                self._tunnel_failure_count,
+                delay,
+            )
         _save_url_file(self._local_url, tunnel_url)
         self._active_url = tunnel_url or self._local_url
         self._printer.broadcast(
@@ -1774,6 +1888,7 @@ class RemoteAccessServer:
             proc.kill()
         self._tunnel_proc = None
         self._tunnel_metrics_port = None
+        self._tunnel_started_at = None
 
     async def _ping_one_ws(self, ws: Any) -> None:
         """Send a ping to a single WebSocket client, closing if stale."""
@@ -1845,6 +1960,9 @@ class RemoteAccessServer:
         """Terminate the ``cloudflared`` tunnel process if running."""
         self._terminate_tunnel_proc()
         self._tunnel_unhealthy_ticks = 0
+        self._tunnel_started_at = None
+        self._tunnel_failure_count = 0
+        self._tunnel_next_retry = 0.0
         # Do NOT delete the URL file on shutdown.  A new daemon
         # instance may have already overwritten it, and deleting it
         # would race with the new instance's _save_url_file().  Stale
@@ -1940,6 +2058,33 @@ class RemoteAccessServer:
         _remove_url_file()
 
 
+def _resolve_tunnel_settings() -> tuple[str | None, str | None]:
+    """Resolve the named-tunnel token and public URL.
+
+    Reads the Cloudflare tunnel token from the
+    ``CLOUDFLARE_TUNNEL_TOKEN`` env var first, falling back to the
+    ``tunnel_token`` key in ``~/.kiss/config.json``.  The public URL
+    is resolved the same way from ``CLOUDFLARE_TUNNEL_URL`` /
+    ``tunnel_url``.  An env-var value takes precedence over the config
+    value independently for each setting.
+
+    Returns:
+        A ``(token, url)`` pair where each element is the resolved
+        string or ``None`` when neither env var nor config provides
+        that setting.
+    """
+    token = os.environ.get("CLOUDFLARE_TUNNEL_TOKEN") or None
+    url = os.environ.get("CLOUDFLARE_TUNNEL_URL") or None
+    if token and url:
+        return token, url
+    cfg = load_config()
+    if not token:
+        token = cfg.get("tunnel_token") or None
+    if not url:
+        url = cfg.get("tunnel_url") or None
+    return token, url
+
+
 def main() -> None:  # pragma: no cover — CLI entry point
     """CLI entry point for the remote access server."""
     import argparse
@@ -1956,15 +2101,12 @@ def main() -> None:  # pragma: no cover — CLI entry point
         _print_url()
         return
 
-    # Resolve tunnel token: env var > config file
-    tunnel_token = os.environ.get("CLOUDFLARE_TUNNEL_TOKEN")
-    if not tunnel_token:
-        cfg = load_config()
-        tunnel_token = cfg.get("tunnel_token")
+    tunnel_token, tunnel_url = _resolve_tunnel_settings()
 
     server = RemoteAccessServer(
         use_tunnel=True,
-        tunnel_token=tunnel_token or None,
+        tunnel_token=tunnel_token,
+        tunnel_url=tunnel_url,
         work_dir=args.workdir,
     )
     server.start()

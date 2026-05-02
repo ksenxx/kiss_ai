@@ -1692,12 +1692,22 @@ class TestTunnelWatchdog(IsolatedAsyncioTestCase):
         else:
             _URL_FILE.unlink(missing_ok=True)
 
-    async def test_watchdog_no_tunnel_proc_is_noop(self) -> None:
-        """When _tunnel_proc is None, _check_and_restart_tunnel is a no-op."""
+    async def test_watchdog_no_tunnel_proc_in_backoff_is_noop(self) -> None:
+        """When _tunnel_proc is None and a backoff window is active, no restart.
+
+        With a missing process the watchdog will normally try to start
+        a fresh tunnel; the exponential restart backoff suppresses
+        that retry until ``_tunnel_next_retry`` elapses.  Verifying
+        that path keeps the test independent of the host's actual
+        ``cloudflared`` install.
+        """
         self.server._tunnel_proc = None
+        self.server._tunnel_failure_count = 1
+        self.server._tunnel_next_retry = time.monotonic() + 600
         await self.server._check_and_restart_tunnel()
-        # Should not raise or change anything
+        # Should not raise or attempt a restart.
         self.assertIsNone(self.server._tunnel_proc)
+        self.assertEqual(self.server._tunnel_failure_count, 1)
 
     async def test_watchdog_alive_process_not_restarted(self) -> None:
         """A still-running tunnel process is left alone."""
