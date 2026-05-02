@@ -1063,16 +1063,19 @@ body.remote-chat #welcome > #input-area {
 
 .sidebar-confirm-yes,
 .sidebar-confirm-no {
-  border: none; cursor: pointer; padding: 4px 6px;
+  border: 1px solid color-mix(in srgb, #000 15%, transparent);
+  cursor: pointer; padding: 3px 8px;
   border-radius: 4px; line-height: 1; display: flex; align-items: center;
-  transition: opacity 0.15s, background 0.15s;
+  font-size: var(--fs-base); font-weight: 600;
+  background: #fff;
+  transition: filter 0.15s, background 0.15s;
 }
 
-.sidebar-confirm-yes { color: var(--green); opacity: 1; background: color-mix(in srgb, var(--green) 15%, transparent); }
-.sidebar-confirm-yes:hover { background: color-mix(in srgb, var(--green) 28%, transparent); }
+.sidebar-confirm-yes { color: #8b0000; }
+.sidebar-confirm-yes:hover { background: #fff; filter: brightness(0.95); }
 
-.sidebar-confirm-no { color: var(--red); opacity: 1; background: color-mix(in srgb, var(--red) 15%, transparent); }
-.sidebar-confirm-no:hover { background: color-mix(in srgb, var(--red) 28%, transparent); }
+.sidebar-confirm-no { color: #006400; }
+.sidebar-confirm-no:hover { background: #fff; filter: brightness(0.95); }
 
 .sidebar-item:hover {
   filter: brightness(0.9); border-color: color-mix(in srgb, var(--fg) 15%, transparent);
