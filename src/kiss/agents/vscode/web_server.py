@@ -445,10 +445,18 @@ def _stderr_reader_loop(
     result: list[str | None],
     proc: subprocess.Popen[str],
 ) -> None:
-    """Read *stderr* lines until *parse* returns a URL or *proc* exits.
+    """Read *stderr* lines until *parse* returns a URL or stderr hits EOF.
 
     Stores the discovered URL in ``result[0]``.  Top-level helper so
     :func:`_read_url_from_stderr` does not need a closure.
+
+    The loop relies on ``iter(stderr.readline, "")`` so it terminates
+    naturally when the subprocess closes its stderr (which happens on
+    exit).  ``proc.poll()`` is intentionally **not** checked between
+    reads: doing so introduces a race where the subprocess can finish
+    writing all its output and exit before the reader has drained the
+    pipe, causing the reader to bail out with stderr buffered data
+    unread (and the URL therefore missed).
 
     Args:
         stderr: A line-buffered text-mode file-like object.
@@ -456,14 +464,14 @@ def _stderr_reader_loop(
             recognised, otherwise ``None``.
         result: Single-element list used to communicate the URL back
             to the caller across the thread boundary.
-        proc: The subprocess being read; the loop stops when it exits.
+        proc: The subprocess being read; retained for API symmetry —
+            timeouts are enforced by :func:`_read_url_from_stderr`.
     """
+    del proc  # see docstring
     for line in iter(stderr.readline, ""):
         url = parse(line)
         if url is not None:
             result[0] = url
-            return
-        if proc.poll() is not None:
             return
 
 
