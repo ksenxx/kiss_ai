@@ -917,11 +917,13 @@ def get_available_models() -> list[str]:
 def get_fast_model() -> str:
     """Return a cheap/fast model based on which API keys are available.
 
-    Priority: Anthropic → OpenAI → Gemini → OpenRouter → Together.
+    Priority: Anthropic → OpenAI → Gemini → OpenRouter → Together → Claude Code CLI.
 
     Returns:
         A fast model name for the first available provider.
     """
+    import shutil
+
     keys = config_module.DEFAULT_CONFIG
     if keys.ANTHROPIC_API_KEY:
         return "claude-haiku-4-5"
@@ -933,15 +935,19 @@ def get_fast_model() -> str:
         return "openrouter/anthropic/claude-haiku-4.5"
     if keys.TOGETHER_API_KEY:
         return "deepseek-ai/DeepSeek-R1-0528"
-    return "claude-haiku-4-5"
+    if shutil.which("claude") is not None:
+        return "cc/haiku"
+    return "No model"
 
 
 def get_default_model() -> str:
     """Return the best default model based on which API keys are configured.
 
-    Priority order: Anthropic > OpenAI > Gemini > OpenRouter > Together AI.
+    Priority order: Anthropic > OpenAI > Gemini > OpenRouter > Together AI > Claude Code CLI.
     Falls back to ``"claude-opus-4-6"`` if no keys are set.
     """
+    import shutil
+
     keys = config_module.DEFAULT_CONFIG
     if keys.ANTHROPIC_API_KEY:
         return "claude-opus-4-7"
@@ -953,7 +959,9 @@ def get_default_model() -> str:
         return "openrouter/anthropic/claude-opus-4.7"
     if keys.TOGETHER_API_KEY:
         return "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8"
-    return "claude-opus-4-6"
+    if shutil.which("claude") is not None:
+        return "cc/opus"
+    return "No model"
 
 
 def get_most_expensive_model(fc_only: bool = True) -> str:

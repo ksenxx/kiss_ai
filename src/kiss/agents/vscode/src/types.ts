@@ -14,6 +14,7 @@ export interface Attachment {
 /** Session/conversation info */
 export interface SessionInfo {
   id: number;
+  task_id?: number;
   title: string;
   timestamp: number;
   preview: string;
@@ -38,6 +39,8 @@ export type FromWebviewMessage =
   | {type: 'selectModel'; model: string; tabId?: string}
   | {type: 'getModels'}
   | {type: 'getHistory'; query?: string; offset?: number; generation?: number}
+  | {type: 'getFrequentTasks'; limit?: number}
+  | {type: 'deleteTask'; taskId: number}
   | {type: 'getFiles'; prefix: string}
   | {type: 'userAnswer'; answer: string; tabId?: string}
   | {type: 'userActionDone'}
@@ -164,6 +167,10 @@ type ToWebviewMessageBody =
   | {type: 'merge_ended'}
   | {type: 'commitMessage'; message: string; error?: string}
   | {type: 'inputHistory'; tasks: string[]}
+  | {
+      type: 'frequentTasks';
+      tasks: Array<{task: string; count: number; timestamp: number}>;
+    }
   | {type: 'setTaskText'; text: string}
   | {type: 'appendToInput'; text: string}
   | {type: 'focusInput'}
@@ -205,6 +212,8 @@ export interface AgentCommand {
     | 'getModels'
     | 'selectModel'
     | 'getHistory'
+    | 'getFrequentTasks'
+    | 'deleteTask'
     | 'getFiles'
     | 'userAnswer'
     | 'recordFileUsage'
@@ -230,10 +239,12 @@ export interface AgentCommand {
   query?: string;
   offset?: number;
   generation?: number;
+  limit?: number;
   prefix?: string;
   answer?: string;
   path?: string;
   chatId?: number | string;
+  taskId?: number;
   activeFileContent?: string;
   action?: 'merge' | 'discard' | 'all-done' | 'commit' | 'skip';
   useWorktree?: boolean;

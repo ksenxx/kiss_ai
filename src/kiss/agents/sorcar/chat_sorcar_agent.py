@@ -15,11 +15,13 @@ from kiss.agents.sorcar.persistence import (
     _add_task,
     _load_chat_context,
     _load_task_chat_id,
+    _record_frequent_task,
     _save_task_extra,
     _save_task_result,
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 
+MAX_TASKS = 10
 
 class ChatSorcarAgent(SorcarAgent):
     """SorcarAgent with chat-session state management.
@@ -80,6 +82,8 @@ class ChatSorcarAgent(SorcarAgent):
         if not chat_context:
             return "# Task\n" + prompt
         parts = ["## Previous tasks and results from the chat session for reference\n"]
+        if len(chat_context) > MAX_TASKS:
+            del chat_context[2:2 + len(chat_context) - MAX_TASKS]
         for i, entry in enumerate(chat_context, 1):
             parts.append(f"### Task {i}\n{entry['task']}")
             if entry.get("result"):
@@ -113,6 +117,7 @@ class ChatSorcarAgent(SorcarAgent):
         agent_prompt = self.build_chat_prompt(prompt_template)
         task_id, self._chat_id = _add_task(prompt_template, chat_id=self._chat_id)
         self._last_task_id = task_id
+        _record_frequent_task(prompt_template)
 
         result_summary = ""
         try:

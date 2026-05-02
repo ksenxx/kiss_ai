@@ -87,11 +87,16 @@
       id: _id,
       title: title || 'new chat',
       backendChatId: '',
+      // task_id (DB row id) of the task currently displayed as the
+      // header / current task in this tab.  null when unknown (fresh
+      // tab before any chat is loaded).  Used by the 'taskDeleted'
+      // handler to close tabs whose current task was deleted.
+      currentTaskId: null,
       isRunning: false,
       outputFragment: null,
       taskPanelHTML: '',
       taskPanelVisible: false,
-      panelsExpanded: false,
+      panelsExpandedMap: {},
       statusTextContent: 'Ready',
       statusTextColor: 'var(--green)',
       statusTokensText: '',
@@ -222,7 +227,7 @@
       else taskPanel.classList.remove('visible');
     }
     currentTaskName = tab.taskPanelHTML || '';
-    updateChevronIcon(!!tab.panelsExpanded);
+    updateChevronIcon(!!tab.panelsExpandedMap[currentTaskName]);
     if (statusText) {
       statusText.textContent = tab.statusTextContent || 'Ready';
       statusText.style.color = tab.statusTextColor || 'var(--green)';
@@ -237,6 +242,7 @@
       } else {
         welcome.style.display = 'none';
       }
+      refreshWelcomeLayout();
     }
     // Restore per-tab state
     selectedModel = tab.selectedModel || 'claude-opus-4-6';
@@ -389,7 +395,10 @@
       stopTimer();
       removeSpinner();
     }
-    applyChevronState(!!tab.panelsExpanded);
+    applyChevronState(
+      !!tab.panelsExpandedMap[currentTaskName],
+      currentTaskName,
+    );
     focusInputWithRetry();
   }
 
@@ -418,7 +427,10 @@
         stopTimer();
         removeSpinner();
       }
-      applyChevronState(!!newTab.panelsExpanded);
+      applyChevronState(
+        !!newTab.panelsExpandedMap[currentTaskName],
+        currentTaskName,
+      );
       focusInputWithRetry();
     }
     renderTabBar();
@@ -547,6 +559,7 @@
       stopTimer();
       removeSpinner();
     }
+    vscode.postMessage({type: 'newChat', tabId: tab.id});
     vscode.postMessage({type: 'getWelcomeSuggestions'});
     focusInputWithRetry();
   }
@@ -649,6 +662,17 @@
   );
   const configSidebarClose = document.getElementById('config-sidebar-close');
   const cfgSaveBtn = document.getElementById('cfg-save-btn');
+
+  // Frequent-tasks sidebar elements
+  const frequentBtn = document.getElementById('frequent-btn');
+  const frequentSidebar = document.getElementById('frequent-sidebar');
+  const frequentSidebarOverlay = document.getElementById(
+    'frequent-sidebar-overlay',
+  );
+  const frequentSidebarClose = document.getElementById(
+    'frequent-sidebar-close',
+  );
+  const frequentList = document.getElementById('frequent-list');
   const autocommitBtn = document.getElementById('autocommit-btn');
   const waitSpinner = document.getElementById('wait-spinner');
   const ghostOverlay = document.getElementById('ghost-overlay');
@@ -664,6 +688,33 @@
   const statusBudget = document.getElementById('status-budget');
   const statusSteps = document.getElementById('status-steps');
 
+  // In the remote chat webview (body.remote-chat) the welcome page hides
+  // the SAMPLE_TASKS suggestions and shows the input textbox + buttons
+  // centered inside #welcome.  We achieve the centering by physically
+  // moving #input-area into #welcome while welcome is visible, and back
+  // to its original position (between #output and #sidebar inside #app)
+  // when a task starts and welcome is hidden.  Outside the remote
+  // webview this helper is a no-op so the VS Code extension layout is
+  // unchanged.
+  function refreshWelcomeLayout() {
+    if (!document.body.classList.contains('remote-chat')) return;
+    const ia = document.getElementById('input-area');
+    const app = document.getElementById('app');
+    if (!ia || !app || !welcome) return;
+    const visible = welcome.style.display !== 'none' && O.contains(welcome);
+    if (visible) {
+      if (ia.parentNode !== welcome) welcome.appendChild(ia);
+    } else if (ia.parentNode === welcome) {
+      const sbar = document.getElementById('sidebar');
+      if (sbar) app.insertBefore(ia, sbar);
+      else app.appendChild(ia);
+    }
+  }
+
+  // Apply the centered remote welcome layout on initial load (welcome
+  // is visible by default in the static HTML).
+  refreshWelcomeLayout();
+
   function setTaskText(text) {
     if (!taskPanel || !taskPanelText) return;
     const t = (text || '').trim();
@@ -677,24 +728,58 @@
   }
 
   /**
-   * Apply the chevron expand/collapse state to panels in the tab.
+   * Return the task name currently visible in the viewport.
+   * Uses the same heuristic as updateVisibleTask: the first
+   * .adjacent-task whose bounds straddle the 30%-from-top line wins;
+   * if none match, the current (main) task is visible.
+   */
+  function getVisibleTaskName() {
+    const adjacentTasks = O.querySelectorAll('.adjacent-task[data-task]');
+    if (!adjacentTasks.length) return currentTaskName;
+    const outputRect = O.getBoundingClientRect();
+    const checkY = outputRect.top + outputRect.height * 0.3;
+    for (let i = 0; i < adjacentTasks.length; i++) {
+      const rect = adjacentTasks[i].getBoundingClientRect();
+      if (rect.top <= checkY && rect.bottom > checkY) {
+        return adjacentTasks[i].dataset.task || currentTaskName;
+      }
+    }
+    return currentTaskName;
+  }
+
+  /**
+   * Apply the chevron expand/collapse state to panels belonging to
+   * a specific task.
+   * @param {boolean} expanded - true = expand, false = collapse
+   * @param {string} taskName - the task whose panels to affect;
+   *   panels belonging to other tasks are left untouched.
+   *   If empty/falsy, affects only the current (main) task panels.
+   *
    * - expanded=false (chevron right, default): hide every .collapsible
-   *   panel in #output (display:none via .chv-hidden) except result panels
-   *   (.rc) and panels belonging to the currently running task.
-   * - expanded=true (chevron down): reveal every hidden panel and expand
-   *   every .collapsible panel in #output except those belonging to the
-   *   currently running task.
+   *   panel that belongs to the specified task (display:none via
+   *   .chv-hidden) except result panels (.rc) and panels belonging
+   *   to the currently running task.
+   * - expanded=true (chevron down): reveal every hidden panel belonging
+   *   to the specified task and expand every .collapsible panel except
+   *   those belonging to the currently running task.
    * Running task panels are direct children of #output (not inside
    *   .adjacent-task) while a task is running; adjacent-task containers
    *   hold previously-completed tasks.
    */
-  function applyChevronState(expanded) {
+  function applyChevronState(expanded, taskName) {
     if (!O) return;
     const panels = O.querySelectorAll('.collapsible');
     for (let i = 0; i < panels.length; i++) {
       const p = panels[i];
-      const inAdjacent = !!p.closest('.adjacent-task');
+      const adjacentContainer = p.closest('.adjacent-task');
+      const inAdjacent = !!adjacentContainer;
       const inRunning = isRunning && !inAdjacent;
+      // Determine which task this panel belongs to
+      const panelTask = inAdjacent
+        ? adjacentContainer.dataset.task || ''
+        : currentTaskName;
+      // Skip panels that don't belong to the target task
+      if (taskName && panelTask !== taskName) continue;
       if (!expanded) {
         if (inRunning || p.classList.contains('rc')) {
           p.classList.remove('chv-hidden');
@@ -723,10 +808,12 @@
       const tab = tabs.find(t => {
         return t.id === activeTabId;
       });
-      const expanded = tab ? !tab.panelsExpanded : true;
-      if (tab) tab.panelsExpanded = expanded;
+      const visibleTask = getVisibleTaskName();
+      const wasExpanded = tab ? !!tab.panelsExpandedMap[visibleTask] : false;
+      const expanded = !wasExpanded;
+      if (tab) tab.panelsExpandedMap[visibleTask] = expanded;
       updateChevronIcon(expanded);
-      applyChevronState(expanded);
+      applyChevronState(expanded, visibleTask);
     });
   }
 
@@ -803,7 +890,7 @@
     if (el && el.parentNode) el.parentNode.removeChild(el);
   }
 
-  function renderAdjacentTask(direction, task, events) {
+  function renderAdjacentTask(direction, task, events, taskId) {
     removeAdjacentLoader();
     adjacentLoading = false;
 
@@ -816,6 +903,11 @@
     // Create a container for the adjacent task
     const container = mkEl('div', 'adjacent-task');
     container.dataset.task = task;
+    // Stamp the row id so a 'taskDeleted' broadcast from the backend
+    // can locate and remove this exact block via
+    //   .adjacent-task[data-task-id="<id>"]
+    if (taskId !== undefined && taskId !== null && taskId !== '')
+      container.dataset.taskId = String(taskId);
 
     // Replay events into the container (save/restore header metrics so
     // adjacent-task replay doesn't overwrite the current task's values)
@@ -849,7 +941,7 @@
     const tab = tabs.find(x => {
       return x.id === activeTabId;
     });
-    if (tab) applyChevronState(!!tab.panelsExpanded);
+    if (tab) applyChevronState(!!tab.panelsExpandedMap[task], task);
   }
 
   function clearOutput() {
@@ -1394,7 +1486,10 @@
       case 'result': {
         const rc = mkEl('div', 'ev rc');
         let rb = '';
-        if (ev.success === false) {
+        if (ev.is_continue) {
+          rb +=
+            '<div style="color:var(--yellow);font-weight:700;font-size:var(--fs-xl);margin-bottom:10px">Status: Continue</div>';
+        } else if (ev.success === false) {
           rb +=
             '<div style="color:var(--red);font-weight:700;font-size:var(--fs-xl);margin-bottom:10px">Status: FAILED</div>';
         }
@@ -1539,7 +1634,7 @@
     }
     if (t === 'result') {
       collapseAllExceptResult(O);
-      if (ev.success === false) {
+      if (ev.success === false && !ev.is_continue) {
         const rTab = tabs.find(x => {
           return x.id === activeTabId;
         });
@@ -1553,7 +1648,8 @@
     const tab = tabs.find(x => {
       return x.id === activeTabId;
     });
-    if (tab && !tab.panelsExpanded && !_demoActive) applyChevronState(false);
+    if (tab && !tab.panelsExpandedMap[currentTaskName] && !_demoActive)
+      applyChevronState(false, currentTaskName);
   }
 
   /**
@@ -1651,7 +1747,7 @@
         if (ev.cost && ev.cost !== 'N/A')
           tab.statusBudgetText = 'Cost: ' + ev.cost;
         collapseAllExceptResult(tab.outputFragment);
-        if (ev.success === false) tab.lastTaskFailed = true;
+        if (ev.success === false && !ev.is_continue) tab.lastTaskFailed = true;
       }
     }
 
@@ -1759,6 +1855,11 @@
       }
     }
     setTaskText(visibleTask);
+    // Sync chevron icon to the visible task's expanded state
+    const vTab = tabs.find(t => {
+      return t.id === activeTabId;
+    });
+    if (vTab) updateChevronIcon(!!vTab.panelsExpandedMap[visibleTask]);
     // Update header metrics to match the visible task
     if (visibleContainer) {
       // Scrolled to an adjacent task — show its metrics
@@ -1885,6 +1986,9 @@
       case 'history':
         renderHistory(ev.sessions || [], ev.offset || 0, ev.generation || 0);
         break;
+      case 'frequentTasks':
+        renderFrequentTasks(ev.tasks || []);
+        break;
       case 'files':
         renderAutocomplete(ev.files || []);
         break;
@@ -1950,12 +2054,21 @@
           return t.id === swTabId;
         });
         if (swTab) {
+          // Update model picker to last user-picked model from DB
+          if (ev.model) {
+            swTab.selectedModel = ev.model;
+            if (swTabId === activeTabId) {
+              selectedModel = ev.model;
+              if (modelName) modelName.textContent = ev.model;
+            }
+          }
           if (swTabId === activeTabId) {
             clearOutput();
             resetOutputState();
             if (welcome) {
               welcome.style.display = '';
               O.appendChild(welcome);
+              refreshWelcomeLayout();
             }
           } else {
             swTab.outputFragment = null;
@@ -1992,6 +2105,50 @@
         vscode.postMessage({type: 'getInputHistory'});
         break;
 
+      case 'taskDeleted': {
+        // Backend deleted a task from the history table.  For every
+        // open tab that displays the deleted task or its chat:
+        //   * remove any .adjacent-task[data-task-id="<id>"] block
+        //     (whether it lives in the active output area O or in
+        //     this tab's detached outputFragment),
+        //   * close the tab if its current (header) task was the
+        //     deleted one, or if the chat now has no remaining
+        //     tasks left in the database.
+        const tdChatId = ev.chatId;
+        const tdTaskId = ev.taskId;
+        const tdHasMore = !!ev.chatHasMoreTasks;
+        if (tdTaskId === undefined || tdTaskId === null) break;
+        const tdSelector =
+          '.adjacent-task[data-task-id="' + String(tdTaskId) + '"]';
+        // Iterate over a snapshot since closeTab() mutates `tabs`.
+        const tdSnapshot = tabs.slice();
+        tdSnapshot.forEach(t => {
+          if (!t || t.backendChatId !== tdChatId) return;
+          // Remove the matching adjacent-task block from active DOM
+          // when this is the active tab.
+          if (t.id === activeTabId && O) {
+            const liveBlock = O.querySelector(tdSelector);
+            if (liveBlock && liveBlock.parentNode)
+              liveBlock.parentNode.removeChild(liveBlock);
+          }
+          // Remove the matching adjacent-task block from the saved
+          // outputFragment (used by inactive tabs to hold their DOM).
+          if (t.outputFragment) {
+            const fragBlock = t.outputFragment.querySelector(tdSelector);
+            if (fragBlock && fragBlock.parentNode)
+              fragBlock.parentNode.removeChild(fragBlock);
+          }
+          // Close the tab when the deleted task was the tab's current
+          // (header) task, or when the underlying chat is now empty.
+          const isCurrent =
+            t.currentTaskId !== undefined &&
+            t.currentTaskId !== null &&
+            String(t.currentTaskId) === String(tdTaskId);
+          if (isCurrent || !tdHasMore) closeTab(t.id);
+        });
+        break;
+      }
+
       case 'task_events': {
         const teTabId = ev.tabId || activeTabId;
         const teTab = tabs.find(t => {
@@ -2001,6 +2158,10 @@
           teTab.backendChatId = ev.chat_id;
           persistTabState();
         }
+        // Track the task_id of the currently displayed task so a later
+        // 'taskDeleted' broadcast can decide whether to close this tab.
+        if (teTab && ev.task_id !== undefined && ev.task_id !== null)
+          teTab.currentTaskId = ev.task_id;
         // Non-active tab: render into a document fragment without touching the DOM
         if (teTabId !== activeTabId && teTab) {
           const taskTitle = (ev.task || '').trim();
@@ -2060,7 +2221,10 @@
           currentTaskName = ev.task;
           resetAdjacentState(); // sets oldest/newest to currentTaskName
           setTaskText(ev.task);
-          if (welcome) welcome.style.display = 'none';
+          if (welcome) {
+            welcome.style.display = 'none';
+            refreshWelcomeLayout();
+          }
           updateActiveTabTitle(ev.task);
         }
         if (ev.extra) {
@@ -2101,7 +2265,7 @@
       }
       case 'adjacent_task_events':
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) break;
-        renderAdjacentTask(ev.direction, ev.task, ev.events || []);
+        renderAdjacentTask(ev.direction, ev.task, ev.events || [], ev.task_id);
         break;
       case 'setTaskText': {
         const stt = (ev.text || '').trim();
@@ -2109,7 +2273,10 @@
           if (stt) {
             currentTaskName = stt;
             resetAdjacentState();
-            if (welcome) welcome.style.display = 'none';
+            if (welcome) {
+              welcome.style.display = 'none';
+              refreshWelcomeLayout();
+            }
             updateActiveTabTitle(stt);
           }
           setTaskText(ev.text || '');
@@ -2414,6 +2581,10 @@
     if (worktreeToggleBtn) worktreeToggleBtn.disabled = running;
     if (parallelToggleBtn) parallelToggleBtn.disabled = running;
     if (demoToggleBtn) demoToggleBtn.disabled = running;
+    const mb = document.getElementById('menu-btn');
+    if (mb) mb.disabled = running;
+    const md = document.getElementById('menu-dropdown');
+    if (running && md) md.classList.remove('open');
     if (modelBtn) {
       modelBtn.disabled = running;
       if (running) closeModelDD();
@@ -2484,6 +2655,11 @@
     if (!url) return;
     const wrapper = document.createElement('div');
     wrapper.className = 'remote-url-bar';
+    const label = document.createElement('div');
+    label.className = 'remote-url-label';
+    label.textContent = 'Web/mobile app';
+    const row = document.createElement('div');
+    row.className = 'remote-url-row';
     const link = document.createElement('a');
     link.href = url;
     link.target = '_blank';
@@ -2507,12 +2683,10 @@
         }, 1500);
       });
     });
-    const label = document.createElement('span');
-    label.className = 'remote-url-label';
-    label.textContent = 'Web/mobile app: ';
+    row.appendChild(link);
+    row.appendChild(copyBtn);
     wrapper.appendChild(label);
-    wrapper.appendChild(link);
-    wrapper.appendChild(copyBtn);
+    wrapper.appendChild(row);
     container.appendChild(wrapper);
   }
 
@@ -2640,7 +2814,11 @@
     const tab = tabs.find(x => {
       return x.id === activeTabId;
     });
-    if (tab) applyChevronState(!!tab.panelsExpanded);
+    if (tab)
+      applyChevronState(
+        !!tab.panelsExpandedMap[currentTaskName],
+        currentTaskName,
+      );
     sb();
   }
 
@@ -2905,6 +3083,14 @@
         e.preventDefault();
         closeSidebar();
       }
+      if (
+        e.key === 'Escape' &&
+        frequentSidebar &&
+        frequentSidebar.classList.contains('open')
+      ) {
+        e.preventDefault();
+        closeFrequentSidebar();
+      }
     });
     inp.addEventListener('keydown', e => {
       // Autocomplete navigation
@@ -3014,6 +3200,26 @@
       input.onchange = handleFileSelect;
       input.click();
     });
+    const menuBtn = document.getElementById('menu-btn');
+    const menuDropdown = document.getElementById('menu-dropdown');
+    if (menuBtn && menuDropdown) {
+      menuBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        closeModelDD();
+        menuDropdown.classList.toggle('open');
+      });
+      document.addEventListener('click', e => {
+        if (!menuDropdown.contains(e.target) && e.target !== menuBtn) {
+          menuDropdown.classList.remove('open');
+        }
+      });
+      menuDropdown.addEventListener('click', e => {
+        if (e.target.closest('.menu-item')) {
+          menuDropdown.classList.remove('open');
+        }
+      });
+    }
+
     if (worktreeToggleBtn) {
       worktreeToggleBtn.addEventListener('click', () => {
         worktreeToggleBtn.classList.toggle('active');
@@ -3064,6 +3270,7 @@
     modelBtn.addEventListener('click', e => {
       e.stopPropagation();
       if (isRunning) return;
+      if (menuDropdown) menuDropdown.classList.remove('open');
       if (modelDropdown.classList.contains('open')) {
         closeModelDD();
         return;
@@ -3125,6 +3332,8 @@
       if (sidebar.classList.contains('open')) {
         closeSidebar();
       } else {
+        closeConfigSidebar();
+        closeFrequentSidebar();
         resetHistoryPagination();
         sidebar.classList.add('open');
         sidebarOverlay.classList.add('open');
@@ -3145,6 +3354,21 @@
         openConfigSidebar();
       }
     });
+    if (frequentBtn) {
+      frequentBtn.addEventListener('click', () => {
+        if (frequentSidebar.classList.contains('open')) {
+          closeFrequentSidebar();
+        } else {
+          openFrequentSidebar();
+        }
+      });
+    }
+    if (frequentSidebarClose) {
+      frequentSidebarClose.addEventListener('click', closeFrequentSidebar);
+    }
+    if (frequentSidebarOverlay) {
+      frequentSidebarOverlay.addEventListener('click', closeFrequentSidebar);
+    }
     configSidebarClose.addEventListener('click', closeConfigSidebar);
     configSidebarOverlay.addEventListener('click', closeConfigSidebar);
     cfgSaveBtn.addEventListener('click', () => {
@@ -3660,10 +3884,69 @@
       const div = document.createElement('div');
       div.className = 'sidebar-item';
       const itemText = s.title || s.preview || 'Untitled';
-      div.textContent = itemText;
       div.dataset.tooltip = s.preview || itemText;
       div.style.backgroundColor = chatIdBgColor(String(s.id));
       div.style.color = '#1a1a1a';
+
+      if (s.failed) {
+        const failedDot = document.createElement('span');
+        failedDot.className = 'sidebar-item-failed';
+        failedDot.dataset.tooltip = 'Task failed';
+        failedDot.setAttribute('aria-label', 'Task failed');
+        div.appendChild(failedDot);
+      }
+
+      const textSpan = document.createElement('span');
+      textSpan.className = 'sidebar-item-text';
+      textSpan.textContent = itemText;
+      div.appendChild(textSpan);
+
+      if (s.task_id) {
+        const delBtn = document.createElement('button');
+        delBtn.className = 'sidebar-item-delete';
+        delBtn.dataset.tooltip = 'Delete task';
+        delBtn.innerHTML =
+          '<svg width="11" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>';
+
+        const confirmWrap = document.createElement('span');
+        confirmWrap.className = 'sidebar-item-confirm';
+        confirmWrap.style.display = 'none';
+
+        const confirmBtn = document.createElement('button');
+        confirmBtn.className = 'sidebar-confirm-yes';
+        confirmBtn.dataset.tooltip = 'Confirm delete';
+        confirmBtn.textContent = 'Delete';
+
+        const cancelBtn = document.createElement('button');
+        cancelBtn.className = 'sidebar-confirm-no';
+        cancelBtn.dataset.tooltip = 'Cancel';
+        cancelBtn.textContent = 'Cancel';
+
+        confirmWrap.appendChild(confirmBtn);
+        confirmWrap.appendChild(cancelBtn);
+
+        delBtn.addEventListener('click', e => {
+          e.stopPropagation();
+          delBtn.style.display = 'none';
+          confirmWrap.style.display = '';
+        });
+
+        confirmBtn.addEventListener('click', e => {
+          e.stopPropagation();
+          vscode.postMessage({type: 'deleteTask', taskId: s.task_id});
+          div.remove();
+        });
+
+        cancelBtn.addEventListener('click', e => {
+          e.stopPropagation();
+          confirmWrap.style.display = 'none';
+          delBtn.style.display = '';
+        });
+
+        div.appendChild(delBtn);
+        div.appendChild(confirmWrap);
+      }
+
       div.addEventListener('click', () => {
         if (demoMode && typeof window._startDemoReplay === 'function') {
           closeSidebar();
@@ -3704,6 +3987,7 @@
   function openConfigSidebar() {
     closeConfigSidebar();
     closeSidebar();
+    closeFrequentSidebar();
     vscode.postMessage({type: 'getConfig'});
     configSidebar.classList.add('open');
     configSidebarOverlay.classList.add('open');
@@ -3713,6 +3997,59 @@
     configSidebar.classList.remove('open');
     configSidebarOverlay.classList.remove('open');
     configBtn.classList.remove('open');
+  }
+
+  function openFrequentSidebar() {
+    if (!frequentSidebar) return;
+    closeSidebar();
+    closeConfigSidebar();
+    vscode.postMessage({type: 'getFrequentTasks', limit: 20});
+    frequentSidebar.classList.add('open');
+    if (frequentSidebarOverlay) frequentSidebarOverlay.classList.add('open');
+    if (frequentBtn) frequentBtn.classList.add('open');
+  }
+  function closeFrequentSidebar() {
+    if (!frequentSidebar) return;
+    frequentSidebar.classList.remove('open');
+    if (frequentSidebarOverlay) frequentSidebarOverlay.classList.remove('open');
+    if (frequentBtn) frequentBtn.classList.remove('open');
+  }
+
+  function renderFrequentTasks(tasks) {
+    if (!frequentList) return;
+    if (!tasks || tasks.length === 0) {
+      frequentList.innerHTML = '<div class="sidebar-empty">No tasks yet</div>';
+      return;
+    }
+    frequentList.innerHTML = '';
+    tasks.forEach(t => {
+      const div = document.createElement('div');
+      div.className = 'sidebar-item frequent-item';
+      const text = String(t.task || '');
+      div.dataset.tooltip = text;
+      div.style.backgroundColor = chatIdBgColor(text);
+      div.style.color = '#1a1a1a';
+
+      const textSpan = document.createElement('span');
+      textSpan.className = 'sidebar-item-text';
+      textSpan.textContent = text.length > 60 ? text.slice(0, 60) + '…' : text;
+      div.appendChild(textSpan);
+
+      const cnt = document.createElement('span');
+      cnt.className = 'frequent-item-count';
+      cnt.textContent = String(t.count);
+      div.appendChild(cnt);
+
+      div.addEventListener('click', () => {
+        inp.value = text;
+        syncClearBtn();
+        inp.style.height = 'auto';
+        inp.style.height = Math.min(inp.scrollHeight, 200) + 'px';
+        inp.focus();
+        closeFrequentSidebar();
+      });
+      frequentList.appendChild(div);
+    });
   }
   function populateConfigForm(cfg, apiKeys) {
     const el = id => document.getElementById(id);
@@ -3923,7 +4260,10 @@
     setTaskText: setTaskText,
     updateTabTitle: updateActiveTabTitle,
     hideWelcome: function () {
-      if (welcome) welcome.style.display = 'none';
+      if (welcome) {
+        welcome.style.display = 'none';
+        refreshWelcomeLayout();
+      }
     },
     scrollToBottom: sb,
     getActiveTabId: function () {

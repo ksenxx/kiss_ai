@@ -349,6 +349,7 @@ class BaseBrowserPrinter(Printer):
         parsed = parse_result_yaml(text) if text else None
         if parsed:
             event["success"] = parsed.get("success")
+            event["is_continue"] = bool(parsed.get("is_continue", False))
             event["summary"] = str(parsed["summary"])
         self.broadcast(event)
 

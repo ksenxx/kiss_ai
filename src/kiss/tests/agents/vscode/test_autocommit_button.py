@@ -3,7 +3,7 @@
 Validates:
 - The button element exists in the HTML template (SorcarTab.ts).
 - The button is placed between parallel-toggle-btn and demo-toggle-btn in #model-picker.
-- CSS styles are defined for #autocommit-btn.
+- The button uses the shared dropdown menu-item CSS.
 - The JS click handler sends the correct ``autocommitAction`` message.
 - The button is disabled when a task is running (setRunningState).
 - The backend ``autocommitAction`` command dispatches to ``_handle_autocommit_action``.
@@ -11,7 +11,6 @@ Validates:
 
 from __future__ import annotations
 
-import re
 import threading
 import unittest
 from pathlib import Path
@@ -55,14 +54,12 @@ class TestAutocommitButtonInTemplate(unittest.TestCase):
             "autocommit-btn button not found in SorcarTab.ts"
         )
 
-    def test_button_has_tooltip(self) -> None:
+    def test_button_has_menu_label(self) -> None:
         html = _read("src/SorcarTab.ts")
-        # The button should have a data-tooltip attribute
-        match = re.search(
-            r'id="autocommit-btn"[^>]*data-tooltip="([^"]*)"', html,
-        )
-        assert match is not None, "autocommit-btn missing data-tooltip"
-        assert "commit" in match.group(1).lower()
+        btn_start = html.index('id="autocommit-btn"')
+        btn_end = html.index("</button>", btn_start)
+        btn_html = html[btn_start:btn_end]
+        assert "Auto commit" in btn_html
 
     def test_button_between_parallel_and_demo(self) -> None:
         """The autocommit button is between parallel-toggle-btn and demo-toggle-btn."""
@@ -99,19 +96,20 @@ class TestAutocommitButtonInTemplate(unittest.TestCase):
 
 
 class TestAutocommitButtonCSS(unittest.TestCase):
-    """CSS styles are defined for the autocommit button."""
+    """The autocommit button uses shared menu-item CSS."""
 
     def test_base_styles_exist(self) -> None:
         css = _read("media/main.css")
-        assert "#autocommit-btn" in css
+        assert ".menu-item" in css
+        assert "#autocommit-btn" not in css
 
     def test_hover_style_exists(self) -> None:
         css = _read("media/main.css")
-        assert "#autocommit-btn:hover" in css or "#autocommit-btn:hover:not(:disabled)" in css
+        assert ".menu-item:hover:not(:disabled)" in css
 
     def test_disabled_style_exists(self) -> None:
         css = _read("media/main.css")
-        assert "#autocommit-btn:disabled" in css
+        assert ".menu-item:disabled" in css
 
 
 # ===================================================================

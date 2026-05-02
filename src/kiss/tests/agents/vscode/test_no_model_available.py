@@ -42,6 +42,12 @@ class TestNoModelAvailableResultEvent(TestCase):
             "OPENROUTER_API_KEY": keys.OPENROUTER_API_KEY,
             "MINIMAX_API_KEY": getattr(keys, "MINIMAX_API_KEY", ""),
         }
+        # Also clear PATH so shutil.which("claude") (and any other CLI
+        # provider lookups in get_available_models) returns None — without
+        # this, machines with the Claude Code CLI installed report cc/*
+        # models as available even when every API key is empty, which
+        # bypasses the no-model gate this test is exercising.
+        saved_path = os.environ.get("PATH", "")
         try:
             keys.ANTHROPIC_API_KEY = ""
             keys.OPENAI_API_KEY = ""
@@ -49,6 +55,7 @@ class TestNoModelAvailableResultEvent(TestCase):
             keys.TOGETHER_API_KEY = ""
             keys.OPENROUTER_API_KEY = ""
             keys.MINIMAX_API_KEY = ""
+            os.environ["PATH"] = ""
 
             server = _make_server()
             events: list[dict[str, Any]] = []
@@ -110,6 +117,7 @@ class TestNoModelAvailableResultEvent(TestCase):
         finally:
             for attr, val in saved.items():
                 setattr(keys, attr, val)
+            os.environ["PATH"] = saved_path
 
     def test_with_model_proceeds_normally(self) -> None:
         """When API keys are set, task should proceed to agent.run()."""

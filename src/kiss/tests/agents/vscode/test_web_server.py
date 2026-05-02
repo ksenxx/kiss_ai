@@ -26,8 +26,8 @@ from websockets.asyncio.client import connect
 
 from kiss.agents.vscode.vscode_config import CONFIG_PATH, save_config
 from kiss.agents.vscode.web_server import (
+    _TUNNEL_UNHEALTHY_LIMIT,
     _URL_FILE,
-    SAMPLE_TASKS_PATH,
     TUNNEL_CHECK_INTERVAL,
     RemoteAccessServer,
     WebPrinter,
@@ -37,7 +37,9 @@ from kiss.agents.vscode.web_server import (
     _discover_tunnel_url_from_metrics,
     _generate_self_signed_cert,
     _get_local_ips,
+    _pick_free_local_port,
     _print_url,
+    _probe_tunnel_ready,
     _read_version,
     _reject_all_hunks_in_file,
     _reject_hunk_in_file,
@@ -90,6 +92,18 @@ class TestBuildHtml(unittest.TestCase):
         html = _build_html()
         self.assertNotIn("acquireVsCodeApi()", html.split("acquireVsCodeApi")[0])
         self.assertNotIn("webview.cspSource", html)
+
+    def test_body_has_remote_chat_class(self) -> None:
+        """Body carries ``remote-chat`` class so CSS/JS can branch on remote.
+
+        The remote-chat layout hides SAMPLE_TASKS suggestions on the
+        welcome page and centers the input textbox + buttons inside
+        ``#welcome``.  The frontend (``main.js`` and ``main.css``)
+        relies on ``body.remote-chat`` to enable that layout only for
+        the remote webview, not the bundled VS Code extension webview.
+        """
+        html = _build_html()
+        self.assertIn('<body class="remote-chat">', html)
 
 
 class TestTranslateWebviewCommand(unittest.TestCase):
@@ -1678,12 +1692,22 @@ class TestTunnelWatchdog(IsolatedAsyncioTestCase):
         else:
             _URL_FILE.unlink(missing_ok=True)
 
-    async def test_watchdog_no_tunnel_proc_is_noop(self) -> None:
-        """When _tunnel_proc is None, _check_and_restart_tunnel is a no-op."""
+    async def test_watchdog_no_tunnel_proc_in_backoff_is_noop(self) -> None:
+        """When _tunnel_proc is None and a backoff window is active, no restart.
+
+        With a missing process the watchdog will normally try to start
+        a fresh tunnel; the exponential restart backoff suppresses
+        that retry until ``_tunnel_next_retry`` elapses.  Verifying
+        that path keeps the test independent of the host's actual
+        ``cloudflared`` install.
+        """
         self.server._tunnel_proc = None
+        self.server._tunnel_failure_count = 1
+        self.server._tunnel_next_retry = time.monotonic() + 600
         await self.server._check_and_restart_tunnel()
-        # Should not raise or change anything
+        # Should not raise or attempt a restart.
         self.assertIsNone(self.server._tunnel_proc)
+        self.assertEqual(self.server._tunnel_failure_count, 1)
 
     async def test_watchdog_alive_process_not_restarted(self) -> None:
         """A still-running tunnel process is left alone."""
@@ -4462,8 +4486,8 @@ class TestStopTunnelKillPath(IsolatedAsyncioTestCase):
         self.assertIsNotNone(proc.returncode)
 
 
-class TestWelcomeInfoMissingSampleTasks(IsolatedAsyncioTestCase):
-    """Test _send_welcome_info when SAMPLE_TASKS_PATH is missing (1262-1263)."""
+class TestRemoteWelcomeSuggestionsEmpty(IsolatedAsyncioTestCase):
+    """The remote chat webview must never expose SAMPLE_TASKS suggestions."""
 
     async def asyncSetUp(self) -> None:
         self.port = _find_free_port()
@@ -4484,21 +4508,7 @@ class TestWelcomeInfoMissingSampleTasks(IsolatedAsyncioTestCase):
         )
         await self.server.start_async()
 
-        # Temporarily move SAMPLE_TASKS_PATH
-        self._sample_backup: bytes | None = None
-        if SAMPLE_TASKS_PATH.is_file():
-            self._sample_backup = SAMPLE_TASKS_PATH.read_bytes()
-            SAMPLE_TASKS_PATH.rename(SAMPLE_TASKS_PATH.with_suffix(".bak"))
-
     async def asyncTearDown(self) -> None:
-        # Restore SAMPLE_TASKS_PATH
-        if self._sample_backup is not None:
-            bak = SAMPLE_TASKS_PATH.with_suffix(".bak")
-            if bak.exists():
-                bak.rename(SAMPLE_TASKS_PATH)
-            else:
-                SAMPLE_TASKS_PATH.write_bytes(self._sample_backup)
-
         await self.server.stop_async()
         if self._orig_config is not None:
             CONFIG_PATH.write_text(self._orig_config)
@@ -4509,8 +4519,14 @@ class TestWelcomeInfoMissingSampleTasks(IsolatedAsyncioTestCase):
         else:
             _URL_FILE.unlink(missing_ok=True)
 
-    async def test_welcome_info_with_missing_sample_tasks(self) -> None:
-        """welcome_suggestions falls back to empty list when file missing."""
+    async def test_remote_welcome_suggestions_always_empty(self) -> None:
+        """Remote welcome_suggestions event always carries an empty list.
+
+        The remote chat webview deliberately suppresses the
+        SAMPLE_TASKS.json suggestions and centers the input textbox on
+        the welcome page instead, so the backend must broadcast an
+        empty list regardless of whether SAMPLE_TASKS.json exists.
+        """
         async with connect(
             f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl(),
         ) as ws:
@@ -5885,6 +5901,324 @@ class TestRemoveUrlFileReadOnly(unittest.TestCase):
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class _FakeMetricsHandler(BaseHTTPRequestHandler):
+    """HTTP handler that mimics ``cloudflared``'s ``/ready`` endpoint.
+
+    The class attribute ``ready_connections`` is read on each request
+    so tests can flip the value mid-server to simulate a tunnel
+    going from healthy to deregistered or back.
+    """
+
+    ready_connections = 0
+
+    def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
+        if self.path != "/ready":
+            self.send_response(404)
+            self.end_headers()
+            return
+        body = json.dumps({
+            "status": 200 if self.ready_connections > 0 else 503,
+            "readyConnections": self.ready_connections,
+            "connectorId": "test-connector",
+        }).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+        pass
+
+
+class TestPickFreeLocalPort(unittest.TestCase):
+    """Test ``_pick_free_local_port``."""
+
+    def test_returns_bindable_port(self) -> None:
+        """The returned port can be re-bound on 127.0.0.1."""
+        port = _pick_free_local_port()
+        self.assertIsInstance(port, int)
+        self.assertGreater(port, 0)
+        # We should be able to bind it again right after.
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", port))
+
+
+class TestProbeTunnelReady(unittest.TestCase):
+    """Integration tests for ``_probe_tunnel_ready`` against a real HTTP server."""
+
+    def setUp(self) -> None:
+        # Reset class state so tests don't bleed into each other.
+        _FakeMetricsHandler.ready_connections = 0
+        self.server = HTTPServer(("127.0.0.1", 0), _FakeMetricsHandler)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+
+    def test_returns_true_when_ready_connections_positive(self) -> None:
+        """A healthy tunnel (readyConnections > 0) returns True."""
+        _FakeMetricsHandler.ready_connections = 4
+        self.assertTrue(_probe_tunnel_ready(self.port))
+
+    def test_returns_false_when_ready_connections_zero(self) -> None:
+        """A deregistered tunnel (readyConnections == 0) returns False."""
+        _FakeMetricsHandler.ready_connections = 0
+        self.assertFalse(_probe_tunnel_ready(self.port))
+
+    def test_returns_false_when_endpoint_unreachable(self) -> None:
+        """Connection refused (no server listening) returns False."""
+        # Pick a port that is free *now* so connect refuses immediately.
+        free_port = _pick_free_local_port()
+        self.assertFalse(_probe_tunnel_ready(free_port))
+
+
+class TestProbeTunnelReadyMalformedJson(unittest.TestCase):
+    """``_probe_tunnel_ready`` must tolerate non-numeric or missing fields."""
+
+    def test_missing_field_returns_false(self) -> None:
+        """When ``readyConnections`` is absent, treat as unhealthy."""
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802
+                body = b'{"status": 503}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), _Handler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            self.assertFalse(_probe_tunnel_ready(port))
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+    def test_non_numeric_field_returns_false(self) -> None:
+        """When ``readyConnections`` is non-numeric, treat as unhealthy."""
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802
+                body = b'{"readyConnections": "many"}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), _Handler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            self.assertFalse(_probe_tunnel_ready(port))
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+
+class TestWatchdogEdgeDeregistration(IsolatedAsyncioTestCase):
+    """Integration tests: watchdog must restart on edge-deregistration.
+
+    Simulates the failure mode where ``cloudflared`` is alive but
+    Cloudflare's edge has dropped the tunnel registration so
+    ``readyConnections`` stays at 0.  The watchdog must count
+    consecutive failures and force-restart after
+    :data:`_TUNNEL_UNHEALTHY_LIMIT` ticks.
+    """
+
+    async def asyncSetUp(self) -> None:
+        self.port = _find_free_port()
+        self._orig_config = None
+        if CONFIG_PATH.exists():
+            self._orig_config = CONFIG_PATH.read_text()
+        save_config({"remote_password": ""})
+        self._backup_url: bytes | None = None
+        if _URL_FILE.is_file():
+            self._backup_url = _URL_FILE.read_bytes()
+
+        # Spin up a fake cloudflared metrics endpoint.
+        _FakeMetricsHandler.ready_connections = 0
+        self.metrics_server = HTTPServer(
+            ("127.0.0.1", 0), _FakeMetricsHandler,
+        )
+        self.metrics_port = self.metrics_server.server_address[1]
+        self.metrics_thread = threading.Thread(
+            target=self.metrics_server.serve_forever, daemon=True,
+        )
+        self.metrics_thread.start()
+
+        self.server = RemoteAccessServer(
+            host="127.0.0.1",
+            port=self.port,
+            work_dir=tempfile.mkdtemp(),
+        )
+        await self.server.start_async()
+        self.server.use_tunnel = True
+        # Inject a long-running fake "cloudflared" subprocess and point
+        # the watchdog at our fake metrics server.
+        self.fake_proc = subprocess.Popen(
+            ["sleep", "120"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.server._tunnel_proc = self.fake_proc  # type: ignore[assignment]
+        self.server._tunnel_metrics_port = self.metrics_port
+        self.server._tunnel_unhealthy_ticks = 0
+
+    async def asyncTearDown(self) -> None:
+        if self.fake_proc.poll() is None:
+            self.fake_proc.terminate()
+            try:
+                self.fake_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.fake_proc.kill()
+        self.metrics_server.shutdown()
+        self.metrics_server.server_close()
+        self.metrics_thread.join(timeout=5)
+        await self.server.stop_async()
+        if self._orig_config is not None:
+            CONFIG_PATH.write_text(self._orig_config)
+        elif CONFIG_PATH.exists():
+            CONFIG_PATH.unlink()
+        if self._backup_url is not None:
+            _URL_FILE.write_bytes(self._backup_url)
+        else:
+            _URL_FILE.unlink(missing_ok=True)
+
+    async def test_healthy_tunnel_resets_counter(self) -> None:
+        """``readyConnections > 0`` keeps the unhealthy counter at zero."""
+        _FakeMetricsHandler.ready_connections = 2
+        # Pre-seed a non-zero counter to verify it gets reset.
+        self.server._tunnel_unhealthy_ticks = 1
+        await self.server._check_and_restart_tunnel()
+        self.assertEqual(self.server._tunnel_unhealthy_ticks, 0)
+        # Subprocess must not have been touched.
+        self.assertIs(self.server._tunnel_proc, self.fake_proc)
+        self.assertIsNone(self.fake_proc.poll())
+
+    async def test_unhealthy_below_limit_only_increments(self) -> None:
+        """Below the threshold, the counter increments without restart."""
+        _FakeMetricsHandler.ready_connections = 0
+        for tick in range(1, _TUNNEL_UNHEALTHY_LIMIT):
+            await self.server._check_and_restart_tunnel()
+            self.assertEqual(self.server._tunnel_unhealthy_ticks, tick)
+            self.assertIs(
+                self.server._tunnel_proc,
+                self.fake_proc,
+                f"Subprocess should still be alive at tick {tick}",
+            )
+
+    async def test_unhealthy_at_limit_force_restarts(self) -> None:
+        """At the threshold the watchdog terminates and restarts the tunnel.
+
+        Without ``cloudflared`` installed the restart returns None,
+        but the original "deregistered" subprocess MUST be terminated
+        and the counter MUST be reset.
+        """
+        _FakeMetricsHandler.ready_connections = 0
+        for _ in range(_TUNNEL_UNHEALTHY_LIMIT):
+            await self.server._check_and_restart_tunnel()
+        # Force-restart path should have run.
+        self.assertEqual(self.server._tunnel_unhealthy_ticks, 0)
+        self.assertIsNot(self.server._tunnel_proc, self.fake_proc)
+        # Old subprocess was terminated.
+        self.assertIsNotNone(self.fake_proc.poll())
+
+    async def test_no_metrics_port_skips_health_probe(self) -> None:
+        """When ``_tunnel_metrics_port`` is None, only liveness is checked."""
+        self.server._tunnel_metrics_port = None
+        # The probe endpoint reports zero, but we should not increment.
+        _FakeMetricsHandler.ready_connections = 0
+        await self.server._check_and_restart_tunnel()
+        self.assertEqual(self.server._tunnel_unhealthy_ticks, 0)
+        self.assertIs(self.server._tunnel_proc, self.fake_proc)
+
+
+class TestDeadProcessClearsMetricsState(IsolatedAsyncioTestCase):
+    """When the subprocess dies, the watchdog must reset metrics state."""
+
+    async def asyncSetUp(self) -> None:
+        self.port = _find_free_port()
+        self._orig_config = None
+        if CONFIG_PATH.exists():
+            self._orig_config = CONFIG_PATH.read_text()
+        save_config({"remote_password": ""})
+        self._backup_url: bytes | None = None
+        if _URL_FILE.is_file():
+            self._backup_url = _URL_FILE.read_bytes()
+        self.server = RemoteAccessServer(
+            host="127.0.0.1",
+            port=self.port,
+            work_dir=tempfile.mkdtemp(),
+        )
+        await self.server.start_async()
+
+    async def asyncTearDown(self) -> None:
+        await self.server.stop_async()
+        if self._orig_config is not None:
+            CONFIG_PATH.write_text(self._orig_config)
+        elif CONFIG_PATH.exists():
+            CONFIG_PATH.unlink()
+        if self._backup_url is not None:
+            _URL_FILE.write_bytes(self._backup_url)
+        else:
+            _URL_FILE.unlink(missing_ok=True)
+
+    async def test_dead_process_clears_metrics_port_and_counter(self) -> None:
+        """A died subprocess resets the unhealthy counter and rotates metrics port.
+
+        Whether the subsequent restart succeeds or not depends on the
+        local environment (``cloudflared`` may or may not be installed).
+        Either way the previous subprocess must no longer be referenced
+        and the unhealthy counter must be zero — those are the
+        invariants we care about.
+        """
+        proc = subprocess.Popen(
+            ["true"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        proc.wait()
+        sentinel_port = 65530
+        self.server._tunnel_proc = proc  # type: ignore[assignment]
+        self.server._tunnel_metrics_port = sentinel_port
+        self.server._tunnel_unhealthy_ticks = 2
+        self.server.use_tunnel = True
+
+        await self.server._check_and_restart_tunnel()
+
+        self.assertIsNot(self.server._tunnel_proc, proc)
+        # The original sentinel port belonging to the dead subprocess
+        # must not survive — either cleared (no cloudflared) or
+        # replaced with a fresh free port (cloudflared installed).
+        self.assertNotEqual(self.server._tunnel_metrics_port, sentinel_port)
+        self.assertEqual(self.server._tunnel_unhealthy_ticks, 0)
+        # Tear down any tunnel subprocess the restart may have spawned
+        # so it doesn't leak past this test.
+        if self.server._tunnel_proc is not None:
+            self.server._tunnel_proc.terminate()
+            try:
+                self.server._tunnel_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.server._tunnel_proc.kill()
+            self.server._tunnel_proc = None
 
 
 if __name__ == "__main__":

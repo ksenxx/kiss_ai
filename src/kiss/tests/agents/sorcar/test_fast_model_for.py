@@ -45,8 +45,13 @@ class TestFastModelFor:
         assert get_fast_model() == "gpt-4o"
 
     def test_no_keys_returns_haiku_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """When no API keys are set, falls back to claude-haiku-4-5."""
-        assert get_fast_model() == "claude-haiku-4-5"
+        """When no API keys are set, falls back to cc/haiku or claude-haiku-4-5."""
+        import shutil
+
+        if shutil.which("claude") is not None:
+            assert get_fast_model() == "cc/haiku"
+        else:
+            assert get_fast_model() == "claude-haiku-4-5"
 
     def test_priority_openai_over_gemini(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """OpenAI key takes priority over Gemini key."""
