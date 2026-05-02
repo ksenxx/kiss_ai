@@ -2475,7 +2475,7 @@ class TestSorcarSidebarViewMessageHandling(unittest.TestCase):
             "worktreeAction", "resolveDroppedPaths", "focusEditor",
             "closeTab", "getWelcomeSuggestions",
             "webviewFocusChanged", "autocommitAction", "setSkipMerge",
-            "getConfig", "saveConfig", "deleteTask",
+            "getConfig", "saveConfig", "deleteTask", "getFrequentTasks",
         }
         extra = sidebar_cases - known
         assert not extra, f"Sidebar has extra message handlers: {extra}"

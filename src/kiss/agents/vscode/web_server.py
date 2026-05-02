@@ -869,6 +869,12 @@ width=device-width,initial-scale=1,maximum-scale=1">
 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 \
 4h-.09a1.65 1.65 0 00-1.51 1z"/>
               </svg>
+            </button><button id="frequent-btn" title="Frequent tasks">
+              <svg width="1em" height="1em" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round"
+               stroke-linejoin="round">
+                <polyline points="20 12 18 7 14 17 10 5 6 14 4 12"/>
+              </svg>
             </button><button id="history-btn">
               <svg class="history-chevron" width="1em" height="1em" viewBox="0 0 24 24"
                fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"
@@ -1032,6 +1038,17 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
       </div>
     </div>
     <div id="sidebar-overlay"></div>
+
+    <div id="frequent-sidebar">
+      <button id="frequent-sidebar-close">&times;</button>
+      <div class="sidebar-section">
+        <div class="sidebar-hdr">Frequent Tasks</div>
+        <div id="frequent-list">
+          <div class="sidebar-empty">No tasks yet</div>
+        </div>
+      </div>
+    </div>
+    <div id="frequent-sidebar-overlay"></div>
 
     <div id="config-sidebar">
       <button id="config-sidebar-close">&times;</button>
