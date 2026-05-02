@@ -1499,7 +1499,10 @@
       case 'result': {
         const rc = mkEl('div', 'ev rc');
         let rb = '';
-        if (ev.success === false) {
+        if (ev.is_continue) {
+          rb +=
+            '<div style="color:var(--yellow);font-weight:700;font-size:var(--fs-xl);margin-bottom:10px">Status: Continue</div>';
+        } else if (ev.success === false) {
           rb +=
             '<div style="color:var(--red);font-weight:700;font-size:var(--fs-xl);margin-bottom:10px">Status: FAILED</div>';
         }
@@ -1644,7 +1647,7 @@
     }
     if (t === 'result') {
       collapseAllExceptResult(O);
-      if (ev.success === false) {
+      if (ev.success === false && !ev.is_continue) {
         const rTab = tabs.find(x => {
           return x.id === activeTabId;
         });
@@ -1757,7 +1760,7 @@
         if (ev.cost && ev.cost !== 'N/A')
           tab.statusBudgetText = 'Cost: ' + ev.cost;
         collapseAllExceptResult(tab.outputFragment);
-        if (ev.success === false) tab.lastTaskFailed = true;
+        if (ev.success === false && !ev.is_continue) tab.lastTaskFailed = true;
       }
     }
 
