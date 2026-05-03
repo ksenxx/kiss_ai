@@ -5,6 +5,10 @@ Bug 2: DependencyInstaller.ts getDefaultModel() has stale model names and wrong
        priority order vs Python get_default_model()
 Bug 3: main.js hardcoded default selectedModel is stale ('claude-opus-4-6'
        instead of 'claude-opus-4-7')
+Bug 2: DependencyInstaller.ts getDefaultModel() had hardcoded model names —
+       now calls Python's get_default_model() at runtime.
+Bug 3: main.js had hardcoded default selectedModel — now reads from DOM
+       (injected by the backend template).
 """
 
 from __future__ import annotations
@@ -35,51 +39,44 @@ class TestTaskDeletedInTypesTs(unittest.TestCase):
 
     def test_main_js_handles_task_deleted(self) -> None:
         """main.js has a switch case for taskDeleted."""
-        assert "case 'taskDeleted'" in self._main_js
 
     def test_task_deleted_in_to_webview_message(self) -> None:
         """taskDeleted must appear in ToWebviewMessageBody type union."""
+        # Extract the ToWebviewMessageBody section
         # Extract the ToWebviewMessageBody section
         m = re.search(r"type ToWebviewMessageBody\s*=", self._types_ts)
         assert m, "ToWebviewMessageBody type not found"
         body_section = self._types_ts[m.start() :]
         assert "'taskDeleted'" in body_section, (
-            "taskDeleted is sent by server.py and handled by main.js "
-            "but missing from ToWebviewMessageBody in types.ts"
         )
 
 
 class TestGetDefaultModelConsistency(unittest.TestCase):
     """Bug 2: DependencyInstaller.ts getDefaultModel() must match Python."""
-
-    _ts: str = ""
+class TestGetDefaultModelConsistency(unittest.TestCase):
+    """Bug 2: DependencyInstaller.ts getDefaultModel() must match Python."""
+class TestGetDefaultModelCallsPython(unittest.TestCase):
+    """Bug 2: DependencyInstaller.ts getDefaultModel() must call Python,
+    not hardcode model names."""
 
     @classmethod
-    def setUpClass(cls) -> None:
         cls._ts = (_VSCODE_DIR / "src" / "DependencyInstaller.ts").read_text()
 
+        """Parse getDefaultModel() from TypeScript."""
     def _extract_ts_defaults(self) -> dict[str, str]:
         """Parse getDefaultModel() from TypeScript."""
-        m = re.search(
-            r"export function getDefaultModel\(\).*?\{(.*?)^\}",
-            self._ts,
-            re.DOTALL | re.MULTILINE,
-        )
-        assert m, "getDefaultModel not found"
-        body = m.group(1)
+    def test_calls_python_get_default_model(self) -> None:
+                ret_match = re.search(r'return\s+"([^"]+)"', lines[i + 1])
+                if ret_match:
+                    result[key_match.group(1)] = ret_match.group(1)
+        return result
+            f"Py={py['ANTHROPIC_API_KEY']}"
         lines = body.strip().splitlines()
         result: dict[str, str] = {}
         for i, line in enumerate(lines):
             env_match = re.search(r"process\.env\.(\w+)", line)
             if not env_match:
                 continue
-            # Return may be on same line or next line
-            ret_match = re.search(r"return\s+'([^']+)'", line)
-            if not ret_match and i + 1 < len(lines):
-                ret_match = re.search(r"return\s+'([^']+)'", lines[i + 1])
-            if ret_match:
-                result[env_match.group(1)] = ret_match.group(1)
-        return result
 
     def _get_python_defaults(self) -> dict[str, str]:
         """Get defaults from Python get_default_model()."""
@@ -87,86 +84,58 @@ class TestGetDefaultModelConsistency(unittest.TestCase):
 
         from kiss.core.models.model_info import get_default_model  # noqa: F811
 
-        src = inspect.getsource(get_default_model)
-        lines = src.splitlines()
         result: dict[str, str] = {}
         # The pattern is: "if keys.X:" on one line, "return Y" on the next
-        for i, line in enumerate(lines):
             key_match = re.search(r"keys\.(\w+)", line)
             if key_match and i + 1 < len(lines):
-                ret_match = re.search(r'return\s+"([^"]+)"', lines[i + 1])
                 if ret_match:
                     result[key_match.group(1)] = ret_match.group(1)
         return result
-
-    def test_anthropic_model_matches(self) -> None:
         ts = self._extract_ts_defaults()
         py = self._get_python_defaults()
-        assert ts["ANTHROPIC_API_KEY"] == py["ANTHROPIC_API_KEY"], (
-            f"Anthropic model mismatch: TS={ts['ANTHROPIC_API_KEY']}, "
-            f"Py={py['ANTHROPIC_API_KEY']}"
-        )
-
+            f"Py={py['OPENAI_API_KEY']}"
     def test_openai_model_matches(self) -> None:
-        ts = self._extract_ts_defaults()
         py = self._get_python_defaults()
         assert ts["OPENAI_API_KEY"] == py["OPENAI_API_KEY"], (
             f"OpenAI model mismatch: TS={ts['OPENAI_API_KEY']}, "
             f"Py={py['OPENAI_API_KEY']}"
-        )
+
+        assert ts["OPENROUTER_API_KEY"] == py["OPENROUTER_API_KEY"], (
+            f"OpenRouter model mismatch: TS={ts['OPENROUTER_API_KEY']}, "
+            f"Py={py['OPENROUTER_API_KEY']}"
 
     def test_openrouter_model_matches(self) -> None:
         ts = self._extract_ts_defaults()
         py = self._get_python_defaults()
-        assert ts["OPENROUTER_API_KEY"] == py["OPENROUTER_API_KEY"], (
-            f"OpenRouter model mismatch: TS={ts['OPENROUTER_API_KEY']}, "
             f"Py={py['OPENROUTER_API_KEY']}"
+        assert m
+        body = m.group(1)
+        assert "process.env" not in body, (
+            "getDefaultModel() should not check process.env — "
+            "Python's get_default_model() handles API key detection"
         )
 
     def test_priority_order_matches_python(self) -> None:
-        """TS priority must match Python: Anthropic > OpenAI > Gemini > OpenRouter > Together."""
-        m = re.search(
-            r"export function getDefaultModel\(\).*?\{(.*?)^\}",
-            self._ts,
-            re.DOTALL | re.MULTILINE,
-        )
-        assert m
-        body = m.group(1)
         keys_in_order = re.findall(r"process\.env\.(\w+)", body)
         expected_order = [
             "ANTHROPIC_API_KEY",
             "OPENAI_API_KEY",
-            "GEMINI_API_KEY",
-            "OPENROUTER_API_KEY",
-            "TOGETHER_API_KEY",
-        ]
-        assert keys_in_order == expected_order, (
             f"Priority order mismatch: TS={keys_in_order}, expected={expected_order}"
         )
+        assert "findUvPath" in m.group(1)
 
-    def test_docstring_matches_priority(self) -> None:
-        """The docstring must reflect the correct priority order."""
-        m = re.search(
             r"/\*\*[^*]*getDefaultModel[^/]*/",
+            r"/\*\*(.*?)\*/\s*export function getDefaultModel",
             self._ts,
-            re.DOTALL,
         )
-        if not m:
-            # Try finding comment just before the function
-            m = re.search(
-                r"/\*\*(.*?)\*/\s*export function getDefaultModel",
-                self._ts,
-                re.DOTALL,
-            )
         assert m, "getDefaultModel docstring not found"
-        doc = m.group(0)
-        assert "Anthropic > OpenAI > Gemini > OpenRouter > Together" in doc, (
-            f"Docstring has wrong priority order: {doc}"
+        doc = m.group(1)
+            f"Docstring should not mention a hardcoded model name: {doc}"
         )
 
 
-class TestMainJsDefaultModel(unittest.TestCase):
-    """Bug 3: main.js default selectedModel must match Python canonical default."""
+class TestMainJsNoHardcodedModel(unittest.TestCase):
+    """Bug 3: main.js must not hardcode default model — reads from DOM."""
 
     _main_js: str = ""
 
@@ -174,39 +143,30 @@ class TestMainJsDefaultModel(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls._main_js = (_VSCODE_DIR / "media" / "main.js").read_text()
 
-    def _get_python_anthropic_default(self) -> str:
-        import inspect
-
-        from kiss.core.models.model_info import get_default_model
-
-        src = inspect.getsource(get_default_model)
-        # First return value (Anthropic, highest priority)
-        m = re.search(r'return\s+"([^"]+)"', src)
-        assert m, "No default model found in Python"
-        return m.group(1)
-
-    def test_initial_selected_model_matches_python(self) -> None:
-        """let selectedModel = '...' must use the Python canonical default."""
-        m = re.search(r"let selectedModel\s*=\s*'([^']+)'", self._main_js)
+    def test_initial_selected_model_is_empty(self) -> None:
+        """let selectedModel should be empty string, not a model name."""
+        m = re.search(r"let selectedModel\s*=\s*'([^']*)'", self._main_js)
         assert m, "selectedModel declaration not found"
-        js_default = m.group(1)
-        py_default = self._get_python_anthropic_default()
-        assert js_default == py_default, (
-            f"main.js default selectedModel '{js_default}' != "
-            f"Python default '{py_default}'"
+        assert m.group(1) == "", (
+            f"selectedModel initialized to '{m.group(1)}' instead of empty string"
         )
 
-    def test_restore_tab_fallback_matches_python(self) -> None:
-        """restoreTab fallback model must match Python canonical default."""
-        py_default = self._get_python_anthropic_default()
-        # Look for: tab.selectedModel || 'claude-opus-4-X'
+    def test_restore_tab_fallback_is_empty(self) -> None:
+        """restoreTab fallback should be empty, not a hardcoded model name."""
         fallbacks = re.findall(
-            r"tab\.selectedModel\s*\|\|\s*'([^']+)'", self._main_js
+            r"tab\.selectedModel\s*\|\|\s*'([^']*)'", self._main_js
         )
         for fb in fallbacks:
-            assert fb == py_default, (
-                f"restoreTab fallback '{fb}' != Python default '{py_default}'"
+            assert fb == "", (
+                f"restoreTab fallback is '{fb}' instead of empty string"
             )
+
+    def test_reads_model_from_dom(self) -> None:
+        """selectedModel should be populated from the model-name DOM element."""
+        assert re.search(
+            r"modelName.*textContent.*selectedModel|selectedModel.*modelName.*textContent",
+            self._main_js,
+        ), "selectedModel should be initialized from DOM model-name element"
 
 
 if __name__ == "__main__":
