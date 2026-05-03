@@ -782,6 +782,9 @@ width=device-width,initial-scale=1,maximum-scale=1">
             color: var(--vscode-editor-foreground, #cccccc); }}
     :root {{
       --vscode-font-size: 16px;
+      --vscode-font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI',
+        Roboto, 'Helvetica Neue', Arial, sans-serif;
+      --vscode-editor-font-size: 16px;
       --vscode-editor-background: #1e1e1e;
       --vscode-editor-foreground: #cccccc;
       --vscode-input-background: #3c3c3c;

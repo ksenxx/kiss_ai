@@ -32,7 +32,8 @@
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
-html { max-width: 100vw; overflow-x: hidden; text-size-adjust: 100%; }
+/* stylelint-disable-next-line property-no-vendor-prefix -- iOS Safari requires -webkit- prefix */
+html { max-width: 100vw; overflow-x: hidden; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 
 body {
   font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
