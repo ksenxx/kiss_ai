@@ -275,7 +275,7 @@
     inp.value = tab.inputValue || '';
     syncClearBtn();
     inp.style.height = 'auto';
-    inp.style.height = Math.min(inp.scrollHeight, 200) + 'px';
+    inp.style.height = inp.scrollHeight + 'px';
     isMerging = tab.isMerging || false;
     t0 = tab.t0 || null;
     // Restore streaming state (DOM refs valid since fragment preserves elements)
@@ -1026,7 +1026,7 @@
     clearGhost();
     syncClearBtn();
     inp.style.height = 'auto';
-    inp.style.height = Math.min(inp.scrollHeight, 200) + 'px';
+    inp.style.height = inp.scrollHeight + 'px';
     return true;
   }
 
@@ -1036,7 +1036,7 @@
       histIdx = Math.min(histIdx + 1, histCache.length - 1);
       inp.value = histCache[histIdx];
       inp.style.height = 'auto';
-      inp.style.height = Math.min(inp.scrollHeight, 200) + 'px';
+      inp.style.height = inp.scrollHeight + 'px';
       syncClearBtn();
       clearGhost();
       return true;
@@ -1050,7 +1050,7 @@
     histIdx--;
     inp.value = histIdx >= 0 ? histCache[histIdx] : '';
     inp.style.height = 'auto';
-    inp.style.height = Math.min(inp.scrollHeight, 200) + 'px';
+    inp.style.height = inp.scrollHeight + 'px';
     syncClearBtn();
     clearGhost();
     return true;
@@ -3194,7 +3194,7 @@
     });
     inp.addEventListener('input', () => {
       inp.style.height = 'auto';
-      inp.style.height = Math.min(inp.scrollHeight, 200) + 'px';
+      inp.style.height = inp.scrollHeight + 'px';
       checkAutocomplete();
       requestGhost();
       histIdx = -1;
@@ -4071,7 +4071,7 @@
         inp.value = text;
         syncClearBtn();
         inp.style.height = 'auto';
-        inp.style.height = Math.min(inp.scrollHeight, 200) + 'px';
+        inp.style.height = inp.scrollHeight + 'px';
         inp.focus();
         closeFrequentSidebar();
       });
