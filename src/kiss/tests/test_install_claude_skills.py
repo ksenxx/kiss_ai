@@ -171,7 +171,7 @@ class TestReleaseShClaudeSkillsStep(unittest.TestCase):
         )
 
     def test_claude_skills_deleted_after_build_before_commit(self) -> None:
-        """claude_skills directory must be deleted after build (step 4) and before commit (step 5)."""
+        """Skills dir must be deleted after build (4), before commit (5)."""
         text = RELEASE_SH.read_text()
         build_pos = text.index("Step 4: Build VS Code extension")
         cleanup_pos = text.index("Cleaned up $CLAUDE_SKILLS_DIR (bundled in extension)")
@@ -199,6 +199,22 @@ class TestReleaseShClaudeSkillsStep(unittest.TestCase):
             "# 4. Download official Claude Code skills",
             text,
             "release.sh workflow comment must include Claude skills step",
+        )
+
+    def test_release_sh_claude_skills_dir_is_absolute(self) -> None:
+        """CLAUDE_SKILLS_DIR must be an absolute path so cp works after cd."""
+        text = RELEASE_SH.read_text()
+        # The assignment must use $(pwd) or similar to make the path absolute;
+        # a bare relative path like CLAUDE_SKILLS_DIR="src/..." would break
+        # after cd into the sparse-checkout temp directory.
+        import re
+
+        match = re.search(r'CLAUDE_SKILLS_DIR="([^"]*)"', text)
+        assert match is not None, "CLAUDE_SKILLS_DIR assignment not found"
+        value = match.group(1)
+        self.assertTrue(
+            value.startswith("$(pwd)") or value.startswith("/"),
+            f"CLAUDE_SKILLS_DIR must be absolute, got: {value}",
         )
 
     def test_release_sh_workflow_has_13_steps(self) -> None:
