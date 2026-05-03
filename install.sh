@@ -280,7 +280,7 @@ find_code_cli() {
     fi
 
     # --- 1. git ---------------------------------------------------------------
-    echo ">>> [1/10] Checking git..."
+    echo ">>> [1/11] Checking git..."
     if ! command -v git &>/dev/null; then
         install_git
     fi
@@ -288,7 +288,7 @@ find_code_cli() {
     echo ""
 
     # --- 2. uv ----------------------------------------------------------------
-    echo ">>> [2/10] Installing uv..."
+    echo ">>> [2/11] Installing uv..."
     if ! command -v uv &>/dev/null; then
         install_uv
     fi
@@ -296,7 +296,7 @@ find_code_cli() {
     echo ""
 
     # --- 3. Node.js -----------------------------------------------------------
-    echo ">>> [3/10] Installing Node.js..."
+    echo ">>> [3/11] Installing Node.js..."
     if ! command -v node &>/dev/null; then
         install_node || true
     fi
@@ -308,7 +308,7 @@ find_code_cli() {
     echo ""
 
     # --- 4. VS Code -----------------------------------------------------------
-    echo ">>> [4/10] Installing VS Code..."
+    echo ">>> [4/11] Installing VS Code..."
     if ! find_code_cli; then
         install_code_cli || true
         find_code_cli || true
@@ -321,7 +321,7 @@ find_code_cli() {
     echo ""
 
     # --- 5. Python environment ------------------------------------------------
-    echo ">>> [5/10] Setting up Python environment..."
+    echo ">>> [5/11] Setting up Python environment..."
     cd "$PROJECT_DIR"
     if [ ! -d "$PROJECT_DIR/.venv" ]; then
         echo "   Creating virtual environment with Python 3.13..."
@@ -340,12 +340,12 @@ find_code_cli() {
     echo ""
 
     # --- 6. Playwright Chromium -----------------------------------------------
-    echo ">>> [6/10] Installing Playwright Chromium..."
+    echo ">>> [6/11] Installing Playwright Chromium..."
     uv run playwright install chromium
     echo ""
 
     # --- 7. cloudflared (for remote web server tunnel) -------------------------
-    echo ">>> [7/10] Installing cloudflared..."
+    echo ">>> [7/11] Installing cloudflared..."
     if ! command -v cloudflared &>/dev/null; then
         case "$OS" in
             Darwin)
@@ -389,7 +389,7 @@ find_code_cli() {
     echo ""
 
     # --- 8. Build VS Code extension ------------------------------------------
-    echo ">>> [8/10] Building VS Code extension..."
+    echo ">>> [8/11] Building VS Code extension..."
     VSCODE_EXT_DIR="$PROJECT_DIR/src/kiss/agents/vscode"
     VSIX="$VSCODE_EXT_DIR/kiss-sorcar.vsix"
     if [ -f "$VSIX" ]; then
@@ -408,7 +408,7 @@ find_code_cli() {
     echo ""
 
     # --- 9. Install VS Code extension ----------------------------------------
-    echo ">>> [9/10] Installing VS Code extension..."
+    echo ">>> [9/11] Installing VS Code extension..."
     if [ -f "$VSIX" ]; then
         if find_code_cli && [ -n "$CODE_CLI" ]; then
             "$CODE_CLI" --install-extension "$VSIX" --force 2>&1
@@ -422,8 +422,38 @@ find_code_cli() {
     fi
     echo ""
 
-    # --- 10. Start kiss-web daemon service ------------------------------------
-    echo ">>> [10/10] Setting up kiss-web daemon service..."
+    # --- 10. Download official Claude Code skills ------------------------------
+    echo ">>> [10/11] Downloading official Claude Code skills..."
+    CLAUDE_SKILLS_DIR="$PROJECT_DIR/src/kiss/agents/claude_skills"
+    if [ -d "$CLAUDE_SKILLS_DIR" ] && [ "$(ls -d "$CLAUDE_SKILLS_DIR"/*/ 2>/dev/null)" ]; then
+        echo "   Claude skills already present — skipping download"
+    else
+        mkdir -p "$CLAUDE_SKILLS_DIR"
+        SKILLS_TMP="$(mktemp -d)"
+        echo "   Cloning anthropics/claude-code plugins..."
+        if git clone --depth 1 --filter=blob:none --sparse \
+            https://github.com/anthropics/claude-code.git "$SKILLS_TMP/claude-code" 2>&1; then
+            cd "$SKILLS_TMP/claude-code"
+            git sparse-checkout set plugins 2>&1
+            # Copy each plugin directory into claude_skills
+            for plugin_dir in plugins/*/; do
+                if [ -d "$plugin_dir" ]; then
+                    plugin_name="$(basename "$plugin_dir")"
+                    cp -R "$plugin_dir" "$CLAUDE_SKILLS_DIR/$plugin_name"
+                fi
+            done
+            cd "$PROJECT_DIR"
+            SKILL_COUNT="$(ls -d "$CLAUDE_SKILLS_DIR"/*/ 2>/dev/null | wc -l | tr -d ' ')"
+            echo "   Installed $SKILL_COUNT Claude skills to $CLAUDE_SKILLS_DIR"
+        else
+            echo "   WARNING: Failed to download Claude Code skills"
+        fi
+        rm -rf "$SKILLS_TMP"
+    fi
+    echo ""
+
+    # --- 11. Start kiss-web daemon service ------------------------------------
+    echo ">>> [11/11] Setting up kiss-web daemon service..."
     KISS_WEB_BIN="$PROJECT_DIR/.venv/bin/kiss-web"
     if [ -x "$KISS_WEB_BIN" ]; then
         case "$OS" in
