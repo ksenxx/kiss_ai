@@ -49,7 +49,6 @@ def _run_node(script: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-# Minimal browser shim for running demo.js in Node.js
 _NODE_SHIM = r"""
 var window = {};
 var document = {
@@ -108,7 +107,6 @@ class TestDemoStopButtonSpinnerStructural(unittest.TestCase):
         """_startDemoReplay must call api.setRunningState(true) before
         the main loop."""
         fn = _extract_fn(self.demo_src, "window._startDemoReplay")
-        # setRunningState(true) must appear before the for loop
         rs_idx = fn.index("setRunningState(true)")
         loop_idx = fn.index("for (let i =")
         assert rs_idx < loop_idx, (
@@ -127,7 +125,6 @@ class TestDemoStopButtonSpinnerStructural(unittest.TestCase):
     def test_replay_calls_set_running_state_false_at_end(self) -> None:
         """_startDemoReplay must call setRunningState(false) after the loop."""
         fn = _extract_fn(self.demo_src, "window._startDemoReplay")
-        # Find the last occurrence of setRunningState(false)
         last_rs = fn.rfind("setRunningState(false)")
         assert last_rs != -1, (
             "setRunningState(false) must be called after the replay loop"
@@ -165,11 +162,9 @@ class TestDemoStopButtonSpinnerStructural(unittest.TestCase):
     def test_stop_button_handles_demo_mode(self) -> None:
         """The stop button click handler must check _demoActive and
         cancel the demo instead of sending a stop message to the backend."""
-        # Find the stopBtn click handler
         stop_handler_start = self.main_src.index(
             "stopBtn.addEventListener('click'"
         )
-        # Extract the handler body
         depth = 0
         handler = ""
         for i in range(stop_handler_start, len(self.main_src)):
@@ -198,7 +193,6 @@ class TestDemoStopButtonSpinnerBehavioral(unittest.TestCase):
         at start and setRunningState(false) + removeSpinner at end."""
         demo_src = _DEMO_JS.read_text()
 
-        # Patch sleep to be instant and log calls
         patched = demo_src.replace(
             "function sleep(ms) {\n"
             "    return new Promise(resolve => {\n"
@@ -274,19 +268,16 @@ window._startDemoReplay(sessions).then(function() {
         assert r.returncode == 0, f"Node failed: {r.stderr}"
         calls = json.loads(r.stdout.strip())
 
-        # setRunningState:true must be the first meaningful call
         assert "setRunningState:true" in calls, (
             f"setRunningState(true) was not called: {calls}"
         )
         rs_true_idx = calls.index("setRunningState:true")
-        # It must come before hideWelcome (first per-task call)
         hw_idx = calls.index("hideWelcome")
         assert rs_true_idx < hw_idx, (
             f"setRunningState(true) (idx {rs_true_idx}) must come "
             f"before hideWelcome (idx {hw_idx}): {calls}"
         )
 
-        # showSpinner must be called at the start
         assert "showSpinner" in calls, (
             f"showSpinner was not called: {calls}"
         )
@@ -296,12 +287,10 @@ window._startDemoReplay(sessions).then(function() {
             f"hideWelcome (idx {hw_idx}): {calls}"
         )
 
-        # setRunningState:false must be called at the end
         assert "setRunningState:false" in calls, (
             f"setRunningState(false) was not called: {calls}"
         )
         rs_false_idx = calls.index("setRunningState:false")
-        # It must come after the last task event
         last_process = max(
             i for i, c in enumerate(calls) if c.startswith("processEvent:")
             or c.startswith("sleep:")
@@ -311,7 +300,6 @@ window._startDemoReplay(sessions).then(function() {
             f"after last event (idx {last_process}): {calls}"
         )
 
-        # removeSpinner must be called at the end
         assert "removeSpinner" in calls, (
             f"removeSpinner was not called: {calls}"
         )

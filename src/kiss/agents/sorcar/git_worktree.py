@@ -390,9 +390,6 @@ class GitWorktreeOps:
         result = _git("stash", "pop", "--index", cwd=repo)
         if result.returncode == 0:
             return True
-        # --index can fail when staged changes conflict with the
-        # current tree.  Fall back to plain pop (loses staging state
-        # but preserves the content).
         result = _git("stash", "pop", cwd=repo)
         return result.returncode == 0
 

@@ -203,7 +203,6 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                     wt.wt_dir,
                 )
                 return False
-            # Copy USER_PREFS.md back to the repo root before removal
             wt_prefs = wt.wt_dir / "USER_PREFS.md"
             if wt_prefs.is_file():
                 shutil.copy2(str(wt_prefs), str(wt.repo_root / "USER_PREFS.md"))
@@ -496,7 +495,6 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             baseline_commit=baseline_commit,
         )
 
-        # Copy USER_PREFS.md into the worktree so the agent has access
         user_prefs = repo / "USER_PREFS.md"
         if user_prefs.is_file():
             shutil.copy2(str(user_prefs), str(wt_dir / "USER_PREFS.md"))

@@ -41,10 +41,6 @@ class _NonGitHarness(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        # Sanity guard: tempfile.mkdtemp() may live under a path that
-        # is itself inside a git repo (e.g. /var/folders/... is fine on
-        # macOS, but /tmp on Linux developer boxes can be a worktree).
-        # Skip the test rather than produce false positives.
         if _is_inside_git_repo(self.tmpdir):
             self.skipTest(
                 f"tempdir {self.tmpdir} is inside a git repo; "
@@ -103,7 +99,6 @@ class TestNonGitCommandsDoNotCrash(_NonGitHarness):
     def test_refresh_files_then_get(self) -> None:
         Path(self.tmpdir, "x.md").write_text("x\n")
         self.server._handle_command({"type": "refreshFiles"})
-        # Wait briefly for the daemon thread to populate the cache.
         for _ in range(50):
             with self.server._state_lock:
                 if self.server._file_cache is not None:
@@ -118,7 +113,6 @@ class TestNonGitCommandsDoNotCrash(_NonGitHarness):
         )
 
     def test_record_file_usage(self) -> None:
-        # No broadcast expected — just must not raise.
         self.server._handle_command(
             {"type": "recordFileUsage", "path": "foo.txt"},
         )
@@ -148,13 +142,11 @@ class TestNonGitCommandsDoNotCrash(_NonGitHarness):
         assert self.server._get_tab("t-skip").skip_merge is True
 
     def test_user_answer_no_queue(self) -> None:
-        # No queue exists — must be silently dropped, not raise.
         self.server._handle_command(
             {"type": "userAnswer", "tabId": "t-noq", "answer": "hi"},
         )
 
     def test_resume_session_unknown_chat(self) -> None:
-        # Unknown chat id — must early-return without raising.
         self.server._handle_command(
             {"type": "resumeSession", "chatId": "no-such", "tabId": "t-rs"},
         )
@@ -168,8 +160,6 @@ class TestNonGitCommandsDoNotCrash(_NonGitHarness):
         assert evt and evt[-1]["task"] == ""
 
     def test_delete_task_unknown(self) -> None:
-        # Deleting a non-existent task must not crash and must not
-        # broadcast a taskDeleted (since _delete_task returns False).
         self.server._handle_command(
             {"type": "deleteTask", "taskId": 999_999_999},
         )
@@ -180,21 +170,15 @@ class TestNonGitCommandsDoNotCrash(_NonGitHarness):
         assert self._events_of("configData")
 
     def test_unknown_command(self) -> None:
-        # Unknown command emits a single 'error' event but does not
-        # raise.  This validates the dispatch error path itself.
         self.server._handle_command({"type": "doesNotExist"})
         errs = self._events_of("error")
         assert any("Unknown command" in e.get("text", "") for e in errs)
 
     def test_merge_action_no_op(self) -> None:
-        # 'all-done' on a tab not currently merging must be a no-op
-        # (and specifically must not emit autocommit_prompt in non-git).
         self.server._get_tab("t-merge").is_merging = True
         self.server._handle_command(
             {"type": "mergeAction", "action": "all-done", "tabId": "t-merge"},
         )
-        # _finish_merge always emits merge_ended; confirm no
-        # autocommit_prompt is broadcast in non-git.
         assert "autocommit_prompt" not in self._types()
         assert "merge_ended" in self._types()
 
@@ -219,7 +203,6 @@ class TestNonGitWorktreeActions(_NonGitHarness):
         assert evt and evt[-1]["success"] is False
 
     def test_worktree_action_unknown(self) -> None:
-        # use_worktree=True but unknown action — must report failure.
         tab = self.server._get_tab("t-wt3")
         tab.use_worktree = True
         self.server._handle_command(
@@ -270,7 +253,6 @@ class TestNonGitGenerateCommitMessage(_NonGitHarness):
         self.server._handle_command(
             {"type": "generateCommitMessage", "tabId": "t-gen"},
         )
-        # Wait for the daemon thread to broadcast.
         import time as _t
         for _ in range(50):
             if self._events_of("commitMessage"):
@@ -280,9 +262,6 @@ class TestNonGitGenerateCommitMessage(_NonGitHarness):
         assert evt, "expected a commitMessage event"
         last = evt[-1]
         assert last.get("message") == ""
-        # The error must explicitly say it is not a git repository so
-        # the user is not misled into thinking they merely forgot to
-        # ``git add``.
         assert last.get("error") == "Not a git repository."
 
 
@@ -299,7 +278,6 @@ class TestNonGitRunTask(_NonGitHarness):
         def fake_run(**kwargs: Any) -> str:
             called["called"] = True
             called["kwargs"] = kwargs
-            # Simulate the agent creating a new file in work_dir.
             Path(self.tmpdir, "agent_output.txt").write_text("hi\n")
             tab.agent.total_tokens_used = 10
             tab.agent.budget_used = 0.001
@@ -319,7 +297,6 @@ class TestNonGitRunTask(_NonGitHarness):
         return called
 
     def test_run_task_non_worktree(self) -> None:
-        # Need at least one model available to bypass the no-model gate.
         from kiss.core import config as config_module
         keys = config_module.DEFAULT_CONFIG
         saved = keys.ANTHROPIC_API_KEY
@@ -347,10 +324,8 @@ class TestNonGitRunTask(_NonGitHarness):
             assert any(s.get("running") is False for s in statuses)
             errors = self._events_of("error")
             assert not errors, f"unexpected error events: {errors}"
-            # No merge view should appear — there is no git baseline.
             assert "merge_data" not in self._types()
             assert "merge_started" not in self._types()
-            # The new file the "agent" created is still on disk.
             assert Path(self.tmpdir, "agent_output.txt").is_file()
         finally:
             keys.ANTHROPIC_API_KEY = saved
@@ -382,7 +357,6 @@ class TestNonGitRunTask(_NonGitHarness):
             errors = self._events_of("error")
             assert not errors, f"unexpected error events: {errors}"
             assert "merge_started" not in self._types()
-            # No worktree branch was created since this is not a git repo.
             assert tab.agent._wt_branch is None
             assert tab.agent._wt_pending is False
         finally:

@@ -30,11 +30,9 @@ class TestCreateNewTabStopsTimer(unittest.TestCase):
 
     def test_create_new_tab_stops_timer_when_not_running(self) -> None:
         source = MAIN_JS.read_text()
-        # Extract the createNewTab function body
         m = re.search(r"function createNewTab\(\)\s*\{", source)
         assert m is not None, "createNewTab not found in main.js"
         start = m.start()
-        # Find matching closing brace
         depth = 0
         body_start = source.index("{", start)
         i = body_start
@@ -47,7 +45,6 @@ class TestCreateNewTabStopsTimer(unittest.TestCase):
                     break
             i += 1
         body = source[body_start : i + 1]
-        # The body must contain the stopTimer guard after setRunningState
         self.assertIn("stopTimer()", body, "createNewTab must call stopTimer()")
         self.assertIn("t0 = null", body, "createNewTab must reset t0 to null")
         self.assertIn(

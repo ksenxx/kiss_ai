@@ -24,10 +24,6 @@ from kiss.agents.vscode.merge_flow import _MergeFlowMixin
 from kiss.agents.vscode.server import VSCodeServer
 from kiss.agents.vscode.task_runner import _TaskRunnerMixin
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 
 def _make_server() -> tuple[VSCodeServer, list[dict]]:
     """Create a VSCodeServer with broadcast capture (no stdout)."""
@@ -43,11 +39,6 @@ def _make_server() -> tuple[VSCodeServer, list[dict]]:
 
     server.printer.broadcast = capture  # type: ignore[assignment]
     return server, events
-
-
-# ===================================================================
-# B1 — _await_user_response reads _tab_states without lock
-# ===================================================================
 
 
 class TestAwaitUserResponseLockingFix(unittest.TestCase):
@@ -91,12 +82,9 @@ class TestAwaitUserResponseLockingFix(unittest.TestCase):
         def hold_lock() -> None:
             with server._state_lock:
                 lock_held.set()
-                # Hold the lock until the await thread has had a chance
-                # to start and block on it
                 await_started.wait(timeout=5)
                 import time
                 time.sleep(0.05)
-            # Lock released — _await_user_response can proceed
 
         def call_await() -> None:
             lock_held.wait(timeout=5)
@@ -113,16 +101,10 @@ class TestAwaitUserResponseLockingFix(unittest.TestCase):
         t2.join(timeout=5)
         t1.join(timeout=5)
 
-        # The call succeeded after the lock was released
         assert result_box == ["hello"], (
             f"Expected ['hello'], got {result_box}. "
             "B1 FIX: _await_user_response correctly acquires the lock"
         )
-
-
-# ===================================================================
-# B2 — _handle_autocommit_action reads _tab_states without lock
-# ===================================================================
 
 
 class TestAutocommitActionLockingFix(unittest.TestCase):
@@ -144,12 +126,6 @@ class TestAutocommitActionLockingFix(unittest.TestCase):
             f"B2 FIX: {len(tab_accesses)} _tab_states.get() calls "
             f"guarded by {len(lock_blocks)} _state_lock blocks"
         )
-
-
-
-# ===================================================================
-# I1 — Inconsistent tabId default across command handlers
-# ===================================================================
 
 
 class TestTabIdDefaultConsistencyFix(unittest.TestCase):

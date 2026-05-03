@@ -30,7 +30,6 @@ class TestNoModelAvailableResultEvent(TestCase):
     def test_no_model_emits_result_event(self) -> None:
         """With all API keys cleared, running a task should immediately
         broadcast a result event with the no-model error message."""
-        # Save and clear all API keys
         from kiss.core import config as config_module
 
         keys = config_module.DEFAULT_CONFIG
@@ -42,12 +41,10 @@ class TestNoModelAvailableResultEvent(TestCase):
             "OPENROUTER_API_KEY": keys.OPENROUTER_API_KEY,
             "MINIMAX_API_KEY": getattr(keys, "MINIMAX_API_KEY", ""),
         }
-        # Also clear PATH so shutil.which("claude") (and any other CLI
-        # provider lookups in get_available_models) returns None — without
-        # this, machines with the Claude Code CLI installed report cc/*
-        # models as available even when every API key is empty, which
-        # bypasses the no-model gate this test is exercising.
+        from kiss.core.models import codex_model as codex_module
+
         saved_path = os.environ.get("PATH", "")
+        saved_codex_paths = codex_module._UI_CANDIDATE_PATHS
         try:
             keys.ANTHROPIC_API_KEY = ""
             keys.OPENAI_API_KEY = ""
@@ -56,6 +53,7 @@ class TestNoModelAvailableResultEvent(TestCase):
             keys.OPENROUTER_API_KEY = ""
             keys.MINIMAX_API_KEY = ""
             os.environ["PATH"] = ""
+            codex_module._UI_CANDIDATE_PATHS = ()
 
             server = _make_server()
             events: list[dict[str, Any]] = []
@@ -73,7 +71,6 @@ class TestNoModelAvailableResultEvent(TestCase):
             tab_id = "no-model-test-1"
             tab = server._get_tab(tab_id)
 
-            # The agent's run should NOT be called at all
             run_called = False
 
             def fake_run(**kwargs: Any) -> None:
@@ -118,6 +115,7 @@ class TestNoModelAvailableResultEvent(TestCase):
             for attr, val in saved.items():
                 setattr(keys, attr, val)
             os.environ["PATH"] = saved_path
+            codex_module._UI_CANDIDATE_PATHS = saved_codex_paths
 
     def test_with_model_proceeds_normally(self) -> None:
         """When API keys are set, task should proceed to agent.run()."""
@@ -181,7 +179,6 @@ class TestNoModelAvailableResultEvent(TestCase):
             with lock:
                 result_events = [e for e in events if e.get("type") == "result"]
 
-            # Should have the success result, not the no-model error
             assert len(result_events) >= 1
             no_model_results = [
                 e for e in result_events

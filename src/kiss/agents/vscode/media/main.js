@@ -81,6 +81,29 @@
   let tabs = []; // array of tab objects (see makeTab for fields)
   let activeTabId = '';
 
+  // Hard cap on the number of open chat tabs.  When createNewTab pushes
+  // the count beyond this, trimOldestTabs() drops the oldest entries
+  // (front of the array) and notifies the backend so server-side
+  // _TabState is also released.
+  const MAX_TABS = 5;
+
+  /** Drop the oldest tabs from the front of `tabs` until the count
+   * is <= MAX_TABS.  Posts a `closeTab` message for each dropped tab
+   * so the backend releases its per-tab state.  Skips tabs whose id
+   * matches activeTabId so the freshly created / focused tab is never
+   * collected.
+   */
+  function trimOldestTabs() {
+    while (tabs.length > MAX_TABS) {
+      const idx = tabs.findIndex(t => {
+        return t.id !== activeTabId;
+      });
+      if (idx < 0) return;
+      const removed = tabs.splice(idx, 1)[0];
+      vscode.postMessage({type: 'closeTab', tabId: removed.id});
+    }
+  }
+
   function makeTab(title) {
     const _id = genTabId();
     return {
@@ -541,6 +564,10 @@
     tab.inputValue = pendingText;
     tabs.push(tab);
     activeTabId = tab.id;
+    // Enforce the open-tab cap: drop oldest tabs (and notify backend)
+    // before any rendering / persistence so renderTabBar reflects the
+    // post-trim state.
+    trimOldestTabs();
     // Reset UI for fresh tab
     // (empty fragment, "Ready" status, welcome visible, no merge,
     // no worktree bar, etc.).  `restoreTab` applies that state to

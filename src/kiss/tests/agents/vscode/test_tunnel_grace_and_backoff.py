@@ -88,7 +88,6 @@ class TestBackoffDelaySchedule(unittest.TestCase):
 
     def test_caps_at_max(self) -> None:
         """The delay never exceeds the max-backoff constant."""
-        # Pick a failure count large enough to overflow the cap.
         self.assertEqual(
             _tunnel_backoff_delay(20), _TUNNEL_BACKOFF_MAX,
         )
@@ -115,10 +114,7 @@ class TestStartupGracePeriod(unittest.IsolatedAsyncioTestCase):
         self.server = RemoteAccessServer(use_tunnel=False)
         self.server._loop = self._loop
         self.server._tunnel_proc = self._proc
-        # Pretend cloudflared is exposing metrics on a port that has
-        # nothing listening, so _probe_tunnel_ready returns False
-        # whenever it actually runs.
-        self.server._tunnel_metrics_port = 1  # closed port
+        self.server._tunnel_metrics_port = 1
 
     async def asyncTearDown(self) -> None:
         self._proc.terminate()
@@ -168,9 +164,6 @@ class TestRestartBackoff(unittest.IsolatedAsyncioTestCase):
         """Build a server whose tunnel subprocess has already exited."""
         srv = RemoteAccessServer(use_tunnel=False)
         srv._loop = asyncio.get_event_loop()
-        # Use /bin/true (or a one-shot cloudflared replacement) that
-        # exits immediately so poll() returns a non-None rc on the
-        # first watchdog tick.
         proc = subprocess.Popen(
             ["sh", "-c", "exit 1"],
             stdout=subprocess.DEVNULL,
@@ -185,7 +178,6 @@ class TestRestartBackoff(unittest.IsolatedAsyncioTestCase):
 
     async def test_failed_restart_sets_backoff_window(self) -> None:
         """When _start_tunnel returns None, _tunnel_next_retry is set."""
-        # Fake cloudflared that exits 1 with no output → returns None.
         _write_fake_cloudflared(
             self._tmpdir, ["ERR connect: 429"], exit_code=1,
         )
@@ -203,10 +195,7 @@ class TestRestartBackoff(unittest.IsolatedAsyncioTestCase):
             self._tmpdir, ["ERR connect: 429"], exit_code=1,
         )
         srv = await self._make_server_with_dead_proc()
-        # Manually pretend two prior failures already happened.
         srv._tunnel_failure_count = 2
-        # Force out of any pre-existing backoff window so the watchdog
-        # actually attempts a restart this tick.
         srv._tunnel_next_retry = 0.0
         before = time.monotonic()
         await srv._check_and_restart_tunnel()
@@ -223,14 +212,9 @@ class TestRestartBackoff(unittest.IsolatedAsyncioTestCase):
         srv._tunnel_proc = None
         srv._tunnel_failure_count = 1
         srv._tunnel_next_retry = time.monotonic() + 600
-        # No fake cloudflared on PATH at all — if the watchdog were to
-        # ignore the backoff and call _start_tunnel, it would block
-        # for 30 s on stderr readline.  The fact that this test
-        # finishes quickly proves the backoff short-circuited.
         before = time.monotonic()
         await srv._check_and_restart_tunnel()
         self.assertLess(time.monotonic() - before, 1)
-        # State unchanged.
         self.assertEqual(srv._tunnel_failure_count, 1)
         self.assertIsNone(srv._tunnel_proc)
 
@@ -250,7 +234,6 @@ class TestSuccessfulRestartResetsBackoff(unittest.IsolatedAsyncioTestCase):
 
     async def test_success_resets_failure_count(self) -> None:
         """After a successful tunnel start, failure count returns to 0."""
-        # Fake cloudflared that prints a recognizable URL and stays alive.
         _write_fake_cloudflared(
             self._tmpdir,
             [

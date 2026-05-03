@@ -44,10 +44,6 @@ import pytest
 from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 from kiss.core.models.anthropic_model import AnthropicModel
 
-# ---------------------------------------------------------------------------
-# Fake Anthropic streaming server — adaptive thinking with no thinking_delta
-# ---------------------------------------------------------------------------
-
 
 def _signature_only_thinking_events() -> list[tuple[str, str]]:
     """Build SSE event pairs where the thinking block has only signature deltas.
@@ -71,7 +67,6 @@ def _signature_only_thinking_events() -> list[tuple[str, str]]:
             },
         }),
     ))
-    # Thinking block with ONLY a signature delta (no thinking_delta).
     events.append((
         "content_block_start",
         json.dumps({
@@ -92,7 +87,6 @@ def _signature_only_thinking_events() -> list[tuple[str, str]]:
         "content_block_stop",
         json.dumps({"type": "content_block_stop", "index": 0}),
     ))
-    # Real text answer.
     events.append((
         "content_block_start",
         json.dumps({
@@ -157,9 +151,6 @@ def _real_thinking_events() -> list[tuple[str, str]]:
             "content_block": {"type": "thinking", "thinking": ""},
         }),
     ))
-    # signature_delta first, then real thinking_delta — exercises the
-    # "deferred start" branch where thinking_callback(True) must fire on
-    # the FIRST thinking_delta, not the earlier signature_delta.
     events.append((
         "content_block_delta",
         json.dumps({
@@ -223,8 +214,6 @@ def _real_thinking_events() -> list[tuple[str, str]]:
     return events
 
 
-# Module-level switch read by the request handler — flipped per-test before
-# triggering an API call.  Avoids closures and global mocks.
 _RESPONSE_EVENTS: list[tuple[str, str]] = []
 
 
@@ -267,11 +256,6 @@ def _build_opus_4_7_model(server_url: str, printer: BaseBrowserPrinter) -> Anthr
     return m
 
 
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
-
-
 class TestOpus47AdaptiveThinking:
     """Verify claude-opus-4-7 adaptive thinking does not show empty 'Thinking' panel."""
 
@@ -309,7 +293,6 @@ class TestOpus47AdaptiveThinking:
             f"Empty thinking block must not emit thinking_delta; got: {types}"
         )
 
-        # The real text answer must still be broadcast.
         text_deltas = [e for e in recorded if e["type"] == "text_delta"]
         full_text = "".join(e.get("text", "") for e in text_deltas)
         assert full_text == "The answer is 42.", full_text

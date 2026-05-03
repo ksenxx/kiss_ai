@@ -37,10 +37,6 @@ from kiss.agents.vscode.commands import _CommandsMixin
 from kiss.agents.vscode.server import VSCodeServer
 from kiss.agents.vscode.task_runner import _TaskRunnerMixin
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 
 def _make_server() -> tuple[VSCodeServer, list[dict]]:
     """Create a VSCodeServer with broadcast capture (no stdout)."""
@@ -58,11 +54,6 @@ def _make_server() -> tuple[VSCodeServer, list[dict]]:
     return server, events
 
 
-# ===================================================================
-# A1 — _replay_session use_worktree reset to False (FIXED)
-# ===================================================================
-
-
 class TestReplaySessionUseWorktreeFixed(unittest.TestCase):
     """A1 fix: ``_replay_session`` now unconditionally sets
     ``tab.use_worktree = bool(extra.get("is_worktree"))``, so a
@@ -74,8 +65,6 @@ class TestReplaySessionUseWorktreeFixed(unittest.TestCase):
         which evaluates to both True and False.
         """
         src = inspect.getsource(VSCodeServer._replay_session)
-        # The fix uses bool(extra.get("is_worktree")) — a single
-        # assignment that covers both cases
         assert "bool(extra.get" in src or (
             re.search(r"use_worktree\s*=\s*bool\(", src)
         ), (
@@ -87,7 +76,6 @@ class TestReplaySessionUseWorktreeFixed(unittest.TestCase):
         without a corresponding False path.
         """
         src = inspect.getsource(VSCodeServer._replay_session)
-        # Old bug pattern: if guard → True, no else → False
         old_pattern = re.compile(
             r'if extra\.get\("is_worktree"\):\s*\n\s*with.*\n\s*tab\.use_worktree\s*=\s*True',
             re.DOTALL,
@@ -106,14 +94,12 @@ class TestReplaySessionUseWorktreeFixed(unittest.TestCase):
 
         assert tab.use_worktree is False, "Initial use_worktree should be False"
 
-        # Simulate replaying a worktree session (the fixed code path)
         extra_wt = json.dumps({"is_worktree": True, "model": "test"})
         extra = json.loads(extra_wt)
         with server._state_lock:
             tab.use_worktree = bool(extra.get("is_worktree"))
         assert tab.use_worktree is True
 
-        # Now simulate replaying a NON-worktree session
         extra_non_wt = json.dumps({"is_worktree": False, "model": "test"})
         extra2 = json.loads(extra_non_wt)
         with server._state_lock:
@@ -130,20 +116,15 @@ class TestReplaySessionUseWorktreeFixed(unittest.TestCase):
         server, _ = _make_server()
         tab_id = "tab-a1-missing"
         tab = server._get_tab(tab_id)
-        tab.use_worktree = True  # Pre-set to True
+        tab.use_worktree = True
 
-        extra = json.loads(json.dumps({"model": "test"}))  # no is_worktree key
+        extra = json.loads(json.dumps({"model": "test"}))
         with server._state_lock:
             tab.use_worktree = bool(extra.get("is_worktree"))
 
         assert tab.use_worktree is False, (
             "A1 fix: missing is_worktree key → False"
         )
-
-
-# ===================================================================
-# A2 — _run_task status broadcast inside lock (FIXED)
-# ===================================================================
 
 
 class TestRunTaskStatusBroadcastFixed(unittest.TestCase):
@@ -180,7 +161,6 @@ class TestRunTaskStatusBroadcastFixed(unittest.TestCase):
         assert broadcast_false_idx is not None, "Found broadcast(status: False)"
         assert broadcast_false_idx > lock_idx, "broadcast is after lock line"
 
-        # broadcast should be deeper than the with-line (inside the block)
         indent_lock = len(lines[lock_idx]) - len(lines[lock_idx].lstrip())
         indent_bc = len(lines[broadcast_false_idx]) - len(
             lines[broadcast_false_idx].lstrip()
@@ -198,7 +178,6 @@ class TestRunTaskStatusBroadcastFixed(unittest.TestCase):
         tab_id = "tab-a2"
         tab = server._get_tab(tab_id)
 
-        # Simulate the fixed sequence: both operations under one lock
         with server._state_lock:
             tab.task_thread = None
             tab.stop_event = None
@@ -207,7 +186,6 @@ class TestRunTaskStatusBroadcastFixed(unittest.TestCase):
                 {"type": "status", "running": False, "tabId": tab_id}
             )
 
-        # Now the new _cmd_run acquires the lock
         blocker = threading.Event()
         new_thread = threading.Thread(target=blocker.wait, daemon=True)
         with server._state_lock:
@@ -220,7 +198,6 @@ class TestRunTaskStatusBroadcastFixed(unittest.TestCase):
             {"type": "status", "running": True, "tabId": tab_id}
         )
 
-        # The last status event should be True (the new task)
         status_events = [
             e for e in events
             if e.get("type") == "status" and e.get("tabId") == tab_id
@@ -232,11 +209,6 @@ class TestRunTaskStatusBroadcastFixed(unittest.TestCase):
 
         blocker.set()
         new_thread.join(timeout=2)
-
-
-# ===================================================================
-# A3 — _cmd_select_model consistent locking (FIXED)
-# ===================================================================
 
 
 class TestCmdSelectModelConsistentLock(unittest.TestCase):
@@ -267,7 +239,6 @@ class TestCmdSelectModelConsistentLock(unittest.TestCase):
         assert selected_idx is not None
         assert default_idx is not None
 
-        # Both assignments should be AFTER the lock line
         assert selected_idx > lock_idx, (
             "A3 fix: tab.selected_model is set inside _state_lock"
         )
@@ -283,21 +254,13 @@ class TestCmdSelectModelConsistentLock(unittest.TestCase):
         tab = server._get_tab("tab-a3")
         new_model = "claude-test-atomic"
 
-        # Simulate the fixed code path
         with server._state_lock:
             tab.selected_model = new_model
             server._default_model = new_model
-            # Inside the lock, both are consistent
             assert tab.selected_model == new_model
             assert server._default_model == new_model
 
-        # No window where one is updated and the other isn't
         assert tab.selected_model == server._default_model == new_model
-
-
-# ===================================================================
-# A5 — _run_task_inner use_worktree local variable (FIXED)
-# ===================================================================
 
 
 class TestRunTaskInnerUseWorktreeLocalVar(unittest.TestCase):
@@ -327,7 +290,6 @@ class TestRunTaskInnerUseWorktreeLocalVar(unittest.TestCase):
         src = inspect.getsource(_TaskRunnerMixin._run_task_inner)
         lines = src.splitlines()
 
-        # Find the capture line
         capture_idx = None
         for i, line in enumerate(lines):
             if "use_worktree = tab.use_worktree" in line:
@@ -335,7 +297,6 @@ class TestRunTaskInnerUseWorktreeLocalVar(unittest.TestCase):
                 break
         assert capture_idx is not None
 
-        # After the capture, no more tab.use_worktree reads
         remaining = "\n".join(lines[capture_idx + 1:])
         tab_reads = re.findall(r"tab\.use_worktree(?!\s*=)", remaining)
         assert len(tab_reads) == 0, (
@@ -350,26 +311,18 @@ class TestRunTaskInnerUseWorktreeLocalVar(unittest.TestCase):
         server, _ = _make_server()
         tab = server._get_tab("tab-a5")
 
-        # Simulate the fixed code path: capture under lock
         with server._state_lock:
             tab.use_worktree = False
             use_worktree = tab.use_worktree
 
-        # Concurrent mutation (e.g. from _replay_session)
         tab.use_worktree = True
 
-        # The local is unaffected
         assert use_worktree is False, (
             "A5 fix: local use_worktree is immune to concurrent mutation"
         )
         assert tab.use_worktree is True, (
             "tab.use_worktree was mutated, but local was not"
         )
-
-
-# ===================================================================
-# A6 — _cmd_run single lock acquisition (FIXED)
-# ===================================================================
 
 
 class TestCmdRunSingleLockFixed(unittest.TestCase):
@@ -418,7 +371,6 @@ class TestCmdRunSingleLockFixed(unittest.TestCase):
         server, events = _make_server()
         tab_id = "tab-a6"
 
-        # Simulate the fixed single-lock code path
         with server._state_lock:
             tab = server._tab_states.get(tab_id)
             if tab is None:
@@ -426,14 +378,12 @@ class TestCmdRunSingleLockFixed(unittest.TestCase):
                 tab = _TabState(tab_id, server._default_model)
                 server._tab_states[tab_id] = tab
 
-            # Still inside the same lock — no TOCTOU gap
             assert tab_id in server._tab_states, (
                 "Tab is tracked throughout the single lock block"
             )
             tab.stop_event = threading.Event()
             tab.task_thread = threading.Thread(target=lambda: None, daemon=True)
 
-        # Tab is still tracked after the lock
         assert tab_id in server._tab_states
         assert tab.task_thread is not None
 

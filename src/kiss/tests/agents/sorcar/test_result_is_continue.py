@@ -78,7 +78,6 @@ def test_main_js_renders_continue_for_is_continue() -> None:
     main_js = Path(__file__).resolve().parents[3] / "agents" / "vscode" / "media" / "main.js"
     src = main_js.read_text()
 
-    # Locate the result-event branch.
     match = re.search(
         r"case 'result':\s*\{(?P<body>.*?)break;\s*\}",
         src,
@@ -95,8 +94,6 @@ def test_main_js_renders_continue_for_is_continue() -> None:
         "main.js result handler must render 'Status: Continue' "
         "when ev.is_continue is true"
     )
-    # The FAILED branch must be guarded (else-if) so a continue does
-    # not also render the red FAILED banner.
     cont_idx = body.index("Status: Continue")
     fail_idx = body.index("Status: FAILED")
     assert cont_idx < fail_idx, "Continue branch must precede the FAILED branch"
