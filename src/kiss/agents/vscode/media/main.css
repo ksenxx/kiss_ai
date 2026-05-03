@@ -720,7 +720,7 @@ body.remote-chat #welcome > #input-area {
 #task-input {
   width: 100%; background: transparent; border: none; color: var(--fg);
   font-family: inherit; font-size: var(--fs-base); line-height: 1.5;
-  resize: none; outline: none; min-height: 4.5em; max-height: 200px;
+  resize: none; outline: none; min-height: 4.5em;
   padding: 2px 18px 2px 2px;
 }
 #task-input::placeholder { color: color-mix(in srgb, var(--fg) 50%, transparent); }
