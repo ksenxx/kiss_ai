@@ -366,6 +366,13 @@ def find_deprecated_models(
     deprecated: list[dict] = []
 
     for name in current:  # pragma: no branch
+        if name.startswith("codex/"):  # pragma: no branch
+            # codex/* entries are aliases accepted by the codex CLI's -m flag
+            # and billed via the ChatGPT subscription. They are intentionally
+            # not present in OpenAI's REST API model listing, so the OpenAI
+            # alias/snapshot deprecation rule below does not apply. They are
+            # managed separately by _add_codex_candidates.
+            continue
         if name.startswith("openrouter/"):  # pragma: no branch
             if openrouter and name not in openrouter:  # pragma: no branch
                 base_name = name.split("/")[-1]
