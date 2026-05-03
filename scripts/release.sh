@@ -364,7 +364,7 @@ main() {
 
     # Step 3: Download official Claude Code skills (before building extension)
     print_step "Downloading official Claude Code skills..."
-    CLAUDE_SKILLS_DIR="src/kiss/agents/claude_skills"
+    CLAUDE_SKILLS_DIR="$(pwd)/src/kiss/agents/claude_skills"
     if [ -d "$CLAUDE_SKILLS_DIR" ] && [ "$(ls -d "$CLAUDE_SKILLS_DIR"/*/ 2>/dev/null)" ]; then
         print_info "Claude skills already present — skipping download"
     else
