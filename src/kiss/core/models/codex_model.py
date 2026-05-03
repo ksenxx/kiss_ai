@@ -7,8 +7,11 @@
 
 This lets you use OpenAI Codex models through a ChatGPT subscription at
 subsidized per-token pricing.  The model invokes
-``codex exec --json --skip-git-repo-check --sandbox read-only`` in
-single-shot mode and consumes the JSONL event stream emitted on stdout.
+``codex exec --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox``
+in single-shot mode and consumes the JSONL event stream emitted on stdout.
+Sandbox/approvals are bypassed because KISS is the outer agent and the user
+has already authorized KISS to act on their behalf; running codex in a
+read-only sandbox would prevent any file modifications the user requested.
 
 For agentic use, tool descriptions are injected into the prompt and the
 model's text output is parsed for tool-call JSON — the same approach used
@@ -199,7 +202,7 @@ class CodexModel(Model):
             "exec",
             "--json",
             "--skip-git-repo-check",
-            "--sandbox", "read-only",
+            "--dangerously-bypass-approvals-and-sandbox",
         ]
         if self._cli_model and self._cli_model != "default":
             args.extend(["-m", self._cli_model])
@@ -268,6 +271,13 @@ class CodexModel(Model):
         Recognised events:
             - ``thread.started``: records ``thread_id`` in the result.
             - ``turn.started``: ignored.
+            - ``item.started`` with ``item.type == "command_execution"``:
+              the shell command is forwarded via the token callback wrapped
+              in a thinking start/end pair so the user sees real-time
+              progress instead of waiting silently.
+            - ``item.completed`` with ``item.type == "command_execution"``:
+              the aggregated output is forwarded via the token callback
+              wrapped in a thinking start/end pair.
             - ``item.completed`` with ``item.type == "agent_message"``:
               text is appended to *content* and forwarded via the token
               callback.
@@ -301,6 +311,14 @@ class CodexModel(Model):
 
             if event_type == "thread.started":
                 result_json["thread_id"] = event.get("thread_id", "")
+            elif event_type == "item.started":
+                item = event.get("item", {})
+                if item.get("type") == "command_execution":
+                    command = item.get("command", "")
+                    if command:
+                        self._invoke_thinking_callback(True)
+                        self._invoke_token_callback(f"$ {command}\n")
+                        self._invoke_thinking_callback(False)
             elif event_type == "item.completed":
                 item = event.get("item", {})
                 item_type = item.get("type")
@@ -312,6 +330,12 @@ class CodexModel(Model):
                     self._invoke_thinking_callback(True)
                     self._invoke_token_callback(text)
                     self._invoke_thinking_callback(False)
+                elif item_type == "command_execution":
+                    output = item.get("aggregated_output", "")
+                    if output:
+                        self._invoke_thinking_callback(True)
+                        self._invoke_token_callback(output)
+                        self._invoke_thinking_callback(False)
             elif event_type == "turn.completed":
                 result_json["usage"] = event.get("usage", {})
             elif event_type in ("error", "turn.failed"):

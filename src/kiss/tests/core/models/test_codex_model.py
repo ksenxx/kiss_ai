@@ -165,8 +165,16 @@ class TestBuildCliArgs:
         assert "exec" in args
         assert "--json" in args
         assert "--skip-git-repo-check" in args
-        assert "--sandbox" in args
-        assert args[args.index("--sandbox") + 1] == "read-only"
+        assert "--dangerously-bypass-approvals-and-sandbox" in args
+
+    def test_no_read_only_sandbox(self) -> None:
+        # Regression: --sandbox read-only previously blocked codex from
+        # making any file modifications when KISS asked it to fix code.
+        m = CodexModel("codex/default")
+        args = m._build_cli_args()
+        assert "read-only" not in args
+        # The sandbox flag must not be present at all; bypass replaces it.
+        assert "--sandbox" not in args
 
 
 class TestBuildPrompt:
@@ -255,6 +263,39 @@ class TestParseStreamEvents:
         content, _result, err = m._parse_stream_events(iter(lines))
         assert content == "ok"
         assert err is None
+
+    def test_command_execution_started_streams_command(self) -> None:
+        # Regression: previously item.started events were ignored, so the
+        # user saw nothing while codex was running shell commands and
+        # appeared to wait silently for a long time.
+        tokens: list[str] = []
+        thinking_states: list[bool] = []
+        m = CodexModel(
+            "codex/default",
+            token_callback=tokens.append,
+            thinking_callback=thinking_states.append,
+        )
+        lines = [
+            '{"type":"item.started","item":{"id":"item_0",'
+            '"type":"command_execution","command":"/bin/zsh -lc ls",'
+            '"status":"in_progress"}}',
+            '{"type":"item.completed","item":{"id":"item_0",'
+            '"type":"command_execution","command":"/bin/zsh -lc ls",'
+            '"aggregated_output":"file1\\nfile2\\n","exit_code":0,'
+            '"status":"completed"}}',
+            '{"type":"item.completed","item":{"type":"agent_message",'
+            '"text":"done"}}',
+        ]
+        content, _result, err = m._parse_stream_events(iter(lines))
+        assert content == "done"
+        assert err is None
+        # Command-line text was streamed before the final answer.
+        assert any("/bin/zsh -lc ls" in t for t in tokens)
+        # Command output was streamed too.
+        assert any("file1" in t for t in tokens)
+        # Streaming was wrapped in thinking-callback pairs.
+        assert thinking_states.count(True) == thinking_states.count(False)
+        assert thinking_states.count(True) >= 2
 
 
 class TestGenerateAndProcessWithTools:
@@ -376,6 +417,63 @@ class TestGenerateIntegration:
         m.initialize("hi")
         with pytest.raises(KISSError, match="Codex CLI failed"):
             m.generate()
+
+    @pytest.mark.timeout(240)
+    def test_generate_can_modify_files(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: codex must be able to make filesystem modifications.
+
+        With ``--sandbox read-only`` codex would refuse to write the file
+        and emit an ``agent_message`` saying it could not create it, which
+        is what the user reported when running ``uv run check --full and
+        fix`` against the codex/gpt-5.5 model.
+        """
+        monkeypatch.chdir(tmp_path)
+        m = CodexModel("codex/default", model_config={"timeout": 240})
+        m.initialize(
+            f"Create a file at the absolute path "
+            f"{tmp_path / 'result.txt'} with exactly the text "
+            f"'ok' and nothing else. Do not ask for permission."
+        )
+        m.generate()
+        result = tmp_path / "result.txt"
+        assert result.exists(), (
+            "Codex CLI should have been able to create the file, but it "
+            "wasn't created — the sandbox is likely still read-only."
+        )
+        assert result.read_text().strip() == "ok"
+
+    @pytest.mark.timeout(240)
+    def test_generate_streams_command_progress(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: progress events must stream while codex is working.
+
+        Previously only ``item.completed`` agent_message events fired the
+        token callback, so users saw nothing while codex was busy running
+        shell commands — the symptom reported as "long waits".
+        """
+        monkeypatch.chdir(tmp_path)
+        tokens: list[str] = []
+        thinking_states: list[bool] = []
+        m = CodexModel(
+            "codex/default",
+            token_callback=tokens.append,
+            thinking_callback=thinking_states.append,
+            model_config={"timeout": 240},
+        )
+        m.initialize(
+            "Run the shell command 'ls -la' in the current directory and "
+            "report the output."
+        )
+        m.generate()
+        # The shell command should have been streamed via the token
+        # callback while codex was executing it.
+        assert any("ls" in t for t in tokens), (
+            "Expected shell command progress to be streamed, but token "
+            f"callback only saw: {tokens!r}"
+        )
 
     @pytest.mark.timeout(180)
     def test_generate_and_process_with_tools_runs(self) -> None:
