@@ -60,7 +60,8 @@ class TestFrequentTasks:
         assert len(rows) == 1
         assert rows[0]["task"] == "task A"
         assert rows[0]["count"] == 2
-        assert rows[0]["timestamp"] > 0
+        ts = rows[0]["timestamp"]
+        assert isinstance(ts, (int, float)) and ts > 0
 
     def test_empty_string_ignored(self) -> None:
         """Empty task strings are ignored and produce no row."""
