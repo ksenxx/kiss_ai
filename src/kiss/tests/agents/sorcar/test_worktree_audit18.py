@@ -460,9 +460,11 @@ class TestRaceRunTaskInnerBUGBClearTOCTOU:
         start = src.index("def _run_task_inner")
         body = src[start : start + 8000]
 
-        bugb = body.index("BUG-B fix")
-        wt_clear = body.index("tab.agent._wt = None", bugb)
-        assert wt_clear > bugb
+        # The block formerly labeled "BUG-B fix" is now the
+        # ``if use_worktree and tab.agent._wt_pending:`` conditional.
+        wt_pending = body.index("_wt_pending")
+        wt_clear = body.index("tab.agent._wt = None", wt_pending)
+        assert wt_clear > wt_pending
 
         after_bugb = body[wt_clear:]
         next_lock_idx = after_bugb.find("with self._state_lock")
