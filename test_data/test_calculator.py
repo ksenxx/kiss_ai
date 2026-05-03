@@ -9,8 +9,6 @@ from test_data.calculator.cli import main
 from test_data.calculator.evaluator import _get_operator, evaluate, tokenize
 from test_data.calculator.operators import OPERATORS
 
-# --- Operator registry tests ---
-
 
 class TestOperatorRegistry:
     def test_all_operators_registered(self):
@@ -32,9 +30,6 @@ class TestOperatorRegistry:
         assert subtract.eval(0, 5) == -5
 
 
-# --- Tokenizer tests ---
-
-
 class TestTokenizer:
     def test_simple(self):
         assert tokenize("2 + 3") == ["2", "+", "3"]
@@ -43,15 +38,11 @@ class TestTokenizer:
         assert tokenize("2+3") == ["2", "+", "3"]
 
     def test_standalone_minus_as_operator(self):
-        # "-" followed by another operator: parsed as operator, not negative number
         assert tokenize("- + 3") == ["-", "+", "3"]
 
     def test_unknown_char_raises(self):
         with pytest.raises(ValueError, match="unexpected character"):
             tokenize("2 @ 3")
-
-
-# --- Evaluator tests ---
 
 
 class TestEvaluator:
@@ -83,9 +74,6 @@ class TestEvaluator:
     def test_unknown_operator_via_get_operator(self):
         with pytest.raises(ValueError, match="unknown operator"):
             _get_operator("^")
-
-
-# --- CLI tests ---
 
 
 class TestCLI:

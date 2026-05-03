@@ -24,11 +24,8 @@ class TestHistoryFailedFlag(unittest.TestCase):
     """``getHistory`` reports per-task failed status for UI marking."""
 
     def setUp(self) -> None:
-        # Use a fresh in-memory-style db file under a temp dir.
         self._tmp = tempfile.mkdtemp()
         self._orig_db_path = th._DB_PATH  # type: ignore[attr-defined]
-        # Reset connection so the next _get_db() opens against the
-        # new path and re-creates schema.
         th._close_db()
         th._DB_PATH = Path(self._tmp) / "sorcar.db"  # type: ignore[attr-defined]
 
@@ -58,25 +55,18 @@ class TestHistoryFailedFlag(unittest.TestCase):
         return []
 
     def test_failed_flag_for_each_result_kind(self) -> None:
-        # Successful task: result is a normal summary string.
         ok_id, _ = th._add_task("ok task")
         th._save_task_result(result="all good", task_id=ok_id)
 
-        # Failed task: result is "Task failed".
         fail_id, _ = th._add_task("fail task")
         th._save_task_result(result="Task failed", task_id=fail_id)
 
-        # Failed-with-message task: result starts with "Task failed: ".
         fail2_id, _ = th._add_task("fail2 task")
         th._save_task_result(result="Task failed: boom", task_id=fail2_id)
 
-        # Crashed task: result still has the placeholder
-        # "Agent Failed Abruptly" because the agent never wrote a result.
         crash_id, _ = th._add_task("crash task")
-        # No _save_task_result call: row keeps default placeholder.
-        del crash_id  # row exists; we only need it to appear
+        del crash_id
 
-        # User-stopped task: should NOT be marked failed.
         stop_id, _ = th._add_task("stop task")
         th._save_task_result(result="Task stopped by user", task_id=stop_id)
 

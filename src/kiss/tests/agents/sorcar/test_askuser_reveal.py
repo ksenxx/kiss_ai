@@ -39,7 +39,6 @@ class TestAskUserSidebarReveal:
         source = _TS_PATH.read_text()
 
         start = source.index("_setupProcessListeners(proc:")
-        # Find the end of the method (next `private ` at indent level 2)
         end = source.find("\n  private ", start + 1)
         if end == -1:
             end = start + 10000

@@ -29,9 +29,6 @@ _DB_PATH = _KISS_DIR / "sorcar.db"
 
 _MAX_FILE_USAGE_ENTRIES = 10000
 
-#: Maximum number of rows kept in the ``frequent_tasks`` table.  When a
-#: new task is inserted that exceeds this cap, the row with the lowest
-#: count and oldest timestamp is evicted.
 _MAX_FREQUENT_TASKS = 100
 
 

@@ -14,7 +14,6 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-
 def _find_windows_bash() -> str | None:  # pragma: no cover — Windows only
     """Find bash.exe on Windows (Git for Windows, WSL, etc.)."""
     found = shutil.which("bash")
@@ -79,7 +78,6 @@ def _truncate_output(output: str, max_chars: int) -> str:
     if tail:
         return output[:head] + msg + output[-tail:]
     return output[:head] + msg
-
 
 
 def _clean_env() -> dict[str, str]:

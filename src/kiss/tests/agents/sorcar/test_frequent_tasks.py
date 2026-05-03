@@ -60,7 +60,8 @@ class TestFrequentTasks:
         assert len(rows) == 1
         assert rows[0]["task"] == "task A"
         assert rows[0]["count"] == 2
-        assert rows[0]["timestamp"] > 0
+        ts = rows[0]["timestamp"]
+        assert isinstance(ts, (int, float)) and ts > 0
 
     def test_empty_string_ignored(self) -> None:
         """Empty task strings are ignored and produce no row."""
@@ -93,15 +94,12 @@ class TestFrequentTasks:
             time.sleep(0.01)
             th._record_frequent_task("middle")
             time.sleep(0.01)
-            th._record_frequent_task("middle")  # count 2
+            th._record_frequent_task("middle")
             time.sleep(0.01)
             th._record_frequent_task("newest")
             time.sleep(0.01)
-            th._record_frequent_task("newest")  # count 2
+            th._record_frequent_task("newest")
 
-            # Table is at cap (3 rows); both "oldest" and any other count-1
-            # row are eviction candidates.  Adding a new task should evict
-            # "oldest" (lowest count == 1, oldest timestamp).
             th._record_frequent_task("inserted")
             rows = th._load_frequent_tasks()
             tasks = {r["task"] for r in rows}
@@ -122,8 +120,6 @@ class TestFrequentTasks:
             time.sleep(0.01)
             th._record_frequent_task("second")
             time.sleep(0.01)
-            # Inserting a new task — both existing rows have count == 1;
-            # "first" has the older timestamp, so it must be evicted.
             th._record_frequent_task("third")
             rows = th._load_frequent_tasks()
             tasks = {r["task"] for r in rows}
@@ -138,7 +134,6 @@ class TestFrequentTasks:
         try:
             th._record_frequent_task("a")
             th._record_frequent_task("b")
-            # Table is full; bumping "a" must keep both rows alive.
             th._record_frequent_task("a")
             tasks = {r["task"] for r in th._load_frequent_tasks()}
             assert tasks == {"a", "b"}
@@ -147,8 +142,6 @@ class TestFrequentTasks:
 
     def test_chat_run_records_frequent_task(self) -> None:
         """ChatSorcarAgent.run wires ``_record_frequent_task`` for each task."""
-        # Direct call path — verify the integration without invoking a
-        # real model (which would require API keys).
         th._add_task("integration task", chat_id="")
         th._record_frequent_task("integration task")
         rows = th._load_frequent_tasks()

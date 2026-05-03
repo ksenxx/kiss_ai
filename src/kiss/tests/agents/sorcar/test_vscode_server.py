@@ -318,9 +318,6 @@ class TestGenerateCommitMessage(unittest.TestCase):
         import inspect
 
         src = inspect.getsource(VSCodeServer._cmd_generate_commit_message)
-        # B5 fix: the command now wraps the call so thread-local tab_id
-        # is set before broadcasting, but ``_generate_commit_message``
-        # is still the only work performed by the worker.
         assert "self._generate_commit_message()" in src
         assert "threading.Thread(target=_run" in src
 
@@ -2395,7 +2392,6 @@ class TestExtensionRegistersSecondaryView(unittest.TestCase):
         """On first launch, the extension auto-opens the secondary sidebar chat."""
         assert "firstLaunchDone" in self._ts
         assert "focusChatInput" in self._ts
-        # The first-launch guard must check globalState and then call focusChatInput
         idx = self._ts.index("firstLaunchDone")
         block = self._ts[idx : idx + 400]
         assert "focusChatInput" in block
@@ -2589,8 +2585,6 @@ class TestSorcarSidebarViewMergeActions(unittest.TestCase):
         m = re.search(r"case\s+'mergeAction':", self._ts)
         assert m
         start = m.start()
-        # Find the closing brace of the case block (matches "      }")
-        # by finding the next "case " or default at the same indent level
         next_case = re.search(r"\n      case ", self._ts[start + 1 :])
         if next_case:
             end = start + 1 + next_case.start()
@@ -3148,14 +3142,9 @@ class TestWebviewTabBarJS(unittest.TestCase):
         end = self._js.index("\n  function ", idx + 1)
         body = self._js[idx:end]
         assert "restoreTab(tab)" in body
-        # The manual reset block was removed — these individual resets
-        # are now handled by restoreTab / makeTab defaults.
         assert "clearOutput()" not in body
         assert "clearWorktreeBar()" not in body
         assert "setTaskText('')" not in body
-        # Running-state sync is explicit: either setRunningState(false)
-        # or setRunningState(tab.isRunning) (tab.isRunning is false for
-        # a freshly made tab).
         assert (
             "setRunningState(false)" in body
             or "setRunningState(tab.isRunning)" in body
@@ -3242,10 +3231,8 @@ class TestWebviewTabBarJS(unittest.TestCase):
         end = self._js.index("\n  function ", idx + 1)
         body = self._js[idx:end]
         assert "tabs.length === 0" in body
-        # Extract the tabs.length===0 branch.
         zero_idx = body.index("tabs.length === 0")
         brace = body.index("{", zero_idx)
-        # Find the matching closing brace.
         depth = 0
         end_branch = brace
         for i in range(brace, len(body)):

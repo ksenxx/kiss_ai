@@ -104,10 +104,6 @@ class TestBudgetLimitViaRealHTTP:
             """A no-op tool that does nothing."""
             return "ok"
 
-        # gpt-4o-mini: $0.15/1M input, $0.60/1M output
-        # Server returns 500k input + 500k output per call:
-        #   cost = (500000*0.15 + 500000*0.60) / 1_000_000 = $0.375
-        # max_budget=$0.01 → first step costs $0.375 → exceeds budget on step 2
         with pytest.raises(KISSError, match="budget exceeded"):
             agent.run(
                 model_name="gpt-4o-mini",
@@ -123,7 +119,6 @@ class TestBudgetLimitViaRealHTTP:
                 },
             )
 
-        # The agent ran at least 1 step and accumulated real cost
         assert agent.step_count >= 1
         assert agent.budget_used > 0.01
         assert agent.total_tokens_used > 0
@@ -156,7 +151,6 @@ class TestBudgetLimitViaRealHTTP:
         """When the budget is large enough, the agent should NOT raise
         KISSError for budget.  Here we use a server that returns a
         finish tool call so the agent completes normally."""
-        # Start a second server that returns finish
         finish_response = {
             "id": "chatcmpl-fin",
             "object": "chat.completion",
@@ -318,12 +312,7 @@ class TestRelentlessAgentBudgetAcrossSubSessions:
                     },
                 )
 
-        # Total budget used should be roughly one sub-session's cost
-        # (the second sub-session never starts), not 10x the budget
         assert agent.budget_used > 0.0
-        # With the fix, at most 2 sub-sessions could run (the budget
-        # check happens before session start). Without the fix, all 10
-        # would run.
         assert agent.budget_used < 0.50, (
             f"Total cost ${agent.budget_used:.4f} far exceeds max_budget $0.10 — "
             f"budget was not enforced across sub-sessions"
@@ -336,7 +325,6 @@ class TestRelentlessAgentBudgetAcrossSubSessions:
         run but eventually the budget is exhausted."""
         agent = RelentlessAgent("budget-remaining")
         with tempfile.TemporaryDirectory() as td:
-            # Each sub-session costs ~$0.15, budget=$0.50 allows ~3
             with pytest.raises(KISSError, match="budget"):
                 agent.run(
                     model_name="gpt-4o-mini",
@@ -352,7 +340,6 @@ class TestRelentlessAgentBudgetAcrossSubSessions:
                     },
                 )
 
-        # Should have run 3-4 sub-sessions before budget is exhausted
         assert agent.total_steps >= 2
         assert agent.budget_used < 1.00, (
             f"Total cost ${agent.budget_used:.4f} greatly exceeded $0.50"

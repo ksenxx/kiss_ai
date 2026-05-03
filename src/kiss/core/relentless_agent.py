@@ -198,7 +198,7 @@ class RelentlessAgent(Base):
                 if (
                     exc.__cause__ is not None
                     or not isinstance(exc, KISSError)
-                    or executor.step_count == 0
+                    or executor.step_count <= 1
                 ):
                     self.budget_used += executor.budget_used
                     self.total_tokens_used += executor.total_tokens_used

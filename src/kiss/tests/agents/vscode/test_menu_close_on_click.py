@@ -26,7 +26,6 @@ class TestMenuCloseOnItemClick(unittest.TestCase):
     def test_delegated_click_listener_exists(self) -> None:
         """A click listener on menuDropdown removes 'open' when a .menu-item is clicked."""
         js = _read_js()
-        # There should be a listener on menuDropdown that checks for .menu-item
         self.assertIn(
             "menuDropdown.addEventListener('click'",
             js,
@@ -45,7 +44,6 @@ class TestMenuCloseOnItemClick(unittest.TestCase):
     def test_listener_removes_open_class(self) -> None:
         """The delegated listener removes the 'open' class from the dropdown."""
         js = _read_js()
-        # Find the delegated listener block
         pattern = re.compile(
             r"menuDropdown\.addEventListener\('click',\s*e\s*=>\s*\{[^}]*"
             r"menuDropdown\.classList\.remove\('open'\)"

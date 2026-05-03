@@ -923,7 +923,6 @@ class TestRunCronJobLifecycle:
         )
 
         assert len(result["job_id"]) == 12
-        # jobs list was captured AFTER add but BEFORE remove
         assert len(result["jobs"]) == 1
         assert result["jobs"][0]["id"] == result["job_id"]
         assert result["jobs"][0]["schedule"] == "*/5 * * * *"

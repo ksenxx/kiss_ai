@@ -32,7 +32,6 @@ class TestFindKissProjectSearchOrder(unittest.TestCase):
     def test_no_workspace_folder_search(self) -> None:
         """No upward search from workspace folders."""
         source = (VSCODE_SRC / "AgentProcess.ts").read_text()
-        # Extract the findKissProject function body
         fn_match = re.search(
             r"export function findKissProject\(\)[^{]*\{(.+?)^}",
             source,

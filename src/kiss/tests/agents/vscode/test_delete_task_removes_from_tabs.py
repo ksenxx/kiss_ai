@@ -239,7 +239,6 @@ class TestMainJsTaskDeletedHandler:
         assert "taskId" in params, (
             "renderAdjacentTask must accept a taskId parameter"
         )
-        # Body must stamp data-task-id on the container.
         m2 = re.search(
             r"function\s+renderAdjacentTask\s*\([^)]*\)\s*\{",
             src,
@@ -265,7 +264,6 @@ class TestMainJsTaskDeletedHandler:
         ``ev.task_id`` to ``renderAdjacentTask`` so the container
         is stamped with the row id."""
         src = self._src()
-        # Find the case block.
         m = re.search(
             r"case\s+'adjacent_task_events':[\s\S]*?renderAdjacentTask\s*\(([^)]*)\)",
             src,

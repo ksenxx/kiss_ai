@@ -12,7 +12,6 @@ import re
 import unittest
 from pathlib import Path
 
-# Paths to source files under test
 _WEB_SERVER_PY = (
     Path(__file__).resolve().parents[3] / "agents" / "vscode" / "web_server.py"
 )
@@ -33,7 +32,6 @@ class TestWebServerBroadcastsNewUrlOnTunnelRestart(unittest.TestCase):
 
     def test_restart_tunnel_url_broadcasts_remote_url(self) -> None:
         """_restart_tunnel_url must broadcast the new URL to all clients."""
-        # Find the _restart_tunnel_url method
         match = re.search(
             r"async def _restart_tunnel_url\(self\).*?(?=\n    (?:async )?def |\nclass |\Z)",
             self.src,
@@ -41,7 +39,6 @@ class TestWebServerBroadcastsNewUrlOnTunnelRestart(unittest.TestCase):
         )
         assert match, "_restart_tunnel_url method not found in web_server.py"
         body = match.group(0)
-        # Must broadcast remote_url after saving
         self.assertIn(
             'self._printer.broadcast',
             body,
@@ -62,8 +59,6 @@ class TestWebServerBroadcastsNewUrlOnTunnelRestart(unittest.TestCase):
         )
         assert match
         body = match.group(0)
-        # _active_url is set to tunnel_url or self._local_url as fallback,
-        # so the broadcast should use self._active_url
         self.assertIn("self._active_url", body)
 
     def test_broadcast_happens_after_save(self) -> None:
@@ -112,7 +107,6 @@ class TestSidebarWatchesUrlFile(unittest.TestCase):
             body,
             "_tryReadAndSendUrl must compare against _lastSentUrl",
         )
-        # Must check url !== this._lastSentUrl or equivalent
         self.assertIn(
             "!== this._lastSentUrl",
             body,
@@ -128,13 +122,11 @@ class TestSidebarWatchesUrlFile(unittest.TestCase):
         )
         assert match, "_watchUrlFile not found"
         body = match.group(1)
-        # Must NOT have 'remaining' or a stop condition
         self.assertNotIn(
             "remaining",
             body,
             "_watchUrlFile must be persistent — no 'remaining' countdown",
         )
-        # Must use setInterval
         self.assertIn("setInterval", body)
 
     def test_send_remote_url_always_starts_watcher(self) -> None:
@@ -151,7 +143,6 @@ class TestSidebarWatchesUrlFile(unittest.TestCase):
             body,
             "_sendRemoteUrl must always start the persistent watcher",
         )
-        # Must NOT have retry logic (no setTimeout recursion)
         self.assertNotIn(
             "setTimeout",
             body,
@@ -160,7 +151,6 @@ class TestSidebarWatchesUrlFile(unittest.TestCase):
 
     def test_send_remote_url_has_no_retries_parameter(self) -> None:
         """_sendRemoteUrl must not accept a retries parameter."""
-        # The old signature was: _sendRemoteUrl(retries: number = 6)
         match = re.search(r"private _sendRemoteUrl\((.*?)\)", self.src)
         assert match, "_sendRemoteUrl not found"
         params = match.group(1).strip()

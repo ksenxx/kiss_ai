@@ -45,8 +45,6 @@ from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps, _git
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.server import VSCodeServer
 
-# ── helpers ────────────────────────────────────────────────────────
-
 
 def _redirect_db(tmpdir: str) -> tuple:
     old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
@@ -153,9 +151,6 @@ def _server(repo: Path) -> VSCodeServer:
     return server
 
 
-# ── BUG 1: is_task_active leaks True on early return ──────────────
-
-
 class TestBug1IsTaskActiveLeaks:
     """Non-wt task rejected by worktree-merge guard leaks is_task_active."""
 
@@ -172,32 +167,25 @@ class TestBug1IsTaskActiveLeaks:
         """is_task_active must be False after a non-wt task is rejected."""
         server = _server(self.repo)
 
-        # Tab A: worktree tab in merge-review state
         tab_a = server._get_tab("tab-a")
         tab_a.use_worktree = True
         tab_a.is_merging = True
 
-        # Tab B: non-worktree tab tries to start a task
         tab_b = server._get_tab("tab-b")
         tab_b.stop_event = threading.Event()
         tab_b.user_answer_queue = queue.Queue(maxsize=1)
         tab_b.task_thread = threading.Thread(target=lambda: None)
 
-        # Simulate _run_task_inner's early return path
         server._run_task_inner({
             "tabId": "tab-b",
             "prompt": "do something",
             "useWorktree": False,
         })
 
-        # After early return, is_task_active must be False
         assert tab_b.is_task_active is False, (
             "BUG 1: is_task_active leaked True after non-wt task was "
             "rejected by worktree-merge guard"
         )
-
-
-# ── BUG 2: stash_pop loses staging state ──────────────────────────
 
 
 class TestBug2StashPopLosesStagingState:
@@ -214,7 +202,6 @@ class TestBug2StashPopLosesStagingState:
         """After stash → pop, staged modifications should remain staged."""
         repo = self.repo
 
-        # Create two tracked files (both committed)
         (repo / "f.txt").write_text("line1\n")
         (repo / "g.txt").write_text("line1\n")
         subprocess.run(
@@ -226,7 +213,6 @@ class TestBug2StashPopLosesStagingState:
             capture_output=True, check=True,
         )
 
-        # Stage a modification to f.txt, leave g.txt unstaged
         (repo / "f.txt").write_text("line1\nline2\n")
         subprocess.run(
             ["git", "-C", str(repo), "add", "f.txt"],
@@ -234,31 +220,24 @@ class TestBug2StashPopLosesStagingState:
         )
         (repo / "g.txt").write_text("line1\nline2\n")
 
-        # Verify: f.txt is staged, g.txt is unstaged
         cached = _git("diff", "--cached", "--name-only", cwd=repo)
         assert "f.txt" in cached.stdout
         unstaged = _git("diff", "--name-only", cwd=repo)
         assert "g.txt" in unstaged.stdout
 
-        # Stash and pop
         did_stash = GitWorktreeOps.stash_if_dirty(repo)
         assert did_stash
 
         ok = GitWorktreeOps.stash_pop(repo)
         assert ok
 
-        # After pop, f.txt must still be in the index (staged)
         cached_after = _git("diff", "--cached", "--name-only", cwd=repo)
         assert "f.txt" in cached_after.stdout, (
             "BUG 2: stash_pop lost staging state — f.txt is no longer "
             "in the index after stash → pop"
         )
-        # g.txt must still be unstaged
         unstaged_after = _git("diff", "--name-only", cwd=repo)
         assert "g.txt" in unstaged_after.stdout
-
-
-# ── BUG 3: _auto_commit_worktree crashes when LLM unavailable ────
 
 
 class TestBug3AutoCommitNoLLMFallback:
@@ -279,19 +258,8 @@ class TestBug3AutoCommitNoLLMFallback:
         branch = "kiss/wt-test-llm-fail"
         wt = _make_wt_with_commit(self.repo, branch, agent)
 
-        # Add uncommitted changes to the worktree
         (wt.wt_dir / "extra.txt").write_text("extra work\n")
 
-        # Make the LLM commit message generator fail by poisoning the
-        # import path.  _generate_commit_message calls
-        # generate_commit_message_from_diff which requires an LLM.
-        # We simulate LLM unavailability by making the staged diff empty
-        # after staging (which can't happen normally), so instead we
-        # directly test _auto_commit_worktree with a broken LLM.
-        #
-        # To trigger the LLM failure path without mocks, we use a
-        # monkeypatch on the module-level function that is NOT a test
-        # double — it's the real function replaced temporarily.
         import kiss.agents.sorcar.worktree_sorcar_agent as wsa_mod
 
         original_fn = wsa_mod._generate_commit_message
@@ -301,14 +269,12 @@ class TestBug3AutoCommitNoLLMFallback:
 
         wsa_mod._generate_commit_message = _failing_commit_msg  # type: ignore[assignment]
         try:
-            # _auto_commit_worktree must not raise
             result = agent._auto_commit_worktree()
             assert result is True, (
                 "BUG 3: _auto_commit_worktree should commit with fallback "
                 "message when LLM fails, but returned False"
             )
 
-            # Verify the commit was actually created
             assert not GitWorktreeOps.has_uncommitted_changes(wt.wt_dir), (
                 "BUG 3: worktree still has uncommitted changes after "
                 "_auto_commit_worktree with LLM failure"
@@ -316,13 +282,9 @@ class TestBug3AutoCommitNoLLMFallback:
         finally:
             wsa_mod._generate_commit_message = original_fn  # type: ignore[assignment]
 
-            # Cleanup
             GitWorktreeOps.remove(self.repo, wt.wt_dir)
             GitWorktreeOps.prune(self.repo)
             GitWorktreeOps.delete_branch(self.repo, branch)
-
-
-# ── BUG 4: _close_tab orphans pending worktrees ──────────────────
 
 
 class TestBug4CloseTabOrphansWorktree:
@@ -347,13 +309,10 @@ class TestBug4CloseTabOrphansWorktree:
         branch = "kiss/wt-close-test"
         wt = _make_wt_with_commit(self.repo, branch, tab.agent)
 
-        # Verify the worktree is pending
         assert tab.agent._wt_pending
 
-        # Close the tab
         server._close_tab(tab_id)
 
-        # After close, the branch should be merged and deleted
         assert not GitWorktreeOps.branch_exists(self.repo, branch), (
             "BUG 4: _close_tab left orphaned branch after closing tab "
             "with pending worktree"
@@ -369,8 +328,6 @@ class TestBug4CloseTabOrphansWorktree:
         tab = server._get_tab(tab_id)
         tab.use_worktree = True
 
-        # Create a worktree with NO agent changes (branch exists but
-        # is at the same commit as main)
         branch = "kiss/wt-close-empty"
         slug = branch.replace("/", "_")
         wt_dir = self.repo / ".kiss-worktrees" / slug
@@ -403,11 +360,9 @@ class TestBug4CloseTabOrphansWorktree:
 
         server._close_tab(tab_id)
 
-        # Tab should still be present (close refused)
         assert tab_id in server._tab_states
         assert GitWorktreeOps.branch_exists(self.repo, branch)
 
-        # Cleanup
         tab.is_task_active = False
         GitWorktreeOps.remove(self.repo, tab.agent._wt.wt_dir)  # type: ignore[union-attr]
         GitWorktreeOps.prune(self.repo)

@@ -366,6 +366,8 @@ def find_deprecated_models(
     deprecated: list[dict] = []
 
     for name in current:  # pragma: no branch
+        if name.startswith("codex/"):  # pragma: no branch
+            continue
         if name.startswith("openrouter/"):  # pragma: no branch
             if openrouter and name not in openrouter:  # pragma: no branch
                 base_name = name.split("/")[-1]
@@ -378,8 +380,6 @@ def find_deprecated_models(
                 if has_date:  # pragma: no branch
                     deprecated.append({"name": name, "reason": "not in Anthropic API"})
                 else:
-                    # Alias (no date suffix): deprecated only if no dated
-                    # snapshot like {alias}-YYYYMMDD exists in the API.
                     alias_re = re.compile(rf"^{re.escape(name)}-\d{{8}}$")
                     if not any(alias_re.match(n) for n in anthropic):
                         deprecated.append(
@@ -396,9 +396,6 @@ def find_deprecated_models(
                 if has_date:  # pragma: no branch
                     deprecated.append({"name": name, "reason": "not in OpenAI API"})
                 else:
-                    # Alias (no date suffix): deprecated only if no dated
-                    # snapshot like {alias}-YYYYMMDD or {alias}-YYYY-MM-DD
-                    # exists in the API.
                     alias_re = re.compile(
                         rf"^{re.escape(name)}-(\d{{8}}|\d{{4}}-\d{{2}}-\d{{2}})$"
                     )
@@ -423,6 +420,62 @@ _VENDOR_OR_PREFIX: dict[str, str] = {
     "anthropic": "openrouter/anthropic/",
     "gemini": "openrouter/google/",
 }
+
+_CODEX_GPT_PATTERN = re.compile(r"^gpt-([5-9]|\d{2,})(\.\d+)?(-.*)?$")
+_CODEX_GPT_SKIP_FRAGMENTS = (
+    "image",
+    "audio",
+    "tts",
+    "search",
+    "transcribe",
+    "whisper",
+    "embedding",
+)
+_CODEX_GPT_DATE_SUFFIX = re.compile(r"-(\d{8}|\d{4}-\d{2}-\d{2})$")
+
+
+def _add_codex_candidates(
+    openai: dict[str, dict],
+    current: dict[str, dict],
+    openrouter: dict[str, dict],
+    new_models: list[dict],
+) -> None:
+    """Add ``codex/<gpt-model>`` entries for every OpenAI GPT-5+ model.
+
+    The codex CLI accepts any model name via ``-m`` and is billed via the
+    user's ChatGPT subscription, so all such entries get $0/0 pricing.
+    Context length is taken from the matching OpenRouter entry when
+    available, falling back to 400000 (the default for codex/* models).
+
+    Date-suffixed snapshots (e.g. ``gpt-5-2025-08-07``) are skipped because
+    the un-suffixed alias already covers them. Multimodal/embedding/search
+    variants are filtered out because they are not useful with codex.
+    """
+    for name in openai:  # pragma: no branch
+        if not _CODEX_GPT_PATTERN.match(name):  # pragma: no branch
+            continue
+        if any(s in name for s in _CODEX_GPT_SKIP_FRAGMENTS):  # pragma: no branch
+            continue
+        if _CODEX_GPT_DATE_SUFFIX.search(name):  # pragma: no branch
+            continue
+        codex_name = f"codex/{name}"
+        if codex_name in current:  # pragma: no branch
+            continue
+        or_info = _lookup_openrouter_pricing(name, "openai", openrouter)
+        ctx = or_info["context_length"] if or_info and or_info.get("context_length") else 400000
+        new_models.append(
+            {
+                "name": codex_name,
+                "context_length": ctx,
+                "input_price_per_1M": 0.0,
+                "output_price_per_1M": 0.0,
+                "source": "codex",
+                "needs_pricing": False,
+                "gen": True,
+                "fc": True,
+                "emb": False,
+            }
+        )
 
 
 def _lookup_openrouter_pricing(
@@ -596,6 +649,8 @@ def compute_changes(
                     "needs_pricing": inp == 0,
                 }
             )
+
+    _add_codex_candidates(openai, current, openrouter, new_models)
 
     from kiss.core.models.model_info import _OPENAI_PREFIXES
 
@@ -904,6 +959,8 @@ def main() -> None:
     if new_models and not args.skip_test:  # pragma: no branch
         print(f"\n[5/6] Testing {len(new_models)} new models...")
         for nm in new_models:  # pragma: no branch
+            if nm["name"].startswith("codex/"):  # pragma: no branch
+                continue
             caps = test_model_capabilities(nm["name"], verbose=args.verbose)
             nm["gen"] = caps["gen"]
             nm["emb"] = caps["emb"]

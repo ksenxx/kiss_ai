@@ -132,7 +132,6 @@ class TestEarlyExitGuard(unittest.TestCase):
         """The early-exit guard must not trigger when the extension-updated
         marker exists, so that code changes from build-extension.sh are
         picked up via the normal restart path."""
-        # Find the early-exit block (before the main uvPath / venvExists logic)
         guard_match = re.search(
             r"isDaemonRunning\(\).*?!fs\.existsSync\(updateMarker\)",
             INSTALLER_SOURCE,
@@ -147,7 +146,6 @@ class TestEarlyExitGuard(unittest.TestCase):
         """The early-exit path must still call loadApiKeysFromShellRc so that
         API keys from ~/.zshrc are available when VS Code is launched from
         macOS Dock/Spotlight."""
-        # Find the early-exit block and verify loadApiKeysFromShellRc is called
         nothing_match = re.search(
             r"nothing to do.*?loadApiKeysFromShellRc\(\)",
             INSTALLER_SOURCE,
