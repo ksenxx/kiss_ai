@@ -126,24 +126,20 @@ class TestBuildChatPromptTruncation:
         for i in range(1, MAX_TASKS + 1):
             assert f"task {i}" in out
             assert f"result {i}" in out
-        # No 11th entry should exist; the `### Task 11` header must not appear.
         assert "### Task 11" not in out
 
     def test_one_over_limit_drops_one_middle_entry(self) -> None:
         """N == MAX_TASKS+1 → drop exactly the third-oldest entry (index 2)."""
-        chat_id = _seed_chat(MAX_TASKS + 1)  # 11 tasks
+        chat_id = _seed_chat(MAX_TASKS + 1)
         agent = ChatSorcarAgent("test")
         agent.resume_chat_by_id(chat_id)
         out = agent.build_chat_prompt("now")
 
-        # Kept inputs: tasks 1, 2, 4, 5, 6, 7, 8, 9, 10, 11 (10 total).
-        # Dropped: task 3.
         assert "task 3" not in out
         assert "result 3" not in out
         for kept in (1, 2, 4, 5, 6, 7, 8, 9, 10, 11):
             assert f"task {kept}" in out
             assert f"result {kept}" in out
-        # Headers are renumbered 1..10 (only MAX_TASKS entries rendered).
         assert "### Task 10" in out
         assert "### Task 11" not in out
 
@@ -156,7 +152,6 @@ class TestBuildChatPromptTruncation:
         out = agent.build_chat_prompt("now")
 
         kept_inputs = {1, 2} | set(range(n - (MAX_TASKS - 2) + 1, n + 1))
-        # i.e. {1, 2, 13, 14, 15, 16, 17, 18, 19, 20}
         assert kept_inputs == {1, 2, 13, 14, 15, 16, 17, 18, 19, 20}
         for kept in kept_inputs:
             assert f"task {kept}" in out
@@ -164,7 +159,6 @@ class TestBuildChatPromptTruncation:
         for dropped in set(range(1, n + 1)) - kept_inputs:
             assert f"task {dropped}" not in out
             assert f"result {dropped}" not in out
-        # Exactly MAX_TASKS rendered task headers (1..10), nothing beyond.
         assert out.count("### Task ") == MAX_TASKS
         assert "### Task 11" not in out
 
@@ -172,7 +166,6 @@ class TestBuildChatPromptTruncation:
         """Entries with empty result should not produce a '### Result' block."""
         chat_id = ""
         task_id, chat_id = _add_task("only-task", chat_id=chat_id)
-        # Intentionally do NOT save a result → result column stays "".
         _save_task_result(result="", task_id=task_id)
 
         agent = ChatSorcarAgent("test")

@@ -38,7 +38,6 @@ class TestGeminiStreamPartsThinkingCallback:
             thinking_callback=lambda s: thinking_events.append(s),
         )
 
-        # Simulate a chunk with a thinking part followed by a text part
         thinking_part = types.Part(text="Let me think about this.", thought=True)
         text_part = types.Part(text="The answer is 42.")
 
@@ -72,16 +71,11 @@ class TestGeminiStreamPartsThinkingCallback:
             thinking_callback=lambda s: thinking_events.append(s),
         )
 
-        # Chunk 1: thinking part
         m._stream_parts([types.Part(text="Thinking chunk 1", thought=True)])
-        # Chunk 2: more thinking
         m._stream_parts([types.Part(text=" and chunk 2", thought=True)])
-        # Chunk 3: regular text — should close thinking and start text
         m._stream_parts([types.Part(text="Final answer.")])
 
-        # Should have: True (start thinking), False (end thinking when text starts)
         assert thinking_events[0] is True
-        # Thinking should have been closed before text
         assert False in thinking_events
 
         combined = "".join(tokens)
@@ -123,14 +117,12 @@ class TestGeminiStreamPartsThinkingCallback:
             thinking_callback=printer.thinking_callback,
         )
 
-        # Simulate streaming: thinking part then text part
         m._stream_parts([types.Part(text="Deep reasoning here.", thought=True)])
         m._stream_parts([types.Part(text="The result is X.")])
 
         recorded = printer.stop_recording()
         event_types = [e["type"] for e in recorded]
 
-        # Must have thinking_start / thinking_end events
         assert "thinking_start" in event_types, (
             f"No thinking_start — types: {event_types}"
         )
@@ -138,7 +130,6 @@ class TestGeminiStreamPartsThinkingCallback:
             f"No thinking_end — types: {event_types}"
         )
 
-        # Thinking tokens must be thinking_delta, not text_delta
         start_idx = event_types.index("thinking_start")
         end_idx = event_types.index("thinking_end")
         between = recorded[start_idx + 1 : end_idx]
@@ -148,11 +139,9 @@ class TestGeminiStreamPartsThinkingCallback:
             "thinking tokens leaked as text_delta"
         )
 
-        # Verify the thinking text content
         thought_text = "".join(d["text"] for d in thinking_deltas)
         assert "Deep reasoning here." in thought_text
 
-        # No thinking content should be in text_delta events
         text_deltas = [e for e in recorded if e["type"] == "text_delta"]
         text_content = "".join(d.get("text", "") for d in text_deltas)
         assert "Deep reasoning here." not in text_content, (
@@ -175,9 +164,7 @@ class TestGeminiStreamPartsThinkingCallback:
             thinking_callback=lambda s: thinking_events.append(s),
         )
 
-        # Stream only thinking parts (no text follows)
         m._stream_parts([types.Part(text="Only thinking.", thought=True)])
-        # Must close the block explicitly
         m._end_thinking_stream()
 
         assert thinking_events == [True, False], (

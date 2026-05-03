@@ -257,8 +257,6 @@ def test_find_deprecated_skips_codex_entries():
         "codex/gpt-5": {"source": "codex"},
         "codex/gpt-5-codex": {"source": "codex"},
         "codex/gpt-5.5-pro": {"source": "codex"},
-        # A real OpenAI alias with no dated snapshot, to confirm the rest of
-        # the deprecation logic still works.
         "gpt-foo-removed": {"source": "openai"},
     }
     openai = {"gpt-5": {"source": "openai"}, "gpt-5-2025-08-07": {"source": "openai"}}

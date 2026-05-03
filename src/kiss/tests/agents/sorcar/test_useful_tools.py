@@ -40,7 +40,6 @@ class TestUsefulTools:
         assert "Error:" in result
 
 
-
 @pytest.fixture
 def streaming_tools(temp_test_dir):
     streamed: list[str] = []

@@ -55,14 +55,12 @@ class TestDeleteTask:
         th._append_chat_event({"type": "text_delta", "text": "hello"}, task_id=task_id)
         th._append_chat_event({"type": "result", "text": "done"}, task_id=task_id)
 
-        # Verify events exist
         db = th._get_db()
         rows = db.execute("SELECT COUNT(*) FROM events WHERE task_id = ?", (task_id,)).fetchone()
         assert rows[0] == 2
 
         th._delete_task(task_id)
 
-        # Verify events are gone
         rows = db.execute("SELECT COUNT(*) FROM events WHERE task_id = ?", (task_id,)).fetchone()
         assert rows[0] == 0
 
@@ -80,7 +78,6 @@ class TestDeleteTask:
         assert len(entries) == 1
         assert entries[0]["task"] == "keep this"
 
-        # Events for kept task still exist
         db = th._get_db()
         rows = db.execute("SELECT COUNT(*) FROM events WHERE task_id = ?", (id1,)).fetchone()
         assert rows[0] == 1
@@ -102,7 +99,6 @@ class TestDeleteTask:
         assert "third in session" in tasks
         assert "second in session" not in tasks
 
-        # Remaining tasks still share the same chat_id
         for e in entries:
             assert e["chat_id"] == chat_id
 

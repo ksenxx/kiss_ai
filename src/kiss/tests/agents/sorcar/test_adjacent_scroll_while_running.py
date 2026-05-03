@@ -30,16 +30,10 @@ class TestAdjacentScrollWhileRunning(unittest.TestCase):
     def setUp(self) -> None:
         self.src = MAIN_JS.read_text()
 
-    # ------------------------------------------------------------------
-    # Structural: the overscroll guard must NOT block on isRunning
-    # ------------------------------------------------------------------
 
     def test_overscroll_guard_does_not_check_is_running(self) -> None:
         """The ``if (…)`` that gates adjacent-task loading must not
         include ``!isRunning`` or ``isRunning`` as a conjunct."""
-        # Find the line that contains the adjacent-loading guard.
-        # It's the condition that also checks adjacentLoading,
-        # activeTabId, and currentTaskName.
         pattern = re.compile(
             r"if\s*\([^)]*adjacentLoading[^)]*currentTaskName[^)]*\)"
         )

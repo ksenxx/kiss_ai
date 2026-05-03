@@ -239,7 +239,3 @@ class TestSorcarBashStreaming:
         assert "line3" in sys_text
 
 
-
-
-
-

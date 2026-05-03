@@ -98,7 +98,6 @@ class TestMergeLaunchedAfterFileModification(_LifecycleHarness):
         tab = self.server._get_tab(tab_id)
         tab.use_worktree = False
 
-        # --- Pre-task snapshot ---
         from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 
         repo = GitWorktreeOps.discover_repo(Path(self.tmpdir))
@@ -108,12 +107,10 @@ class TestMergeLaunchedAfterFileModification(_LifecycleHarness):
             )
         )
 
-        # --- Simulate agent modifying the file ---
         Path(self.tmpdir, "README.md").write_text(
             "# Hello\n\nUpdated content by the agent\n"
         )
 
-        # --- Post-task: prepare and start merge ---
         started = self.server._prepare_and_start_merge(
             self.tmpdir,
             pre_hunks,
@@ -143,7 +140,6 @@ class TestMergeLaunchedAfterFileModification(_LifecycleHarness):
         ms_event = _find_event(self.events, "merge_started")
         assert ms_event["tabId"] == tab_id
 
-        # tab should be marked as merging
         assert tab.is_merging is True
 
     def test_merge_events_after_new_file(self) -> None:
@@ -161,7 +157,6 @@ class TestMergeLaunchedAfterFileModification(_LifecycleHarness):
             )
         )
 
-        # Agent creates a new file
         Path(self.tmpdir, "new_file.txt").write_text("brand new file\n")
 
         started = self.server._prepare_and_start_merge(
@@ -190,7 +185,6 @@ class TestAutocommitPromptAfterMergeReview(_LifecycleHarness):
         tab = self.server._get_tab(tab_id)
         tab.use_worktree = False
 
-        # Step 1: Pre-snapshot
         from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 
         repo = GitWorktreeOps.discover_repo(Path(self.tmpdir))
@@ -200,12 +194,10 @@ class TestAutocommitPromptAfterMergeReview(_LifecycleHarness):
             )
         )
 
-        # Step 2: Agent modifies file
         Path(self.tmpdir, "README.md").write_text(
             "# Updated README\n\nNew TOC\n"
         )
 
-        # Step 3: Prepare and start merge
         started = self.server._prepare_and_start_merge(
             self.tmpdir,
             pre_hunks,
@@ -216,7 +208,6 @@ class TestAutocommitPromptAfterMergeReview(_LifecycleHarness):
         )
         assert started
 
-        # Step 4: Simulate merge review completion (all-done)
         self.events.clear()
         self.server._handle_command(
             {"type": "mergeAction", "action": "all-done", "tabId": tab_id}
@@ -233,7 +224,6 @@ class TestAutocommitPromptAfterMergeReview(_LifecycleHarness):
         assert ac_event["tabId"] == tab_id
         assert "README.md" in ac_event["changedFiles"]
 
-        # tab should no longer be merging
         assert tab.is_merging is False
 
 
@@ -267,7 +257,6 @@ class TestAutocommitActionAfterPrompt(_LifecycleHarness):
         tab_id = "test-tab-commit"
         self._setup_merge_complete(tab_id)
 
-        # Verify autocommit_prompt was sent
         assert "autocommit_prompt" in _event_types(self.events)
 
         self.events.clear()
@@ -280,7 +269,6 @@ class TestAutocommitActionAfterPrompt(_LifecycleHarness):
         assert done["committed"] is True
         assert done["tabId"] == tab_id
 
-        # Working tree should be clean
         status = _git(self.tmpdir, "status", "--porcelain").stdout.strip()
         assert status == "", f"Expected clean working tree, got: {status}"
 
@@ -323,7 +311,6 @@ class TestMergeNotLaunchedWhenNoChanges(_LifecycleHarness):
             )
         )
 
-        # Agent does NOT modify anything
         started = self.server._prepare_and_start_merge(
             self.tmpdir,
             pre_hunks,
@@ -357,7 +344,6 @@ class TestMergeLaunchedAfterAgentCommit(_LifecycleHarness):
             )
         )
 
-        # Agent modifies, stages, and commits
         Path(self.tmpdir, "README.md").write_text("# Agent committed\n")
         _git(self.tmpdir, "add", "README.md")
         _git(self.tmpdir, "commit", "-m", "agent commit")
@@ -389,7 +375,6 @@ class TestMergeWithPreExistingDirtyFiles(_LifecycleHarness):
 
     def test_pre_dirty_files_filtered(self) -> None:
         """Pre-existing modifications are filtered from the merge view."""
-        # Dirty the working tree BEFORE the task
         Path(self.tmpdir, "README.md").write_text("# Pre-existing dirty\n")
 
         tab_id = "test-tab-predirty"
@@ -405,7 +390,6 @@ class TestMergeWithPreExistingDirtyFiles(_LifecycleHarness):
             )
         )
 
-        # Agent modifies a DIFFERENT file, leaves README.md as-is
         Path(self.tmpdir, "new_agent_file.py").write_text("print('hello')\n")
 
         started = self.server._prepare_and_start_merge(
@@ -420,7 +404,6 @@ class TestMergeWithPreExistingDirtyFiles(_LifecycleHarness):
         assert started
         md_event = _find_event(self.events, "merge_data")
         file_names = [f["name"] for f in md_event["data"]["files"]]
-        # Only the new file should appear, not the pre-dirty README.md
         assert "new_agent_file.py" in file_names
         assert "README.md" not in file_names, (
             "Pre-existing dirty README.md should be filtered from merge view"
@@ -435,9 +418,8 @@ class TestAutocommitPromptNotShownForCleanWorkTree(_LifecycleHarness):
         tab_id = "test-tab-clean"
         tab = self.server._get_tab(tab_id)
         tab.use_worktree = False
-        tab.is_merging = True  # simulate active merge
+        tab.is_merging = True
 
-        # Ensure working tree is clean
         self.server._finish_merge(tab_id)
 
         types = _event_types(self.events)
@@ -459,10 +441,8 @@ class TestFinishMergeTabMissing(_LifecycleHarness):
         """_finish_merge must send autocommit_prompt even when the tab
         is not pre-existing in _tab_states."""
         tab_id = "missing-tab-id"
-        # Do NOT create the tab first — simulate a fresh process
         assert tab_id not in self.server._tab_states
 
-        # Dirty the working tree
         Path(self.tmpdir, "README.md").write_text("# Modified\n")
 
         self.server._finish_merge(tab_id)
@@ -513,7 +493,6 @@ class TestMergeStartSessionEventContent(_LifecycleHarness):
 
         md_event = _find_event(self.events, "merge_data")
 
-        # Required fields for TypeScript MergeManager
         assert "tabId" in md_event, "merge_data must have tabId"
         assert md_event["tabId"] == tab_id
         assert "data" in md_event, "merge_data must have data"
@@ -521,13 +500,11 @@ class TestMergeStartSessionEventContent(_LifecycleHarness):
         assert "hunk_count" in md_event, "merge_data must have hunk_count"
         assert md_event["hunk_count"] > 0
 
-        # Each file must have base, current, name, hunks
         for f in md_event["data"]["files"]:
             assert "name" in f, f"file entry missing 'name': {f}"
             assert "base" in f, f"file entry missing 'base': {f}"
             assert "current" in f, f"file entry missing 'current': {f}"
             assert "hunks" in f, f"file entry missing 'hunks': {f}"
-            # base and current must be absolute paths that exist on disk
             assert Path(f["base"]).is_absolute(), f"base path not absolute: {f['base']}"
             assert Path(f["current"]).is_absolute(), f"current path not absolute: {f['current']}"
             assert Path(f["base"]).exists(), f"base path doesn't exist: {f['base']}"

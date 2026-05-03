@@ -76,11 +76,9 @@ class TestBuildConfigCLI(unittest.TestCase):
         add_config("extra", ExtraConfig)
         self.assertEqual(config_module.DEFAULT_CONFIG.extra.extra_val, 10)  # type: ignore[union-attr]
 
-        # Now override a base field via build_config
         sys.argv = ["test", "--max-budget", "333.0"]
         build_config()
         self.assertEqual(config_module.DEFAULT_CONFIG.max_budget, 333.0)
-        # Extension field should still be accessible
         self.assertEqual(config_module.DEFAULT_CONFIG.extra.extra_val, 10)  # type: ignore[union-attr]
 
     def test_build_config_overrides_extended_sub_field(self) -> None:

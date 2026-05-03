@@ -50,7 +50,6 @@ def _extract_function(source: str, name: str) -> str:
     match = re.search(pattern, source)
     assert match, f"Function {name} not found in source"
     start = match.start()
-    # Find the opening brace
     brace_start = source.index("{", match.end())
     depth = 1
     i = brace_start + 1
@@ -63,9 +62,6 @@ def _extract_function(source: str, name: str) -> str:
     return source[start:i]
 
 
-# Minimal DOM shim that simulates textContent-fallback behavior for innerText.
-# In a real browser, innerText on display:none elements equals textContent
-# (no separators between block elements).  Our shim reproduces this.
 _NODE_SHIM = r"""
 function _MiniEl(tag) {
     this.tagName = tag || 'div';
@@ -227,7 +223,6 @@ def _build_test_script(body_children_json: str, collapse: bool = True) -> str:
     mkel_fn = _extract_function(source, "mkEl")
 
     script = _NODE_SHIM + "\n"
-    # Provide document.createElement for mkEl
     script += "var document = { createElement: mkTestEl };\n"
     script += mkel_fn + "\n"
     script += collect_fn + "\n"
@@ -325,7 +320,6 @@ class TestCollapsePreviewSpacingBehavioral(unittest.TestCase):
     def test_empty_panel_collapsed(self) -> None:
         """A collapsed panel with no body content should produce empty or header-only preview."""
         preview = self._get_preview([])
-        # Should not crash and should produce either empty or minimal text
         assert isinstance(preview, str)
 
     def test_not_collapsed_produces_empty_preview(self) -> None:

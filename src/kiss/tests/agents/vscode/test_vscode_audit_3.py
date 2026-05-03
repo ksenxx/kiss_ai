@@ -47,10 +47,6 @@ from kiss.agents.vscode.diff_merge import (
 from kiss.agents.vscode.server import VSCodeServer
 from kiss.agents.vscode.task_runner import _TaskRunnerMixin
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 
 def _make_server() -> tuple[VSCodeServer, list[dict]]:
     """Create a VSCodeServer with broadcast capture (no stdout)."""
@@ -68,11 +64,6 @@ def _make_server() -> tuple[VSCodeServer, list[dict]]:
     return server, events
 
 
-# ===================================================================
-# N1 — _timer_flush type annotation says int but should say str
-# ===================================================================
-
-
 class TestTimerFlushTypeAnnotation(unittest.TestCase):
     """N1: The ``_timer_flush`` inner function inside
     ``BaseBrowserPrinter.print`` uses the type annotation
@@ -84,7 +75,6 @@ class TestTimerFlushTypeAnnotation(unittest.TestCase):
     def test_source_has_wrong_type_annotation(self) -> None:
         """Structural: the inner function annotates ``tid`` as ``int``."""
         src = inspect.getsource(BaseBrowserPrinter.print)
-        # Find the _timer_flush definition
         match = re.search(r"def _timer_flush\(tid:\s*([\w |]+)", src)
         assert match is not None, (
             "N1: could not find _timer_flush definition"
@@ -102,16 +92,10 @@ class TestTimerFlushTypeAnnotation(unittest.TestCase):
         printer = BaseBrowserPrinter()
         printer._thread_local.tab_id = "test-tab-123"
 
-        # Simulate the assignment path: owner_tab captures tab_id
         owner_tab = getattr(printer._thread_local, "tab_id", None)
         assert isinstance(owner_tab, str), (
             f"N1: owner_tab should be str, got {type(owner_tab).__name__}"
         )
-
-
-# ===================================================================
-# N2 — _await_user_response reads _tab_states without _state_lock
-# ===================================================================
 
 
 class TestAwaitUserResponseNoLock(unittest.TestCase):
@@ -128,7 +112,6 @@ class TestAwaitUserResponseNoLock(unittest.TestCase):
         src = inspect.getsource(_TaskRunnerMixin._await_user_response)
         lines = src.splitlines()
 
-        # Find the line with _tab_states.get
         tab_get_idx = None
         for i, line in enumerate(lines):
             if "_tab_states.get" in line:
@@ -138,7 +121,6 @@ class TestAwaitUserResponseNoLock(unittest.TestCase):
             "N2: could not find _tab_states.get in _await_user_response"
         )
 
-        # Check that _state_lock IS in the preceding lines (fix confirmed)
         preceding = "\n".join(lines[max(0, tab_get_idx - 5):tab_get_idx])
         assert "_state_lock" in preceding, (
             "N2 fix: _tab_states.get should be protected by _state_lock"
@@ -172,29 +154,20 @@ class TestAwaitUserResponseNoLock(unittest.TestCase):
         tab.stop_event = threading.Event()
         tab.user_answer_queue = queue.Queue(maxsize=1)
 
-        # Put an answer in the queue
         tab.user_answer_queue.put("yes")
 
-        # Simulate _await_user_response's unlocked read BEFORE close
         server.printer._thread_local.stop_event = tab.stop_event
         server.printer._thread_local.tab_id = "t1"
         pre_close_tab = server._tab_states.get("t1")
         assert pre_close_tab is not None, "Tab exists before close"
 
-        # Now close the tab (simulating concurrent _close_tab)
         with server._state_lock:
             server._tab_states.pop("t1", None)
 
-        # After close, the unlocked read returns None
         post_close_tab = server._tab_states.get("t1")
         assert post_close_tab is None, (
             "N2: after close, unlocked read returns None — answer is lost"
         )
-
-
-# ===================================================================
-# N3 — _scan_files depth limit off-by-one
-# ===================================================================
 
 
 class TestScanFilesDepthOffByOne(unittest.TestCase):
@@ -231,17 +204,14 @@ class TestScanFilesDepthOffByOne(unittest.TestCase):
         """
         td = tempfile.mkdtemp()
         try:
-            # Create depth-9 file
             d9 = os.path.join(td, "a", "b", "c", "d", "e", "f", "g", "h", "i")
             os.makedirs(d9)
             Path(d9, "shallow.txt").write_text("ok")
 
-            # Create depth-10 file
             d10 = os.path.join(td, "a", "b", "c", "d", "e", "f", "g", "h", "i", "j")
             os.makedirs(d10)
             Path(d10, "deep.txt").write_text("too deep?")
 
-            # Create depth-11 file (should definitely be excluded)
             d11 = os.path.join(td, "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k")
             os.makedirs(d11)
             Path(d11, "very_deep.txt").write_text("way too deep")
@@ -252,11 +222,9 @@ class TestScanFilesDepthOffByOne(unittest.TestCase):
             assert "a/b/c/d/e/f/g/h/i/shallow.txt" in file_results, (
                 "depth-9 files should always be included"
             )
-            # N3 bug: depth-10 files ARE included due to off-by-one
             assert "a/b/c/d/e/f/g/h/i/j/deep.txt" in file_results, (
                 "N3: depth-10 files are included due to the off-by-one bug"
             )
-            # depth-11 is always excluded
             assert "a/b/c/d/e/f/g/h/i/j/k/very_deep.txt" not in file_results, (
                 "depth-11 files should be excluded"
             )
@@ -271,27 +239,19 @@ class TestScanFilesDepthOffByOne(unittest.TestCase):
           depth10: len(('a',..,'j')) = 10  → 10 > 10 is False (included)
           depth11: len(('a',..,'k')) = 11  → 11 > 10 is True (excluded)
         """
-        # Root
         assert len(PurePath(".").parts) == 0
 
-        # Depth 10 — included: 10 > 10 is False
         depth10 = PurePath("a/b/c/d/e/f/g/h/i/j")
         assert len(depth10.parts) == 10
         assert not (len(depth10.parts) > 10), (
             "depth 10 passes the check (10 > 10 is False) — included"
         )
 
-        # Depth 11 — excluded: 11 > 10 is True
         depth11 = PurePath("a/b/c/d/e/f/g/h/i/j/k")
         assert len(depth11.parts) == 11
         assert len(depth11.parts) > 10, (
             "depth 11 fails the check (11 > 10 is True) — excluded"
         )
-
-
-# ===================================================================
-# N4 — Truncated comment in _run_task_inner
-# ===================================================================
 
 
 class TestTruncatedCommentInRunTaskInner(unittest.TestCase):
@@ -302,34 +262,22 @@ class TestTruncatedCommentInRunTaskInner(unittest.TestCase):
     def test_source_has_truncated_comment(self) -> None:
         """Structural: find the truncated comment."""
         src = inspect.getsource(_TaskRunnerMixin._run_task_inner)
-        # The comment ends mid-sentence with "from a"
         assert "pending branch from a" in src, (
             "N4: could not find the truncated comment"
         )
 
-        # Extract the full comment line
         for line in src.splitlines():
             if "pending branch from a" in line:
                 stripped = line.strip()
-                # The line should end abruptly — it's a comment that
-                # doesn't form a complete sentence
                 assert stripped.startswith("#"), (
                     "N4: the truncated text should be in a comment"
                 )
-                # Check the comment doesn't continue with meaningful text
                 after_marker = stripped.split("pending branch from a", 1)[1]
-                # The remaining text should be empty or very short (no
-                # complete sentence follows)
                 assert len(after_marker.strip()) < 10, (
                     f"N4: expected truncated comment, but found continuation: "
                     f"{after_marker!r}"
                 )
                 break
-
-
-# ===================================================================
-# N5 — Write paths don't guard against empty tab_id
-# ===================================================================
 
 
 class TestWritePathsEmptyTabId(unittest.TestCase):
@@ -354,9 +302,6 @@ class TestWritePathsEmptyTabId(unittest.TestCase):
         the parent merge_dir rather than a per-tab subdirectory."""
         empty = _untracked_base_dir("")
         with_tab = _untracked_base_dir("tab-1")
-        # empty is merge_dir/untracked-base
-        # with_tab is merge_dir/tab-1/untracked-base
-        # empty.parent is merge_dir (the shared parent)
         assert empty.parent == _merge_data_dir(""), (
             "N5: empty tab_id puts untracked-base in shared parent dir"
         )
@@ -371,8 +316,6 @@ class TestWritePathsEmptyTabId(unittest.TestCase):
         assert "_save_untracked_base" in src, (
             "N5: _capture_pre_snapshot calls _save_untracked_base"
         )
-        # Check there's no guard like `if not tab_id: return` or
-        # `if tab_id:` before the call
         lines = src.splitlines()
         save_idx = None
         for i, line in enumerate(lines):
@@ -415,7 +358,6 @@ class TestWritePathsEmptyTabId(unittest.TestCase):
             "N5: two empty-tab_id calls write to the same directory"
         )
 
-        # With proper tab_id, they'd be isolated
         dir_c = _merge_data_dir("tab-A")
         dir_d = _merge_data_dir("tab-B")
         assert dir_c != dir_d, (

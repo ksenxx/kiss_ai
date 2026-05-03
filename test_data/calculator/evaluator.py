@@ -23,7 +23,6 @@ def tokenize(expression: str) -> list[str]:
             tokens.append(ch)
             i += 1
             continue
-        # Check for a number (including leading minus for negative numbers)
         if ch.isdigit() or ch == "." or (
             ch == "-"
             and (not tokens or tokens[-1] == "(" or tokens[-1] in OPERATORS)
@@ -35,13 +34,10 @@ def tokenize(expression: str) -> list[str]:
                 i += 1
             token = expression[start:i]
             if token == "-":
-                # Standalone minus sign — it's an operator, not a number
                 tokens.append(token)
             else:
                 tokens.append(token)
             continue
-        # Must be an operator symbol
-        # Support multi-char operators by trying longest match first
         matched = False
         for length in range(min(3, len(expression) - i), 0, -1):
             candidate = expression[i : i + length]
@@ -61,7 +57,7 @@ def evaluate(expression: str) -> float:
     Supports operator precedence and parentheses.
     """
     tokens = tokenize(expression)
-    pos = [0]  # mutable index for recursive descent
+    pos = [0]
 
     def _parse_expr(min_prec: int) -> float:
         left = _parse_atom()

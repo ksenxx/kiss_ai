@@ -20,15 +20,10 @@ import pytest
 
 from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
 
-# ---------------------------------------------------------------------------
-# Fake OpenAI streaming server
-# ---------------------------------------------------------------------------
-
 
 def _sse_chunks_with_reasoning() -> list[str]:
     """Build SSE chunks that simulate reasoning_content followed by content."""
     chunks = []
-    # Chunk 1: reasoning_content (thinking)
     chunks.append(
         json.dumps(
             {
@@ -49,7 +44,6 @@ def _sse_chunks_with_reasoning() -> list[str]:
             }
         )
     )
-    # Chunk 2: more reasoning_content
     chunks.append(
         json.dumps(
             {
@@ -66,7 +60,6 @@ def _sse_chunks_with_reasoning() -> list[str]:
             }
         )
     )
-    # Chunk 3: normal content (reasoning ended)
     chunks.append(
         json.dumps(
             {
@@ -83,7 +76,6 @@ def _sse_chunks_with_reasoning() -> list[str]:
             }
         )
     )
-    # Chunk 4: stop
     chunks.append(
         json.dumps(
             {
@@ -94,7 +86,6 @@ def _sse_chunks_with_reasoning() -> list[str]:
             }
         )
     )
-    # Chunk 5: usage
     chunks.append(
         json.dumps(
             {
@@ -191,11 +182,6 @@ def reasoning_server() -> Generator[str]:
     server.shutdown()
 
 
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
-
-
 class TestOpenAIThinkingCallback:
     """Verify that thinking_callback fires for OpenAI reasoning_content."""
 
@@ -222,7 +208,6 @@ class TestOpenAIThinkingCallback:
 
         fc, content, response = m.generate_and_process_with_tools({"dummy": dummy})
 
-        # thinking_callback must have been called: True (start), False (end)
         assert True in thinking_events, (
             "thinking_callback(True) was never called — "
             "thought tokens won't appear in the webview"
@@ -231,12 +216,10 @@ class TestOpenAIThinkingCallback:
             "thinking_callback(False) was never called — "
             "thinking panel will never close"
         )
-        # Verify ordering: first True, then False
         first_true = thinking_events.index(True)
         last_false = len(thinking_events) - 1 - thinking_events[::-1].index(False)
         assert first_true < last_false
 
-        # Token callback should have received reasoning tokens
         combined = "".join(tokens)
         assert "Let me think" in combined
         assert "The answer is 42" in content

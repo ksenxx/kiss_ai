@@ -63,7 +63,6 @@ class TestInstallUrl(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, f"curl failed: {result.stderr}")
         self.assertNotIn("<!DOCTYPE html>", result.stdout)
-        # The script should contain shell commands, not HTML
         self.assertIn("git clone", result.stdout)
 
     def test_website_uses_raw_url(self) -> None:
@@ -104,7 +103,6 @@ class TestInstallUrl(unittest.TestCase):
             text=True,
             timeout=15,
         )
-        # The blob URL returns HTML, which is the bug
         self.assertIn("<!DOCTYPE html>", result.stdout)
 
 

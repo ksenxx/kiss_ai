@@ -19,7 +19,6 @@ _MAIN_JS = (
     / "main.js"
 )
 
-# Minimal DOM stubs matching the pattern used by other main.js tests
 _JS_PREAMBLE = r"""
 var _elements = {};
 
@@ -294,8 +293,6 @@ class TestHistoryTextareaResize(unittest.TestCase):
 
     def _run_js(self, test_code):
         """Run main.js + test code in Node.js and return stdout."""
-        # We need to capture window.addEventListener('message', ...) handler
-        # so we can invoke it in our test code.
         patched_preamble = _JS_PREAMBLE + r"""
 // Capture the message handler registered via window.addEventListener
 var _origAddEventListener = window.addEventListener;
@@ -321,15 +318,12 @@ window.addEventListener = function(type, fn) {
         output = self._run_js(_JS_TEST)
         results = json.loads(output)
 
-        # After ArrowUp to the long task, height must NOT stay at '20px'
-        # It should be expanded (e.g., '120px' based on our scrollHeight mock)
         self.assertNotEqual(
             results["heightAfterLong"],
             "20px",
             "Textarea height was not adjusted after ArrowUp to a long history item",
         )
 
-        # The height should be set to the scrollHeight value (120px in our mock)
         self.assertEqual(results["heightAfterLong"], "120px")
 
     def test_arrow_down_resizes_textarea(self):
@@ -339,7 +333,6 @@ window.addEventListener = function(type, fn) {
         output = self._run_js(_JS_TEST)
         results = json.loads(output)
 
-        # After ArrowDown from long to short, height should adjust
         self.assertNotEqual(
             results["heightAfterDown"],
             "200px",
@@ -353,7 +346,6 @@ window.addEventListener = function(type, fn) {
         output = self._run_js(_JS_TEST)
         results = json.loads(output)
 
-        # After ArrowDown to empty, height should be reset to scrollHeight (20px)
         self.assertEqual(results["heightAfterClear"], "20px")
 
 

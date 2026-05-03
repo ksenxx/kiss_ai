@@ -320,8 +320,6 @@ class _MergeFlowMixin:
                     message=f"Committed: {subject}",
                     commit_message=msg,
                 )
-                # Persist to task history so the commit shows up in
-                # session replay ("the report").
                 if tab_id:
                     with self._state_lock:
                         tab = self._tab_states.get(tab_id)

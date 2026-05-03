@@ -50,9 +50,7 @@ class TestStoppedTaskEmitsResultEvent(TestCase):
         tab_id = "stop-test-1"
         tab = server._get_tab(tab_id)
 
-        # Make the agent's run() raise KeyboardInterrupt immediately
         def fake_run(**kwargs: Any) -> None:
-            # Simulate some token usage before stopping
             tab.agent.total_tokens_used = 1234
             tab.agent.budget_used = 0.05
             tab.agent.step_count = 7
@@ -88,7 +86,6 @@ class TestStoppedTaskEmitsResultEvent(TestCase):
         assert "stopped" in (result_ev.get("text") or "").lower(), (
             f"Result text should mention 'stopped', got: {result_ev.get('text')}"
         )
-        # Should include token/cost/step info
         assert result_ev.get("total_tokens") == 1234, (
             f"Expected total_tokens=1234, got {result_ev.get('total_tokens')}"
         )
@@ -99,7 +96,6 @@ class TestStoppedTaskEmitsResultEvent(TestCase):
             f"Expected step_count=7, got {result_ev.get('step_count')}"
         )
 
-        # The task_stopped event should still be broadcast (for status bar)
         assert len(stopped_events) >= 1, (
             f"Expected task_stopped event too. Events: {[e.get('type') for e in events]}"
         )
@@ -160,7 +156,6 @@ class TestStoppedTaskEmitsResultEvent(TestCase):
         assert result_ev.get("total_tokens") == 500
         assert result_ev.get("step_count") == 3
 
-        # The task_error event should still be broadcast
         assert len(error_events) >= 1
 
     def test_successful_task_still_works(self) -> None:
@@ -187,7 +182,6 @@ class TestStoppedTaskEmitsResultEvent(TestCase):
             tab.agent.total_tokens_used = 2000
             tab.agent.budget_used = 0.10
             tab.agent.step_count = 15
-            # Simulate the agent emitting its own result event
             printer.print(
                 "success: true\nsummary: Task completed successfully",
                 type="result",
@@ -214,12 +208,10 @@ class TestStoppedTaskEmitsResultEvent(TestCase):
         with lock:
             result_events = [e for e in events if e.get("type") == "result"]
 
-        # Should have exactly one result event (from the agent), not two
         assert len(result_events) == 1, (
             f"Expected exactly 1 result event for success, got {len(result_events)}. "
             f"Events: {result_events}"
         )
-        # The success result should NOT have success=False
         assert result_events[0].get("success") is not False
 
 
@@ -252,7 +244,6 @@ class TestBudgetExceededResultPanel(TestCase):
         tab = server._get_tab(tab_id)
 
         def fake_run(**kwargs: Any) -> None:
-            # Simulate the agent accumulating cost beyond the $1 budget
             tab.agent.total_tokens_used = 50000
             tab.agent.budget_used = 1.05
             tab.agent.step_count = 42
@@ -288,7 +279,6 @@ class TestBudgetExceededResultPanel(TestCase):
         assert "budget exceeded" in (result_ev.get("text") or "").lower(), (
             f"Result text should mention 'budget exceeded', got: {result_ev.get('text')}"
         )
-        # Should include token/cost/step info
         assert result_ev.get("total_tokens") == 50000, (
             f"Expected total_tokens=50000, got {result_ev.get('total_tokens')}"
         )
@@ -299,7 +289,6 @@ class TestBudgetExceededResultPanel(TestCase):
             f"Expected step_count=42, got {result_ev.get('step_count')}"
         )
 
-        # The task_error event should also be broadcast
         assert len(error_events) >= 1, (
             f"Expected task_error event. Events: {[e.get('type') for e in events]}"
         )

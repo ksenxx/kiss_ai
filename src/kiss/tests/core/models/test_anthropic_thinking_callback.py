@@ -26,10 +26,6 @@ import pytest
 from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 from kiss.core.models.anthropic_model import AnthropicModel
 
-# ---------------------------------------------------------------------------
-# Fake Anthropic streaming server
-# ---------------------------------------------------------------------------
-
 
 def _anthropic_sse_events() -> list[tuple[str, str]]:
     """Build (event_type, data) pairs for an Anthropic-format SSE stream.
@@ -38,7 +34,6 @@ def _anthropic_sse_events() -> list[tuple[str, str]]:
     """
     events: list[tuple[str, str]] = []
 
-    # message_start
     events.append((
         "message_start",
         json.dumps({
@@ -55,7 +50,6 @@ def _anthropic_sse_events() -> list[tuple[str, str]]:
         }),
     ))
 
-    # thinking block
     events.append((
         "content_block_start",
         json.dumps({
@@ -85,7 +79,6 @@ def _anthropic_sse_events() -> list[tuple[str, str]]:
         json.dumps({"type": "content_block_stop", "index": 0}),
     ))
 
-    # text block
     events.append((
         "content_block_start",
         json.dumps({
@@ -107,7 +100,6 @@ def _anthropic_sse_events() -> list[tuple[str, str]]:
         json.dumps({"type": "content_block_stop", "index": 1}),
     ))
 
-    # message_delta + message_stop
     events.append((
         "message_delta",
         json.dumps({
@@ -151,11 +143,6 @@ def anthropic_server() -> Generator[str]:
     thread.start()
     yield f"http://127.0.0.1:{server.server_port}"
     server.shutdown()
-
-
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
 
 
 class TestAnthropicThinkingCallback:
@@ -225,11 +212,9 @@ class TestAnthropicThinkingCallback:
         recorded = printer.stop_recording()
         types = [e["type"] for e in recorded]
 
-        # Must have thinking_start / thinking_end events
         assert "thinking_start" in types, f"No thinking_start — types: {types}"
         assert "thinking_end" in types, f"No thinking_end — types: {types}"
 
-        # Thinking tokens must be thinking_delta, not text_delta
         start_idx = types.index("thinking_start")
         end_idx = types.index("thinking_end")
         between = recorded[start_idx + 1 : end_idx]
@@ -239,11 +224,9 @@ class TestAnthropicThinkingCallback:
             "thinking tokens leaked as text_delta"
         )
 
-        # Verify the thinking text content
         thought_text = "".join(d["text"] for d in thinking_deltas)
         assert "Let me think" in thought_text
 
-        # No thinking content should be in text_delta events
         text_deltas = [e for e in recorded if e["type"] == "text_delta"]
         text_content = "".join(d.get("text", "") for d in text_deltas)
         assert "Let me think" not in text_content, (

@@ -132,11 +132,6 @@ class TestMainJsStructural(unittest.TestCase):
         assert "syncAskModalToActiveTab()" in block
 
 
-# --------------------------------------------------------------------------
-# Behavioural tests: execute a minimal replay of the new helpers in Node.js
-# to verify slot behaviour end-to-end without a real DOM.
-# --------------------------------------------------------------------------
-
 _JS_PREAMBLE = r"""
 // Minimal DOM stubs used to drive the per-tab ask helpers inline.
 function _mkEl(tag) {

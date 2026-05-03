@@ -63,7 +63,6 @@ class TestAutocommitPersistence(unittest.TestCase):
         def capture(event: dict) -> None:
             self.events.append(event)
 
-        # Keep reference to real broadcast for persistence tests
         self._real_broadcast = self.server.printer.broadcast
         self.server.printer.broadcast = capture  # type: ignore[assignment]
 
@@ -101,23 +100,18 @@ class TestAutocommitPersistence(unittest.TestCase):
         tab.use_worktree = False
         task_id, chat_id = self._create_task_for_tab("t1")
 
-        # Simulate agent modifying a file
         Path(self.tmpdir, "seed.txt").write_text("modified content\n")
 
-        # Trigger autocommit
         self.server._handle_autocommit_action("commit", "t1")
 
-        # Verify git commit was made
         status = _run_git(self.tmpdir, "status", "--porcelain").stdout.strip()
         assert status == "", f"Working tree should be clean after commit: {status}"
 
-        # Verify autocommit_done was broadcast
         done_events = [e for e in self.events if e.get("type") == "autocommit_done"]
         assert len(done_events) == 1
         assert done_events[0]["success"] is True
         assert done_events[0]["committed"] is True
 
-        # THE BUG: The autocommit_done event should be persisted
         persisted = self._load_events_for_task(task_id)
         ac_events = [e for e in persisted if e.get("type") == "autocommit_done"]
         assert len(ac_events) == 1, (
@@ -137,12 +131,10 @@ class TestAutocommitPersistence(unittest.TestCase):
         Path(self.tmpdir, "seed.txt").write_text("dirty\n")
         self.server._handle_autocommit_action("skip", "t2")
 
-        # Verify autocommit_done was broadcast with committed=False
         done_events = [e for e in self.events if e.get("type") == "autocommit_done"]
         assert len(done_events) == 1
         assert done_events[0]["committed"] is False
 
-        # Skip events should NOT be persisted (no commit was made)
         persisted = self._load_events_for_task(task_id)
         ac_events = [e for e in persisted if e.get("type") == "autocommit_done"]
         assert len(ac_events) == 0
@@ -206,8 +198,6 @@ class TestMainJsHandlesAutocommitDoneInReplay(unittest.TestCase):
 
     def test_handle_output_event_has_autocommit_done_case(self) -> None:
         """handleOutputEvent must have a case for autocommit_done."""
-        # Extract the handleOutputEvent function body and check it
-        # contains an autocommit_done case
         import re
         match = re.search(
             r"function handleOutputEvent\(.*?\)\s*\{(.*?)^\s{2}\}",

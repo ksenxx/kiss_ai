@@ -144,9 +144,6 @@ class TestGetHistoryBranches:
         assert sessions[0]["preview"] == "fix the bug"
 
 
-# server.py — line 622: remove # pragma: no branch
-
-
 class TestCompleteFromActiveFileEqualSuffix:
     """Cover the False branch of 'if len(suffix) > len(best)' (line 622).
 

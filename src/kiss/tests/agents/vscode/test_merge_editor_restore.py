@@ -62,11 +62,6 @@ def _extract_method_body(source: str, method_name: str) -> str:
     raise AssertionError(f"Unbalanced braces for method: {method_name}")  # noqa: F821
 
 
-# ---------------------------------------------------------------------------
-# Field declaration
-# ---------------------------------------------------------------------------
-
-
 class TestPreMergeOpenFilesField(unittest.TestCase):
     """The class must have a per-tab ``_preMergeOpenFiles`` Map field."""
 
@@ -79,7 +74,6 @@ class TestPreMergeOpenFilesField(unittest.TestCase):
     def test_field_is_map(self) -> None:
         """The field must be a Map<string, Set<string>>, not a single Set."""
         src = _extract_source()
-        # Match the field declaration line
         m = re.search(
             r"private\s+_preMergeOpenFiles\s*[:=].*", src
         )
@@ -98,11 +92,6 @@ class TestPreMergeOpenFilesField(unittest.TestCase):
         assert m is not None, (
             "_preMergeOpenFiles must be initialized with new Map()"
         )
-
-
-# ---------------------------------------------------------------------------
-# _getOpenEditorFiles
-# ---------------------------------------------------------------------------
 
 
 class TestGetOpenEditorFilesMethod(unittest.TestCase):
@@ -129,11 +118,6 @@ class TestGetOpenEditorFilesMethod(unittest.TestCase):
         assert "new Set" in body or "Set<string>" in body, (
             "_getOpenEditorFiles must return a Set of file paths"
         )
-
-
-# ---------------------------------------------------------------------------
-# _restorePreMergeEditors — now accepts tabId
-# ---------------------------------------------------------------------------
 
 
 class TestRestorePreMergeEditorsMethod(unittest.TestCase):
@@ -198,11 +182,6 @@ class TestRestorePreMergeEditorsMethod(unittest.TestCase):
         )
 
 
-# ---------------------------------------------------------------------------
-# merge_data handler — per-tab snapshot
-# ---------------------------------------------------------------------------
-
-
 class TestMergeDataSnapshotsEditors(unittest.TestCase):
     """When a ``merge_data`` message arrives in ``_setupProcessListeners``,
     the handler must snapshot open editors per-tab before calling ``openMerge``.
@@ -236,18 +215,12 @@ class TestMergeDataSnapshotsEditors(unittest.TestCase):
         assert "_preMergeOpenFiles" in merge_block, (
             "merge_data handler must reference _preMergeOpenFiles"
         )
-        # Must use .set() to store per-tab snapshot
         assert re.search(
             r"_preMergeOpenFiles\.set\s*\(", merge_block
         ), (
             "merge_data handler must use _preMergeOpenFiles.set() to store "
             "the per-tab snapshot"
         )
-
-
-# ---------------------------------------------------------------------------
-# allDone handler — passes tabId to restore
-# ---------------------------------------------------------------------------
 
 
 class TestAllDoneRestoresEditors(unittest.TestCase):
@@ -300,18 +273,12 @@ class TestAllDoneRestoresEditors(unittest.TestCase):
                     break
             i += 1
         callback_body = arrow_or_fn[brace_idx : i + 1]
-        # Must pass tabId (not call with empty args)
         m = re.search(
             r"_restorePreMergeEditors\s*\(\s*(\w+)\s*\)", callback_body
         )
         assert m is not None, (
             "_restorePreMergeEditors must be called with a tabId argument"
         )
-
-
-# ---------------------------------------------------------------------------
-# Snapshot guard — per-tab .has() check
-# ---------------------------------------------------------------------------
 
 
 class TestSnapshotOnlyOncePerTab(unittest.TestCase):
@@ -327,7 +294,6 @@ class TestSnapshotOnlyOncePerTab(unittest.TestCase):
 
         snapshot_idx = merge_block.find("_getOpenEditorFiles")
         preceding = merge_block[:snapshot_idx]
-        # Must use .has() to check if this tab already has a snapshot
         assert re.search(
             r"_preMergeOpenFiles\.has\s*\(", preceding
         ), (

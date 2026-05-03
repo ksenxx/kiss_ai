@@ -1031,7 +1031,6 @@ class TestPerTabAttachments(unittest.TestCase):
         body = self.js[idx:end]
         assert "makeTab(" in body
         assert "restoreTab(tab)" in body
-        # And restoreTab itself applies the empty list + re-renders.
         rt_idx = self.js.index("function restoreTab(tab)")
         rt_end = self.js.index("\n  function ", rt_idx + 1)
         rt_body = self.js[rt_idx:rt_end]
@@ -1715,7 +1714,6 @@ class TestShowMergeToolbarCapturesOwnerTabId(unittest.TestCase):
     def test_show_merge_toolbar_uses_captured_tab_id(self) -> None:
         """Button click handlers use capturedTabId, not activeTabId."""
         idx = self.js.index("function showMergeToolbar(ownerTabId)")
-        # Find end of function (next top-level function)
         end = self.js.index("\n  function ", idx + 1)
         body = self.js[idx:end]
         assert "capturedTabId = ownerTabId || activeTabId" in body, (
@@ -1724,7 +1722,6 @@ class TestShowMergeToolbarCapturesOwnerTabId(unittest.TestCase):
         assert "tabId: capturedTabId" in body, (
             "click handlers must use capturedTabId, not activeTabId"
         )
-        # Ensure it does NOT use activeTabId in the click handler
         click_idx = body.index("addEventListener('click'")
         click_body = body[click_idx:]
         assert "tabId: activeTabId" not in click_body, (
@@ -1746,19 +1743,16 @@ class TestShowMergeToolbarCapturesOwnerTabId(unittest.TestCase):
 
     def test_consistency_with_worktree_and_autocommit_bars(self) -> None:
         """All three bar types capture ownerTabId in closures."""
-        # createWorktreeBar captures ownerTabId
         wt_idx = self.js.index("function createWorktreeBar(ownerTabId)")
         wt_end = self.js.index("\n  function ", wt_idx + 1)
         wt_body = self.js[wt_idx:wt_end]
         assert "tabId: ownerTabId" in wt_body
 
-        # createAutocommitBar captures ownerTabId
         ac_idx = self.js.index("function createAutocommitBar(ev)")
         ac_end = self.js.index("\n  function ", ac_idx + 1)
         ac_body = self.js[ac_idx:ac_end]
         assert "tabId: ownerTabId" in ac_body
 
-        # showMergeToolbar captures via capturedTabId
         mt_idx = self.js.index("function showMergeToolbar(ownerTabId)")
         mt_end = self.js.index("\n  function ", mt_idx + 1)
         mt_body = self.js[mt_idx:mt_end]

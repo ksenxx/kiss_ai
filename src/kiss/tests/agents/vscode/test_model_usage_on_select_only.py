@@ -97,22 +97,18 @@ class TestModelPickerUpdatesUsageAndLastModel:
     def test_select_model_behavioral(self) -> None:
         """Selecting a model via the picker must persist last_model and
         increment usage count."""
-        # Before: no model selected
         assert _load_last_model() == ""
         assert _load_model_usage() == {}
 
-        # Simulate model picker selection
         _record_model_usage("gpt-4o")
 
         assert _load_last_model() == "gpt-4o"
         usage = _load_model_usage()
         assert usage.get("gpt-4o") == 1
 
-        # Second selection of same model
         _record_model_usage("gpt-4o")
         assert _load_model_usage().get("gpt-4o") == 2
 
-        # Different model
         _record_model_usage("claude-sonnet")
         assert _load_last_model() == "claude-sonnet"
         usage = _load_model_usage()

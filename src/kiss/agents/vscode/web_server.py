@@ -70,38 +70,16 @@ logger = logging.getLogger(__name__)
 
 MEDIA_DIR = Path(__file__).parent / "media"
 
-#: How often (in seconds) the unified watchdog runs.  Each tick checks
-#: tunnel health, IP address changes, and pings WebSocket clients.
 TUNNEL_CHECK_INTERVAL = 30
 
-#: WebSocket pong timeout in seconds.  Connections that fail to respond
-#: to a ping within this window are closed as stale.
 _WS_PING_TIMEOUT = 10
 
-#: Number of consecutive watchdog ticks the ``cloudflared`` tunnel may
-#: have zero ready edge connections before the watchdog force-restarts
-#: it.  Cloudflare occasionally drops a quick-tunnel's registration
-#: (the local subprocess stays alive but the public hostname stops
-#: resolving).  At ``TUNNEL_CHECK_INTERVAL=30`` this allows ~90s of
-#: zero edge connections before forcing a restart, which is generous
-#: enough to ride out transient connection blips during initial
-#: startup or network flaps.
 _TUNNEL_UNHEALTHY_LIMIT = 3
 
-#: Seconds after a tunnel subprocess starts during which the watchdog
-#: skips the ``readyConnections`` metrics check.  Without this grace
-#: period, the watchdog sees ``readyConnections=0`` while the tunnel
-#: is still registering with Cloudflare's edge, counts those ticks as
-#: unhealthy, and force-restarts a tunnel that would have come up on
-#: its own.  Repeated premature restarts burn through quick-tunnels
-#: and trigger trycloudflare.com 429 rate-limits.
 _TUNNEL_STARTUP_GRACE = 60
 
-#: Initial backoff (seconds) after a failed tunnel start.  Each
-#: subsequent consecutive failure doubles this delay.
 _TUNNEL_BACKOFF_INITIAL = 60
 
-#: Maximum backoff (seconds) between failed tunnel-start attempts.
 _TUNNEL_BACKOFF_MAX = 1800
 
 
@@ -124,7 +102,6 @@ def _tunnel_backoff_delay(failure_count: int) -> int:
     delay: int = _TUNNEL_BACKOFF_INITIAL * (2 ** (failure_count - 1))
     return min(delay, _TUNNEL_BACKOFF_MAX)
 
-#: HTTP 200 response for HEAD health checks from cloudflared.
 _HEAD_200 = (
     b"HTTP/1.1 200 OK\r\n"
     b"Content-Length: 0\r\n"
@@ -174,7 +151,7 @@ class _HeadAwareServerConnection(ServerConnection):
         self._head_buffer += data
         idx = self._head_buffer.find(b"\r\n")
         if idx == -1:
-            return  # first line not yet complete
+            return
         self._head_checked = True
         first_line = self._head_buffer[:idx]
         if first_line.startswith(b"HEAD "):
@@ -183,15 +160,9 @@ class _HeadAwareServerConnection(ServerConnection):
                 transport.write(_HEAD_200)
                 transport.close()
             return
-        # Not a HEAD request — replay buffered data through normal path
         buffered = self._head_buffer
         self._head_buffer = b""
         super().data_received(buffered)
-
-
-# ---------------------------------------------------------------------------
-# Server-side merge state for web clients
-# ---------------------------------------------------------------------------
 
 
 class _WebMergeState:
@@ -216,7 +187,7 @@ class _WebMergeState:
             for fi, f in enumerate(self.files)
             for hi in range(len(f.get("hunks", [])))
         ]
-        self._pos = 0  # index into _all_hunks
+        self._pos = 0
         self._resolved: set[tuple[int, int]] = set()
 
     @property
@@ -319,7 +290,6 @@ def _reject_all_hunks_in_file(file_data: dict[str, Any]) -> None:
     if Path(file_data["base"]).is_file():
         shutil.copy2(file_data["base"], file_data["current"])
 
-#: Commands that are VS-Code-UI-specific and have no backend handler.
 _VSCODE_ONLY_COMMANDS = frozenset({
 
     "focusEditor",
@@ -354,8 +324,6 @@ def _discover_tunnel_url_from_metrics() -> str | None:
     except Exception:
         return None
 
-    # Look for --metrics port in command lines, then try default ports.
-    # Use dict.fromkeys for insertion-ordered dedup.
     parsed: list[int] = []
     for line in result.stdout.splitlines():
         parts = line.split()
@@ -467,7 +435,7 @@ def _stderr_reader_loop(
         proc: The subprocess being read; retained for API symmetry —
             timeouts are enforced by :func:`_read_url_from_stderr`.
     """
-    del proc  # see docstring
+    del proc
     for line in iter(stderr.readline, ""):
         url = parse(line)
         if url is not None:
@@ -498,7 +466,7 @@ def _read_url_from_stderr(
         or the timeout elapses without a match.
     """
     stderr = proc.stderr
-    assert stderr is not None  # guaranteed by PIPE
+    assert stderr is not None
     result: list[str | None] = [None]
     reader = threading.Thread(
         target=_stderr_reader_loop,
@@ -714,11 +682,6 @@ def _create_ssl_context(
     return ctx
 
 
-# ---------------------------------------------------------------------------
-# WebPrinter — sends events over WebSocket instead of stdout
-# ---------------------------------------------------------------------------
-
-
 class WebPrinter(BaseBrowserPrinter):
     """Printer that broadcasts JSON events to connected WebSocket clients.
 
@@ -751,10 +714,8 @@ class WebPrinter(BaseBrowserPrinter):
         """
         event = self._inject_tab_id(event)
 
-        # Augment merge_data with file contents for web clients
         if event.get("type") == "merge_data":
             event = _augment_merge_data(event)
-            # Register merge state for the web merge manager
             evt_tab = event.get("tabId", "")
             if evt_tab and self._merge_state_callback is not None:
                 self._merge_state_callback(evt_tab, event.get("data", {}))
@@ -792,11 +753,6 @@ class WebPrinter(BaseBrowserPrinter):
         """
         with self._ws_lock:
             self._ws_clients.discard(ws)
-
-
-# ---------------------------------------------------------------------------
-# HTML template with WebSocket shim
-# ---------------------------------------------------------------------------
 
 
 def _build_html() -> str:
@@ -1136,8 +1092,6 @@ def _read_version() -> str:
     return ""
 
 
-#: JavaScript shim injected before ``main.js`` to replace the VS Code
-#: webview API with WebSocket-based communication.
 _WS_SHIM_JS = r"""
 (function() {
   var _state = null;
@@ -1294,11 +1248,6 @@ def _translate_webview_command(cmd: dict[str, Any]) -> dict[str, Any]:
     return cmd
 
 
-# ---------------------------------------------------------------------------
-# RemoteAccessServer
-# ---------------------------------------------------------------------------
-
-
 class RemoteAccessServer:
     """Web server providing remote browser access to KISS Sorcar.
 
@@ -1366,27 +1315,10 @@ class RemoteAccessServer:
 
         self._html_bytes = _build_html().encode("utf-8")
         self._tunnel_proc: subprocess.Popen[str] | None = None
-        #: Port assigned to ``cloudflared --metrics`` so the watchdog
-        #: can probe ``/ready`` and detect edge deregistrations.
         self._tunnel_metrics_port: int | None = None
-        #: Number of consecutive watchdog ticks the tunnel has had
-        #: zero ready edge connections.  When this reaches
-        #: :data:`_TUNNEL_UNHEALTHY_LIMIT`, the watchdog force-restarts
-        #: the ``cloudflared`` subprocess.
         self._tunnel_unhealthy_ticks = 0
-        #: Monotonic time the current tunnel subprocess started.  The
-        #: watchdog uses this to skip the metrics-based health check
-        #: during the :data:`_TUNNEL_STARTUP_GRACE` window — otherwise
-        #: ``readyConnections=0`` while the tunnel is still registering
-        #: would count as unhealthy.  ``None`` when no tunnel is running.
         self._tunnel_started_at: float | None = None
-        #: Number of consecutive failed tunnel-start attempts.  Reset
-        #: to zero on a successful start.
         self._tunnel_failure_count = 0
-        #: Monotonic time at or after which the watchdog may next
-        #: attempt to (re)start the tunnel.  Set to ``now + delay``
-        #: after a failure to apply exponential backoff and avoid
-        #: hammering Cloudflare when rate-limited.
         self._tunnel_next_retry = 0.0
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ws_server: Any = None
@@ -1397,7 +1329,6 @@ class RemoteAccessServer:
         self._active_url: str | None = None
         self._last_ips: frozenset[str] = frozenset()
 
-    # -- HTTP handler -------------------------------------------------------
 
     async def _process_request(
         self, connection: ServerConnection, request: Request
@@ -1418,7 +1349,7 @@ class RemoteAccessServer:
         if path == "/" or path == "":
             return _http_response(200, "text/html; charset=utf-8", self._html_bytes)
         if path == "/ws":
-            return None  # proceed to WebSocket
+            return None
         if path.startswith("/media/"):
             filepath = MEDIA_DIR / path[7:]
             if (
@@ -1429,7 +1360,6 @@ class RemoteAccessServer:
                 return _http_response(200, ctype, filepath.read_bytes())
         return _http_response(404, "text/plain", b"Not Found")
 
-    # -- WebSocket handler --------------------------------------------------
 
     async def _authenticate_ws(self, websocket: ServerConnection) -> bool:
         """Authenticate a WebSocket client using the configured password.
@@ -1487,7 +1417,7 @@ class RemoteAccessServer:
                     continue
                 cmd_type = cmd.get("type", "")
                 if cmd_type in _VSCODE_ONLY_COMMANDS:
-                    continue  # silently ignore VS Code-only commands
+                    continue
                 if cmd_type == "ready":
                     await self._handle_ready(cmd, websocket)
                     continue
@@ -1502,10 +1432,6 @@ class RemoteAccessServer:
                     if action != "all-done":
                         await self._handle_web_merge_action(cmd)
                         continue
-                    # "all-done" falls through to backend
-                # Translate webview-only fields that the TypeScript
-                # extension normally rewrites before they reach the
-                # Python backend.
                 cmd = _translate_webview_command(cmd)
                 await self._run_cmd(cmd)
         except websockets.exceptions.ConnectionClosed:
@@ -1515,7 +1441,6 @@ class RemoteAccessServer:
         finally:
             self._printer.remove_client(websocket)
 
-    # -- Webview command translators -----------------------------------------
 
     def _send_welcome_info(self) -> None:
         """Broadcast welcome suggestions and the active remote URL.
@@ -1590,10 +1515,8 @@ class RemoteAccessServer:
         """
         tab_id = cmd.get("tabId", "")
         prompt = cmd.get("prompt", "")
-        # Emit status events that the TypeScript extension normally sends
         self._printer.broadcast({"type": "setTaskText", "text": prompt, "tabId": tab_id})
         self._printer.broadcast({"type": "status", "running": True, "tabId": tab_id})
-        # Translate submit → run
         run_cmd: dict[str, Any] = {
             "type": "run",
             "prompt": prompt,
@@ -1622,7 +1545,6 @@ class RemoteAccessServer:
         """
         self._merge_states[tab_id] = _WebMergeState(merge_data)
 
-    # -- Merge action handling for web clients --------------------------------
 
     async def _handle_web_merge_action(self, cmd: dict[str, Any]) -> None:
         """Handle merge toolbar actions (accept/reject/navigate) server-side.
@@ -1640,7 +1562,7 @@ class RemoteAccessServer:
         tab_id = cmd.get("tabId", "")
         state = self._merge_states.get(tab_id)
         if state is None:
-            return  # no active merge for this tab
+            return
 
         assert self._loop is not None
         cur = state.current()
@@ -1656,7 +1578,6 @@ class RemoteAccessServer:
                 await self._loop.run_in_executor(
                     None, _reject_hunk_in_file, fd["current"], fd["base"], hunk,
                 )
-                # Adjust subsequent hunks' cs offsets in the same file
                 delta = hunk["bc"] - hunk["cc"]
                 for later_hi in range(hi + 1, len(fd["hunks"])):
                     if (fi, later_hi) not in state._resolved:
@@ -1682,7 +1603,6 @@ class RemoteAccessServer:
             for fi, hi in state.all_unresolved():
                 state.mark_resolved(fi, hi)
         elif action == "reject-all":
-            # Group unresolved hunks by file and reject whole files
             unresolved_files: set[int] = set()
             for fi, hi in state.all_unresolved():
                 unresolved_files.add(fi)
@@ -1693,7 +1613,6 @@ class RemoteAccessServer:
                     None, _reject_all_hunks_in_file, fd,
                 )
 
-        # Broadcast navigation update
         self._printer.broadcast({
             "type": "merge_nav",
             "tabId": tab_id,
@@ -1701,14 +1620,12 @@ class RemoteAccessServer:
             "total": state.total_hunks,
         })
 
-        # When all hunks resolved, finish the merge via backend
         if not state.remaining:
             del self._merge_states[tab_id]
             await self._run_cmd(
                 {"type": "mergeAction", "action": "all-done", "tabId": tab_id},
             )
 
-    # -- Tunnel management --------------------------------------------------
 
     def _spawn_cloudflared(self, args: list[str]) -> None:
         """Spawn ``cloudflared`` with *args* and a free ``--metrics`` port.
@@ -1779,7 +1696,6 @@ class RemoteAccessServer:
         )
         if url:
             return url
-        # Fallback: poll the cloudflared metrics API.
         for _ in range(20):
             if self._tunnel_proc.poll() is not None:
                 break
@@ -1838,8 +1754,6 @@ class RemoteAccessServer:
         now = time.monotonic()
         proc = self._tunnel_proc
 
-        # Detect a dead subprocess and clear it so the restart path
-        # below behaves the same as the process-missing case.
         if proc is not None and proc.poll() is not None:
             logger.info(
                 "cloudflared tunnel process died (rc=%s), restarting…",
@@ -1853,7 +1767,6 @@ class RemoteAccessServer:
                 await self._restart_tunnel_url()
             return
 
-        # Process is alive — skip metrics check during startup grace.
         if (
             self._tunnel_started_at is not None
             and now - self._tunnel_started_at < _TUNNEL_STARTUP_GRACE
@@ -1969,7 +1882,6 @@ class RemoteAccessServer:
         """
         while True:
             await asyncio.sleep(TUNNEL_CHECK_INTERVAL)
-            # 1. Tunnel health
             if self.use_tunnel:
                 try:
                     await self._check_and_restart_tunnel()
@@ -1977,7 +1889,6 @@ class RemoteAccessServer:
                     raise
                 except Exception:
                     logger.debug("Watchdog tunnel check error", exc_info=True)
-            # 2. IP change
             try:
                 current_ips = _get_local_ips()
                 if current_ips != self._last_ips:
@@ -1994,7 +1905,6 @@ class RemoteAccessServer:
                 raise
             except Exception:
                 logger.debug("Watchdog IP check error", exc_info=True)
-            # 3. WebSocket ping
             try:
                 if self._ws_server is not None:
                     connections = list(self._ws_server.connections)
@@ -2023,7 +1933,6 @@ class RemoteAccessServer:
         self._tunnel_next_retry = 0.0
         self._active_url = None
 
-    # -- Server lifecycle ---------------------------------------------------
 
     async def _setup_server(self) -> None:
         """Shared setup for both blocking and async server start.
@@ -2103,10 +2012,6 @@ class RemoteAccessServer:
             except TimeoutError:
                 pass
         self._stop_tunnel()
-        # Graceful shutdown: remove URL marker file so kiss-web detection
-        # correctly reports the daemon as stopped.  Crash paths (where
-        # stop_async is not invoked) leave the file in place — this is
-        # handled by _stop_tunnel's "do not delete" policy.
         _remove_url_file()
 
 

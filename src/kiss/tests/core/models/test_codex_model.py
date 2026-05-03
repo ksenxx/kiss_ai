@@ -23,8 +23,6 @@ requires_codex_cli = pytest.mark.skipif(not _has_codex, reason="codex CLI not in
 class TestFindCodexCli:
 
     def test_find_codex_cli_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # Hide both the CLI on PATH and any Codex UI installation so the
-        # full fallback chain is exhausted.
         monkeypatch.setattr(shutil, "which", lambda _name: None)
         monkeypatch.setattr(codex_module, "_UI_CANDIDATE_PATHS", ())
         with pytest.raises(KISSError, match="not found"):
@@ -41,7 +39,6 @@ class TestFindInCandidatePaths:
     def test_skips_non_executable_files(self, tmp_path: Path) -> None:
         non_exec = tmp_path / "codex-noexec"
         non_exec.write_text("#!/bin/sh\necho hi\n")
-        # Explicitly remove all execute bits.
         non_exec.chmod(stat.S_IRUSR | stat.S_IWUSR)
         assert _find_in_candidate_paths([str(non_exec)]) is None
 
@@ -51,7 +48,6 @@ class TestFindInCandidatePaths:
         for f in (first, second):
             f.write_text("#!/bin/sh\necho hi\n")
             f.chmod(0o755)
-        # Order matters: first listed wins.
         result = _find_in_candidate_paths([str(first), str(second)])
         assert result == str(first)
 
@@ -64,7 +60,6 @@ class TestFindInCandidatePaths:
         assert result == str(existing)
 
     def test_expands_user_home(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        # Pretend $HOME is tmp_path, then reference the binary via "~".
         monkeypatch.setenv("HOME", str(tmp_path))
         bin_path = tmp_path / "codex-home"
         bin_path.write_text("#!/bin/sh\necho hi\n")
@@ -79,12 +74,10 @@ class TestFindCodexExecutable:
     def test_prefers_path_when_available(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Stage a fake codex on a directory we put on PATH.
         path_codex = tmp_path / "codex"
         path_codex.write_text("#!/bin/sh\necho hi\n")
         path_codex.chmod(0o755)
         monkeypatch.setenv("PATH", str(tmp_path))
-        # Even if a UI candidate also exists, PATH should win.
         ui_codex = tmp_path / "ui-codex"
         ui_codex.write_text("#!/bin/sh\necho hi\n")
         ui_codex.chmod(0o755)
@@ -94,11 +87,9 @@ class TestFindCodexExecutable:
     def test_falls_back_to_ui_when_not_on_path(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Empty PATH so shutil.which("codex") returns None.
         empty_dir = tmp_path / "empty"
         empty_dir.mkdir()
         monkeypatch.setenv("PATH", str(empty_dir))
-        # A Codex UI-style binary lives elsewhere.
         ui_codex = tmp_path / "ui-codex"
         ui_codex.write_text("#!/bin/sh\necho hi\n")
         ui_codex.chmod(0o755)

@@ -37,17 +37,11 @@ from kiss.core.models.model import (
 
 logger = logging.getLogger(__name__)
 
-# Known locations where the Codex desktop UI ships a usable ``codex`` binary.
-# When the standalone ``codex`` CLI isn't on ``PATH`` but the user has the
-# Codex UI app installed, we fall back to the binary bundled with the app.
 _UI_CANDIDATE_PATHS: tuple[str, ...] = (
-    # macOS — system-wide and per-user installs
     "/Applications/Codex.app/Contents/Resources/codex",
     "~/Applications/Codex.app/Contents/Resources/codex",
-    # Windows — Electron-style install layout
     "~/AppData/Local/Programs/codex/resources/codex.exe",
     "~/AppData/Local/Programs/Codex/resources/codex.exe",
-    # Linux — Electron-style install layout
     "/opt/Codex/resources/codex",
     "~/.local/share/Codex/resources/codex",
 )

@@ -28,9 +28,6 @@ def _read(p: Path) -> str:
     return p.read_text()
 
 
-# ── Helpers ────────────────────────────────────────────────────────────
-
-
 def _css_rules_for_selector(css: str, selector: str) -> list[str]:
     """Return all CSS declaration blocks whose selector matches *selector*.
 
@@ -48,9 +45,6 @@ def _extract_case(src: str, label: str) -> str:
     m = re.search(rf"case\s+'{label}':\s*(.*?)break;", src, re.DOTALL)
     assert m, f"could not locate case '{label}': in main.js"
     return m.group(1)
-
-
-# ── Tests ──────────────────────────────────────────────────────────────
 
 
 def test_txt_has_pre_wrap() -> None:
@@ -78,9 +72,6 @@ def test_txt_md_body_resets_white_space() -> None:
     """
     css = _read(MAIN_CSS)
 
-    # Look for a rule that targets .txt elements with .md-body and sets
-    # white-space to something other than pre-wrap.  Accepted selectors:
-    #   .txt.md-body   or   .md-body.txt   or   .md-body (if it sets white-space)
     candidates = (
         _css_rules_for_selector(css, ".txt.md-body")
         + _css_rules_for_selector(css, ".md-body.txt")
