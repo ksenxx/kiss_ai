@@ -215,6 +215,146 @@ class TestDockerStreamCallback(unittest.TestCase):
         self.assertTrue(parsed["success"])
 
 
+class TestMultiSessionSummaryMerge(unittest.TestCase):
+    """Test that multi-session completions merge all session summaries."""
+
+    def _start_openai_server(self, responses: list[dict]) -> tuple:
+        """Start a fake OpenAI-compatible server returning sequential responses."""
+        call_count = [0]
+        response_list = responses
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                content_length = int(self.headers.get("Content-Length", 0))
+                self.rfile.read(content_length)
+                idx = min(call_count[0], len(response_list) - 1)
+                call_count[0] += 1
+                body = json.dumps(response_list[idx]).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        return server, port
+
+    @staticmethod
+    def _make_tool_call_response(
+        name: str, arguments: dict, call_id: str = "call_1"
+    ) -> dict:
+        return {
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "id": call_id,
+                                "type": "function",
+                                "function": {
+                                    "name": name,
+                                    "arguments": json.dumps(arguments),
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 10,
+                "total_tokens": 20,
+            },
+        }
+
+    def test_merged_summary_on_completion(self) -> None:
+        """After 2 continue sessions + final success, summary merges all sessions."""
+        # Session 1: continue with summary "did A"
+        resp1 = self._make_tool_call_response(
+            "finish",
+            {"success": False, "is_continue": True, "summary": "did A"},
+        )
+        # Session 2: continue with summary "did B"
+        resp2 = self._make_tool_call_response(
+            "finish",
+            {"success": False, "is_continue": True, "summary": "did B"},
+        )
+        # Session 3: success with summary "did C"
+        resp3 = self._make_tool_call_response(
+            "finish",
+            {"success": True, "is_continue": False, "summary": "did C"},
+        )
+        server, port = self._start_openai_server([resp1, resp2, resp3])
+        try:
+            agent = RelentlessAgent("MergeTest")
+            with tempfile.TemporaryDirectory() as td:
+                result = agent.run(
+                    model_name="test-model",
+                    prompt_template="Do multi-step work.",
+                    max_steps=5,
+                    max_budget=1.0,
+                    max_sub_sessions=5,
+                    work_dir=td,
+                    verbose=False,
+                    model_config={
+                        "base_url": f"http://127.0.0.1:{port}/v1",
+                        "api_key": "sk-test",
+                    },
+                )
+            parsed = yaml.safe_load(result)
+            assert parsed["success"] is True
+            summary = parsed["summary"]
+            assert "### Session 1" in summary
+            assert "did A" in summary
+            assert "### Session 2" in summary
+            assert "did B" in summary
+            assert "### Session 3" in summary
+            assert "did C" in summary
+        finally:
+            server.shutdown()
+
+    def test_single_session_summary_unchanged(self) -> None:
+        """Single-session success does not add Session headers."""
+        resp = self._make_tool_call_response(
+            "finish",
+            {"success": True, "is_continue": False, "summary": "all done"},
+        )
+        server, port = self._start_openai_server([resp])
+        try:
+            agent = RelentlessAgent("SingleTest")
+            with tempfile.TemporaryDirectory() as td:
+                result = agent.run(
+                    model_name="test-model",
+                    prompt_template="Do one-step work.",
+                    max_steps=5,
+                    max_budget=1.0,
+                    max_sub_sessions=5,
+                    work_dir=td,
+                    verbose=False,
+                    model_config={
+                        "base_url": f"http://127.0.0.1:{port}/v1",
+                        "api_key": "sk-test",
+                    },
+                )
+            parsed = yaml.safe_load(result)
+            assert parsed["success"] is True
+            assert parsed["summary"] == "all done"
+            assert "### Session" not in parsed["summary"]
+        finally:
+            server.shutdown()
+
+
 class TestNonRetryableModelErrors(unittest.TestCase):
     """Test that non-retryable model errors return finish(False, False, cause)."""
 
