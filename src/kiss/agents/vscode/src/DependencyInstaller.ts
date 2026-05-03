@@ -69,19 +69,26 @@ function findNodeDirWindows(baseDir: string): string {
 }
 
 /**
- * Return the best default model name based on which LLM API keys are set
- * in ``process.env``.  Priority: Anthropic > OpenAI > Gemini > OpenRouter > Together AI.
- * Falls back to ``"claude-opus-4-7"`` when no keys are present.
+ * Return the best default model name by calling Python's canonical
+ * ``get_default_model()`` from ``kiss.core.models.model_info``.
+ *
+ * Requires ``uv`` and the KISS project ``.venv`` to be available.
+ * Returns an empty string when the Python call fails (e.g. during
+ * first-time setup before dependencies are installed).  The backend
+ * will send the real model via the ``showWelcome`` event in that case.
  */
 export function getDefaultModel(): string {
-  if (process.env.ANTHROPIC_API_KEY) return 'claude-opus-4-7';
-  if (process.env.OPENAI_API_KEY) return 'gpt-5.5';
-  if (process.env.GEMINI_API_KEY) return 'gemini-3.1-pro-preview';
-  if (process.env.OPENROUTER_API_KEY)
-    return 'openrouter/anthropic/claude-opus-4.7';
-  if (process.env.TOGETHER_API_KEY)
-    return 'Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8';
-  return 'claude-opus-4-7';
+  const uvPath = findUvPath();
+  const kissProject = findKissProject();
+  if (!uvPath || !kissProject) return '';
+  try {
+    return execSync(
+      `"${uvPath}" run --directory "${kissProject}" python -c "from kiss.core.models.model_info import get_default_model; print(get_default_model())"`,
+      {encoding: 'utf-8', timeout: 15_000, stdio: ['ignore', 'pipe', 'ignore']},
+    ).trim();
+  } catch {
+    return '';
+  }
 }
 
 /**

@@ -14,7 +14,7 @@
 
   // State — isRunning mirrors the active tab's tab.isRunning for UI controls
   let isRunning = false;
-  let selectedModel = 'claude-opus-4-7';
+  let selectedModel = '';
   let allModels = [];
   let modelDDIdx = -1;
   let attachments = [];
@@ -268,7 +268,7 @@
       refreshWelcomeLayout();
     }
     // Restore per-tab state
-    selectedModel = tab.selectedModel || 'claude-opus-4-7';
+    selectedModel = tab.selectedModel || '';
     if (modelName) modelName.textContent = selectedModel;
     attachments = tab.attachments || [];
     renderFileChips();
@@ -666,6 +666,8 @@
   const modelSearch = document.getElementById('model-search');
   const modelList = document.getElementById('model-list');
   const modelName = document.getElementById('model-name');
+  // Read initial model from DOM (injected by the backend template)
+  if (modelName && modelName.textContent) selectedModel = modelName.textContent;
   const fileChips = document.getElementById('file-chips');
 
   const statusText = document.getElementById('status-text');
