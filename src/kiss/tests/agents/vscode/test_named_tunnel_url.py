@@ -80,7 +80,6 @@ class TestStartNamedTunnelUsesConfiguredUrl(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self._tmpdir = Path(self._tmp.name)
-        # Prepend tmpdir to PATH so subprocess.Popen finds our fake.
         self._old_path = os.environ.get("PATH", "")
         os.environ["PATH"] = f"{self._tmpdir}{os.pathsep}{self._old_path}"
 
@@ -154,7 +153,6 @@ class TestResolveTunnelSettings(unittest.TestCase):
     """_resolve_tunnel_settings reads env var first, config as fallback."""
 
     def setUp(self) -> None:
-        # Snapshot env vars and config loader so we can restore.
         self._saved_env = {
             k: os.environ.pop(k, None)
             for k in ("CLOUDFLARE_TUNNEL_TOKEN", "CLOUDFLARE_TUNNEL_URL")

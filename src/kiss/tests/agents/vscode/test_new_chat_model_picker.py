@@ -78,7 +78,6 @@ class TestNewChatModelPicker:
         the showWelcome event must contain model="model-B"."""
         server, events = _make_server()
 
-        # Simulate user picking "model-A" then "model-B" via the picker
         server._handle_command({
             "type": "selectModel",
             "model": "model-A",
@@ -90,24 +89,19 @@ class TestNewChatModelPicker:
             "tabId": "tab-1",
         })
 
-        # Verify DB has "model-B" as last picked
         assert _load_last_model() == "model-B"
 
-        # Clear captured events
         events.clear()
 
-        # Open new chat on a fresh tab
         server._handle_command({
             "type": "newChat",
             "tabId": "tab-2",
         })
 
-        # Find the showWelcome event
         welcome_events = [e for e in events if e.get("type") == "showWelcome"]
         assert len(welcome_events) == 1
         welcome = welcome_events[0]
 
-        # The showWelcome event must include the last-picked model
         assert welcome.get("model") == "model-B", (
             f"showWelcome should include model='model-B' from DB, "
             f"got model={welcome.get('model')!r}"
@@ -118,23 +112,16 @@ class TestNewChatModelPicker:
         not a stale _default_model from server init."""
         server, _events = _make_server()
 
-        # Server init _default_model might be empty or from an old DB.
-        # User picks "fresh-model" via the picker.
         server._handle_command({
             "type": "selectModel",
             "model": "fresh-model",
             "tabId": "tab-1",
         })
 
-        # Simulate the _default_model being stale by overwriting it
-        # (as if a different code path changed it)
         server._default_model = "stale-model"
 
-        # Write "fresh-model" to DB to simulate that the user's pick was
-        # persisted but the in-memory default diverged
         _record_model_usage("fresh-model")
 
-        # Open new chat — should read from DB, not from stale _default_model
         server._handle_command({
             "type": "newChat",
             "tabId": "tab-new",
@@ -152,27 +139,20 @@ class TestNewChatModelPicker:
         the new chat must use model-B."""
         server, events = _make_server()
 
-        # Tab-1 runs with model-A
         tab1 = server._get_tab("tab-1")
         tab1.selected_model = "model-A"
 
-        # User picks model-B via picker (saved to DB and _default_model)
         server._handle_command({
             "type": "selectModel",
             "model": "model-B",
             "tabId": "tab-1",
         })
 
-        # Now change tab-1 back to model-A in memory only (simulates
-        # switching to a tab that was using model-A)
         tab1.selected_model = "model-A"
-        # Also set _default_model to model-A (simulating the bug where
-        # _default_model tracks the current tab)
         server._default_model = "model-A"
 
         events.clear()
 
-        # Open new chat — should read from DB where model-B is saved
         server._handle_command({
             "type": "newChat",
             "tabId": "tab-new",
@@ -194,11 +174,9 @@ class TestFrontendSendsNewChatCommand:
         """createNewTab() in main.js must include vscode.postMessage({type: 'newChat', ...})."""
         source = MAIN_JS.read_text()
 
-        # Find the createNewTab function body
         m = re.search(r"function\s+createNewTab\s*\(\s*\)", source)
         assert m is not None, "createNewTab function not found in main.js"
 
-        # Extract function body by counting braces
         start = source.index("{", m.start())
         depth = 0
         end = start
@@ -221,13 +199,10 @@ class TestFrontendSendsNewChatCommand:
         """The showWelcome case in main.js must set selectedModel from ev.model."""
         source = MAIN_JS.read_text()
 
-        # Find the showWelcome case block
         m = re.search(r"case\s+'showWelcome'\s*:", source)
         assert m is not None, "showWelcome case not found in main.js"
 
-        # Extract the case block (until next case or closing brace)
         start = m.start()
-        # Find the block - look for next case or closing brace at same level
         block_end = source.find("case '", start + 20)
         if block_end == -1:
             block_end = len(source)

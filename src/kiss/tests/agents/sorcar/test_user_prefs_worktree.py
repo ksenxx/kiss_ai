@@ -61,7 +61,6 @@ class TestUserPrefsCopyToWorktree:
     def test_no_copy_when_absent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = _make_repo(Path(tmp) / "repo")
-            # No USER_PREFS.md in repo
 
             agent = WorktreeSorcarAgent("test")
             agent._chat_id = "testchat2"
@@ -86,20 +85,17 @@ class TestUserPrefsCopyBackOnFinalize:
             agent._try_setup_worktree(repo, str(repo))
             assert agent._wt is not None
 
-            # Simulate agent updating USER_PREFS.md in the worktree
             updated_content = "## Preferences\n- Pref A\n- Pref B (new)\n"
             (agent._wt.wt_dir / "USER_PREFS.md").write_text(updated_content)
 
             result = agent._finalize_worktree()
             assert result is True
 
-            # USER_PREFS.md in repo root should have the updated content
             assert (repo / "USER_PREFS.md").read_text() == updated_content
 
     def test_no_copy_back_when_absent_in_worktree(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = _make_repo(Path(tmp) / "repo")
-            # No USER_PREFS.md anywhere
 
             agent = WorktreeSorcarAgent("test")
             agent._chat_id = "testchat4"
@@ -109,15 +105,12 @@ class TestUserPrefsCopyBackOnFinalize:
             result = agent._finalize_worktree()
             assert result is True
 
-            # No USER_PREFS.md should appear
             assert not (repo / "USER_PREFS.md").exists()
 
     def test_copy_back_preserves_on_merge(self) -> None:
         """Full merge flow: prefs updated in worktree survive merge."""
         with tempfile.TemporaryDirectory() as tmp:
             repo = _make_repo(Path(tmp) / "repo")
-            # Gitignore USER_PREFS.md so it doesn't get committed
-            # and cause merge conflicts
             (repo / ".gitignore").write_text("USER_PREFS.md\n")
             subprocess.run(
                 ["git", "-C", str(repo), "add", ".gitignore"],
@@ -136,7 +129,6 @@ class TestUserPrefsCopyBackOnFinalize:
             agent._try_setup_worktree(repo, str(repo))
             assert agent._wt is not None
 
-            # Simulate agent updating prefs and making a code change
             updated_prefs = "## Prefs\n- Updated pref\n"
             (agent._wt.wt_dir / "USER_PREFS.md").write_text(updated_prefs)
             (agent._wt.wt_dir / "new_file.txt").write_text("hello\n")
@@ -145,5 +137,4 @@ class TestUserPrefsCopyBackOnFinalize:
             result = agent.merge()
             assert "Successfully merged" in result
 
-            # USER_PREFS.md should have been copied back before removal
             assert (repo / "USER_PREFS.md").read_text() == updated_prefs

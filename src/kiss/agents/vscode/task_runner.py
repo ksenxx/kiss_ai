@@ -231,7 +231,6 @@ class _TaskRunnerMixin:
                         tab.is_running_non_wt = False
                     raise
 
-        # BUG-B fix: if this worktree tab has a pending branch from a
         if use_worktree and tab.agent._wt_pending:
             with self._state_lock:
                 if self._any_non_wt_running():
@@ -284,7 +283,6 @@ class _TaskRunnerMixin:
                     continue
                 finally:
                     tab.task_history_id = tab.agent._last_task_id
-                # Only reached from except handlers (else: continue skips)
                 self.printer.broadcast({
                     "type": "result",
                     "text": result_summary,

@@ -81,7 +81,6 @@ def _merge_data_block(source: str) -> str:
     body = _method_body(source, "_setupProcessListeners")
     idx = body.find("merge_data")
     assert idx != -1, "merge_data handling not found"
-    # Find the if-block opening brace
     brace_start = body.index("{", idx)
     depth = 0
     i = brace_start
@@ -94,11 +93,6 @@ def _merge_data_block(source: str) -> str:
                 return body[brace_start : i + 1]
         i += 1
     raise AssertionError("Unbalanced braces in merge_data block")  # noqa: F821
-
-
-# ---------------------------------------------------------------------------
-# _restoreChain field
-# ---------------------------------------------------------------------------
 
 
 class TestRestoreChainField(unittest.TestCase):
@@ -115,11 +109,6 @@ class TestRestoreChainField(unittest.TestCase):
         assert re.search(
             r"_restoreChain\b[^;]*Promise\.resolve\s*\(\s*\)", src
         ), "_restoreChain must be initialized with Promise.resolve()"
-
-
-# ---------------------------------------------------------------------------
-# allDone handler — must chain, not fire-and-forget
-# ---------------------------------------------------------------------------
 
 
 class TestAllDoneChainsRestore(unittest.TestCase):
@@ -150,18 +139,12 @@ class TestAllDoneChainsRestore(unittest.TestCase):
     def test_restore_inside_then_callback(self) -> None:
         """_restorePreMergeEditors must be called inside the .then() callback."""
         body = _all_done_body(_src())
-        # Find the .then( ... _restorePreMergeEditors ... ) pattern
         then_idx = body.find(".then(")
         assert then_idx != -1
         rest = body[then_idx:]
         assert "_restorePreMergeEditors" in rest, (
             "_restorePreMergeEditors must be inside the .then() callback"
         )
-
-
-# ---------------------------------------------------------------------------
-# merge_data handler — must wait for restore chain
-# ---------------------------------------------------------------------------
 
 
 class TestMergeDataAwaitsRestoreChain(unittest.TestCase):
@@ -183,7 +166,6 @@ class TestMergeDataAwaitsRestoreChain(unittest.TestCase):
         block = _merge_data_block(_src())
         chain_idx = block.find("_restoreChain")
         assert chain_idx != -1
-        # Everything after _restoreChain should contain the snapshot
         after_chain = block[chain_idx:]
         assert "_getOpenEditorFiles" in after_chain, (
             "_getOpenEditorFiles must be inside the _restoreChain callback"

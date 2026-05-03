@@ -76,17 +76,10 @@ class TestCreateNewTabDoesNotBlockInput(unittest.TestCase):
         self,
     ) -> None:
         create_new_tab_src = _extract_fn_body(self.js, "function createNewTab()")
-        # Sanity: the extracted source must be the real function body.
         assert "saveCurrentTab()" in create_new_tab_src
         assert "makeTab(" in create_new_tab_src
         assert "restoreTab(tab)" in create_new_tab_src
 
-        # The simulation below faithfully mirrors the *relevant* bits of
-        # main.js: updateInputDisabled derives inp.disabled / sendBtn.disabled
-        # from the module-global isRunning (and isMerging), and restoreTab
-        # ends with updateInputDisabled() — matching the real file.  If
-        # createNewTab fails to sync the module-global isRunning to the
-        # new (non-running) tab, inp.disabled stays stuck at true.
         preamble = r"""
             var isRunning = false;
             var isMerging = false;
@@ -232,9 +225,6 @@ class TestCreateNewTabStructural(unittest.TestCase):
 
     def test_create_new_tab_syncs_running_state(self) -> None:
         body = _extract_fn_body(self.js, "function createNewTab()")
-        # Must call setRunningState so that isRunning / sendBtn / upload /
-        # worktree / parallel / model button states are synced with the
-        # new (empty, non-running) tab.
         assert re.search(r"setRunningState\(\s*(false|tab\.isRunning)\s*\)", body), (
             "createNewTab() must call setRunningState(false) or "
             "setRunningState(tab.isRunning) after restoreTab(tab); otherwise "

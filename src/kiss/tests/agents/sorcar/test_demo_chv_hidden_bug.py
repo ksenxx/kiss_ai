@@ -48,7 +48,6 @@ class TestDemoChvHiddenBugStructural(unittest.TestCase):
     def _get_process_output_event_body(self) -> str:
         """Extract the processOutputEvent function body."""
         start = self.src.index("function processOutputEvent(ev)")
-        # Find the matching closing brace by counting braces
         depth = 0
         for i in range(start, len(self.src)):
             if self.src[i] == "{":
@@ -71,7 +70,6 @@ class TestDemoChvHiddenBugStructural(unittest.TestCase):
     def test_chevron_not_applied_when_demo_active(self) -> None:
         """The guard must prevent applyChevronState from firing during demo."""
         body = self._get_process_output_event_body()
-        # Should have: if (tab && !tab.panelsExpanded && !_demoActive)
         assert "!_demoActive" in body, (
             "Guard must use !_demoActive to skip chevron application"
         )
@@ -87,8 +85,6 @@ class TestDemoChvHiddenBugBehavioral(unittest.TestCase):
 
     def test_panels_not_hidden_during_demo_replay(self) -> None:
         """Panels created during demo replay must NOT have chv-hidden."""
-        # We extract the applyChevronState function and test its behavior
-        # when isRunning=false (as in demo mode)
         script = r"""
 // Minimal DOM shim
 function MockElement(tag, className) {
@@ -190,8 +186,6 @@ console.log(JSON.stringify(results));
         assert r.returncode == 0, r.stderr
         results = json.loads(r.stdout.strip())
 
-        # This confirms the bug: when isRunning=false, llm and tool panels
-        # get chv-hidden, making them invisible during demo replay
         assert results["llmPanelHidden"] is True, (
             "Bug reproduction: llm panel should get chv-hidden when "
             "isRunning=false"
@@ -206,10 +200,8 @@ console.log(JSON.stringify(results));
 
     def test_fix_panels_visible_when_demo_guard_active(self) -> None:
         """With the _demoActive guard, panels must remain visible."""
-        # Read actual main.js and check the guard is in processOutputEvent
         src = _MAIN_JS.read_text()
 
-        # Extract the applyChevronState guard from processOutputEvent
         fn_start = src.index("function processOutputEvent(ev)")
         depth = 0
         fn_end = fn_start
@@ -223,16 +215,11 @@ console.log(JSON.stringify(results));
                     break
         fn_body = src[fn_start:fn_end]
 
-        # The fix: the line that calls applyChevronState must also check
-        # _demoActive, so that during demo replay applyChevronState is
-        # never called and panels stay visible.
         assert "_demoActive" in fn_body, (
             "processOutputEvent must guard applyChevronState with "
             "_demoActive check"
         )
 
-        # Simulate the fixed behavior: when _demoActive is true,
-        # applyChevronState should NOT be called
         script = r"""
 function makeMockPanel(classes) {
     var el = { _classes: new Set(classes.split(' ')) };
@@ -287,7 +274,6 @@ console.log(JSON.stringify({
         assert r.returncode == 0, r.stderr
         results = json.loads(r.stdout.strip())
 
-        # With the fix, panels should NOT be hidden
         assert results["llmHidden"] is False, (
             "With _demoActive guard, llm panel must NOT be hidden"
         )

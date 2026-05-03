@@ -179,12 +179,11 @@ class TestCrashRecovery:
         ctx = web_tool._context
         brw = web_tool._browser
 
-        # Simulate a renderer crash event (only page dies, browser alive)
         web_tool._on_page_crash()
 
         assert web_tool._page is None
-        assert web_tool._context is ctx  # Must be preserved
-        assert web_tool._browser is brw  # Must be preserved
+        assert web_tool._context is ctx
+        assert web_tool._browser is brw
         assert not web_tool._is_alive()
 
     def test_page_crash_closes_old_browser(self, web_tool, http_server):
@@ -196,26 +195,20 @@ class TestCrashRecovery:
         _on_browser_lost cleared the context reference, leaking the
         main browser process.
         """
-        # Recover from previous test's crash state first
         web_tool.go_to_url(http_server + "/")
         assert web_tool._is_alive()
 
-        # Keep a reference to the old browser
         old_browser = web_tool._browser
         assert old_browser is not None
 
-        # Simulate a renderer crash (only page dies, browser still running)
         web_tool._on_page_crash()
         assert not web_tool._is_alive()
-        # Context still alive — browser process still running
         assert old_browser.is_connected()
 
-        # Recovery: _ensure_browser should close the old browser, then relaunch
         result = web_tool.go_to_url(http_server + "/")
         assert "Test Form" in result
         assert web_tool._is_alive()
 
-        # The old browser must have been closed (not leaked)
         assert not old_browser.is_connected()
 
 
@@ -327,7 +320,7 @@ class TestConcurrentProfileAccess:
         t1.start()
         t2.start()
         t2.join(timeout=90)
-        b_done.set()  # unblock t1 if t2 failed
+        b_done.set()
         t1.join(timeout=30)
 
         assert not errors, f"Thread errors: {errors}"
@@ -417,7 +410,6 @@ class TestAccountsGoogleUrlRegex:
         assert not _ACCOUNTS_GOOGLE_URL_RE.match("https://myaccounts.google.com/")
 
     def test_rejects_homograph_suffix(self):
-        # Must not match accounts.google.com.evil.com
         assert not _ACCOUNTS_GOOGLE_URL_RE.match(
             "https://accounts.google.com.evil.com/"
         )
@@ -509,9 +501,6 @@ class TestAccountsGoogleRouteBlocking:
             "No requestfailed event captured for accounts.google.com; "
             f"all failures: {out['failures']}"
         )
-        # Playwright's route.abort() default reason produces ERR_FAILED
-        # (not ERR_NAME_NOT_RESOLVED, which would indicate the request
-        # actually went out).
         url, err = matches[0]
         assert err is not None
         assert "ERR_FAILED" in err or "ABORTED" in err, (

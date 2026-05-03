@@ -244,13 +244,6 @@ class AnthropicModel(Model):
         """
         with self.client.messages.stream(**kwargs) as stream:
             if self.token_callback is not None:
-                # ``in_thinking`` tracks whether the current content block
-                # is a thinking block.  ``thinking_started`` tracks whether
-                # ``thinking_callback(True)`` has actually been invoked for
-                # the current block — deferred until the first non-empty
-                # ``thinking_delta`` arrives so adaptive thinking blocks
-                # with only signature deltas (claude-opus-4-7) do not show
-                # an empty "Thinking" panel in the UI.
                 in_thinking = False
                 thinking_started = False
                 for event in stream:

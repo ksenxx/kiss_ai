@@ -26,7 +26,6 @@ DEFAULTS: dict[str, Any] = {
     "remote_password": "",
 }
 
-#: Map from UI label to environment variable name for API keys.
 API_KEY_ENV_VARS: dict[str, str] = {
     "GEMINI_API_KEY": "GEMINI_API_KEY",
     "OPENAI_API_KEY": "OPENAI_API_KEY",
@@ -170,7 +169,6 @@ def save_api_key_to_shell(key_name: str, key_value: str) -> None:
 
     rc.write_text("".join(lines))
 
-    # Set in current process
     os.environ[key_name] = key_value
     _refresh_config()
 

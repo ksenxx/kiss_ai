@@ -48,22 +48,15 @@ def _isolate_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         "kiss.agents.vscode.vscode_config.CONFIG_PATH",
         fake_home / ".kiss" / "config.json",
     )
-    # Snapshot all API key env vars so monkeypatch restores them on teardown.
     for key in API_KEY_ENV_VARS:
         val = os.environ.get(key)
         if val is not None:
             monkeypatch.setenv(key, val)
         else:
             monkeypatch.delenv(key, raising=False)
-    # Snapshot DEFAULT_CONFIG so _refresh_config() side effects are undone.
     from kiss.core import config as config_module
 
     monkeypatch.setattr(config_module, "DEFAULT_CONFIG", config_module.DEFAULT_CONFIG)
-
-
-# ---------------------------------------------------------------------------
-# load_config / save_config
-# ---------------------------------------------------------------------------
 
 
 class TestLoadSaveConfig:
@@ -114,8 +107,8 @@ class TestLoadSaveConfig:
         (cfg_dir / "config.json").write_text('{"max_budget": 42}')
         cfg = load_config()
         assert cfg["max_budget"] == 42
-        assert cfg["use_web_browser"] is True  # default
-        assert cfg["custom_endpoint"] == ""  # default
+        assert cfg["use_web_browser"] is True
+        assert cfg["custom_endpoint"] == ""
 
     def test_load_with_extra_stored_keys(self) -> None:
         """Stored config with extra keys preserves them in loaded dict."""
@@ -140,15 +133,9 @@ class TestLoadSaveConfig:
         cfg_dir.mkdir(parents=True, exist_ok=True)
         cfg_path = cfg_dir / "config.json"
         cfg_path.write_text('{"max_budget": 1}')
-        # Make the path a directory to trigger OSError on open()
         cfg_path.unlink()
         cfg_path.mkdir()
         assert load_config() == DEFAULTS
-
-
-# ---------------------------------------------------------------------------
-# API key shell writing
-# ---------------------------------------------------------------------------
 
 
 class TestApiKeyShell:
@@ -231,7 +218,6 @@ class TestApiKeyShell:
         monkeypatch.setenv("SHELL", "/bin/zsh")
         old_cfg = config_module.DEFAULT_CONFIG
         save_api_key_to_shell("MINIMAX_API_KEY", "mm-key")
-        # DEFAULT_CONFIG is a new instance after refresh
         assert config_module.DEFAULT_CONFIG is not old_cfg
 
     def test_multiple_keys_sequential(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -248,11 +234,6 @@ class TestApiKeyShell:
         assert os.environ["GEMINI_API_KEY"] == "gem-key"
         assert os.environ["OPENAI_API_KEY"] == "oai-key"
         assert os.environ["ANTHROPIC_API_KEY"] == "ant-key"
-
-
-# ---------------------------------------------------------------------------
-# apply_config_to_env
-# ---------------------------------------------------------------------------
 
 
 class TestApplyConfig:
@@ -280,11 +261,6 @@ class TestApplyConfig:
             )
         finally:
             config_module.DEFAULT_CONFIG.max_budget = original
-
-
-# ---------------------------------------------------------------------------
-# get_custom_model_entry
-# ---------------------------------------------------------------------------
 
 
 class TestCustomModelEntry:
@@ -322,11 +298,6 @@ class TestCustomModelEntry:
         assert entry["name"] == "custom/v1"
 
 
-# ---------------------------------------------------------------------------
-# _get_user_shell
-# ---------------------------------------------------------------------------
-
-
 class TestGetUserShell:
     """Test shell detection."""
 
@@ -351,11 +322,6 @@ class TestGetUserShell:
         assert _get_user_shell() == "bash"
 
 
-# ---------------------------------------------------------------------------
-# _shell_rc_path
-# ---------------------------------------------------------------------------
-
-
 class TestShellRcPath:
     """Test RC file path resolution."""
 
@@ -367,11 +333,6 @@ class TestShellRcPath:
 
     def test_fish_path(self) -> None:
         assert _shell_rc_path("fish") == Path.home() / ".config" / "fish" / "config.fish"
-
-
-# ---------------------------------------------------------------------------
-# source_shell_env
-# ---------------------------------------------------------------------------
 
 
 class TestSourceShellEnv:
@@ -388,8 +349,7 @@ class TestSourceShellEnv:
     def test_source_no_rc_file(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """No RC file — should not crash."""
         monkeypatch.setenv("SHELL", "/bin/zsh")
-        # Don't create .zshrc
-        source_shell_env()  # must not raise
+        source_shell_env()
 
     def test_source_env_output_with_non_api_keys(
         self, monkeypatch: pytest.MonkeyPatch,
@@ -400,7 +360,6 @@ class TestSourceShellEnv:
         ``k not in API_KEY_ENV_VARS``.
         """
         rc = Path.home() / ".zshrc"
-        # echo produces a line without '=' in the subprocess output
         rc.write_text(
             'echo "no-equals-line"\n'
             'export GEMINI_API_KEY="from-source"\n'
@@ -415,11 +374,9 @@ class TestSourceShellEnv:
         rc = Path.home() / ".zshrc"
         rc.write_text('export GEMINI_API_KEY="key"\n')
         monkeypatch.setenv("SHELL", "/bin/zsh")
-        # Clear PATH so shell binary isn't found
         monkeypatch.setenv("PATH", "")
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-        source_shell_env()  # must not raise
-        # Key not set because subprocess failed
+        source_shell_env()
         assert os.environ.get("GEMINI_API_KEY") is None
 
     def test_source_fish_shell(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -429,12 +386,7 @@ class TestSourceShellEnv:
         rc = fish_dir / "config.fish"
         rc.write_text("set -gx OPENAI_API_KEY fish-key\n")
         monkeypatch.setenv("SHELL", "/usr/bin/fish")
-        source_shell_env()  # must not raise
-
-
-# ---------------------------------------------------------------------------
-# Command handler integration tests (real VSCodeServer, real broadcast)
-# ---------------------------------------------------------------------------
+        source_shell_env()
 
 
 class TestCommandHandlerIntegration:
@@ -482,7 +434,6 @@ class TestCommandHandlerIntegration:
         assert len(cfg_events) == 1
         assert cfg_events[0]["config"]["max_budget"] == 25
         assert cfg_events[0]["config"]["use_web_browser"] is False
-        # Verify persisted to disk
         assert load_config()["max_budget"] == 25
 
     def test_save_config_with_api_keys(
@@ -497,9 +448,7 @@ class TestCommandHandlerIntegration:
             "config": {"max_budget": 100},
             "apiKeys": {"OPENROUTER_API_KEY": "or-key-123"},
         })
-        # Key set in environment
         assert os.environ["OPENROUTER_API_KEY"] == "or-key-123"
-        # Key written to RC file
         rc = Path.home() / ".zshrc"
         assert 'export OPENROUTER_API_KEY="or-key-123"' in rc.read_text()
 
@@ -530,7 +479,6 @@ class TestCommandHandlerIntegration:
         events = self._parse_events(captured)
         model_events = [e for e in events if e["type"] == "models"]
         assert len(model_events) == 1
-        # Custom model should be in the list
         names = [m["name"] for m in model_events[0]["models"]]
         assert "custom/v1" in names
 
@@ -545,11 +493,6 @@ class TestCommandHandlerIntegration:
         cfg_events = [e for e in events if e["type"] == "configData"]
         assert cfg_events[0]["config"]["max_budget"] == 77
         assert cfg_events[0]["config"]["remote_password"] == "pw123"
-
-
-# ---------------------------------------------------------------------------
-# End-to-end integration flows
-# ---------------------------------------------------------------------------
 
 
 class TestEndToEndFlows:
@@ -576,11 +519,9 @@ class TestEndToEndFlows:
         save_api_key_to_shell("GEMINI_API_KEY", "flow-key")
         assert os.environ["GEMINI_API_KEY"] == "flow-key"
 
-        # Simulate a new process by clearing the env var
         monkeypatch.delenv("GEMINI_API_KEY")
         assert os.environ.get("GEMINI_API_KEY") is None
 
-        # Source shell env should pick it back up
         source_shell_env()
         assert os.environ.get("GEMINI_API_KEY") == "flow-key"
 
@@ -634,11 +575,6 @@ class TestEndToEndFlows:
             m for m in model_events[0]["models"] if m.get("vendor") == "Custom"
         ]
         assert len(custom_models) == 0
-
-
-# ---------------------------------------------------------------------------
-# API_KEY_ENV_VARS constant
-# ---------------------------------------------------------------------------
 
 
 class TestGetCurrentApiKeys:
@@ -715,16 +651,13 @@ class TestGetConfigIncludesApiKeys:
         captured = io.StringIO()
         monkeypatch.setattr(sys, "stdout", captured)
         server = VSCodeServer()
-        # Save an API key
         server._handle_command({
             "type": "saveConfig",
             "config": {"max_budget": 100},
             "apiKeys": {"TOGETHER_API_KEY": "tog-key-saved"},
         })
-        # Reset captured output
         captured.truncate(0)
         captured.seek(0)
-        # Now getConfig should include the saved key
         server._handle_command({"type": "getConfig"})
         events = [
             json.loads(line)

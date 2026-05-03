@@ -41,10 +41,9 @@ class TestDaemonUrlFileLifecycle(IsolatedAsyncioTestCase):
 
         server = RemoteAccessServer(
             host="127.0.0.1",
-            port=0,  # 0 won't work; use a specific port
+            port=0,
             use_tunnel=False,
         )
-        # Use a random high port to avoid conflicts
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
@@ -53,8 +52,6 @@ class TestDaemonUrlFileLifecycle(IsolatedAsyncioTestCase):
         server.port = port
         await server.start_async()
 
-        # The async start doesn't call _save_url_file — it's done in
-        # _serve_async.  We simulate the URL file write that happens there.
         _save_url_file(f"https://localhost:{port}")
 
         try:
@@ -124,7 +121,6 @@ class TestDaemonDetection(IsolatedAsyncioTestCase):
         await server.start_async()
 
         try:
-            # Make an HTTP request to verify the server is responding
             loop = asyncio.get_event_loop()
             ctx = _no_verify_ssl()
             resp = await loop.run_in_executor(
@@ -153,7 +149,6 @@ class TestDaemonDetection(IsolatedAsyncioTestCase):
         _save_url_file(f"https://localhost:{port}")
 
         try:
-            # Verify URL file exists — this is what the daemon check uses
             self.assertTrue(_URL_FILE.is_file())
             data = json.loads(_URL_FILE.read_text())
             self.assertEqual(data["local"], f"https://localhost:{port}")
@@ -178,14 +173,12 @@ class TestDaemonRestart(IsolatedAsyncioTestCase):
         port = sock.getsockname()[1]
         sock.close()
 
-        # Start the first server instance
         server1 = RemoteAccessServer(
             host="127.0.0.1", port=port, use_tunnel=False
         )
         await server1.start_async()
         _save_url_file(f"https://localhost:{port}")
 
-        # Verify it responds
         loop = asyncio.get_event_loop()
         ctx = _no_verify_ssl()
         resp = await loop.run_in_executor(
@@ -196,11 +189,9 @@ class TestDaemonRestart(IsolatedAsyncioTestCase):
         )
         self.assertEqual(resp.status, 200)
 
-        # Stop the first server (simulates pkill in restartKissWebDaemon)
         await server1.stop_async()
         _remove_url_file()
 
-        # Start a second server on the same port (simulates launchctl bootstrap)
         server2 = RemoteAccessServer(
             host="127.0.0.1", port=port, use_tunnel=False
         )
@@ -208,7 +199,6 @@ class TestDaemonRestart(IsolatedAsyncioTestCase):
         _save_url_file(f"https://localhost:{port}")
 
         try:
-            # Verify the new server responds
             ctx2 = _no_verify_ssl()
             resp2 = await loop.run_in_executor(
                 None,
@@ -220,7 +210,6 @@ class TestDaemonRestart(IsolatedAsyncioTestCase):
             self.assertIn("<title>KISS Sorcar</title>", html)
             self.assertEqual(resp2.status, 200)
 
-            # Verify URL file was recreated
             self.assertTrue(_URL_FILE.is_file())
             data = json.loads(_URL_FILE.read_text())
             self.assertEqual(data["local"], f"https://localhost:{port}")
@@ -233,11 +222,9 @@ class TestDaemonRestart(IsolatedAsyncioTestCase):
         _save_url_file("https://localhost:8787", "https://old.trycloudflare.com")
         self.assertTrue(_URL_FILE.is_file())
 
-        # Simulate the stop phase of a restart
         _remove_url_file()
         self.assertFalse(_URL_FILE.is_file())
 
-        # Simulate the start phase with a new URL
         _save_url_file("https://localhost:8787", "https://new.trycloudflare.com")
         self.assertTrue(_URL_FILE.is_file())
         data = json.loads(_URL_FILE.read_text())

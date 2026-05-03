@@ -41,7 +41,6 @@ def _run_node(script: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-# Minimal browser shim for running demo.js in Node.js
 _NODE_SHIM = r"""
 var window = {};
 var document = {
@@ -138,12 +137,9 @@ class TestGroupEventsIntoPanelsBehavioral(unittest.TestCase):
 
         groups = json.loads(r.stdout.strip())
         assert len(groups) == 3
-        # Group 1: llm panel
         assert groups[0][0]["type"] == "thinking_start"
-        # Group 2: tool_call panel
         assert groups[1][0]["type"] == "tool_call"
         assert groups[1][-1]["type"] == "tool_result"
-        # Group 3: second llm panel
         assert groups[2][0]["type"] == "thinking_start"
 
     def test_result_is_own_group(self) -> None:
@@ -173,7 +169,6 @@ class TestGroupEventsIntoPanelsBehavioral(unittest.TestCase):
         import json
 
         groups = json.loads(r.stdout.strip())
-        # All lifecycle events skipped, only thinking_start + text_delta in one group
         assert len(groups) == 1
         types = [e["type"] for e in groups[0]]
         assert "task_done" not in types
@@ -192,7 +187,6 @@ class TestGroupEventsIntoPanelsBehavioral(unittest.TestCase):
         import json
 
         groups = json.loads(r.stdout.strip())
-        # LLM panel, tool_call 1, tool_call 2, result
         assert len(groups) == 4
         assert groups[1][0]["name"] == "Read"
         assert groups[2][0]["name"] == "Write"
@@ -242,12 +236,8 @@ class TestDemoReplayUsesPanel(unittest.TestCase):
 
     def test_no_1s_per_event_delay(self) -> None:
         """The old 1-second per-event delay should be gone."""
-        # The old pattern was: api.processEvent(ev); ... await sleep(1000);
-        # in the event loop. Now there should be no sleep(1000) inside the
-        # panel group processing loop.
         replay_fn_start = self.src.index("window._startDemoReplay")
         replay_fn = self.src[replay_fn_start:]
-        # The only sleep(1000) should be the pause between tasks
         occurrences = replay_fn.count("await sleep(1000)")
         assert occurrences == 1, (
             f"Expected 1 sleep(1000) (inter-task pause), found {occurrences}"

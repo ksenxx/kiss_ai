@@ -30,7 +30,6 @@ class TestNoModelAvailableResultEvent(TestCase):
     def test_no_model_emits_result_event(self) -> None:
         """With all API keys cleared, running a task should immediately
         broadcast a result event with the no-model error message."""
-        # Save and clear all API keys
         from kiss.core import config as config_module
 
         keys = config_module.DEFAULT_CONFIG
@@ -42,13 +41,6 @@ class TestNoModelAvailableResultEvent(TestCase):
             "OPENROUTER_API_KEY": keys.OPENROUTER_API_KEY,
             "MINIMAX_API_KEY": getattr(keys, "MINIMAX_API_KEY", ""),
         }
-        # Also clear PATH so shutil.which("claude") (and any other CLI
-        # provider lookups in get_available_models) returns None — without
-        # this, machines with the Claude Code CLI installed report cc/*
-        # models as available even when every API key is empty, which
-        # bypasses the no-model gate this test is exercising.  Likewise,
-        # the Codex backend falls back to the Codex desktop UI's bundled
-        # binary, so we must also clear that candidate-path list.
         from kiss.core.models import codex_model as codex_module
 
         saved_path = os.environ.get("PATH", "")
@@ -79,7 +71,6 @@ class TestNoModelAvailableResultEvent(TestCase):
             tab_id = "no-model-test-1"
             tab = server._get_tab(tab_id)
 
-            # The agent's run should NOT be called at all
             run_called = False
 
             def fake_run(**kwargs: Any) -> None:
@@ -188,7 +179,6 @@ class TestNoModelAvailableResultEvent(TestCase):
             with lock:
                 result_events = [e for e in events if e.get("type") == "result"]
 
-            # Should have the success result, not the no-model error
             assert len(result_events) >= 1
             no_model_results = [
                 e for e in result_events

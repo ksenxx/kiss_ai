@@ -204,7 +204,6 @@ class TestB19StepCountCheck:
         from kiss.core.kiss_agent import KISSAgent
 
         source = inspect.getsource(KISSAgent._check_limits)
-        # The step_count > max_steps line should not have pragma: no branch
         for line in source.split("\n"):
             if "step_count" in line and "max_steps" in line:
                 assert "pragma: no branch" not in line, (

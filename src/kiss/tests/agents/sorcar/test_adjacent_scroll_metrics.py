@@ -39,9 +39,6 @@ class TestAdjacentScrollMetrics(unittest.TestCase):
     def setUp(self) -> None:
         self.src = MAIN_JS.read_text()
 
-    # ------------------------------------------------------------------
-    # 1. currentTaskMetrics variable exists
-    # ------------------------------------------------------------------
 
     def test_current_task_metrics_declared(self) -> None:
         """A ``currentTaskMetrics`` variable must be declared to hold the
@@ -52,15 +49,11 @@ class TestAdjacentScrollMetrics(unittest.TestCase):
             "currentTaskMetrics variable not declared",
         )
 
-    # ------------------------------------------------------------------
-    # 2. renderAdjacentTask saves/restores statusSteps
-    # ------------------------------------------------------------------
 
     def test_render_adjacent_task_saves_status_steps(self) -> None:
         """renderAdjacentTask must save statusSteps before replay and
         restore it after, so the adjacent task doesn't clobber the
         current task's step count."""
-        # Extract the function body
         m = re.search(
             r"function renderAdjacentTask\b[^{]*\{(.*?)^\s{2}\}",
             self.src,
@@ -74,7 +67,6 @@ class TestAdjacentScrollMetrics(unittest.TestCase):
             body,
             "renderAdjacentTask does not save statusSteps",
         )
-        # Must assign savedSteps before replayEventsInto
         replay_pos = body.index("replayEventsInto")
         save_pos = body.index("savedSteps")
         self.assertLess(
@@ -82,7 +74,6 @@ class TestAdjacentScrollMetrics(unittest.TestCase):
             replay_pos,
             "savedSteps must be captured before replayEventsInto",
         )
-        # Must restore after replay
         restore_match = re.search(
             r"statusSteps\b.*=\s*savedSteps", body[replay_pos:]
         )
@@ -91,9 +82,6 @@ class TestAdjacentScrollMetrics(unittest.TestCase):
             "statusSteps is not restored from savedSteps after replay",
         )
 
-    # ------------------------------------------------------------------
-    # 3. renderAdjacentTask stores per-task metrics on container dataset
-    # ------------------------------------------------------------------
 
     def test_render_adjacent_task_stores_dataset_metrics(self) -> None:
         """The adjacent-task container must have dataset.metricTokens,
@@ -114,9 +102,6 @@ class TestAdjacentScrollMetrics(unittest.TestCase):
                 f"renderAdjacentTask does not set container.dataset.{attr}",
             )
 
-    # ------------------------------------------------------------------
-    # 4. updateVisibleTask updates header metrics
-    # ------------------------------------------------------------------
 
     def test_update_visible_task_updates_metrics(self) -> None:
         """updateVisibleTask must update statusTokens, statusBudget, and
@@ -129,23 +114,18 @@ class TestAdjacentScrollMetrics(unittest.TestCase):
         self.assertIsNotNone(m, "Could not find updateVisibleTask body")
         assert m is not None
         body = m.group(1)
-        # Must read from dataset
         for attr in ("metricTokens", "metricBudget", "metricSteps"):
             self.assertIn(
                 f"dataset.{attr}",
                 body,
                 f"updateVisibleTask does not read dataset.{attr}",
             )
-        # Must also restore currentTaskMetrics when scrolled back
         self.assertIn(
             "currentTaskMetrics",
             body,
             "updateVisibleTask does not restore currentTaskMetrics",
         )
 
-    # ------------------------------------------------------------------
-    # 5. updateVisibleTask tracks the visible container
-    # ------------------------------------------------------------------
 
     def test_update_visible_task_captures_visible_container(self) -> None:
         """updateVisibleTask must capture a reference to the visible
@@ -165,9 +145,6 @@ class TestAdjacentScrollMetrics(unittest.TestCase):
             "updateVisibleTask does not capture visibleContainer",
         )
 
-    # ------------------------------------------------------------------
-    # 6. replayTaskEvents snapshots currentTaskMetrics
-    # ------------------------------------------------------------------
 
     def test_replay_task_events_snapshots_metrics(self) -> None:
         """replayTaskEvents must store the replayed task's metrics
@@ -186,9 +163,6 @@ class TestAdjacentScrollMetrics(unittest.TestCase):
             "replayTaskEvents does not snapshot currentTaskMetrics",
         )
 
-    # ------------------------------------------------------------------
-    # 7. processOutputEvent updates currentTaskMetrics on result/usage
-    # ------------------------------------------------------------------
 
     def test_process_output_event_updates_metrics_on_result(self) -> None:
         """processOutputEvent must snapshot currentTaskMetrics after
@@ -208,9 +182,6 @@ class TestAdjacentScrollMetrics(unittest.TestCase):
             "processOutputEvent does not update currentTaskMetrics",
         )
 
-    # ------------------------------------------------------------------
-    # 8. clearUsageMetrics resets currentTaskMetrics
-    # ------------------------------------------------------------------
 
     def test_clear_usage_metrics_resets_current_task_metrics(self) -> None:
         """clearUsageMetrics must reset currentTaskMetrics so stale

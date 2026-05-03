@@ -42,9 +42,7 @@ class TestConcurrentMergeRouting(unittest.TestCase):
 
     def test_no_single_merge_manager_field(self) -> None:
         """No single _mergeManager field — only the per-tab Map."""
-        # The per-tab map is _mergeManagers (plural)
         assert "_mergeManagers" in _SIDEBAR_TS
-        # The old single field _mergeManager: MergeManager must be gone
         assert "private _mergeManager:" not in _SIDEBAR_TS
 
     def test_no_active_merge_tab_id(self) -> None:
@@ -144,7 +142,6 @@ class TestConcurrentMergeRouting(unittest.TestCase):
 
     def test_constructor_takes_no_merge_manager(self) -> None:
         """SorcarSidebarView constructor must not take a MergeManager param."""
-        # Find the constructor signature
         idx = _SIDEBAR_TS.index("constructor(extensionUri")
         sig = _SIDEBAR_TS[idx : idx + 100]
         assert "mergeManager" not in sig

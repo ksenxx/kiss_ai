@@ -40,11 +40,6 @@ def _make_server() -> tuple[VSCodeServer, list[dict]]:
     return server, events
 
 
-# ===================================================================
-# HTML template tests
-# ===================================================================
-
-
 class TestAutocommitButtonInTemplate(unittest.TestCase):
     """The autocommit button exists in the SorcarTab HTML template."""
 
@@ -84,15 +79,9 @@ class TestAutocommitButtonInTemplate(unittest.TestCase):
         """The button contains an SVG icon."""
         html = _read("src/SorcarTab.ts")
         btn_start = html.index('id="autocommit-btn"')
-        # Find the closing </button> after the btn
         btn_end = html.index("</button>", btn_start)
         btn_html = html[btn_start:btn_end]
         assert "<svg" in btn_html, "autocommit-btn should contain an SVG icon"
-
-
-# ===================================================================
-# CSS tests
-# ===================================================================
 
 
 class TestAutocommitButtonCSS(unittest.TestCase):
@@ -112,11 +101,6 @@ class TestAutocommitButtonCSS(unittest.TestCase):
         assert ".menu-item:disabled" in css
 
 
-# ===================================================================
-# JavaScript tests
-# ===================================================================
-
-
 class TestAutocommitButtonJS(unittest.TestCase):
     """The JS code references the autocommit button and wires it correctly."""
 
@@ -127,12 +111,9 @@ class TestAutocommitButtonJS(unittest.TestCase):
     def test_click_sends_autocommit_action(self) -> None:
         """The click handler posts an autocommitAction message with action 'commit'."""
         js = _read("media/main.js")
-        # Find the autocommitBtn click listener
         assert "autocommitBtn.addEventListener('click'" in js or \
                "autocommitBtn.addEventListener(\"click\"" in js
-        # Verify it sends the right message type
         click_idx = js.index("autocommitBtn.addEventListener")
-        # Find the postMessage call within the next ~300 chars
         snippet = js[click_idx:click_idx + 500]
         assert "type: 'autocommitAction'" in snippet or \
                'type: "autocommitAction"' in snippet
@@ -142,10 +123,8 @@ class TestAutocommitButtonJS(unittest.TestCase):
     def test_disabled_when_running(self) -> None:
         """The button is disabled in setRunningState when running."""
         js = _read("media/main.js")
-        # Find the setRunningState function
         assert "autocommitBtn" in js
         idx = js.index("function setRunningState")
-        # Get the function body (up to next top-level function)
         end = js.index("\n  function ", idx + 1)
         fn_body = js[idx:end]
         assert "autocommitBtn" in fn_body, (
@@ -153,11 +132,6 @@ class TestAutocommitButtonJS(unittest.TestCase):
         )
         assert "autocommitBtn.disabled" in fn_body or \
                "autocommitBtn) autocommitBtn.disabled" in fn_body
-
-
-# ===================================================================
-# Backend dispatch test
-# ===================================================================
 
 
 class TestAutocommitButtonBackend(unittest.TestCase):
@@ -176,8 +150,6 @@ class TestAutocommitButtonBackend(unittest.TestCase):
 
         server._handle_autocommit_action("commit", tab_id)
 
-        # Should get autocommit_done (likely "Not a git repository" since
-        # /tmp/nonexistent isn't a git repo)
         done_events = [e for e in events if e.get("type") == "autocommit_done"]
         assert len(done_events) == 1
         assert done_events[0]["tabId"] == tab_id

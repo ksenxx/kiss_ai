@@ -367,11 +367,6 @@ def find_deprecated_models(
 
     for name in current:  # pragma: no branch
         if name.startswith("codex/"):  # pragma: no branch
-            # codex/* entries are aliases accepted by the codex CLI's -m flag
-            # and billed via the ChatGPT subscription. They are intentionally
-            # not present in OpenAI's REST API model listing, so the OpenAI
-            # alias/snapshot deprecation rule below does not apply. They are
-            # managed separately by _add_codex_candidates.
             continue
         if name.startswith("openrouter/"):  # pragma: no branch
             if openrouter and name not in openrouter:  # pragma: no branch
@@ -385,8 +380,6 @@ def find_deprecated_models(
                 if has_date:  # pragma: no branch
                     deprecated.append({"name": name, "reason": "not in Anthropic API"})
                 else:
-                    # Alias (no date suffix): deprecated only if no dated
-                    # snapshot like {alias}-YYYYMMDD exists in the API.
                     alias_re = re.compile(rf"^{re.escape(name)}-\d{{8}}$")
                     if not any(alias_re.match(n) for n in anthropic):
                         deprecated.append(
@@ -403,9 +396,6 @@ def find_deprecated_models(
                 if has_date:  # pragma: no branch
                     deprecated.append({"name": name, "reason": "not in OpenAI API"})
                 else:
-                    # Alias (no date suffix): deprecated only if no dated
-                    # snapshot like {alias}-YYYYMMDD or {alias}-YYYY-MM-DD
-                    # exists in the API.
                     alias_re = re.compile(
                         rf"^{re.escape(name)}-(\d{{8}}|\d{{4}}-\d{{2}}-\d{{2}})$"
                     )
@@ -431,10 +421,6 @@ _VENDOR_OR_PREFIX: dict[str, str] = {
     "gemini": "openrouter/google/",
 }
 
-# OpenAI GPT models usable with the codex CLI's ``-m`` flag. Codex needs
-# tool-use + reasoning, which is reliably available only on gpt-5 and newer
-# (gpt-5, gpt-5-codex, gpt-5.1-codex-max, gpt-6, gpt-10, ...). Older
-# families (gpt-3.5, gpt-4, gpt-4o, gpt-4.1) are excluded.
 _CODEX_GPT_PATTERN = re.compile(r"^gpt-([5-9]|\d{2,})(\.\d+)?(-.*)?$")
 _CODEX_GPT_SKIP_FRAGMENTS = (
     "image",
@@ -485,9 +471,6 @@ def _add_codex_candidates(
                 "output_price_per_1M": 0.0,
                 "source": "codex",
                 "needs_pricing": False,
-                # codex/* are billed via ChatGPT subscription. Capability
-                # testing is skipped in main() because it requires the codex
-                # CLI/UI binary to be installed.
                 "gen": True,
                 "fc": True,
                 "emb": False,
@@ -976,10 +959,6 @@ def main() -> None:
     if new_models and not args.skip_test:  # pragma: no branch
         print(f"\n[5/6] Testing {len(new_models)} new models...")
         for nm in new_models:  # pragma: no branch
-            # codex/* entries already have gen/fc/emb defaults set by
-            # _add_codex_candidates and are billed via ChatGPT subscription.
-            # Skipping their capability tests keeps the script usable on
-            # machines without the codex CLI.
             if nm["name"].startswith("codex/"):  # pragma: no branch
                 continue
             caps = test_model_capabilities(nm["name"], verbose=args.verbose)
