@@ -600,14 +600,14 @@ class TestGetCurrentApiKeys:
             monkeypatch.delenv(k, raising=False)
         keys = get_current_api_keys()
         assert all(v == "" for v in keys.values())
-        assert set(keys.keys()) == set(API_KEY_ENV_VARS.keys())
+        assert set(keys.keys()) == API_KEY_ENV_VARS
 
     def test_all_keys_present(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """All expected API key names are included in the result."""
         from kiss.agents.vscode.vscode_config import get_current_api_keys
 
         keys = get_current_api_keys()
-        assert set(keys.keys()) == set(API_KEY_ENV_VARS.keys())
+        assert set(keys.keys()) == API_KEY_ENV_VARS
 
 
 class TestGetConfigIncludesApiKeys:
@@ -670,11 +670,10 @@ class TestGetConfigIncludesApiKeys:
 
 
 class TestApiKeyEnvVarsConstant:
-    """Verify the API_KEY_ENV_VARS mapping is correct."""
+    """Verify the API_KEY_ENV_VARS frozenset is correct."""
 
-    def test_all_keys_are_identity_mapped(self) -> None:
-        for k, v in API_KEY_ENV_VARS.items():
-            assert k == v
+    def test_is_frozenset(self) -> None:
+        assert isinstance(API_KEY_ENV_VARS, frozenset)
 
     def test_expected_providers_present(self) -> None:
         expected = {
@@ -685,4 +684,4 @@ class TestApiKeyEnvVarsConstant:
             "OPENROUTER_API_KEY",
             "MINIMAX_API_KEY",
         }
-        assert set(API_KEY_ENV_VARS.keys()) == expected
+        assert API_KEY_ENV_VARS == expected

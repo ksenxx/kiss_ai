@@ -2,6 +2,7 @@
 
 import threading
 import time
+from functools import partial
 from typing import Any
 
 from kiss.agents.sorcar.persistence import _append_chat_event
@@ -235,6 +236,21 @@ class BaseBrowserPrinter(Printer):
                 self._bash_state.timer.cancel()
                 self._bash_state.timer = None
 
+    def _timer_flush_for_tab(self, tab_id: str | None) -> None:
+        """Timer callback that sets the thread-local tab_id and flushes bash.
+
+        Used by the bash-stream buffering timer.  Replaces the former
+        closure ``_timer_flush`` so that ``self`` is not captured from
+        an enclosing scope.
+
+        Args:
+            tab_id: The tab identifier that owns the bash buffer, or
+                None when no tab context is available.
+        """
+        if tab_id is not None:
+            self._thread_local.tab_id = tab_id
+        self._flush_bash()
+
     def _flush_bash(self) -> None:
         """Flush the bash buffer.
 
@@ -403,13 +419,9 @@ class BaseBrowserPrinter(Printer):
                     bs.last_flush = time.monotonic()
                 elif bs.timer is None:
                     owner_tab = getattr(self._thread_local, "tab_id", None)
-
-                    def _timer_flush(tid: int | None = owner_tab) -> None:
-                        if tid is not None:
-                            self._thread_local.tab_id = tid
-                        self._flush_bash()
-
-                    bs.timer = threading.Timer(0.1, _timer_flush)
+                    bs.timer = threading.Timer(
+                        0.1, partial(self._timer_flush_for_tab, owner_tab),
+                    )
                     bs.timer.daemon = True
                     bs.timer.start()
             if text:
