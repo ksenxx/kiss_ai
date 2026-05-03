@@ -267,6 +267,14 @@ class RelentlessAgent(Base):
             is_continue = _str_to_bool(payload.get("is_continue", False))
 
             if not is_continue or success:
+                if summaries:
+                    current_summary = payload.get("summary", "")
+                    if current_summary:
+                        summaries.append(current_summary)
+                    payload["summary"] = "\n\n---\n\n".join(
+                        f"### Session {i + 1}\n{s}" for i, s in enumerate(summaries)
+                    )
+                    result = yaml.dump(payload, sort_keys=False)
                 return result
 
             summary = payload.get("summary", "")
