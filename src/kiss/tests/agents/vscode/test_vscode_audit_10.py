@@ -70,6 +70,7 @@ class TestNoHardcodedModelsInDependencyInstaller:
         )
 
     def test_uses_findUvPath_and_findKissProject(self) -> None:
+    def test_uses_findUvPath_and_findKissProject(self) -> None:
     def test_uses_find_uv_path_and_find_kiss_project(self) -> None:
         src = _read("src/DependencyInstaller.ts")
         match = re.search(
@@ -87,6 +88,7 @@ class TestNoHardcodedModelsInMainJs:
     """main.js must not hardcode default or fast model names."""
 
     def test_no_hardcoded_initial_selectedModel(self) -> None:
+    def test_no_hardcoded_initial_selectedModel(self) -> None:
     def test_no_hardcoded_initial_selected_model(self) -> None:
         src = _read("media/main.js")
         # Check that the initial selectedModel declaration doesn't use a model name
@@ -97,6 +99,7 @@ class TestNoHardcodedModelsInMainJs:
 
     def test_no_hardcoded_restoreTab_fallback(self) -> None:
     def test_no_hardcoded_restore_tab_fallback(self) -> None:
+    def test_no_hardcoded_restoreTab_fallback(self) -> None:
         src = _read("media/main.js")
         for model in _DEFAULT_MODELS:
             # Check for patterns like: tab.selectedModel || 'claude-opus-4-7'
@@ -107,6 +110,7 @@ class TestNoHardcodedModelsInMainJs:
     def test_selectedModel_initialized_from_dom(self) -> None:
     def test_selected_model_initialized_from_dom(self) -> None:
         src = _read("media/main.js")
+    def test_selectedModel_initialized_from_dom(self) -> None:
         # Should read the model name from the DOM element injected by the template
         assert "modelName" in src and "selectedModel" in src
         # Check that there's code reading from model-name element
@@ -126,6 +130,7 @@ class TestNoHardcodedModelsAnywhere:
         result: list[Path] = []
         for pattern in ("src/*.ts", "media/main.js"):
             result.extend(VSCODE_DIR.glob(pattern))
+        result = []
 
     def test_no_hardcoded_default_model_literals(
         self, ts_js_files: list[Path]

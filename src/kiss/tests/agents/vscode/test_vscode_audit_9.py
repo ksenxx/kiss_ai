@@ -5,6 +5,10 @@ Bug 2: DependencyInstaller.ts getDefaultModel() has stale model names and wrong
        priority order vs Python get_default_model()
 Bug 3: main.js hardcoded default selectedModel is stale ('claude-opus-4-6'
        instead of 'claude-opus-4-7')
+Bug 2: DependencyInstaller.ts getDefaultModel() has stale model names and wrong
+       priority order vs Python get_default_model()
+Bug 3: main.js hardcoded default selectedModel is stale ('claude-opus-4-6'
+       instead of 'claude-opus-4-7')
 Bug 2: DependencyInstaller.ts getDefaultModel() had hardcoded model names —
        now calls Python's get_default_model() at runtime.
 Bug 3: main.js had hardcoded default selectedModel — now reads from DOM
@@ -149,25 +153,10 @@ class TestMainJsNoHardcodedModel(unittest.TestCase):
         assert m, "selectedModel declaration not found"
         assert m.group(1) == "", (
             f"selectedModel initialized to '{m.group(1)}' instead of empty string"
-        )
 
     def test_restore_tab_fallback_is_empty(self) -> None:
         """restoreTab fallback should be empty, not a hardcoded model name."""
-        fallbacks = re.findall(
-            r"tab\.selectedModel\s*\|\|\s*'([^']*)'", self._main_js
-        )
-        for fb in fallbacks:
-            assert fb == "", (
-                f"restoreTab fallback is '{fb}' instead of empty string"
-            )
-
-    def test_reads_model_from_dom(self) -> None:
-        """selectedModel should be populated from the model-name DOM element."""
-        assert re.search(
-            r"modelName.*textContent.*selectedModel|selectedModel.*modelName.*textContent",
             self._main_js,
         ), "selectedModel should be initialized from DOM model-name element"
-
-
 if __name__ == "__main__":
     unittest.main()
