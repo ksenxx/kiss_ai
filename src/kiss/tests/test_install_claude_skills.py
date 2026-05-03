@@ -170,15 +170,21 @@ class TestReleaseShClaudeSkillsStep(unittest.TestCase):
             "Claude skills download must precede VS Code extension build in release.sh",
         )
 
-    def test_claude_skills_deleted_after_extension_install(self) -> None:
-        """claude_skills directory must be deleted after extension install (step 11)."""
+    def test_claude_skills_deleted_after_build_before_commit(self) -> None:
+        """claude_skills directory must be deleted after build (step 4) and before commit (step 5)."""
         text = RELEASE_SH.read_text()
-        install_pos = text.index("Step 11: Install extension")
+        build_pos = text.index("Step 4: Build VS Code extension")
         cleanup_pos = text.index("Cleaned up $CLAUDE_SKILLS_DIR (bundled in extension)")
+        commit_pos = text.index("Step 5: Commit")
         self.assertLess(
-            install_pos,
+            build_pos,
             cleanup_pos,
-            "claude_skills cleanup must come after extension install in release.sh",
+            "claude_skills cleanup must come after extension build in release.sh",
+        )
+        self.assertLess(
+            cleanup_pos,
+            commit_pos,
+            "claude_skills cleanup must come before git commit in release.sh",
         )
 
     def test_claude_skills_cleanup_uses_rm_rf(self) -> None:

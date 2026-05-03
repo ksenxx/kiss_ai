@@ -393,6 +393,12 @@ main() {
     # Step 4: Build VS Code extension (before commit so vsix is included)
     build_vscode_extension
 
+    # Clean up source claude_skills now that they are bundled in the extension
+    if [ -d "$CLAUDE_SKILLS_DIR" ]; then
+        rm -rf "$CLAUDE_SKILLS_DIR"
+        print_info "Cleaned up $CLAUDE_SKILLS_DIR (bundled in extension)"
+    fi
+
     # Step 5: Commit changes (includes version bump + fresh vsix)
     print_step "Committing version bump..."
     git add -A
@@ -449,12 +455,6 @@ main() {
 
     # Step 11: Install extension into local VS Code and Cursor IDE if available
     install_local_extension
-
-    # Clean up source claude_skills now that they are bundled in the extension
-    if [ -d "$CLAUDE_SKILLS_DIR" ]; then
-        rm -rf "$CLAUDE_SKILLS_DIR"
-        print_info "Cleaned up $CLAUDE_SKILLS_DIR (bundled in extension)"
-    fi
 
     # Restore stashed changes
     trap - EXIT
