@@ -388,42 +388,8 @@ find_code_cli() {
     fi
     echo ""
 
-    # --- 8. Build VS Code extension ------------------------------------------
-    echo ">>> [8/11] Building VS Code extension..."
-    VSCODE_EXT_DIR="$PROJECT_DIR/src/kiss/agents/vscode"
-    VSIX="$VSCODE_EXT_DIR/kiss-sorcar.vsix"
-    if [ -f "$VSIX" ]; then
-        echo "   kiss-sorcar.vsix already exists — skipping build"
-    else
-        cd "$VSCODE_EXT_DIR"
-        npm ci
-        npm run package
-        cd "$PROJECT_DIR"
-        if [ -f "$VSIX" ]; then
-            echo "   Built $VSIX"
-        else
-            echo "   WARNING: Failed to build VSIX"
-        fi
-    fi
-    echo ""
-
-    # --- 9. Install VS Code extension ----------------------------------------
-    echo ">>> [9/11] Installing VS Code extension..."
-    if [ -f "$VSIX" ]; then
-        if find_code_cli && [ -n "$CODE_CLI" ]; then
-            "$CODE_CLI" --install-extension "$VSIX" --force 2>&1
-            echo "   Extension installed into VS Code"
-        else
-            echo "   WARNING: VS Code CLI not found — skipping extension install"
-            echo "   To install manually: code --install-extension $VSIX --force"
-        fi
-    else
-        echo "   WARNING: VSIX not found — skipping extension install"
-    fi
-    echo ""
-
-    # --- 10. Download official Claude Code skills ------------------------------
-    echo ">>> [10/11] Downloading official Claude Code skills..."
+    # --- 8. Download official Claude Code skills ------------------------------
+    echo ">>> [8/11] Downloading official Claude Code skills..."
     CLAUDE_SKILLS_DIR="$PROJECT_DIR/src/kiss/agents/claude_skills"
     if [ -d "$CLAUDE_SKILLS_DIR" ] && [ "$(ls -d "$CLAUDE_SKILLS_DIR"/*/ 2>/dev/null)" ]; then
         echo "   Claude skills already present — skipping download"
@@ -449,6 +415,45 @@ find_code_cli() {
             echo "   WARNING: Failed to download Claude Code skills"
         fi
         rm -rf "$SKILLS_TMP"
+    fi
+    echo ""
+
+    # --- 9. Build VS Code extension ------------------------------------------
+    echo ">>> [9/11] Building VS Code extension..."
+    VSCODE_EXT_DIR="$PROJECT_DIR/src/kiss/agents/vscode"
+    VSIX="$VSCODE_EXT_DIR/kiss-sorcar.vsix"
+    if [ -f "$VSIX" ]; then
+        echo "   kiss-sorcar.vsix already exists — skipping build"
+    else
+        cd "$VSCODE_EXT_DIR"
+        npm ci
+        npm run package
+        cd "$PROJECT_DIR"
+        if [ -f "$VSIX" ]; then
+            echo "   Built $VSIX"
+        else
+            echo "   WARNING: Failed to build VSIX"
+        fi
+    fi
+    echo ""
+
+    # --- 10. Install VS Code extension ----------------------------------------
+    echo ">>> [10/11] Installing VS Code extension..."
+    if [ -f "$VSIX" ]; then
+        if find_code_cli && [ -n "$CODE_CLI" ]; then
+            "$CODE_CLI" --install-extension "$VSIX" --force 2>&1
+            echo "   Extension installed into VS Code"
+        else
+            echo "   WARNING: VS Code CLI not found — skipping extension install"
+            echo "   To install manually: code --install-extension $VSIX --force"
+        fi
+    else
+        echo "   WARNING: VSIX not found — skipping extension install"
+    fi
+    # Clean up source claude_skills now that they are bundled in the extension
+    if [ -d "$CLAUDE_SKILLS_DIR" ]; then
+        rm -rf "$CLAUDE_SKILLS_DIR"
+        echo "   Cleaned up $CLAUDE_SKILLS_DIR (bundled in extension)"
     fi
     echo ""
 

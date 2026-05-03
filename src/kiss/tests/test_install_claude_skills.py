@@ -5,24 +5,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 INSTALL_SH = REPO_ROOT / "install.sh"
-CLAUDE_SKILLS_DIR = REPO_ROOT / "src" / "kiss" / "agents" / "claude_skills"
-
-# All 13 official Claude Code plugins from anthropics/claude-code
-EXPECTED_SKILLS = [
-    "agent-sdk-dev",
-    "claude-opus-4-5-migration",
-    "code-review",
-    "commit-commands",
-    "explanatory-output-style",
-    "feature-dev",
-    "frontend-design",
-    "hookify",
-    "learning-output-style",
-    "plugin-dev",
-    "pr-review-toolkit",
-    "ralph-wiggum",
-    "security-guidance",
-]
+COPY_KISS_SH = REPO_ROOT / "src" / "kiss" / "agents" / "vscode" / "copy-kiss.sh"
 
 
 class TestInstallShClaudeSkillsStep(unittest.TestCase):
@@ -62,8 +45,6 @@ class TestInstallShClaudeSkillsStep(unittest.TestCase):
 
     def test_install_sh_step_numbering(self) -> None:
         text = INSTALL_SH.read_text()
-        self.assertIn("[10/11]", text)
-        self.assertIn("[11/11]", text)
         # Ensure all 11 steps are present
         for i in range(1, 12):
             self.assertIn(
@@ -80,54 +61,58 @@ class TestInstallShClaudeSkillsStep(unittest.TestCase):
             "install.sh must skip download when skills are already present",
         )
 
-
-class TestClaudeSkillsDownloaded(unittest.TestCase):
-    """Verify all official Claude skills were downloaded to the target dir."""
-
-    def test_claude_skills_dir_exists(self) -> None:
-        self.assertTrue(
-            CLAUDE_SKILLS_DIR.is_dir(),
-            f"{CLAUDE_SKILLS_DIR} must exist",
+    def test_claude_skills_downloaded_before_extension_build(self) -> None:
+        """Claude skills step (8) must come before Build VS Code extension (9)."""
+        text = INSTALL_SH.read_text()
+        skills_pos = text.index("[8/11] Downloading official Claude Code skills")
+        build_pos = text.index("[9/11] Building VS Code extension")
+        self.assertLess(
+            skills_pos,
+            build_pos,
+            "Claude skills download must precede VS Code extension build",
         )
 
-    def test_all_expected_skills_present(self) -> None:
-        for skill_name in EXPECTED_SKILLS:
-            skill_dir = CLAUDE_SKILLS_DIR / skill_name
-            self.assertTrue(
-                skill_dir.is_dir(),
-                f"Expected skill directory not found: {skill_name}",
-            )
-
-    def test_most_skills_have_claude_plugin_dir(self) -> None:
-        with_plugin = [
-            s for s in EXPECTED_SKILLS
-            if (CLAUDE_SKILLS_DIR / s / ".claude-plugin").is_dir()
-        ]
-        # At least 12 of 13 official plugins ship with .claude-plugin/
-        self.assertGreaterEqual(
-            len(with_plugin), 12,
-            f"Expected at least 12 skills with .claude-plugin/, got {len(with_plugin)}",
+    def test_claude_skills_deleted_after_extension_install(self) -> None:
+        """claude_skills directory must be deleted after extension install (step 10)."""
+        text = INSTALL_SH.read_text()
+        install_pos = text.index("[10/11] Installing VS Code extension")
+        cleanup_pos = text.index("Cleaned up $CLAUDE_SKILLS_DIR (bundled in extension)")
+        daemon_pos = text.index("[11/11] Setting up kiss-web daemon service")
+        self.assertLess(
+            install_pos,
+            cleanup_pos,
+            "claude_skills cleanup must come after extension install",
+        )
+        self.assertLess(
+            cleanup_pos,
+            daemon_pos,
+            "claude_skills cleanup must come before daemon setup",
         )
 
-    def test_no_unexpected_extra_directories(self) -> None:
-        actual = {
-            d.name
-            for d in CLAUDE_SKILLS_DIR.iterdir()
-            if d.is_dir() and not d.name.startswith(".")
-        }
-        expected = set(EXPECTED_SKILLS)
-        self.assertEqual(
-            actual,
-            expected,
-            f"Unexpected directories in claude_skills: {actual - expected}",
+    def test_claude_skills_cleanup_uses_rm_rf(self) -> None:
+        """Cleanup must use rm -rf to remove the directory."""
+        text = INSTALL_SH.read_text()
+        self.assertIn('rm -rf "$CLAUDE_SKILLS_DIR"', text)
+
+
+class TestCopyKissIncludesClaudeSkills(unittest.TestCase):
+    """Verify copy-kiss.sh copies claude_skills into the extension bundle."""
+
+    def test_copy_kiss_copies_claude_skills(self) -> None:
+        text = COPY_KISS_SH.read_text()
+        self.assertIn(
+            "claude_skills",
+            text,
+            "copy-kiss.sh must copy claude_skills into kiss_project",
         )
 
-    def test_skill_count(self) -> None:
-        dirs = [
-            d for d in CLAUDE_SKILLS_DIR.iterdir()
-            if d.is_dir() and not d.name.startswith(".")
-        ]
-        self.assertEqual(len(dirs), 13, f"Expected 13 skills, got {len(dirs)}")
+    def test_copy_kiss_checks_dir_exists(self) -> None:
+        text = COPY_KISS_SH.read_text()
+        self.assertIn(
+            '-d "$CLAUDE_SKILLS_SRC"',
+            text,
+            "copy-kiss.sh must check if claude_skills directory exists before copying",
+        )
 
 
 if __name__ == "__main__":
