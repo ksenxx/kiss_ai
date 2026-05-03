@@ -781,7 +781,7 @@ width=device-width,initial-scale=1,maximum-scale=1">
     body {{ background: var(--vscode-editor-background, #1e1e1e);
             color: var(--vscode-editor-foreground, #cccccc); }}
     :root {{
-      --vscode-font-size: 13px;
+      --vscode-font-size: 16px;
       --vscode-editor-background: #1e1e1e;
       --vscode-editor-foreground: #cccccc;
       --vscode-input-background: #3c3c3c;
