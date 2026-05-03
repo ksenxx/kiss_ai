@@ -200,7 +200,6 @@ class TestRemoteAccessServerHTTP(IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         self.port = _find_free_port()
-        # Use empty password for test simplicity
         self._orig_config = None
         if CONFIG_PATH.exists():
             self._orig_config = CONFIG_PATH.read_text()
@@ -379,12 +378,9 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
-            # Send a VS Code-only command
             await ws.send(json.dumps({"type": "focusEditor"}))
-            # Send getModels to verify the connection still works
             await ws.send(json.dumps({"type": "getModels"}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
-            # Should get models response, not an error about focusEditor
             self.assertEqual(resp["type"], "models")
 
     async def test_ws_unknown_command_returns_error(self) -> None:
@@ -411,7 +407,6 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
             self.assertEqual(resp["tabId"], tab_id)
 
             await ws.send(json.dumps({"type": "closeTab", "tabId": tab_id}))
-            # closeTab doesn't broadcast, so verify no error by sending another command
             await ws.send(json.dumps({"type": "getModels"}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "models")
@@ -431,7 +426,6 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                     }
                 )
             )
-            # selectModel doesn't broadcast, verify via getModels
             await ws.send(json.dumps({"type": "getModels"}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "models")
@@ -453,8 +447,6 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                     }
                 )
             )
-            # Collect all responses — expect models, inputHistory,
-            # configData, welcome_suggestions, and focusInput (order may vary)
             received_types: set[str] = set()
             for _ in range(5):
                 raw = await asyncio.wait_for(ws.recv(), timeout=5)
@@ -505,7 +497,6 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                     }
                 )
             )
-            # Collect events; the first should be setTaskText and status
             events: list[dict[str, Any]] = []
             deadline = asyncio.get_event_loop().time() + 10
             while asyncio.get_event_loop().time() < deadline:
@@ -513,7 +504,6 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                     raw = await asyncio.wait_for(ws.recv(), timeout=3)
                     ev = json.loads(raw)
                     events.append(ev)
-                    # Stop once we see status running=False or result
                     if ev.get("type") == "status" and not ev.get("running"):
                         break
                     if ev.get("type") == "result":
@@ -535,8 +525,6 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
             await asyncio.wait_for(ws.recv(), timeout=5)
 
             await ws.send(json.dumps({"type": "userActionDone"}))
-            # userAnswer without an active task just drops the answer.
-            # Verify no "Unknown command" error by sending a follow-up.
             await ws.send(json.dumps({"type": "getModels"}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "models")
@@ -547,10 +535,6 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
-            # Send resumeSession with 'id' (webview format) instead of
-            # 'chatId' (backend format).  A non-existent id produces no
-            # broadcast (empty session), but crucially no Unknown command
-            # error.  Verify by sending a follow-up command.
             await ws.send(
                 json.dumps(
                     {
@@ -561,8 +545,6 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                 )
             )
             await ws.send(json.dumps({"type": "getModels"}))
-            # Drain responses — the first may be task_events from
-            # resumeSession or models from getModels.
             events: list[dict[str, Any]] = []
             deadline = asyncio.get_event_loop().time() + 5
             while asyncio.get_event_loop().time() < deadline:
@@ -574,7 +556,6 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                         break
                 except TimeoutError:
                     break
-            # Must not have an "Unknown command: resumeSession" error
             for ev in events:
                 if ev.get("type") == "error":
                     self.assertNotIn(
@@ -596,16 +577,13 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
 
     async def test_ws_remote_url_from_active_url(self) -> None:
         """remote_url event uses in-memory _active_url even when URL file is missing."""
-        # Set the in-memory URL directly (simulates what _serve_async does)
         self.server._active_url = "https://test-dynamic.trycloudflare.com"
-        # Ensure the URL file does NOT exist so the fallback is needed
         _remove_url_file()
         async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
             await ws.send(json.dumps({"type": "getWelcomeSuggestions"}))
-            # Collect events — expect welcome_suggestions and remote_url
             events: list[dict[str, Any]] = []
             for _ in range(3):
                 try:
@@ -692,7 +670,6 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                     }
                 )
             )
-            # saveConfig broadcasts models and configData
             received_types: set[str] = set()
             for _ in range(2):
                 raw = await asyncio.wait_for(ws.recv(), timeout=5)
@@ -715,7 +692,6 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                     }
                 )
             )
-            # setSkipMerge doesn't broadcast — verify no error
             await ws.send(json.dumps({"type": "getModels"}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "models")
@@ -727,7 +703,6 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
             await asyncio.wait_for(ws.recv(), timeout=5)
 
             await ws.send(json.dumps({"type": "stop", "tabId": "no-task"}))
-            # stop without a running task is a no-op — verify no error
             await ws.send(json.dumps({"type": "getModels"}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "models")
@@ -747,7 +722,6 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                     }
                 )
             )
-            # Verify no crash by sending a follow-up and draining
             await ws.send(json.dumps({"type": "getModels"}))
             events: list[dict[str, Any]] = []
             deadline = asyncio.get_event_loop().time() + 5
@@ -790,8 +764,6 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
             await asyncio.wait_for(ws.recv(), timeout=5)
 
             await ws.send(json.dumps({"type": "generateCommitMessage"}))
-            # The command runs async and may produce a commitMessage or
-            # nothing (no git diff). Verify no Unknown command error.
             await ws.send(json.dumps({"type": "getModels"}))
             events: list[dict[str, Any]] = []
             deadline = asyncio.get_event_loop().time() + 5
@@ -804,7 +776,6 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                         break
                 except TimeoutError:
                     break
-            # No "Unknown command: generateCommitMessage" error
             for ev in events:
                 if ev.get("type") == "error":
                     self.assertNotIn("Unknown command", ev.get("text", ""))
@@ -835,7 +806,6 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
             await asyncio.wait_for(ws.recv(), timeout=5)
 
             await ws.send(json.dumps({"type": "complete", "query": "hello"}))
-            # complete either returns a ghost event or nothing; verify no error
             await ws.send(json.dumps({"type": "getModels"}))
             events: list[dict[str, Any]] = []
             deadline = asyncio.get_event_loop().time() + 5
@@ -867,7 +837,6 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                     }
                 )
             )
-            # worktreeAction may broadcast worktree_result; verify no Unknown command
             await ws.send(json.dumps({"type": "getModels"}))
             events: list[dict[str, Any]] = []
             deadline = asyncio.get_event_loop().time() + 5
@@ -921,7 +890,6 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
-            # All 30 FromWebviewMessage types with minimal required fields
             commands = [
                 {"type": "ready", "tabId": "t"},
                 {
@@ -953,7 +921,6 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                 {"type": "autocommitAction", "action": "skip", "tabId": "t"},
                 {"type": "setSkipMerge", "tabId": "t", "skip": False},
                 {"type": "saveConfig", "config": {}, "apiKeys": {}},
-                # VS Code-only (should be silently ignored)
                 {"type": "openFile", "path": "/tmp/x"},
                 {"type": "focusEditor"},
 
@@ -963,7 +930,6 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
             for cmd in commands:
                 await ws.send(json.dumps(cmd))
 
-            # Drain all messages, check none is an Unknown command error
             events: list[dict[str, Any]] = []
             deadline = asyncio.get_event_loop().time() + 10
             while asyncio.get_event_loop().time() < deadline:
@@ -1016,7 +982,6 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
             event_types = [e["type"] for e in events]
             self.assertIn("setTaskText", event_types)
             self.assertIn("status", event_types)
-            # setTaskText should come before or at the same time as status running=True
             task_text_events = [e for e in events if e.get("type") == "setTaskText"]
             self.assertTrue(
                 any(e.get("text") == "test task" for e in task_text_events),
@@ -1062,7 +1027,6 @@ class TestRemoteAccessServerAuth(IsolatedAsyncioTestCase):
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "auth_required")
 
-            # Second attempt with correct password
             await ws.send(json.dumps({"type": "auth", "password": "test-secret-123"}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "auth_ok")
@@ -1110,15 +1074,12 @@ class TestRemoteAccessServerMultiClient(IsolatedAsyncioTestCase):
             connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws1,
             connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws2,
         ):
-            # Authenticate both
             for ws in [ws1, ws2]:
                 await ws.send(json.dumps({"type": "auth", "password": ""}))
                 await asyncio.wait_for(ws.recv(), timeout=5)
 
-            # Trigger an event from client 1
             await ws1.send(json.dumps({"type": "newChat", "tabId": "shared-tab"}))
 
-            # Both clients should receive the showWelcome event
             r1 = json.loads(await asyncio.wait_for(ws1.recv(), timeout=5))
             r2 = json.loads(await asyncio.wait_for(ws2.recv(), timeout=5))
             self.assertEqual(r1["type"], "showWelcome")
@@ -1140,7 +1101,6 @@ class TestRemoteAccessServerTask(IsolatedAsyncioTestCase):
             self._orig_config = CONFIG_PATH.read_text()
         self._tmpdir = tempfile.mkdtemp()
 
-        # Start a fake OpenAI-compatible model server
         self._model_server = _FakeModelServer(self.model_port)
         self._model_server.start()
 
@@ -1180,7 +1140,6 @@ class TestRemoteAccessServerTask(IsolatedAsyncioTestCase):
             endpoint = f"http://127.0.0.1:{self.model_port}/v1"
             model_name = f"custom/{endpoint.rstrip('/').split('/')[-1]}"
 
-            # Select the custom model
             await ws.send(
                 json.dumps(
                     {
@@ -1191,7 +1150,6 @@ class TestRemoteAccessServerTask(IsolatedAsyncioTestCase):
                 )
             )
 
-            # Run a simple task
             await ws.send(
                 json.dumps(
                     {
@@ -1202,7 +1160,6 @@ class TestRemoteAccessServerTask(IsolatedAsyncioTestCase):
                 )
             )
 
-            # Collect events until we see a result or status running=False
             events: list[dict] = []
             deadline = asyncio.get_event_loop().time() + 30
             done = False
@@ -1219,17 +1176,10 @@ class TestRemoteAccessServerTask(IsolatedAsyncioTestCase):
                     break
 
             event_types = {e["type"] for e in events}
-            # Should have received a status running=True and eventually
-            # either a result or error
             self.assertTrue(
                 "status" in event_types or "result" in event_types or "error" in event_types,
                 f"Expected task lifecycle events, got: {event_types}",
             )
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 
 class _FakeModelHandler(BaseHTTPRequestHandler):
@@ -1320,7 +1270,6 @@ class TestRemoteAccessServerMerge(IsolatedAsyncioTestCase):
             self._orig_config = CONFIG_PATH.read_text()
         save_config({"remote_password": ""})
 
-        # Create a git repo with a file, commit, then modify
         self._tmpdir = tempfile.mkdtemp()
         subprocess.run(
             ["git", "init", self._tmpdir],
@@ -1350,7 +1299,6 @@ class TestRemoteAccessServerMerge(IsolatedAsyncioTestCase):
             capture_output=True,
             check=True,
         )
-        # Simulate agent changes
         with open(self._test_file, "w") as f:
             f.write("line1\nmodified_line2\nline3\nnew_line4\n")
 
@@ -1413,13 +1361,11 @@ class TestRemoteAccessServerMerge(IsolatedAsyncioTestCase):
             await self._auth(ws)
             await self._trigger_merge(tab_id)
 
-            # Receive merge_data and merge_started
             events = await self._collect_until(ws, "merge_started")
             types = [e["type"] for e in events]
             self.assertIn("merge_data", types)
             self.assertIn("merge_started", types)
 
-            # Send accept-all
             await ws.send(
                 json.dumps(
                     {
@@ -1430,7 +1376,6 @@ class TestRemoteAccessServerMerge(IsolatedAsyncioTestCase):
                 )
             )
 
-            # Should receive merge_ended
             events = await self._collect_until(ws, "merge_ended", timeout=5)
             ended = [e for e in events if e.get("type") == "merge_ended"]
             self.assertTrue(
@@ -1446,11 +1391,7 @@ class TestRemoteAccessServerMerge(IsolatedAsyncioTestCase):
             await self._trigger_merge(tab_id)
             events = await self._collect_until(ws, "merge_started")
 
-            # Remember the original (base) content
-            # The base is "line1\nline2\nline3\n"
-            # The current (agent) content is "line1\nmodified_line2\nline3\nnew_line4\n"
 
-            # Send reject-all
             await ws.send(
                 json.dumps(
                     {
@@ -1465,7 +1406,6 @@ class TestRemoteAccessServerMerge(IsolatedAsyncioTestCase):
             ended = [e for e in events if e.get("type") == "merge_ended"]
             self.assertTrue(len(ended) > 0, "merge_ended should be broadcast")
 
-            # The file should be reverted to base content
             with open(self._test_file) as f:
                 content = f.read()
             self.assertEqual(content, "line1\nline2\nline3\n")
@@ -1484,7 +1424,6 @@ class TestRemoteAccessServerMerge(IsolatedAsyncioTestCase):
             md = md_events[0]
             files = md["data"]["files"]
             self.assertTrue(len(files) > 0)
-            # Each file should have base_text and current_text
             for f in files:
                 self.assertIn("base_text", f, "merge_data files must include base_text")
                 self.assertIn("current_text", f, "merge_data files must include current_text")
@@ -1500,7 +1439,6 @@ class TestRemoteAccessServerMerge(IsolatedAsyncioTestCase):
             md_events = [e for e in events if e.get("type") == "merge_data"]
             total_hunks = md_events[0]["hunk_count"]
 
-            # Accept all hunks one by one
             for _ in range(total_hunks):
                 await ws.send(
                     json.dumps(
@@ -1516,7 +1454,6 @@ class TestRemoteAccessServerMerge(IsolatedAsyncioTestCase):
             ended = [e for e in events if e.get("type") == "merge_ended"]
             self.assertTrue(len(ended) > 0, "merge should complete after all hunks accepted")
 
-            # Content should be preserved (agent's changes kept)
             with open(self._test_file) as f:
                 content = f.read()
             self.assertEqual(content, "line1\nmodified_line2\nline3\nnew_line4\n")
@@ -1532,7 +1469,6 @@ class TestRemoteAccessServerMerge(IsolatedAsyncioTestCase):
             md_events = [e for e in events if e.get("type") == "merge_data"]
             total_hunks = md_events[0]["hunk_count"]
 
-            # Reject all hunks one by one
             for _ in range(total_hunks):
                 await ws.send(
                     json.dumps(
@@ -1548,7 +1484,6 @@ class TestRemoteAccessServerMerge(IsolatedAsyncioTestCase):
             ended = [e for e in events if e.get("type") == "merge_ended"]
             self.assertTrue(len(ended) > 0)
 
-            # Content should be reverted to base
             with open(self._test_file) as f:
                 content = f.read()
             self.assertEqual(content, "line1\nline2\nline3\n")
@@ -1571,7 +1506,6 @@ class TestGenerateSelfSignedCert(unittest.TestCase):
             self.assertIn(b"BEGIN CERTIFICATE", cert_path.read_bytes())
             self.assertIn(b"BEGIN RSA PRIVATE KEY", key_path.read_bytes())
 
-            # Verify ssl module can load them
             ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_SERVER)
             ctx.load_cert_chain(str(cert_path), str(key_path))
 
@@ -1705,13 +1639,11 @@ class TestTunnelWatchdog(IsolatedAsyncioTestCase):
         self.server._tunnel_failure_count = 1
         self.server._tunnel_next_retry = time.monotonic() + 600
         await self.server._check_and_restart_tunnel()
-        # Should not raise or attempt a restart.
         self.assertIsNone(self.server._tunnel_proc)
         self.assertEqual(self.server._tunnel_failure_count, 1)
 
     async def test_watchdog_alive_process_not_restarted(self) -> None:
         """A still-running tunnel process is left alone."""
-        # Start a long-running process
         proc = subprocess.Popen(
             ["sleep", "60"],
             stdout=subprocess.PIPE,
@@ -1720,37 +1652,30 @@ class TestTunnelWatchdog(IsolatedAsyncioTestCase):
         self.server._tunnel_proc = proc  # type: ignore[assignment]
         try:
             await self.server._check_and_restart_tunnel()
-            # Process should still be the same (alive)
             self.assertIs(self.server._tunnel_proc, proc)
-            self.assertIsNone(proc.poll())  # still running
+            self.assertIsNone(proc.poll())
         finally:
             proc.terminate()
             proc.wait()
 
     async def test_watchdog_restarts_dead_process(self) -> None:
         """A dead tunnel process triggers restart (which fails without cloudflared)."""
-        # Start a process that exits immediately
         proc = subprocess.Popen(
             ["true"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        proc.wait()  # ensure it's dead
+        proc.wait()
         self.server._tunnel_proc = proc  # type: ignore[assignment]
         self.server.use_tunnel = True
 
-        # _check_and_restart_tunnel will detect the dead process and
-        # try to restart.  Without cloudflared installed in CI, _start_tunnel
-        # returns None, but the dead process should be cleared.
         await self.server._check_and_restart_tunnel()
-        # The old dead proc should no longer be referenced
         self.assertIsNot(self.server._tunnel_proc, proc)
 
     async def test_watchdog_task_runs_and_cancels(self) -> None:
         """The watchdog task can be started and cancelled cleanly."""
         self.server._tunnel_proc = None
         task = asyncio.create_task(self.server._watchdog())
-        # Let it run one check cycle (with a very short sleep)
         await asyncio.sleep(0.05)
         task.cancel()
         with self.assertRaises(asyncio.CancelledError):
@@ -1774,13 +1699,11 @@ class TestUrlFile(unittest.TestCase):
     """Test URL file save/remove/print helpers."""
 
     def setUp(self) -> None:
-        # Back up any existing URL file
         self._backup: bytes | None = None
         if _URL_FILE.is_file():
             self._backup = _URL_FILE.read_bytes()
 
     def tearDown(self) -> None:
-        # Restore original URL file
         if self._backup is not None:
             _URL_FILE.write_bytes(self._backup)
         else:
@@ -1810,7 +1733,7 @@ class TestUrlFile(unittest.TestCase):
     def test_remove_url_file_missing(self) -> None:
         """Removing when file doesn't exist is a no-op."""
         _URL_FILE.unlink(missing_ok=True)
-        _remove_url_file()  # should not raise
+        _remove_url_file()
         self.assertFalse(_URL_FILE.is_file())
 
     def test_print_url_tunnel(self) -> None:
@@ -1892,9 +1815,6 @@ class TestStartQuickTunnelUrlParsing(IsolatedAsyncioTestCase):
         """_start_quick_tunnel ignores api.trycloudflare.com from stderr."""
         import sys
 
-        # Create a helper script that mimics cloudflared stderr output:
-        # first emits api.trycloudflare.com (the API endpoint), then
-        # the real tunnel URL, then sleeps so the process stays alive.
         script = (
             "import sys, time\n"
             'sys.stderr.write("INF Requesting new quick Tunnel on '
@@ -1906,19 +1826,14 @@ class TestStartQuickTunnelUrlParsing(IsolatedAsyncioTestCase):
             "sys.stderr.flush()\n"
             "time.sleep(30)\n"
         )
-        # Start the fake cloudflared process
         proc = subprocess.Popen(
             [sys.executable, "-c", script],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
         )
-        # Inject it as the tunnel process so _start_quick_tunnel's
-        # reader sees the stderr from this process.
         self.server._tunnel_proc = proc  # type: ignore[assignment]
 
-        # Directly invoke the stderr reader logic from _start_quick_tunnel.
-        # We replicate the exact reader thread approach used in production.
         import re
 
         stderr_fd = proc.stderr
@@ -1968,7 +1883,6 @@ class TestStartQuickTunnelUrlParsing(IsolatedAsyncioTestCase):
             "Old regex captured the api.trycloudflare.com URL",
         )
 
-        # New regex should NOT match the api URL
         new_regex = r"(https://(?!api\.)[^\s]+\.trycloudflare\.com)"
         match2 = re.search(new_regex, line)
         self.assertIsNone(
@@ -2052,9 +1966,7 @@ class TestIpWatchdog(IsolatedAsyncioTestCase):
 
     async def test_ip_watchdog_closes_server_on_change(self) -> None:
         """When IPs change, the watchdog closes the WebSocket server."""
-        # Simulate an IP change by setting _last_ips to something different
         self.server._last_ips = frozenset({"10.255.255.1"})
-        # Cancel the existing watchdog and start a fresh one with short interval
         if self.server._watchdog_task is not None:
             self.server._watchdog_task.cancel()
             try:
@@ -2062,14 +1974,12 @@ class TestIpWatchdog(IsolatedAsyncioTestCase):
             except asyncio.CancelledError:
                 pass
 
-        # Temporarily override TUNNEL_CHECK_INTERVAL for fast test.
         import kiss.agents.vscode.web_server as ws_mod
 
         original_interval = ws_mod.TUNNEL_CHECK_INTERVAL
-        ws_mod.TUNNEL_CHECK_INTERVAL = 0  # minimal sleep for fast test
+        ws_mod.TUNNEL_CHECK_INTERVAL = 0
         try:
             task = asyncio.create_task(self.server._watchdog())
-            # Wait for the watchdog to detect the change and close the server
             await asyncio.sleep(0.3)
             self.assertTrue(task.done(), "Watchdog should have returned after IP change")
         finally:
@@ -2088,11 +1998,10 @@ class TestIpWatchdog(IsolatedAsyncioTestCase):
                 pass
 
         original_interval = ws_mod.TUNNEL_CHECK_INTERVAL
-        ws_mod.TUNNEL_CHECK_INTERVAL = 0  # minimal sleep for fast test
+        ws_mod.TUNNEL_CHECK_INTERVAL = 0
         try:
             task = asyncio.create_task(self.server._watchdog())
             await asyncio.sleep(0.2)
-            # Should still be running (IPs haven't changed)
             self.assertFalse(task.done(), "Watchdog should keep running when IPs unchanged")
             task.cancel()
             try:
@@ -2110,8 +2019,6 @@ class TestDiscoverTunnelUrlFromMetricsFiltersApi(unittest.TestCase):
         """When metrics API returns api.trycloudflare.com, return None."""
         import urllib.request
 
-        # Start a real HTTP server that returns api.trycloudflare.com
-        # as the hostname on /quicktunnel.
         port = _find_free_port()
 
         class Handler(BaseHTTPRequestHandler):
@@ -2134,10 +2041,6 @@ class TestDiscoverTunnelUrlFromMetricsFiltersApi(unittest.TestCase):
         t.start()
 
         try:
-            # _discover_tunnel_url_from_metrics scans pgrep output for
-            # cloudflared processes and tries metrics ports.  We can't
-            # easily inject our port into pgrep output, so test the
-            # filtering logic directly by querying our server.
             req = urllib.request.Request(
                 f"http://127.0.0.1:{port}/quicktunnel",
                 headers={"User-Agent": "kiss-web"},
@@ -2145,7 +2048,6 @@ class TestDiscoverTunnelUrlFromMetricsFiltersApi(unittest.TestCase):
             with urllib.request.urlopen(req, timeout=2) as resp:
                 data = json.loads(resp.read())
                 hostname = data.get("hostname", "")
-                # This is what _discover_tunnel_url_from_metrics now checks:
                 if hostname and not hostname.startswith("api."):
                     result = f"https://{hostname}"
                 else:
@@ -2220,10 +2122,10 @@ class TestWebMergeStateEdgeCases(unittest.TestCase):
                 "files": [{"name": "a.py", "hunks": [{"cs": 0, "cc": 1, "bs": 0, "bc": 1}]}],
             }
         )
-        state._pos = 999  # way past end
+        state._pos = 999
         cur = state.current()
         self.assertEqual(cur, (0, 0))
-        self.assertEqual(state._pos, 0)  # clamped to last index
+        self.assertEqual(state._pos, 0)
 
     def test_advance_noop_when_all_resolved(self) -> None:
         """advance() is a no-op when all hunks are resolved."""
@@ -2265,11 +2167,9 @@ class TestWebMergeStateEdgeCases(unittest.TestCase):
                 ],
             }
         )
-        # Resolve middle hunk, position at last
         state.mark_resolved(0, 1)
         state._pos = 2
         state.advance()
-        # Should wrap to first unresolved (0, 0)
         self.assertEqual(state._all_hunks[state._pos], (0, 0))
 
     def test_go_prev_wraps_around(self) -> None:
@@ -2289,7 +2189,6 @@ class TestWebMergeStateEdgeCases(unittest.TestCase):
         )
         state._pos = 0
         state.go_prev()
-        # Should wrap to last hunk
         self.assertEqual(state._all_hunks[state._pos], (0, 1))
 
     def test_unresolved_in_file(self) -> None:
@@ -2469,10 +2368,7 @@ class TestDiscoverTunnelUrlFromMetrics(unittest.TestCase):
 
     def test_returns_none_when_no_cloudflared(self) -> None:
         """Returns None when no cloudflared process is running."""
-        # In test environments, cloudflared is typically not running,
-        # so this should return None.
         result = _discover_tunnel_url_from_metrics()
-        # Can be None or a URL if cloudflared happens to be running.
         self.assertTrue(result is None or isinstance(result, str))
 
 
@@ -2495,18 +2391,14 @@ class TestWebPrinterBroadcastEdgeCases(IsolatedAsyncioTestCase):
             )
             await server.start_async()
             try:
-                # Connect and authenticate, then close abruptly
                 ws = await connect(
                     f"wss://127.0.0.1:{port}/ws",
                     ssl=_no_verify_ssl(),
                 )
                 await ws.send(json.dumps({"type": "auth", "password": ""}))
                 await asyncio.wait_for(ws.recv(), timeout=5)
-                # Close the WS connection
                 await ws.close()
-                # Wait a moment for the server to notice
                 await asyncio.sleep(0.1)
-                # Broadcast should not raise even though client is gone
                 server._printer.broadcast({"type": "text_delta", "text": "hello"})
             finally:
                 await server.stop_async()
@@ -2575,11 +2467,9 @@ class TestAuthenticationEdgeCases(IsolatedAsyncioTestCase):
             f"wss://127.0.0.1:{self.port}/ws",
             ssl=_no_verify_ssl(),
         ) as ws:
-            # Send wrong password
             await ws.send(json.dumps({"type": "auth", "password": "wrong"}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "auth_required")
-            # Retry with correct password
             await ws.send(json.dumps({"type": "auth", "password": "secret123"}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "auth_ok")
@@ -2596,7 +2486,6 @@ class TestAuthenticationEdgeCases(IsolatedAsyncioTestCase):
             await ws.send(json.dumps({"type": "auth", "password": "still-wrong"}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "error")
-            # Connection should be closed
             with self.assertRaises(Exception):
                 await asyncio.wait_for(ws.recv(), timeout=3)
 
@@ -2607,7 +2496,6 @@ class TestAuthenticationEdgeCases(IsolatedAsyncioTestCase):
             ssl=_no_verify_ssl(),
         ) as ws:
             await ws.send(json.dumps({"type": "getModels"}))
-            # Connection should be closed
             with self.assertRaises(Exception):
                 await asyncio.wait_for(ws.recv(), timeout=3)
 
@@ -2716,7 +2604,6 @@ class TestMergeActionsDetailed(IsolatedAsyncioTestCase):
             md_events = [e for e in events if e.get("type") == "merge_data"]
             total_hunks = md_events[0]["hunk_count"]
 
-            # Send prev
             await ws.send(
                 json.dumps(
                     {
@@ -2731,7 +2618,6 @@ class TestMergeActionsDetailed(IsolatedAsyncioTestCase):
             self.assertTrue(len(nav_events) > 0)
             self.assertEqual(nav_events[0]["remaining"], total_hunks)
 
-            # Send next
             await ws.send(
                 json.dumps(
                     {
@@ -2746,7 +2632,6 @@ class TestMergeActionsDetailed(IsolatedAsyncioTestCase):
             self.assertTrue(len(nav_events) > 0)
             self.assertEqual(nav_events[0]["remaining"], total_hunks)
 
-            # Accept all to clean up
             await ws.send(
                 json.dumps(
                     {
@@ -2781,7 +2666,6 @@ class TestMergeActionsDetailed(IsolatedAsyncioTestCase):
             events = await self._collect_until(ws, "merge_ended", timeout=5)
             ended = [e for e in events if e.get("type") == "merge_ended"]
             self.assertTrue(len(ended) > 0)
-            # Content should be preserved (agent's changes kept)
             with open(self._test_file) as f:
                 content = f.read()
             self.assertEqual(content, "line1\nmodified_line2\nline3\nnew_line4\n")
@@ -2809,7 +2693,6 @@ class TestMergeActionsDetailed(IsolatedAsyncioTestCase):
             events = await self._collect_until(ws, "merge_ended", timeout=5)
             ended = [e for e in events if e.get("type") == "merge_ended"]
             self.assertTrue(len(ended) > 0)
-            # Content should be reverted to base
             with open(self._test_file) as f:
                 content = f.read()
             self.assertEqual(content, "line1\nline2\nline3\n")
@@ -2821,7 +2704,6 @@ class TestMergeActionsDetailed(IsolatedAsyncioTestCase):
             ssl=_no_verify_ssl(),
         ) as ws:
             await self._auth(ws)
-            # Send mergeAction for a tab that has no merge state
             await ws.send(
                 json.dumps(
                     {
@@ -2831,7 +2713,6 @@ class TestMergeActionsDetailed(IsolatedAsyncioTestCase):
                     }
                 )
             )
-            # Should not crash; send another command to verify connection is alive
             await ws.send(json.dumps({"type": "getModels"}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "models")
@@ -2883,7 +2764,6 @@ class TestHandleReadyRestoredTabs(IsolatedAsyncioTestCase):
                     }
                 )
             )
-            # Collect several events (models, input_history, config, etc.)
             events: list[dict] = []
             for _ in range(20):
                 try:
@@ -2913,7 +2793,6 @@ class TestHandleReadyRestoredTabs(IsolatedAsyncioTestCase):
                     }
                 )
             )
-            # Should work fine - collect events
             events: list[dict] = []
             for _ in range(10):
                 try:
@@ -2969,7 +2848,6 @@ class TestSubmitWithSkipMerge(IsolatedAsyncioTestCase):
                     }
                 )
             )
-            # Collect events - should see setTaskText and status
             events: list[dict] = []
             for _ in range(10):
                 try:
@@ -3016,7 +2894,6 @@ class TestSendWelcomeInfoFallbacks(IsolatedAsyncioTestCase):
 
     async def test_welcome_info_uses_url_file_fallback(self) -> None:
         """When _active_url is None, _send_welcome_info reads URL file."""
-        # Save a URL file with a known URL
         _save_url_file(
             "https://localhost:8787",
             "https://test.trycloudflare.com",
@@ -3064,8 +2941,6 @@ class TestSendWelcomeInfoFallbacks(IsolatedAsyncioTestCase):
                     break
             types = [e.get("type") for e in events]
             self.assertIn("welcome_suggestions", types)
-            # remote_url may or may not be present depending on metrics API
-            # The key thing is no crash occurred
 
 
 class TestNamedTunnel(IsolatedAsyncioTestCase):
@@ -3103,7 +2978,6 @@ class TestNamedTunnel(IsolatedAsyncioTestCase):
             tunnel_token="fake-token",
             work_dir=tempfile.mkdtemp(),
         )
-        # Create a fake cloudflared that outputs a hostname
         script = (
             "import sys, time\n"
             'sys.stderr.write("INF Connection registered '
@@ -3120,7 +2994,6 @@ class TestNamedTunnel(IsolatedAsyncioTestCase):
         server._tunnel_proc = proc  # type: ignore[assignment]
 
         try:
-            # Call _start_named_tunnel logic by reading stderr
             import re
 
             url = None
@@ -3192,16 +3065,8 @@ class TestNamedTunnel(IsolatedAsyncioTestCase):
             use_tunnel=False,
             work_dir=tempfile.mkdtemp(),
         )
-        # Force FileNotFoundError by using a nonexistent binary
-        # We can't use mocks, so test indirectly:
-        # _start_tunnel catches FileNotFoundError. If cloudflared isn't
-        # at an impossible path, we verify the function handles it.
-        # On most test envs, cloudflared IS available but with a bad token
-        # it would still not raise FileNotFoundError. Instead, test the
-        # path where tunnel_token is set but cloudflared is present.
         server.tunnel_token = "fake-token-that-will-fail"
         result = server._start_tunnel()
-        # It should either return None or a URL (if cloudflared is present)
         self.assertTrue(result is None or isinstance(result, str))
 
 
@@ -3241,7 +3106,6 @@ class TestWatchdogBranches(IsolatedAsyncioTestCase):
         """Watchdog pings connected WS clients."""
         import kiss.agents.vscode.web_server as ws_mod
 
-        # Connect a client
         ws = await connect(
             f"wss://127.0.0.1:{self.port}/ws",
             ssl=_no_verify_ssl(),
@@ -3249,7 +3113,6 @@ class TestWatchdogBranches(IsolatedAsyncioTestCase):
         await ws.send(json.dumps({"type": "auth", "password": ""}))
         await asyncio.wait_for(ws.recv(), timeout=5)
 
-        # Cancel existing watchdog
         if self.server._watchdog_task is not None:
             self.server._watchdog_task.cancel()
             try:
@@ -3257,19 +3120,16 @@ class TestWatchdogBranches(IsolatedAsyncioTestCase):
             except asyncio.CancelledError:
                 pass
 
-        # Run one watchdog tick with short interval
         original_interval = ws_mod.TUNNEL_CHECK_INTERVAL
         ws_mod.TUNNEL_CHECK_INTERVAL = 0
         try:
             task = asyncio.create_task(self.server._watchdog())
             await asyncio.sleep(0.3)
-            # Client should still be connected (pong responded)
             task.cancel()
             try:
                 await task
             except asyncio.CancelledError:
                 pass
-            # Verify client is still alive by sending a message
             await ws.send(json.dumps({"type": "getModels"}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "models")
@@ -3282,7 +3142,6 @@ class TestWatchdogBranches(IsolatedAsyncioTestCase):
         import kiss.agents.vscode.web_server as ws_mod
 
         self.server.use_tunnel = True
-        # Set a bad tunnel_proc that will cause an exception
         self.server._tunnel_proc = "not-a-process"  # type: ignore[assignment]
 
         if self.server._watchdog_task is not None:
@@ -3297,7 +3156,6 @@ class TestWatchdogBranches(IsolatedAsyncioTestCase):
         try:
             task = asyncio.create_task(self.server._watchdog())
             await asyncio.sleep(0.3)
-            # Watchdog should still be running (caught the exception)
             self.assertFalse(task.done())
             task.cancel()
             try:
@@ -3343,7 +3201,6 @@ class TestCheckAndRestartTunnel(IsolatedAsyncioTestCase):
 
     async def test_restart_dead_tunnel_updates_url(self) -> None:
         """When tunnel dies, _check_and_restart_tunnel updates URL file."""
-        # Start a quick-dying process
         proc = subprocess.Popen(
             ["true"],
             stdout=subprocess.PIPE,
@@ -3355,7 +3212,6 @@ class TestCheckAndRestartTunnel(IsolatedAsyncioTestCase):
 
         await self.server._check_and_restart_tunnel()
 
-        # URL file should have been updated
         self.assertTrue(_URL_FILE.is_file())
         data = json.loads(_URL_FILE.read_text())
         self.assertIn("local", data)
@@ -3379,7 +3235,6 @@ class TestStopAsyncTimeout(IsolatedAsyncioTestCase):
                 work_dir=tempfile.mkdtemp(),
             )
             await server.start_async()
-            # Double-stop should be safe
             await server.stop_async()
             await server.stop_async()
         finally:
@@ -3421,9 +3276,7 @@ class TestWSHandlerInvalidJson(IsolatedAsyncioTestCase):
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
-            # Send invalid JSON
             await ws.send("not valid json{{{")
-            # Then send a valid command to verify handler is still alive
             await ws.send(json.dumps({"type": "getModels"}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "models")
@@ -3461,12 +3314,10 @@ class TestPingOneWs(IsolatedAsyncioTestCase):
         await ws.send(json.dumps({"type": "auth", "password": ""}))
         await asyncio.wait_for(ws.recv(), timeout=5)
 
-        # Get the server-side connection object
         assert self.server._ws_server is not None
         server_conns = list(self.server._ws_server.connections)
         self.assertTrue(len(server_conns) > 0)
 
-        # Ping should succeed
         await self.server._ping_one_ws(server_conns[0])
         await ws.close()
 
@@ -3479,17 +3330,14 @@ class TestPingOneWs(IsolatedAsyncioTestCase):
         await ws.send(json.dumps({"type": "auth", "password": ""}))
         await asyncio.wait_for(ws.recv(), timeout=5)
 
-        # Get server-side connection
         assert self.server._ws_server is not None
         server_conns = list(self.server._ws_server.connections)
         self.assertTrue(len(server_conns) > 0)
         conn = server_conns[0]
 
-        # Close the client connection abruptly
         await ws.close()
         await asyncio.sleep(0.1)
 
-        # Ping should not raise (handles the exception)
         await self.server._ping_one_ws(conn)
 
 
@@ -3526,13 +3374,12 @@ class TestStopTunnel(IsolatedAsyncioTestCase):
         self.server._tunnel_proc = proc  # type: ignore[assignment]
         self.server._stop_tunnel()
         self.assertIsNone(self.server._tunnel_proc)
-        self.assertIsNotNone(proc.poll())  # process is dead
+        self.assertIsNotNone(proc.poll())
 
     async def test_stop_tunnel_kills_stubborn_process(self) -> None:
         """_stop_tunnel kills a process that ignores SIGTERM."""
         import sys
 
-        # Script that ignores SIGTERM
         script = (
             "import signal, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\ntime.sleep(60)\n"
         )
@@ -3543,12 +3390,7 @@ class TestStopTunnel(IsolatedAsyncioTestCase):
         )
         self.server._tunnel_proc = proc  # type: ignore[assignment]
 
-        # Override wait timeout to be very short for fast test
 
-        # We can't easily override the timeout, but the process ignores
-        # SIGTERM so _stop_tunnel should eventually kill it.
-        # However, the 5s timeout will make this slow. Let's just verify
-        # the normal terminate path works and the kill path is a bonus.
         self.server._stop_tunnel()
         self.assertIsNone(self.server._tunnel_proc)
         self.assertIsNotNone(proc.poll())
@@ -3556,7 +3398,7 @@ class TestStopTunnel(IsolatedAsyncioTestCase):
     async def test_stop_tunnel_noop_when_no_process(self) -> None:
         """_stop_tunnel is a no-op when _tunnel_proc is None."""
         self.server._tunnel_proc = None
-        self.server._stop_tunnel()  # should not raise
+        self.server._stop_tunnel()
         self.assertIsNone(self.server._tunnel_proc)
 
 
@@ -3698,8 +3540,6 @@ class TestStartQuickTunnelFallback(IsolatedAsyncioTestCase):
             use_tunnel=False,
             work_dir=tempfile.mkdtemp(),
         )
-        # Script that writes something but NOT a trycloudflare URL,
-        # then keeps running briefly
         script = (
             "import sys, time\n"
             'sys.stderr.write("INF Starting tunnel\\n")\n'
@@ -3714,9 +3554,7 @@ class TestStartQuickTunnelFallback(IsolatedAsyncioTestCase):
         )
         try:
             server._tunnel_proc = proc  # type: ignore[assignment]
-            # This will try stderr (timeout), then metrics API (no cloudflared)
             url = server._start_quick_tunnel()
-            # Should return None since no real tunnel is available
             self.assertTrue(url is None or isinstance(url, str))
         finally:
             proc.terminate()
@@ -3732,7 +3570,6 @@ class TestStartQuickTunnelFallback(IsolatedAsyncioTestCase):
             use_tunnel=False,
             work_dir=tempfile.mkdtemp(),
         )
-        # Script that exits immediately without writing a URL
         script = "import sys; sys.stderr.write('error\\n'); sys.exit(1)\n"
         proc = subprocess.Popen(
             [sys.executable, "-c", script],
@@ -3784,14 +3621,11 @@ class TestServeAsyncPrinting(IsolatedAsyncioTestCase):
             use_tunnel=False,
             work_dir=tempfile.mkdtemp(),
         )
-        # Capture stderr
         old_stderr = sys.stderr
         buf = io.StringIO()
         sys.stderr = buf
         try:
-            # Start _serve_async but don't let it block on serve_forever
             await server._setup_server()
-            # Manually do what _serve_async does after _setup_server
             print(
                 f"KISS Sorcar remote access: {server._local_url}",
                 file=sys.stderr,
@@ -3820,14 +3654,12 @@ class TestAutoGenCertInCreateSslContext(unittest.TestCase):
         """When cert/key don't exist in TLS dir, auto-generates them."""
         import kiss.agents.vscode.web_server as ws_mod
 
-        # Temporarily point _TLS_DIR to a clean directory
         original_tls_dir = ws_mod._TLS_DIR
         with tempfile.TemporaryDirectory() as td:
             ws_mod._TLS_DIR = Path(td) / "tls"
             try:
                 ctx = _create_ssl_context()
                 self.assertIsNotNone(ctx)
-                # Cert and key should now exist
                 self.assertTrue((ws_mod._TLS_DIR / "cert.pem").is_file())
                 self.assertTrue((ws_mod._TLS_DIR / "key.pem").is_file())
             finally:
@@ -3866,11 +3698,9 @@ class TestWSHandlerConnectionClosed(IsolatedAsyncioTestCase):
         await ws.send(json.dumps({"type": "auth", "password": ""}))
         await asyncio.wait_for(ws.recv(), timeout=5)
 
-        # Close without proper close handshake
         ws.transport.close()  # type: ignore[union-attr]
         await asyncio.sleep(0.2)
 
-        # Server should still be alive
         async with connect(
             f"wss://127.0.0.1:{self.port}/ws",
             ssl=_no_verify_ssl(),
@@ -3905,24 +3735,15 @@ class TestAuthTimeout(IsolatedAsyncioTestCase):
 
     async def test_connection_without_auth_message_times_out(self) -> None:
         """Connecting but not sending auth within timeout closes connection."""
-        # This tests the exception path in _authenticate_ws (lines 1189-1191)
-        # when no message is received within the timeout.
-        # We open a WS connection but never send the auth message.
-        # However, the 30s timeout is too long for tests. Instead,
-        # we test by sending a message that causes a json.loads error
-        # in the auth handler.
         ws = await connect(
             f"wss://127.0.0.1:{self.port}/ws",
             ssl=_no_verify_ssl(),
         )
-        # Send binary data that isn't valid JSON
         try:
             await ws.send(b"\x00\x01\x02")
         except Exception:
             pass
         await asyncio.sleep(0.2)
-        # The auth should have failed; connection should be closed
-        # Try to receive - should get nothing or raise
         with self.assertRaises(Exception):
             await asyncio.wait_for(ws.recv(), timeout=2)
 
@@ -3947,7 +3768,6 @@ class TestStartTunnelFileNotFound(IsolatedAsyncioTestCase):
 
     async def test_start_tunnel_returns_none_when_not_found(self) -> None:
         """_start_tunnel returns None and logs warning when cloudflared missing."""
-        # Empty PATH so cloudflared can't be found
         os.environ["PATH"] = ""
         server = RemoteAccessServer(
             host="127.0.0.1",
@@ -4008,7 +3828,6 @@ class TestCheckAndRestartTunnelFailedRestart(IsolatedAsyncioTestCase):
 
     async def test_restart_fails_logs_warning(self) -> None:
         """When restart fails, logs warning and updates URL to local."""
-        # Make a dead process
         proc = subprocess.Popen(
             ["true"],
             stdout=subprocess.PIPE,
@@ -4017,10 +3836,8 @@ class TestCheckAndRestartTunnelFailedRestart(IsolatedAsyncioTestCase):
         proc.wait()
         self.server._tunnel_proc = proc  # type: ignore[assignment]
         self.server.use_tunnel = True
-        # Empty PATH so cloudflared can't be found → _start_tunnel returns None
         os.environ["PATH"] = ""
         await self.server._check_and_restart_tunnel()
-        # Active URL should fall back to local
         self.assertEqual(self.server._active_url, self.server._local_url)
 
 
@@ -4051,18 +3868,15 @@ class TestWatchdogWSPingException(IsolatedAsyncioTestCase):
         """Watchdog continues running when WS ping encounters errors."""
         import kiss.agents.vscode.web_server as ws_mod
 
-        # Connect then close to create a stale connection scenario
         ws = await connect(
             f"wss://127.0.0.1:{self.port}/ws",
             ssl=_no_verify_ssl(),
         )
         await ws.send(json.dumps({"type": "auth", "password": ""}))
         await asyncio.wait_for(ws.recv(), timeout=5)
-        # Close client abruptly
         ws.transport.close()  # type: ignore[union-attr]
         await asyncio.sleep(0.1)
 
-        # Cancel existing watchdog
         if self.server._watchdog_task is not None:
             self.server._watchdog_task.cancel()
             try:
@@ -4075,7 +3889,6 @@ class TestWatchdogWSPingException(IsolatedAsyncioTestCase):
         try:
             task = asyncio.create_task(self.server._watchdog())
             await asyncio.sleep(0.3)
-            # Watchdog should still be running (caught ping exceptions)
             self.assertFalse(task.done())
             task.cancel()
             try:
@@ -4120,7 +3933,6 @@ class TestWatchdogIPChangeDetection(IsolatedAsyncioTestCase):
             except asyncio.CancelledError:
                 pass
 
-        # Set fake IPs to simulate change
         self.server._last_ips = frozenset({"10.255.255.1"})
         original_interval = ws_mod.TUNNEL_CHECK_INTERVAL
         ws_mod.TUNNEL_CHECK_INTERVAL = 0
@@ -4171,11 +3983,9 @@ class TestHeadPartialBuffer(IsolatedAsyncioTestCase):
         reader, writer = await asyncio.open_connection(
             "127.0.0.1", self.port, ssl=ctx,
         )
-        # Send partial first line without \r\n
         writer.write(b"HEA")
         await writer.drain()
         await asyncio.sleep(0.05)
-        # Now complete the HEAD request
         writer.write(b"D / HTTP/1.1\r\nHost: localhost\r\n\r\n")
         await writer.drain()
         response = await asyncio.wait_for(reader.read(4096), timeout=5)
@@ -4191,10 +4001,9 @@ class TestRemoveUrlFileOSError(unittest.TestCase):
         import kiss.agents.vscode.web_server as ws_mod
 
         original = ws_mod._URL_FILE
-        # Point to a path inside a non-existent directory
         ws_mod._URL_FILE = Path("/nonexistent_dir_abc/remote-url.json")
         try:
-            _remove_url_file()  # should not raise
+            _remove_url_file()
         finally:
             ws_mod._URL_FILE = original
 
@@ -4254,7 +4063,6 @@ class TestMergeActionCurNone(IsolatedAsyncioTestCase):
     async def test_accept_when_cur_is_none(self) -> None:
         """accept action when cur is None (no hunks) is a no-op."""
         tab_id = "tab-cur-none"
-        # Create a merge state with no hunks → current() returns None
         merge_data = {"files": [{"base": "/dev/null", "current": "/dev/null", "hunks": []}]}
         state = _WebMergeState(merge_data)
         self.server._merge_states[tab_id] = state
@@ -4265,11 +4073,9 @@ class TestMergeActionCurNone(IsolatedAsyncioTestCase):
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
-            # accept when all resolved (cur is None)
             await ws.send(json.dumps({
                 "type": "mergeAction", "action": "accept", "tabId": tab_id,
             }))
-            # Should get merge_nav broadcast
             msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(msg["type"], "merge_nav")
             self.assertEqual(msg["remaining"], 0)
@@ -4364,7 +4170,6 @@ class TestReadyRestoredTabEmptyChatId(IsolatedAsyncioTestCase):
                     {"tabId": "t2", "chatId": ""},
                 ],
             }))
-            # Should get responses without error
             msgs = []
             for _ in range(10):
                 try:
@@ -4390,7 +4195,6 @@ class TestNoWorkDir(IsolatedAsyncioTestCase):
         if _URL_FILE.is_file():
             self._backup_url = _URL_FILE.read_bytes()
 
-        # Save and remove KISS_WORKDIR if set
         self._orig_workdir = os.environ.pop("KISS_WORKDIR", None)
 
     async def asyncTearDown(self) -> None:
@@ -4462,7 +4266,6 @@ class TestStopTunnelKillPath(IsolatedAsyncioTestCase):
 
     async def test_kill_stubborn_process_with_ready_signal(self) -> None:
         """_stop_tunnel kills a process that ignores SIGTERM."""
-        # Script that ignores SIGTERM and signals readiness via stdout
         script = (
             "import signal, sys, time\n"
             "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
@@ -4475,13 +4278,11 @@ class TestStopTunnelKillPath(IsolatedAsyncioTestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        # Wait for child to be ready (SIGTERM handler installed)
         assert proc.stdout is not None
         proc.stdout.readline()
         self.server._tunnel_proc = proc  # type: ignore[assignment]
         self.server._stop_tunnel()
         self.assertIsNone(self.server._tunnel_proc)
-        # Process was killed — reap it
         proc.wait(timeout=5)
         self.assertIsNotNone(proc.returncode)
 
@@ -4572,9 +4373,6 @@ class TestStartMethodLifecycle(unittest.TestCase):
 
         def run_server() -> None:
             try:
-                # We need to interrupt asyncio.run from outside
-                # The simplest way is to have the server started and then
-                # raise KeyboardInterrupt in the main loop
                 server.start()
             except Exception as e:
                 error_box.append(e)
@@ -4582,7 +4380,6 @@ class TestStartMethodLifecycle(unittest.TestCase):
         t = threading.Thread(target=run_server, daemon=True)
         t.start()
 
-        # Wait for server to be up
         for _ in range(50):
             time.sleep(0.1)
             try:
@@ -4594,7 +4391,6 @@ class TestStartMethodLifecycle(unittest.TestCase):
             except OSError:
                 continue
 
-        # Stop the server - _stop_tunnel is called in the finally block
         if server._loop is not None:
             server._loop.call_soon_threadsafe(server._loop.stop)
 
@@ -4647,9 +4443,7 @@ class TestServeAsyncBranches(IsolatedAsyncioTestCase):
         )
         await server._setup_server()
 
-        # Simulate tunnel failure: use_tunnel=True but active_url == local_url
         server.use_tunnel = True
-        # _active_url is already local_url because tunnel wasn't started
 
         old_stderr = sys.stderr
         buf = io.StringIO()
@@ -4689,7 +4483,6 @@ class TestServeAsyncBranches(IsolatedAsyncioTestCase):
         )
         await server._setup_server()
 
-        # Simulate tunnel success
         server.use_tunnel = True
         server._active_url = "https://test-tunnel.trycloudflare.com"
 
@@ -4763,13 +4556,10 @@ class TestBroadcastWsSendException(IsolatedAsyncioTestCase):
         await asyncio.wait_for(ws.recv(), timeout=5)
         await asyncio.sleep(0.1)
 
-        # Forcefully close the underlying transport without clean close
         ws.transport.abort()
         await asyncio.sleep(0.1)
 
-        # Now broadcast - should not raise even though client is dead
         self.server._printer.broadcast({"type": "test", "data": "hello"})
-        # Give the coroutine time to run
         await asyncio.sleep(0.2)
 
 
@@ -4806,18 +4596,14 @@ class TestStopAsyncWaitTimeout(IsolatedAsyncioTestCase):
             work_dir=tempfile.mkdtemp(),
         )
         await server.start_async()
-        # Verify server is running
         self.assertIsNotNone(server._ws_server)
 
-        # Connect a client and keep it open to slow down close
         ws = await connect(
             f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl(),
         )
         await ws.send(json.dumps({"type": "auth", "password": ""}))
         await asyncio.wait_for(ws.recv(), timeout=5)
 
-        # Close the ws_server but replace wait_closed with a slow version
-        # Actually, let's just test the normal path - stop_async should work
         await server.stop_async()
         await ws.close()
 
@@ -4863,10 +4649,8 @@ class TestWatchdogWSPingWithConnections(IsolatedAsyncioTestCase):
         await ws.send(json.dumps({"type": "auth", "password": ""}))
         await asyncio.wait_for(ws.recv(), timeout=5)
 
-        # Verify connection is registered
         self.assertTrue(len(self.server._ws_server.connections) >= 1)
 
-        # Cancel existing watchdog
         if self.server._watchdog_task is not None:
             self.server._watchdog_task.cancel()
             try:
@@ -4874,15 +4658,12 @@ class TestWatchdogWSPingWithConnections(IsolatedAsyncioTestCase):
             except asyncio.CancelledError:
                 pass
 
-        # Manually run the WS ping section
         connections = list(self.server._ws_server.connections)
         self.assertTrue(len(connections) > 0)
 
-        # Ping each connection
         for conn in connections:
             await self.server._ping_one_ws(conn)
 
-        # Client should still be alive
         await ws.send(json.dumps({"type": "getModels"}))
         resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
         self.assertEqual(resp["type"], "models")
@@ -4931,12 +4712,10 @@ class TestFocusInputSendFails(IsolatedAsyncioTestCase):
         await ws.send(json.dumps({"type": "auth", "password": ""}))
         await asyncio.wait_for(ws.recv(), timeout=5)
 
-        # Send ready then immediately close
         await ws.send(json.dumps({"type": "ready", "tabId": "t1"}))
         await asyncio.sleep(0.01)
         ws.transport.abort()
         await asyncio.sleep(0.5)
-        # Server should not crash
 
 
 class TestDiscoverTunnelUrlEdgeCases(unittest.TestCase):
@@ -4947,13 +4726,6 @@ class TestDiscoverTunnelUrlEdgeCases(unittest.TestCase):
         result = _discover_tunnel_url_from_metrics()
         if result is not None:
             self.assertTrue(result.startswith("https://"))
-        # Else None is also valid — no cloudflared running
-
-
-# ---------------------------------------------------------------------------
-# Coverage: _discover_tunnel_url_from_metrics with fake pgrep
-# Covers lines 310-311, 320-323, 335->326, 339
-# ---------------------------------------------------------------------------
 
 
 class TestDiscoverTunnelFakePgrep(unittest.TestCase):
@@ -4973,12 +4745,10 @@ class TestDiscoverTunnelFakePgrep(unittest.TestCase):
         with open(pgrep_path, "w") as f:
             f.write("#!/bin/bash\n" + script_body + "\n")
         os.chmod(pgrep_path, 0o755)
-        # Put fake dir first on PATH so our pgrep is found first
         os.environ["PATH"] = self._tmpdir + ":" + self._old_path
 
     def test_pgrep_exception_returns_none(self) -> None:
         """When pgrep is not on PATH at all, returns None (line 310-311)."""
-        # Set PATH to empty dir so pgrep can't be found
         os.environ["PATH"] = self._tmpdir
         result = _discover_tunnel_url_from_metrics()
         self.assertIsNone(result)
@@ -4988,8 +4758,6 @@ class TestDiscoverTunnelFakePgrep(unittest.TestCase):
         self._write_fake_pgrep(
             'echo "1234 cloudflared tunnel --metrics not_a_port"'
         )
-        # Should not crash — may return None or a URL if real cloudflared
-        # has a metrics endpoint on a default port
         result = _discover_tunnel_url_from_metrics()
         if result is not None:
             self.assertTrue(result.startswith("https://"))
@@ -4997,17 +4765,9 @@ class TestDiscoverTunnelFakePgrep(unittest.TestCase):
     def test_no_cloudflared_running(self) -> None:
         """pgrep returns empty output → tries default ports (line 339)."""
         self._write_fake_pgrep('echo ""')
-        # Still tries default metrics ports 20240-20259, so may find
-        # a real running cloudflared on this machine
         result = _discover_tunnel_url_from_metrics()
         if result is not None:
             self.assertTrue(result.startswith("https://"))
-
-
-# ---------------------------------------------------------------------------
-# Coverage: _read_version with no matching __version__ line
-# Covers branch 899->898
-# ---------------------------------------------------------------------------
 
 
 class TestReadVersionNoMatch(unittest.TestCase):
@@ -5023,12 +4783,6 @@ class TestReadVersionNoMatch(unittest.TestCase):
             self.assertEqual(result, "")
         finally:
             vfile.write_text(original)
-
-
-# ---------------------------------------------------------------------------
-# Coverage: broadcast with merge_data but no tabId
-# Covers branch 551->554
-# ---------------------------------------------------------------------------
 
 
 class TestBroadcastMergeDataNoTabId(IsolatedAsyncioTestCase):
@@ -5053,18 +4807,11 @@ class TestBroadcastMergeDataNoTabId(IsolatedAsyncioTestCase):
         async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=ctx) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             _ = await asyncio.wait_for(ws.recv(), timeout=5)
-            # Now broadcast merge_data without tabId
             self.server._printer.broadcast({
                 "type": "merge_data",
                 "data": {"files": []},
             })
             await asyncio.sleep(0.1)
-
-
-# ---------------------------------------------------------------------------
-# Coverage: broadcast when loop is None
-# Covers branch 564->563
-# ---------------------------------------------------------------------------
 
 
 class TestBroadcastLoopNone(unittest.TestCase):
@@ -5075,13 +4822,6 @@ class TestBroadcastLoopNone(unittest.TestCase):
         printer = WebPrinter()
         printer._loop = None
         printer.broadcast({"type": "test_event"})
-        # Should not raise
-
-
-# ---------------------------------------------------------------------------
-# Coverage: reject hunk delta loop not entered (1396->1395)
-# When rejected hunk is the last in the file
-# ---------------------------------------------------------------------------
 
 
 class TestRejectLastHunk(IsolatedAsyncioTestCase):
@@ -5134,16 +4874,10 @@ class TestRejectLastHunk(IsolatedAsyncioTestCase):
                 "action": "reject",
                 "tabId": tab_id,
             }))
-            # Wait for merge_nav response
             msg = await asyncio.wait_for(ws.recv(), timeout=5)
             data = json.loads(msg)
             self.assertEqual(data["type"], "merge_nav")
             self.assertEqual(data["remaining"], 0)
-
-
-# ---------------------------------------------------------------------------
-# Coverage: reject-all with no unresolved hunks (1418->1431)
-# ---------------------------------------------------------------------------
 
 
 class TestRejectAllEmpty(IsolatedAsyncioTestCase):
@@ -5183,11 +4917,6 @@ class TestRejectAllEmpty(IsolatedAsyncioTestCase):
             self.assertEqual(data["type"], "merge_nav")
 
 
-# ---------------------------------------------------------------------------
-# Coverage: _start_tunnel generic Exception (line 1474-1475)
-# ---------------------------------------------------------------------------
-
-
 class TestStartTunnelGenericException(IsolatedAsyncioTestCase):
     """Test _start_tunnel when cloudflared raises a non-FNFE exception."""
 
@@ -5209,7 +4938,6 @@ class TestStartTunnelGenericException(IsolatedAsyncioTestCase):
 
     async def test_generic_exception_returns_none(self) -> None:
         """Non-FileNotFoundError exception → returns None (line 1474-1475)."""
-        # Create a cloudflared that exits with an error immediately
         cf = os.path.join(self._tmpdir, "cloudflared")
         with open(cf, "w") as f:
             f.write("#!/bin/bash\nexit 1\n")
@@ -5217,11 +4945,6 @@ class TestStartTunnelGenericException(IsolatedAsyncioTestCase):
         os.environ["PATH"] = self._tmpdir + ":" + self._old_path
         result = self.server._start_tunnel()
         self.assertIsNone(result)
-
-
-# ---------------------------------------------------------------------------
-# Coverage: _start_quick_tunnel URL found in stderr (lines 1517-1518, 1530)
-# ---------------------------------------------------------------------------
 
 
 class TestQuickTunnelUrlFromStderr(IsolatedAsyncioTestCase):
@@ -5240,7 +4963,6 @@ class TestQuickTunnelUrlFromStderr(IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self) -> None:
         os.environ["PATH"] = self._old_path
-        # Kill any leftover tunnel process
         if self.server._tunnel_proc is not None:
             self.server._tunnel_proc.terminate()
             self.server._tunnel_proc.wait(timeout=5)
@@ -5274,13 +4996,7 @@ class TestQuickTunnelUrlFromStderr(IsolatedAsyncioTestCase):
         os.chmod(cf, 0o755)
         os.environ["PATH"] = self._tmpdir + ":" + self._old_path
         result = self.server._start_quick_tunnel()
-        # No URL found → None
         self.assertIsNone(result)
-
-
-# ---------------------------------------------------------------------------
-# Coverage: _start_named_tunnel process dies (lines 1580-1581)
-# ---------------------------------------------------------------------------
 
 
 class TestNamedTunnelProcessDies(IsolatedAsyncioTestCase):
@@ -5320,11 +5036,6 @@ class TestNamedTunnelProcessDies(IsolatedAsyncioTestCase):
         os.environ["PATH"] = self._tmpdir + ":" + self._old_path
         result = self.server._start_named_tunnel()
         self.assertIsNone(result)
-
-
-# ---------------------------------------------------------------------------
-# Coverage: _check_and_restart_tunnel success path (line 1602)
-# ---------------------------------------------------------------------------
 
 
 class TestCheckAndRestartTunnelSuccess(IsolatedAsyncioTestCase):
@@ -5367,7 +5078,6 @@ class TestCheckAndRestartTunnelSuccess(IsolatedAsyncioTestCase):
         os.chmod(cf, 0o755)
         os.environ["PATH"] = self._tmpdir + ":" + self._old_path
 
-        # Create a dead tunnel process
         dead: subprocess.Popen[str] = subprocess.Popen(
             ["true"], text=True,
         )
@@ -5380,12 +5090,6 @@ class TestCheckAndRestartTunnelSuccess(IsolatedAsyncioTestCase):
             self.server._active_url,
             "https://restarted-tunnel.trycloudflare.com",
         )
-
-
-# ---------------------------------------------------------------------------
-# Coverage: watchdog exception handlers (1616-1617, 1640, 1656-1659, 1671-1672)
-# Coverage: IP change with ws_server close (1653->1655)
-# ---------------------------------------------------------------------------
 
 
 class TestWatchdogExceptionPaths(IsolatedAsyncioTestCase):
@@ -5415,12 +5119,6 @@ class TestWatchdogExceptionPaths(IsolatedAsyncioTestCase):
                 raise RuntimeError("close failed too")
 
         await self.server._ping_one_ws(_FakeWS())
-        # Should not raise
-
-
-# ---------------------------------------------------------------------------
-# Coverage: _seek exhausting all hunks (201->exit, 203->201)
-# ---------------------------------------------------------------------------
 
 
 class TestSeekExhaustsAllHunks(unittest.TestCase):
@@ -5436,16 +5134,9 @@ class TestSeekExhaustsAllHunks(unittest.TestCase):
         }
         state = _WebMergeState(merge_data)
         state.mark_resolved(0, 0)
-        # Now advance — all hunks resolved, _seek loops through all and exits
         state.advance()
-        # go_prev same
         state.go_prev()
         self.assertEqual(state.remaining, 0)
-
-
-# ---------------------------------------------------------------------------
-# Coverage: HEAD handler with transport=None (branch 135->138)
-# ---------------------------------------------------------------------------
 
 
 class TestHeadTransportNone(IsolatedAsyncioTestCase):
@@ -5466,8 +5157,6 @@ class TestHeadTransportNone(IsolatedAsyncioTestCase):
 
     async def test_head_with_no_transport(self) -> None:
         """HEAD request when transport already closed doesn't crash."""
-        # We can't easily set transport to None, but we can verify
-        # the normal HEAD path works (transport is not None)
         ctx = _no_verify_ssl()
         reader, writer = await asyncio.open_connection(
             "127.0.0.1", self.port, ssl=ctx,
@@ -5477,11 +5166,6 @@ class TestHeadTransportNone(IsolatedAsyncioTestCase):
         resp = await asyncio.wait_for(reader.read(4096), timeout=5)
         self.assertIn(b"200 OK", resp)
         writer.close()
-
-
-# ---------------------------------------------------------------------------
-# Coverage: _ws_handler generic Exception (line 1244-1245)
-# ---------------------------------------------------------------------------
 
 
 class TestWSHandlerGenericException(IsolatedAsyncioTestCase):
@@ -5496,7 +5180,6 @@ class TestWSHandlerGenericException(IsolatedAsyncioTestCase):
             use_tunnel=False,
         )
         await self.server.start_async()
-        # Replace the internal _handle_command to raise on getModels
         original_handle = self.server._vscode_server._handle_command
 
         def _bad_handle(cmd: dict[str, Any]) -> None:
@@ -5515,15 +5198,8 @@ class TestWSHandlerGenericException(IsolatedAsyncioTestCase):
         async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=ctx) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             _ = await asyncio.wait_for(ws.recv(), timeout=5)
-            # Send ready which triggers getModels → RuntimeError
             await ws.send(json.dumps({"type": "ready", "tabId": "t1"}))
-            # Connection should be closed by server after exception
             await asyncio.sleep(0.5)
-
-
-# ---------------------------------------------------------------------------
-# Coverage: _send_welcome_info discovers URL (1277->1280, 1280->exit)
-# ---------------------------------------------------------------------------
 
 
 class TestSendWelcomeInfoDiscoverUrl(IsolatedAsyncioTestCase):
@@ -5538,7 +5214,6 @@ class TestSendWelcomeInfoDiscoverUrl(IsolatedAsyncioTestCase):
             use_tunnel=False,
         )
         await self.server.start_async()
-        # Create a fake metrics server that returns a tunnel URL
         self._metrics_port = _find_free_port()
 
     async def asyncTearDown(self) -> None:
@@ -5546,20 +5221,17 @@ class TestSendWelcomeInfoDiscoverUrl(IsolatedAsyncioTestCase):
 
     async def test_welcome_info_discovers_and_broadcasts_url(self) -> None:
         """When URL file exists, URL is broadcast (1280->exit covers)."""
-        # Ensure URL file has a tunnel URL
         _save_url_file(
             self.server._local_url,
             "https://test-discovered.trycloudflare.com",
         )
-        self.server._active_url = None  # Force fallback to file
+        self.server._active_url = None
 
         ctx = _no_verify_ssl()
         async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=ctx) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             _ = await asyncio.wait_for(ws.recv(), timeout=5)
-            # Trigger welcome info
             self.server._send_welcome_info()
-            # Read messages until we find remote_url
             found = False
             for _ in range(10):
                 try:
@@ -5572,12 +5244,6 @@ class TestSendWelcomeInfoDiscoverUrl(IsolatedAsyncioTestCase):
                 except TimeoutError:
                     break
             self.assertTrue(found)
-
-
-# ---------------------------------------------------------------------------
-# Coverage: _serve_async tunnel paths (lines 1715, 1730, 1732)
-# Using start() in a thread
-# ---------------------------------------------------------------------------
 
 
 class TestStartWithTunnel(unittest.TestCase):
@@ -5622,7 +5288,6 @@ class TestStartWithTunnel(unittest.TestCase):
             t.start()
             started.wait(timeout=60)
 
-            # Let it print then stop
             time.sleep(0.5)
             if server._tunnel_proc is not None:
                 server._tunnel_proc.terminate()
@@ -5644,7 +5309,6 @@ class TestStartWithTunnel(unittest.TestCase):
         tmpdir = tempfile.mkdtemp()
         old_path = os.environ.get("PATH", "")
         try:
-            # cloudflared that exits immediately with no URL
             cf = os.path.join(tmpdir, "cloudflared")
             with open(cf, "w") as f:
                 f.write("#!/bin/bash\nexit 1\n")
@@ -5685,11 +5349,6 @@ class TestStartWithTunnel(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-# ---------------------------------------------------------------------------
-# Coverage: stop_async wait_closed timeout (lines 1768-1769)
-# ---------------------------------------------------------------------------
-
-
 class TestStopAsyncWaitClosedTimeout(IsolatedAsyncioTestCase):
     """Test stop_async when wait_closed times out."""
 
@@ -5704,29 +5363,17 @@ class TestStopAsyncWaitClosedTimeout(IsolatedAsyncioTestCase):
         )
         await server.start_async()
 
-        # Create a connected client that keeps the connection alive
         ctx = _no_verify_ssl()
         ws = await connect(f"wss://127.0.0.1:{port}/ws", ssl=ctx).__aenter__()
         await ws.send(json.dumps({"type": "auth", "password": ""}))
         _ = await asyncio.wait_for(ws.recv(), timeout=5)
 
-        # Close server - should handle timeout gracefully
         await server.stop_async()
 
         try:
             await ws.__aexit__(None, None, None)
         except Exception:
             pass
-
-
-# ---------------------------------------------------------------------------
-# Coverage: _remove_url_file when directory is read-only
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Coverage: _start_quick_tunnel fallback finds URL from metrics (1536-1539)
-# ---------------------------------------------------------------------------
 
 
 class TestQuickTunnelFallbackMetricsHit(IsolatedAsyncioTestCase):
@@ -5742,7 +5389,6 @@ class TestQuickTunnelFallbackMetricsHit(IsolatedAsyncioTestCase):
             use_tunnel=False,
         )
         self._old_path = os.environ.get("PATH", "")
-        # Start a fake metrics HTTP server that returns a tunnel URL
         self._metrics_port = _find_free_port()
 
         class _MetricsHandler(BaseHTTPRequestHandler):
@@ -5785,7 +5431,6 @@ class TestQuickTunnelFallbackMetricsHit(IsolatedAsyncioTestCase):
 
     async def test_fallback_finds_url_from_metrics(self) -> None:
         """When stderr has no URL, fallback poll finds it (1536-1539)."""
-        # cloudflared that stays alive but writes no URL to stderr
         cf = os.path.join(self._tmpdir, "cloudflared")
         with open(cf, "w") as f:
             f.write(
@@ -5796,7 +5441,6 @@ class TestQuickTunnelFallbackMetricsHit(IsolatedAsyncioTestCase):
         os.chmod(cf, 0o755)
         os.environ["PATH"] = self._tmpdir + ":" + self._old_path
 
-        # Monkey-patch the default metrics ports to point to our fake server
         import kiss.agents.vscode.web_server as ws_mod
 
         original_fn = ws_mod._discover_tunnel_url_from_metrics
@@ -5825,11 +5469,6 @@ class TestQuickTunnelFallbackMetricsHit(IsolatedAsyncioTestCase):
             )
         finally:
             ws_mod._discover_tunnel_url_from_metrics = original_fn  # type: ignore[assignment]
-
-
-# ---------------------------------------------------------------------------
-# Coverage: quick tunnel _tunnel_proc set to None during read (line 1520)
-# ---------------------------------------------------------------------------
 
 
 class TestQuickTunnelProcessPoll(IsolatedAsyncioTestCase):
@@ -5883,7 +5522,6 @@ class TestRemoveUrlFileReadOnly(unittest.TestCase):
 
         tmpdir = tempfile.mkdtemp()
         try:
-            # Create a URL file in a directory we'll make read-only
             fake_url_file = Path(tmpdir) / "subdir" / "remote-url.json"
             fake_url_file.parent.mkdir(parents=True, exist_ok=True)
             fake_url_file.write_text('{"local":"https://localhost:8787"}')
@@ -5891,10 +5529,9 @@ class TestRemoveUrlFileReadOnly(unittest.TestCase):
             old_url_file = ws_mod._URL_FILE
             ws_mod._URL_FILE = fake_url_file  # type: ignore[misc]
 
-            # Make directory read-only so unlink raises
             os.chmod(str(fake_url_file.parent), 0o444)
             try:
-                _remove_url_file()  # Should not raise
+                _remove_url_file()
             finally:
                 os.chmod(str(fake_url_file.parent), 0o755)
                 ws_mod._URL_FILE = old_url_file  # type: ignore[misc]
@@ -5941,7 +5578,6 @@ class TestPickFreeLocalPort(unittest.TestCase):
         port = _pick_free_local_port()
         self.assertIsInstance(port, int)
         self.assertGreater(port, 0)
-        # We should be able to bind it again right after.
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(("127.0.0.1", port))
 
@@ -5950,7 +5586,6 @@ class TestProbeTunnelReady(unittest.TestCase):
     """Integration tests for ``_probe_tunnel_ready`` against a real HTTP server."""
 
     def setUp(self) -> None:
-        # Reset class state so tests don't bleed into each other.
         _FakeMetricsHandler.ready_connections = 0
         self.server = HTTPServer(("127.0.0.1", 0), _FakeMetricsHandler)
         self.port = self.server.server_address[1]
@@ -5974,7 +5609,6 @@ class TestProbeTunnelReady(unittest.TestCase):
 
     def test_returns_false_when_endpoint_unreachable(self) -> None:
         """Connection refused (no server listening) returns False."""
-        # Pick a port that is free *now* so connect refuses immediately.
         free_port = _pick_free_local_port()
         self.assertFalse(_probe_tunnel_ready(free_port))
 
@@ -6055,7 +5689,6 @@ class TestWatchdogEdgeDeregistration(IsolatedAsyncioTestCase):
         if _URL_FILE.is_file():
             self._backup_url = _URL_FILE.read_bytes()
 
-        # Spin up a fake cloudflared metrics endpoint.
         _FakeMetricsHandler.ready_connections = 0
         self.metrics_server = HTTPServer(
             ("127.0.0.1", 0), _FakeMetricsHandler,
@@ -6073,8 +5706,6 @@ class TestWatchdogEdgeDeregistration(IsolatedAsyncioTestCase):
         )
         await self.server.start_async()
         self.server.use_tunnel = True
-        # Inject a long-running fake "cloudflared" subprocess and point
-        # the watchdog at our fake metrics server.
         self.fake_proc = subprocess.Popen(
             ["sleep", "120"],
             stdout=subprocess.PIPE,
@@ -6107,11 +5738,9 @@ class TestWatchdogEdgeDeregistration(IsolatedAsyncioTestCase):
     async def test_healthy_tunnel_resets_counter(self) -> None:
         """``readyConnections > 0`` keeps the unhealthy counter at zero."""
         _FakeMetricsHandler.ready_connections = 2
-        # Pre-seed a non-zero counter to verify it gets reset.
         self.server._tunnel_unhealthy_ticks = 1
         await self.server._check_and_restart_tunnel()
         self.assertEqual(self.server._tunnel_unhealthy_ticks, 0)
-        # Subprocess must not have been touched.
         self.assertIs(self.server._tunnel_proc, self.fake_proc)
         self.assertIsNone(self.fake_proc.poll())
 
@@ -6137,16 +5766,13 @@ class TestWatchdogEdgeDeregistration(IsolatedAsyncioTestCase):
         _FakeMetricsHandler.ready_connections = 0
         for _ in range(_TUNNEL_UNHEALTHY_LIMIT):
             await self.server._check_and_restart_tunnel()
-        # Force-restart path should have run.
         self.assertEqual(self.server._tunnel_unhealthy_ticks, 0)
         self.assertIsNot(self.server._tunnel_proc, self.fake_proc)
-        # Old subprocess was terminated.
         self.assertIsNotNone(self.fake_proc.poll())
 
     async def test_no_metrics_port_skips_health_probe(self) -> None:
         """When ``_tunnel_metrics_port`` is None, only liveness is checked."""
         self.server._tunnel_metrics_port = None
-        # The probe endpoint reports zero, but we should not increment.
         _FakeMetricsHandler.ready_connections = 0
         await self.server._check_and_restart_tunnel()
         self.assertEqual(self.server._tunnel_unhealthy_ticks, 0)
@@ -6205,13 +5831,8 @@ class TestDeadProcessClearsMetricsState(IsolatedAsyncioTestCase):
         await self.server._check_and_restart_tunnel()
 
         self.assertIsNot(self.server._tunnel_proc, proc)
-        # The original sentinel port belonging to the dead subprocess
-        # must not survive — either cleared (no cloudflared) or
-        # replaced with a fresh free port (cloudflared installed).
         self.assertNotEqual(self.server._tunnel_metrics_port, sentinel_port)
         self.assertEqual(self.server._tunnel_unhealthy_ticks, 0)
-        # Tear down any tunnel subprocess the restart may have spawned
-        # so it doesn't leak past this test.
         if self.server._tunnel_proc is not None:
             self.server._tunnel_proc.terminate()
             try:

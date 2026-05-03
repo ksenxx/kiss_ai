@@ -21,7 +21,6 @@ _MAIN_JS = (
     / "main.js"
 )
 
-# Minimal DOM stubs (same pattern as test_history_textarea_resize)
 _JS_PREAMBLE = r"""
 var _elements = {};
 
@@ -268,11 +267,8 @@ process.stdout.write(JSON.stringify({
 }) + '\n');
 """
         results = json.loads(self._run_js(js))
-        # Small swipe shouldn't trigger
         self.assertEqual(results["afterSmall"], "")
-        # First swipe up gets histCache[0] = 'task one'
         self.assertEqual(results["afterSwipeUp"], "task one")
-        # Second swipe up gets histCache[1] = 'task two'
         self.assertEqual(results["afterSwipeUp2"], "task two")
 
     def test_swipe_down_cycles_history_forward(self):
@@ -319,7 +315,6 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(results["atSecond"], "second")
         self.assertEqual(results["afterDown"], "first")
         self.assertEqual(results["afterClear"], "")
-        # Extra swipe down when already at bottom shouldn't change anything
         self.assertEqual(results["afterExtra"], "")
 
     def test_swipe_right_accepts_ghost(self):
@@ -351,7 +346,6 @@ process.stdout.write(JSON.stringify({
 }) + '\n');
 """
         results = json.loads(self._run_js(js))
-        # Ghost text should be appended to inp.value
         self.assertIn("complete this task", results["afterSwipeRight"])
         self.assertTrue(results["prevented"])
 
@@ -441,7 +435,6 @@ process.stdout.write(JSON.stringify({
 }) + '\n');
 """
         results = json.loads(self._run_js(js))
-        # Diagonal: absDx == absDy, so absDx > absDy is false and absDy > absDx is false
         self.assertEqual(results["value"], "")
         self.assertFalse(results["prevented"])
 

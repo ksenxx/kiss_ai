@@ -106,7 +106,6 @@ def config_to_dict() -> dict[Any, Any]:
     return cast(dict[Any, Any], convert_to_json(config_module.DEFAULT_CONFIG))
 
 
-
 def finish(
     status: str = "success",
     analysis: str = "",

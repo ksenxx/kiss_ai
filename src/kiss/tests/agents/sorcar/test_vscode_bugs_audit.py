@@ -30,9 +30,6 @@ import unittest
 from kiss.agents.vscode.diff_merge import _diff_files, _hunk_to_dict
 from kiss.agents.vscode.server import VSCodeServer
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def _make_server() -> tuple[VSCodeServer, list[dict]]:
     """Create a VSCodeServer with broadcast capture (no stdout)."""
@@ -47,10 +44,6 @@ def _make_server() -> tuple[VSCodeServer, list[dict]]:
     server.printer.broadcast = capture  # type: ignore[assignment]
     return server, events
 
-
-# ===================================================================
-# B1 — _cmd_run broadcasts status: running: True (fix verified)
-# ===================================================================
 
 class TestCmdRunSpuriousStatusFalse(unittest.TestCase):
     """B1 fix: When a second ``run`` command is sent while a task is
@@ -85,10 +78,6 @@ class TestCmdRunSpuriousStatusFalse(unittest.TestCase):
         thread.join(timeout=2)
 
 
-# ===================================================================
-# B2 — _close_tab now guards on task_thread (fix verified)
-# ===================================================================
-
 class TestCloseTabRaceWithTaskStartup(unittest.TestCase):
     """B2 fix: ``_close_tab`` now also checks ``task_thread.is_alive()``
     so it refuses to remove a tab with an alive thread even when
@@ -108,7 +97,6 @@ class TestCloseTabRaceWithTaskStartup(unittest.TestCase):
 
         self.server._close_tab("t1")
 
-        # B2 fix: the tab is NOT removed because thread is alive.
         assert "t1" in self.server._tab_states, (
             "B2 fix: tab should NOT be removed while task_thread is alive"
         )
@@ -123,10 +111,6 @@ class TestCloseTabRaceWithTaskStartup(unittest.TestCase):
             "B2 fix: _close_tab should check task_thread"
         )
 
-
-# ===================================================================
-# B3 — _hunk_to_dict symmetric zero-count handling (fix verified)
-# ===================================================================
 
 class TestHunkToDictAsymmetry(unittest.TestCase):
     """B3 fix: ``_hunk_to_dict`` now treats ``bs`` and ``cs``
@@ -143,14 +127,10 @@ class TestHunkToDictAsymmetry(unittest.TestCase):
 
     def test_symmetry_between_bs_and_cs_for_zero_counts(self) -> None:
         """Both zero-count sides now use the same convention."""
-        # Pure deletion: @@ -5,3 +3,0 @@
         deletion = _hunk_to_dict(5, 3, 3, 0)
-        # Pure insertion: @@ -3,0 +5,3 @@
         insertion = _hunk_to_dict(3, 0, 5, 3)
 
-        # cs stays at raw value when cc == 0
         assert deletion["cs"] == 3, "cs is NOT decremented when cc == 0"
-        # bs now stays at raw value when bc == 0 (symmetric)
         assert insertion["bs"] == 3, (
             "B3 fix: bs is NOT decremented when bc == 0"
         )
@@ -178,10 +158,6 @@ class TestHunkToDictAsymmetry(unittest.TestCase):
 
         shutil.rmtree(td)
 
-
-# ===================================================================
-# R1 — _finish_merge single tab lookup (fix verified)
-# ===================================================================
 
 class TestFinishMergeRedundantLookup(unittest.TestCase):
     """R1 fix: ``_finish_merge`` now performs a single tab lookup."""
@@ -215,17 +191,7 @@ class TestFinishMergeRedundantLookup(unittest.TestCase):
         server._finish_merge("t1")
 
         assert removed.is_set(), "Intercept ran"
-        # R1 fix: the tab reference from the first lookup is reused,
-        # so the autocommit block still runs (tab is not None).
-        # It may or may not produce an autocommit_prompt depending on
-        # _main_dirty_files, but the code path is reached (no silent loss).
-        # We verify by checking the code doesn't crash and the tab ref
-        # was valid.
 
-
-# ===================================================================
-# I1 — _replay_session sets use_worktree under lock (fix verified)
-# ===================================================================
 
 class TestReplaySessionUseWorktreeNoLock(unittest.TestCase):
     """I1 fix: ``_replay_session`` now sets ``tab.use_worktree`` under
@@ -264,10 +230,6 @@ class TestReplaySessionUseWorktreeNoLock(unittest.TestCase):
             "_run_task_inner sets use_worktree under _state_lock"
         )
 
-
-# ===================================================================
-# Additional: _cmd_run already-running error path (fix verified)
-# ===================================================================
 
 class TestCmdRunAlreadyRunningErrorContent(unittest.TestCase):
     """When a duplicate run arrives, the error and status events carry

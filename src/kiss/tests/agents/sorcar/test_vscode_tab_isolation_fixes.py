@@ -130,16 +130,12 @@ class TestB5CommitMessageCarriesTabId(unittest.TestCase):
         captured_tab_ids: list[object] = []
 
         def stub() -> None:
-            # Capture the thread-local tab_id so the test can verify
-            # the worker thread set it correctly before broadcasting.
             captured_tab_ids.append(
                 getattr(server.printer._thread_local, "tab_id", None)
             )
             server.printer.broadcast({"type": "commitMessage", "message": "x"})
             done.set()
 
-        # Replace stdout.write in the real broadcast pipeline with a capture
-        # so tabId injection from thread-local is exercised end-to-end.
         import io
         import sys as _sys
         buf = io.StringIO()

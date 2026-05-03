@@ -20,7 +20,6 @@ def main(argv: list[str] | None = None) -> int:
     except (ValueError, ZeroDivisionError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
-    # Print as int if the result is a whole number
     print(int(result) if result == int(result) else result)
     return 0
 

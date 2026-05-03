@@ -55,10 +55,6 @@ from kiss.agents.vscode.merge_flow import _MergeFlowMixin
 from kiss.agents.vscode.server import VSCodeServer
 from kiss.agents.vscode.task_runner import _TaskRunnerMixin
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 
 def _make_server() -> tuple[VSCodeServer, list[dict]]:
     """Create a VSCodeServer with broadcast capture (no stdout)."""
@@ -69,17 +65,11 @@ def _make_server() -> tuple[VSCodeServer, list[dict]]:
     def capture(event: dict) -> None:
         with lock:
             events.append(event)
-        # Still call original to exercise _record_event, but suppress stdout
         with server.printer._lock:
             server.printer._record_event(event)
 
     server.printer.broadcast = capture  # type: ignore[assignment]
     return server, events
-
-
-# ===================================================================
-# B4 — _complete_from_active_file returns LONGEST suffix (intentional)
-# ===================================================================
 
 
 class TestCompleteFromActiveFileLongestMatch(unittest.TestCase):
@@ -116,11 +106,6 @@ class TestCompleteFromActiveFileLongestMatch(unittest.TestCase):
         )
 
 
-# ===================================================================
-# B5 — _close_tab now cleans up merge data on disk (FIXED)
-# ===================================================================
-
-
 class TestCloseTabMergeDataCleanup(unittest.TestCase):
     """B5 fix: ``_close_tab`` now calls ``_cleanup_merge_data`` to
     remove on-disk merge artifacts when a tab is closed.
@@ -150,7 +135,6 @@ class TestCloseTabMergeDataCleanup(unittest.TestCase):
         try:
             server._close_tab(tab_id)
 
-            # B5 fix: the merge directory is cleaned up after close
             assert not sentinel.exists(), (
                 "B5 fix: pending-merge.json should be removed after _close_tab"
             )
@@ -160,11 +144,6 @@ class TestCloseTabMergeDataCleanup(unittest.TestCase):
         finally:
             if merge_dir.exists():
                 shutil.rmtree(merge_dir)
-
-
-# ===================================================================
-# B6 — model_vendor correctly classifies openai/ models (FIXED)
-# ===================================================================
 
 
 class TestModelVendorOpenAIClassification(unittest.TestCase):
@@ -206,11 +185,6 @@ class TestModelVendorOpenAIClassification(unittest.TestCase):
         )
 
 
-# ===================================================================
-# B7 — _finish_merge guards against empty string (FIXED)
-# ===================================================================
-
-
 class TestFinishMergeEmptyTabIdGuard(unittest.TestCase):
     """B7 fix: ``_finish_merge("")`` is now a no-op instead of nuking
     the parent merge directory.
@@ -237,7 +211,6 @@ class TestFinishMergeEmptyTabIdGuard(unittest.TestCase):
         """Behavioral: calling _finish_merge('') does not destroy data."""
         server, _ = _make_server()
 
-        # Create merge data for a real tab
         real_tab_id = "real-tab"
         merge_dir = _merge_data_dir(real_tab_id)
         merge_dir.mkdir(parents=True, exist_ok=True)
@@ -245,10 +218,8 @@ class TestFinishMergeEmptyTabIdGuard(unittest.TestCase):
         sentinel.write_text('{"files": []}')
 
         try:
-            # Call _finish_merge with empty tab_id — should be a no-op
             server._finish_merge("")
 
-            # B7 fix: the real tab's data should survive
             assert merge_dir.exists(), (
                 "B7 fix: real tab's merge_dir should survive _finish_merge('')"
             )
@@ -275,11 +246,6 @@ class TestFinishMergeEmptyTabIdGuard(unittest.TestCase):
         assert not os.path.exists(td), (
             "_cleanup_merge_data removes the entire tree"
         )
-
-
-# ===================================================================
-# B8 — _run_task broadcasts status OUTSIDE _state_lock (FIXED)
-# ===================================================================
 
 
 class TestRunTaskStatusBroadcastInsideLock(unittest.TestCase):
@@ -318,19 +284,12 @@ class TestRunTaskStatusBroadcastInsideLock(unittest.TestCase):
             "broadcast is after the lock line"
         )
 
-        # A2 fix: the broadcast should be DEEPER than the `with`
-        # statement, meaning it's inside the critical section
         indent_lock = len(lines[lock_idx]) - len(lines[lock_idx].lstrip())
         indent_bc = len(lines[broadcast_idx]) - len(lines[broadcast_idx].lstrip())
         assert indent_bc > indent_lock, (
             f"A2 fix: broadcast indent ({indent_bc}) > lock indent "
             f"({indent_lock}), confirming it's inside the critical section"
         )
-
-
-# ===================================================================
-# R2 — clip_autocomplete_suggestion is a no-op for identifier suffixes
-# ===================================================================
 
 
 class TestClipAutocompleteSuggestionRedundant(unittest.TestCase):
@@ -360,11 +319,6 @@ class TestClipAutocompleteSuggestionRedundant(unittest.TestCase):
         assert "clip_autocomplete_suggestion" in src
 
 
-# ===================================================================
-# I2 — tab_id parameter types now consistently use str = "" (FIXED)
-# ===================================================================
-
-
 class TestTabIdTypeConsistency(unittest.TestCase):
     """I2 fix: ``tab_id`` parameter types and defaults are now
     consistently ``str = ""`` across all methods.
@@ -384,7 +338,6 @@ class TestTabIdTypeConsistency(unittest.TestCase):
                 if "tab" in pname.lower() and param.default is not inspect.Parameter.empty:
                     methods_with_defaults[name] = param.default
 
-        # I2 fix: all defaults should be "" (no None mixed in)
         defaults = set(methods_with_defaults.values())
         assert defaults == {""}, (
             f"I2 fix: all tab_id defaults should be '', got: {methods_with_defaults}"
@@ -402,16 +355,10 @@ class TestTabIdTypeConsistency(unittest.TestCase):
                 if "tab" in pname.lower() and param.default is not inspect.Parameter.empty:
                     annotations[name] = str(param.annotation)
 
-        # I2 fix: all should be 'str', no 'str | None'
         for name, ann in annotations.items():
             assert "None" not in ann, (
                 f"I2 fix: {name} tab_id annotation should be str, got: {ann}"
             )
-
-
-# ===================================================================
-# I3 — _broadcast_worktree_done always includes tabId (FIXED)
-# ===================================================================
 
 
 class TestBroadcastWorktreeDoneAlwaysHasTabId(unittest.TestCase):

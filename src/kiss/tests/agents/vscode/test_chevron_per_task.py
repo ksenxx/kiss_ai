@@ -47,13 +47,10 @@ class TestChevronStateIsPerTask:
         """makeTab() must initialise a panelsExpandedMap (object/dict),
         not a scalar panelsExpanded boolean."""
         src = _read_main_js()
-        # Must have panelsExpandedMap initialised as an object literal
         assert re.search(r"panelsExpandedMap\s*:\s*\{", src), (
             "makeTab() must use panelsExpandedMap: {} instead of "
             "panelsExpanded: false"
         )
-        # Must NOT have the old scalar panelsExpanded property
-        # (check in makeTab context — between 'function makeTab' and the next 'function')
         make_tab_match = re.search(
             r"function\s+makeTab\b.*?return\s*\{(.*?)\};",
             src,
@@ -69,7 +66,6 @@ class TestChevronStateIsPerTask:
         """applyChevronState must accept a taskName parameter so it can
         scope its mutations to a single task's panels."""
         src = _read_main_js()
-        # The function signature must include a taskName parameter
         m = re.search(r"function\s+applyChevronState\s*\(([^)]*)\)", src)
         assert m, "Could not find applyChevronState function"
         params = m.group(1)
@@ -82,14 +78,12 @@ class TestChevronStateIsPerTask:
         """applyChevronState must filter panels by task membership,
         not blindly iterate all .collapsible panels."""
         src = _read_main_js()
-        # Extract the function body
         m = re.search(
             r"function\s+applyChevronState\s*\([^)]*\)\s*\{",
             src,
         )
         assert m, "Could not find applyChevronState"
         start = m.end()
-        # Find matching closing brace
         depth = 1
         i = start
         while i < len(src) and depth > 0:
@@ -99,7 +93,6 @@ class TestChevronStateIsPerTask:
                 depth -= 1
             i += 1
         body = src[start:i]
-        # Must check task membership for each panel
         assert "taskName" in body, (
             "applyChevronState body must use taskName to filter panels "
             "by task membership"
@@ -109,18 +102,14 @@ class TestChevronStateIsPerTask:
         """The chevron click handler must determine the currently visible
         task and toggle only that task's state in panelsExpandedMap."""
         src = _read_main_js()
-        # Find the chevron click handler — search for the addEventListener
-        # call specifically (not the getElementById declaration)
         m = re.search(
             r"taskPanelChevron\)\s*\{[^}]*addEventListener\s*\(\s*'click'",
             src,
             re.DOTALL,
         )
         assert m, "Could not find taskPanelChevron click handler"
-        # Extract handler body (from the addEventListener match onward)
         handler_start = m.end()
         handler_region = src[handler_start : handler_start + 1000]
-        # Must reference panelsExpandedMap and a task identifier
         assert "panelsExpandedMap" in handler_region, (
             "Chevron click handler must use panelsExpandedMap "
             "(per-task state), not panelsExpanded (global boolean)"
@@ -130,7 +119,6 @@ class TestChevronStateIsPerTask:
         """updateVisibleTask must call updateChevronIcon to reflect the
         visible task's expanded state from panelsExpandedMap."""
         src = _read_main_js()
-        # Find updateVisibleTask function body
         m = re.search(r"function\s+updateVisibleTask\s*\(\s*\)\s*\{", src)
         assert m, "Could not find updateVisibleTask function"
         start = m.end()
@@ -156,8 +144,6 @@ class TestChevronStateIsPerTask:
         """There must be no remaining references to tab.panelsExpanded
         (the old scalar boolean) outside of panelsExpandedMap."""
         src = _read_main_js()
-        # Find all occurrences of .panelsExpanded that are NOT .panelsExpandedMap
-        # Use negative lookahead to exclude panelsExpandedMap
         stale_refs = re.findall(r"\.panelsExpanded(?!Map)\b", src)
         assert len(stale_refs) == 0, (
             f"Found {len(stale_refs)} stale references to .panelsExpanded "

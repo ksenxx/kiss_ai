@@ -444,4 +444,3 @@ class TestAnthropicAddFunctionResults:
         assert "Tokens: 100" in last["content"][0]["content"]
 
 
-

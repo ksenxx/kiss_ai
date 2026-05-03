@@ -44,7 +44,6 @@ def _run_node(script: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-# Minimal browser shim for running demo.js in Node.js
 _NODE_SHIM = r"""
 var window = {};
 var document = {
@@ -142,8 +141,6 @@ class TestDemoWelcomeBetweenTasksBehavioral(unittest.TestCase):
         """Track the exact sequence of API calls during a 2-task replay."""
         demo_src = _DEMO_JS.read_text()
 
-        # Patch the sleep function inside demo.js IIFE to be instant
-        # and to log calls via a global tracker.
         patched = demo_src.replace(
             "function sleep(ms) {\n"
             "    return new Promise(resolve => {\n"
@@ -225,12 +222,10 @@ window._startDemoReplay(sessions).then(function() {
 
         calls = json.loads(r.stdout.strip())
 
-        # 1. createNewTab must never be called
         assert "createNewTab" not in calls, (
             f"createNewTab was called during replay: {calls}"
         )
 
-        # 2. For each task, hideWelcome must come before sleep:2000
         hide_indices = [i for i, c in enumerate(calls) if c == "hideWelcome"]
         sleep_indices = [i for i, c in enumerate(calls) if c == "sleep:2000"]
         assert len(hide_indices) >= 2, (
@@ -247,14 +242,12 @@ window._startDemoReplay(sessions).then(function() {
                 f"sleep:2000 (idx {sleep_indices[k]}): {calls}"
             )
 
-        # 3. clearForReplay must only be called once (for first task)
         clear_count = calls.count("clearForReplay")
         assert clear_count == 1, (
             f"clearForReplay should be called once (first task only), "
             f"but was called {clear_count} times: {calls}"
         )
 
-        # 4. resetOutputState must be called for subsequent tasks
         reset_count = calls.count("resetOutputState")
         assert reset_count >= 1, (
             f"resetOutputState should be called for tasks after the first, "

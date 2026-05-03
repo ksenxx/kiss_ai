@@ -27,10 +27,6 @@ from kiss.agents.vscode.vscode_config import (
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
 
-# ---------------------------------------------------------------------------
-# Shared HTTP helpers
-# ---------------------------------------------------------------------------
-
 
 def _finish_response(model: str = "gpt-4o-mini") -> dict:
     """OpenAI chat-completion that calls ``finish`` with result='done'."""
@@ -143,11 +139,6 @@ def _start_server(
     return srv, f"http://127.0.0.1:{srv.server_port}/v1"
 
 
-# ---------------------------------------------------------------------------
-# 1. Budget limit via real HTTP
-# ---------------------------------------------------------------------------
-
-
 class TestBudgetLimitRealHTTP:
     """Budget exceeded through real HTTP agent loop."""
 
@@ -195,11 +186,6 @@ class TestBudgetLimitRealHTTP:
             srv.shutdown()
 
 
-# ---------------------------------------------------------------------------
-# 2. Custom endpoint + key via real HTTP
-# ---------------------------------------------------------------------------
-
-
 class TestCustomEndpointRealHTTP:
     """Agent uses the custom base_url and api_key from model_config."""
 
@@ -224,7 +210,6 @@ class TestCustomEndpointRealHTTP:
             )
             assert result == "done"
             assert _FinishHandler.request_count >= 1
-            # The Authorization header must contain the custom key
             auth = _FinishHandler.received_headers.get("Authorization", "")
             assert "sk-custom-secret-key" in auth
         finally:
@@ -276,11 +261,6 @@ class TestCustomEndpointRealHTTP:
             srv.shutdown()
 
 
-# ---------------------------------------------------------------------------
-# 3. use_web_browser toggle
-# ---------------------------------------------------------------------------
-
-
 class TestWebBrowserToggle:
     """web_tools parameter controls browser tool availability."""
 
@@ -289,7 +269,6 @@ class TestWebBrowserToggle:
         from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 
         agent = SorcarAgent("no-web")
-        # Simulate what run() does: set the flag, then call _get_tools
         agent._use_web_tools = False
         agent.web_use_tool = None
         tools = agent._get_tools()
@@ -312,7 +291,6 @@ class TestWebBrowserToggle:
         tool_names = [t.__name__ for t in tools]
         assert "go_to_url" in tool_names
         assert agent.web_use_tool is not None
-        # Clean up browser
         agent.web_use_tool.close()
         agent.web_use_tool = None
 
@@ -335,11 +313,6 @@ class TestWebBrowserToggle:
         assert cfg["use_web_browser"] is False
 
 
-# ---------------------------------------------------------------------------
-# 4. API key setup and deletion in the configuration panel
-# ---------------------------------------------------------------------------
-
-
 class TestApiKeySetupAndDeletion:
     """Full lifecycle: save key → verify → delete key → verify gone."""
 
@@ -358,10 +331,8 @@ class TestApiKeySetupAndDeletion:
             fake_home / ".kiss" / "config.json",
         )
         monkeypatch.setenv("SHELL", "/bin/zsh")
-        # Clear all API key env vars for isolation
         for k in API_KEY_ENV_VARS:
             monkeypatch.delenv(k, raising=False)
-        # Snapshot DEFAULT_CONFIG so _refresh_config() side effects are undone.
         from kiss.core import config as config_module
 
         monkeypatch.setattr(config_module, "DEFAULT_CONFIG", config_module.DEFAULT_CONFIG)
@@ -398,7 +369,6 @@ class TestApiKeySetupAndDeletion:
         monkeypatch.setattr(sys, "stdout", captured)
         server = VSCodeServer()
 
-        # First, save a key
         server._handle_command({
             "type": "saveConfig",
             "config": {"max_budget": 100},
@@ -408,14 +378,12 @@ class TestApiKeySetupAndDeletion:
         rc = Path.home() / ".zshrc"
         assert "ant-key-to-delete" in rc.read_text()
 
-        # Now "delete" by saving empty — handler skips empty keys
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         server._handle_command({
             "type": "saveConfig",
             "config": {"max_budget": 100},
             "apiKeys": {"ANTHROPIC_API_KEY": ""},
         })
-        # Key is no longer in env (we cleared it and empty save didn't restore)
         assert os.environ.get("ANTHROPIC_API_KEY") is None
 
     def test_save_key_then_getconfig_returns_it(
@@ -453,8 +421,7 @@ class TestApiKeySetupAndDeletion:
         content = rc.read_text()
         assert "gem-val" in content
         assert "oai-val" in content
-        # Overwrite one
         save_api_key_to_shell("GEMINI_API_KEY", "gem-new")
         content = rc.read_text()
         assert "gem-new" in content
-        assert "oai-val" in content  # unchanged
+        assert "oai-val" in content
