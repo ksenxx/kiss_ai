@@ -1,10 +1,11 @@
-"""Integration tests for the install.sh Claude skills download step."""
+"""Integration tests for Claude skills steps in install.sh and release.sh."""
 
 import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 INSTALL_SH = REPO_ROOT / "install.sh"
+RELEASE_SH = REPO_ROOT / "scripts" / "release.sh"
 COPY_KISS_SH = REPO_ROOT / "src" / "kiss" / "agents" / "vscode" / "copy-kiss.sh"
 
 
@@ -112,6 +113,95 @@ class TestCopyKissIncludesClaudeSkills(unittest.TestCase):
             '-d "$CLAUDE_SKILLS_SRC"',
             text,
             "copy-kiss.sh must check if claude_skills directory exists before copying",
+        )
+
+
+class TestReleaseShClaudeSkillsStep(unittest.TestCase):
+    """Verify release.sh has the Claude skills download step."""
+
+    def test_release_sh_has_claude_skills_step(self) -> None:
+        text = RELEASE_SH.read_text()
+        self.assertIn(
+            "Downloading official Claude Code skills",
+            text,
+            "release.sh must contain the Claude skills download step",
+        )
+
+    def test_release_sh_clones_anthropics_repo(self) -> None:
+        text = RELEASE_SH.read_text()
+        self.assertIn(
+            "anthropics/claude-code.git",
+            text,
+            "release.sh must clone from the anthropics/claude-code repo",
+        )
+
+    def test_release_sh_targets_claude_skills_dir(self) -> None:
+        text = RELEASE_SH.read_text()
+        self.assertIn(
+            "src/kiss/agents/claude_skills",
+            text,
+            "release.sh must target the claude_skills directory",
+        )
+
+    def test_release_sh_uses_sparse_checkout(self) -> None:
+        text = RELEASE_SH.read_text()
+        self.assertIn(
+            "sparse-checkout set plugins",
+            text,
+            "release.sh must use sparse checkout to download only the plugins dir",
+        )
+
+    def test_release_sh_has_idempotency_guard(self) -> None:
+        text = RELEASE_SH.read_text()
+        self.assertIn(
+            "Claude skills already present",
+            text,
+            "release.sh must skip download when skills are already present",
+        )
+
+    def test_claude_skills_downloaded_before_extension_build(self) -> None:
+        """Claude skills step (3) must come before Build VS Code extension (4)."""
+        text = RELEASE_SH.read_text()
+        skills_pos = text.index("Step 3: Download official Claude Code skills")
+        build_pos = text.index("Step 4: Build VS Code extension")
+        self.assertLess(
+            skills_pos,
+            build_pos,
+            "Claude skills download must precede VS Code extension build in release.sh",
+        )
+
+    def test_claude_skills_deleted_after_extension_install(self) -> None:
+        """claude_skills directory must be deleted after extension install (step 11)."""
+        text = RELEASE_SH.read_text()
+        install_pos = text.index("Step 11: Install extension")
+        cleanup_pos = text.index("Cleaned up $CLAUDE_SKILLS_DIR (bundled in extension)")
+        self.assertLess(
+            install_pos,
+            cleanup_pos,
+            "claude_skills cleanup must come after extension install in release.sh",
+        )
+
+    def test_claude_skills_cleanup_uses_rm_rf(self) -> None:
+        """Cleanup must use rm -rf to remove the directory."""
+        text = RELEASE_SH.read_text()
+        self.assertIn('rm -rf "$CLAUDE_SKILLS_DIR"', text)
+
+    def test_release_sh_workflow_comment_includes_claude_skills(self) -> None:
+        """Header workflow comment must list the Claude skills step."""
+        text = RELEASE_SH.read_text()
+        self.assertIn(
+            "# 4. Download official Claude Code skills",
+            text,
+            "release.sh workflow comment must include Claude skills step",
+        )
+
+    def test_release_sh_workflow_has_13_steps(self) -> None:
+        """Header workflow comment must have 13 steps after adding Claude skills."""
+        text = RELEASE_SH.read_text()
+        self.assertIn(
+            "# 13. Restore stashed changes",
+            text,
+            "release.sh workflow must have 13 steps",
         )
 
 

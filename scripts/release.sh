@@ -8,15 +8,16 @@
 # 1. Stash any uncommitted changes
 # 2. Check if origin is ahead of kiss_ai repo
 # 3. If ahead, bump version in _version.py, README.md, SYSTEM.md, package.json, package-lock.json
-# 4. Build VS Code extension (.vsix) so it's included in the commit
-# 5. Commit changes with "Version bumped" (includes vsix)
-# 6. Push to origin
-# 7. Push to kiss_ai repo and tag with version
-# 8. Create GitHub release and upload VSIX asset
-# 9. Publish to PyPI
-# 10. Publish VS Code extension to marketplace
-# 11. Install extension into local VS Code and Cursor IDE (if installed)
-# 12. Restore stashed changes
+# 4. Download official Claude Code skills (bundled into the extension)
+# 5. Build VS Code extension (.vsix) so it's included in the commit
+# 6. Commit changes with "Version bumped" (includes vsix)
+# 7. Push to origin
+# 8. Push to kiss_ai repo and tag with version
+# 9. Create GitHub release and upload VSIX asset
+# 10. Publish to PyPI
+# 11. Publish VS Code extension to marketplace
+# 12. Install extension into local VS Code and Cursor IDE (if installed)
+# 13. Restore stashed changes
 
 set -e  # Exit on error
 
@@ -361,16 +362,44 @@ main() {
     update_vscode_package_version "$VERSION"
     update_vscode_package_lock_version "$VERSION"
 
-    # Step 3: Build VS Code extension (before commit so vsix is included)
+    # Step 3: Download official Claude Code skills (before building extension)
+    print_step "Downloading official Claude Code skills..."
+    CLAUDE_SKILLS_DIR="src/kiss/agents/claude_skills"
+    if [ -d "$CLAUDE_SKILLS_DIR" ] && [ "$(ls -d "$CLAUDE_SKILLS_DIR"/*/ 2>/dev/null)" ]; then
+        print_info "Claude skills already present — skipping download"
+    else
+        mkdir -p "$CLAUDE_SKILLS_DIR"
+        SKILLS_TMP="$(mktemp -d)"
+        print_info "Cloning anthropics/claude-code plugins..."
+        if git clone --depth 1 --filter=blob:none --sparse \
+            https://github.com/anthropics/claude-code.git "$SKILLS_TMP/claude-code" 2>&1; then
+            cd "$SKILLS_TMP/claude-code"
+            git sparse-checkout set plugins 2>&1
+            for plugin_dir in plugins/*/; do
+                if [ -d "$plugin_dir" ]; then
+                    plugin_name="$(basename "$plugin_dir")"
+                    cp -R "$plugin_dir" "$CLAUDE_SKILLS_DIR/$plugin_name"
+                fi
+            done
+            cd - > /dev/null
+            SKILL_COUNT="$(ls -d "$CLAUDE_SKILLS_DIR"/*/ 2>/dev/null | wc -l | tr -d ' ')"
+            print_info "Installed $SKILL_COUNT Claude skills to $CLAUDE_SKILLS_DIR"
+        else
+            print_warn "Failed to download Claude Code skills"
+        fi
+        rm -rf "$SKILLS_TMP"
+    fi
+
+    # Step 4: Build VS Code extension (before commit so vsix is included)
     build_vscode_extension
 
-    # Step 4: Commit changes (includes version bump + fresh vsix)
+    # Step 5: Commit changes (includes version bump + fresh vsix)
     print_step "Committing version bump..."
     git add -A
     git commit -m "Version bumped to $VERSION"
     print_info "Committed version bump"
 
-    # Step 5: Pull latest from origin (rebase), then push (with retry)
+    # Step 6: Pull latest from origin (rebase), then push (with retry)
     print_step "Syncing with origin..."
     for attempt in 1 2 3; do
         git pull --rebase origin "$CURRENT_BRANCH"
@@ -386,7 +415,7 @@ main() {
     done
     print_info "Pushed to origin"
 
-    # Step 6: Push to kiss_ai repo (mirror from origin, force to ensure sync)
+    # Step 7: Push to kiss_ai repo (mirror from origin, force to ensure sync)
     print_step "Pushing to kiss_ai repo..."
     git push "$PUBLIC_REMOTE" "$CURRENT_BRANCH:main" --force
     print_info "Pushed to kiss_ai repo"
@@ -396,7 +425,7 @@ main() {
     git push "$PUBLIC_REMOTE" "$TAG_NAME"
     print_info "Created and pushed tag: $TAG_NAME"
 
-    # Step 7: Create GitHub release and upload VSIX
+    # Step 8: Create GitHub release and upload VSIX
     print_step "Creating GitHub release..."
     gh release create "$TAG_NAME" \
         --repo ksenxx/kiss_ai \
@@ -411,15 +440,21 @@ main() {
         print_info "VSIX uploaded to release"
     fi
 
-    # Step 8: Publish to PyPI
+    # Step 9: Publish to PyPI
     print_step "Publishing to PyPI..."
     publish_to_pypi "$VERSION"
 
-    # Step 9: Publish VS Code extension (already built in step 3)
+    # Step 10: Publish VS Code extension (already built in step 4)
     publish_vscode_extension "$VERSION"
 
-    # Step 10: Install extension into local VS Code and Cursor IDE if available
+    # Step 11: Install extension into local VS Code and Cursor IDE if available
     install_local_extension
+
+    # Clean up source claude_skills now that they are bundled in the extension
+    if [ -d "$CLAUDE_SKILLS_DIR" ]; then
+        rm -rf "$CLAUDE_SKILLS_DIR"
+        print_info "Cleaned up $CLAUDE_SKILLS_DIR (bundled in extension)"
+    fi
 
     # Restore stashed changes
     trap - EXIT
