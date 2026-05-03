@@ -128,17 +128,6 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "cc/haiku": _mi(200000, 0.00, 0.00),
     "cc/opus": _mi(200000, 0.00, 0.00),
     "cc/sonnet": _mi(200000, 0.00, 0.00),
-    "codex/default": _mi(400000, 0.00, 0.00),
-    "codex/gpt-5": _mi(400000, 0.00, 0.00),
-    "codex/gpt-5-codex": _mi(400000, 0.00, 0.00),
-    "codex/gpt-5.1-codex": _mi(400000, 0.00, 0.00),
-    "codex/gpt-5.1-codex-max": _mi(400000, 0.00, 0.00),
-    "codex/gpt-5.1-codex-mini": _mi(400000, 0.00, 0.00),
-    "codex/gpt-5.2-codex": _mi(400000, 0.00, 0.00),
-    "codex/gpt-5.3-codex": _mi(400000, 0.00, 0.00),
-    "codex/gpt-5.5": _mi(1050000, 0.00, 0.00),
-    "codex/gpt-5.5-codex": _mi(1050000, 0.00, 0.00),
-    "codex/gpt-5.5-pro": _mi(1050000, 0.00, 0.00),
     "claude-haiku-4-5": _mi(200000, 1.00, 5.00),
     "claude-haiku-4-5-20251001": _mi(200000, 1.00, 5.00),
     "claude-opus-4": _mi(200000, 15.00, 75.00),
@@ -154,6 +143,31 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "claude-sonnet-4-5": _mi(200000, 3.00, 15.00),
     "claude-sonnet-4-5-20250929": _mi(200000, 3.00, 15.00),
     "claude-sonnet-4-6": _mi(200000, 3.00, 15.00),
+    "codex/default": _mi(400000, 0.00, 0.00),
+    "codex/gpt-5": _mi(400000, 0.00, 0.00),
+    "codex/gpt-5-chat-latest": _mi(400000, 0.00, 0.00),  # NEW
+    "codex/gpt-5-codex": _mi(400000, 0.00, 0.00),
+    "codex/gpt-5-mini": _mi(400000, 0.00, 0.00),  # NEW
+    "codex/gpt-5-nano": _mi(400000, 0.00, 0.00),  # NEW
+    "codex/gpt-5-pro": _mi(400000, 0.00, 0.00),  # NEW
+    "codex/gpt-5.1": _mi(400000, 0.00, 0.00),  # NEW
+    "codex/gpt-5.1-chat-latest": _mi(400000, 0.00, 0.00),  # NEW
+    "codex/gpt-5.1-codex": _mi(400000, 0.00, 0.00),
+    "codex/gpt-5.1-codex-max": _mi(400000, 0.00, 0.00),
+    "codex/gpt-5.1-codex-mini": _mi(400000, 0.00, 0.00),
+    "codex/gpt-5.2": _mi(400000, 0.00, 0.00),  # NEW
+    "codex/gpt-5.2-chat-latest": _mi(400000, 0.00, 0.00),  # NEW
+    "codex/gpt-5.2-codex": _mi(400000, 0.00, 0.00),
+    "codex/gpt-5.2-pro": _mi(400000, 0.00, 0.00),  # NEW
+    "codex/gpt-5.3-chat-latest": _mi(400000, 0.00, 0.00),  # NEW
+    "codex/gpt-5.3-codex": _mi(400000, 0.00, 0.00),
+    "codex/gpt-5.4": _mi(1050000, 0.00, 0.00),  # NEW
+    "codex/gpt-5.4-mini": _mi(400000, 0.00, 0.00),  # NEW
+    "codex/gpt-5.4-nano": _mi(400000, 0.00, 0.00),  # NEW
+    "codex/gpt-5.4-pro": _mi(1050000, 0.00, 0.00),  # NEW
+    "codex/gpt-5.5": _mi(1050000, 0.00, 0.00),
+    "codex/gpt-5.5-codex": _mi(1050000, 0.00, 0.00),
+    "codex/gpt-5.5-pro": _mi(1050000, 0.00, 0.00),
     "computer-use-preview": _mi(128000, 3.00, 12.00),
     "computer-use-preview-2025-03-11": _mi(128000, 3.00, 12.00),
     "deepcogito/cogito-v1-preview-llama-70B": _mi(131072, 0.00, 0.00),  # NEW: needs pricing
@@ -375,7 +389,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/deepseek/deepseek-v4-flash": _mi(1048576, 0.14, 0.28),  # NEW
     "openrouter/deepseek/deepseek-v4-pro": _mi(1048576, 0.435, 0.87, fc=False),  # NEW
     "openrouter/essentialai/rnj-1-instruct": _mi(32768, 0.15, 0.15, fc=False),
-    "openrouter/google/gemini-2.0-flash-001": _mi(1000000, 0.10, 0.40),
+    "openrouter/google/gemini-2.0-flash-001": _mi(1048576, 0.10, 0.40),
     "openrouter/google/gemini-2.0-flash-lite-001": _mi(1048576, 0.075, 0.30),
     "openrouter/google/gemini-2.5-flash": _mi(1048576, 0.30, 2.50),
     "openrouter/google/gemini-2.5-flash-image": _mi(32768, 0.30, 2.50, fc=False, gen=False),
@@ -586,7 +600,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/qwen/qwen3.5-flash-02-23": _mi(1000000, 0.065, 0.26),
     "openrouter/qwen/qwen3.5-plus-02-15": _mi(1000000, 0.26, 1.56),
     "openrouter/qwen/qwen3.5-plus-20260420": _mi(1000000, 0.40, 2.40),  # NEW
-    "openrouter/qwen/qwen3.6-27b": _mi(256000, 0.325, 3.25),  # NEW
+    "openrouter/qwen/qwen3.6-27b": _mi(262144, 0.32, 3.20),  # NEW
     "openrouter/qwen/qwen3.6-35b-a3b": _mi(262144, 0.161, 0.965, fc=False),  # NEW
     "openrouter/qwen/qwen3.6-flash": _mi(1000000, 0.25, 1.50),  # NEW
     "openrouter/qwen/qwen3.6-max-preview": _mi(262144, 1.04, 6.24),  # NEW

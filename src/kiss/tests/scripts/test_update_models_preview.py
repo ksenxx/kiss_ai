@@ -1,6 +1,10 @@
 """Tests for preview model handling in update_models.py compute_changes."""
 
-from kiss.scripts.update_models import _add_codex_candidates, compute_changes
+from kiss.scripts.update_models import (
+    _add_codex_candidates,
+    compute_changes,
+    find_deprecated_models,
+)
 
 
 def _make_current() -> dict[str, dict]:
@@ -239,3 +243,29 @@ def test_openrouter_preview_zero_context_not_added():
     _, new_models = compute_changes(current, openrouter, {}, {}, {}, {})
     names = [m["name"] for m in new_models]
     assert "openrouter/acme/cool-model-preview" not in names
+
+
+def test_find_deprecated_skips_codex_entries():
+    """codex/* entries must NOT be flagged deprecated based on the OpenAI API.
+
+    They are aliases accepted by the codex CLI's -m flag, billed via the
+    ChatGPT subscription, and intentionally absent from OpenAI's REST model
+    listing. They are managed separately by _add_codex_candidates.
+    """
+    current = {
+        "codex/default": {"source": "codex"},
+        "codex/gpt-5": {"source": "codex"},
+        "codex/gpt-5-codex": {"source": "codex"},
+        "codex/gpt-5.5-pro": {"source": "codex"},
+        # A real OpenAI alias with no dated snapshot, to confirm the rest of
+        # the deprecation logic still works.
+        "gpt-foo-removed": {"source": "openai"},
+    }
+    openai = {"gpt-5": {"source": "openai"}, "gpt-5-2025-08-07": {"source": "openai"}}
+    deprecated = find_deprecated_models(current, {}, {}, {}, openai)
+    names = {d["name"] for d in deprecated}
+    assert "codex/default" not in names
+    assert "codex/gpt-5" not in names
+    assert "codex/gpt-5-codex" not in names
+    assert "codex/gpt-5.5-pro" not in names
+    assert "gpt-foo-removed" in names
