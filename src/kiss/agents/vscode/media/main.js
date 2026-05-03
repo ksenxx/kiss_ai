@@ -14,7 +14,7 @@
 
   // State — isRunning mirrors the active tab's tab.isRunning for UI controls
   let isRunning = false;
-  let selectedModel = 'claude-opus-4-6';
+  let selectedModel = 'claude-opus-4-7';
   let allModels = [];
   let modelDDIdx = -1;
   let attachments = [];
@@ -268,7 +268,7 @@
       refreshWelcomeLayout();
     }
     // Restore per-tab state
-    selectedModel = tab.selectedModel || 'claude-opus-4-6';
+    selectedModel = tab.selectedModel || 'claude-opus-4-7';
     if (modelName) modelName.textContent = selectedModel;
     attachments = tab.attachments || [];
     renderFileChips();

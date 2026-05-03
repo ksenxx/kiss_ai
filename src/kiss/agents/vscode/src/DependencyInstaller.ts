@@ -70,18 +70,18 @@ function findNodeDirWindows(baseDir: string): string {
 
 /**
  * Return the best default model name based on which LLM API keys are set
- * in ``process.env``.  Priority: Anthropic > OpenRouter > Gemini > OpenAI > Together AI.
- * Falls back to ``"claude-opus-4-6"`` when no keys are present.
+ * in ``process.env``.  Priority: Anthropic > OpenAI > Gemini > OpenRouter > Together AI.
+ * Falls back to ``"claude-opus-4-7"`` when no keys are present.
  */
 export function getDefaultModel(): string {
-  if (process.env.ANTHROPIC_API_KEY) return 'claude-opus-4-6';
-  if (process.env.OPENROUTER_API_KEY)
-    return 'openrouter/anthropic/claude-opus-4.6';
+  if (process.env.ANTHROPIC_API_KEY) return 'claude-opus-4-7';
+  if (process.env.OPENAI_API_KEY) return 'gpt-5.5';
   if (process.env.GEMINI_API_KEY) return 'gemini-3.1-pro-preview';
-  if (process.env.OPENAI_API_KEY) return 'gpt-5.4';
+  if (process.env.OPENROUTER_API_KEY)
+    return 'openrouter/anthropic/claude-opus-4.7';
   if (process.env.TOGETHER_API_KEY)
     return 'Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8';
-  return 'claude-opus-4-6';
+  return 'claude-opus-4-7';
 }
 
 /**
