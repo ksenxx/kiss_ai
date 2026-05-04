@@ -296,6 +296,7 @@ _VSCODE_ONLY_COMMANDS = frozenset({
     "webviewFocusChanged",
     "openFile",
     "resolveDroppedPaths",
+    "pickFolder",
 })
 
 _TLS_DIR = Path.home() / ".kiss" / "tls"
@@ -714,6 +715,11 @@ class WebPrinter(BaseBrowserPrinter):
         """
         event = self._inject_tab_id(event)
 
+        if event.get("type") == "configData":
+            cfg = event.get("config")
+            if isinstance(cfg, dict) and not cfg.get("work_dir"):
+                cfg["work_dir"] = os.environ.get("KISS_WORKDIR", "") or os.getcwd()
+
         if event.get("type") == "merge_data":
             event = _augment_merge_data(event)
             evt_tab = event.get("tabId", "")
@@ -1035,8 +1041,13 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
              placeholder="Remote access password">
           </label>
           <label class="config-label">Working directory
-            <input type="text" id="cfg-work-dir"
-             placeholder="Default: current workspace folder">
+            <div style="display:flex;gap:4px;align-items:center;">
+              <input type="text" id="cfg-work-dir"
+               placeholder="Default: current workspace folder" style="flex:1;">
+              <button type="button" id="cfg-work-dir-browse"
+               title="Browse for folder"
+               style="padding:4px 8px;cursor:pointer;display:none;">Browse</button>
+            </div>
           </label>
           <div class="config-divider"></div>
           <div class="sidebar-hdr" style="margin-top:8px;">API Keys</div>

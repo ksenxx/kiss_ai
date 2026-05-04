@@ -2017,6 +2017,11 @@
       case 'configData':
         populateConfigForm(ev.config || {}, ev.apiKeys || {});
         break;
+      case 'folderPicked':
+        if (ev.path) {
+          document.getElementById('cfg-work-dir').value = ev.path;
+        }
+        break;
       case 'history':
         renderHistory(ev.sessions || [], ev.offset || 0, ev.generation || 0);
         break;
@@ -3420,6 +3425,12 @@
       vscode.postMessage({type: 'saveConfig', ...data});
       closeConfigSidebar();
     });
+    const browseBtn = document.getElementById('cfg-work-dir-browse');
+    if (browseBtn) {
+      browseBtn.addEventListener('click', () => {
+        vscode.postMessage({type: 'pickFolder'});
+      });
+    }
     historySearch.addEventListener('input', () => {
       resetHistoryPagination();
       vscode.postMessage({

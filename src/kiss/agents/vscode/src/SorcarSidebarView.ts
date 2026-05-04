@@ -329,6 +329,11 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         this._view.show(true);
       }
 
+      // Ensure work_dir always shows the resolved directory
+      if (msg.type === 'configData' && msg.config && !msg.config['work_dir']) {
+        msg.config['work_dir'] = this._getWorkDir();
+      }
+
       this._sendToWebview(msg);
       if (msg.type === 'status') {
         const statusTabId = msg.tabId;
@@ -969,6 +974,22 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           apiKeys: message.apiKeys,
         });
         break;
+
+      case 'pickFolder': {
+        const result = await vscode.window.showOpenDialog({
+          canSelectFiles: false,
+          canSelectFolders: true,
+          canSelectMany: false,
+          openLabel: 'Select Working Directory',
+        });
+        if (result && result.length > 0) {
+          this._sendToWebview({
+            type: 'folderPicked',
+            path: result[0].fsPath,
+          });
+        }
+        break;
+      }
 
       case 'resolveDroppedPaths': {
         const workDir = this._getWorkDir();

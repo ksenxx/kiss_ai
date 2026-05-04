@@ -2472,6 +2472,7 @@ class TestSorcarSidebarViewMessageHandling(unittest.TestCase):
             "closeTab", "getWelcomeSuggestions",
             "webviewFocusChanged", "autocommitAction", "setSkipMerge",
             "getConfig", "saveConfig", "deleteTask", "getFrequentTasks",
+            "pickFolder",
         }
         extra = sidebar_cases - known
         assert not extra, f"Sidebar has extra message handlers: {extra}"
