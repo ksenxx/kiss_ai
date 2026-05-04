@@ -991,7 +991,7 @@ def get_default_model() -> str:
     """Return the best default model based on which API keys are configured.
 
     Priority order: Anthropic > OpenAI > Gemini > OpenRouter > Together AI > Claude Code CLI.
-    Falls back to ``"claude-opus-4-6"`` if no keys are set.
+    Falls back to ``"No model"`` if no keys are set.
     """
     import shutil
 
