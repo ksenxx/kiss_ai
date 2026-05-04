@@ -14,7 +14,7 @@
 
   // State — isRunning mirrors the active tab's tab.isRunning for UI controls
   let isRunning = false;
-  let selectedModel = 'claude-opus-4-6';
+  let selectedModel = '';
   let allModels = [];
   let modelDDIdx = -1;
   let attachments = [];
@@ -268,7 +268,7 @@
       refreshWelcomeLayout();
     }
     // Restore per-tab state
-    selectedModel = tab.selectedModel || 'claude-opus-4-6';
+    selectedModel = tab.selectedModel || '';
     if (modelName) modelName.textContent = selectedModel;
     attachments = tab.attachments || [];
     renderFileChips();
@@ -666,6 +666,8 @@
   const modelSearch = document.getElementById('model-search');
   const modelList = document.getElementById('model-list');
   const modelName = document.getElementById('model-name');
+  // Read initial model from DOM (injected by the backend template)
+  if (modelName && modelName.textContent) selectedModel = modelName.textContent;
   const fileChips = document.getElementById('file-chips');
 
   const statusText = document.getElementById('status-text');
@@ -1667,6 +1669,9 @@
         });
         if (rTab) rTab.lastTaskFailed = true;
       }
+      // After a result, the next thinking/text (e.g. from a new
+      // RelentlessAgent sub-session) must create its own Thoughts panel.
+      pendingPanel = true;
     }
     if (target === llmPanel) llmPanel.scrollTop = llmPanel.scrollHeight;
     // Keep the chevron "right" state consistent across new panels added by streaming.
@@ -1775,6 +1780,8 @@
           tab.statusBudgetText = 'Cost: ' + ev.cost;
         collapseAllExceptResult(tab.outputFragment);
         if (ev.success === false && !ev.is_continue) tab.lastTaskFailed = true;
+        // After a result, the next thinking/text must create a new panel.
+        bgPendingPanel = true;
       }
     }
 
@@ -2055,6 +2062,16 @@
           clearOutput();
           resetOutputState();
           showSpinner();
+        } else if (clearTab) {
+          // Reset background tab streaming state so the first thinking
+          // event of the new task creates a fresh Thoughts panel.
+          clearTab.outputFragment = null;
+          clearTab.streamState = null;
+          clearTab.streamLlmPanel = null;
+          clearTab.streamLlmPanelState = null;
+          clearTab.streamLastToolName = '';
+          clearTab.streamPendingPanel = false;
+          clearTab.streamStepCount = 0;
         }
         renderTabBar();
         break;

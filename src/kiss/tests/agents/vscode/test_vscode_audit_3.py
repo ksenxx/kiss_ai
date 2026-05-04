@@ -260,24 +260,13 @@ class TestTruncatedCommentInRunTaskInner(unittest.TestCase):
     """
 
     def test_source_has_truncated_comment(self) -> None:
-        """Structural: find the truncated comment."""
+        """Structural: the truncated comment has been removed."""
         src = inspect.getsource(_TaskRunnerMixin._run_task_inner)
-        assert "pending branch from a" in src, (
-            "N4: could not find the truncated comment"
+        # N4 fix: the truncated "pending branch from a" comment was
+        # cleaned up.  Verify it is no longer present.
+        assert "pending branch from a" not in src, (
+            "N4: the truncated comment should have been removed"
         )
-
-        for line in src.splitlines():
-            if "pending branch from a" in line:
-                stripped = line.strip()
-                assert stripped.startswith("#"), (
-                    "N4: the truncated text should be in a comment"
-                )
-                after_marker = stripped.split("pending branch from a", 1)[1]
-                assert len(after_marker.strip()) < 10, (
-                    f"N4: expected truncated comment, but found continuation: "
-                    f"{after_marker!r}"
-                )
-                break
 
 
 class TestWritePathsEmptyTabId(unittest.TestCase):

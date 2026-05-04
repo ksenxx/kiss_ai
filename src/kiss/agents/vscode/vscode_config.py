@@ -26,14 +26,14 @@ DEFAULTS: dict[str, Any] = {
     "remote_password": "",
 }
 
-API_KEY_ENV_VARS: dict[str, str] = {
-    "GEMINI_API_KEY": "GEMINI_API_KEY",
-    "OPENAI_API_KEY": "OPENAI_API_KEY",
-    "ANTHROPIC_API_KEY": "ANTHROPIC_API_KEY",
-    "TOGETHER_API_KEY": "TOGETHER_API_KEY",
-    "OPENROUTER_API_KEY": "OPENROUTER_API_KEY",
-    "MINIMAX_API_KEY": "MINIMAX_API_KEY",
-}
+API_KEY_ENV_VARS: frozenset[str] = frozenset({
+    "GEMINI_API_KEY",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "TOGETHER_API_KEY",
+    "OPENROUTER_API_KEY",
+    "MINIMAX_API_KEY",
+})
 
 
 def get_current_api_keys() -> dict[str, str]:

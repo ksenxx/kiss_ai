@@ -202,7 +202,13 @@ type ToWebviewMessageBody =
       task: string;
       events: unknown[];
     }
-  | {type: 'triggerStop'};
+  | {type: 'triggerStop'}
+  | {
+      type: 'taskDeleted';
+      chatId: number;
+      taskId: number;
+      chatHasMoreTasks: boolean;
+    };
 
 /** Command sent to Python backend */
 export interface AgentCommand {
