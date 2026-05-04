@@ -690,7 +690,6 @@
     'config-sidebar-overlay',
   );
   const configSidebarClose = document.getElementById('config-sidebar-close');
-  const cfgSaveBtn = document.getElementById('cfg-save-btn');
 
   // Frequent-tasks sidebar elements
   const frequentBtn = document.getElementById('frequent-btn');
@@ -3527,11 +3526,6 @@
     }
     configSidebarClose.addEventListener('click', closeConfigSidebar);
     configSidebarOverlay.addEventListener('click', closeConfigSidebar);
-    cfgSaveBtn.addEventListener('click', () => {
-      const data = collectConfigForm();
-      vscode.postMessage({type: 'saveConfig', ...data});
-      closeConfigSidebar();
-    });
     const browseBtn = document.getElementById('cfg-work-dir-browse');
     if (browseBtn) {
       browseBtn.addEventListener('click', () => {
@@ -4159,6 +4153,10 @@
     configBtn.classList.add('open');
   }
   function closeConfigSidebar() {
+    if (configSidebar.classList.contains('open')) {
+      const data = collectConfigForm();
+      vscode.postMessage({type: 'saveConfig', ...data});
+    }
     configSidebar.classList.remove('open');
     configSidebarOverlay.classList.remove('open');
     configBtn.classList.remove('open');

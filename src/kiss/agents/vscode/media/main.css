@@ -195,12 +195,7 @@ body {
 .config-checkbox input[type="checkbox"] { margin: 0; width: auto; }
 .config-divider { border-top: 1px solid var(--border); margin: 12px 0; }
 
-.config-save-btn {
-  display: block; width: 100%; padding: 8px; margin-top: 8px;
-  background: var(--accent); color: #fff; border: none; border-radius: 4px;
-  cursor: pointer; font-size: var(--fs-sm); font-weight: 600;
-}
-.config-save-btn:hover { opacity: 0.9; }
+
 
 #tab-list::-webkit-scrollbar { display: none; }
 

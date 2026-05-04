@@ -1075,7 +1075,7 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
             <input type="text" id="cfg-key-MINIMAX_API_KEY"
              placeholder="Enter MiniMax API key">
           </label>
-          <button id="cfg-save-btn" class="config-save-btn">Save Configuration</button>
+
         </div>
       </div>
     </div>

@@ -255,7 +255,7 @@ export function buildChatHtml(
           <label class="config-label">MiniMax API Key
             <input type="text" id="cfg-key-MINIMAX_API_KEY" placeholder="Enter MiniMax API key">
           </label>
-          <button id="cfg-save-btn" class="config-save-btn">Save Configuration</button>
+
         </div>
       </div>
     </div>
