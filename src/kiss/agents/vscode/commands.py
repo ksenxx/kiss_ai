@@ -30,6 +30,7 @@ class _CommandsMixin:
 
     if TYPE_CHECKING:
         printer: VSCodePrinter
+        work_dir: str
         _state_lock: threading.Lock
         _tab_states: dict[str, _TabState]
         _default_model: str
@@ -287,6 +288,10 @@ class _CommandsMixin:
         cfg = cmd.get("config", {})
         save_config(cfg)
         apply_config_to_env(cfg)
+
+        new_work_dir = cfg.get("work_dir", "")
+        if new_work_dir:
+            self.work_dir = new_work_dir
 
         api_keys = cmd.get("apiKeys", {})
         for key_name, key_value in api_keys.items():
