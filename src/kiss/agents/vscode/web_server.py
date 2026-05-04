@@ -299,8 +299,9 @@ _VSCODE_ONLY_COMMANDS = frozenset({
     "pickFolder",
 })
 
-_TLS_DIR = Path.home() / ".kiss" / "tls"
-_URL_FILE = Path.home() / ".kiss" / "remote-url.json"
+_KISS_HOME = Path(os.environ.get("KISS_HOME") or (Path.home() / ".kiss"))
+_TLS_DIR = _KISS_HOME / "tls"
+_URL_FILE = _KISS_HOME / "remote-url.json"
 
 
 def _discover_tunnel_url_from_metrics() -> str | None:
@@ -1898,14 +1899,19 @@ class RemoteAccessServer:
     async def _watchdog(self) -> None:
         """Unified periodic watchdog (runs every :data:`TUNNEL_CHECK_INTERVAL`).
 
-        Each tick performs three checks:
+        Each tick performs four checks:
 
         1. **Tunnel health** — if the ``cloudflared`` process died
            (e.g. macOS killed it during sleep), restart it.
-        2. **IP change** — if the host's network addresses changed
+        2. **URL-file presence** — re-write ``~/.kiss/remote-url.json``
+           if it has been removed (e.g. by a developer's pytest run
+           that touches the real file, or by an unrelated cleanup).
+           Without this the VS Code settings panel's 10-second poller
+           cannot discover the active URL.
+        3. **IP change** — if the host's network addresses changed
            (WiFi switch, DHCP renewal, VPN), initiate a graceful
            shutdown so the daemon manager restarts the process.
-        3. **WebSocket ping** — send a ping to every connected client
+        4. **WebSocket ping** — send a ping to every connected client
            and close connections that fail to respond within
            :data:`_WS_PING_TIMEOUT` seconds.
         """
@@ -1918,6 +1924,22 @@ class RemoteAccessServer:
                     raise
                 except Exception:
                     logger.debug("Watchdog tunnel check error", exc_info=True)
+            try:
+                if not _URL_FILE.is_file():
+                    tunnel_url = (
+                        self._active_url
+                        if self._active_url and self._active_url != self._local_url
+                        else None
+                    )
+                    _save_url_file(self._local_url, tunnel_url)
+                    logger.info(
+                        "Re-wrote missing URL file %s (tunnel=%s)",
+                        _URL_FILE, tunnel_url,
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug("Watchdog URL-file check error", exc_info=True)
             try:
                 current_ips = _get_local_ips()
                 if current_ips != self._last_ips:
