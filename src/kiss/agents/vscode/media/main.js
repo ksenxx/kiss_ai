@@ -392,7 +392,7 @@
       addBtn.addEventListener('click', () => {
         createNewTab();
       });
-      tabBar.insertBefore(addBtn, document.getElementById('config-btn'));
+      tabBar.appendChild(addBtn);
     }
 
     // Scroll the active tab into view
@@ -3492,7 +3492,7 @@
         resetHistoryPagination();
         sidebar.classList.add('open');
         sidebarOverlay.classList.add('open');
-        historyBtn.classList.add('open');
+        historyBtn.classList.add('active');
         vscode.postMessage({
           type: 'getHistory',
           query: historySearch.value,
@@ -4140,7 +4140,7 @@
   function closeSidebar() {
     sidebar.classList.remove('open');
     sidebarOverlay.classList.remove('open');
-    historyBtn.classList.remove('open');
+    historyBtn.classList.remove('active');
   }
 
   function openConfigSidebar() {
@@ -4150,7 +4150,7 @@
     vscode.postMessage({type: 'getConfig'});
     configSidebar.classList.add('open');
     configSidebarOverlay.classList.add('open');
-    configBtn.classList.add('open');
+    configBtn.classList.add('active');
   }
   function closeConfigSidebar() {
     if (configSidebar.classList.contains('open')) {
@@ -4159,7 +4159,7 @@
     }
     configSidebar.classList.remove('open');
     configSidebarOverlay.classList.remove('open');
-    configBtn.classList.remove('open');
+    configBtn.classList.remove('active');
   }
 
   function openFrequentSidebar() {
@@ -4169,13 +4169,13 @@
     vscode.postMessage({type: 'getFrequentTasks', limit: 20});
     frequentSidebar.classList.add('open');
     if (frequentSidebarOverlay) frequentSidebarOverlay.classList.add('open');
-    if (frequentBtn) frequentBtn.classList.add('open');
+    if (frequentBtn) frequentBtn.classList.add('active');
   }
   function closeFrequentSidebar() {
     if (!frequentSidebar) return;
     frequentSidebar.classList.remove('open');
     if (frequentSidebarOverlay) frequentSidebarOverlay.classList.remove('open');
-    if (frequentBtn) frequentBtn.classList.remove('open');
+    if (frequentBtn) frequentBtn.classList.remove('active');
   }
 
   function renderFrequentTasks(tasks) {

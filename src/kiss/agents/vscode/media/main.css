@@ -95,48 +95,7 @@ body {
   -ms-overflow-style: none;
 }
 
-#tab-bar > #history-btn {
-  flex-shrink: 0;
-  background: none;
-  border: none;
-  color: var(--dim);
-  cursor: pointer;
-  padding: 5px 8px;
-  display: flex;
-  align-items: center;
-  gap: 3px;
-  font-size: var(--fs-base);
-  transition: color 0.15s;
-}
-#tab-bar > #history-btn:hover { color: var(--fg); }
 
-#tab-bar > #history-btn .history-chevron {
-  transition: transform 0.2s ease;
-}
-
-#tab-bar > #history-btn.open .history-chevron {
-  transform: rotate(-90deg);
-}
-
-#tab-bar > #config-btn,
-#tab-bar > #frequent-btn {
-  flex-shrink: 0;
-  background: none;
-  border: none;
-  color: var(--dim);
-  cursor: pointer;
-  padding: 5px 6px;
-  display: flex;
-  align-items: center;
-  font-size: var(--fs-base);
-  transition: color 0.15s;
-}
-
-#tab-bar > #config-btn:hover,
-#tab-bar > #frequent-btn:hover { color: var(--fg); }
-
-#tab-bar > #config-btn.open,
-#tab-bar > #frequent-btn.open { color: var(--accent); }
 
 /* ── Config Sidebar ─────────────────────────────────── */
 #config-sidebar {
@@ -823,6 +782,12 @@ body.remote-chat #welcome > #input-area {
 }
 .menu-item.active svg { opacity: 1; }
 .menu-item.active:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+
+.menu-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 0;
+}
 
 #upload-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 

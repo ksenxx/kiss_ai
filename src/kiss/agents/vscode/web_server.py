@@ -820,34 +820,7 @@ width=device-width,initial-scale=1,maximum-scale=1">
 </head>
 <body class="remote-chat">
   <div id="app">
-    <div id="tab-bar"><div id="tab-list"></div><button id="config-btn" title="Configuration">
-              <svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-               stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <circle cx="12" cy="12" r="3"/>
-                <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 \
-2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 \
-2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 \
-01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 \
-010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 \
-012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 \
-0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 \
-2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 \
-4h-.09a1.65 1.65 0 00-1.51 1z"/>
-              </svg>
-            </button><button id="frequent-btn" title="Frequent tasks">
-              <svg width="1em" height="1em" viewBox="0 0 24 24" fill="none"
-               stroke="currentColor" stroke-width="2" stroke-linecap="round"
-               stroke-linejoin="round">
-                <polyline points="20 12 18 7 14 17 10 5 6 14 4 12"/>
-              </svg>
-            </button><button id="history-btn">
-              <svg class="history-chevron" width="1em" height="1em" viewBox="0 0 24 24"
-               fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"
-               stroke-linejoin="round">
-                <polyline points="15 18 9 12 15 6"/>
-              </svg>
-              <span>History</span>
-            </button></div>
+    <div id="tab-bar"><div id="tab-list"></div></div>
 
     <div id="tab-status-bar">
       <div class="status">
@@ -958,6 +931,40 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
                   <line x1="12" y1="17" x2="12" y2="21"/>
                 </svg>
                 <span>Demo mode</span>
+              </button>
+              <div class="menu-divider"></div>
+              <button id="frequent-btn" class="menu-item">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                 stroke-linejoin="round">
+                  <polyline points="20 12 18 7 14 17 10 5 6 14 4 12"/>
+                </svg>
+                <span>Frequent tasks</span>
+              </button>
+              <button id="history-btn" class="menu-item">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                 stroke-linejoin="round">
+                  <polyline points="15 18 9 12 15 6"/>
+                </svg>
+                <span>History</span>
+              </button>
+              <button id="config-btn" class="menu-item">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                 stroke-linejoin="round">
+                  <circle cx="12" cy="12" r="3"/>
+                  <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 \
+2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 \
+1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06\
+.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1\
+H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 \
+2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 \
+014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 \
+2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 \
+4h-.09a1.65 1.65 0 00-1.51 1z"/>
+                </svg>
+                <span>Settings</span>
               </button>
             </div>
             <div id="model-dropdown">
