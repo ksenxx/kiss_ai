@@ -335,6 +335,7 @@ body {
 /* ── Output Area ────────────────────────────────────── */
 #output {
   flex: 1; overflow-y: auto; overflow-x: hidden;
+  overscroll-behavior-y: none;
   padding: 14px 12px 12px;
 }
 

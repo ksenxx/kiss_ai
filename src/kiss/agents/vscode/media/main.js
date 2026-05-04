@@ -1873,6 +1873,113 @@
       }
     }
   });
+
+  // --- Touch-based adjacent scrolling on #output ---
+  // Mirrors the wheel handler above for mobile/tablet devices where wheel
+  // events do not fire.  Tracks incremental finger movement while the
+  // scroll position is pinned at a boundary.
+  let _touchOutputLastY = 0;
+
+  O.addEventListener(
+    'touchstart',
+    function handleOutputTouchStart(e) {
+      if (e.touches.length === 1) {
+        _touchOutputLastY = e.touches[0].clientY;
+      }
+    },
+    {passive: true},
+  );
+
+  O.addEventListener(
+    'touchmove',
+    function handleOutputTouchMove(e) {
+      if (e.touches.length !== 1) return;
+      const currentY = e.touches[0].clientY;
+      // Positive touchDelta = finger moved up = scroll down ("next")
+      // Negative touchDelta = finger moved down = scroll up ("prev")
+      const touchDelta = _touchOutputLastY - currentY;
+      _touchOutputLastY = currentY;
+
+      if (adjacentLoading || !activeTabId || !currentTaskName) return;
+
+      const atTop = O.scrollTop <= 0;
+      const atBottom = O.scrollTop + O.clientHeight >= O.scrollHeight - 2;
+
+      if (atTop && touchDelta < 0 && !noPrevTask && oldestLoadedTask) {
+        // Pulling down at top — load previous task
+        if (overscrollDir !== 'prev') {
+          overscrollAccum = 0;
+          overscrollDir = 'prev';
+        }
+        overscrollAccum += Math.abs(touchDelta);
+        clearTimeout(overscrollTimer);
+        overscrollTimer = setTimeout(() => {
+          overscrollAccum = 0;
+          overscrollDir = '';
+        }, 500);
+        if (overscrollAccum >= OVERSCROLL_THRESHOLD) {
+          overscrollAccum = 0;
+          overscrollDir = '';
+          adjacentLoading = true;
+          showAdjacentLoader('prev');
+          vscode.postMessage({
+            type: 'getAdjacentTask',
+            tabId: activeTabId,
+            task: oldestLoadedTask,
+            direction: 'prev',
+          });
+        }
+      } else if (
+        atBottom &&
+        touchDelta > 0 &&
+        !noNextTask &&
+        newestLoadedTask
+      ) {
+        // Pushing up at bottom — load next task
+        if (overscrollDir !== 'next') {
+          overscrollAccum = 0;
+          overscrollDir = 'next';
+        }
+        overscrollAccum += Math.abs(touchDelta);
+        clearTimeout(overscrollTimer);
+        overscrollTimer = setTimeout(() => {
+          overscrollAccum = 0;
+          overscrollDir = '';
+        }, 500);
+        if (overscrollAccum >= OVERSCROLL_THRESHOLD) {
+          overscrollAccum = 0;
+          overscrollDir = '';
+          adjacentLoading = true;
+          showAdjacentLoader('next');
+          vscode.postMessage({
+            type: 'getAdjacentTask',
+            tabId: activeTabId,
+            task: newestLoadedTask,
+            direction: 'next',
+          });
+        }
+      } else {
+        overscrollAccum = 0;
+        overscrollDir = '';
+      }
+    },
+    {passive: true},
+  );
+
+  O.addEventListener(
+    'touchend',
+    function handleOutputTouchEnd() {
+      // Reset overscroll state when the finger lifts
+      overscrollAccum = 0;
+      overscrollDir = '';
+      if (overscrollTimer) {
+        clearTimeout(overscrollTimer);
+        overscrollTimer = null;
+      }
+    },
+    {passive: true},
+  );
+
   function updateVisibleTask() {
     const adjacentTasks = O.querySelectorAll('.adjacent-task[data-task]');
     if (!adjacentTasks.length) return;
