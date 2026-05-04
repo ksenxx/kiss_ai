@@ -65,7 +65,7 @@ export type FromWebviewMessage =
   | {type: 'setSkipMerge'; tabId?: string; skip: boolean}
   | {type: 'resolveDroppedPaths'; uris: string[]}
   | {type: 'webviewFocusChanged'; focused: boolean}
-  | {type: 'pickFolder'}
+  | {type: 'pickFolder'; currentPath?: string}
   | {
       type: 'getAdjacentTask';
       tabId?: string;

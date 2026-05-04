@@ -976,11 +976,16 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         break;
 
       case 'pickFolder': {
+        const defaultUri =
+          message.currentPath && fs.existsSync(message.currentPath)
+            ? vscode.Uri.file(message.currentPath)
+            : undefined;
         const result = await vscode.window.showOpenDialog({
           canSelectFiles: false,
           canSelectFolders: true,
           canSelectMany: false,
           openLabel: 'Select Working Directory',
+          defaultUri,
         });
         if (result && result.length > 0) {
           this._sendToWebview({

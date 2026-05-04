@@ -3428,7 +3428,9 @@
     const browseBtn = document.getElementById('cfg-work-dir-browse');
     if (browseBtn) {
       browseBtn.addEventListener('click', () => {
-        vscode.postMessage({type: 'pickFolder'});
+        const workDirInput = document.getElementById('cfg-work-dir');
+        const currentPath = workDirInput ? workDirInput.value.trim() : '';
+        vscode.postMessage({type: 'pickFolder', currentPath});
       });
     }
     historySearch.addEventListener('input', () => {
