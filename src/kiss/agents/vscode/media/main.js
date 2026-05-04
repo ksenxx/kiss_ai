@@ -4124,6 +4124,7 @@
           vscode.postMessage({
             type: 'resumeSession',
             id: s.id,
+            taskId: s.task_id,
             tabId: activeTabId,
           });
         } else {

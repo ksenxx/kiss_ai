@@ -51,7 +51,7 @@ export type FromWebviewMessage =
       tabId?: string;
       restoredTabs?: Array<{tabId: string; chatId: string}>;
     }
-  | {type: 'resumeSession'; id: number; tabId?: string}
+  | {type: 'resumeSession'; id: number; taskId?: number; tabId?: string}
   | {type: 'getWelcomeSuggestions'}
   | {type: 'complete'; query: string}
   | {type: 'mergeAction'; action: string; tabId?: string}

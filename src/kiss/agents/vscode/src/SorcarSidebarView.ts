@@ -830,6 +830,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         resumeProc.sendCommand({
           type: 'resumeSession',
           chatId: message.id,
+          taskId: message.taskId,
           tabId: resumeTabId,
         });
         break;

@@ -49,7 +49,9 @@ class _CommandsMixin:
         def _get_frequent_tasks(self, limit: int = 20) -> None: ...
         def _get_files(self, prefix: str) -> None: ...
         def _refresh_file_cache(self) -> None: ...
-        def _replay_session(self, chat_id: str, tab_id: str = "") -> None: ...
+        def _replay_session(
+            self, chat_id: str, tab_id: str = "", task_id: int | None = None,
+        ) -> None: ...
         def _finish_merge(self, tab_id: str = "") -> None: ...
         def _new_chat(self, tab_id: str) -> None: ...
         def _close_tab(self, tab_id: str) -> None: ...
@@ -157,11 +159,19 @@ class _CommandsMixin:
         q.put(cmd.get("answer", ""))
 
     def _cmd_resume_session(self, cmd: dict[str, Any]) -> None:
-        """Replay a previous chat session."""
+        """Replay a previous chat session.
+
+        When ``taskId`` is present, load that specific task instead of
+        the latest task in the chat session.
+        """
         raw_id = cmd.get("chatId")
         chat_id = str(raw_id) if raw_id else ""
-        if chat_id:
-            self._replay_session(chat_id, cmd.get("tabId", ""))
+        raw_task_id = cmd.get("taskId")
+        task_id = int(raw_task_id) if raw_task_id is not None else None
+        if chat_id or task_id is not None:
+            self._replay_session(
+                chat_id, cmd.get("tabId", ""), task_id=task_id,
+            )
 
     def _cmd_merge_action(self, cmd: dict[str, Any]) -> None:
         """Handle merge accept/reject from the extension.
