@@ -154,6 +154,7 @@ body {
   flex-direction: column;
 }
 #config-sidebar.open { transform: translateX(0); }
+#config-sidebar .sidebar-section { overflow: visible; flex: none; }
 
 #config-sidebar-overlay {
   position: fixed; inset: 0; background: rgb(0 0 0 / 50%);
