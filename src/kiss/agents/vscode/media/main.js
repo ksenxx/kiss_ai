@@ -1669,6 +1669,9 @@
         });
         if (rTab) rTab.lastTaskFailed = true;
       }
+      // After a result, the next thinking/text (e.g. from a new
+      // RelentlessAgent sub-session) must create its own Thoughts panel.
+      pendingPanel = true;
     }
     if (target === llmPanel) llmPanel.scrollTop = llmPanel.scrollHeight;
     // Keep the chevron "right" state consistent across new panels added by streaming.
@@ -1777,6 +1780,8 @@
           tab.statusBudgetText = 'Cost: ' + ev.cost;
         collapseAllExceptResult(tab.outputFragment);
         if (ev.success === false && !ev.is_continue) tab.lastTaskFailed = true;
+        // After a result, the next thinking/text must create a new panel.
+        bgPendingPanel = true;
       }
     }
 
@@ -2057,6 +2062,16 @@
           clearOutput();
           resetOutputState();
           showSpinner();
+        } else if (clearTab) {
+          // Reset background tab streaming state so the first thinking
+          // event of the new task creates a fresh Thoughts panel.
+          clearTab.outputFragment = null;
+          clearTab.streamState = null;
+          clearTab.streamLlmPanel = null;
+          clearTab.streamLlmPanelState = null;
+          clearTab.streamLastToolName = '';
+          clearTab.streamPendingPanel = false;
+          clearTab.streamStepCount = 0;
         }
         renderTabBar();
         break;
