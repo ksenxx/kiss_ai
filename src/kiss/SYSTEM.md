@@ -19,9 +19,11 @@
   higher timeout. Only for commands expected to take more than 10 minutes,
   run them in the background, redirect output to a file, and poll
   periodically.
-- Use go_to_url() for browser tool.  Use internet search extensively.
+- Use go_to_url() for browser tool. Use internet search extensively.
 - **The user cannot see intermediate chat. Show whatever the user asks in the
-  summary of the 'finish' tool call.**
+  summary of the 'finish' tool call. When answering an informational question,
+  include the full detailed answer in the summary, not just a meta-description
+  like "Answered the user's question about X".**
 - READ large files in chunks.
 - Create temporary files in PWD/tmp. Cleanup temporary files after the task is done.
 - Use ULTRA thinking ALWAYS.
