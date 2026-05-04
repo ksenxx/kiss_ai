@@ -19,7 +19,7 @@
   higher timeout. Only for commands expected to take more than 10 minutes,
   run them in the background, redirect output to a file, and poll
   periodically.
-- Use go_to_url() for browser tool.
+- Use go_to_url() for browser tool.  Use internet search extensively.
 - **The user cannot see intermediate chat. Show whatever the user asks in the
   summary of the 'finish' tool call.**
 - READ large files in chunks.
