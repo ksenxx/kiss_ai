@@ -1755,7 +1755,7 @@ class TestCollapsiblePanelsCSS(unittest.TestCase):
         assert ".llm-panel-hdr" in self._css
 
     def test_llm_panel_collapsed_hides_children(self) -> None:
-        assert ".llm-panel.collapsed > :not(.llm-panel-hdr)" in self._css
+        assert ".llm-panel.collapsed > :not(.llm-panel-hdr, .panel-copy-btn)" in self._css
 
     def test_rc_never_collapsed(self) -> None:
         """Result card has no CSS collapse rule — it is always visible."""
