@@ -35,7 +35,7 @@ from kiss.agents.sorcar.persistence import (
 )
 from kiss.agents.vscode.autocomplete import _AutocompleteMixin
 from kiss.agents.vscode.commands import _CommandsMixin
-from kiss.agents.vscode.diff_merge import (  # noqa: F401 (re-export for tests)
+from kiss.agents.vscode.diff_merge import (
     _cleanup_merge_data,
     _git,
     _merge_data_dir,
