@@ -58,7 +58,7 @@ Skip for simple single-file tasks.
 
 ## Web Research (MANDATORY)
 
-- **Visit ≥30 websites every search. Hard requirement—don't stop before 30 or rationalize fewer.**
+- **Visit ≥30 websites every search. Hard requirement—-don't stop before 30 or don't rationalize fewer.**
 - Procedure:
   1. Create PWD/tmp/information-{unique_id}.md: `# Web Research — Websites visited: 0/30`
   1. Per site, append: `## [N/30] URL` + extracted info. Update header counter each visit.
