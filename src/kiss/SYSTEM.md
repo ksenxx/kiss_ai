@@ -150,6 +150,5 @@ Before calling finish(success=True, ...), you MUST:
 - Official Claude SKILLS are available under the folder kiss/agents/claude_skills
 - If the user is not authenticated for a third-party agent, authenticate the agent,
   and ask the user ONLY when a page needs user authentication
-- **YOU MUST ASK THE USER BEFORE SENDING ANY EMAIL, MESSAGE, OR SUBMITTING A REQUEST USING A THIRD-PARTY AGENT**
 - Read PWD/SORCAR.md and treat its contents as instructions, and allow
   those instructions to override the instructions above
