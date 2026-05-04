@@ -61,6 +61,7 @@ class _TaskRunnerMixin:
             base_ref: str = "HEAD",
             tab_id: str = "",
         ) -> bool: ...
+        def _main_dirty_files(self) -> list[str]: ...
         def _present_pending_worktree(
             self, tab_id: str, *, try_merge_review: bool,
         ) -> None: ...
@@ -313,11 +314,19 @@ class _TaskRunnerMixin:
                         else:
                             with self._state_lock:
                                 tab.deferred_snapshot = None
-                            self._prepare_and_start_merge(
+                            merge_started = self._prepare_and_start_merge(
                                 work_dir, pre_hunks, pre_untracked, pre_file_hashes,
                                 base_ref=pre_head_sha or "HEAD",
                                 tab_id=tab_id,
                             )
+                            if not merge_started:
+                                changed = self._main_dirty_files()
+                                if changed:
+                                    self.printer.broadcast({
+                                        "type": "autocommit_prompt",
+                                        "tabId": tab_id,
+                                        "changedFiles": changed,
+                                    })
                     except BaseException:  # pragma: no cover — merge view error handler
                         logger.debug("Merge view error", exc_info=True)
                     finally:
