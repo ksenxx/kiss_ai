@@ -105,17 +105,17 @@ For simple single-file tasks, skip formal planning and execute directly.
 - Follow this exact procedure:
   1. Create PWD/tmp/information-{unique_id}.md with a counter header:
      `# Web Research — Websites visited: 0/30`
-  2. For each website you visit, append an entry with the incremented
+  1. For each website you visit, append an entry with the incremented
      counter, URL, and extracted information:
      `## [1/30] https://example.com` ... content ...
      `## [2/30] https://other.com` ... content ...
-  3. Update the counter header after every visit. **Do NOT move on to
+  1. Update the counter header after every visit. **Do NOT move on to
      the next step of your task until the counter shows ≥ 30.**
-  4. If search results run dry for one query, try different queries,
+  1. If search results run dry for one query, try different queries,
      synonyms, related terms, official docs, GitHub repos, GitHub
      issues, Stack Overflow, blog posts, tutorials, Reddit threads,
      academic papers, and API references.
-  5. After reaching 30, read through the collected information and think
+  1. After reaching 30, read through the collected information and think
      deeply about how to complete the task.
 - If you need to log in to a website while browsing for information, you
   MUST ask the user to help you with the login.
