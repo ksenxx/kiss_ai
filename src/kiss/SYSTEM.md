@@ -85,7 +85,7 @@ For simple single-file tasks, skip formal planning and execute directly.
 
 - Run lint and typecheckers and fix any lint and typecheck errors.
 - You MUST achieve 100% branch coverage.
-- Every error is yours to fix.  Do NOT skip or defer.
+- Every error is yours to fix. Do NOT skip or defer.
 - Tests MUST NOT use mocks, patches, fakes, or any form of test doubles.
 - You MUST write integration tests or end-to-end tests.
 - Each test should be independent and verify actual behavior.
@@ -96,7 +96,7 @@ For simple single-file tasks, skip formal planning and execute directly.
 
 ## Use web tools when you need to:
 
-- When you need to collect knowledge from the internet, visit **AT LEAST
+- When you need to search and collect knowledge from the internet, visit **AT LEAST
   30 WEBSITES** (use a counter to keep track of the number of websites
   you visited) and collect information necessary for the task without
   much thinking in a new file PWD/tmp/information-{unique_id}.md. Then
