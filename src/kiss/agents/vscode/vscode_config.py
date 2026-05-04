@@ -24,6 +24,7 @@ DEFAULTS: dict[str, Any] = {
     "custom_api_key": "",
     "use_web_browser": True,
     "remote_password": "",
+    "work_dir": "",
 }
 
 API_KEY_ENV_VARS: frozenset[str] = frozenset({

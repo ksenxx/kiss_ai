@@ -229,6 +229,9 @@ export function buildChatHtml(
           <label class="config-label">Remote password
             <input type="password" id="cfg-remote-password" placeholder="Remote access password">
           </label>
+          <label class="config-label">Working directory
+            <input type="text" id="cfg-work-dir" placeholder="Default: current workspace folder">
+          </label>
           <div class="config-divider"></div>
           <div class="sidebar-hdr" style="margin-top:8px;">API Keys</div>
           <label class="config-label">Gemini API Key

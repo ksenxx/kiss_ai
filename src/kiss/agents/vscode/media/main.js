@@ -4102,6 +4102,7 @@
     el('cfg-custom-api-key').value = cfg.custom_api_key || '';
     el('cfg-use-web-browser').checked = cfg.use_web_browser !== false;
     el('cfg-remote-password').value = cfg.remote_password || '';
+    el('cfg-work-dir').value = cfg.work_dir || '';
     // Populate API key fields from current environment values
     const keyIds = [
       'GEMINI_API_KEY',
@@ -4123,6 +4124,7 @@
       custom_api_key: el('cfg-custom-api-key').value.trim(),
       use_web_browser: el('cfg-use-web-browser').checked,
       remote_password: el('cfg-remote-password').value.trim(),
+      work_dir: el('cfg-work-dir').value.trim(),
     };
     const apiKeys = {};
     const keyIds = [

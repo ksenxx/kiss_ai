@@ -1034,6 +1034,10 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
             <input type="password" id="cfg-remote-password"
              placeholder="Remote access password">
           </label>
+          <label class="config-label">Working directory
+            <input type="text" id="cfg-work-dir"
+             placeholder="Default: current workspace folder">
+          </label>
           <div class="config-divider"></div>
           <div class="sidebar-hdr" style="margin-top:8px;">API Keys</div>
           <label class="config-label">Gemini API Key
@@ -1309,6 +1313,10 @@ class RemoteAccessServer:
         self.tunnel_url = tunnel_url
         self._ssl_context: ssl.SSLContext = _create_ssl_context(certfile, keyfile)
 
+        if not work_dir:
+            from kiss.agents.vscode.vscode_config import load_config
+
+            work_dir = load_config().get("work_dir", "") or None
         if work_dir:
             os.environ["KISS_WORKDIR"] = work_dir
 

@@ -446,6 +446,15 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   }
 
   private _getWorkDir(): string {
+    const configDir = path.join(os.homedir(), '.kiss', 'config.json');
+    try {
+      const cfg = JSON.parse(fs.readFileSync(configDir, 'utf-8'));
+      if (cfg.work_dir && typeof cfg.work_dir === 'string') {
+        return cfg.work_dir;
+      }
+    } catch {
+      // config.json missing or unreadable — fall through
+    }
     const folders = vscode.workspace.workspaceFolders;
     if (folders && folders.length > 0) {
       return folders[0].uri.fsPath;
