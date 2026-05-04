@@ -85,6 +85,7 @@ For simple single-file tasks, skip formal planning and execute directly.
 
 - Run lint and typecheckers and fix any lint and typecheck errors.
 - You MUST achieve 100% branch coverage.
+- Every error is yours to fix.  Do NOT skip or defer.
 - Tests MUST NOT use mocks, patches, fakes, or any form of test doubles.
 - You MUST write integration tests or end-to-end tests.
 - Each test should be independent and verify actual behavior.
