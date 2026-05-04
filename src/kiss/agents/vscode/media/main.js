@@ -1169,6 +1169,16 @@
    */
   function collectText(node) {
     if (node.nodeType === 3) return node.textContent || '';
+    if (node.nodeType === 1 && node.classList) {
+      // Skip UI-only chrome injected by the panel helpers so it never
+      // ends up in either the collapse preview or the clipboard payload.
+      if (
+        node.classList.contains('panel-copy-btn') ||
+        node.classList.contains('collapse-chv') ||
+        node.classList.contains('collapse-preview')
+      )
+        return '';
+    }
     let out = '';
     for (let i = 0; i < node.childNodes.length; i++) {
       const child = node.childNodes[i];
@@ -1225,6 +1235,84 @@
         _noScroll = false;
       }, 0);
     });
+    addCopyButton(panelEl);
+  }
+
+  // Outline+check icons reused for every panel copy button.
+  const PANEL_COPY_SVG =
+    '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" ' +
+    'stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+    'stroke-linejoin="round" aria-hidden="true">' +
+    '<rect x="9" y="9" width="13" height="13" rx="2"/>' +
+    '<path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>';
+  const PANEL_CHECK_SVG =
+    '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" ' +
+    'stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+    'stroke-linejoin="round" aria-hidden="true">' +
+    '<polyline points="20 6 9 17 4 12"/></svg>';
+
+  /**
+   * Attach a copy-to-clipboard button to a chat panel.
+   *
+   * The button is positioned absolutely in the top-right corner of
+   * ``panelEl`` (the helper adds the ``copyable`` class which sets
+   * ``position: relative`` on the panel) and copies the panel's plain
+   * visible text — excluding the button itself, the collapse chevron,
+   * and the collapse preview — to the system clipboard via
+   * ``navigator.clipboard.writeText``.  Clicking the button does not
+   * collapse/expand the panel: the click handler stops propagation
+   * before the collapsible-header listener runs.  After a successful
+   * copy the icon swaps to a check mark for 1.5 s as feedback.
+   *
+   * Idempotent: calling twice on the same panel is a no-op.
+   *
+   * @param {HTMLElement} panelEl - panel container to attach the
+   *   button to.
+   */
+  function addCopyButton(panelEl) {
+    if (!panelEl || panelEl.querySelector(':scope > .panel-copy-btn')) return;
+    panelEl.classList.add('copyable');
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'panel-copy-btn';
+    btn.title = 'Copy panel text';
+    btn.setAttribute('aria-label', 'Copy panel text');
+    btn.innerHTML = PANEL_COPY_SVG;
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      e.preventDefault();
+      const text = collectText(panelEl)
+        .replace(/[ \t]+\n/g, '\n')
+        .replace(/\n{3,}/g, '\n\n')
+        .replace(/[ \t]{2,}/g, ' ')
+        .trim();
+      const done = () => {
+        btn.innerHTML = PANEL_CHECK_SVG;
+        btn.classList.add('copied');
+        setTimeout(() => {
+          btn.innerHTML = PANEL_COPY_SVG;
+          btn.classList.remove('copied');
+        }, 1500);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, () => {});
+      } else {
+        // Fallback for environments without the async clipboard API.
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try {
+          document.execCommand('copy');
+          done();
+        } finally {
+          document.body.removeChild(ta);
+        }
+      }
+    });
+    panelEl.appendChild(btn);
   }
 
   function collapseAllExceptResult(container) {
@@ -1457,6 +1545,7 @@
           const bp = mkEl('div', 'bash-panel');
           const bpContent = mkEl('div', 'bash-panel-content');
           bp.appendChild(bpContent);
+          addCopyButton(bp);
           c.appendChild(bp);
           tState.bashPanel = bpContent;
         }
@@ -1486,6 +1575,7 @@
           const opContent = mkEl('div', 'bash-panel-content');
           opContent.textContent = ev.content;
           op.appendChild(opContent);
+          addCopyButton(op);
           resultTarget.appendChild(op);
         }
         break;
@@ -1549,6 +1639,7 @@
           rb +
           '</div>';
         hlBlock(rc);
+        addCopyButton(rc);
         target.appendChild(rc);
         if (statusTokens && ev.total_tokens)
           statusTokens.textContent = 'Tokens: ' + fmtN(ev.total_tokens);
@@ -1881,7 +1972,7 @@
 
   O.addEventListener(
     'touchstart',
-    function handleOutputTouchStart(e) {
+    e => {
       if (e.touches.length === 1) {
         _touchOutputLastY = e.touches[0].clientY;
       }
@@ -1891,7 +1982,7 @@
 
   O.addEventListener(
     'touchmove',
-    function handleOutputTouchMove(e) {
+    e => {
       if (e.touches.length !== 1) return;
       const currentY = e.touches[0].clientY;
       // Positive touchDelta = finger moved up = scroll down ("next")
@@ -1967,7 +2058,7 @@
 
   O.addEventListener(
     'touchend',
-    function handleOutputTouchEnd() {
+    () => {
       // Reset overscroll state when the finger lifts
       overscrollAccum = 0;
       overscrollDir = '';

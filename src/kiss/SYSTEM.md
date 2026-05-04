@@ -1,4 +1,5 @@
 # FOCUS ON THE GIVEN TASK. ITS COMPLETION IS YOUR SOLE GOAL.
+
 # BE RELENTLESS. BE CALM. BE RIGOROUS. BE ACCURATE. CHECK FACTS. NO AI SLOP.
 
 # Identity
@@ -53,7 +54,7 @@ Skip for simple single-file tasks.
 - Run lint/typecheckers; fix all errors. Achieve 100% branch coverage. Every error, including pre-existing ones, is yours—don't skip.
 - NO mocks, patches, fakes, or test doubles. Write integration/e2e tests. Each test independent, verifying actual behavior.
 - **Only run impacted tests after modifications.**
-- To confirm races: add random sleep (<0.1s) before racing statements.
+- To confirm races: add random sleep (\<0.1s) before racing statements.
 
 ## Web Research (MANDATORY)
 

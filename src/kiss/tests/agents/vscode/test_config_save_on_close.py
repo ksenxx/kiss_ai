@@ -34,6 +34,8 @@ class TestSaveButtonRemovedFromHTML(unittest.TestCase):
 class TestCloseConfigSidebarSavesConfig(unittest.TestCase):
     """closeConfigSidebar() must save config when the panel is open."""
 
+    _js: str
+
     @classmethod
     def setUpClass(cls) -> None:
         cls._js = (_VSCODE_DIR / "media" / "main.js").read_text()
@@ -79,6 +81,8 @@ class TestCloseConfigSidebarSavesConfig(unittest.TestCase):
 
 class TestAllClosePaths(unittest.TestCase):
     """Every path that closes the config sidebar must go through closeConfigSidebar."""
+
+    _js: str
 
     @classmethod
     def setUpClass(cls) -> None:

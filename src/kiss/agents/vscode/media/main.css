@@ -420,7 +420,7 @@ body.remote-chat #welcome > #input-area {
   background: color-mix(in srgb, var(--orange) 8%, transparent); color: var(--orange);
 }
 .tc-h:hover { color: var(--fg); }
-.tc.collapsed > :not(.tc-h) { display: none; }
+.tc.collapsed > :not(.tc-h, .panel-copy-btn) { display: none; }
 
 .tp {
   font-size: var(--fs-md); color: var(--cyan);
@@ -1329,7 +1329,32 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
   display: flex; align-items: center; padding-bottom: 4px;
 }
 .llm-panel-hdr:hover { color: var(--fg); }
-.llm-panel.collapsed > :not(.llm-panel-hdr) { display: none; }
+.llm-panel.collapsed > :not(.llm-panel-hdr, .panel-copy-btn) { display: none; }
+
+/* Panel copy button — anchored top-right of any .copyable panel. */
+.copyable { position: relative; }
+
+.panel-copy-btn {
+  position: absolute; top: 5px; right: 6px; z-index: 5;
+  display: flex; align-items: center; justify-content: center;
+  padding: 3px 5px; cursor: pointer;
+  background: color-mix(in srgb, var(--surface) 80%, transparent);
+  border: 1px solid var(--border); border-radius: 4px;
+  color: var(--dim);
+  opacity: 0.45;
+  transition: opacity 0.15s, color 0.15s, background 0.15s;
+}
+
+.copyable:hover > .panel-copy-btn,
+.panel-copy-btn:focus-visible,
+.panel-copy-btn.copied { opacity: 1; }
+
+.panel-copy-btn:hover {
+  color: var(--fg);
+  background: color-mix(in srgb, var(--fg) 10%, transparent);
+}
+
+.panel-copy-btn.copied { color: var(--green); }
 
 .system-prompt.collapsed .system-prompt-body,
 .prompt.collapsed .prompt-body { display: none; }
