@@ -72,19 +72,22 @@ class TestTimerFlushTypeAnnotation(unittest.TestCase):
     None)`` which is ``str | None``.
     """
 
-    def test_source_has_wrong_type_annotation(self) -> None:
-        """Structural: the inner function annotates ``tid`` as ``int``."""
-        src = inspect.getsource(BaseBrowserPrinter.print)
-        match = re.search(r"def _timer_flush\(tid:\s*([\w |]+)", src)
+    def test_source_has_correct_type_annotation(self) -> None:
+        """Structural: the ``_timer_flush_for_tab`` method annotates
+        ``tab_id`` as ``str | None`` (the N1 bug was fixed by
+        refactoring the closure into a method with the correct type).
+        """
+        src = inspect.getsource(BaseBrowserPrinter._timer_flush_for_tab)
+        match = re.search(r"def _timer_flush_for_tab\(self,\s*tab_id:\s*([\w |]+)", src)
         assert match is not None, (
-            "N1: could not find _timer_flush definition"
+            "N1 fix: could not find _timer_flush_for_tab definition"
         )
         annotation = match.group(1).strip()
-        assert "int" in annotation, (
-            f"N1: expected 'int' in annotation, got: {annotation!r}"
+        assert "str" in annotation, (
+            f"N1 fix: expected 'str' in annotation, got: {annotation!r}"
         )
-        assert "str" not in annotation, (
-            f"N1: annotation should NOT already contain 'str': {annotation!r}"
+        assert "int" not in annotation, (
+            f"N1 fix: annotation should NOT contain 'int': {annotation!r}"
         )
 
     def test_owner_tab_is_string(self) -> None:
