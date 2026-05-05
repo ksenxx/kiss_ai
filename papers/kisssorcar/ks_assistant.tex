@@ -50,11 +50,12 @@ We present \textbf{KS Assistant}, a general-purpose assistant and integrated dev
 We implemented KS Assistant as a free, open-source Visual Studio Code extension that runs locally, is effective for long-horizon tasks, and supports browser automation, multimodal input, and Docker containers.  We deliberately prioritize output quality over speed: giving a frontier model adequate time to validate its own output---running linters, type checkers, and tests---dramatically reduces the low-quality code that plagues faster but less thorough agents.  The entire system was built using itself over four months, providing a continuous stress test in which any bug was patched immediately after its manifestation.  On Terminal-Bench~2.0, KS Assistant achieves a 62.2\% overall pass rate with Claude Opus~4.6~\citep{anthropic2026opus46}, comparing favorably to Claude~Code (58\%) and Cursor Composer~2 (61.7\%).  These results are achieved without benchmark-specific prompt tuning or model fine-tuning.
 \end{abstract}
 
-\vspace*{-3ex}
+\vspace*{-2ex}
 %----------------------------------------------------------------------
 \section{Introduction}
 \label{sec:intro}
 %----------------------------------------------------------------------
+\vspace*{-1ex}
 
 Modern large language models (LLMs), such as Claude Opus 4.7~\citep{anthropic2026opus47}, GPT 5.5~\citep{openai2026gpt55}, and Gemini 3.1~\citep{google2026gemini31}, have demonstrated a remarkable ability to generate code, reason about software architecture, and use developer tools~\citep{chen2021evaluating,roziere2023code}.  A growing body of work has explored how to harness these capabilities for autonomous software engineering, from single-session agents that resolve GitHub issues~\citep{yang2024sweagent,wang2024openhands} to industrial products marketed as AI software and general assistants~\citep{copilot2021,cursor2024,devin2024,claudecode2025,codex2025,openclaw2025}.  Yet using an LLM as a practical software engineering assistant still exposes several stubborn gaps: context windows are finite, a single mistake can derail an entire session, agents get stuck in dead ends, models generate AI slop, and generated changes are difficult to review or revert once applied to a live codebase.
 
@@ -79,11 +80,13 @@ We evaluate on Terminal-Bench~2.0 and achieve a 62.2\% overall pass rate using C
 \paragraph{Outline.}
 Section~\ref{sec:architecture} presents the five-layer agent architecture.  Section~\ref{sec:evaluation} reports evaluation results on Terminal-Bench~2.0.  Section~\ref{sec:system-prompt} describes the two most distinctive aspects of the system prompt: the execution mindset and the web research protocol (the full prompt is detailed in Appendix~\ref{app:full-prompt}).  Section~\ref{sec:vscode-features} covers unique features of the VS~Code extension.  Section~\ref{sec:painless} demonstrates a ``painless'' natural-language development workflow drawn from the project's own history.  Section~\ref{sec:related} discusses related work, and Section~\ref{sec:conclusion} concludes.
 
-\vspace*{-3ex}
+\vspace*{-2ex}
 %----------------------------------------------------------------------
 \section{Agent Architecture}
 \label{sec:architecture}
 %----------------------------------------------------------------------
+\vspace*{-1ex}
+
 
 The KS Agent Framework was originally built to rapidly prototype and experiment with prompt optimization techniques~\citep{agrawal2025gepa} and evolutionary algorithms for algorithmic optimization~\citep{novikov2025alphaevolve,openevolve2025}.  The emphasis on simplicity enabled coding agents to write simple, bug-free code.  Eventually, no prompt optimization techniques were used when creating the system prompt for KS Assistant; it was hand-tuned based on long-term experience with the agent and its behavior.  The framework uses five agent layers combining composition and inheritance.  Each layer delegates upward for concerns it does not own.
 
@@ -189,10 +192,12 @@ The Worktree Agent is the outermost layer.  Its defining feature is git-worktree
 
 \textbf{Graceful fallback.}  If the working directory is not inside a git repository, has no commits, or has a detached HEAD, the agent falls back to direct execution without worktree isolation.
 
+\vspace*{-2ex}
 %----------------------------------------------------------------------
 \section{Evaluation on Terminal-Bench~2.0}
 \label{sec:evaluation}
 %----------------------------------------------------------------------
+\vspace*{-1ex}
 
 We evaluate on Terminal-Bench~2.0,\footnote{\url{https://www.tbench.ai/}} a benchmark comprising 89 diverse terminal-based programming tasks, ranging from building legacy compilers and configuring servers to solving cryptanalysis challenges and training machine-learning models.  Each task runs in an isolated Docker container; a separate verifier automatically judges the result.  We use the Harbor\footnote{\url{https://github.com/harbor-framework/harbor}} framework to orchestrate execution and Claude Opus~4.6~\citep{anthropic2026opus46} as the underlying LLM.  We do not modify the general system prompt or inject benchmark-specific instructions.  Evaluation was carried out on a 2025 MacBook Air 15'' with an M4 processor and 24\,GB RAM.
 
