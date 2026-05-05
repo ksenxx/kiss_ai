@@ -424,6 +424,7 @@ def _stderr_reader_loop(
     parse: Callable[[str], str | None],
     result: list[str | None],
     proc: subprocess.Popen[str],
+    stop_event: threading.Event | None = None,
 ) -> None:
     """Read *stderr* lines until *parse* returns a URL or stderr hits EOF.
 
@@ -446,12 +447,19 @@ def _stderr_reader_loop(
             to the caller across the thread boundary.
         proc: The subprocess being read; retained for API symmetry —
             timeouts are enforced by :func:`_read_url_from_stderr`.
+        stop_event: When set by the caller (after a timeout) the loop
+            exits at its next iteration.  Used by H6 to bound the
+            reader-thread lifetime: once a single additional line is
+            consumed (or the subprocess dies) the daemon thread exits
+            instead of running until process shutdown.
     """
     del proc
     for line in iter(stderr.readline, ""):
         url = parse(line)
         if url is not None:
             result[0] = url
+            return
+        if stop_event is not None and stop_event.is_set():
             return
 
 
@@ -480,23 +488,23 @@ def _read_url_from_stderr(
     stderr = proc.stderr
     assert stderr is not None
     result: list[str | None] = [None]
+    stop_event = threading.Event()
     reader = threading.Thread(
         target=_stderr_reader_loop,
-        args=(stderr, parse, result, proc),
+        args=(stderr, parse, result, proc, stop_event),
         daemon=True,
     )
     reader.start()
     reader.join(timeout=timeout)
-    # On timeout, close stderr so the blocked readline() returns ""
-    # and the reader thread exits promptly.  Without this, every
-    # timed-out tunnel restart leaks a daemon thread that keeps
-    # draining cloudflared's stderr forever.
-    if reader.is_alive():
-        try:
-            stderr.close()
-        except Exception:
-            logger.debug("Failed to close stderr on timeout", exc_info=True)
-        reader.join(timeout=2.0)
+    # H6: Signal the reader to exit on its next iteration.  The reader
+    # may still be blocked inside readline() (closing stderr from
+    # another thread does not unblock the in-flight read on every
+    # platform), but the moment the next log line arrives — or the
+    # subprocess dies and readline() returns "" — the loop will
+    # observe stop_event and exit, instead of running forever.  This
+    # bounds the leak to "one extra line consumed after timeout"
+    # rather than "thread leaks on every timed-out restart".
+    stop_event.set()
     return result[0]
 
 

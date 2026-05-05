@@ -5044,7 +5044,8 @@ class TestCheckAndRestartTunnelSuccess(IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp()
         self.port = _find_free_port()
-        save_config({"remote_password": ""})
+        # Tunnel restart requires a configured password (H1 guard).
+        save_config({"remote_password": "test-pw"})
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
