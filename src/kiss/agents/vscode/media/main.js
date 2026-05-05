@@ -2388,7 +2388,11 @@
           inp.focus();
         });
         O.appendChild(fu);
-        sb();
+        // Do not invoke the scroll-to-bottom helper here: rendering
+        // "Suggested next" must not force the chat to scroll to the bottom
+        // (the user may have scrolled up to read earlier content).  The
+        // replay path in replayEventsInto also does not scroll for this
+        // event — the two code paths are now consistent.
         break;
       }
       case 'tasks_updated':
