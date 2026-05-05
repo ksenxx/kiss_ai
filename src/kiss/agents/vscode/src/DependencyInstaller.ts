@@ -50,8 +50,11 @@ function unitEscape(s: string): string {
  * Follows up to 5 redirects.  Resolves only after the response has been
  * fully written to disk.  Never spawns a shell.
  */
-function downloadFile(url: string, destPath: string,
-                      maxRedirects = 5): Promise<void> {
+function downloadFile(
+  url: string,
+  destPath: string,
+  maxRedirects = 5,
+): Promise<void> {
   return new Promise((resolve, reject) => {
     const get = (u: string, hops: number): void => {
       const req = https.get(u, {timeout: 60000}, res => {
@@ -74,7 +77,9 @@ function downloadFile(url: string, destPath: string,
         }
         const out = fs.createWriteStream(destPath);
         res.pipe(out);
-        out.on('finish', () => out.close(err => err ? reject(err) : resolve()));
+        out.on('finish', () =>
+          out.close(err => (err ? reject(err) : resolve())),
+        );
         out.on('error', reject);
       });
       req.on('error', reject);
@@ -113,15 +118,22 @@ async function verifyDownloadHash(
 ): Promise<void> {
   const got = sha256OfFile(filePath);
   if (!expectedHashHex) {
-    log(`No SHA256 expectation for ${path.basename(filePath)}; ` +
-        `computed hash = ${got}`);
+    log(
+      `No SHA256 expectation for ${path.basename(filePath)}; ` +
+        `computed hash = ${got}`,
+    );
     return;
   }
   if (got.toLowerCase() !== expectedHashHex.toLowerCase()) {
-    try { fs.unlinkSync(filePath); } catch { /* ignore */ }
+    try {
+      fs.unlinkSync(filePath);
+    } catch {
+      /* ignore */
+    }
     throw new Error(
       `SHA256 mismatch for ${path.basename(filePath)}: ` +
-      `expected ${expectedHashHex}, got ${got}`);
+        `expected ${expectedHashHex}, got ${got}`,
+    );
   }
   log(`SHA256 ok for ${path.basename(filePath)}`);
 }
@@ -132,8 +144,7 @@ async function verifyDownloadHash(
  */
 function fetchUvStyleSha256(assetUrl: string): Promise<string | null> {
   return new Promise(resolve => {
-    const req = https.get(assetUrl + '.sha256',
-                          {timeout: 15000}, res => {
+    const req = https.get(assetUrl + '.sha256', {timeout: 15000}, res => {
       if ((res.statusCode || 0) !== 200) {
         res.resume();
         resolve(null);
@@ -149,7 +160,10 @@ function fetchUvStyleSha256(assetUrl: string): Promise<string | null> {
       });
     });
     req.on('error', () => resolve(null));
-    req.on('timeout', () => { req.destroy(); resolve(null); });
+    req.on('timeout', () => {
+      req.destroy();
+      resolve(null);
+    });
   });
 }
 
@@ -158,8 +172,7 @@ function fetchUvStyleSha256(assetUrl: string): Promise<string | null> {
  * the hash for ``assetName``.  Returns null on any error.
  */
 function fetchNodeSha256(assetName: string): Promise<string | null> {
-  const url =
-    `https://nodejs.org/dist/${NODE_VERSION}/SHASUMS256.txt`;
+  const url = `https://nodejs.org/dist/${NODE_VERSION}/SHASUMS256.txt`;
   return new Promise(resolve => {
     const req = https.get(url, {timeout: 15000}, res => {
       if ((res.statusCode || 0) !== 200) {
@@ -182,7 +195,10 @@ function fetchNodeSha256(assetName: string): Promise<string | null> {
       });
     });
     req.on('error', () => resolve(null));
-    req.on('timeout', () => { req.destroy(); resolve(null); });
+    req.on('timeout', () => {
+      req.destroy();
+      resolve(null);
+    });
   });
 }
 
@@ -192,24 +208,37 @@ function fetchNodeSha256(assetName: string): Promise<string | null> {
  * Used for ``tar``, ``mv``, etc. where a shell would be required only
  * to interpolate user-controlled paths.
  */
-function spawnPromise(cmd: string, args: string[], cwd?: string,
-                      timeoutMs = 300_000): Promise<string> {
+function spawnPromise(
+  cmd: string,
+  args: string[],
+  cwd?: string,
+  timeoutMs = 300_000,
+): Promise<string> {
   return new Promise((resolve, reject) => {
     const proc = spawn(cmd, args, {cwd, stdio: ['ignore', 'pipe', 'pipe']});
     let stdout = '';
     let stderr = '';
     const timer = setTimeout(() => {
       proc.kill('SIGKILL');
-      reject(new Error(`${cmd} ${args.join(' ')} timed out after ${timeoutMs}ms`));
+      reject(
+        new Error(`${cmd} ${args.join(' ')} timed out after ${timeoutMs}ms`),
+      );
     }, timeoutMs);
-    proc.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
-    proc.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
+    proc.stdout?.on('data', (d: Buffer) => {
+      stdout += d.toString();
+    });
+    proc.stderr?.on('data', (d: Buffer) => {
+      stderr += d.toString();
+    });
     proc.on('close', code => {
       clearTimeout(timer);
       if (code === 0) resolve(stdout.trim());
-      else reject(new Error(
-        `${cmd} ${args.join(' ')} exited ${code}: ${stderr.trim()}`,
-      ));
+      else
+        reject(
+          new Error(
+            `${cmd} ${args.join(' ')} exited ${code}: ${stderr.trim()}`,
+          ),
+        );
     });
     proc.on('error', err => {
       clearTimeout(timer);
@@ -284,9 +313,15 @@ export function getDefaultModel(): string {
     // (both come from user-controlled HOME / settings) cannot inject.
     return execFileSync(
       uvPath,
-      ['run', '--directory', kissProject, 'python', '-c',
-       'from kiss.core.models.model_info import get_default_model; ' +
-       'print(get_default_model())'],
+      [
+        'run',
+        '--directory',
+        kissProject,
+        'python',
+        '-c',
+        'from kiss.core.models.model_info import get_default_model; ' +
+          'print(get_default_model())',
+      ],
       {encoding: 'utf-8', timeout: 15_000, stdio: ['ignore', 'pipe', 'ignore']},
     ).trim();
   } catch {
@@ -617,7 +652,9 @@ async function ensureDependenciesImpl(): Promise<void> {
         // had to prompt the user for an API key).
         progress.report({message: 'Finalizing setup...'});
         const finalizedKeys = await runFinalization(
-          progress, kissProjectPath, uvPath,
+          progress,
+          kissProjectPath,
+          uvPath,
         );
         return {success: true, apiKeysReady: finalizedKeys};
       },
@@ -694,8 +731,7 @@ function restartKissWebDaemon(kissProjectPath: string): void {
   // kiss-web.py in another VS Code window).
   for (const procName of ['kiss-web', 'cloudflared']) {
     try {
-      execFileSync('pkill', ['-x', procName],
-                   {stdio: 'ignore', timeout: 5000});
+      execFileSync('pkill', ['-x', procName], {stdio: 'ignore', timeout: 5000});
     } catch {
       /* no matching process — ok */
     }
@@ -769,25 +805,25 @@ function restartKissWebDaemon(kissProjectPath: string): void {
       // arbitrary shell commands.
       const uid = execFileSync('id', ['-u'], {encoding: 'utf-8'}).trim();
       try {
-        execFileSync(
-          'launchctl', ['bootout', `gui/${uid}/${plistLabel}`],
-          {stdio: 'ignore', timeout: 5000},
-        );
+        execFileSync('launchctl', ['bootout', `gui/${uid}/${plistLabel}`], {
+          stdio: 'ignore',
+          timeout: 5000,
+        });
       } catch {
         /* not loaded — ok */
       }
       try {
-        execFileSync(
-          'launchctl', ['bootstrap', `gui/${uid}`, plistFile],
-          {stdio: 'ignore', timeout: 5000},
-        );
+        execFileSync('launchctl', ['bootstrap', `gui/${uid}`, plistFile], {
+          stdio: 'ignore',
+          timeout: 5000,
+        });
       } catch {
         // Fall back to older load command — same argv-form to avoid
         // shell interpolation of plistFile.
-        execFileSync(
-          'launchctl', ['load', '-w', plistFile],
-          {stdio: 'ignore', timeout: 5000},
-        );
+        execFileSync('launchctl', ['load', '-w', plistFile], {
+          stdio: 'ignore',
+          timeout: 5000,
+        });
       }
       log(`kiss-web macOS LaunchAgent restarted: ${plistFile}`);
     } catch (err) {
@@ -982,13 +1018,24 @@ async function installUv(): Promise<string | null> {
       for (const bin of ['uv', 'uvx']) {
         const src = path.join(extractedDir, bin);
         const dst = path.join(installDir, bin);
-        try { fs.unlinkSync(dst); } catch { /* not present */ }
+        try {
+          fs.unlinkSync(dst);
+        } catch {
+          /* not present */
+        }
         fs.renameSync(src, dst);
         fs.chmodSync(dst, 0o755);
       }
-      try { fs.rmSync(extractedDir, {recursive: true, force: true}); }
-      catch { /* ignore */ }
-      try { fs.unlinkSync(tarPath); } catch { /* ignore */ }
+      try {
+        fs.rmSync(extractedDir, {recursive: true, force: true});
+      } catch {
+        /* ignore */
+      }
+      try {
+        fs.unlinkSync(tarPath);
+      } catch {
+        /* ignore */
+      }
     }
 
     log('uv installed successfully');
@@ -1324,11 +1371,18 @@ async function installNode(): Promise<boolean> {
     await downloadFile(url, tarPath);
     const expectedHash = await fetchNodeSha256(`${assetName}.tar.gz`);
     await verifyDownloadHash(tarPath, expectedHash);
-    await spawnPromise(
-      'tar',
-      ['xzf', tarPath, '-C', installDir, '--strip-components=1'],
-    );
-    try { fs.unlinkSync(tarPath); } catch { /* ignore */ }
+    await spawnPromise('tar', [
+      'xzf',
+      tarPath,
+      '-C',
+      installDir,
+      '--strip-components=1',
+    ]);
+    try {
+      fs.unlinkSync(tarPath);
+    } catch {
+      /* ignore */
+    }
     log('Node.js installed successfully');
     return commandExists('node');
   } catch (err) {

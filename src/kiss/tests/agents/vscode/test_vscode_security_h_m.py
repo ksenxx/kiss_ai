@@ -126,7 +126,7 @@ class TestH9AutocompleteNonBlocking(unittest.TestCase):
 
         class FakeServer(ac._AutocompleteMixin):
             def __init__(self) -> None:
-                self.printer = StubPrinter()
+                self.printer = StubPrinter()  # type: ignore[assignment]
                 self.work_dir = "/"
                 self._state_lock = threading.Lock()
                 self._complete_queue = None
@@ -306,8 +306,8 @@ class TestM2StopEventOrder(unittest.TestCase):
              if "_capture_pre_snapshot" in ln),
             None,
         )
-        self.assertIsNotNone(stop_idx, "stop_event assignment not found")
-        self.assertIsNotNone(snap_idx, "_capture_pre_snapshot not found")
+        assert stop_idx is not None, "stop_event assignment not found"
+        assert snap_idx is not None, "_capture_pre_snapshot not found"
         self.assertLess(stop_idx, snap_idx,
                         f"stop_event installed at line {stop_idx} but "
                         f"_capture_pre_snapshot runs at line {snap_idx}; "
@@ -333,7 +333,7 @@ class TestM4AwaitUserResponseEmptyQueue(unittest.TestCase):
 
         class FakeServer(tr._TaskRunnerMixin):
             def __init__(self) -> None:
-                self.printer = FakePrinter()
+                self.printer = FakePrinter()  # type: ignore[assignment]
                 self.printer._thread_local.stop_event = threading.Event()
                 self.printer._thread_local.tab_id = "ghost-tab"
                 self._state_lock = threading.Lock()

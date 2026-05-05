@@ -32,7 +32,18 @@ import os
 import re
 import subprocess
 import unittest
+from dataclasses import dataclass
 from pathlib import Path
+
+
+@dataclass
+class SimResult:
+    """Result of one Node-based widenToOneThird convergence simulation."""
+
+    final: float
+    target: float
+    iters: int
+    within_tol: bool
 
 VSCODE_DIR = Path(__file__).resolve().parents[3] / "agents" / "vscode"
 TS_DIR = VSCODE_DIR / "src"
@@ -46,6 +57,8 @@ def _read(p: Path) -> str:
 class TestExtensionUsesWidenToOneThird(unittest.TestCase):
     """``extension.ts`` calls ``widenToOneThird`` on first activation
     and no longer hard-codes a 3-iteration ``increaseViewSize`` loop."""
+
+    src: str
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -67,7 +80,7 @@ class TestExtensionUsesWidenToOneThird(unittest.TestCase):
             self.src,
             re.DOTALL,
         )
-        self.assertIsNotNone(m, "could not locate the sidebarWidened first-run gate")
+        assert m is not None, "could not locate the sidebarWidened first-run gate"
         self.assertIn(
             "widenToOneThird",
             m.group(1),
@@ -105,6 +118,8 @@ class TestExtensionUsesWidenToOneThird(unittest.TestCase):
 class TestSidebarViewHasWidenToOneThird(unittest.TestCase):
     """``SorcarSidebarView`` exposes ``widenToOneThird`` and uses
     measure→adjust feedback rather than a fixed iteration count."""
+
+    src: str
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -177,6 +192,8 @@ class TestSidebarViewHasWidenToOneThird(unittest.TestCase):
 class TestWebviewHandlesMeasureSize(unittest.TestCase):
     """``main.js`` answers ``measureSize`` with ``sizeReport``."""
 
+    src: str
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.src = _read(MEDIA_DIR / "main.js")
@@ -196,7 +213,7 @@ class TestWebviewHandlesMeasureSize(unittest.TestCase):
             self.src,
             re.DOTALL,
         )
-        self.assertIsNotNone(m, "could not locate measureSize case body")
+        assert m is not None, "could not locate measureSize case body"
         body = m.group(1)
         self.assertIn(
             "type: 'sizeReport'",
@@ -228,6 +245,8 @@ class TestWebviewHandlesMeasureSize(unittest.TestCase):
 
 class TestTypesDeclareNewMessages(unittest.TestCase):
     """``types.ts`` declares the new measureSize / sizeReport messages."""
+
+    src: str
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -280,7 +299,7 @@ class TestConvergenceSimulation(unittest.TestCase):
         increment: int = 50,
         max_iter: int = 30,
         tol: float = 0.06,
-    ) -> dict:
+    ) -> SimResult:
         script = f"""
             const screen = {screen_width};
             const inc = {increment};
@@ -307,50 +326,56 @@ class TestConvergenceSimulation(unittest.TestCase):
             timeout=10,
             check=True,
         )
-        return json.loads(out.stdout.strip())
+        raw = json.loads(out.stdout.strip())
+        return SimResult(
+            final=float(raw["final"]),
+            target=float(raw["target"]),
+            iters=int(raw["iters"]),
+            within_tol=bool(raw["within_tol"]),
+        )
 
     def test_converges_on_typical_laptop_1440(self) -> None:
         # 1440-px window, sidebar starts at default 300 px.
         r = self._run_sim(screen_width=1440, initial=300)
         self.assertTrue(
-            r["within_tol"],
+            r.within_tol,
             f"did not converge on 1440px screen: {r}",
         )
-        self.assertLess(r["iters"], 30, f"too many iterations: {r}")
+        self.assertLess(r.iters, 30, f"too many iterations: {r}")
 
     def test_converges_on_wide_monitor_2560(self) -> None:
         r = self._run_sim(screen_width=2560, initial=300)
-        self.assertTrue(r["within_tol"], f"did not converge on 2560px screen: {r}")
+        self.assertTrue(r.within_tol, f"did not converge on 2560px screen: {r}")
         # Target = 853, start = 300, +50/iter ⇒ ≤ 12 iterations.
-        self.assertLess(r["iters"], 30, f"too many iterations: {r}")
+        self.assertLess(r.iters, 30, f"too many iterations: {r}")
 
     def test_converges_on_4k_3840(self) -> None:
         r = self._run_sim(screen_width=3840, initial=300)
-        self.assertTrue(r["within_tol"], f"did not converge on 3840px screen: {r}")
-        self.assertLess(r["iters"], 30, f"too many iterations: {r}")
+        self.assertTrue(r.within_tol, f"did not converge on 3840px screen: {r}")
+        self.assertLess(r.iters, 30, f"too many iterations: {r}")
 
     def test_converges_when_starting_too_wide(self) -> None:
         # Sidebar already wider than 1/3 — must shrink, not grow.
         r = self._run_sim(screen_width=1440, initial=900)
         self.assertTrue(
-            r["within_tol"],
+            r.within_tol,
             f"did not converge when starting too wide: {r}",
         )
         self.assertLess(
-            r["final"],
+            r.final,
             900,
-            f"sidebar was not shrunk from 900px: final={r['final']}",
+            f"sidebar was not shrunk from 900px: final={r.final}",
         )
 
     def test_within_tol_means_within_six_percent(self) -> None:
         # Sanity: the algorithm's tolerance gate works as advertised.
         r = self._run_sim(screen_width=1500, initial=300)
-        self.assertTrue(r["within_tol"])
-        rel = abs(r["final"] - r["target"]) / r["target"]
+        self.assertTrue(r.within_tol)
+        rel = abs(r.final - r.target) / r.target
         self.assertLessEqual(
             rel,
             0.06 + 1e-9,
-            f"final {r['final']} is more than 6% off target {r['target']}",
+            f"final {r.final} is more than 6% off target {r.target}",
         )
 
 
