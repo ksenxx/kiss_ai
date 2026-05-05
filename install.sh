@@ -591,3 +591,21 @@ SERVICE
 echo ""
 echo "Log saved to $LOG_FILE"
 echo "Open a new terminal for PATH changes to take effect."
+
+# --- Relaunch VS Code -------------------------------------------------------
+# The just-installed PATH/dependency updates only take effect in VS Code
+# windows started after this script finished, so we (re)launch `code` here.
+# `code` with no arguments opens a new window if none exists or focuses an
+# existing one; if the user already has VS Code open, the KISS Sorcar
+# extension's sticky "Restart VS Code" notification will prompt them to
+# reload the window so the new PATH is picked up.
+if command -v code &>/dev/null; then
+    echo "Launching VS Code..."
+    # Detach from the terminal so the script exits cleanly even if `code`
+    # backgrounds itself slowly.  Errors are non-fatal — the install is
+    # already complete by this point.
+    (code >/dev/null 2>&1 &) || true
+else
+    echo "VS Code 'code' command not found on PATH."
+    echo "Install VS Code from https://code.visualstudio.com/ and run 'code' to launch it."
+fi
