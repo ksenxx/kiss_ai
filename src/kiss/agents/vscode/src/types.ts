@@ -77,7 +77,8 @@ export type FromWebviewMessage =
       type: 'saveConfig';
       config: Record<string, unknown>;
       apiKeys: Record<string, string>;
-    };
+    }
+  | {type: 'sizeReport'; innerWidth: number; screenWidth: number};
 
 /** Messages from extension to webview (matches browser event protocol) */
 export type ToWebviewMessage = ToWebviewMessageBody & {tabId?: string};
@@ -210,7 +211,8 @@ type ToWebviewMessageBody =
       chatId: number;
       taskId: number;
       chatHasMoreTasks: boolean;
-    };
+    }
+  | {type: 'measureSize'};
 
 /** Command sent to Python backend */
 export interface AgentCommand {

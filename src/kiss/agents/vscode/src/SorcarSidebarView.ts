@@ -81,6 +81,11 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _preMergeOpenFiles: Map<string, Set<string>> = new Map();
   private _restoreChain: Promise<void> = Promise.resolve();
   private _onFirstResolve: (() => void) | undefined;
+  /** Pending resolver for the next ``sizeReport`` from the webview.
+   *  Set by ``_measureSidebar`` and cleared by the ``sizeReport`` handler. */
+  private _sizeReportResolver:
+    | ((s: {inner: number; screen: number}) => void)
+    | undefined;
 
   /**
    * Show a notification-progress dialog with a timeout-based auto-resolve.
@@ -1059,6 +1064,13 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         this._webviewHasFocus = message.focused;
         break;
 
+      case 'sizeReport': {
+        const cb = this._sizeReportResolver;
+        this._sizeReportResolver = undefined;
+        if (cb) cb({inner: message.innerWidth, screen: message.screenWidth});
+        break;
+      }
+
       case 'focusEditor':
         vscode.commands.executeCommand(
           'workbench.action.focusFirstEditorGroup',
@@ -1162,6 +1174,88 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   /** Ensure at least one chat tab exists; creates one only if there are none. */
   public ensureChat(): void {
     this._sendToWebview({type: 'ensureChat'});
+  }
+
+  /**
+   * Ask the webview to report its current sidebar width (``window.innerWidth``)
+   * and the host screen width (``screen.availWidth``).  Returns ``undefined``
+   * if the webview does not respond within ``timeoutMs`` (default 1500ms).
+   *
+   * The host VS Code window width is not exposed by the extension API, so
+   * ``screen.availWidth`` is used as the closest proxy — it equals the VS
+   * Code window width when the window is maximized (the typical case on
+   * first install).
+   */
+  private _measureSidebar(
+    timeoutMs: number = 1500,
+  ): Promise<{inner: number; screen: number} | undefined> {
+    if (!this._view) return Promise.resolve(undefined);
+    // Drop any previous pending resolver — we only want the latest.
+    this._sizeReportResolver = undefined;
+    return new Promise(resolve => {
+      let done = false;
+      const finish = (v: {inner: number; screen: number} | undefined) => {
+        if (done) return;
+        done = true;
+        if (this._sizeReportResolver === inner) {
+          this._sizeReportResolver = undefined;
+        }
+        resolve(v);
+      };
+      const inner = (s: {inner: number; screen: number}) => finish(s);
+      this._sizeReportResolver = inner;
+      this._sendToWebview({type: 'measureSize'} as ToWebviewMessage);
+      setTimeout(() => finish(undefined), timeoutMs);
+    });
+  }
+
+  /**
+   * Iteratively resize the secondary side bar so its width is approximately
+   * one-third of the VS Code window width.
+   *
+   * Algorithm: measure the current sidebar width via the webview, compare to
+   * ``screenWidth / 3``, then call ``workbench.action.increaseViewSize`` or
+   * ``workbench.action.decreaseViewSize`` (each adjusts by a fixed amount)
+   * and re-measure.  Stops when the width is within ``tolerance`` (default
+   * 6 % of target) or after ``maxIterations`` attempts (default 30).
+   *
+   * Used on first activation so the chat panel has enough room without
+   * requiring the user to drag the splitter.  The webview needs to be
+   * focused for the increase/decrease commands to apply to the secondary
+   * side bar — callers must ensure ``focusAuxiliaryBar`` is invoked first.
+   */
+  public async widenToOneThird(
+    maxIterations: number = 30,
+    tolerance: number = 0.06,
+  ): Promise<void> {
+    if (!this._view) return;
+    const initial = await this._measureSidebar();
+    if (!initial || initial.screen <= 0) return;
+    const target = initial.screen / 3;
+    let prev = initial.inner;
+    let stuck = 0;
+    for (let i = 0; i < maxIterations; i++) {
+      const m = await this._measureSidebar();
+      if (!m) return;
+      const cur = m.inner;
+      if (Math.abs(cur - target) <= target * tolerance) return;
+      const cmd =
+        cur < target
+          ? 'workbench.action.increaseViewSize'
+          : 'workbench.action.decreaseViewSize';
+      await vscode.commands.executeCommand(cmd);
+      // Give VS Code a moment to apply the resize before measuring again.
+      await new Promise(r => setTimeout(r, 60));
+      // Bail out if the resize command had no effect for two consecutive
+      // iterations (e.g. we hit the min/max sidebar size).
+      if (Math.abs(cur - prev) < 1) {
+        stuck += 1;
+        if (stuck >= 2) return;
+      } else {
+        stuck = 0;
+      }
+      prev = cur;
+    }
   }
 
   /**

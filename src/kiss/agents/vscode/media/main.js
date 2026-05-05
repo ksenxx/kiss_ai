@@ -2388,7 +2388,11 @@
           inp.focus();
         });
         O.appendChild(fu);
-        sb();
+        // Do not invoke the scroll-to-bottom helper here: rendering
+        // "Suggested next" must not force the chat to scroll to the bottom
+        // (the user may have scrolled up to read earlier content).  The
+        // replay path in replayEventsInto also does not scroll for this
+        // event — the two code paths are now consistent.
         break;
       }
       case 'tasks_updated':
@@ -2599,6 +2603,28 @@
         break;
       case 'focusInput':
         focusInputWithRetry();
+        break;
+
+      case 'measureSize':
+        // The extension is asking how wide the sidebar webview is so it
+        // can iteratively resize the secondary side bar to ~1/3 of the
+        // VS Code window.  window.innerWidth gives the webview iframe's
+        // width (= sidebar width); screen.availWidth is the best proxy
+        // for the host VS Code window width that the sandboxed webview
+        // can read (works correctly when VS Code is maximized, which is
+        // the common case on first install).
+        try {
+          vscode.postMessage({
+            type: 'sizeReport',
+            innerWidth: window.innerWidth || 0,
+            screenWidth:
+              (window.screen && window.screen.availWidth) ||
+              window.innerWidth ||
+              0,
+          });
+        } catch (_e) {
+          /* ignored */
+        }
         break;
 
       case 'inputHistory':
