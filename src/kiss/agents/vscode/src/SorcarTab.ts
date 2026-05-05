@@ -33,7 +33,9 @@ export function getVersion(): string {
 export function getNonce(): string {
   // 24 random bytes -> 32 base64url chars; restrict to [A-Za-z0-9] for
   // CSP-safe nonce values.
-  return crypto.randomBytes(24).toString('base64')
+  return crypto
+    .randomBytes(24)
+    .toString('base64')
     .replace(/[^A-Za-z0-9]/g, '')
     .slice(0, 32);
 }

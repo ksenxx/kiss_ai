@@ -167,13 +167,24 @@ class TestEarlyExitGuard(unittest.TestCase):
         )
 
     def test_early_exit_returns_before_restart_daemon(self) -> None:
-        """The early-exit must happen before restartKissWebDaemon."""
-        guard_pos = INSTALLER_SOURCE.find("nothing to do")
-        assert guard_pos > 0
-        daemon_pos = INSTALLER_SOURCE.find("restartKissWebDaemon(kissProjectPath)")
-        assert daemon_pos > 0, "restartKissWebDaemon call not found"
-        assert guard_pos < daemon_pos, (
-            "Early-exit guard must appear before the restartKissWebDaemon call"
+        """The early-exit must happen before any call site that triggers
+        restartKissWebDaemon (i.e. any invocation of runFinalization)
+        within ensureDependenciesImpl."""
+        impl_pos = INSTALLER_SOURCE.find("function ensureDependenciesImpl")
+        assert impl_pos > 0, "ensureDependenciesImpl function not found"
+        # Search relative to the start of ensureDependenciesImpl so that
+        # forward-declared helpers (whose bodies textually appear earlier
+        # in the file) do not skew the position check.
+        guard_rel = INSTALLER_SOURCE.find("nothing to do", impl_pos)
+        assert guard_rel > 0, "Early-exit log message not found in ensureDependenciesImpl"
+        # runFinalization() is the helper that calls restartKissWebDaemon.
+        # Verify its first *call site* inside ensureDependenciesImpl is
+        # after the early-exit, not before it.
+        finalize_rel = INSTALLER_SOURCE.find("runFinalization(", impl_pos)
+        assert finalize_rel > 0, "runFinalization call not found in ensureDependenciesImpl"
+        assert guard_rel < finalize_rel, (
+            "Early-exit guard must appear before any runFinalization call "
+            "(which restarts the daemon) inside ensureDependenciesImpl"
         )
 
 
