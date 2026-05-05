@@ -5232,7 +5232,7 @@ class TestSendWelcomeInfoDiscoverUrl(IsolatedAsyncioTestCase):
         async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=ctx) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             _ = await asyncio.wait_for(ws.recv(), timeout=5)
-            self.server._send_welcome_info()
+            await self.server._send_welcome_info()
             found = False
             for _ in range(10):
                 try:
