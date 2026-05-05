@@ -21,11 +21,7 @@ function isPathInside(target: string, root: string): boolean {
   const tg = path.resolve(target);
   if (tg === rt) return true;
   const rel = path.relative(rt, tg);
-  return (
-    rel.length > 0 &&
-    !rel.startsWith('..') &&
-    !path.isAbsolute(rel)
-  );
+  return rel.length > 0 && !rel.startsWith('..') && !path.isAbsolute(rel);
 }
 import {AgentProcess} from './AgentProcess';
 import {MergeManager} from './MergeManager';

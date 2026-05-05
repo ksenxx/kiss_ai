@@ -25,12 +25,26 @@
     const t = document.createElement('template');
     t.innerHTML = String(html == null ? '' : html);
     const BAD_TAGS = new Set([
-      'SCRIPT', 'IFRAME', 'OBJECT', 'EMBED', 'FORM', 'META', 'LINK',
-      'STYLE', 'BASE', 'FRAME', 'FRAMESET',
+      'SCRIPT',
+      'IFRAME',
+      'OBJECT',
+      'EMBED',
+      'FORM',
+      'META',
+      'LINK',
+      'STYLE',
+      'BASE',
+      'FRAME',
+      'FRAMESET',
     ]);
-    const URL_ATTRS = new Set(['href', 'src', 'action', 'formaction',
-                               'xlink:href']);
-    const walk = (root) => {
+    const URL_ATTRS = new Set([
+      'href',
+      'src',
+      'action',
+      'formaction',
+      'xlink:href',
+    ]);
+    const walk = root => {
       const elements = Array.from(root.querySelectorAll('*'));
       for (const el of elements) {
         if (BAD_TAGS.has(el.tagName)) {
@@ -1580,7 +1594,9 @@
         if (tState.txtEl) {
           if (typeof marked !== 'undefined') {
             tState.txtEl.classList.add('md-body');
-            tState.txtEl.innerHTML = kissSanitize(marked.parse(tState.txtBuf || ''));
+            tState.txtEl.innerHTML = kissSanitize(
+              marked.parse(tState.txtBuf || ''),
+            );
             hlBlock(tState.txtEl);
           } else if (tState.txtNode && tState.txtPending) {
             tState.txtNode.appendData(tState.txtPending);

@@ -21,21 +21,40 @@
     const t = document.createElement('template');
     t.innerHTML = String(html == null ? '' : html);
     const BAD_TAGS = new Set([
-      'SCRIPT', 'IFRAME', 'OBJECT', 'EMBED', 'FORM', 'META', 'LINK',
-      'STYLE', 'BASE', 'FRAME', 'FRAMESET',
+      'SCRIPT',
+      'IFRAME',
+      'OBJECT',
+      'EMBED',
+      'FORM',
+      'META',
+      'LINK',
+      'STYLE',
+      'BASE',
+      'FRAME',
+      'FRAMESET',
     ]);
-    const URL_ATTRS = new Set(['href', 'src', 'action', 'formaction',
-                               'xlink:href']);
+    const URL_ATTRS = new Set([
+      'href',
+      'src',
+      'action',
+      'formaction',
+      'xlink:href',
+    ]);
     for (const el of Array.from(t.content.querySelectorAll('*'))) {
-      if (BAD_TAGS.has(el.tagName)) { el.remove(); continue; }
+      if (BAD_TAGS.has(el.tagName)) {
+        el.remove();
+        continue;
+      }
       for (const attr of Array.from(el.attributes)) {
         const name = attr.name.toLowerCase();
         if (name.startsWith('on')) {
           el.removeAttribute(attr.name);
           continue;
         }
-        if (URL_ATTRS.has(name) &&
-            /^(javascript|data|vbscript):/i.test((attr.value || '').trim())) {
+        if (
+          URL_ATTRS.has(name) &&
+          /^(javascript|data|vbscript):/i.test((attr.value || '').trim())
+        ) {
           el.removeAttribute(attr.name);
         }
       }
