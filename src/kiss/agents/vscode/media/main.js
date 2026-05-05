@@ -912,8 +912,17 @@
   function mkS() {
     return {
       thinkEl: null,
+      // Cached descendants/buffers for RAF-batched streaming.  Coalescing
+      // many small token deltas into a single DOM mutation per frame
+      // avoids per-token layout thrash during high-rate LLM streaming.
+      thinkCnt: null,
+      thinkBuf: '',
+      thinkRaf: 0,
       txtEl: null,
       txtBuf: '',
+      txtNode: null,
+      txtPending: '',
+      txtRaf: 0,
       bashPanel: null,
       bashBuf: '',
       bashRaf: 0,
@@ -1487,39 +1496,99 @@
           '<div class="lbl" onclick="toggleThink(this)">' +
           '<span class="arrow">\u25BE</span> Thinking</div>' +
           '<div class="cnt"></div>';
+        // Cache the .cnt child so per-delta updates do not pay
+        // querySelector cost on every streamed token.
+        tState.thinkCnt = tState.thinkEl.querySelector('.cnt');
+        tState.thinkBuf = '';
+        tState.thinkRaf = 0;
         target.appendChild(tState.thinkEl);
         break;
       case 'thinking_delta':
-        if (tState.thinkEl) {
-          const tc = tState.thinkEl.querySelector('.cnt');
-          tc.textContent += (ev.text || '').replace(/\n\n+/g, '\n');
-          tState.thinkEl.scrollTop = tState.thinkEl.scrollHeight;
+        if (tState.thinkCnt) {
+          tState.thinkBuf += (ev.text || '').replace(/\n\n+/g, '\n');
+          if (!tState.thinkRaf) {
+            tState.thinkRaf = requestAnimationFrame(() => {
+              tState.thinkRaf = 0;
+              if (!tState.thinkCnt) {
+                tState.thinkBuf = '';
+                return;
+              }
+              // appendData on a single Text node is far cheaper than
+              // reassigning textContent (which discards/rebuilds nodes).
+              const cnt = tState.thinkCnt;
+              const last = cnt.lastChild;
+              if (last && last.nodeType === 3) {
+                last.appendData(tState.thinkBuf);
+              } else {
+                cnt.appendChild(document.createTextNode(tState.thinkBuf));
+              }
+              tState.thinkBuf = '';
+              if (tState.thinkEl)
+                tState.thinkEl.scrollTop = tState.thinkEl.scrollHeight;
+            });
+          }
         }
         break;
       case 'thinking_end':
         // Keep the thinking panel expanded so the streamed thinking
         // tokens remain visible after the block ends.  The user can
         // still click the "Thinking" label to manually collapse.
+        if (tState.thinkRaf) {
+          cancelAnimationFrame(tState.thinkRaf);
+          tState.thinkRaf = 0;
+          if (tState.thinkCnt && tState.thinkBuf) {
+            const cnt = tState.thinkCnt;
+            const last = cnt.lastChild;
+            if (last && last.nodeType === 3) last.appendData(tState.thinkBuf);
+            else cnt.appendChild(document.createTextNode(tState.thinkBuf));
+          }
+          tState.thinkBuf = '';
+        }
         tState.thinkEl = null;
+        tState.thinkCnt = null;
         break;
       case 'text_delta':
         if (!tState.txtEl) {
           tState.txtEl = mkEl('div', 'txt');
           target.appendChild(tState.txtEl);
           tState.txtBuf = '';
+          tState.txtNode = document.createTextNode('');
+          tState.txtEl.appendChild(tState.txtNode);
+          tState.txtPending = '';
+          tState.txtRaf = 0;
         }
-        tState.txtBuf += ev.text || '';
-        tState.txtEl.textContent += (ev.text || '').replace(/\n\n+/g, '\n');
+        {
+          const _td = ev.text || '';
+          tState.txtBuf += _td;
+          tState.txtPending += _td.replace(/\n\n+/g, '\n');
+        }
+        if (!tState.txtRaf) {
+          tState.txtRaf = requestAnimationFrame(() => {
+            tState.txtRaf = 0;
+            if (tState.txtNode && tState.txtPending) {
+              tState.txtNode.appendData(tState.txtPending);
+            }
+            tState.txtPending = '';
+          });
+        }
         break;
       case 'text_end':
+        if (tState.txtRaf) {
+          cancelAnimationFrame(tState.txtRaf);
+          tState.txtRaf = 0;
+        }
         if (tState.txtEl) {
           if (typeof marked !== 'undefined') {
             tState.txtEl.classList.add('md-body');
             tState.txtEl.innerHTML = kissSanitize(marked.parse(tState.txtBuf || ''));
             hlBlock(tState.txtEl);
+          } else if (tState.txtNode && tState.txtPending) {
+            tState.txtNode.appendData(tState.txtPending);
           }
           tState.txtEl = null;
           tState.txtBuf = '';
+          tState.txtNode = null;
+          tState.txtPending = '';
         }
         break;
       case 'tool_call': {
@@ -1808,7 +1877,15 @@
       // RelentlessAgent sub-session) must create its own Thoughts panel.
       pendingPanel = true;
     }
-    if (target === llmPanel) llmPanel.scrollTop = llmPanel.scrollHeight;
+    // Batch the llm-panel auto-scroll into one RAF tick so a burst of
+    // streaming deltas does not force a synchronous layout per event.
+    if (target === llmPanel && llmPanel && !llmPanel._scrollRaf) {
+      const _lp = llmPanel;
+      _lp._scrollRaf = requestAnimationFrame(() => {
+        _lp._scrollRaf = 0;
+        _lp.scrollTop = _lp.scrollHeight;
+      });
+    }
     // Keep the chevron "right" state consistent across new panels added by streaming.
     // Skip during demo replay — demo mode never sets isRunning so
     // applyChevronState(false) would hide every non-result panel via chv-hidden.
