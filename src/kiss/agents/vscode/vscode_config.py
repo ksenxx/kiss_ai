@@ -9,7 +9,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shlex
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +26,7 @@ DEFAULTS: dict[str, Any] = {
     "custom_api_key": "",
     "use_web_browser": True,
     "remote_password": "",
+    "work_dir": "",
 }
 
 API_KEY_ENV_VARS: frozenset[str] = frozenset({
@@ -142,11 +145,15 @@ def save_api_key_to_shell(key_name: str, key_value: str) -> None:
     rc = _shell_rc_path(shell)
     rc.parent.mkdir(parents=True, exist_ok=True)
 
+    # H3 — shell-quote the value so embedded `"`, `$`, backticks, etc.
+    # cannot break out of the export line and execute arbitrary commands
+    # when the RC is sourced.
+    quoted = shlex.quote(key_value)
     if shell == "fish":
-        export_line = f"set -gx {key_name} {key_value}"
+        export_line = f"set -gx {key_name} {quoted}"
         pattern = f"set -gx {key_name} "
     else:
-        export_line = f'export {key_name}="{key_value}"'
+        export_line = f"export {key_name}={quoted}"
         pattern = f"export {key_name}="
 
     lines: list[str] = []
@@ -167,10 +174,43 @@ def save_api_key_to_shell(key_name: str, key_value: str) -> None:
             lines.append("\n")
         lines.append(export_line + "\n")
 
-    rc.write_text("".join(lines))
+    # H3 — write atomically with mode 0600 so the RC (which now contains
+    # API keys) is never world-readable, even momentarily.
+    _atomic_write_text_secure(rc, "".join(lines))
 
     os.environ[key_name] = key_value
     _refresh_config()
+
+
+def _atomic_write_text_secure(target: Path, content: str) -> None:
+    """Write *content* to *target* atomically with mode 0600.
+
+    Uses a temp file in the same directory + ``os.replace`` so that
+    readers never observe a partially written RC, and forces the final
+    file to be readable only by the owner.
+
+    On Windows ``os.chmod`` honours only the read-only bit, but the
+    atomic-replace pattern still applies.
+    """
+    parent = target.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".kiss-rc-", dir=str(parent))
+    try:
+        os.write(fd, content.encode("utf-8"))
+    finally:
+        os.close(fd)
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:
+        logger.debug("chmod 0600 failed on temp RC", exc_info=True)
+    os.replace(tmp, target)
+    # Defensive: ensure the destination is 0600 even if it pre-existed
+    # with looser permissions (replace preserves the source mode but
+    # some filesystems don't honour that contract).
+    try:
+        os.chmod(target, 0o600)
+    except OSError:
+        logger.debug("chmod 0600 failed on RC", exc_info=True)
 
 
 def _refresh_config() -> None:
@@ -183,8 +223,9 @@ def _refresh_config() -> None:
 def apply_config_to_env(cfg: dict[str, Any]) -> None:
     """Apply loaded config values to the running process.
 
-    Sets ``max_budget`` on the default config and registers a custom
-    endpoint model if configured.
+    Sets ``max_budget`` on the default config and updates
+    ``KISS_WORKDIR`` in ``os.environ`` when ``work_dir`` is non-empty
+    so that the running server picks up work-dir changes immediately.
 
     Args:
         cfg: The configuration dict (from :func:`load_config`).
@@ -193,6 +234,10 @@ def apply_config_to_env(cfg: dict[str, Any]) -> None:
 
     budget = cfg.get("max_budget", DEFAULTS["max_budget"])
     config_module.DEFAULT_CONFIG.max_budget = float(budget)
+
+    work_dir = cfg.get("work_dir", "")
+    if work_dir:
+        os.environ["KISS_WORKDIR"] = work_dir
 
 
 def get_custom_model_entry(cfg: dict[str, Any]) -> dict[str, Any] | None:
@@ -229,10 +274,16 @@ def source_shell_env() -> None:
     if not rc.exists():
         return
     try:
+        # H1 — shell-quote ``rc`` so a HOME containing single-quotes,
+        # spaces, or other metacharacters cannot inject extra shell
+        # commands when the RC is sourced.
+        rc_q = shlex.quote(str(rc))
         if shell == "fish":
-            cmd = f"source {rc} 2>/dev/null; env"
+            # fish does not honour shlex.quote's POSIX rules verbatim,
+            # but the safe subset (no single-quote, no $) round-trips.
+            cmd = f"source {rc_q} 2>/dev/null; env"
         else:
-            cmd = f"source {rc} 2>/dev/null && env"
+            cmd = f"source {rc_q} 2>/dev/null && env"
         result = subprocess.run(
             [shell, "-c", cmd] if shell != "fish" else ["fish", "-c", cmd],
             capture_output=True,

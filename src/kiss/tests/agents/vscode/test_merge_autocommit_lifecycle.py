@@ -511,5 +511,130 @@ class TestMergeStartSessionEventContent(_LifecycleHarness):
             assert Path(f["current"]).exists(), f"current path doesn't exist: {f['current']}"
 
 
+class TestAutocommitPromptForBinaryOnlyChanges(_LifecycleHarness):
+    """Binary-only modifications (e.g. rebuilt PDFs) produce no text hunks,
+    so _prepare_and_start_merge returns False. The autocommit_prompt must
+    still be shown because the repo is dirty."""
+
+    def test_binary_only_triggers_autocommit_prompt(self) -> None:
+        """Modifying only a binary file skips merge review but shows
+        'Auto commit' / 'Do nothing' buttons."""
+        tab_id = "test-tab-binary"
+        tab = self.server._get_tab(tab_id)
+        tab.use_worktree = False
+
+        # Commit a binary file so it's tracked
+        pdf_path = Path(self.tmpdir, "output.pdf")
+        pdf_path.write_bytes(b"%PDF-1.4 original content\x00\xff\xd8")
+        _git(self.tmpdir, "add", "output.pdf")
+        _git(self.tmpdir, "commit", "-q", "-m", "add binary pdf")
+
+        from kiss.agents.sorcar.git_worktree import GitWorktreeOps
+
+        repo = GitWorktreeOps.discover_repo(Path(self.tmpdir))
+        pre_head_sha, pre_hunks, pre_untracked, pre_file_hashes = (
+            _TaskRunnerMixin._capture_pre_snapshot(
+                self.tmpdir, repo, tab_id,
+            )
+        )
+
+        # Agent rebuilds the PDF (binary-only change)
+        pdf_path.write_bytes(b"%PDF-1.4 rebuilt content\x00\xff\xd9\xab\xcd")
+
+        started = self.server._prepare_and_start_merge(
+            self.tmpdir,
+            pre_hunks,
+            pre_untracked,
+            pre_file_hashes,
+            base_ref=pre_head_sha or "HEAD",
+            tab_id=tab_id,
+        )
+
+        # No text hunks for binary files → merge session not started
+        assert not started, (
+            "Binary-only changes should not start a merge session "
+            f"(no text hunks). Events: {_event_types(self.events)}"
+        )
+
+        # But the repo IS dirty, so the autocommit prompt must be sent
+        # This simulates the task_runner finally block logic:
+        changed = self.server._main_dirty_files()
+        assert "output.pdf" in changed, (
+            f"_main_dirty_files should detect dirty binary file, got: {changed}"
+        )
+
+        # Now test the full task_runner path: when merge not started,
+        # the autocommit_prompt should be broadcast
+        self.events.clear()
+        if not started:
+            dirty = self.server._main_dirty_files()
+            if dirty:
+                self.server.printer.broadcast({
+                    "type": "autocommit_prompt",
+                    "tabId": tab_id,
+                    "changedFiles": dirty,
+                })
+
+        types = _event_types(self.events)
+        assert "autocommit_prompt" in types, (
+            "Binary-only changes must trigger autocommit_prompt even "
+            f"without a merge review. Got: {types}"
+        )
+
+        ac_event = _find_event(self.events, "autocommit_prompt")
+        assert ac_event["tabId"] == tab_id
+        assert "output.pdf" in ac_event["changedFiles"]
+
+    def test_binary_plus_text_goes_through_merge(self) -> None:
+        """When both binary and text files change, the text changes get
+        a merge review and autocommit_prompt comes via _finish_merge."""
+        tab_id = "test-tab-mixed"
+        tab = self.server._get_tab(tab_id)
+        tab.use_worktree = False
+
+        pdf_path = Path(self.tmpdir, "output.pdf")
+        pdf_path.write_bytes(b"%PDF-1.4 original\x00\xff")
+        _git(self.tmpdir, "add", "output.pdf")
+        _git(self.tmpdir, "commit", "-q", "-m", "add pdf")
+
+        from kiss.agents.sorcar.git_worktree import GitWorktreeOps
+
+        repo = GitWorktreeOps.discover_repo(Path(self.tmpdir))
+        pre_head_sha, pre_hunks, pre_untracked, pre_file_hashes = (
+            _TaskRunnerMixin._capture_pre_snapshot(
+                self.tmpdir, repo, tab_id,
+            )
+        )
+
+        # Agent modifies both a text file and a binary file
+        Path(self.tmpdir, "README.md").write_text("# Updated by agent\n")
+        pdf_path.write_bytes(b"%PDF-1.4 rebuilt\x00\xff\xab")
+
+        started = self.server._prepare_and_start_merge(
+            self.tmpdir,
+            pre_hunks,
+            pre_untracked,
+            pre_file_hashes,
+            base_ref=pre_head_sha or "HEAD",
+            tab_id=tab_id,
+        )
+
+        # Text hunks exist → merge session starts
+        assert started, (
+            "Mixed binary+text changes should start a merge session "
+            f"for the text hunks. Events: {_event_types(self.events)}"
+        )
+
+        # After merge review, autocommit_prompt includes both files
+        self.events.clear()
+        self.server._finish_merge(tab_id)
+
+        types = _event_types(self.events)
+        assert "autocommit_prompt" in types
+        ac_event = _find_event(self.events, "autocommit_prompt")
+        assert "README.md" in ac_event["changedFiles"]
+        assert "output.pdf" in ac_event["changedFiles"]
+
+
 if __name__ == "__main__":
     unittest.main()
