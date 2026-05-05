@@ -594,18 +594,82 @@ echo "Open a new terminal for PATH changes to take effect."
 
 # --- Relaunch VS Code -------------------------------------------------------
 # The just-installed PATH/dependency updates only take effect in VS Code
-# windows started after this script finished, so we (re)launch `code` here.
-# `code` with no arguments opens a new window if none exists or focuses an
-# existing one; if the user already has VS Code open, the KISS Sorcar
-# extension's sticky "Restart VS Code" notification will prompt them to
-# reload the window so the new PATH is picked up.
-if command -v code &>/dev/null; then
-    echo "Launching VS Code..."
-    # Detach from the terminal so the script exits cleanly even if `code`
-    # backgrounds itself slowly.  Errors are non-fatal — the install is
-    # already complete by this point.
-    (code >/dev/null 2>&1 &) || true
+# windows started after this script finished, so we (re)launch VS Code here.
+# We try several strategies in order of reliability so that VS Code is
+# launched even when the `code` shell command is not on PATH (a common
+# situation on a brand-new macOS install where the user has never run
+# "Shell Command: Install 'code' command in PATH" from the command palette,
+# or on Linux where VS Code was installed via snap/flatpak with a non-PATH
+# binary).  Every step is non-fatal — the install itself is already complete.
+launch_vscode() {
+    case "$OS" in
+        Darwin)
+            # macOS: `open -a` uses LaunchServices to find and activate the
+            # app bundle.  This works even when the `code` CLI is not on
+            # PATH and reliably foregrounds an existing window or opens a
+            # new one.
+            if open -a "Visual Studio Code" >/dev/null 2>&1; then
+                echo "Launched VS Code via 'open -a'."
+                return 0
+            fi
+            # Fallback 1: open the .app bundle directly by path.
+            if [ -d "/Applications/Visual Studio Code.app" ]; then
+                if open "/Applications/Visual Studio Code.app" >/dev/null 2>&1; then
+                    echo "Launched VS Code from /Applications."
+                    return 0
+                fi
+            fi
+            ;;
+        Linux)
+            # Linux: try the `code` CLI on PATH, then known install paths,
+            # then snap and flatpak.
+            for candidate in \
+                "$(command -v code 2>/dev/null || true)" \
+                "$BIN_DIR/code" \
+                "/usr/local/bin/code" \
+                "/usr/bin/code" \
+                "/snap/bin/code" \
+                "/usr/share/code/code"; do
+                if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+                    (nohup "$candidate" >/dev/null 2>&1 &)
+                    echo "Launched VS Code from $candidate."
+                    return 0
+                fi
+            done
+            if command -v flatpak &>/dev/null \
+               && flatpak info com.visualstudio.code &>/dev/null; then
+                (nohup flatpak run com.visualstudio.code >/dev/null 2>&1 &)
+                echo "Launched VS Code via flatpak."
+                return 0
+            fi
+            ;;
+    esac
+
+    # Last-resort fallback (works on both OSes if `code` is on PATH):
+    # detach so the script exits cleanly even if `code` backgrounds itself
+    # slowly.
+    if command -v code &>/dev/null; then
+        (nohup code >/dev/null 2>&1 &)
+        echo "Launched VS Code via 'code' on PATH."
+        return 0
+    fi
+
+    return 1
+}
+
+if launch_vscode; then
+    :
 else
-    echo "VS Code 'code' command not found on PATH."
-    echo "Install VS Code from https://code.visualstudio.com/ and run 'code' to launch it."
+    echo ""
+    echo "WARNING: Could not launch VS Code automatically."
+    case "$OS" in
+        Darwin)
+            echo "  - Install VS Code from https://code.visualstudio.com/ and"
+            echo "    re-run this script, OR open it manually from /Applications."
+            ;;
+        Linux)
+            echo "  - Install VS Code from https://code.visualstudio.com/ (deb/rpm/snap/flatpak)"
+            echo "    and re-run this script, OR launch it manually."
+            ;;
+    esac
 fi
