@@ -84,6 +84,32 @@ _TUNNEL_BACKOFF_INITIAL = 60
 
 _TUNNEL_BACKOFF_MAX = 1800
 
+# When cloudflared's stderr reports HTTP 429 / Cloudflare error code
+# 1015 ("rate-limited") on the trycloudflare.com quick-tunnel API, the
+# normal exponential backoff (60s → 120s → ...) is far too aggressive:
+# every retry within the cooldown window resets Cloudflare's per-IP
+# clock, so the tunnel can stay unreachable for *hours* while burning
+# through dozens of distinct *.trycloudflare.com URLs.  When a
+# rate-limit signal is detected we use a much longer baseline plus a
+# random jitter so a fleet of restarts (e.g. across machines on the
+# same egress IP) does not synchronise into another rate-limit burst.
+_TUNNEL_RATE_LIMIT_BACKOFF = 900  # 15 minutes
+
+_TUNNEL_RATE_LIMIT_JITTER = 300  # 0..5 minutes additional jitter
+
+# Substrings (case-insensitive) in cloudflared's stderr that indicate
+# trycloudflare.com is rate-limiting the local egress IP.  Matching is
+# done line-by-line via :func:`_is_rate_limit_line`.
+_RATE_LIMIT_INDICATORS = (
+    "error code: 1015",
+    "error code 1015",
+    "429 too many requests",
+    'status_code="429',
+    "status_code=429",
+    "rate-limited",
+    "rate limited",
+)
+
 # Auth rate-limiting (per source IP).  After _AUTH_FAIL_MAX failures
 # within _AUTH_FAIL_WINDOW seconds, new connections from that IP are
 # refused for _AUTH_LOCKOUT seconds.
@@ -124,6 +150,39 @@ def _tunnel_backoff_delay(failure_count: int) -> int:
         return 0
     delay: int = _TUNNEL_BACKOFF_INITIAL * (2 ** (failure_count - 1))
     return min(delay, _TUNNEL_BACKOFF_MAX)
+
+
+def _is_rate_limit_line(line: str) -> bool:
+    """Return True if *line* indicates Cloudflare rate-limiting.
+
+    Matches the substrings in :data:`_RATE_LIMIT_INDICATORS`
+    case-insensitively.  A typical rate-limited cloudflared stderr
+    line looks like::
+
+        ERR Error unmarshaling QuickTunnel response: error code: 1015
+            error="invalid character 'e' ..."  status_code="429 Too Many Requests"
+
+    Args:
+        line: A single line of cloudflared stderr.
+
+    Returns:
+        True when the line names HTTP 429 or Cloudflare error 1015.
+    """
+    low = line.lower()
+    return any(ind in low for ind in _RATE_LIMIT_INDICATORS)
+
+
+def _rate_limit_backoff_seconds() -> int:
+    """Return the backoff to apply after a rate-limited tunnel attempt.
+
+    Uses :data:`_TUNNEL_RATE_LIMIT_BACKOFF` as the floor and adds a
+    cryptographically-random jitter of up to
+    :data:`_TUNNEL_RATE_LIMIT_JITTER` seconds so concurrent daemons on
+    the same egress IP do not synchronise into the same retry window
+    and re-trigger the rate-limit cooldown.
+    """
+    jitter = secrets.randbelow(_TUNNEL_RATE_LIMIT_JITTER + 1)
+    return _TUNNEL_RATE_LIMIT_BACKOFF + jitter
 
 _HEAD_200 = (
     b"HTTP/1.1 200 OK\r\n"
@@ -457,6 +516,7 @@ def _stderr_reader_loop(
     result: list[str | None],
     proc: subprocess.Popen[str],
     stop_event: threading.Event | None = None,
+    rate_limit_flag: list[bool] | None = None,
 ) -> None:
     """Read *stderr* lines until *parse* returns a URL or stderr hits EOF.
 
@@ -484,9 +544,21 @@ def _stderr_reader_loop(
             reader-thread lifetime: once a single additional line is
             consumed (or the subprocess dies) the daemon thread exits
             instead of running until process shutdown.
+        rate_limit_flag: Optional single-element list set to ``True``
+            on the first stderr line matching
+            :func:`_is_rate_limit_line`.  Lets callers distinguish a
+            rate-limited tunnel start (HTTP 429 / Cloudflare error
+            1015) from a generic failure so the watchdog can apply a
+            much longer backoff.
     """
     del proc
     for line in iter(stderr.readline, ""):
+        if (
+            rate_limit_flag is not None
+            and not rate_limit_flag[0]
+            and _is_rate_limit_line(line)
+        ):
+            rate_limit_flag[0] = True
         url = parse(line)
         if url is not None:
             result[0] = url
@@ -499,6 +571,7 @@ def _read_url_from_stderr(
     proc: subprocess.Popen[str],
     parse: Callable[[str], str | None],
     timeout: float = 30.0,
+    rate_limit_flag: list[bool] | None = None,
 ) -> str | None:
     """Read *proc*'s stderr until *parse* finds a URL or *timeout* elapses.
 
@@ -512,6 +585,11 @@ def _read_url_from_stderr(
         parse: Per-line URL extractor; returns the URL string or
             ``None``.
         timeout: Maximum seconds to wait before giving up.
+        rate_limit_flag: Optional single-element list forwarded to
+            :func:`_stderr_reader_loop`; set to ``True`` if any
+            consumed stderr line matches a Cloudflare rate-limit
+            indicator (HTTP 429 / error 1015).  Lets the caller
+            apply a different backoff for rate-limited failures.
 
     Returns:
         The first URL returned by *parse*, or ``None`` if *proc* exits
@@ -523,7 +601,9 @@ def _read_url_from_stderr(
     stop_event = threading.Event()
     reader = threading.Thread(
         target=_stderr_reader_loop,
-        args=(stderr, parse, result, proc, stop_event),
+        args=(
+            stderr, parse, result, proc, stop_event, rate_limit_flag,
+        ),
         daemon=True,
     )
     reader.start()
@@ -1526,6 +1606,12 @@ class RemoteAccessServer:
         self._tunnel_started_at: float | None = None
         self._tunnel_failure_count = 0
         self._tunnel_next_retry = 0.0
+        # Set by ``_start_quick_tunnel`` when cloudflared's stderr
+        # reports a Cloudflare quick-tunnel rate-limit (HTTP 429 /
+        # error 1015).  ``_restart_tunnel_url`` reads (and clears) it
+        # to apply a much longer backoff than the regular exponential
+        # one so the per-IP cooldown actually has time to clear.
+        self._tunnel_rate_limited = False
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ws_server: Any = None
         self._watchdog_task: asyncio.Task[None] | None = None
@@ -2092,8 +2178,10 @@ class RemoteAccessServer:
             ["--url", self._local_url, "--no-tls-verify"],
         )
         assert self._tunnel_proc is not None
+        rate_limit_flag = [False]
         url = _read_url_from_stderr(
             self._tunnel_proc, _parse_quick_tunnel_url, timeout=30,
+            rate_limit_flag=rate_limit_flag,
         )
         if url:
             return url
@@ -2104,6 +2192,18 @@ class RemoteAccessServer:
             if url:
                 return url
             time.sleep(1)
+        # Rate-limit detection: if cloudflared's stderr named HTTP
+        # 429 / error 1015 (and we never got a URL out), tell the
+        # restart machinery to use a longer cooldown.  Setting this
+        # only when ``url is None`` prevents a stray mid-line match
+        # in healthy logs from poisoning the next backoff.
+        if rate_limit_flag[0]:
+            self._tunnel_rate_limited = True
+            logger.warning(
+                "cloudflared reported HTTP 429 / Cloudflare error "
+                "1015 — Cloudflare is rate-limiting "
+                "trycloudflare.com quick-tunnels for this egress IP",
+            )
         return None
 
     def _start_named_tunnel(self) -> str | None:
@@ -2226,15 +2326,34 @@ class RemoteAccessServer:
             logger.info("Tunnel restarted: %s", tunnel_url)
             self._tunnel_failure_count = 0
             self._tunnel_next_retry = 0.0
+            self._tunnel_rate_limited = False
         else:
             self._tunnel_failure_count += 1
-            delay = _tunnel_backoff_delay(self._tunnel_failure_count)
+            # When cloudflared reported a rate-limit on this attempt,
+            # ignore the regular exponential schedule (60s, 120s, ...)
+            # and wait at least _TUNNEL_RATE_LIMIT_BACKOFF + jitter
+            # seconds: shorter waits keep resetting Cloudflare's per-IP
+            # cooldown clock and burn through dozens of distinct
+            # *.trycloudflare.com URLs without ever recovering.
+            if self._tunnel_rate_limited:
+                delay = _rate_limit_backoff_seconds()
+                self._tunnel_rate_limited = False
+                logger.warning(
+                    "cloudflared rate-limited (HTTP 429 / error 1015) "
+                    "on attempt %d; backing off %ds (long cooldown) "
+                    "to let Cloudflare's per-IP quota clear",
+                    self._tunnel_failure_count,
+                    delay,
+                )
+            else:
+                delay = _tunnel_backoff_delay(self._tunnel_failure_count)
+                logger.warning(
+                    "Failed to restart tunnel (attempt %d); "
+                    "backing off %ds",
+                    self._tunnel_failure_count,
+                    delay,
+                )
             self._tunnel_next_retry = time.monotonic() + delay
-            logger.warning(
-                "Failed to restart tunnel (attempt %d); backing off %ds",
-                self._tunnel_failure_count,
-                delay,
-            )
         _save_url_file(self._local_url, tunnel_url)
         self._active_url = tunnel_url or self._local_url
         self._printer.broadcast(
@@ -2359,6 +2478,7 @@ class RemoteAccessServer:
         self._terminate_tunnel_proc()
         self._tunnel_failure_count = 0
         self._tunnel_next_retry = 0.0
+        self._tunnel_rate_limited = False
         self._active_url = None
 
 
