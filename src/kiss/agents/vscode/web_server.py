@@ -42,6 +42,7 @@ import logging
 import mimetypes
 import os
 import re
+import secrets
 import shutil
 import socket
 import ssl
@@ -81,6 +82,15 @@ _TUNNEL_STARTUP_GRACE = 60
 _TUNNEL_BACKOFF_INITIAL = 60
 
 _TUNNEL_BACKOFF_MAX = 1800
+
+# Auth rate-limiting (per source IP).  After _AUTH_FAIL_MAX failures
+# within _AUTH_FAIL_WINDOW seconds, new connections from that IP are
+# refused for _AUTH_LOCKOUT seconds.
+_AUTH_FAIL_MAX = 5
+
+_AUTH_FAIL_WINDOW = 60.0
+
+_AUTH_LOCKOUT = 60.0
 
 
 def _tunnel_backoff_delay(failure_count: int) -> int:
@@ -477,6 +487,16 @@ def _read_url_from_stderr(
     )
     reader.start()
     reader.join(timeout=timeout)
+    # On timeout, close stderr so the blocked readline() returns ""
+    # and the reader thread exits promptly.  Without this, every
+    # timed-out tunnel restart leaks a daemon thread that keeps
+    # draining cloudflared's stderr forever.
+    if reader.is_alive():
+        try:
+            stderr.close()
+        except Exception:
+            logger.debug("Failed to close stderr on timeout", exc_info=True)
+        reader.join(timeout=2.0)
     return result[0]
 
 
@@ -641,14 +661,27 @@ def _generate_self_signed_cert(
 
     for d in {cert_path.parent, key_path.parent}:
         d.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(d, 0o700)
+        except OSError:
+            logger.debug("Could not chmod 0700 on %s", d, exc_info=True)
 
-    key_path.write_bytes(
-        key.private_bytes(
-            serialization.Encoding.PEM,
-            serialization.PrivateFormat.TraditionalOpenSSL,
-            serialization.NoEncryption(),
-        )
+    key_bytes = key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.TraditionalOpenSSL,
+        serialization.NoEncryption(),
     )
+    # Create the key file with mode 0600 *before* writing, so the
+    # private key bytes are never on disk world-readable even briefly.
+    if key_path.exists():
+        key_path.unlink()
+    fd = os.open(str(key_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(fd, key_bytes)
+    finally:
+        os.close(fd)
+    # Defensive: also chmod afterwards in case umask interfered.
+    os.chmod(key_path, 0o600)
     cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
 
 
@@ -1358,6 +1391,8 @@ class RemoteAccessServer:
         self._printer._merge_state_callback = self._register_merge_state
         self._active_url: str | None = None
         self._last_ips: frozenset[str] = frozenset()
+        # Per-IP auth failure timestamps, used by _is_auth_locked.
+        self._auth_failures: dict[str, list[float]] = {}
 
 
     async def _process_request(
@@ -1391,11 +1426,63 @@ class RemoteAccessServer:
         return _http_response(404, "text/plain", b"Not Found")
 
 
+    @staticmethod
+    def _passwords_equal(a: str, b: str) -> bool:
+        """Constant-time string compare to defeat timing attacks.
+
+        Encodes to bytes and delegates to :func:`secrets.compare_digest`.
+        """
+        return secrets.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+
+    def _client_ip(self, websocket: ServerConnection) -> str:
+        """Return the source IP of *websocket*, or ``"?"`` if unknown."""
+        addr = getattr(websocket, "remote_address", None)
+        if addr and len(addr) >= 1:
+            return str(addr[0])
+        return "?"
+
+    def _is_auth_locked(self, ip: str) -> bool:
+        """Return True if *ip* is currently rate-limited.
+
+        An IP becomes locked once it has accumulated
+        :data:`_AUTH_FAIL_MAX` failures within the most recent
+        :data:`_AUTH_FAIL_WINDOW` seconds.  The lock persists until
+        :data:`_AUTH_LOCKOUT` seconds have elapsed since the last
+        recorded failure.
+        """
+        now = time.monotonic()
+        fails = self._auth_failures.get(ip, [])
+        # Drop entries outside the window.
+        fails = [t for t in fails if now - t <= _AUTH_FAIL_WINDOW]
+        self._auth_failures[ip] = fails
+        if len(fails) < _AUTH_FAIL_MAX:
+            return False
+        return (now - fails[-1]) <= _AUTH_LOCKOUT
+
+    def _record_auth_failure(self, ip: str) -> None:
+        """Record a failed authentication attempt from *ip*."""
+        now = time.monotonic()
+        self._auth_failures.setdefault(ip, []).append(now)
+
     async def _authenticate_ws(self, websocket: ServerConnection) -> bool:
         """Authenticate a WebSocket client using the configured password.
 
         Returns True on success, False (and closes the socket) on failure.
+
+        When the configured ``remote_password`` is empty, all clients
+        are still required to send an empty-password ``auth`` message
+        (using a constant-time compare).  See also
+        :meth:`_setup_server` which refuses to advertise the public
+        cloudflared tunnel when no password is configured.
         """
+        ip = self._client_ip(websocket)
+        if self._is_auth_locked(ip):
+            logger.warning("Auth rate-limit hit for %s; closing socket", ip)
+            try:
+                await websocket.close()
+            except Exception:
+                pass
+            return False
         password = load_config().get("remote_password", "")
         try:
             raw = await asyncio.wait_for(websocket.recv(), timeout=30)
@@ -1403,11 +1490,21 @@ class RemoteAccessServer:
             if msg.get("type") != "auth":
                 await websocket.close()
                 return False
-            if password and msg.get("password") != password:
+            client_pw = msg.get("password", "")
+            if not isinstance(client_pw, str):
+                client_pw = ""
+            if not self._passwords_equal(password, client_pw):
+                self._record_auth_failure(ip)
                 await websocket.send(json.dumps({"type": "auth_required"}))
                 raw2 = await asyncio.wait_for(websocket.recv(), timeout=60)
                 msg2 = json.loads(raw2)
-                if msg2.get("type") != "auth" or msg2.get("password") != password:
+                client_pw2 = msg2.get("password", "")
+                if not isinstance(client_pw2, str):
+                    client_pw2 = ""
+                if msg2.get("type") != "auth" or not self._passwords_equal(
+                    password, client_pw2,
+                ):
+                    self._record_auth_failure(ip)
                     await websocket.send(
                         json.dumps({"type": "error", "text": "Authentication failed"})
                     )
@@ -1417,6 +1514,10 @@ class RemoteAccessServer:
             return True
         except Exception:
             logger.debug("WS auth failed", exc_info=True)
+            try:
+                await websocket.close()
+            except Exception:
+                pass
             return False
 
     async def _run_cmd(self, cmd: dict[str, Any]) -> None:
@@ -1669,13 +1770,16 @@ class RemoteAccessServer:
         tunnel).
         """
         self._tunnel_metrics_port = _pick_free_local_port()
+        # stdout is DEVNULL (not PIPE) because nothing reads it.  An
+        # un-drained PIPE buffer fills after ~64 KiB of cloudflared
+        # log output and causes the subprocess to block on write().
         self._tunnel_proc = subprocess.Popen(
             [
                 "cloudflared", "tunnel",
                 "--metrics", f"127.0.0.1:{self._tunnel_metrics_port}",
                 *args,
             ],
-            stdout=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
         )
@@ -1793,6 +1897,12 @@ class RemoteAccessServer:
             proc = None
 
         if proc is None:
+            # Don't (re)start the tunnel when the auth password is
+            # unset — see H1 in the security review.  The watchdog
+            # mirrors the guard in _setup_server so a runtime config
+            # change doesn't accidentally bring up an open tunnel.
+            if not load_config().get("remote_password", ""):
+                return
             if now >= self._tunnel_next_retry:
                 await self._restart_tunnel_url()
             return
@@ -2007,9 +2117,29 @@ class RemoteAccessServer:
 
         tunnel_url: str | None = None
         if self.use_tunnel:
-            tunnel_url = await self._loop.run_in_executor(  # type: ignore[union-attr]
-                None, self._start_tunnel,
-            )
+            # Refuse to expose the server to the public internet
+            # (cloudflared tunnel) when no authentication password is
+            # configured.  Without a password every WS client is
+            # admitted, which would let anyone on the internet drive
+            # the local agent.  Local connections still work.
+            password = load_config().get("remote_password", "")
+            if not password:
+                logger.warning(
+                    "remote_password is not set in ~/.kiss/config.json; "
+                    "refusing to start the cloudflared tunnel.  "
+                    "Set a password in the config panel to enable "
+                    "remote access.",
+                )
+                print(
+                    "Warning: remote_password is empty; cloudflared "
+                    "tunnel disabled.  Set a password to enable "
+                    "remote access.",
+                    file=sys.stderr,
+                )
+            else:
+                tunnel_url = await self._loop.run_in_executor(  # type: ignore[union-attr]
+                    None, self._start_tunnel,
+                )
 
         _save_url_file(self._local_url, tunnel_url)
         self._active_url = tunnel_url or self._local_url
