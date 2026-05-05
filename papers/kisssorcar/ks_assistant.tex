@@ -141,8 +141,6 @@ print(result)  # 127.05
 \begin{minipage}[t]{0.48\textwidth}
 \vspace{0pt}
 \centering
-\captionof{table}{Terminal-Bench~2.0 aggregate results (89 tasks, 5 trials each, Claude Opus~4.6).}
-\label{tab:tb2-aggregate}
 \small
 \setlength{\tabcolsep}{3pt}
 \fbox{%
@@ -164,6 +162,8 @@ Mean duration / trial    & 446\,s \\
 \bottomrule
 \end{tabular}%
 }
+\captionof{table}{Terminal-Bench~2.0 aggregate results (89 tasks, 5 trials each, Claude Opus~4.6).}
+\label{tab:tb2-aggregate}
 \end{minipage}
 
 \textbf{Native function calling.}  Tools are registered as ordinary Python callables.  The agent builds an OpenAI-compatible tool schema once at setup time and caches it.  A special \texttt{finish} tool signals task completion and returns the result. Using a model's native calling API avoids the mistakes that models make on custom function calling conventions.
