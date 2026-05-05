@@ -589,16 +589,25 @@ async function ensureDependenciesImpl(): Promise<void> {
   // Show restart notification only after API key prompting has completed.
   if (showRestartNotification) {
     if (apiKeysReady) {
-      vscode.window
-        .showInformationMessage(
-          'KISS Sorcar: Installation complete! Please restart VS Code and any open terminal for changes to take effect.',
-          'Restart VS Code',
-        )
-        .then(choice => {
+      // Loop until the user explicitly clicks "Restart VS Code".  VS
+      // Code may auto-hide information notifications (depending on
+      // user settings or notification-center state) and the user may
+      // dismiss the toast with the close button — in either case
+      // ``showInformationMessage`` resolves to ``undefined`` and we
+      // re-show, guaranteeing the prompt stays visible until the
+      // restart button is clicked.
+      void (async () => {
+        for (;;) {
+          const choice = await vscode.window.showInformationMessage(
+            'KISS Sorcar: Installation complete! Please restart VS Code and any open terminal for changes to take effect.',
+            'Restart VS Code',
+          );
           if (choice === 'Restart VS Code') {
             vscode.commands.executeCommand('workbench.action.reloadWindow');
+            return;
           }
-        });
+        }
+      })();
     } else {
       vscode.window.showWarningMessage(
         'KISS Sorcar: Installation complete, but at least one of Claude Code, ANTHROPIC_API_KEY, or OPENAI_API_KEY is required. ' +
