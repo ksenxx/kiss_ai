@@ -94,7 +94,7 @@ Before finish(success=True):
 
 - Lint/typecheck/format: `uv run check --full`. Test: `uv run pytest -v` (timeout 900s).
 - **Do NOT install the KISS Sorcar extension from inside Sorcar.**
-- To open/edit system prompt: ~/.vscode/extensions/ksenxx.kiss-sorcar-2026.5.9/kiss_project/src/kiss/SYSTEM.md
+- To open/edit system prompt: ~/.vscode/extensions/ksenxx.kiss-sorcar-2026.5.10/kiss_project/src/kiss/SYSTEM.md
 - KISS Sorcar info: https://github.com/ksenxx/kiss_ai/blob/main/papers/kisssorcar/kiss_sorcar.tex
 - Third-party agents: kiss/agents/third_party_agents
 - Official Claude SKILLS: kiss/agents/claude_skills
