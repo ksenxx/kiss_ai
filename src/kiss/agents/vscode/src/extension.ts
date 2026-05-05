@@ -254,20 +254,20 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   });
 
-  // Widen the secondary sidebar on first activation so the chat panel
-  // has enough room.  Each increaseViewSize call adds ~50 CSS-px;
-  // 3 calls ≈ 150 px ≈ 50 % wider than the ~300 px default.
+  // Widen the secondary sidebar on first activation so the chat panel's
+  // width is approximately one-third of the VS Code window.  We can't read
+  // the workbench window width from an extension, but the webview can
+  // report its own ``window.innerWidth`` (= sidebar width) and
+  // ``screen.availWidth`` (close proxy for window width when maximized).
+  // ``widenToOneThird`` runs an iterative measure→increase/decrease loop
+  // until the sidebar is within ~6 % of the target.
   if (!context.globalState.get<boolean>('sidebarWidened')) {
     sidebarView!.onFirstResolve(() => {
       setTimeout(async () => {
         await vscode.commands.executeCommand(
           'workbench.action.focusAuxiliaryBar',
         );
-        for (let i = 0; i < 3; i++) {
-          await vscode.commands.executeCommand(
-            'workbench.action.increaseViewSize',
-          );
-        }
+        await sidebarView!.widenToOneThird();
         await vscode.commands.executeCommand(
           'workbench.action.focusFirstEditorGroup',
         );
