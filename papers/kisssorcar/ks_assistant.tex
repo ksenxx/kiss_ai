@@ -109,7 +109,7 @@ Section~\ref{sec:architecture} presents the five-layer agent architecture.  Sect
 
 The KS Agent Framework was originally built to rapidly prototype and experiment with prompt optimization techniques~\citep{agrawal2025gepa} and evolutionary algorithms for algorithmic optimization~\citep{novikov2025alphaevolve,openevolve2025}.  The emphasis on simplicity enabled coding agents to write simple, bug-free code.  Eventually, no prompt optimization techniques were used when creating the system prompt for KS Assistant; it was hand-tuned based on long-term experience with the agent and its behavior.  The framework uses five agent layers combining composition and inheritance.  Each layer delegates upward for concerns it does not own.
 
-\vspace*{-1ex}
+\vspace*{-2ex}
 %......................................................................
 \subsection{KS Agent}
 \label{sec:ks-agent}
@@ -178,7 +178,7 @@ Listing~\ref{lst:simple-agent} shows a complete, working agent in under ten line
 
 The KS Agent is stateless across runs: each call resets the conversation, token counters, and tool registry, making it safe to reuse a single instance for multiple sequential tasks.
 
-\vspace*{-1ex}
+\vspace*{-2ex}
 %......................................................................
 \subsection{Relentless Agent}
 \label{sec:relentless-agent}
@@ -195,7 +195,7 @@ Rather than investing in context-compaction techniques, we adopt a simple contin
 
 \textbf{Pre-emptive continuation.}  To force the agent to self-continue before exhausting its step budget, the system prompt is augmented with a step-threshold instruction that requires the agent, at a designated step or whenever the task is at risk of running out of steps or context length, to call \texttt{finish} with \texttt{success=False}, \texttt{is\_continue=True}, and a precise chronologically-ordered summary of work done so far.  This instruction is injected near the end of the budget window.  Without it, the agent exhibits a ``rush to finish'' behavior when steps are running low---skipping verification, making hasty edits, and calling \texttt{finish} with an incomplete result.  The explicit step threshold redirects that urgency into the continuation protocol, ensuring that a clean handoff to a new sub-session produces better results than a frantic attempt to squeeze everything into the remaining steps.
 
-\vspace*{-1ex}
+\vspace*{-2ex}
 %......................................................................
 \subsection{Tool Agent}
 \label{sec:tool-agent}
@@ -214,7 +214,7 @@ The Tool Agent adds the tools that make the system useful for software developme
 
 \textbf{Docker isolation.}  When a Docker image is specified, coding tools are replaced with Docker-aware variants that execute commands inside a container.
 
-\vspace*{-1ex}
+\vspace*{-2ex}
 %......................................................................
 \subsection{Chat Agent}
 \label{sec:chat-agent}
@@ -233,7 +233,7 @@ The Chat Agent adds multi-turn conversation persistence.
 
 \textbf{Metadata persistence.}  After each task, the agent records metadata including the model used, working directory, software version, token counts, cost, and whether the task used parallel execution or worktree isolation.  This audit trail supports cost analysis and debugging.
 
-\vspace*{-1ex}
+\vspace*{-2ex}
 %......................................................................
 \subsection{Worktree Agent}
 \label{sec:worktree-agent}
