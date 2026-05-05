@@ -295,6 +295,58 @@ export function getDefaultModel(): string {
 }
 
 /**
+ * Run the post-install finalization steps: install the ``sorcar`` CLI
+ * wrapper, restart the kiss-web daemon, persist PATH entries to the
+ * user's shell rc file, and prompt for any missing API keys.  Returns
+ * whether at least one API key (or the Claude CLI) is available.
+ *
+ * When called with a non-null ``progress`` reporter this function
+ * publishes brief sub-step messages so the surrounding "KISS Sorcar:
+ * Setting up" notification stays visible continuously from the first
+ * install step until the restart prompt is shown.  Passing ``null``
+ * skips the progress reports (used on the fast path, which has no
+ * progress notification to annotate).
+ */
+async function runFinalization(
+  progress: vscode.Progress<{message?: string; increment?: number}> | null,
+  kissProjectPath: string,
+  uvPath: string | null,
+): Promise<boolean> {
+  if (uvPath) {
+    if (progress) progress.report({message: 'Installing CLI wrapper...'});
+    installCliScript(kissProjectPath, uvPath);
+  }
+
+  if (progress) progress.report({message: 'Restarting kiss-web daemon...'});
+  restartKissWebDaemon(kissProjectPath);
+
+  if (progress) progress.report({message: 'Updating shell PATH...'});
+  try {
+    const rcPath = getShellRcPath();
+    const localBin = path.join(HOME_DIR, '.local', 'bin');
+    ensurePathInShellRc(rcPath, localBin);
+    if (process.platform === 'win32') {
+      const gitCmdDir = path.join(HOME_DIR, '.local', 'git', 'cmd');
+      if (fs.existsSync(gitCmdDir)) {
+        ensurePathInShellRc(rcPath, gitCmdDir);
+      }
+      const nodeBaseDir = path.join(HOME_DIR, '.local', 'node');
+      const nodeDir = findNodeDirWindows(nodeBaseDir);
+      if (fs.existsSync(nodeDir)) {
+        ensurePathInShellRc(rcPath, nodeDir);
+      }
+    }
+  } catch (err) {
+    log(
+      `Failed to update shell rc PATH: ${err instanceof Error ? err.message : err}`,
+    );
+  }
+
+  if (progress) progress.report({message: 'Checking API keys...'});
+  return await ensureApiKeys();
+}
+
+/**
  * Ensure all required dependencies are installed.
  * Shows a progress notification during first-time installation.
  * Safe to call multiple times — uses a concurrency guard so overlapping
@@ -371,6 +423,11 @@ async function ensureDependenciesImpl(): Promise<void> {
   // the fast path where uv + .venv are already present.
   // (updateMarker is declared above for the early-exit guard.)
   let showRestartNotification = false;
+  // ``apiKeysReady`` is set by ``runFinalization`` in either the fast
+  // or slow path below.  Declared up here so the post-progress
+  // restart-notification block below can read it regardless of which
+  // path was taken.
+  let apiKeysReady = false;
   if (fs.existsSync(updateMarker)) {
     showRestartNotification = true;
     try {
@@ -434,9 +491,17 @@ async function ensureDependenciesImpl(): Promise<void> {
     if (!commandExists('code')) {
       void installCodeCli();
     }
+    // Fast-path finalization: when we did not enter the slow-path
+    // withProgress block we still need to run the finalization
+    // steps.  The fast path does NOT show a progress notification
+    // (because there was no "installing" notification to keep
+    // visible to begin with), so the user-visible UX gap that
+    // motivated wrapping finalization in withProgress does not
+    // apply here.
+    apiKeysReady = await runFinalization(null, kissProjectPath, uvPath);
   } else {
     // Slow path: show progress bar and install missing deps
-    const success = await vscode.window.withProgress(
+    const result = await vscode.window.withProgress(
       {
         location: vscode.ProgressLocation.Notification,
         title: 'KISS Sorcar: Setting up',
@@ -452,7 +517,7 @@ async function ensureDependenciesImpl(): Promise<void> {
                 vscode.window.showErrorMessage(
                   `KISS Sorcar: '${bin}' is required to install uv but was not found. Please install '${bin}' and restart VS Code.`,
                 );
-                return false;
+                return {success: false, apiKeysReady: false};
               }
             }
           }
@@ -465,7 +530,7 @@ async function ensureDependenciesImpl(): Promise<void> {
             vscode.window.showErrorMessage(
               'KISS Sorcar: Failed to install uv. Install manually: curl -LsSf https://astral.sh/uv/install.sh | sh',
             );
-            return false;
+            return {success: false, apiKeysReady: false};
           }
           progress.report({increment: 20});
         }
@@ -519,7 +584,7 @@ async function ensureDependenciesImpl(): Promise<void> {
             `KISS Sorcar requires Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR}+. ` +
               `Please install Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR} or later and restart VS Code.`,
           );
-          return false;
+          return {success: false, apiKeysReady: false};
         }
 
         // 7. Install Playwright Chromium
@@ -541,50 +606,28 @@ async function ensureDependenciesImpl(): Promise<void> {
           );
         }
         progress.report({increment: 30});
-        return true;
+
+        // Finalization runs INSIDE the withProgress callback so the
+        // "KISS Sorcar: Setting up" notification stays visible
+        // continuously from the first install step until the
+        // "Restart VS Code" prompt is shown.  Previously these steps
+        // ran after the callback returned, leaving a visible gap
+        // between "Installing dependencies..." and "Restart VS Code"
+        // (often several seconds — much longer when ensureApiKeys
+        // had to prompt the user for an API key).
+        progress.report({message: 'Finalizing setup...'});
+        const finalizedKeys = await runFinalization(
+          progress, kissProjectPath, uvPath,
+        );
+        return {success: true, apiKeysReady: finalizedKeys};
       },
     );
 
-    showRestartNotification = showRestartNotification || !!success;
-  }
-
-  // Install CLI wrapper so `sorcar` is available from any terminal
-  if (uvPath) {
-    installCliScript(kissProjectPath, uvPath);
-  }
-
-  // Restart kiss-web daemon so it picks up any code changes (editable install)
-  restartKissWebDaemon(kissProjectPath);
-
-  // Persist PATH entries to the user's shell rc file so new terminals find
-  // installed binaries (uv, node, sorcar, etc.) without manual setup.
-  try {
-    const rcPath = getShellRcPath();
-    const localBin = path.join(HOME_DIR, '.local', 'bin');
-    ensurePathInShellRc(rcPath, localBin);
-    // If MinGit was installed on Windows, persist its PATH entry too
-    if (process.platform === 'win32') {
-      const gitCmdDir = path.join(HOME_DIR, '.local', 'git', 'cmd');
-      if (fs.existsSync(gitCmdDir)) {
-        ensurePathInShellRc(rcPath, gitCmdDir);
-      }
-      // Find the actual nested node directory (e.g. node-v22.16.0-win-x64)
-      const nodeBaseDir = path.join(HOME_DIR, '.local', 'node');
-      const nodeDir = findNodeDirWindows(nodeBaseDir);
-      if (fs.existsSync(nodeDir)) {
-        ensurePathInShellRc(rcPath, nodeDir);
-      }
-    }
-  } catch (err) {
-    log(
-      `Failed to update shell rc PATH: ${err instanceof Error ? err.message : err}`,
-    );
+    showRestartNotification = showRestartNotification || !!result.success;
+    apiKeysReady = result.apiKeysReady;
   }
 
   log('=== Dependency check finished ===');
-
-  // Prompt for missing API keys (returns true when at least one key is set)
-  const apiKeysReady = await ensureApiKeys();
 
   // Show restart notification only after API key prompting has completed.
   if (showRestartNotification) {
