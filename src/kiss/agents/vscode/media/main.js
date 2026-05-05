@@ -2605,6 +2605,28 @@
         focusInputWithRetry();
         break;
 
+      case 'measureSize':
+        // The extension is asking how wide the sidebar webview is so it
+        // can iteratively resize the secondary side bar to ~1/3 of the
+        // VS Code window.  window.innerWidth gives the webview iframe's
+        // width (= sidebar width); screen.availWidth is the best proxy
+        // for the host VS Code window width that the sandboxed webview
+        // can read (works correctly when VS Code is maximized, which is
+        // the common case on first install).
+        try {
+          vscode.postMessage({
+            type: 'sizeReport',
+            innerWidth: window.innerWidth || 0,
+            screenWidth:
+              (window.screen && window.screen.availWidth) ||
+              window.innerWidth ||
+              0,
+          });
+        } catch (_e) {
+          /* ignored */
+        }
+        break;
+
       case 'inputHistory':
         histCache = ev.tasks || [];
         if (histIdx < 0) histIdx = -1;
