@@ -12,6 +12,51 @@
     return Number(n).toLocaleString('en-US');
   }
 
+  /**
+   * Sanitize an HTML string before assigning to innerHTML.
+   *
+   * Strips dangerous tags (script/iframe/object/embed/form/meta/link/style/
+   * base), all event-handler attributes (onclick, onerror, ...) and
+   * javascript:/data:/vbscript: URLs in href/src/action.  Used to wrap every
+   * marked.parse() result that flows into innerHTML so that agent-supplied
+   * markdown can never inject script/iframe/form via the webview.
+   */
+  function kissSanitize(html) {
+    const t = document.createElement('template');
+    t.innerHTML = String(html == null ? '' : html);
+    const BAD_TAGS = new Set([
+      'SCRIPT', 'IFRAME', 'OBJECT', 'EMBED', 'FORM', 'META', 'LINK',
+      'STYLE', 'BASE', 'FRAME', 'FRAMESET',
+    ]);
+    const URL_ATTRS = new Set(['href', 'src', 'action', 'formaction',
+                               'xlink:href']);
+    const walk = (root) => {
+      const elements = Array.from(root.querySelectorAll('*'));
+      for (const el of elements) {
+        if (BAD_TAGS.has(el.tagName)) {
+          el.remove();
+          continue;
+        }
+        for (const attr of Array.from(el.attributes)) {
+          const name = attr.name.toLowerCase();
+          // Strip every event-handler attribute (onclick, onerror, ...).
+          if (name.startsWith('on')) {
+            el.removeAttribute(attr.name);
+            continue;
+          }
+          if (URL_ATTRS.has(name)) {
+            const v = (attr.value || '').trim();
+            if (/^(javascript|data|vbscript):/i.test(v)) {
+              el.removeAttribute(attr.name);
+            }
+          }
+        }
+      }
+    };
+    walk(t.content);
+    return t.innerHTML;
+  }
+
   // State — isRunning mirrors the active tab's tab.isRunning for UI controls
   let isRunning = false;
   let selectedModel = '';
@@ -392,7 +437,7 @@
       addBtn.addEventListener('click', () => {
         createNewTab();
       });
-      tabBar.insertBefore(addBtn, document.getElementById('config-btn'));
+      tabBar.appendChild(addBtn);
     }
 
     // Scroll the active tab into view
@@ -690,7 +735,6 @@
     'config-sidebar-overlay',
   );
   const configSidebarClose = document.getElementById('config-sidebar-close');
-  const cfgSaveBtn = document.getElementById('cfg-save-btn');
 
   // Frequent-tasks sidebar elements
   const frequentBtn = document.getElementById('frequent-btn');
@@ -1170,6 +1214,16 @@
    */
   function collectText(node) {
     if (node.nodeType === 3) return node.textContent || '';
+    if (node.nodeType === 1 && node.classList) {
+      // Skip UI-only chrome injected by the panel helpers so it never
+      // ends up in either the collapse preview or the clipboard payload.
+      if (
+        node.classList.contains('panel-copy-btn') ||
+        node.classList.contains('collapse-chv') ||
+        node.classList.contains('collapse-preview')
+      )
+        return '';
+    }
     let out = '';
     for (let i = 0; i < node.childNodes.length; i++) {
       const child = node.childNodes[i];
@@ -1226,6 +1280,84 @@
         _noScroll = false;
       }, 0);
     });
+    addCopyButton(panelEl);
+  }
+
+  // Outline+check icons reused for every panel copy button.
+  const PANEL_COPY_SVG =
+    '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" ' +
+    'stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+    'stroke-linejoin="round" aria-hidden="true">' +
+    '<rect x="9" y="9" width="13" height="13" rx="2"/>' +
+    '<path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>';
+  const PANEL_CHECK_SVG =
+    '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" ' +
+    'stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+    'stroke-linejoin="round" aria-hidden="true">' +
+    '<polyline points="20 6 9 17 4 12"/></svg>';
+
+  /**
+   * Attach a copy-to-clipboard button to a chat panel.
+   *
+   * The button is positioned absolutely in the top-right corner of
+   * ``panelEl`` (the helper adds the ``copyable`` class which sets
+   * ``position: relative`` on the panel) and copies the panel's plain
+   * visible text — excluding the button itself, the collapse chevron,
+   * and the collapse preview — to the system clipboard via
+   * ``navigator.clipboard.writeText``.  Clicking the button does not
+   * collapse/expand the panel: the click handler stops propagation
+   * before the collapsible-header listener runs.  After a successful
+   * copy the icon swaps to a check mark for 1.5 s as feedback.
+   *
+   * Idempotent: calling twice on the same panel is a no-op.
+   *
+   * @param {HTMLElement} panelEl - panel container to attach the
+   *   button to.
+   */
+  function addCopyButton(panelEl) {
+    if (!panelEl || panelEl.querySelector(':scope > .panel-copy-btn')) return;
+    panelEl.classList.add('copyable');
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'panel-copy-btn';
+    btn.title = 'Copy panel text';
+    btn.setAttribute('aria-label', 'Copy panel text');
+    btn.innerHTML = PANEL_COPY_SVG;
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      e.preventDefault();
+      const text = collectText(panelEl)
+        .replace(/[ \t]+\n/g, '\n')
+        .replace(/\n{3,}/g, '\n\n')
+        .replace(/[ \t]{2,}/g, ' ')
+        .trim();
+      const done = () => {
+        btn.innerHTML = PANEL_CHECK_SVG;
+        btn.classList.add('copied');
+        setTimeout(() => {
+          btn.innerHTML = PANEL_COPY_SVG;
+          btn.classList.remove('copied');
+        }, 1500);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, () => {});
+      } else {
+        // Fallback for environments without the async clipboard API.
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try {
+          document.execCommand('copy');
+          done();
+        } finally {
+          document.body.removeChild(ta);
+        }
+      }
+    });
+    panelEl.appendChild(btn);
   }
 
   function collapseAllExceptResult(container) {
@@ -1383,7 +1515,7 @@
         if (tState.txtEl) {
           if (typeof marked !== 'undefined') {
             tState.txtEl.classList.add('md-body');
-            tState.txtEl.innerHTML = marked.parse(tState.txtBuf || '');
+            tState.txtEl.innerHTML = kissSanitize(marked.parse(tState.txtBuf || ''));
             hlBlock(tState.txtEl);
           }
           tState.txtEl = null;
@@ -1458,6 +1590,7 @@
           const bp = mkEl('div', 'bash-panel');
           const bpContent = mkEl('div', 'bash-panel-content');
           bp.appendChild(bpContent);
+          addCopyButton(bp);
           c.appendChild(bp);
           tState.bashPanel = bpContent;
         }
@@ -1487,6 +1620,7 @@
           const opContent = mkEl('div', 'bash-panel-content');
           opContent.textContent = ev.content;
           op.appendChild(opContent);
+          addCopyButton(op);
           resultTarget.appendChild(op);
         }
         break;
@@ -1526,7 +1660,7 @@
         if (ev.summary) {
           const sum = (ev.summary || '').replace(/\n{3,}/g, '\n\n').trim();
           if (typeof marked !== 'undefined') {
-            rb += marked.parse(sum);
+            rb += kissSanitize(marked.parse(sum));
             usePre = false;
           } else {
             rb += esc(sum);
@@ -1550,6 +1684,7 @@
           rb +
           '</div>';
         hlBlock(rc);
+        addCopyButton(rc);
         target.appendChild(rc);
         if (statusTokens && ev.total_tokens)
           statusTokens.textContent = 'Tokens: ' + fmtN(ev.total_tokens);
@@ -1565,7 +1700,7 @@
         const el = mkEl('div', 'ev ' + cls);
         const body =
           typeof marked !== 'undefined'
-            ? marked.parse(ev.text || '')
+            ? kissSanitize(marked.parse(ev.text || ''))
             : esc(ev.text || '');
         el.innerHTML =
           '<div class="' +
@@ -1873,6 +2008,113 @@
       }
     }
   });
+
+  // --- Touch-based adjacent scrolling on #output ---
+  // Mirrors the wheel handler above for mobile/tablet devices where wheel
+  // events do not fire.  Tracks incremental finger movement while the
+  // scroll position is pinned at a boundary.
+  let _touchOutputLastY = 0;
+
+  O.addEventListener(
+    'touchstart',
+    e => {
+      if (e.touches.length === 1) {
+        _touchOutputLastY = e.touches[0].clientY;
+      }
+    },
+    {passive: true},
+  );
+
+  O.addEventListener(
+    'touchmove',
+    e => {
+      if (e.touches.length !== 1) return;
+      const currentY = e.touches[0].clientY;
+      // Positive touchDelta = finger moved up = scroll down ("next")
+      // Negative touchDelta = finger moved down = scroll up ("prev")
+      const touchDelta = _touchOutputLastY - currentY;
+      _touchOutputLastY = currentY;
+
+      if (adjacentLoading || !activeTabId || !currentTaskName) return;
+
+      const atTop = O.scrollTop <= 0;
+      const atBottom = O.scrollTop + O.clientHeight >= O.scrollHeight - 2;
+
+      if (atTop && touchDelta < 0 && !noPrevTask && oldestLoadedTask) {
+        // Pulling down at top — load previous task
+        if (overscrollDir !== 'prev') {
+          overscrollAccum = 0;
+          overscrollDir = 'prev';
+        }
+        overscrollAccum += Math.abs(touchDelta);
+        clearTimeout(overscrollTimer);
+        overscrollTimer = setTimeout(() => {
+          overscrollAccum = 0;
+          overscrollDir = '';
+        }, 500);
+        if (overscrollAccum >= OVERSCROLL_THRESHOLD) {
+          overscrollAccum = 0;
+          overscrollDir = '';
+          adjacentLoading = true;
+          showAdjacentLoader('prev');
+          vscode.postMessage({
+            type: 'getAdjacentTask',
+            tabId: activeTabId,
+            task: oldestLoadedTask,
+            direction: 'prev',
+          });
+        }
+      } else if (
+        atBottom &&
+        touchDelta > 0 &&
+        !noNextTask &&
+        newestLoadedTask
+      ) {
+        // Pushing up at bottom — load next task
+        if (overscrollDir !== 'next') {
+          overscrollAccum = 0;
+          overscrollDir = 'next';
+        }
+        overscrollAccum += Math.abs(touchDelta);
+        clearTimeout(overscrollTimer);
+        overscrollTimer = setTimeout(() => {
+          overscrollAccum = 0;
+          overscrollDir = '';
+        }, 500);
+        if (overscrollAccum >= OVERSCROLL_THRESHOLD) {
+          overscrollAccum = 0;
+          overscrollDir = '';
+          adjacentLoading = true;
+          showAdjacentLoader('next');
+          vscode.postMessage({
+            type: 'getAdjacentTask',
+            tabId: activeTabId,
+            task: newestLoadedTask,
+            direction: 'next',
+          });
+        }
+      } else {
+        overscrollAccum = 0;
+        overscrollDir = '';
+      }
+    },
+    {passive: true},
+  );
+
+  O.addEventListener(
+    'touchend',
+    () => {
+      // Reset overscroll state when the finger lifts
+      overscrollAccum = 0;
+      overscrollDir = '';
+      if (overscrollTimer) {
+        clearTimeout(overscrollTimer);
+        overscrollTimer = null;
+      }
+    },
+    {passive: true},
+  );
+
   function updateVisibleTask() {
     const adjacentTasks = O.querySelectorAll('.adjacent-task[data-task]');
     if (!adjacentTasks.length) return;
@@ -2016,6 +2258,11 @@
         break;
       case 'configData':
         populateConfigForm(ev.config || {}, ev.apiKeys || {});
+        break;
+      case 'folderPicked':
+        if (ev.path) {
+          document.getElementById('cfg-work-dir').value = ev.path;
+        }
         break;
       case 'history':
         renderHistory(ev.sessions || [], ev.offset || 0, ev.generation || 0);
@@ -3381,7 +3628,7 @@
         resetHistoryPagination();
         sidebar.classList.add('open');
         sidebarOverlay.classList.add('open');
-        historyBtn.classList.add('open');
+        historyBtn.classList.add('active');
         vscode.postMessage({
           type: 'getHistory',
           query: historySearch.value,
@@ -3415,11 +3662,14 @@
     }
     configSidebarClose.addEventListener('click', closeConfigSidebar);
     configSidebarOverlay.addEventListener('click', closeConfigSidebar);
-    cfgSaveBtn.addEventListener('click', () => {
-      const data = collectConfigForm();
-      vscode.postMessage({type: 'saveConfig', ...data});
-      closeConfigSidebar();
-    });
+    const browseBtn = document.getElementById('cfg-work-dir-browse');
+    if (browseBtn) {
+      browseBtn.addEventListener('click', () => {
+        const workDirInput = document.getElementById('cfg-work-dir');
+        const currentPath = workDirInput ? workDirInput.value.trim() : '';
+        vscode.postMessage({type: 'pickFolder', currentPath});
+      });
+    }
     historySearch.addEventListener('input', () => {
       resetHistoryPagination();
       vscode.postMessage({
@@ -3716,7 +3966,7 @@
   function setAskQuestionTextForTab(tab, text) {
     const t = text || '';
     if (typeof marked !== 'undefined') {
-      tab.askQuestionEl.innerHTML = marked.parse(t);
+      tab.askQuestionEl.innerHTML = kissSanitize(marked.parse(t));
       tab.askQuestionEl.classList.add('md-body');
       hlBlock(tab.askQuestionEl);
     } else {
@@ -4004,6 +4254,7 @@
           vscode.postMessage({
             type: 'resumeSession',
             id: s.id,
+            taskId: s.task_id,
             tabId: activeTabId,
           });
         } else {
@@ -4025,7 +4276,7 @@
   function closeSidebar() {
     sidebar.classList.remove('open');
     sidebarOverlay.classList.remove('open');
-    historyBtn.classList.remove('open');
+    historyBtn.classList.remove('active');
   }
 
   function openConfigSidebar() {
@@ -4035,12 +4286,16 @@
     vscode.postMessage({type: 'getConfig'});
     configSidebar.classList.add('open');
     configSidebarOverlay.classList.add('open');
-    configBtn.classList.add('open');
+    configBtn.classList.add('active');
   }
   function closeConfigSidebar() {
+    if (configSidebar.classList.contains('open')) {
+      const data = collectConfigForm();
+      vscode.postMessage({type: 'saveConfig', ...data});
+    }
     configSidebar.classList.remove('open');
     configSidebarOverlay.classList.remove('open');
-    configBtn.classList.remove('open');
+    configBtn.classList.remove('active');
   }
 
   function openFrequentSidebar() {
@@ -4050,13 +4305,13 @@
     vscode.postMessage({type: 'getFrequentTasks', limit: 20});
     frequentSidebar.classList.add('open');
     if (frequentSidebarOverlay) frequentSidebarOverlay.classList.add('open');
-    if (frequentBtn) frequentBtn.classList.add('open');
+    if (frequentBtn) frequentBtn.classList.add('active');
   }
   function closeFrequentSidebar() {
     if (!frequentSidebar) return;
     frequentSidebar.classList.remove('open');
     if (frequentSidebarOverlay) frequentSidebarOverlay.classList.remove('open');
-    if (frequentBtn) frequentBtn.classList.remove('open');
+    if (frequentBtn) frequentBtn.classList.remove('active');
   }
 
   function renderFrequentTasks(tasks) {
@@ -4102,6 +4357,7 @@
     el('cfg-custom-api-key').value = cfg.custom_api_key || '';
     el('cfg-use-web-browser').checked = cfg.use_web_browser !== false;
     el('cfg-remote-password').value = cfg.remote_password || '';
+    el('cfg-work-dir').value = cfg.work_dir || '';
     // Populate API key fields from current environment values
     const keyIds = [
       'GEMINI_API_KEY',
@@ -4123,6 +4379,7 @@
       custom_api_key: el('cfg-custom-api-key').value.trim(),
       use_web_browser: el('cfg-use-web-browser').checked,
       remote_password: el('cfg-remote-password').value.trim(),
+      work_dir: el('cfg-work-dir').value.trim(),
     };
     const apiKeys = {};
     const keyIds = [

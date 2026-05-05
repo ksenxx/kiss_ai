@@ -576,6 +576,54 @@ def _load_latest_chat_events_by_chat_id(
     }
 
 
+def _load_chat_events_by_task_id(
+    task_id: int,
+) -> dict[str, object] | None:
+    """Load a specific task and its events by the task row ID.
+
+    Unlike ``_load_latest_chat_events_by_chat_id`` which always picks
+    the most recent task in a chat session, this loads the exact task
+    identified by *task_id*.
+
+    Args:
+        task_id: The primary key of the ``task_history`` row.
+
+    Returns:
+        A dict with ``task`` (str), ``task_id`` (int), ``events``
+        (list of event dicts), ``chat_id`` (str), and ``extra`` (str,
+        JSON metadata), or ``None`` if no such row exists.
+    """
+    db = _get_db()
+    row = db.execute(
+        "SELECT id, task, chat_id, extra FROM task_history WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if not row:
+        return None
+    task = row["task"]
+    chat_id = str(row["chat_id"] or "")
+    extra_str = row["extra"] or ""
+    event_rows = db.execute(
+        "SELECT event_json, timestamp FROM events WHERE task_id = ? ORDER BY seq",
+        (task_id,),
+    ).fetchall()
+    events: list[dict[str, object]] = []
+    for r in event_rows:
+        try:
+            ev = json.loads(r["event_json"])
+            ev["_timestamp"] = r["timestamp"]
+            events.append(ev)
+        except (json.JSONDecodeError, TypeError):
+            logger.debug("Exception caught", exc_info=True)
+    return {
+        "task": task,
+        "task_id": task_id,
+        "events": events,
+        "chat_id": chat_id,
+        "extra": extra_str,
+    }
+
+
 def _get_adjacent_task_by_chat_id(
     chat_id: str, current_task: str, direction: str
 ) -> dict[str, object] | None:

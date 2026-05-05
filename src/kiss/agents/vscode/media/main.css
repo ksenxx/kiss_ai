@@ -95,48 +95,7 @@ body {
   -ms-overflow-style: none;
 }
 
-#tab-bar > #history-btn {
-  flex-shrink: 0;
-  background: none;
-  border: none;
-  color: var(--dim);
-  cursor: pointer;
-  padding: 5px 8px;
-  display: flex;
-  align-items: center;
-  gap: 3px;
-  font-size: var(--fs-base);
-  transition: color 0.15s;
-}
-#tab-bar > #history-btn:hover { color: var(--fg); }
 
-#tab-bar > #history-btn .history-chevron {
-  transition: transform 0.2s ease;
-}
-
-#tab-bar > #history-btn.open .history-chevron {
-  transform: rotate(-90deg);
-}
-
-#tab-bar > #config-btn,
-#tab-bar > #frequent-btn {
-  flex-shrink: 0;
-  background: none;
-  border: none;
-  color: var(--dim);
-  cursor: pointer;
-  padding: 5px 6px;
-  display: flex;
-  align-items: center;
-  font-size: var(--fs-base);
-  transition: color 0.15s;
-}
-
-#tab-bar > #config-btn:hover,
-#tab-bar > #frequent-btn:hover { color: var(--fg); }
-
-#tab-bar > #config-btn.open,
-#tab-bar > #frequent-btn.open { color: var(--accent); }
 
 /* ── Config Sidebar ─────────────────────────────────── */
 #config-sidebar {
@@ -154,6 +113,7 @@ body {
   flex-direction: column;
 }
 #config-sidebar.open { transform: translateX(0); }
+#config-sidebar .sidebar-section { overflow: visible; flex: none; }
 
 #config-sidebar-overlay {
   position: fixed; inset: 0; background: rgb(0 0 0 / 50%);
@@ -194,12 +154,7 @@ body {
 .config-checkbox input[type="checkbox"] { margin: 0; width: auto; }
 .config-divider { border-top: 1px solid var(--border); margin: 12px 0; }
 
-.config-save-btn {
-  display: block; width: 100%; padding: 8px; margin-top: 8px;
-  background: var(--accent); color: #fff; border: none; border-radius: 4px;
-  cursor: pointer; font-size: var(--fs-sm); font-weight: 600;
-}
-.config-save-btn:hover { opacity: 0.9; }
+
 
 #tab-list::-webkit-scrollbar { display: none; }
 
@@ -334,6 +289,7 @@ body {
 /* ── Output Area ────────────────────────────────────── */
 #output {
   flex: 1; overflow-y: auto; overflow-x: hidden;
+  overscroll-behavior-y: none;
   padding: 14px 12px 12px;
 }
 
@@ -464,7 +420,7 @@ body.remote-chat #welcome > #input-area {
   background: color-mix(in srgb, var(--orange) 8%, transparent); color: var(--orange);
 }
 .tc-h:hover { color: var(--fg); }
-.tc.collapsed > :not(.tc-h) { display: none; }
+.tc.collapsed > :not(.tc-h, .panel-copy-btn) { display: none; }
 
 .tp {
   font-size: var(--fs-md); color: var(--cyan);
@@ -826,6 +782,12 @@ body.remote-chat #welcome > #input-area {
 }
 .menu-item.active svg { opacity: 1; }
 .menu-item.active:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+
+.menu-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 0;
+}
 
 #upload-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 
@@ -1367,7 +1329,32 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
   display: flex; align-items: center; padding-bottom: 4px;
 }
 .llm-panel-hdr:hover { color: var(--fg); }
-.llm-panel.collapsed > :not(.llm-panel-hdr) { display: none; }
+.llm-panel.collapsed > :not(.llm-panel-hdr, .panel-copy-btn) { display: none; }
+
+/* Panel copy button — anchored top-right of any .copyable panel. */
+.copyable { position: relative; }
+
+.panel-copy-btn {
+  position: absolute; top: 5px; right: 6px; z-index: 5;
+  display: flex; align-items: center; justify-content: center;
+  padding: 3px 5px; cursor: pointer;
+  background: color-mix(in srgb, var(--surface) 80%, transparent);
+  border: 1px solid var(--border); border-radius: 4px;
+  color: var(--dim);
+  opacity: 0.45;
+  transition: opacity 0.15s, color 0.15s, background 0.15s;
+}
+
+.copyable:hover > .panel-copy-btn,
+.panel-copy-btn:focus-visible,
+.panel-copy-btn.copied { opacity: 1; }
+
+.panel-copy-btn:hover {
+  color: var(--fg);
+  background: color-mix(in srgb, var(--fg) 10%, transparent);
+}
+
+.panel-copy-btn.copied { color: var(--green); }
 
 .system-prompt.collapsed .system-prompt-body,
 .prompt.collapsed .prompt-body { display: none; }

@@ -216,6 +216,24 @@ class AnthropicModel(Model):
             else:
                 kwargs["thinking"] = {"type": "enabled", "budget_tokens": 10000}
 
+        # When extended thinking is enabled, request interleaved thinking via
+        # the anthropic-beta header so the model emits between-tool-call
+        # reasoning as ``thinking`` content blocks (routed to the Thoughts
+        # panel) instead of as plain ``text`` blocks (which would render in
+        # the main response area).
+        if "thinking" in kwargs:
+            existing_headers = kwargs.get("extra_headers") or {}
+            beta_header = existing_headers.get("anthropic-beta", "")
+            beta_token = "interleaved-thinking-2025-05-14"
+            if beta_token not in beta_header:
+                merged_beta = (
+                    f"{beta_header},{beta_token}" if beta_header else beta_token
+                )
+                kwargs["extra_headers"] = {
+                    **existing_headers,
+                    "anthropic-beta": merged_beta,
+                }
+
         kwargs.update(
             {
                 "model": self.model_name,

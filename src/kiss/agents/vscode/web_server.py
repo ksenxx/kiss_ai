@@ -42,6 +42,7 @@ import logging
 import mimetypes
 import os
 import re
+import secrets
 import shutil
 import socket
 import ssl
@@ -51,6 +52,7 @@ import threading
 import time
 import urllib.request
 from collections.abc import Callable
+from concurrent.futures import Future as ConcurrentFuture
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -82,6 +84,53 @@ _TUNNEL_BACKOFF_INITIAL = 60
 
 _TUNNEL_BACKOFF_MAX = 1800
 
+# When cloudflared's stderr reports HTTP 429 / Cloudflare error code
+# 1015 ("rate-limited") on the trycloudflare.com quick-tunnel API, the
+# normal exponential backoff (60s → 120s → ...) is far too aggressive:
+# every retry within the cooldown window resets Cloudflare's per-IP
+# clock, so the tunnel can stay unreachable for *hours* while burning
+# through dozens of distinct *.trycloudflare.com URLs.  When a
+# rate-limit signal is detected we use a much longer baseline plus a
+# random jitter so a fleet of restarts (e.g. across machines on the
+# same egress IP) does not synchronise into another rate-limit burst.
+_TUNNEL_RATE_LIMIT_BACKOFF = 900  # 15 minutes
+
+_TUNNEL_RATE_LIMIT_JITTER = 300  # 0..5 minutes additional jitter
+
+# Substrings (case-insensitive) in cloudflared's stderr that indicate
+# trycloudflare.com is rate-limiting the local egress IP.  Matching is
+# done line-by-line via :func:`_is_rate_limit_line`.
+_RATE_LIMIT_INDICATORS = (
+    "error code: 1015",
+    "error code 1015",
+    "429 too many requests",
+    'status_code="429',
+    "status_code=429",
+    "rate-limited",
+    "rate limited",
+)
+
+# Auth rate-limiting (per source IP).  After _AUTH_FAIL_MAX failures
+# within _AUTH_FAIL_WINDOW seconds, new connections from that IP are
+# refused for _AUTH_LOCKOUT seconds.
+_AUTH_FAIL_MAX = 5
+
+_AUTH_FAIL_WINDOW = 60.0
+
+_AUTH_LOCKOUT = 60.0
+
+# M7: client-supplied lists are clamped to these sizes to bound the
+# work the server does per command.  An authenticated-but-malicious or
+# buggy client cannot make the server resume thousands of sessions or
+# attach thousands of files in a single submit.
+_MAX_RESTORED_TABS = 32
+
+_MAX_ATTACHMENTS = 32
+
+# M7: cap the prompt size echoed back via ``setTaskText`` so a giant
+# JSON payload cannot push tens of MB through the broadcast pipeline.
+_MAX_PROMPT_BYTES = 1_000_000
+
 
 def _tunnel_backoff_delay(failure_count: int) -> int:
     """Return the backoff delay for *failure_count* consecutive failures.
@@ -101,6 +150,39 @@ def _tunnel_backoff_delay(failure_count: int) -> int:
         return 0
     delay: int = _TUNNEL_BACKOFF_INITIAL * (2 ** (failure_count - 1))
     return min(delay, _TUNNEL_BACKOFF_MAX)
+
+
+def _is_rate_limit_line(line: str) -> bool:
+    """Return True if *line* indicates Cloudflare rate-limiting.
+
+    Matches the substrings in :data:`_RATE_LIMIT_INDICATORS`
+    case-insensitively.  A typical rate-limited cloudflared stderr
+    line looks like::
+
+        ERR Error unmarshaling QuickTunnel response: error code: 1015
+            error="invalid character 'e' ..."  status_code="429 Too Many Requests"
+
+    Args:
+        line: A single line of cloudflared stderr.
+
+    Returns:
+        True when the line names HTTP 429 or Cloudflare error 1015.
+    """
+    low = line.lower()
+    return any(ind in low for ind in _RATE_LIMIT_INDICATORS)
+
+
+def _rate_limit_backoff_seconds() -> int:
+    """Return the backoff to apply after a rate-limited tunnel attempt.
+
+    Uses :data:`_TUNNEL_RATE_LIMIT_BACKOFF` as the floor and adds a
+    cryptographically-random jitter of up to
+    :data:`_TUNNEL_RATE_LIMIT_JITTER` seconds so concurrent daemons on
+    the same egress IP do not synchronise into the same retry window
+    and re-trigger the rate-limit cooldown.
+    """
+    jitter = secrets.randbelow(_TUNNEL_RATE_LIMIT_JITTER + 1)
+    return _TUNNEL_RATE_LIMIT_BACKOFF + jitter
 
 _HEAD_200 = (
     b"HTTP/1.1 200 OK\r\n"
@@ -201,8 +283,16 @@ class _WebMergeState:
         return self.total_hunks - len(self._resolved)
 
     def current(self) -> tuple[int, int] | None:
-        """Return (file_idx, hunk_idx) for the current position, or None."""
+        """Return (file_idx, hunk_idx) for the current position, or None.
+
+        M11: returns ``None`` when every hunk has been resolved, so a
+        post-``accept-all``/``reject-all`` ``current()`` consultation
+        is unambiguously empty rather than silently pointing at the
+        last (now-resolved) hunk.
+        """
         if not self._all_hunks:
+            return None
+        if not self.remaining:
             return None
         if self._pos >= len(self._all_hunks):
             self._pos = len(self._all_hunks) - 1
@@ -212,13 +302,22 @@ class _WebMergeState:
         """Mark a hunk as resolved."""
         self._resolved.add((fi, hi))
 
+    def is_resolved(self, fi: int, hi: int) -> bool:
+        """Return True if hunk ``(fi, hi)`` has been marked resolved.
+
+        M9: prefer this method over poking at ``_resolved`` directly so
+        the resolution-tracking representation can change without
+        breaking callers.
+        """
+        return (fi, hi) in self._resolved
+
     def _seek(self, step: int) -> None:
         """Move *step* (+1 or -1) to the next unresolved hunk."""
         if not self.remaining:
             return
         for _ in range(len(self._all_hunks)):
             self._pos = (self._pos + step) % len(self._all_hunks)
-            if self._all_hunks[self._pos] not in self._resolved:
+            if not self.is_resolved(*self._all_hunks[self._pos]):
                 return
 
     def advance(self) -> None:
@@ -234,13 +333,15 @@ class _WebMergeState:
         return [
             hi
             for ffi, hi in self._all_hunks
-            if ffi == fi and (ffi, hi) not in self._resolved
+            if ffi == fi and not self.is_resolved(ffi, hi)
         ]
 
     def all_unresolved(self) -> list[tuple[int, int]]:
         """Return all (file_idx, hunk_idx) pairs not yet resolved."""
         return [
-            (fi, hi) for fi, hi in self._all_hunks if (fi, hi) not in self._resolved
+            (fi, hi)
+            for fi, hi in self._all_hunks
+            if not self.is_resolved(fi, hi)
         ]
 
 
@@ -296,10 +397,12 @@ _VSCODE_ONLY_COMMANDS = frozenset({
     "webviewFocusChanged",
     "openFile",
     "resolveDroppedPaths",
+    "pickFolder",
 })
 
-_TLS_DIR = Path.home() / ".kiss" / "tls"
-_URL_FILE = Path.home() / ".kiss" / "remote-url.json"
+_KISS_HOME = Path(os.environ.get("KISS_HOME") or (Path.home() / ".kiss"))
+_TLS_DIR = _KISS_HOME / "tls"
+_URL_FILE = _KISS_HOME / "remote-url.json"
 
 
 def _discover_tunnel_url_from_metrics() -> str | None:
@@ -412,6 +515,8 @@ def _stderr_reader_loop(
     parse: Callable[[str], str | None],
     result: list[str | None],
     proc: subprocess.Popen[str],
+    stop_event: threading.Event | None = None,
+    rate_limit_flag: list[bool] | None = None,
 ) -> None:
     """Read *stderr* lines until *parse* returns a URL or stderr hits EOF.
 
@@ -434,12 +539,31 @@ def _stderr_reader_loop(
             to the caller across the thread boundary.
         proc: The subprocess being read; retained for API symmetry —
             timeouts are enforced by :func:`_read_url_from_stderr`.
+        stop_event: When set by the caller (after a timeout) the loop
+            exits at its next iteration.  Used by H6 to bound the
+            reader-thread lifetime: once a single additional line is
+            consumed (or the subprocess dies) the daemon thread exits
+            instead of running until process shutdown.
+        rate_limit_flag: Optional single-element list set to ``True``
+            on the first stderr line matching
+            :func:`_is_rate_limit_line`.  Lets callers distinguish a
+            rate-limited tunnel start (HTTP 429 / Cloudflare error
+            1015) from a generic failure so the watchdog can apply a
+            much longer backoff.
     """
     del proc
     for line in iter(stderr.readline, ""):
+        if (
+            rate_limit_flag is not None
+            and not rate_limit_flag[0]
+            and _is_rate_limit_line(line)
+        ):
+            rate_limit_flag[0] = True
         url = parse(line)
         if url is not None:
             result[0] = url
+            return
+        if stop_event is not None and stop_event.is_set():
             return
 
 
@@ -447,6 +571,7 @@ def _read_url_from_stderr(
     proc: subprocess.Popen[str],
     parse: Callable[[str], str | None],
     timeout: float = 30.0,
+    rate_limit_flag: list[bool] | None = None,
 ) -> str | None:
     """Read *proc*'s stderr until *parse* finds a URL or *timeout* elapses.
 
@@ -460,6 +585,11 @@ def _read_url_from_stderr(
         parse: Per-line URL extractor; returns the URL string or
             ``None``.
         timeout: Maximum seconds to wait before giving up.
+        rate_limit_flag: Optional single-element list forwarded to
+            :func:`_stderr_reader_loop`; set to ``True`` if any
+            consumed stderr line matches a Cloudflare rate-limit
+            indicator (HTTP 429 / error 1015).  Lets the caller
+            apply a different backoff for rate-limited failures.
 
     Returns:
         The first URL returned by *parse*, or ``None`` if *proc* exits
@@ -468,13 +598,25 @@ def _read_url_from_stderr(
     stderr = proc.stderr
     assert stderr is not None
     result: list[str | None] = [None]
+    stop_event = threading.Event()
     reader = threading.Thread(
         target=_stderr_reader_loop,
-        args=(stderr, parse, result, proc),
+        args=(
+            stderr, parse, result, proc, stop_event, rate_limit_flag,
+        ),
         daemon=True,
     )
     reader.start()
     reader.join(timeout=timeout)
+    # H6: Signal the reader to exit on its next iteration.  The reader
+    # may still be blocked inside readline() (closing stderr from
+    # another thread does not unblock the in-flight read on every
+    # platform), but the moment the next log line arrives — or the
+    # subprocess dies and readline() returns "" — the loop will
+    # observe stop_event and exit, instead of running forever.  This
+    # bounds the leak to "one extra line consumed after timeout"
+    # rather than "thread leaks on every timed-out restart".
+    stop_event.set()
     return result[0]
 
 
@@ -597,8 +739,14 @@ def _generate_self_signed_cert(
     """Generate a self-signed TLS certificate and private key.
 
     Creates an RSA 2048-bit key and a self-signed X.509 certificate
-    valid for 365 days, covering ``localhost``, ``127.0.0.1``, ``::1``,
+    valid for 10 years, covering ``localhost``, ``127.0.0.1``, ``::1``,
     and all ``*.local`` names.  Parent directories are created as needed.
+
+    M4: the validity is intentionally long-lived (10 years) so the
+    auto-generated developer cert does not silently start failing
+    after a year.  :func:`_create_ssl_context` also regenerates an
+    expiring/expired cert, so even if the validity changes again the
+    auto-renewal path will rescue it.
 
     Args:
         cert_path: Where to write the PEM-encoded certificate.
@@ -624,7 +772,7 @@ def _generate_self_signed_cert(
         .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
         .not_valid_before(now)
-        .not_valid_after(now + datetime.timedelta(days=365))
+        .not_valid_after(now + datetime.timedelta(days=3650))
         .add_extension(
             x509.SubjectAlternativeName([
                 x509.DNSName("localhost"),
@@ -639,14 +787,27 @@ def _generate_self_signed_cert(
 
     for d in {cert_path.parent, key_path.parent}:
         d.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(d, 0o700)
+        except OSError:
+            logger.debug("Could not chmod 0700 on %s", d, exc_info=True)
 
-    key_path.write_bytes(
-        key.private_bytes(
-            serialization.Encoding.PEM,
-            serialization.PrivateFormat.TraditionalOpenSSL,
-            serialization.NoEncryption(),
-        )
+    key_bytes = key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.TraditionalOpenSSL,
+        serialization.NoEncryption(),
     )
+    # Create the key file with mode 0600 *before* writing, so the
+    # private key bytes are never on disk world-readable even briefly.
+    if key_path.exists():
+        key_path.unlink()
+    fd = os.open(str(key_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(fd, key_bytes)
+    finally:
+        os.close(fd)
+    # Defensive: also chmod afterwards in case umask interfered.
+    os.chmod(key_path, 0o600)
     cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
 
 
@@ -676,10 +837,49 @@ def _create_ssl_context(
         if not cert_path.is_file() or not key_path.is_file():
             logger.info("Generating self-signed TLS certificate in %s", _TLS_DIR)
             _generate_self_signed_cert(cert_path, key_path)
+        # M4: regenerate a self-signed cert that is already expired or
+        # within 30 days of expiry.  Without this the server would
+        # silently start serving an expired cert after ~1 year (with
+        # the historical 365-day validity) and every browser would
+        # refuse to connect.  Only the auto-generated path is
+        # regenerated; user-supplied cert/key paths are never touched.
+        elif _self_signed_cert_needs_renewal(cert_path):
+            logger.info(
+                "Self-signed TLS certificate %s is expired or "
+                "expiring within 30 days; regenerating",
+                cert_path,
+            )
+            _generate_self_signed_cert(cert_path, key_path)
 
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    # M3: pin a minimum TLS version so this hardened context cannot be
+    # downgraded to SSLv3 / TLS 1.0 / 1.1 by a hostile client even on
+    # Python builds that allow older protocols by default.
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.load_cert_chain(str(cert_path), str(key_path))
     return ctx
+
+
+def _self_signed_cert_needs_renewal(
+    cert_path: Path, threshold_days: int = 30,
+) -> bool:
+    """Return True if *cert_path* is expired or expires within *threshold_days*.
+
+    Helper for M4 — the auto-generated TLS cert is regenerated when it
+    is close to (or past) its ``not_valid_after`` date.  Returns True
+    on parse errors so a corrupt cert is also regenerated rather than
+    crashing the server at ``load_cert_chain``.
+    """
+    try:
+        from cryptography import x509
+
+        cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
+        not_after = cert.not_valid_after_utc
+    except Exception:
+        return True
+    return not_after - datetime.datetime.now(datetime.UTC) <= datetime.timedelta(
+        days=threshold_days,
+    )
 
 
 class WebPrinter(BaseBrowserPrinter):
@@ -699,6 +899,15 @@ class WebPrinter(BaseBrowserPrinter):
         self._merge_state_callback: (
             Callable[[str, dict[str, Any]], None] | None
         ) = None
+        # M2: per-instance work_dir avoids mutating ``os.environ``
+        # ("KISS_WORKDIR") across instances.  Set by
+        # :class:`RemoteAccessServer.__init__`.  Empty string falls
+        # back to the env var or cwd.
+        self.work_dir: str = ""
+        # M8: Pending ``run_coroutine_threadsafe`` futures per client.
+        # Tracked so :meth:`remove_client` can cancel pending sends to
+        # a slow / dead peer instead of leaking them.
+        self._pending_sends: dict[Any, set[ConcurrentFuture[None]]] = {}
 
     def broadcast(self, event: dict[str, Any]) -> None:
         """Send *event* to every connected WebSocket client.
@@ -713,6 +922,16 @@ class WebPrinter(BaseBrowserPrinter):
             event: The event dictionary to emit.
         """
         event = self._inject_tab_id(event)
+
+        if event.get("type") == "configData":
+            cfg = event.get("config")
+            if isinstance(cfg, dict) and not cfg.get("work_dir"):
+                # M2: prefer per-instance work_dir over the global env var.
+                cfg["work_dir"] = (
+                    self.work_dir
+                    or os.environ.get("KISS_WORKDIR", "")
+                    or os.getcwd()
+                )
 
         if event.get("type") == "merge_data":
             event = _augment_merge_data(event)
@@ -732,9 +951,21 @@ class WebPrinter(BaseBrowserPrinter):
         for ws in clients:
             if loop is not None and loop.is_running():
                 try:
-                    asyncio.run_coroutine_threadsafe(ws.send(data), loop)
+                    fut = asyncio.run_coroutine_threadsafe(
+                        ws.send(data), loop,
+                    )
                 except Exception:
                     logger.debug("Failed to send to WS client", exc_info=True)
+                    continue
+                # M8: track the future so a stuck/slow peer's pending
+                # sends can be cancelled when the client disconnects.
+                with self._ws_lock:
+                    pending = self._pending_sends.get(ws)
+                    if pending is not None:
+                        pending.add(fut)
+                fut.add_done_callback(
+                    partial(self._discard_pending_send, ws),
+                )
 
     def add_client(self, ws: ServerConnection) -> None:
         """Register a WebSocket client for event broadcasting.
@@ -744,15 +975,39 @@ class WebPrinter(BaseBrowserPrinter):
         """
         with self._ws_lock:
             self._ws_clients.add(ws)
+            self._pending_sends.setdefault(ws, set())
 
     def remove_client(self, ws: ServerConnection) -> None:
         """Remove a WebSocket client from event broadcasting.
+
+        Cancels any pending ``run_coroutine_threadsafe`` futures for
+        this client (M8) so a permanently stuck send queue cannot
+        keep the underlying coroutine alive after the peer is gone.
 
         Args:
             ws: The WebSocket server connection to remove.
         """
         with self._ws_lock:
             self._ws_clients.discard(ws)
+            pending = self._pending_sends.pop(ws, set())
+        for fut in pending:
+            try:
+                fut.cancel()
+            except Exception:
+                logger.debug("Failed to cancel pending send", exc_info=True)
+
+    def _discard_pending_send(self, ws: ServerConnection, fut: Any) -> None:
+        """Remove a completed send future from the per-client pending set.
+
+        Called via :meth:`concurrent.futures.Future.add_done_callback`
+        once the wrapped coroutine finishes (or errors).  Keeps the
+        :attr:`_pending_sends` set bounded so it does not grow without
+        limit on a long-running healthy connection.
+        """
+        with self._ws_lock:
+            pending = self._pending_sends.get(ws)
+            if pending is not None:
+                pending.discard(fut)
 
 
 def _build_html() -> str:
@@ -814,34 +1069,7 @@ width=device-width,initial-scale=1,maximum-scale=1">
 </head>
 <body class="remote-chat">
   <div id="app">
-    <div id="tab-bar"><div id="tab-list"></div><button id="config-btn" title="Configuration">
-              <svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-               stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <circle cx="12" cy="12" r="3"/>
-                <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 \
-2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 \
-2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 \
-01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 \
-010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 \
-012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 \
-0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 \
-2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 \
-4h-.09a1.65 1.65 0 00-1.51 1z"/>
-              </svg>
-            </button><button id="frequent-btn" title="Frequent tasks">
-              <svg width="1em" height="1em" viewBox="0 0 24 24" fill="none"
-               stroke="currentColor" stroke-width="2" stroke-linecap="round"
-               stroke-linejoin="round">
-                <polyline points="20 12 18 7 14 17 10 5 6 14 4 12"/>
-              </svg>
-            </button><button id="history-btn">
-              <svg class="history-chevron" width="1em" height="1em" viewBox="0 0 24 24"
-               fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"
-               stroke-linejoin="round">
-                <polyline points="15 18 9 12 15 6"/>
-              </svg>
-              <span>History</span>
-            </button></div>
+    <div id="tab-bar"><div id="tab-list"></div></div>
 
     <div id="tab-status-bar">
       <div class="status">
@@ -953,6 +1181,40 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
                 </svg>
                 <span>Demo mode</span>
               </button>
+              <div class="menu-divider"></div>
+              <button id="frequent-btn" class="menu-item">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                 stroke-linejoin="round">
+                  <polyline points="20 12 18 7 14 17 10 5 6 14 4 12"/>
+                </svg>
+                <span>Frequent tasks</span>
+              </button>
+              <button id="history-btn" class="menu-item">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                 stroke-linejoin="round">
+                  <polyline points="15 18 9 12 15 6"/>
+                </svg>
+                <span>History</span>
+              </button>
+              <button id="config-btn" class="menu-item">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                 stroke-linejoin="round">
+                  <circle cx="12" cy="12" r="3"/>
+                  <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 \
+2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 \
+1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06\
+.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1\
+H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 \
+2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 \
+014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 \
+2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 \
+4h-.09a1.65 1.65 0 00-1.51 1z"/>
+                </svg>
+                <span>Settings</span>
+              </button>
             </div>
             <div id="model-dropdown">
               <div class="search-wrap">
@@ -1034,6 +1296,15 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
             <input type="password" id="cfg-remote-password"
              placeholder="Remote access password">
           </label>
+          <label class="config-label">Working directory
+            <div style="display:flex;gap:4px;align-items:center;">
+              <input type="text" id="cfg-work-dir"
+               placeholder="Default: current workspace folder" style="flex:1;">
+              <button type="button" id="cfg-work-dir-browse"
+               title="Browse for folder"
+               style="padding:4px 8px;cursor:pointer;display:none;">Browse</button>
+            </div>
+          </label>
           <div class="config-divider"></div>
           <div class="sidebar-hdr" style="margin-top:8px;">API Keys</div>
           <label class="config-label">Gemini API Key
@@ -1060,7 +1331,7 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
             <input type="text" id="cfg-key-MINIMAX_API_KEY"
              placeholder="Enter MiniMax API key">
           </label>
-          <button id="cfg-save-btn" class="config-save-btn">Save Configuration</button>
+
         </div>
       </div>
     </div>
@@ -1309,11 +1580,23 @@ class RemoteAccessServer:
         self.tunnel_url = tunnel_url
         self._ssl_context: ssl.SSLContext = _create_ssl_context(certfile, keyfile)
 
-        if work_dir:
-            os.environ["KISS_WORKDIR"] = work_dir
+        if not work_dir:
+            from kiss.agents.vscode.vscode_config import load_config
+
+            work_dir = load_config().get("work_dir", "") or None
+        # M2: store work_dir on the instance instead of mutating the
+        # global ``os.environ["KISS_WORKDIR"]`` (which would stomp on
+        # other concurrent ``RemoteAccessServer`` instances and leak
+        # process-wide state into tests).  ``self.work_dir`` is the
+        # canonical resolved value, ``""`` when neither argument nor
+        # config provides one.
+        self.work_dir: str = work_dir or ""
 
         self._vscode_server = VSCodeServer()
+        if self.work_dir:
+            self._vscode_server.work_dir = self.work_dir
         self._printer = WebPrinter()
+        self._printer.work_dir = self.work_dir
         self._vscode_server.printer = self._printer  # type: ignore[assignment]
 
         self._html_bytes = _build_html().encode("utf-8")
@@ -1323,14 +1606,35 @@ class RemoteAccessServer:
         self._tunnel_started_at: float | None = None
         self._tunnel_failure_count = 0
         self._tunnel_next_retry = 0.0
+        # Set by ``_start_quick_tunnel`` when cloudflared's stderr
+        # reports a Cloudflare quick-tunnel rate-limit (HTTP 429 /
+        # error 1015).  ``_restart_tunnel_url`` reads (and clears) it
+        # to apply a much longer backoff than the regular exponential
+        # one so the per-IP cooldown actually has time to clear.
+        self._tunnel_rate_limited = False
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ws_server: Any = None
         self._watchdog_task: asyncio.Task[None] | None = None
         self._local_url = f"https://localhost:{self.port}"
         self._merge_states: dict[str, _WebMergeState] = {}
+        # M6: a small lock guards _merge_states so the agent
+        # task-runner thread (via WebPrinter.broadcast →
+        # _register_merge_state) and the asyncio thread (via
+        # _handle_web_merge_action / _ws_handler cleanup) cannot lose
+        # each other's mutations.  CPython's GIL makes individual
+        # dict ops atomic, but a sequence like ``del[k]`` racing a
+        # concurrent ``[k] = v`` can still drop a registration.
+        self._merge_states_lock = threading.Lock()
+        # M6: per-WebSocket set of tab IDs ever seen on this
+        # connection.  When the WS closes we delete merge states
+        # belonging to those tabs so the dict does not grow unbounded
+        # over many short-lived sessions.
+        self._ws_tabs: dict[ServerConnection, set[str]] = {}
         self._printer._merge_state_callback = self._register_merge_state
         self._active_url: str | None = None
         self._last_ips: frozenset[str] = frozenset()
+        # Per-IP auth failure timestamps, used by _is_auth_locked.
+        self._auth_failures: dict[str, list[float]] = {}
 
 
     async def _process_request(
@@ -1364,11 +1668,63 @@ class RemoteAccessServer:
         return _http_response(404, "text/plain", b"Not Found")
 
 
+    @staticmethod
+    def _passwords_equal(a: str, b: str) -> bool:
+        """Constant-time string compare to defeat timing attacks.
+
+        Encodes to bytes and delegates to :func:`secrets.compare_digest`.
+        """
+        return secrets.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+
+    def _client_ip(self, websocket: ServerConnection) -> str:
+        """Return the source IP of *websocket*, or ``"?"`` if unknown."""
+        addr = getattr(websocket, "remote_address", None)
+        if addr and len(addr) >= 1:
+            return str(addr[0])
+        return "?"
+
+    def _is_auth_locked(self, ip: str) -> bool:
+        """Return True if *ip* is currently rate-limited.
+
+        An IP becomes locked once it has accumulated
+        :data:`_AUTH_FAIL_MAX` failures within the most recent
+        :data:`_AUTH_FAIL_WINDOW` seconds.  The lock persists until
+        :data:`_AUTH_LOCKOUT` seconds have elapsed since the last
+        recorded failure.
+        """
+        now = time.monotonic()
+        fails = self._auth_failures.get(ip, [])
+        # Drop entries outside the window.
+        fails = [t for t in fails if now - t <= _AUTH_FAIL_WINDOW]
+        self._auth_failures[ip] = fails
+        if len(fails) < _AUTH_FAIL_MAX:
+            return False
+        return (now - fails[-1]) <= _AUTH_LOCKOUT
+
+    def _record_auth_failure(self, ip: str) -> None:
+        """Record a failed authentication attempt from *ip*."""
+        now = time.monotonic()
+        self._auth_failures.setdefault(ip, []).append(now)
+
     async def _authenticate_ws(self, websocket: ServerConnection) -> bool:
         """Authenticate a WebSocket client using the configured password.
 
         Returns True on success, False (and closes the socket) on failure.
+
+        When the configured ``remote_password`` is empty, all clients
+        are still required to send an empty-password ``auth`` message
+        (using a constant-time compare).  See also
+        :meth:`_setup_server` which refuses to advertise the public
+        cloudflared tunnel when no password is configured.
         """
+        ip = self._client_ip(websocket)
+        if self._is_auth_locked(ip):
+            logger.warning("Auth rate-limit hit for %s; closing socket", ip)
+            try:
+                await websocket.close()
+            except Exception:
+                pass
+            return False
         password = load_config().get("remote_password", "")
         try:
             raw = await asyncio.wait_for(websocket.recv(), timeout=30)
@@ -1376,11 +1732,21 @@ class RemoteAccessServer:
             if msg.get("type") != "auth":
                 await websocket.close()
                 return False
-            if password and msg.get("password") != password:
+            client_pw = msg.get("password", "")
+            if not isinstance(client_pw, str):
+                client_pw = ""
+            if not self._passwords_equal(password, client_pw):
+                self._record_auth_failure(ip)
                 await websocket.send(json.dumps({"type": "auth_required"}))
                 raw2 = await asyncio.wait_for(websocket.recv(), timeout=60)
                 msg2 = json.loads(raw2)
-                if msg2.get("type") != "auth" or msg2.get("password") != password:
+                client_pw2 = msg2.get("password", "")
+                if not isinstance(client_pw2, str):
+                    client_pw2 = ""
+                if msg2.get("type") != "auth" or not self._passwords_equal(
+                    password, client_pw2,
+                ):
+                    self._record_auth_failure(ip)
                     await websocket.send(
                         json.dumps({"type": "error", "text": "Authentication failed"})
                     )
@@ -1390,6 +1756,10 @@ class RemoteAccessServer:
             return True
         except Exception:
             logger.debug("WS auth failed", exc_info=True)
+            try:
+                await websocket.close()
+            except Exception:
+                pass
             return False
 
     async def _run_cmd(self, cmd: dict[str, Any]) -> None:
@@ -1412,12 +1782,18 @@ class RemoteAccessServer:
             return
 
         self._printer.add_client(websocket)
+        # M6: track tab_ids seen on this connection so we can clean
+        # up associated merge state when the connection drops.
+        self._ws_tabs[websocket] = set()
         try:
             async for message in websocket:
                 try:
                     cmd = json.loads(message)
                 except json.JSONDecodeError:
                     continue
+                tab_id = cmd.get("tabId", "")
+                if isinstance(tab_id, str) and tab_id:
+                    self._ws_tabs[websocket].add(tab_id)
                 cmd_type = cmd.get("type", "")
                 if cmd_type in _VSCODE_ONLY_COMMANDS:
                     continue
@@ -1428,7 +1804,7 @@ class RemoteAccessServer:
                     await self._handle_submit(cmd)
                     continue
                 if cmd_type == "getWelcomeSuggestions":
-                    self._send_welcome_info()
+                    await self._send_welcome_info()
                     continue
                 if cmd_type == "mergeAction":
                     action = cmd.get("action", "")
@@ -1442,10 +1818,16 @@ class RemoteAccessServer:
         except Exception:
             logger.debug("WS handler error", exc_info=True)
         finally:
+            # M6: drop merge states owned by this connection.
+            tabs = self._ws_tabs.pop(websocket, set())
+            if tabs:
+                with self._merge_states_lock:
+                    for tab in tabs:
+                        self._merge_states.pop(tab, None)
             self._printer.remove_client(websocket)
 
 
-    def _send_welcome_info(self) -> None:
+    async def _send_welcome_info(self) -> None:
         """Broadcast welcome suggestions and the active remote URL.
 
         Broadcasts a ``welcome_suggestions`` event with an empty list
@@ -1454,25 +1836,52 @@ class RemoteAccessServer:
         textbox is the only welcome-page UI).  Then broadcasts the
         ``remote_url`` event using the in-memory URL, the URL file, or
         the ``cloudflared`` metrics API as successive fallbacks.
+
+        M10: the URL-file read and the ``_discover_tunnel_url_from_metrics``
+        call (which spawns ``pgrep`` and does HTTP requests) are
+        blocking I/O.  They run in :meth:`asyncio.AbstractEventLoop.run_in_executor`
+        so a slow ``pgrep`` or unreachable cloudflared metrics
+        endpoint cannot stall the asyncio event loop.
         """
         self._printer.broadcast({
             "type": "welcome_suggestions", "suggestions": [],
         })
 
         url: str | None = self._active_url
+        loop = self._loop
+        assert loop is not None
         if not url:
-            try:
-                data = json.loads(_URL_FILE.read_text())
-                url = data.get("tunnel") or data.get("local", "")
-            except Exception:
-                pass
+            url = await loop.run_in_executor(
+                None, self._read_url_from_file,
+            )
         if not url:
-            url = _discover_tunnel_url_from_metrics()
-            if url:
-                _save_url_file(self._local_url, url)
-                self._active_url = url
+            discovered = await loop.run_in_executor(
+                None, _discover_tunnel_url_from_metrics,
+            )
+            if discovered:
+                await loop.run_in_executor(
+                    None, _save_url_file, self._local_url, discovered,
+                )
+                self._active_url = discovered
+                url = discovered
         if url:
             self._printer.broadcast({"type": "remote_url", "url": url})
+
+    @staticmethod
+    def _read_url_from_file() -> str | None:
+        """Read the active remote URL from ``~/.kiss/remote-url.json``.
+
+        Synchronous helper invoked from
+        :meth:`_send_welcome_info` via ``run_in_executor`` so the disk
+        read does not block the asyncio event loop.  Returns ``None``
+        on missing file, parse error, or empty content.
+        """
+        try:
+            data = json.loads(_URL_FILE.read_text())
+        except Exception:
+            return None
+        url = data.get("tunnel") or data.get("local", "")
+        return url or None
 
     async def _handle_ready(
         self, cmd: dict[str, Any], websocket: ServerConnection,
@@ -1491,14 +1900,27 @@ class RemoteAccessServer:
         tab_id = cmd.get("tabId", "")
         for init_cmd in ("getModels", "getInputHistory", "getConfig"):
             await self._run_cmd({"type": init_cmd})
-        self._send_welcome_info()
+        await self._send_welcome_info()
         try:
             await websocket.send(
                 json.dumps({"type": "focusInput", "tabId": tab_id})
             )
         except Exception:
             pass
-        for rt in cmd.get("restoredTabs") or []:
+        # M7: cap the number of restored tabs a single client can ask
+        # the server to resume so an authenticated-but-malicious or
+        # buggy client cannot flood the executor with thousands of
+        # ``resumeSession`` jobs.
+        restored = cmd.get("restoredTabs") or []
+        if not isinstance(restored, list):
+            restored = []
+        if len(restored) > _MAX_RESTORED_TABS:
+            logger.warning(
+                "restoredTabs count %d exceeds cap %d; truncating",
+                len(restored), _MAX_RESTORED_TABS,
+            )
+            restored = restored[:_MAX_RESTORED_TABS]
+        for rt in restored:
             chat_id = rt.get("chatId", "")
             if chat_id:
                 await self._run_cmd(
@@ -1518,6 +1940,23 @@ class RemoteAccessServer:
         """
         tab_id = cmd.get("tabId", "")
         prompt = cmd.get("prompt", "")
+        # M7: clamp the prompt size so a giant payload cannot push
+        # tens of MB through the broadcast pipeline (every connected
+        # client receives a ``setTaskText`` echo of this string).
+        if isinstance(prompt, str) and len(prompt) > _MAX_PROMPT_BYTES:
+            logger.warning(
+                "prompt size %d exceeds cap %d bytes; truncating",
+                len(prompt), _MAX_PROMPT_BYTES,
+            )
+            prompt = prompt[:_MAX_PROMPT_BYTES]
+        # M7: clamp the attachments list size symmetrically.
+        attachments = cmd.get("attachments")
+        if isinstance(attachments, list) and len(attachments) > _MAX_ATTACHMENTS:
+            logger.warning(
+                "attachments count %d exceeds cap %d; truncating",
+                len(attachments), _MAX_ATTACHMENTS,
+            )
+            attachments = attachments[:_MAX_ATTACHMENTS]
         self._printer.broadcast({"type": "setTaskText", "text": prompt, "tabId": tab_id})
         self._printer.broadcast({"type": "status", "running": True, "tabId": tab_id})
         run_cmd: dict[str, Any] = {
@@ -1526,7 +1965,7 @@ class RemoteAccessServer:
             "model": cmd.get("model", ""),
             "workDir": cmd.get("workDir", self._vscode_server.work_dir),
             "tabId": tab_id,
-            "attachments": cmd.get("attachments"),
+            "attachments": attachments,
             "useWorktree": cmd.get("useWorktree", False),
             "useParallel": cmd.get("useParallel", False),
         }
@@ -1542,11 +1981,17 @@ class RemoteAccessServer:
         Called from ``WebPrinter.broadcast()`` so the web server can
         track active merge sessions and handle ``mergeAction`` commands.
 
+        M6: takes :attr:`_merge_states_lock` because this runs on the
+        agent task-runner thread while ``_handle_web_merge_action``
+        and the ``_ws_handler`` cleanup mutate the same dict on the
+        asyncio thread.
+
         Args:
             tab_id: The tab that started the merge.
             merge_data: The ``data`` field from the ``merge_data`` event.
         """
-        self._merge_states[tab_id] = _WebMergeState(merge_data)
+        with self._merge_states_lock:
+            self._merge_states[tab_id] = _WebMergeState(merge_data)
 
 
     async def _handle_web_merge_action(self, cmd: dict[str, Any]) -> None:
@@ -1563,7 +2008,8 @@ class RemoteAccessServer:
         """
         action = cmd.get("action", "")
         tab_id = cmd.get("tabId", "")
-        state = self._merge_states.get(tab_id)
+        with self._merge_states_lock:
+            state = self._merge_states.get(tab_id)
         if state is None:
             return
 
@@ -1583,7 +2029,7 @@ class RemoteAccessServer:
                 )
                 delta = hunk["bc"] - hunk["cc"]
                 for later_hi in range(hi + 1, len(fd["hunks"])):
-                    if (fi, later_hi) not in state._resolved:
+                    if not state.is_resolved(fi, later_hi):
                         fd["hunks"][later_hi]["cs"] += delta
                 state.mark_resolved(fi, hi)
                 state.advance()
@@ -1624,13 +2070,14 @@ class RemoteAccessServer:
         })
 
         if not state.remaining:
-            del self._merge_states[tab_id]
+            with self._merge_states_lock:
+                self._merge_states.pop(tab_id, None)
             await self._run_cmd(
                 {"type": "mergeAction", "action": "all-done", "tabId": tab_id},
             )
 
 
-    def _spawn_cloudflared(self, args: list[str]) -> None:
+    def _spawn_cloudflared(self, args: list[str], retries: int = 3) -> None:
         """Spawn ``cloudflared`` with *args* and a free ``--metrics`` port.
 
         Records the subprocess in :attr:`_tunnel_proc`, the metrics
@@ -1640,18 +2087,55 @@ class RemoteAccessServer:
         *args* (e.g. ``["--url", LOCAL, "--no-tls-verify"]`` for a
         quick tunnel or ``["run", "--token", TOKEN]`` for a named
         tunnel).
+
+        M5: there is a small TOCTOU window between
+        :func:`_pick_free_local_port` releasing its probe socket and
+        ``cloudflared`` binding the same port — another process could
+        grab the port in between, causing ``cloudflared`` to exit
+        immediately.  When that happens the spawn is retried up to
+        *retries* times with a freshly-picked port.
+
+        Args:
+            args: Extra arguments after ``--metrics 127.0.0.1:PORT``.
+            retries: Maximum number of bind-failure retries.
         """
-        self._tunnel_metrics_port = _pick_free_local_port()
-        self._tunnel_proc = subprocess.Popen(
-            [
-                "cloudflared", "tunnel",
-                "--metrics", f"127.0.0.1:{self._tunnel_metrics_port}",
-                *args,
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
+        last_proc: subprocess.Popen[str] | None = None
+        for attempt in range(max(1, retries)):
+            self._tunnel_metrics_port = _pick_free_local_port()
+            # stdout is DEVNULL (not PIPE) because nothing reads it.
+            # An un-drained PIPE buffer fills after ~64 KiB of
+            # cloudflared log output and causes the subprocess to
+            # block on write().
+            proc = subprocess.Popen(
+                [
+                    "cloudflared", "tunnel",
+                    "--metrics",
+                    f"127.0.0.1:{self._tunnel_metrics_port}",
+                    *args,
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            # Give cloudflared a brief moment to fail-fast on a bind
+            # collision.  Healthy cloudflared takes seconds to start
+            # so it will not have exited within 250ms.
+            time.sleep(0.25)
+            if proc.poll() is None:
+                self._tunnel_proc = proc
+                self._tunnel_started_at = time.monotonic()
+                return
+            last_proc = proc
+            logger.info(
+                "cloudflared exited immediately on metrics port %d "
+                "(attempt %d/%d, rc=%s); retrying with fresh port",
+                self._tunnel_metrics_port, attempt + 1, retries,
+                proc.returncode,
+            )
+        # All retries exhausted — keep the most recent (already-dead)
+        # process so the caller's stderr-parsing path can still run
+        # (it will time out and return None as before).
+        self._tunnel_proc = last_proc
         self._tunnel_started_at = time.monotonic()
 
     def _start_tunnel(self) -> str | None:
@@ -1694,8 +2178,10 @@ class RemoteAccessServer:
             ["--url", self._local_url, "--no-tls-verify"],
         )
         assert self._tunnel_proc is not None
+        rate_limit_flag = [False]
         url = _read_url_from_stderr(
             self._tunnel_proc, _parse_quick_tunnel_url, timeout=30,
+            rate_limit_flag=rate_limit_flag,
         )
         if url:
             return url
@@ -1706,6 +2192,18 @@ class RemoteAccessServer:
             if url:
                 return url
             time.sleep(1)
+        # Rate-limit detection: if cloudflared's stderr named HTTP
+        # 429 / error 1015 (and we never got a URL out), tell the
+        # restart machinery to use a longer cooldown.  Setting this
+        # only when ``url is None`` prevents a stray mid-line match
+        # in healthy logs from poisoning the next backoff.
+        if rate_limit_flag[0]:
+            self._tunnel_rate_limited = True
+            logger.warning(
+                "cloudflared reported HTTP 429 / Cloudflare error "
+                "1015 — Cloudflare is rate-limiting "
+                "trycloudflare.com quick-tunnels for this egress IP",
+            )
         return None
 
     def _start_named_tunnel(self) -> str | None:
@@ -1766,6 +2264,12 @@ class RemoteAccessServer:
             proc = None
 
         if proc is None:
+            # Don't (re)start the tunnel when the auth password is
+            # unset — see H1 in the security review.  The watchdog
+            # mirrors the guard in _setup_server so a runtime config
+            # change doesn't accidentally bring up an open tunnel.
+            if not load_config().get("remote_password", ""):
+                return
             if now >= self._tunnel_next_retry:
                 await self._restart_tunnel_url()
             return
@@ -1822,15 +2326,34 @@ class RemoteAccessServer:
             logger.info("Tunnel restarted: %s", tunnel_url)
             self._tunnel_failure_count = 0
             self._tunnel_next_retry = 0.0
+            self._tunnel_rate_limited = False
         else:
             self._tunnel_failure_count += 1
-            delay = _tunnel_backoff_delay(self._tunnel_failure_count)
+            # When cloudflared reported a rate-limit on this attempt,
+            # ignore the regular exponential schedule (60s, 120s, ...)
+            # and wait at least _TUNNEL_RATE_LIMIT_BACKOFF + jitter
+            # seconds: shorter waits keep resetting Cloudflare's per-IP
+            # cooldown clock and burn through dozens of distinct
+            # *.trycloudflare.com URLs without ever recovering.
+            if self._tunnel_rate_limited:
+                delay = _rate_limit_backoff_seconds()
+                self._tunnel_rate_limited = False
+                logger.warning(
+                    "cloudflared rate-limited (HTTP 429 / error 1015) "
+                    "on attempt %d; backing off %ds (long cooldown) "
+                    "to let Cloudflare's per-IP quota clear",
+                    self._tunnel_failure_count,
+                    delay,
+                )
+            else:
+                delay = _tunnel_backoff_delay(self._tunnel_failure_count)
+                logger.warning(
+                    "Failed to restart tunnel (attempt %d); "
+                    "backing off %ds",
+                    self._tunnel_failure_count,
+                    delay,
+                )
             self._tunnel_next_retry = time.monotonic() + delay
-            logger.warning(
-                "Failed to restart tunnel (attempt %d); backing off %ds",
-                self._tunnel_failure_count,
-                delay,
-            )
         _save_url_file(self._local_url, tunnel_url)
         self._active_url = tunnel_url or self._local_url
         self._printer.broadcast(
@@ -1872,14 +2395,19 @@ class RemoteAccessServer:
     async def _watchdog(self) -> None:
         """Unified periodic watchdog (runs every :data:`TUNNEL_CHECK_INTERVAL`).
 
-        Each tick performs three checks:
+        Each tick performs four checks:
 
         1. **Tunnel health** — if the ``cloudflared`` process died
            (e.g. macOS killed it during sleep), restart it.
-        2. **IP change** — if the host's network addresses changed
+        2. **URL-file presence** — re-write ``~/.kiss/remote-url.json``
+           if it has been removed (e.g. by a developer's pytest run
+           that touches the real file, or by an unrelated cleanup).
+           Without this the VS Code settings panel's 10-second poller
+           cannot discover the active URL.
+        3. **IP change** — if the host's network addresses changed
            (WiFi switch, DHCP renewal, VPN), initiate a graceful
            shutdown so the daemon manager restarts the process.
-        3. **WebSocket ping** — send a ping to every connected client
+        4. **WebSocket ping** — send a ping to every connected client
            and close connections that fail to respond within
            :data:`_WS_PING_TIMEOUT` seconds.
         """
@@ -1892,6 +2420,22 @@ class RemoteAccessServer:
                     raise
                 except Exception:
                     logger.debug("Watchdog tunnel check error", exc_info=True)
+            try:
+                if not _URL_FILE.is_file():
+                    tunnel_url = (
+                        self._active_url
+                        if self._active_url and self._active_url != self._local_url
+                        else None
+                    )
+                    _save_url_file(self._local_url, tunnel_url)
+                    logger.info(
+                        "Re-wrote missing URL file %s (tunnel=%s)",
+                        _URL_FILE, tunnel_url,
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug("Watchdog URL-file check error", exc_info=True)
             try:
                 current_ips = _get_local_ips()
                 if current_ips != self._last_ips:
@@ -1934,6 +2478,7 @@ class RemoteAccessServer:
         self._terminate_tunnel_proc()
         self._tunnel_failure_count = 0
         self._tunnel_next_retry = 0.0
+        self._tunnel_rate_limited = False
         self._active_url = None
 
 
@@ -1943,7 +2488,12 @@ class RemoteAccessServer:
         Binds the WebSocket server, starts the tunnel (if enabled),
         saves the URL file, and starts watchdog tasks.
         """
-        self._loop = asyncio.get_event_loop()
+        # M1: ``asyncio.get_event_loop()`` is deprecated when there is a
+        # running loop on Python 3.12+.  ``_setup_server`` only ever
+        # runs from inside a coroutine driven by ``asyncio.run`` (or
+        # an externally-managed loop), so the running loop is always
+        # available here — use it directly.
+        self._loop = asyncio.get_running_loop()
         self._printer._loop = self._loop
 
         self._ws_server = await serve(
@@ -1959,9 +2509,29 @@ class RemoteAccessServer:
 
         tunnel_url: str | None = None
         if self.use_tunnel:
-            tunnel_url = await self._loop.run_in_executor(  # type: ignore[union-attr]
-                None, self._start_tunnel,
-            )
+            # Refuse to expose the server to the public internet
+            # (cloudflared tunnel) when no authentication password is
+            # configured.  Without a password every WS client is
+            # admitted, which would let anyone on the internet drive
+            # the local agent.  Local connections still work.
+            password = load_config().get("remote_password", "")
+            if not password:
+                logger.warning(
+                    "remote_password is not set in ~/.kiss/config.json; "
+                    "refusing to start the cloudflared tunnel.  "
+                    "Set a password in the config panel to enable "
+                    "remote access.",
+                )
+                print(
+                    "Warning: remote_password is empty; cloudflared "
+                    "tunnel disabled.  Set a password to enable "
+                    "remote access.",
+                    file=sys.stderr,
+                )
+            else:
+                tunnel_url = await self._loop.run_in_executor(  # type: ignore[union-attr]
+                    None, self._start_tunnel,
+                )
 
         _save_url_file(self._local_url, tunnel_url)
         self._active_url = tunnel_url or self._local_url

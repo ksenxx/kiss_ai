@@ -145,29 +145,64 @@ class _AutocompleteMixin:
         )
         self._complete_worker.start()
 
-    def _refresh_file_cache(self) -> None:
-        """Refresh the file cache from disk in a background thread."""
+    def _refresh_file_cache(self, then_emit_for_prefix: str | None = None) -> None:
+        """Refresh the file cache from disk in a background thread.
+
+        When ``then_emit_for_prefix`` is set, broadcasts a ``files``
+        event ranked for that prefix once the scan finishes.  This lets
+        callers (``_get_files``) kick off a non-blocking refresh and
+        still deliver suggestions to the UI.
+
+        Race protection: when invoked from ``_get_files`` (i.e.
+        ``then_emit_for_prefix is not None``, meaning the cache was
+        empty at the call site), this preserves the original double-
+        check pattern from commit ``e49d867c`` — the scan result is
+        only published if the cache is still empty when the scan
+        finishes.  This prevents a slow scan from clobbering a fresher
+        result published by a concurrent refresh thread.  Explicit
+        refresh requests (``then_emit_for_prefix is None``) overwrite
+        unconditionally, matching their callers' intent (the user just
+        asked for a refresh).
+        """
         from kiss.agents.vscode.diff_merge import _scan_files
+
+        only_if_empty = then_emit_for_prefix is not None
 
         def _do_refresh() -> None:
             result = _scan_files(self.work_dir)
             with self._state_lock:
-                self._file_cache = result
+                if only_if_empty and self._file_cache is not None:
+                    # A concurrent writer published a fresher value
+                    # while we were scanning — emit theirs, not ours.
+                    result = self._file_cache
+                else:
+                    self._file_cache = result
+            if then_emit_for_prefix is not None:
+                usage = _load_file_usage()
+                ranked = rank_file_suggestions(
+                    result, then_emit_for_prefix, usage,
+                )
+                self.printer.broadcast({"type": "files", "files": ranked})
 
         threading.Thread(target=_do_refresh, daemon=True).start()
 
     def _get_files(self, prefix: str) -> None:
-        """Send file list for autocomplete with usage-based sorting."""
+        """Send file list for autocomplete with usage-based sorting.
+
+        H9 — must not block the message-handling thread.  When the cache
+        is empty, kick off a background refresh and respond immediately
+        with an empty ``loading=true`` list; the same scan then emits a
+        second ``files`` event with the populated list once it finishes,
+        so the frontend gets results without the caller blocking.
+        """
         with self._state_lock:
             cache = self._file_cache
-        if not cache:
-            from kiss.agents.vscode.diff_merge import _scan_files
-            cache = _scan_files(self.work_dir)
-            with self._state_lock:
-                if self._file_cache is None:
-                    self._file_cache = cache
-                else:
-                    cache = self._file_cache
+        if cache is None:
+            self._refresh_file_cache(then_emit_for_prefix=prefix)
+            self.printer.broadcast(
+                {"type": "files", "files": [], "loading": True},
+            )
+            return
         usage = _load_file_usage()
         ranked = rank_file_suggestions(cache, prefix, usage)
         self.printer.broadcast({"type": "files", "files": ranked})

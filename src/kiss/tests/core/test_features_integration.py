@@ -11,6 +11,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import shlex
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -342,7 +343,11 @@ class TestApiKeySetupAndDeletion:
         save_api_key_to_shell("GEMINI_API_KEY", "gem-test-123")
         assert os.environ["GEMINI_API_KEY"] == "gem-test-123"
         rc = Path.home() / ".zshrc"
-        assert 'export GEMINI_API_KEY="gem-test-123"' in rc.read_text()
+        # H3 fix uses shlex.quote which omits quotes for shell-safe values.
+        assert (
+            f"export GEMINI_API_KEY={shlex.quote('gem-test-123')}"
+            in rc.read_text()
+        )
 
     def test_overwrite_key_replaces_in_rc(self) -> None:
         """Saving a new value for an existing key replaces the old one."""
@@ -351,7 +356,7 @@ class TestApiKeySetupAndDeletion:
         rc = Path.home() / ".zshrc"
         content = rc.read_text()
         assert "old-val" not in content
-        assert 'export OPENAI_API_KEY="new-val"' in content
+        assert f"export OPENAI_API_KEY={shlex.quote('new-val')}" in content
         assert os.environ["OPENAI_API_KEY"] == "new-val"
 
     def test_delete_key_by_saving_empty(

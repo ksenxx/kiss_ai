@@ -51,7 +51,7 @@ export type FromWebviewMessage =
       tabId?: string;
       restoredTabs?: Array<{tabId: string; chatId: string}>;
     }
-  | {type: 'resumeSession'; id: number; tabId?: string}
+  | {type: 'resumeSession'; id: number; taskId?: number; tabId?: string}
   | {type: 'getWelcomeSuggestions'}
   | {type: 'complete'; query: string}
   | {type: 'mergeAction'; action: string; tabId?: string}
@@ -65,6 +65,7 @@ export type FromWebviewMessage =
   | {type: 'setSkipMerge'; tabId?: string; skip: boolean}
   | {type: 'resolveDroppedPaths'; uris: string[]}
   | {type: 'webviewFocusChanged'; focused: boolean}
+  | {type: 'pickFolder'; currentPath?: string}
   | {
       type: 'getAdjacentTask';
       tabId?: string;
@@ -196,6 +197,7 @@ type ToWebviewMessageBody =
       tabId?: string;
     }
   | {type: 'droppedPaths'; paths: string[]}
+  | {type: 'folderPicked'; path: string}
   | {
       type: 'adjacent_task_events';
       direction: string;

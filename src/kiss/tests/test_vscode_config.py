@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import shlex
 import sys
 from pathlib import Path
 from typing import Any
@@ -146,7 +147,10 @@ class TestApiKeyShell:
         save_api_key_to_shell("GEMINI_API_KEY", "test-key-123")
         rc = Path.home() / ".zshrc"
         content = rc.read_text()
-        assert 'export GEMINI_API_KEY="test-key-123"' in content
+        # H3 fix uses shlex.quote which omits quotes for shell-safe values.
+        assert (
+            f"export GEMINI_API_KEY={shlex.quote('test-key-123')}" in content
+        )
         assert os.environ["GEMINI_API_KEY"] == "test-key-123"
 
     def test_save_key_to_bashrc(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -154,7 +158,7 @@ class TestApiKeyShell:
         save_api_key_to_shell("OPENAI_API_KEY", "sk-test")
         rc = Path.home() / ".bashrc"
         content = rc.read_text()
-        assert 'export OPENAI_API_KEY="sk-test"' in content
+        assert f"export OPENAI_API_KEY={shlex.quote('sk-test')}" in content
 
     def test_save_key_to_fish(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("SHELL", "/usr/bin/fish")
@@ -169,7 +173,7 @@ class TestApiKeyShell:
         rc.write_text('export GEMINI_API_KEY="old-key"\n# other stuff\n')
         save_api_key_to_shell("GEMINI_API_KEY", "new-key")
         content = rc.read_text()
-        assert 'export GEMINI_API_KEY="new-key"' in content
+        assert f"export GEMINI_API_KEY={shlex.quote('new-key')}" in content
         assert "old-key" not in content
         assert "# other stuff" in content
 
@@ -191,7 +195,7 @@ class TestApiKeyShell:
         rc.write_text("")
         save_api_key_to_shell("OPENAI_API_KEY", "key123")
         content = rc.read_text()
-        assert 'export OPENAI_API_KEY="key123"' in content
+        assert f"export OPENAI_API_KEY={shlex.quote('key123')}" in content
 
     def test_save_key_no_trailing_newline(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("SHELL", "/bin/zsh")
@@ -200,7 +204,7 @@ class TestApiKeyShell:
         save_api_key_to_shell("OPENAI_API_KEY", "test-key")
         content = rc.read_text()
         assert "# no trailing newline\n" in content
-        assert 'export OPENAI_API_KEY="test-key"' in content
+        assert f"export OPENAI_API_KEY={shlex.quote('test-key')}" in content
 
     def test_save_key_sets_env_var(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Key is set in os.environ immediately."""
@@ -228,9 +232,9 @@ class TestApiKeyShell:
         save_api_key_to_shell("ANTHROPIC_API_KEY", "ant-key")
         rc = Path.home() / ".zshrc"
         content = rc.read_text()
-        assert 'export GEMINI_API_KEY="gem-key"' in content
-        assert 'export OPENAI_API_KEY="oai-key"' in content
-        assert 'export ANTHROPIC_API_KEY="ant-key"' in content
+        assert f"export GEMINI_API_KEY={shlex.quote('gem-key')}" in content
+        assert f"export OPENAI_API_KEY={shlex.quote('oai-key')}" in content
+        assert f"export ANTHROPIC_API_KEY={shlex.quote('ant-key')}" in content
         assert os.environ["GEMINI_API_KEY"] == "gem-key"
         assert os.environ["OPENAI_API_KEY"] == "oai-key"
         assert os.environ["ANTHROPIC_API_KEY"] == "ant-key"
@@ -450,7 +454,10 @@ class TestCommandHandlerIntegration:
         })
         assert os.environ["OPENROUTER_API_KEY"] == "or-key-123"
         rc = Path.home() / ".zshrc"
-        assert 'export OPENROUTER_API_KEY="or-key-123"' in rc.read_text()
+        assert (
+            f"export OPENROUTER_API_KEY={shlex.quote('or-key-123')}"
+            in rc.read_text()
+        )
 
     def test_save_config_skips_empty_api_keys(
         self, monkeypatch: pytest.MonkeyPatch,

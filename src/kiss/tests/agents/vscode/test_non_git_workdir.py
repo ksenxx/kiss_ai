@@ -87,9 +87,19 @@ class TestNonGitCommandsDoNotCrash(_NonGitHarness):
         assert self._events_of("inputHistory")
 
     def test_get_files(self) -> None:
+        import time
+
         Path(self.tmpdir, "alpha.txt").write_text("a\n")
         Path(self.tmpdir, "beta.py").write_text("b\n")
         self.server._handle_command({"type": "getFiles", "prefix": ""})
+        # H9: the first call schedules a background scan and emits an
+        # empty ``loading`` event; the populated event is broadcast once
+        # the scan completes.  Wait briefly for the second event.
+        for _ in range(50):
+            evt = self._events_of("files")
+            if evt and evt[-1].get("files"):
+                break
+            time.sleep(0.05)
         evt = self._events_of("files")
         assert evt
         names = {f["text"].lstrip("./") for f in evt[-1]["files"]}

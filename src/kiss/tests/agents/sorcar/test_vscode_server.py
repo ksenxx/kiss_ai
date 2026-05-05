@@ -1755,7 +1755,7 @@ class TestCollapsiblePanelsCSS(unittest.TestCase):
         assert ".llm-panel-hdr" in self._css
 
     def test_llm_panel_collapsed_hides_children(self) -> None:
-        assert ".llm-panel.collapsed > :not(.llm-panel-hdr)" in self._css
+        assert ".llm-panel.collapsed > :not(.llm-panel-hdr, .panel-copy-btn)" in self._css
 
     def test_rc_never_collapsed(self) -> None:
         """Result card has no CSS collapse rule — it is always visible."""
@@ -2472,6 +2472,7 @@ class TestSorcarSidebarViewMessageHandling(unittest.TestCase):
             "closeTab", "getWelcomeSuggestions",
             "webviewFocusChanged", "autocommitAction", "setSkipMerge",
             "getConfig", "saveConfig", "deleteTask", "getFrequentTasks",
+            "pickFolder",
         }
         extra = sidebar_cases - known
         assert not extra, f"Sidebar has extra message handlers: {extra}"
@@ -3611,8 +3612,15 @@ class TestSidebarViewBehavior(unittest.TestCase):
 
         m = re.search(r"case\s+'openFile':", self._sidebar_ts)
         assert m
-        end = self._sidebar_ts.index("break;", m.end())
-        block = self._sidebar_ts[m.start() : end]
+        # Find the end of this case by matching the next `case ...:`
+        # marker.  Cannot stop at the first `break;` because the H4
+        # path-traversal guard introduced an early-return break inside
+        # the case body.
+        next_case = re.search(
+            r"case\s+'\w+':", self._sidebar_ts[m.end():],
+        )
+        assert next_case
+        block = self._sidebar_ts[m.start() : m.end() + next_case.start()]
         assert "message.line" in block
         assert "revealRange" in block
 

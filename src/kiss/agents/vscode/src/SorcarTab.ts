@@ -6,6 +6,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as crypto from 'crypto';
 import {findKissProject} from './AgentProcess';
 
 /** Read the KISS project version from ``_version.py`` on disk. */
@@ -24,15 +25,17 @@ export function getVersion(): string {
   return '';
 }
 
-/** Generate a random nonce string for Content Security Policy. */
+/**
+ * Generate a cryptographically random nonce string for Content Security
+ * Policy.  Uses Node's CSPRNG (``crypto.randomBytes``) — never
+ * ``Math.random``, which is predictable.
+ */
 export function getNonce(): string {
-  let text = '';
-  const chars =
-    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  for (let i = 0; i < 32; i++) {
-    text += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return text;
+  // 24 random bytes -> 32 base64url chars; restrict to [A-Za-z0-9] for
+  // CSP-safe nonce values.
+  return crypto.randomBytes(24).toString('base64')
+    .replace(/[^A-Za-z0-9]/g, '')
+    .slice(0, 32);
 }
 
 /**
@@ -71,27 +74,14 @@ export function buildChatHtml(
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; img-src ${webview.cspSource} data: https:; font-src ${webview.cspSource};">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; img-src ${webview.cspSource} data: https:; font-src ${webview.cspSource}; form-action 'none'; frame-src 'none'; object-src 'none'; base-uri 'none';">
   <link href="${styleUri}" rel="stylesheet">
   <link href="${hljsCssUri}" rel="stylesheet">
   <title>KISS Sorcar</title>
 </head>
 <body>
   <div id="app">
-    <div id="tab-bar"><div id="tab-list"></div><button id="config-btn" title="Configuration">
-              <svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/>
-              </svg>
-            </button><button id="frequent-btn" title="Frequent tasks">
-              <svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <polyline points="20 12 18 7 14 17 10 5 6 14 4 12"/>
-              </svg>
-            </button><button id="history-btn">
-              <svg class="history-chevron" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
-                <polyline points="15 18 9 12 15 6"/>
-              </svg>
-              <span>History</span>
-            </button></div>
+    <div id="tab-bar"><div id="tab-list"></div></div>
 
     <div id="tab-status-bar">
       <div class="status">
@@ -158,6 +148,19 @@ export function buildChatHtml(
               <button id="demo-toggle-btn" class="menu-item">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
                 <span>Demo mode</span>
+              </button>
+              <div class="menu-divider"></div>
+              <button id="frequent-btn" class="menu-item">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 12 18 7 14 17 10 5 6 14 4 12"/></svg>
+                <span>Frequent tasks</span>
+              </button>
+              <button id="history-btn" class="menu-item">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+                <span>History</span>
+              </button>
+              <button id="config-btn" class="menu-item">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+                <span>Settings</span>
               </button>
             </div>
             <div id="model-dropdown">
@@ -229,6 +232,12 @@ export function buildChatHtml(
           <label class="config-label">Remote password
             <input type="password" id="cfg-remote-password" placeholder="Remote access password">
           </label>
+          <label class="config-label">Working directory
+            <div style="display:flex;gap:4px;align-items:center;">
+              <input type="text" id="cfg-work-dir" placeholder="Default: current workspace folder" style="flex:1;">
+              <button type="button" id="cfg-work-dir-browse" title="Browse for folder" style="padding:4px 8px;cursor:pointer;">Browse</button>
+            </div>
+          </label>
           <div class="config-divider"></div>
           <div class="sidebar-hdr" style="margin-top:8px;">API Keys</div>
           <label class="config-label">Gemini API Key
@@ -249,7 +258,7 @@ export function buildChatHtml(
           <label class="config-label">MiniMax API Key
             <input type="text" id="cfg-key-MINIMAX_API_KEY" placeholder="Enter MiniMax API key">
           </label>
-          <button id="cfg-save-btn" class="config-save-btn">Save Configuration</button>
+
         </div>
       </div>
     </div>

@@ -26,6 +26,7 @@ from kiss.agents.sorcar.persistence import (
     _delete_task,
     _get_adjacent_task_by_chat_id,
     _get_task_chat_id,
+    _load_chat_events_by_task_id,
     _load_frequent_tasks,
     _load_history,
     _load_last_model,
@@ -357,7 +358,9 @@ class VSCodeServer(
             "model": self._default_model,
         })
 
-    def _replay_session(self, chat_id: str, tab_id: str = "") -> None:
+    def _replay_session(
+        self, chat_id: str, tab_id: str = "", task_id: int | None = None,
+    ) -> None:
         """Replay recorded chat events for a previous chat session.
 
         Sets the tab's agent chat_id to match the resumed session.
@@ -371,11 +374,22 @@ class VSCodeServer(
         Args:
             chat_id: The string chat session identifier to replay.
             tab_id: The frontend tab identifier.
+            task_id: Optional task row ID.  When provided, load this
+                specific task instead of the latest task in the chat
+                session.  This is used when the user clicks a specific
+                task in the history panel.
         """
         if not tab_id:
             logger.debug("_replay_session called without tab_id; ignoring")
             return
-        result = _load_latest_chat_events_by_chat_id(chat_id)
+        result = None
+        if task_id is not None:
+            result = _load_chat_events_by_task_id(task_id)
+            # If found, ensure chat_id is populated for resume_chat_by_id
+            if result:
+                chat_id = str(result.get("chat_id", "") or chat_id)
+        if not result:
+            result = _load_latest_chat_events_by_chat_id(chat_id)
         if not result or not result.get("events"):
             return
         tab = self._get_tab(tab_id)

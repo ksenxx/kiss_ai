@@ -61,6 +61,7 @@ class _TaskRunnerMixin:
             base_ref: str = "HEAD",
             tab_id: str = "",
         ) -> bool: ...
+        def _main_dirty_files(self) -> list[str]: ...
         def _present_pending_worktree(
             self, tab_id: str, *, try_merge_review: bool,
         ) -> None: ...
@@ -313,11 +314,19 @@ class _TaskRunnerMixin:
                         else:
                             with self._state_lock:
                                 tab.deferred_snapshot = None
-                            self._prepare_and_start_merge(
+                            merge_started = self._prepare_and_start_merge(
                                 work_dir, pre_hunks, pre_untracked, pre_file_hashes,
                                 base_ref=pre_head_sha or "HEAD",
                                 tab_id=tab_id,
                             )
+                            if not merge_started:
+                                changed = self._main_dirty_files()
+                                if changed:
+                                    self.printer.broadcast({
+                                        "type": "autocommit_prompt",
+                                        "tabId": tab_id,
+                                        "changedFiles": changed,
+                                    })
                     except BaseException:  # pragma: no cover — merge view error handler
                         logger.debug("Merge view error", exc_info=True)
                     finally:
@@ -450,14 +459,19 @@ class _TaskRunnerMixin:
         with self._state_lock:
             tab = self._tab_states.get(tab_id) if tab_id is not None else None
             q = tab.user_answer_queue if tab is not None else None
+        # M4 — when the tab has no answer queue (e.g. the tab was closed
+        # mid-question) there is no path that can ever return a response.
+        # Refuse to busy-loop forever; raise immediately so the agent
+        # thread can unwind and the user-facing task can finish.
+        if q is None:
+            raise KeyboardInterrupt(
+                "User answer queue is missing (tab closed?); aborting wait",
+            )
         while True:
-            if q is not None:
-                try:
-                    return q.get(timeout=0.5)
-                except queue.Empty:
-                    pass
-            else:
-                stop.wait(timeout=0.5)
+            try:
+                return q.get(timeout=0.5)
+            except queue.Empty:
+                pass
             if stop.is_set():
                 raise KeyboardInterrupt("Stopped while waiting for user")
 

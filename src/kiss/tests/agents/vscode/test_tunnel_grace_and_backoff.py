@@ -33,6 +33,7 @@ import time
 import unittest
 from pathlib import Path
 
+from kiss.agents.vscode.vscode_config import CONFIG_PATH, save_config
 from kiss.agents.vscode.web_server import (
     _TUNNEL_BACKOFF_INITIAL,
     _TUNNEL_BACKOFF_MAX,
@@ -155,10 +156,20 @@ class TestRestartBackoff(unittest.IsolatedAsyncioTestCase):
         self._tmpdir = Path(self._tmp.name)
         self._old_path = os.environ.get("PATH", "")
         os.environ["PATH"] = f"{self._tmpdir}{os.pathsep}{self._old_path}"
+        # The H1 watchdog guard skips tunnel restarts when no password is
+        # configured.  Set one so the restart path under test actually runs.
+        self._orig_config = (
+            CONFIG_PATH.read_text() if CONFIG_PATH.exists() else None
+        )
+        save_config({"remote_password": "test-secret-tunnel"})
 
     def tearDown(self) -> None:
         os.environ["PATH"] = self._old_path
         self._tmp.cleanup()
+        if self._orig_config is None:
+            CONFIG_PATH.unlink(missing_ok=True)
+        else:
+            CONFIG_PATH.write_text(self._orig_config)
 
     async def _make_server_with_dead_proc(self) -> RemoteAccessServer:
         """Build a server whose tunnel subprocess has already exited."""
@@ -227,10 +238,19 @@ class TestSuccessfulRestartResetsBackoff(unittest.IsolatedAsyncioTestCase):
         self._tmpdir = Path(self._tmp.name)
         self._old_path = os.environ.get("PATH", "")
         os.environ["PATH"] = f"{self._tmpdir}{os.pathsep}{self._old_path}"
+        # H1 watchdog guard requires a password before the restart runs.
+        self._orig_config = (
+            CONFIG_PATH.read_text() if CONFIG_PATH.exists() else None
+        )
+        save_config({"remote_password": "test-secret-tunnel"})
 
     def tearDown(self) -> None:
         os.environ["PATH"] = self._old_path
         self._tmp.cleanup()
+        if self._orig_config is None:
+            CONFIG_PATH.unlink(missing_ok=True)
+        else:
+            CONFIG_PATH.write_text(self._orig_config)
 
     async def test_success_resets_failure_count(self) -> None:
         """After a successful tunnel start, failure count returns to 0."""
