@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -83,8 +84,16 @@ def _scan_files(work_dir: str) -> list[str]:
     return paths
 
 
+_GIT_TIMEOUT_SECONDS: float = 30.0
+
+
 def _git(cwd: str, *args: str) -> subprocess.CompletedProcess[str]:
     """Run a git command with captured text output.
+
+    Always passes a 30-second timeout so a hung git process (e.g. waiting
+    on a credential-helper prompt or a network remote) cannot block the
+    agent thread forever (M1).  On timeout returns a non-zero
+    ``CompletedProcess`` so callers don't crash.
 
     Args:
         cwd: Working directory for the git command.
@@ -93,7 +102,34 @@ def _git(cwd: str, *args: str) -> subprocess.CompletedProcess[str]:
     Returns:
         CompletedProcess with stdout/stderr as strings.
     """
-    return subprocess.run(["git", *args], capture_output=True, text=True, cwd=cwd)
+    try:
+        return subprocess.run(
+            ["git", *args],
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+            timeout=_GIT_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        logger.warning("git %s timed out after %ss", args, _GIT_TIMEOUT_SECONDS)
+        # Synthesise a failed CompletedProcess so callers (which expect
+        # a returncode/stdout/stderr triple) keep working.
+        stdout = (
+            exc.stdout.decode("utf-8", "replace")
+            if isinstance(exc.stdout, bytes)
+            else (exc.stdout or "")
+        )
+        stderr = (
+            exc.stderr.decode("utf-8", "replace")
+            if isinstance(exc.stderr, bytes)
+            else (exc.stderr or "")
+        )
+        return subprocess.CompletedProcess(
+            args=["git", *args],
+            returncode=124,  # convention: timeout
+            stdout=stdout or "",
+            stderr=stderr or f"git {args[0] if args else ''} timed out",
+        )
 
 
 _HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
@@ -243,19 +279,47 @@ def _save_untracked_base(
             contents should be saved as the pre-task base.
         tab_id: Frontend tab identifier for per-tab isolation.
     """
+    # M5 — build the new base copy in a sibling temp directory and swap
+    # it into place atomically.  This guarantees that an interrupted /
+    # failing copy never leaves the merge view with a partial base set
+    # (the previous good base copy is preserved).
     base_dir = _untracked_base_dir(tab_id)
-    if base_dir.exists():
-        shutil.rmtree(base_dir)
-    for fname in files:
-        fpath = Path(work_dir) / fname
-        try:
-            if not fpath.is_file() or fpath.stat().st_size > 2_000_000:  # pragma: no cover
-                continue
-            dest = base_dir / fname
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(fpath, dest)
-        except OSError:
-            logger.debug("Exception caught", exc_info=True)
+    parent = base_dir.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(
+        tempfile.mkdtemp(prefix=".untracked-base-staging-", dir=str(parent)),
+    )
+    try:
+        # Iterate in a deterministic order so any partial-copy outcome
+        # is reproducible across runs.
+        for fname in sorted(files):
+            fpath = Path(work_dir) / fname
+            try:
+                if not fpath.is_file() or fpath.stat().st_size > 2_000_000:  # pragma: no cover
+                    continue
+                dest = staging / fname
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(fpath, dest)
+            except OSError:
+                logger.debug("Exception caught", exc_info=True)
+        # Atomic swap: remove the old base after the new one is fully built.
+        if base_dir.exists():
+            old = base_dir.with_name(base_dir.name + ".old")
+            if old.exists():
+                shutil.rmtree(old, ignore_errors=True)
+            os.replace(base_dir, old)
+            try:
+                os.replace(staging, base_dir)
+            except OSError:
+                # Roll back the rename of the old base on failure.
+                os.replace(old, base_dir)
+                raise
+            shutil.rmtree(old, ignore_errors=True)
+        else:
+            os.replace(staging, base_dir)
+    finally:
+        if staging.exists():  # pragma: no cover — only on copy failure
+            shutil.rmtree(staging, ignore_errors=True)
 
 
 def _cleanup_merge_data(data_dir: str) -> None:
@@ -284,13 +348,17 @@ def _diff_files(base_path: str, current_path: str) -> list[tuple[int, int, int, 
     Returns:
         List of (base_start, base_count, current_start, current_count) tuples.
     """
+    # M5 — UnicodeDecodeError is a ValueError, not OSError.  A binary
+    # (or UTF-16) file would otherwise propagate and break merge for the
+    # whole tab — match the more permissive guard already used in
+    # ``_file_as_new_hunks``.
     try:
         base_lines = Path(base_path).read_text().splitlines(keepends=True)
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         base_lines = []
     try:
         current_lines = Path(current_path).read_text().splitlines(keepends=True)
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         current_lines = []
     hunks: list[tuple[int, int, int, int]] = []
     for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(

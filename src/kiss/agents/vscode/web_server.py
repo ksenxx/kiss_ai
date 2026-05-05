@@ -827,7 +827,7 @@ class WebPrinter(BaseBrowserPrinter):
         # M8: Pending ``run_coroutine_threadsafe`` futures per client.
         # Tracked so :meth:`remove_client` can cancel pending sends to
         # a slow / dead peer instead of leaking them.
-        self._pending_sends: dict[Any, set["ConcurrentFuture[None]"]] = {}
+        self._pending_sends: dict[Any, set[ConcurrentFuture[None]]] = {}
 
     def broadcast(self, event: dict[str, Any]) -> None:
         """Send *event* to every connected WebSocket client.

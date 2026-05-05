@@ -6,6 +6,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as crypto from 'crypto';
 import {findKissProject} from './AgentProcess';
 
 /** Read the KISS project version from ``_version.py`` on disk. */
@@ -24,15 +25,17 @@ export function getVersion(): string {
   return '';
 }
 
-/** Generate a random nonce string for Content Security Policy. */
+/**
+ * Generate a cryptographically random nonce string for Content Security
+ * Policy.  Uses Node's CSPRNG (``crypto.randomBytes``) — never
+ * ``Math.random``, which is predictable.
+ */
 export function getNonce(): string {
-  let text = '';
-  const chars =
-    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  for (let i = 0; i < 32; i++) {
-    text += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return text;
+  // 24 random bytes -> 32 base64url chars; restrict to [A-Za-z0-9] for
+  // CSP-safe nonce values.
+  return crypto.randomBytes(24).toString('base64')
+    .replace(/[^A-Za-z0-9]/g, '')
+    .slice(0, 32);
 }
 
 /**
@@ -71,7 +74,7 @@ export function buildChatHtml(
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; img-src ${webview.cspSource} data: https:; font-src ${webview.cspSource};">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; img-src ${webview.cspSource} data: https:; font-src ${webview.cspSource}; form-action 'none'; frame-src 'none'; object-src 'none'; base-uri 'none';">
   <link href="${styleUri}" rel="stylesheet">
   <link href="${hljsCssUri}" rel="stylesheet">
   <title>KISS Sorcar</title>

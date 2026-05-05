@@ -16,6 +16,33 @@
 
   let cancelRequested = false;
 
+  /** Sanitize markdown HTML before innerHTML — see kissSanitize in main.js. */
+  function kissSanitize(html) {
+    const t = document.createElement('template');
+    t.innerHTML = String(html == null ? '' : html);
+    const BAD_TAGS = new Set([
+      'SCRIPT', 'IFRAME', 'OBJECT', 'EMBED', 'FORM', 'META', 'LINK',
+      'STYLE', 'BASE', 'FRAME', 'FRAMESET',
+    ]);
+    const URL_ATTRS = new Set(['href', 'src', 'action', 'formaction',
+                               'xlink:href']);
+    for (const el of Array.from(t.content.querySelectorAll('*'))) {
+      if (BAD_TAGS.has(el.tagName)) { el.remove(); continue; }
+      for (const attr of Array.from(el.attributes)) {
+        const name = attr.name.toLowerCase();
+        if (name.startsWith('on')) {
+          el.removeAttribute(attr.name);
+          continue;
+        }
+        if (URL_ATTRS.has(name) &&
+            /^(javascript|data|vbscript):/i.test((attr.value || '').trim())) {
+          el.removeAttribute(attr.name);
+        }
+      }
+    }
+    return t.innerHTML;
+  }
+
   function sleep(ms) {
     return new Promise(resolve => {
       setTimeout(resolve, ms);
@@ -114,7 +141,7 @@
       accumulated += words[i];
       if (i % WORDS_PER_TICK === WORDS_PER_TICK - 1 || i === words.length - 1) {
         if (typeof marked !== 'undefined') {
-          body.innerHTML = marked.parse(accumulated);
+          body.innerHTML = kissSanitize(marked.parse(accumulated));
         } else {
           body.textContent = accumulated;
         }

@@ -9,7 +9,8 @@ import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs';
 import * as https from 'https';
-import {exec, execSync, spawn} from 'child_process';
+import * as crypto from 'crypto';
+import {exec, execSync, execFileSync, spawn} from 'child_process';
 import {findKissProject, findUvPath} from './AgentProcess';
 
 const HOME_DIR = process.env.HOME || process.env.USERPROFILE || '';
@@ -19,6 +20,203 @@ const MIN_PYTHON_MAJOR = 3;
 const MIN_PYTHON_MINOR = 13;
 const UV_VERSION = '0.11.2';
 const NODE_VERSION = 'v22.16.0';
+
+/**
+ * Escape a string so it is safe to embed inside an XML ``<string>``
+ * element (e.g. macOS LaunchAgent plist).  Without escaping a path
+ * containing ``&`` or ``<`` produces malformed XML and ``launchctl``
+ * silently rejects the unit.
+ */
+function xmlEscape(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+/**
+ * Escape a string so it is safe to embed inside a systemd unit value.
+ * Backslashes and newlines must not appear unescaped — they otherwise
+ * silently corrupt the unit.
+ */
+function unitEscape(s: string): string {
+  return s.replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/%/g, '%%');
+}
+
+/**
+ * Download a URL into ``destPath`` using the Node ``https`` module.
+ * Follows up to 5 redirects.  Resolves only after the response has been
+ * fully written to disk.  Never spawns a shell.
+ */
+function downloadFile(url: string, destPath: string,
+                      maxRedirects = 5): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const get = (u: string, hops: number): void => {
+      const req = https.get(u, {timeout: 60000}, res => {
+        const status = res.statusCode || 0;
+        if (status >= 300 && status < 400 && res.headers.location) {
+          if (hops <= 0) {
+            res.resume();
+            reject(new Error(`Too many redirects from ${url}`));
+            return;
+          }
+          res.resume();
+          const next = new URL(res.headers.location, u).toString();
+          get(next, hops - 1);
+          return;
+        }
+        if (status !== 200) {
+          res.resume();
+          reject(new Error(`HTTP ${status} fetching ${u}`));
+          return;
+        }
+        const out = fs.createWriteStream(destPath);
+        res.pipe(out);
+        out.on('finish', () => out.close(err => err ? reject(err) : resolve()));
+        out.on('error', reject);
+      });
+      req.on('error', reject);
+      req.on('timeout', () => {
+        req.destroy(new Error(`Timeout downloading ${u}`));
+      });
+    };
+    get(url, maxRedirects);
+  });
+}
+
+/**
+ * Compute the lowercase-hex SHA256 digest of a file on disk.
+ */
+function sha256OfFile(filePath: string): string {
+  const buf = fs.readFileSync(filePath);
+  return crypto.createHash('sha256').update(buf).digest('hex');
+}
+
+/**
+ * Best-effort integrity check for a downloaded asset against a vendor-
+ * published SHA256 file (e.g. ``<url>.sha256`` for uv, ``SHASUMS256.txt``
+ * for nodejs.org).  When ``expectedHashHex`` is given and does not match,
+ * the file is unlinked and an error is thrown.  When omitted (vendor
+ * does not publish a hash), the function logs a warning and returns —
+ * we do not silently skip integrity for binaries we know how to verify.
+ *
+ * Pinning the digest in the extension source is preferable but requires
+ * release-time bookkeeping; this helper at minimum compares against the
+ * SHA256 file fetched from the same release URL, defending against
+ * CDN/mirror corruption and accidental wrong-asset downloads.
+ */
+async function verifyDownloadHash(
+  filePath: string,
+  expectedHashHex: string | null,
+): Promise<void> {
+  const got = sha256OfFile(filePath);
+  if (!expectedHashHex) {
+    log(`No SHA256 expectation for ${path.basename(filePath)}; ` +
+        `computed hash = ${got}`);
+    return;
+  }
+  if (got.toLowerCase() !== expectedHashHex.toLowerCase()) {
+    try { fs.unlinkSync(filePath); } catch { /* ignore */ }
+    throw new Error(
+      `SHA256 mismatch for ${path.basename(filePath)}: ` +
+      `expected ${expectedHashHex}, got ${got}`);
+  }
+  log(`SHA256 ok for ${path.basename(filePath)}`);
+}
+
+/**
+ * Fetch ``<assetUrl>.sha256`` (uv-style sidecar) and return the hex digest,
+ * or null when the sidecar isn't available.
+ */
+function fetchUvStyleSha256(assetUrl: string): Promise<string | null> {
+  return new Promise(resolve => {
+    const req = https.get(assetUrl + '.sha256',
+                          {timeout: 15000}, res => {
+      if ((res.statusCode || 0) !== 200) {
+        res.resume();
+        resolve(null);
+        return;
+      }
+      const chunks: Buffer[] = [];
+      res.on('data', d => chunks.push(d));
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf-8').trim();
+        // sidecar is "<hex>  filename"
+        const m = /^([0-9a-fA-F]{64})/.exec(text);
+        resolve(m ? m[1] : null);
+      });
+    });
+    req.on('error', () => resolve(null));
+    req.on('timeout', () => { req.destroy(); resolve(null); });
+  });
+}
+
+/**
+ * Fetch ``https://nodejs.org/dist/<NODE_VERSION>/SHASUMS256.txt`` and find
+ * the hash for ``assetName``.  Returns null on any error.
+ */
+function fetchNodeSha256(assetName: string): Promise<string | null> {
+  const url =
+    `https://nodejs.org/dist/${NODE_VERSION}/SHASUMS256.txt`;
+  return new Promise(resolve => {
+    const req = https.get(url, {timeout: 15000}, res => {
+      if ((res.statusCode || 0) !== 200) {
+        res.resume();
+        resolve(null);
+        return;
+      }
+      const chunks: Buffer[] = [];
+      res.on('data', d => chunks.push(d));
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf-8');
+        for (const line of text.split('\n')) {
+          const m = /^([0-9a-fA-F]{64})\s+(.+?)\s*$/.exec(line);
+          if (m && m[2] === assetName) {
+            resolve(m[1]);
+            return;
+          }
+        }
+        resolve(null);
+      });
+    });
+    req.on('error', () => resolve(null));
+    req.on('timeout', () => { req.destroy(); resolve(null); });
+  });
+}
+
+/**
+ * Run a child process without invoking a shell, capturing combined
+ * stdout/stderr, and resolving with the trimmed stdout on exit code 0.
+ * Used for ``tar``, ``mv``, etc. where a shell would be required only
+ * to interpolate user-controlled paths.
+ */
+function spawnPromise(cmd: string, args: string[], cwd?: string,
+                      timeoutMs = 300_000): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(cmd, args, {cwd, stdio: ['ignore', 'pipe', 'pipe']});
+    let stdout = '';
+    let stderr = '';
+    const timer = setTimeout(() => {
+      proc.kill('SIGKILL');
+      reject(new Error(`${cmd} ${args.join(' ')} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    proc.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
+    proc.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
+    proc.on('close', code => {
+      clearTimeout(timer);
+      if (code === 0) resolve(stdout.trim());
+      else reject(new Error(
+        `${cmd} ${args.join(' ')} exited ${code}: ${stderr.trim()}`,
+      ));
+    });
+    proc.on('error', err => {
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
+}
 
 /** Guard against concurrent ensureDependencies calls. */
 let pendingDeps: Promise<void> | null = null;
@@ -82,8 +280,13 @@ export function getDefaultModel(): string {
   const kissProject = findKissProject();
   if (!uvPath || !kissProject) return '';
   try {
-    return execSync(
-      `"${uvPath}" run --directory "${kissProject}" python -c "from kiss.core.models.model_info import get_default_model; print(get_default_model())"`,
+    // H1 — argv-form so quotes / shell metacharacters in either path
+    // (both come from user-controlled HOME / settings) cannot inject.
+    return execFileSync(
+      uvPath,
+      ['run', '--directory', kissProject, 'python', '-c',
+       'from kiss.core.models.model_info import get_default_model; ' +
+       'print(get_default_model())'],
       {encoding: 'utf-8', timeout: 15_000, stdio: ['ignore', 'pipe', 'ignore']},
     ).trim();
   } catch {
@@ -431,10 +634,16 @@ function restartKissWebDaemon(kissProjectPath: string): void {
 
   const binDir = path.join(HOME_DIR, '.local', 'bin');
 
-  // Kill existing kiss-web and cloudflared processes before restarting
+  // Kill existing kiss-web and cloudflared processes before restarting.
+  // Use ``pkill -x`` (exact comm match) and pass the name as a separate
+  // argv element via ``execFileSync`` so the shell never interpolates
+  // the value.  We deliberately avoid the substring-match flag, which
+  // would otherwise kill unrelated processes (e.g. a user editing
+  // kiss-web.py in another VS Code window).
   for (const procName of ['kiss-web', 'cloudflared']) {
     try {
-      execSync(`pkill -f "${procName}"`, {stdio: 'ignore', timeout: 5000});
+      execFileSync('pkill', ['-x', procName],
+                   {stdio: 'ignore', timeout: 5000});
     } catch {
       /* no matching process — ok */
     }
@@ -460,58 +669,73 @@ function restartKissWebDaemon(kissProjectPath: string): void {
     log('Restarting kiss-web macOS LaunchAgent...');
     try {
       fs.mkdirSync(plistDir, {recursive: true});
+      // XML-escape every interpolated path so that paths containing
+      // ``&``, ``<``, ``>``, ``"`` or ``'`` cannot corrupt the plist
+      // structure or inject alternate ProgramArguments via XML entities.
+      const xLabel = xmlEscape(plistLabel);
+      const xBin = xmlEscape(kissWebBin);
+      const xProj = xmlEscape(kissProjectPath);
+      const xLogDir = xmlEscape(LOG_DIR);
+      const xPath = xmlEscape(
+        `/opt/homebrew/bin:${binDir}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`,
+      );
       const plistContent = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>${plistLabel}</string>
+    <string>${xLabel}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>${kissWebBin}</string>
+        <string>${xBin}</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>${kissProjectPath}</string>
+    <string>${xProj}</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>${LOG_DIR}/kiss-web-stdout.log</string>
+    <string>${xLogDir}/kiss-web-stdout.log</string>
     <key>StandardErrorPath</key>
-    <string>${LOG_DIR}/kiss-web-stderr.log</string>
+    <string>${xLogDir}/kiss-web-stderr.log</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/opt/homebrew/bin:${binDir}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <string>${xPath}</string>
     </dict>
 </dict>
 </plist>`;
 
       fs.writeFileSync(plistFile, plistContent);
 
-      // Unload existing service if present, then bootstrap the new one
-      const uid = execSync('id -u', {encoding: 'utf-8'}).trim();
+      // Unload existing service if present, then bootstrap the new one.
+      // H1 — pass paths as separate argv entries via execFileSync so a
+      // plistFile path containing single/double quotes or shell
+      // metacharacters (HOME_DIR is user-controlled) cannot inject
+      // arbitrary shell commands.
+      const uid = execFileSync('id', ['-u'], {encoding: 'utf-8'}).trim();
       try {
-        execSync(`launchctl bootout gui/${uid}/${plistLabel}`, {
-          stdio: 'ignore',
-          timeout: 5000,
-        });
+        execFileSync(
+          'launchctl', ['bootout', `gui/${uid}/${plistLabel}`],
+          {stdio: 'ignore', timeout: 5000},
+        );
       } catch {
         /* not loaded — ok */
       }
       try {
-        execSync(`launchctl bootstrap gui/${uid} "${plistFile}"`, {
-          stdio: 'ignore',
-          timeout: 5000,
-        });
+        execFileSync(
+          'launchctl', ['bootstrap', `gui/${uid}`, plistFile],
+          {stdio: 'ignore', timeout: 5000},
+        );
       } catch {
-        // Fall back to older load command
-        execSync(`launchctl load -w "${plistFile}"`, {
-          stdio: 'ignore',
-          timeout: 5000,
-        });
+        // Fall back to older load command — same argv-form to avoid
+        // shell interpolation of plistFile.
+        execFileSync(
+          'launchctl', ['load', '-w', plistFile],
+          {stdio: 'ignore', timeout: 5000},
+        );
       }
       log(`kiss-web macOS LaunchAgent restarted: ${plistFile}`);
     } catch (err) {
@@ -526,6 +750,12 @@ function restartKissWebDaemon(kissProjectPath: string): void {
     log('Restarting kiss-web systemd user service...');
     try {
       fs.mkdirSync(systemdDir, {recursive: true});
+      // unit-escape every interpolated path so that backslashes / newlines
+      // / percent signs in user paths cannot corrupt the unit.
+      const uBin = unitEscape(kissWebBin);
+      const uProj = unitEscape(kissProjectPath);
+      const uPath = unitEscape(`${binDir}:/usr/local/bin:/usr/bin:/bin`);
+      const uLogDir = unitEscape(LOG_DIR);
       const serviceContent = `[Unit]
 Description=KISS Sorcar Remote Web Server
 After=network-online.target
@@ -533,13 +763,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=${kissWebBin}
-WorkingDirectory=${kissProjectPath}
+ExecStart=${uBin}
+WorkingDirectory=${uProj}
 Restart=always
 RestartSec=5
-Environment=PATH=${binDir}:/usr/local/bin:/usr/bin:/bin
-StandardOutput=append:${LOG_DIR}/kiss-web-stdout.log
-StandardError=append:${LOG_DIR}/kiss-web-stderr.log
+Environment=PATH=${uPath}
+StandardOutput=append:${uLogDir}/kiss-web-stdout.log
+StandardError=append:${uLogDir}/kiss-web-stderr.log
 
 [Install]
 WantedBy=default.target
@@ -556,7 +786,9 @@ WantedBy=default.target
       // Enable lingering so service runs without active login session
       const username = os.userInfo().username;
       try {
-        execSync(`loginctl enable-linger "${username}"`, {
+        // H1 — argv-form so a username with shell metacharacters cannot
+        // inject commands.
+        execFileSync('loginctl', ['enable-linger', username], {
           stdio: 'ignore',
           timeout: 5000,
         });
@@ -683,14 +915,28 @@ async function installUv(): Promise<string | null> {
           `Remove-Item -Force '${zipPath}'; Remove-Item -Recurse -Force '${path.join(installDir, assetName)}'"`,
       );
     } else {
-      // macOS/Linux: download tar.gz and extract with tar, then move binaries
-      await execPromise(
-        `curl -fsSL '${url}' | tar xz -C '${installDir}' && ` +
-          `mv -f '${path.join(installDir, assetName, 'uv')}' '${installDir}/' && ` +
-          `mv -f '${path.join(installDir, assetName, 'uvx')}' '${installDir}/' && ` +
-          `rm -rf '${path.join(installDir, assetName)}' && ` +
-          `chmod +x '${path.join(installDir, 'uv')}' '${path.join(installDir, 'uvx')}'`,
-      );
+      // macOS/Linux: download tar.gz and extract with tar (no shell so
+      // that ``HOME`` containing single-quotes can never inject shell
+      // commands).  Verify SHA256 against the vendor sidecar before
+      // extracting so a corrupted/MITM'd download is rejected.
+      const tarPath = path.join(installDir, `${assetName}.${asset.ext}`);
+      await downloadFile(url, tarPath);
+      const expectedHash = await fetchUvStyleSha256(url);
+      await verifyDownloadHash(tarPath, expectedHash);
+      // Extract with argv-form spawn — no shell.
+      await spawnPromise('tar', ['xzf', tarPath, '-C', installDir]);
+      // Move uv / uvx into installDir, then remove the extracted folder.
+      const extractedDir = path.join(installDir, assetName);
+      for (const bin of ['uv', 'uvx']) {
+        const src = path.join(extractedDir, bin);
+        const dst = path.join(installDir, bin);
+        try { fs.unlinkSync(dst); } catch { /* not present */ }
+        fs.renameSync(src, dst);
+        fs.chmodSync(dst, 0o755);
+      }
+      try { fs.rmSync(extractedDir, {recursive: true, force: true}); }
+      catch { /* ignore */ }
+      try { fs.unlinkSync(tarPath); } catch { /* ignore */ }
     }
 
     log('uv installed successfully');
@@ -716,7 +962,9 @@ function checkPythonVersion(
   cwd: string,
 ): 'ok' | 'too_old' | 'error' {
   try {
-    const output = execSync(`"${uvPath}" run python --version`, {
+    // H1 — argv-form so a uvPath containing quotes or shell
+    // metacharacters cannot inject commands.
+    const output = execFileSync(uvPath, ['run', 'python', '--version'], {
       cwd,
       encoding: 'utf-8',
       timeout: 30_000,
@@ -789,7 +1037,9 @@ function isChromiumInstalled(): boolean {
  */
 function commandExists(cmd: string): boolean {
   try {
-    execSync(process.platform === 'win32' ? `where ${cmd}` : `which ${cmd}`, {
+    // H1 — argv-form so a caller-supplied ``cmd`` containing shell
+    // metacharacters cannot inject extra commands.
+    execFileSync(process.platform === 'win32' ? 'where' : 'which', [cmd], {
       stdio: 'ignore',
     });
     return true;
@@ -1015,9 +1265,18 @@ async function installNode(): Promise<boolean> {
   try {
     const installDir = path.join(HOME_DIR, '.local');
     fs.mkdirSync(installDir, {recursive: true});
-    await execPromise(
-      `curl -fsSL '${url}' | tar xz -C '${installDir}' --strip-components=1`,
+    // Download with the Node ``https`` module (no shell), verify the
+    // SHA256 against ``SHASUMS256.txt`` from nodejs.org, and extract
+    // with argv-form ``tar`` (no shell).
+    const tarPath = path.join(installDir, `${assetName}.tar.gz`);
+    await downloadFile(url, tarPath);
+    const expectedHash = await fetchNodeSha256(`${assetName}.tar.gz`);
+    await verifyDownloadHash(tarPath, expectedHash);
+    await spawnPromise(
+      'tar',
+      ['xzf', tarPath, '-C', installDir, '--strip-components=1'],
     );
+    try { fs.unlinkSync(tarPath); } catch { /* ignore */ }
     log('Node.js installed successfully');
     return commandExists('node');
   } catch (err) {

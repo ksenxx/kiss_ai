@@ -12,6 +12,51 @@
     return Number(n).toLocaleString('en-US');
   }
 
+  /**
+   * Sanitize an HTML string before assigning to innerHTML.
+   *
+   * Strips dangerous tags (script/iframe/object/embed/form/meta/link/style/
+   * base), all event-handler attributes (onclick, onerror, ...) and
+   * javascript:/data:/vbscript: URLs in href/src/action.  Used to wrap every
+   * marked.parse() result that flows into innerHTML so that agent-supplied
+   * markdown can never inject script/iframe/form via the webview.
+   */
+  function kissSanitize(html) {
+    const t = document.createElement('template');
+    t.innerHTML = String(html == null ? '' : html);
+    const BAD_TAGS = new Set([
+      'SCRIPT', 'IFRAME', 'OBJECT', 'EMBED', 'FORM', 'META', 'LINK',
+      'STYLE', 'BASE', 'FRAME', 'FRAMESET',
+    ]);
+    const URL_ATTRS = new Set(['href', 'src', 'action', 'formaction',
+                               'xlink:href']);
+    const walk = (root) => {
+      const elements = Array.from(root.querySelectorAll('*'));
+      for (const el of elements) {
+        if (BAD_TAGS.has(el.tagName)) {
+          el.remove();
+          continue;
+        }
+        for (const attr of Array.from(el.attributes)) {
+          const name = attr.name.toLowerCase();
+          // Strip every event-handler attribute (onclick, onerror, ...).
+          if (name.startsWith('on')) {
+            el.removeAttribute(attr.name);
+            continue;
+          }
+          if (URL_ATTRS.has(name)) {
+            const v = (attr.value || '').trim();
+            if (/^(javascript|data|vbscript):/i.test(v)) {
+              el.removeAttribute(attr.name);
+            }
+          }
+        }
+      }
+    };
+    walk(t.content);
+    return t.innerHTML;
+  }
+
   // State — isRunning mirrors the active tab's tab.isRunning for UI controls
   let isRunning = false;
   let selectedModel = '';
@@ -1470,7 +1515,7 @@
         if (tState.txtEl) {
           if (typeof marked !== 'undefined') {
             tState.txtEl.classList.add('md-body');
-            tState.txtEl.innerHTML = marked.parse(tState.txtBuf || '');
+            tState.txtEl.innerHTML = kissSanitize(marked.parse(tState.txtBuf || ''));
             hlBlock(tState.txtEl);
           }
           tState.txtEl = null;
@@ -1615,7 +1660,7 @@
         if (ev.summary) {
           const sum = (ev.summary || '').replace(/\n{3,}/g, '\n\n').trim();
           if (typeof marked !== 'undefined') {
-            rb += marked.parse(sum);
+            rb += kissSanitize(marked.parse(sum));
             usePre = false;
           } else {
             rb += esc(sum);
@@ -1655,7 +1700,7 @@
         const el = mkEl('div', 'ev ' + cls);
         const body =
           typeof marked !== 'undefined'
-            ? marked.parse(ev.text || '')
+            ? kissSanitize(marked.parse(ev.text || ''))
             : esc(ev.text || '');
         el.innerHTML =
           '<div class="' +
@@ -3921,7 +3966,7 @@
   function setAskQuestionTextForTab(tab, text) {
     const t = text || '';
     if (typeof marked !== 'undefined') {
-      tab.askQuestionEl.innerHTML = marked.parse(t);
+      tab.askQuestionEl.innerHTML = kissSanitize(marked.parse(t));
       tab.askQuestionEl.classList.add('md-body');
       hlBlock(tab.askQuestionEl);
     } else {

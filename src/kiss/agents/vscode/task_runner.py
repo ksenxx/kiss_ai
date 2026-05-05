@@ -459,14 +459,19 @@ class _TaskRunnerMixin:
         with self._state_lock:
             tab = self._tab_states.get(tab_id) if tab_id is not None else None
             q = tab.user_answer_queue if tab is not None else None
+        # M4 — when the tab has no answer queue (e.g. the tab was closed
+        # mid-question) there is no path that can ever return a response.
+        # Refuse to busy-loop forever; raise immediately so the agent
+        # thread can unwind and the user-facing task can finish.
+        if q is None:
+            raise KeyboardInterrupt(
+                "User answer queue is missing (tab closed?); aborting wait",
+            )
         while True:
-            if q is not None:
-                try:
-                    return q.get(timeout=0.5)
-                except queue.Empty:
-                    pass
-            else:
-                stop.wait(timeout=0.5)
+            try:
+                return q.get(timeout=0.5)
+            except queue.Empty:
+                pass
             if stop.is_set():
                 raise KeyboardInterrupt("Stopped while waiting for user")
 

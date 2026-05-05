@@ -33,17 +33,29 @@ function isValidKissProject(dir: string): boolean {
  * 3. Embedded kiss_project directory bundled with the extension
  */
 export function findKissProject(): string | null {
-  // 1. Environment variable (highest priority — explicit user/Docker override)
-  const envPath = process.env.KISS_PROJECT_PATH;
-  if (envPath && isValidKissProject(envPath)) return envPath;
+  // H5 — only honour explicit workspace-scoped overrides (env var or
+  // setting) inside a *trusted* workspace.  A malicious workspace's
+  // .vscode/settings.json must not be able to redirect the agent
+  // process at attacker-controlled code, since the agent later runs
+  // arbitrary shell commands on user request.  When the workspace is
+  // not trusted, we fall back to the bundled embedded project.
+  const isTrusted = vscode.workspace.isTrusted;
 
-  // 2. Check configuration setting
-  const configPath = vscode.workspace
-    .getConfiguration('kissSorcar')
-    .get<string>('kissProjectPath');
-  if (configPath && isValidKissProject(configPath)) return configPath;
+  if (isTrusted) {
+    // 1. Environment variable (highest priority — explicit user/Docker override)
+    const envPath = process.env.KISS_PROJECT_PATH;
+    if (envPath && isValidKissProject(envPath)) return envPath;
+
+    // 2. Check configuration setting
+    const configPath = vscode.workspace
+      .getConfiguration('kissSorcar')
+      .get<string>('kissProjectPath');
+    if (configPath && isValidKissProject(configPath)) return configPath;
+  }
 
   // 3. Embedded kiss_project bundled inside the extension directory
+  // (always allowed; this is shipped with the extension and trusted by
+  //  installation).
   const embeddedPath = path.join(__dirname, '..', 'kiss_project');
   if (isValidKissProject(embeddedPath)) return embeddedPath;
 
@@ -91,6 +103,13 @@ export function findUvBinary(): string {
 // ---------------------------------------------------------------------------
 // AgentProcess class
 // ---------------------------------------------------------------------------
+
+/**
+ * Maximum size of the per-line stdout buffer for the Python backend.
+ * If a single JSON line ever exceeds this limit the process is killed
+ * to avoid OOMing the extension host (M3 — robustness fix).
+ */
+const MAX_STDOUT_BUFFER_BYTES = 32 * 1024 * 1024; // 32 MB
 
 export class AgentProcess extends EventEmitter {
   private process: ChildProcess | null = null;
@@ -191,6 +210,19 @@ export class AgentProcess extends EventEmitter {
    */
   private handleStdout(data: string): void {
     this.buffer += data;
+    // M3: cap the unparsed-line buffer.  A backend that emits one huge
+    // JSON line with no newline would otherwise grow the buffer until
+    // the extension host runs out of memory.
+    if (this.buffer.length > MAX_STDOUT_BUFFER_BYTES) {
+      console.error(
+        '[AgentProcess] stdout buffer exceeded limit ' +
+          `(${this.buffer.length} > ${MAX_STDOUT_BUFFER_BYTES}); ` +
+          'killing the agent.',
+      );
+      this.buffer = '';
+      this.dispose();
+      return;
+    }
     const lines = this.buffer.split('\n');
     // Keep the last incomplete line in the buffer
     this.buffer = lines.pop() || '';

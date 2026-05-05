@@ -8,6 +8,25 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+
+/**
+ * Return true when *target* (already resolved) is the same as *root* or
+ * lives strictly inside *root* (after resolving symlinks).  Used to
+ * defend against path-traversal in webview-supplied paths.
+ *
+ * H4 — guards every webview→extension file open call site.
+ */
+function isPathInside(target: string, root: string): boolean {
+  const rt = path.resolve(root);
+  const tg = path.resolve(target);
+  if (tg === rt) return true;
+  const rel = path.relative(rt, tg);
+  return (
+    rel.length > 0 &&
+    !rel.startsWith('..') &&
+    !path.isAbsolute(rel)
+  );
+}
 import {AgentProcess} from './AgentProcess';
 import {MergeManager} from './MergeManager';
 import {getDefaultModel} from './DependencyInstaller';
@@ -665,7 +684,14 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         if (trimmed && !trimmed.includes('\n')) {
           const bare = trimmed.replace(/^PWD[/\\]/, '');
           const resolved = path.resolve(effectiveWorkDir, bare);
-          if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
+          // H4 — only treat as a file shortcut when the resolved path is
+          // strictly inside the work dir; otherwise fall through and let
+          // the prompt run as a normal task.
+          if (
+            isPathInside(resolved, effectiveWorkDir) &&
+            fs.existsSync(resolved) &&
+            fs.statSync(resolved).isFile()
+          ) {
             const uri = vscode.Uri.file(resolved);
             const doc = await vscode.workspace.openTextDocument(uri);
             await vscode.window.showTextDocument(doc, {
@@ -802,8 +828,24 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
       case 'openFile':
         if (message.path) {
-          const filePath = path.resolve(this._getWorkDir(), message.path);
-          if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+          const wd = this._getWorkDir();
+          const filePath = path.resolve(wd, message.path);
+          // H4 — refuse to open files outside the workspace.  Use
+          // path.relative so symlinks/normalised paths are compared
+          // properly; isPathInside() avoids prefix-match false
+          // positives like "/wd-evil" matching "/wd".
+          if (
+            !isPathInside(filePath, wd) ||
+            !fs.existsSync(filePath) ||
+            !fs.statSync(filePath).isFile()
+          ) {
+            console.warn(
+              '[SorcarSidebarView] refusing to open file outside workspace:',
+              message.path,
+            );
+            break;
+          }
+          {
             const uri = vscode.Uri.file(filePath);
             const doc = await vscode.workspace.openTextDocument(uri);
             const editor = await vscode.window.showTextDocument(doc, {
