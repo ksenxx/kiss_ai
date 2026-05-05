@@ -3,6 +3,7 @@
 set -e
 
 REPO_URL="https://github.com/ksenxx/kiss.git"
+REPO_URL_FALLBACK="https://github.com/ksenxx/kiss_ai.git"
 REPO_DIR="/home/kiss"
 
 info() { printf '\033[0;32m[INFO]\033[0m  %s\n' "$*"; }
@@ -26,7 +27,10 @@ fi
 # ---------------------------------------------------------------------------
 if [ ! -d "$REPO_DIR/.git" ]; then
     step "Cloning $REPO_URL to $REPO_DIR..."
-    git clone "$REPO_URL" "$REPO_DIR"
+    if ! git clone "$REPO_URL" "$REPO_DIR"; then
+        step "Primary URL failed — trying fallback $REPO_URL_FALLBACK..."
+        git clone "$REPO_URL_FALLBACK" "$REPO_DIR"
+    fi
 else
     step "Repo exists at $REPO_DIR — pulling latest..."
     cd "$REPO_DIR" && git pull || true
