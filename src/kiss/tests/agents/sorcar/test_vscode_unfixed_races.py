@@ -322,19 +322,32 @@ class TestRefreshFileCacheRaceStructural(unittest.TestCase):
     """_refresh_file_cache and _get_files share _file_cache across threads."""
 
     def test_refresh_writes_outside_get_files_scan(self) -> None:
-        """The background refresh thread and _get_files main-thread scan
-        can interleave, with the stale scan potentially overwriting
-        the fresh cache.  _get_files has a double-check pattern, but
-        the race window still exists between the two lock acquisitions.
+        """After the H9 fix, the original race is resolved.
+
+        Previously _get_files scanned the filesystem synchronously when
+        the cache was empty, which raced with the background refresh
+        thread overwriting the same _file_cache attribute.  The H9 fix
+        removed the synchronous scan from _get_files and routed all
+        scanning through _refresh_file_cache, which acquires
+        _state_lock when assigning to self._file_cache.
+
+        This test pins the new architecture: _get_files MUST NOT call
+        _scan_files directly (only via _refresh_file_cache), and
+        _refresh_file_cache MUST run scanning in a background Thread
+        and assign the cache under the state lock.
         """
         import inspect
 
         src = inspect.getsource(VSCodeServer._get_files)
-        self.assertIn("_scan_files", src)
-        self.assertIn("self._file_cache is None", src)
+        # _get_files MUST NOT scan synchronously anymore (H9).
+        self.assertNotIn("_scan_files", src)
+        self.assertIn("self._file_cache", src)
+        # When cache is empty, must delegate to the background refresh.
+        self.assertIn("_refresh_file_cache", src)
 
         src_refresh = inspect.getsource(VSCodeServer._refresh_file_cache)
         self.assertIn("Thread", src_refresh)
+        self.assertIn("_scan_files", src_refresh)
         self.assertIn("self._file_cache = result", src_refresh)
 
 

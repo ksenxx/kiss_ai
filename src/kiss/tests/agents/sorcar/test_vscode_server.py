@@ -3612,8 +3612,15 @@ class TestSidebarViewBehavior(unittest.TestCase):
 
         m = re.search(r"case\s+'openFile':", self._sidebar_ts)
         assert m
-        end = self._sidebar_ts.index("break;", m.end())
-        block = self._sidebar_ts[m.start() : end]
+        # Find the end of this case by matching the next `case ...:`
+        # marker.  Cannot stop at the first `break;` because the H4
+        # path-traversal guard introduced an early-return break inside
+        # the case body.
+        next_case = re.search(
+            r"case\s+'\w+':", self._sidebar_ts[m.end():],
+        )
+        assert next_case
+        block = self._sidebar_ts[m.start() : m.end() + next_case.start()]
         assert "message.line" in block
         assert "revealRange" in block
 

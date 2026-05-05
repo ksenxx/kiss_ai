@@ -152,13 +152,31 @@ class _AutocompleteMixin:
         event ranked for that prefix once the scan finishes.  This lets
         callers (``_get_files``) kick off a non-blocking refresh and
         still deliver suggestions to the UI.
+
+        Race protection: when invoked from ``_get_files`` (i.e.
+        ``then_emit_for_prefix is not None``, meaning the cache was
+        empty at the call site), this preserves the original double-
+        check pattern from commit ``e49d867c`` — the scan result is
+        only published if the cache is still empty when the scan
+        finishes.  This prevents a slow scan from clobbering a fresher
+        result published by a concurrent refresh thread.  Explicit
+        refresh requests (``then_emit_for_prefix is None``) overwrite
+        unconditionally, matching their callers' intent (the user just
+        asked for a refresh).
         """
         from kiss.agents.vscode.diff_merge import _scan_files
+
+        only_if_empty = then_emit_for_prefix is not None
 
         def _do_refresh() -> None:
             result = _scan_files(self.work_dir)
             with self._state_lock:
-                self._file_cache = result
+                if only_if_empty and self._file_cache is not None:
+                    # A concurrent writer published a fresher value
+                    # while we were scanning — emit theirs, not ours.
+                    result = self._file_cache
+                else:
+                    self._file_cache = result
             if then_emit_for_prefix is not None:
                 usage = _load_file_usage()
                 ranked = rank_file_suggestions(
