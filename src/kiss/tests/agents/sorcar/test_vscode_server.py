@@ -1876,7 +1876,10 @@ class TestBashPanelCollapsibleJS(unittest.TestCase):
     def test_mks_has_last_tool_call_el(self) -> None:
         """mkS() initializes lastToolCallEl to null."""
         idx = self._js.index("function mkS()")
-        block = self._js[idx : idx + 200]
+        # Read until the closing `};` of mkS()'s returned object literal so
+        # that the assertion is order-independent within the function body.
+        end = self._js.index("};", idx)
+        block = self._js[idx:end]
         assert "lastToolCallEl: null" in block
 
 
@@ -2472,7 +2475,7 @@ class TestSorcarSidebarViewMessageHandling(unittest.TestCase):
             "closeTab", "getWelcomeSuggestions",
             "webviewFocusChanged", "autocommitAction", "setSkipMerge",
             "getConfig", "saveConfig", "deleteTask", "getFrequentTasks",
-            "pickFolder",
+            "pickFolder", "sizeReport",
         }
         extra = sidebar_cases - known
         assert not extra, f"Sidebar has extra message handlers: {extra}"
