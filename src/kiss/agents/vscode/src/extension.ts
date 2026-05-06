@@ -277,22 +277,25 @@ export function activate(context: vscode.ExtensionContext): void {
     });
   }
 
-  // Reset firstLaunchDone when the extension was just rebuilt/reinstalled
-  // (marker written by build-extension.sh) so the sidebar auto-opens on
-  // this activation.  VS Code remembers the layout across restarts, so
-  // the sidebar stays visible after the pending "Restart VS Code" reload.
+  // Decide whether to auto-open the secondary sidebar.
+  // True on first-ever launch (firstLaunchDone is undefined) or after a
+  // rebuild/reinstall (marker written by build-extension.sh).  We use a
+  // local boolean because globalState.update() is async and the get()
+  // below would still see the stale value.
   const extensionUpdatedMarker = path.join(
     os.homedir(),
     '.kiss',
     '.extension-updated',
   );
+  let shouldAutoOpen = !context.globalState.get<boolean>('firstLaunchDone');
   if (fs.existsSync(extensionUpdatedMarker)) {
+    shouldAutoOpen = true;
     void context.globalState.update('firstLaunchDone', undefined);
   }
 
   // On first launch after install, auto-open the secondary sidebar chat
   // and focus the input so the user can start typing immediately.
-  if (!context.globalState.get<boolean>('firstLaunchDone')) {
+  if (shouldAutoOpen) {
     setTimeout(async () => {
       await sidebarView!.focusChatInput();
       await context.globalState.update('firstLaunchDone', true);
