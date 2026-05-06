@@ -443,6 +443,10 @@ find_code_cli() {
         if find_code_cli && [ -n "$CODE_CLI" ]; then
             "$CODE_CLI" --install-extension "$VSIX" --force 2>&1
             echo "   Extension installed into VS Code"
+            # Write marker so the running extension (if VS Code is open)
+            # detects the update and reloads.  Also used by
+            # ensureDependencies() to bypass the early-exit guard.
+            date -u +%Y-%m-%dT%H:%M:%SZ > "$HOME/.kiss/.extension-updated"
         else
             echo "   WARNING: VS Code CLI not found — skipping extension install"
             echo "   To install manually: code --install-extension $VSIX --force"
