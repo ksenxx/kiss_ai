@@ -273,6 +273,9 @@ install_local_extension() {
         print_step "Installing extension into VS Code..."
         if "$code_cli" --install-extension "$vsix_path" --force 2>&1; then
             print_info "Extension installed into VS Code"
+            # Write marker so the running extension detects the update and reloads.
+            mkdir -p "$HOME/.kiss"
+            date -u +%Y-%m-%dT%H:%M:%SZ > "$HOME/.kiss/.extension-updated"
         else
             print_warn "Failed to install extension into VS Code — continuing"
         fi
