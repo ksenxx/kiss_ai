@@ -227,14 +227,46 @@ export function activate(context: vscode.ExtensionContext): void {
   // Auto-reload when this extension's files are replaced (e.g. VSIX reinstall).
   // fs.watchFile uses stat-polling so it works even when the file is deleted
   // and recreated, which is what happens during VSIX installation.
+  //
+  // Two watchers are needed:
+  //   1. extension.js — fires when the VSIX is reinstalled with the *same*
+  //      version (files overwritten in-place).
+  //   2. ~/.kiss/.extension-updated marker — fires when build-extension.sh
+  //      (or install.sh / release.sh) writes the marker *after* installing a
+  //      *new* version.  A version bump puts the new extension in a separate
+  //      directory, so the old extension.js is never modified and watcher #1
+  //      never fires.
+  let reloadTriggered = false;
+  const triggerReload = () => {
+    if (reloadTriggered) return;
+    reloadTriggered = true;
+    fs.unwatchFile(extJsPath);
+    fs.unwatchFile(markerPath);
+    vscode.commands.executeCommand('workbench.action.reloadWindow');
+  };
+
   const extJsPath = path.join(context.extensionPath, 'out', 'extension.js');
   fs.watchFile(extJsPath, {interval: 2000}, (curr, prev) => {
     if (curr.mtimeMs !== prev.mtimeMs || curr.ino !== prev.ino) {
-      fs.unwatchFile(extJsPath);
-      vscode.commands.executeCommand('workbench.action.reloadWindow');
+      triggerReload();
     }
   });
-  context.subscriptions.push({dispose: () => fs.unwatchFile(extJsPath)});
+
+  const markerPath = path.join(os.homedir(), '.kiss', '.extension-updated');
+  fs.watchFile(markerPath, {interval: 2000}, (curr, prev) => {
+    // Only reload when the marker is *created* or *modified* (size > 0),
+    // not when ensureDependencies() deletes it (size === 0).
+    if (curr.size > 0 && curr.mtimeMs !== prev.mtimeMs) {
+      triggerReload();
+    }
+  });
+
+  context.subscriptions.push({
+    dispose: () => {
+      fs.unwatchFile(extJsPath);
+      fs.unwatchFile(markerPath);
+    },
+  });
 
   // Register tree view so the activity-bar icon opens the sidebar on click.
   const treeView = vscode.window.createTreeView('kissSorcar.chatView', {
