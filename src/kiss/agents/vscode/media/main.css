@@ -980,6 +980,7 @@ body.remote-chat #welcome > #input-area {
 #frequent-list {
   flex: 1;
   overflow-y: auto;
+  scrollbar-width: thin;
   margin-top: 8px;
 }
 
