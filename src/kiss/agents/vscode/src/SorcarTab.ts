@@ -232,7 +232,7 @@ export function buildChatHtml(
             Use web browser
           </label>
           <label class="config-label">Remote password
-            <input type="password" id="cfg-remote-password" placeholder="Remote access password">
+            <input type="text" id="cfg-remote-password" placeholder="Remote access password">
           </label>
           <label class="config-label">Working directory
             <div style="display:flex;gap:4px;align-items:center;">
