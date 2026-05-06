@@ -47,7 +47,7 @@ class _CommandsMixin:
         def _get_history(
             self, query: str | None, offset: int = 0, generation: int = 0
         ) -> None: ...
-        def _get_frequent_tasks(self, limit: int = 20) -> None: ...
+        def _get_frequent_tasks(self, limit: int = 50) -> None: ...
         def _get_files(self, prefix: str) -> None: ...
         def _refresh_file_cache(
             self, then_emit_for_prefix: str | None = None,
@@ -122,8 +122,8 @@ class _CommandsMixin:
         self._get_history(cmd.get("query"), cmd.get("offset", 0), cmd.get("generation", 0))
 
     def _cmd_get_frequent_tasks(self, cmd: dict[str, Any]) -> None:
-        """Send the top-N most-frequent tasks (default 20)."""
-        self._get_frequent_tasks(int(cmd.get("limit", 20)))
+        """Send the top-N most-frequent tasks (default 50)."""
+        self._get_frequent_tasks(int(cmd.get("limit", 50)))
 
     def _cmd_delete_task(self, cmd: dict[str, Any]) -> None:
         """Delete a task from the database and refresh history."""

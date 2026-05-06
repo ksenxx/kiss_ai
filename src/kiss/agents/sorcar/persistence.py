@@ -831,7 +831,7 @@ def _record_frequent_task(task: str) -> None:
         db.commit()
 
 
-def _load_frequent_tasks(limit: int = 20) -> list[dict[str, object]]:
+def _load_frequent_tasks(limit: int = 50) -> list[dict[str, object]]:
     """Return the top *limit* most-frequent tasks (highest count first).
 
     On a tie in ``count``, the more recently used task (larger
