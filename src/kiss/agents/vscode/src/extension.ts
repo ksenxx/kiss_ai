@@ -4,6 +4,7 @@
 
 import * as vscode from 'vscode';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import {SorcarSidebarView} from './SorcarSidebarView';
 
@@ -274,6 +275,19 @@ export function activate(context: vscode.ExtensionContext): void {
         await context.globalState.update('sidebarWidened', true);
       }, 500);
     });
+  }
+
+  // Reset firstLaunchDone when the extension was just rebuilt/reinstalled
+  // (marker written by build-extension.sh) so the sidebar auto-opens on
+  // this activation.  VS Code remembers the layout across restarts, so
+  // the sidebar stays visible after the pending "Restart VS Code" reload.
+  const extensionUpdatedMarker = path.join(
+    os.homedir(),
+    '.kiss',
+    '.extension-updated',
+  );
+  if (fs.existsSync(extensionUpdatedMarker)) {
+    void context.globalState.update('firstLaunchDone', undefined);
   }
 
   // On first launch after install, auto-open the secondary sidebar chat
