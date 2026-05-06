@@ -262,7 +262,7 @@ class VSCodeServer(
             "chatHasMoreTasks": _chat_has_tasks(chat_id),
         })
 
-    def _get_frequent_tasks(self, limit: int = 20) -> None:
+    def _get_frequent_tasks(self, limit: int = 50) -> None:
         """Send the top *limit* most-frequent tasks (highest count first).
 
         Broadcasts a ``frequentTasks`` event whose ``tasks`` field is a
