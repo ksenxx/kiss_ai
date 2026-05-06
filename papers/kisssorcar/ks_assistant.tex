@@ -593,6 +593,7 @@ Skip for simple single-file tasks.
 
 %......................................................................
 \subsection{Testing Instructions}
+\label{app:testing}
 %......................................................................
 
 The testing section is perhaps the most opinionated:
@@ -622,6 +623,7 @@ The testing section is perhaps the most opinionated:
 
 %......................................................................
 \subsection{Self-Improvement Loop}
+\label{app:self-improvement}
 %......................................................................
 
 The agent maintains a preferences file that captures user invariants discovered during task execution:
@@ -644,6 +646,7 @@ Read PWD/USER_PREFS.md at task start. Update with user preferences/invariants (n
 
 %......................................................................
 \subsection{Pre-Finish Verification}
+\label{app:prefinish}
 %......................................................................
 
 Before declaring a task complete, the agent must pass a structured verification checklist:
@@ -697,6 +700,7 @@ The login instruction addresses a practical obstacle in web research: many websi
 
 %......................................................................
 \subsection{File Browsing Protocol}
+\label{app:file-browsing}
 %......................................................................
 
 When a task requires understanding multiple source files before making changes, the prompt prescribes the same two-phase collect-then-synthesize discipline used for web research, but applied to the local file system:
