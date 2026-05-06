@@ -1140,11 +1140,16 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   /** Focus the chat input in the sidebar. */
   public async focusChatInput(): Promise<void> {
     if (!this._view) {
-      // Webview not yet resolved — trigger resolution by focusing the view
+      // Webview not yet resolved — trigger resolution by focusing the view.
+      // The .focus command opens the secondary sidebar and resolves the
+      // webview, but resolution can be slow on first launch.  Poll up to
+      // 2 seconds (10 × 200ms) so we don't miss it.
       await vscode.commands.executeCommand(
         'kissSorcar.chatViewSecondary.focus',
       );
-      await new Promise(r => setTimeout(r, 200));
+      for (let i = 0; i < 10 && !this._view; i++) {
+        await new Promise(r => setTimeout(r, 200));
+      }
     }
     if (this._view) {
       this._view.show(true);
