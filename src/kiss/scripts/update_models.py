@@ -29,7 +29,39 @@ from urllib.request import Request, urlopen
 
 logger = logging.getLogger(__name__)
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+_EXPECTED_SUBPATH = Path("src") / "kiss" / "core" / "models" / "model_info.py"
+
+
+def _find_project_root() -> Path:
+    """Find the project root directory for writing model_info.py.
+
+    Checks in order:
+    1. KISS_WORKDIR environment variable (set by the KISS agent runtime)
+    2. Current working directory if it contains a .git directory and the
+       expected source structure
+    3. __file__-based resolution (fallback for direct invocation)
+
+    This avoids a bug where running from the VS Code extension's bundled
+    copy of the project would write to the extension directory instead of
+    the actual source repository.
+    """
+    # 1. KISS_WORKDIR env var — set by the agent runtime
+    workdir = os.environ.get("KISS_WORKDIR", "")
+    if workdir:
+        p = Path(workdir)
+        if (p / _EXPECTED_SUBPATH).exists():
+            return p
+
+    # 2. CWD with .git marker (a real git checkout, not a bundled copy)
+    cwd = Path.cwd()
+    if (cwd / ".git").exists() and (cwd / _EXPECTED_SUBPATH).exists():
+        return cwd
+
+    # 3. Fallback: derive from script location
+    return Path(__file__).resolve().parent.parent.parent.parent
+
+
+PROJECT_ROOT = _find_project_root()
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 MODEL_INFO_PATH = PROJECT_ROOT / "src" / "kiss" / "core" / "models" / "model_info.py"
