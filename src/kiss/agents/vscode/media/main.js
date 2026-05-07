@@ -2986,19 +2986,8 @@
     sendBtn.style.display = 'flex';
     stopBtn.style.display = running ? 'flex' : 'none';
 
-    if (uploadBtn) uploadBtn.disabled = running;
-    if (autocommitBtn) autocommitBtn.disabled = running;
-    if (worktreeToggleBtn) worktreeToggleBtn.disabled = running;
-    if (parallelToggleBtn) parallelToggleBtn.disabled = running;
-    if (demoToggleBtn) demoToggleBtn.disabled = running;
-    const mb = document.getElementById('menu-btn');
-    if (mb) mb.disabled = running;
     const md = document.getElementById('menu-dropdown');
     if (running && md) md.classList.remove('open');
-    if (modelBtn) {
-      modelBtn.disabled = running;
-      if (running) closeModelDD();
-    }
     updateInputDisabled();
     updateQueueIndicator();
     if (running) {
@@ -3679,7 +3668,6 @@
     }
     modelBtn.addEventListener('click', e => {
       e.stopPropagation();
-      if (isRunning) return;
       if (menuDropdown) menuDropdown.classList.remove('open');
       if (modelDropdown.classList.contains('open')) {
         closeModelDD();
@@ -4421,7 +4409,7 @@
     if (!frequentSidebar) return;
     closeSidebar();
     closeConfigSidebar();
-    vscode.postMessage({type: 'getFrequentTasks', limit: 20});
+    vscode.postMessage({type: 'getFrequentTasks', limit: 50});
     frequentSidebar.classList.add('open');
     if (frequentSidebarOverlay) frequentSidebarOverlay.classList.add('open');
     if (frequentBtn) frequentBtn.classList.add('active');

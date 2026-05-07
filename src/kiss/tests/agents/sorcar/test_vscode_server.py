@@ -352,6 +352,23 @@ class TestLastActiveFile(unittest.TestCase):
         self.server = VSCodeServer()
 
 
+class TestMainJsFrequentTasksLimit(unittest.TestCase):
+    """Test that openFrequentSidebar requests 50 frequent tasks, not fewer."""
+
+    js: str
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
+        cls.js = (base / "vscode" / "media" / "main.js").read_text()
+
+    def test_frequent_sidebar_requests_limit_50(self) -> None:
+        """openFrequentSidebar sends getFrequentTasks with limit: 50."""
+        assert "getFrequentTasks" in self.js
+        assert "limit: 50" in self.js
+        assert "limit: 20" not in self.js
+
+
 class TestMainJsHistoryCycling(unittest.TestCase):
     """Test that ArrowUp/Down history cycling only works when textbox is empty."""
 
