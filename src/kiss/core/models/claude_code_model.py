@@ -29,7 +29,6 @@ from kiss.core.models.model import (
     TokenCallback,
     _build_text_based_tools_prompt,
     _parse_text_based_tool_calls,
-    _strip_text_based_tool_calls,
 )
 
 logger = logging.getLogger(__name__)
@@ -311,6 +310,11 @@ class ClaudeCodeModel(Model):
         returned to the framework for execution — the CLI itself runs in
         pure LLM mode (``--tools ""``), **not** as an agent.
 
+        Thinking and text tokens are streamed directly to the callbacks
+        during generation so the UI renders them incrementally.  This
+        matches how DeepSeek R1's text-based tool calling works in
+        :class:`OpenAICompatibleModel`.
+
         Args:
             function_map: Dictionary mapping function names to callable functions.
             tools_schema: Ignored (text-based tool calling builds its own prompt).
@@ -328,40 +332,12 @@ class ClaudeCodeModel(Model):
         )
         self.model_config = config
 
-        original_token_cb = self.token_callback
-        original_thinking_cb = self.thinking_callback
-        buffer: list[str] = []
-        in_thinking = False
-
-        if original_token_cb is not None:
-            def _thinking_wrapper(is_start: bool) -> None:
-                nonlocal in_thinking
-                in_thinking = is_start
-                if original_thinking_cb is not None:
-                    original_thinking_cb(is_start)
-
-            def _token_wrapper(token: str) -> None:
-                if in_thinking:
-                    original_token_cb(token)
-                else:
-                    buffer.append(token)
-
-            self.token_callback = _token_wrapper
-            self.thinking_callback = _thinking_wrapper
-
         try:
             content, response = self.generate()
         finally:
             self.model_config = original_config
-            self.token_callback = original_token_cb
-            self.thinking_callback = original_thinking_cb
 
         function_calls = _parse_text_based_tool_calls(content)
-
-        if original_token_cb is not None:
-            cleaned = _strip_text_based_tool_calls(content) if function_calls else content
-            if cleaned:
-                original_token_cb(cleaned)
 
         if function_calls:
             self._replace_last_assistant_with_tool_calls(content, function_calls)

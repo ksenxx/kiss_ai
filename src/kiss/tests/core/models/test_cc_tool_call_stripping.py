@@ -2,8 +2,8 @@
 
 Verifies that ``_strip_text_based_tool_calls`` correctly removes
 tool_calls JSON from model output, and that
-``ClaudeCodeModel.generate_and_process_with_tools`` buffers streamed
-tokens and emits only the cleaned text to the token callback.
+``ClaudeCodeModel.generate_and_process_with_tools`` streams tokens
+directly to callbacks (no buffering) for incremental UI updates.
 
 No mocks — uses real functions and real model instances.
 """
@@ -95,51 +95,33 @@ class TestStripTextBasedToolCalls(unittest.TestCase):
         assert "First step:" in result
 
 
-class TestCCModelTokenBuffering(unittest.TestCase):
-    """Verify ClaudeCodeModel.generate_and_process_with_tools buffers tokens
-    and emits cleaned text without tool-call JSON."""
+class TestCCModelTokenStreaming(unittest.TestCase):
+    """Verify ClaudeCodeModel.generate_and_process_with_tools streams tokens
+    directly to callbacks without buffering."""
 
-    def test_source_has_buffer_and_strip(self) -> None:
-        """generate_and_process_with_tools buffers tokens and strips tool calls."""
+    def test_source_has_no_buffer(self) -> None:
+        """generate_and_process_with_tools must NOT buffer tokens."""
         src = inspect.getsource(ClaudeCodeModel.generate_and_process_with_tools)
-        assert "buffer" in src
-        assert "buffer.append" in src
-        assert "_strip_text_based_tool_calls" in src
-        assert "self.token_callback = original_token_cb" in src
+        assert "buffer" not in src, "Token buffering was removed for streaming"
+        assert "buffer.append" not in src
 
-    def test_no_callback_no_buffering(self) -> None:
-        """When there's no token_callback, no buffering occurs."""
+    def test_source_does_not_replace_callbacks(self) -> None:
+        """Callbacks must not be swapped — tokens stream through the originals."""
+        src = inspect.getsource(ClaudeCodeModel.generate_and_process_with_tools)
+        assert "self.token_callback = " not in src
+        assert "self.thinking_callback = " not in src
+
+    def test_no_callback_no_crash(self) -> None:
+        """When there's no token_callback, generate_and_process_with_tools works."""
         m = ClaudeCodeModel("cc/opus")
         m.initialize("test")
         assert m.token_callback is None
 
-    def test_callback_buffered_during_generate(self) -> None:
-        """The original callback is replaced with buffer.append during generate."""
+    def test_config_restored_in_finally(self) -> None:
+        """Model config is restored even on exception."""
         src = inspect.getsource(ClaudeCodeModel.generate_and_process_with_tools)
-        assert "original_token_cb = self.token_callback" in src
-        assert "if original_token_cb is not None:" in src
-
-    def test_cleaned_text_emitted_with_tool_calls(self) -> None:
-        """When tool calls found, cleaned text (no JSON) is emitted."""
-        src = inspect.getsource(ClaudeCodeModel.generate_and_process_with_tools)
-        assert "_strip_text_based_tool_calls(content) if function_calls else content" in src
-
-    def test_original_text_emitted_without_tool_calls(self) -> None:
-        """When no tool calls, original content is emitted unchanged."""
-        src = inspect.getsource(ClaudeCodeModel.generate_and_process_with_tools)
-        assert "if function_calls else content" in src
-
-    def test_callback_restored_in_finally(self) -> None:
-        """Original callback is restored even on exception."""
-        src = inspect.getsource(ClaudeCodeModel.generate_and_process_with_tools)
-        finally_idx = src.index("finally:")
-        restore_idx = src.index("self.token_callback = original_token_cb")
-        assert restore_idx > finally_idx
-
-    def test_import_strip_function(self) -> None:
-        """_strip_text_based_tool_calls is imported in claude_code_model."""
-        import kiss.core.models.claude_code_model as ccm
-        assert hasattr(ccm, "_strip_text_based_tool_calls")
+        assert "finally:" in src
+        assert "self.model_config = original_config" in src
 
 
 class TestStripEdgeCases(unittest.TestCase):
