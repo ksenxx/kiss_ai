@@ -94,6 +94,14 @@ class ClaudeCodeModel(Model):
         # when reasoning models (e.g. ``cc/opus``) emit the ``tool_calls``
         # JSON inside an extended-thinking block instead of a text block.
         self._last_thinking_content: str = ""
+        # Text accumulated from ``content_block_delta`` events *before* the
+        # ``result`` event replaces it.  The ``result`` event's ``result``
+        # field is authoritative for display, but it can be empty or
+        # stripped even when the streaming deltas carried valid content
+        # (including ``tool_calls`` JSON).  Keeping the pre-result snapshot
+        # lets :meth:`generate_and_process_with_tools` recover tool calls
+        # that would otherwise be lost.
+        self._pre_result_content: str = ""
 
     def initialize(self, prompt: str, attachments: list[Attachment] | None = None) -> None:
         """Initialize the conversation with an initial user prompt.
@@ -237,6 +245,7 @@ class ClaudeCodeModel(Model):
         """
         content = ""
         thinking_content = ""
+        pre_result_content = ""
         result_json: dict[str, Any] = {}
         assistant_count = 0
         current_block_type = ""
@@ -311,9 +320,11 @@ class ClaudeCodeModel(Model):
                 current_block_type = ""
             elif event_type == "result":
                 result_json = event
+                pre_result_content = content
                 content = event.get("result", content)
 
         self._last_thinking_content = thinking_content
+        self._pre_result_content = pre_result_content
         return content, result_json
 
     def generate_and_process_with_tools(
@@ -356,6 +367,16 @@ class ClaudeCodeModel(Model):
             self.model_config = original_config
 
         function_calls = _parse_text_based_tool_calls(content)
+
+        # The ``result`` event can replace the accumulated content from
+        # ``content_block_delta`` events with a different (or empty) string.
+        # When the post-result content yields no tool calls, fall back to
+        # the pre-result accumulated content which may still contain the
+        # ``tool_calls`` JSON that was streamed via text deltas.
+        if not function_calls and self._pre_result_content:
+            function_calls = _parse_text_based_tool_calls(
+                self._pre_result_content
+            )
 
         # Reasoning-capable CLI models (e.g. ``cc/opus``) sometimes emit the
         # ``tool_calls`` JSON inside an extended-thinking block instead of a
