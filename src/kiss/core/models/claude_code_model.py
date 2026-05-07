@@ -89,6 +89,11 @@ class ClaudeCodeModel(Model):
             thinking_callback=thinking_callback,
         )
         self._cli_model = model_name[3:] if model_name.startswith("cc/") else model_name
+        # Thinking-block text from the most recent generation.  Captured so
+        # that text-based tool-call parsing can fall back to thinking content
+        # when reasoning models (e.g. ``cc/opus``) emit the ``tool_calls``
+        # JSON inside an extended-thinking block instead of a text block.
+        self._last_thinking_content: str = ""
 
     def initialize(self, prompt: str, attachments: list[Attachment] | None = None) -> None:
         """Initialize the conversation with an initial user prompt.
@@ -222,6 +227,7 @@ class ClaudeCodeModel(Model):
             ``result`` event dict (or ``{}`` if none was received).
         """
         content = ""
+        thinking_content = ""
         result_json: dict[str, Any] = {}
         assistant_count = 0
         current_block_type = ""
@@ -259,6 +265,7 @@ class ClaudeCodeModel(Model):
                     if block_type == "thinking":
                         thinking_text = block.get("thinking", "")
                         if thinking_text:
+                            thinking_content += thinking_text
                             self._invoke_thinking_callback(True)
                             self._invoke_token_callback(thinking_text)
                             self._invoke_thinking_callback(False)
@@ -278,6 +285,7 @@ class ClaudeCodeModel(Model):
                 if delta_type == "thinking_delta":
                     thinking_text = delta.get("thinking", "")
                     if thinking_text:
+                        thinking_content += thinking_text
                         if not thinking_started:
                             self._invoke_thinking_callback(True)
                             thinking_started = True
@@ -296,6 +304,7 @@ class ClaudeCodeModel(Model):
                 result_json = event
                 content = event.get("result", content)
 
+        self._last_thinking_content = thinking_content
         return content, result_json
 
     def generate_and_process_with_tools(
@@ -338,6 +347,16 @@ class ClaudeCodeModel(Model):
             self.model_config = original_config
 
         function_calls = _parse_text_based_tool_calls(content)
+
+        # Reasoning-capable CLI models (e.g. ``cc/opus``) sometimes emit the
+        # ``tool_calls`` JSON inside an extended-thinking block instead of a
+        # text block.  When the visible ``content`` yields no tool calls,
+        # fall back to parsing the captured thinking text so the agent
+        # actually receives the function calls and does not stall.
+        if not function_calls and self._last_thinking_content:
+            function_calls = _parse_text_based_tool_calls(
+                self._last_thinking_content
+            )
 
         if function_calls:
             self._replace_last_assistant_with_tool_calls(content, function_calls)
