@@ -378,7 +378,12 @@ async function runFinalization(
   }
 
   if (progress) progress.report({message: 'Checking API keys...'});
-  return await ensureApiKeys();
+  const apiKeysReady = await ensureApiKeys();
+
+  if (progress) progress.report({message: 'Checking remote password...'});
+  await ensureRemotePassword();
+
+  return apiKeysReady;
 }
 
 /**
@@ -1858,4 +1863,71 @@ async function ensureApiKeys(): Promise<boolean> {
   }
 
   return hasAnyKey();
+}
+
+/**
+ * Read ``~/.kiss/config.json`` and return the parsed object, or an empty
+ * object when the file is missing / unreadable.
+ */
+function readKissConfig(): Record<string, unknown> {
+  const configPath = path.join(LOG_DIR, 'config.json');
+  try {
+    const raw = fs.readFileSync(configPath, 'utf-8');
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    /* missing or malformed — return empty */
+  }
+  return {};
+}
+
+/**
+ * Write ``cfg`` to ``~/.kiss/config.json``, creating the directory if needed.
+ */
+function writeKissConfig(cfg: Record<string, unknown>): void {
+  fs.mkdirSync(LOG_DIR, {recursive: true});
+  fs.writeFileSync(
+    path.join(LOG_DIR, 'config.json'),
+    JSON.stringify(cfg, null, 2) + '\n',
+  );
+}
+
+/**
+ * Ensure the remote-access password for the KISS Sorcar web / mobile app
+ * is configured.  Reads ``remote_password`` from ``~/.kiss/config.json``;
+ * if it is empty or missing, prompts the user to set one.
+ *
+ * When the user provides a password it is persisted to ``config.json``.
+ * When the user cancels, an informational message tells them the password
+ * can be set later from the KISS Sorcar settings panel.
+ */
+async function ensureRemotePassword(): Promise<void> {
+  const cfg = readKissConfig();
+  const existing = cfg['remote_password'];
+  if (typeof existing === 'string' && existing.length > 0) {
+    return; // already configured
+  }
+
+  const password = await vscode.window.showInputBox({
+    title: 'KISS Sorcar — Remote Access Password',
+    prompt:
+      'Set a password for the KISS Sorcar web / mobile app (press Esc to skip):',
+    placeHolder: 'Enter a password',
+    password: true,
+    ignoreFocusOut: true,
+  });
+
+  if (password === undefined || password.trim() === '') {
+    vscode.window.showInformationMessage(
+      'KISS Sorcar: You can set the remote access password later in the ' +
+        'KISS Sorcar settings panel (Remote password field).',
+    );
+    return;
+  }
+
+  cfg['remote_password'] = password.trim();
+  writeKissConfig(cfg);
+  log('Remote access password saved to ~/.kiss/config.json');
 }
