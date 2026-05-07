@@ -2988,7 +2988,6 @@
 
     const md = document.getElementById('menu-dropdown');
     if (running && md) md.classList.remove('open');
-    if (modelBtn && running) closeModelDD();
     updateInputDisabled();
     updateQueueIndicator();
     if (running) {
@@ -3669,7 +3668,6 @@
     }
     modelBtn.addEventListener('click', e => {
       e.stopPropagation();
-      if (isRunning) return;
       if (menuDropdown) menuDropdown.classList.remove('open');
       if (modelDropdown.classList.contains('open')) {
         closeModelDD();
