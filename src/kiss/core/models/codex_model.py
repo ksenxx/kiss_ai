@@ -24,6 +24,7 @@ import logging
 import os
 import shutil
 import subprocess
+import threading
 from collections.abc import Callable, Iterable
 from typing import Any
 
@@ -245,9 +246,37 @@ class CodexModel(Model):
         proc.stdin.close()
 
         assert proc.stdout is not None
-        content, result_json, error_message = self._parse_stream_events(proc.stdout)
 
-        proc.wait(timeout=timeout)
+        # Run stream parsing in a background thread so the timeout applies
+        # to the entire execution, not just proc.wait() after it finishes.
+        # Without this, _parse_stream_events blocks indefinitely when the
+        # codex agent keeps producing events (thinking, running commands).
+        parse_result: list[tuple[str, dict[str, Any], str | None]] = []
+        parse_error: list[BaseException] = []
+
+        def _read_stream() -> None:
+            try:
+                parse_result.append(self._parse_stream_events(proc.stdout))  # type: ignore[arg-type]
+            except BaseException as exc:
+                parse_error.append(exc)
+
+        reader = threading.Thread(target=_read_stream, daemon=True)
+        reader.start()
+        reader.join(timeout=timeout)
+
+        if reader.is_alive():
+            proc.kill()
+            reader.join(timeout=5)
+            raise KISSError(f"Codex CLI timed out after {timeout}s")
+
+        if parse_error:
+            raise KISSError(
+                f"Codex CLI stream parsing failed: {parse_error[0]}"
+            ) from parse_error[0]
+
+        content, result_json, error_message = parse_result[0]
+
+        proc.wait(timeout=10)
         if error_message is not None:
             stderr = proc.stderr.read() if proc.stderr else ""
             raise KISSError(

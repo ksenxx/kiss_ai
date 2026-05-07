@@ -1,9 +1,15 @@
 """Integration tests for redundancy fixes in kiss/agents/vscode/.
 
-Redundancy 1 — ``_cmd_run`` in ``commands.py`` duplicated the
-get-or-create tab pattern that ``_get_tab`` already provides.  After
-the fix, ``_cmd_run`` delegates to ``_get_tab`` and no inline
-``_TabState(...)`` construction remains.
+Redundancy 1 — ``_cmd_run`` and ``_get_tab`` both implemented the
+get-or-create tab pattern.  Naively delegating ``_cmd_run`` to
+``_get_tab`` introduced a TOCTOU bug (see audit round 4, A6): the
+lock would be released between get-or-create and the alive-check /
+thread-start, allowing a concurrent ``_close_tab`` to drop the tab
+from ``_tab_states``.  The correct shape inlines the get-or-create
+inside the same ``_state_lock`` block that performs the alive check
+and starts the thread, so no other helper that would re-acquire the
+lock is called.  ``_TabState`` import is shared at module top, not
+duplicated locally.
 
 Redundancy 2 — The autocommit-prompt broadcast pattern
 (``_main_dirty_files`` → ``autocommit_prompt`` broadcast) was
@@ -15,33 +21,53 @@ copy-pasted in ``task_runner.py::_run_task_inner`` and
 from __future__ import annotations
 
 import inspect
+import re
 import threading
 
-# ── Redundancy 1: _cmd_run must not inline _TabState construction ──
+# ── Redundancy 1: _cmd_run must keep get-or-create + alive-check + thread
+#    start in a single _state_lock block (no nested re-acquisition) ──
 
 
 class TestCmdRunUsesGetTab:
-    """Verify that _cmd_run delegates to _get_tab instead of duplicating it."""
+    """Verify that _cmd_run uses a single _state_lock block."""
 
-    def test_cmd_run_does_not_construct_tab_state_inline(self) -> None:
-        """The body of _cmd_run must not contain '_TabState(' — it
-        should call self._get_tab instead."""
+    def test_cmd_run_does_not_call_get_tab(self) -> None:
+        """_cmd_run must not call self._get_tab.
+
+        Calling ``_get_tab`` would acquire and release ``_state_lock``
+        once, then ``_cmd_run`` re-acquires it for the alive check and
+        thread start — opening a TOCTOU window where ``_close_tab`` can
+        drop the tab from ``_tab_states`` between the two lock blocks.
+        The audit-round-4 A6 fix mandates a single lock block.
+        """
         from kiss.agents.vscode.commands import _CommandsMixin
 
         src = inspect.getsource(_CommandsMixin._cmd_run)
-        assert "_TabState(" not in src, (
-            "_cmd_run still constructs _TabState inline; "
-            "should use self._get_tab(tab_id)"
+        assert "_get_tab(" not in src, (
+            "_cmd_run must not call _get_tab; the get-or-create logic "
+            "must be inlined inside the same _state_lock block as the "
+            "alive check and thread start (audit-round-4 A6 fix)."
         )
 
-    def test_cmd_run_calls_get_tab(self) -> None:
-        """The body of _cmd_run must contain a call to self._get_tab."""
+    def test_cmd_run_uses_single_state_lock_block(self) -> None:
+        """_cmd_run must contain exactly one ``with self._state_lock:`` block."""
         from kiss.agents.vscode.commands import _CommandsMixin
 
         src = inspect.getsource(_CommandsMixin._cmd_run)
-        assert "_get_tab(" in src, (
-            "_cmd_run does not call _get_tab; "
-            "it should delegate tab creation to _get_tab"
+        count = len(re.findall(r"with self\._state_lock:", src))
+        assert count == 1, (
+            f"_cmd_run must use exactly one _state_lock block, found {count}"
+        )
+
+    def test_cmd_run_uses_module_level_tab_state_import(self) -> None:
+        """_cmd_run must use the module-level _TabState import, not a
+        local re-import inside the function body."""
+        from kiss.agents.vscode.commands import _CommandsMixin
+
+        src = inspect.getsource(_CommandsMixin._cmd_run)
+        assert "from kiss.agents.vscode.tab_state import _TabState" not in src, (
+            "_cmd_run must not redundantly re-import _TabState; the "
+            "module-level import in commands.py is sufficient."
         )
 
     def test_get_tab_creates_tab_for_new_id(self) -> None:
