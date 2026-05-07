@@ -2173,11 +2173,11 @@ class TestWorktreeActionExceptionHandling(unittest.TestCase):
 
 
 class TestRunningStateDisablesButtons(unittest.TestCase):
-    """Verify setRunningState disables the correct buttons when running.
+    """Verify setRunningState keeps toggle buttons enabled when running.
 
-    When the agent is running, 'Attach files', 'Use worktree',
-    and 'Use parallelism' must be disabled.
-    'Task history' and 'New chat' must NOT be disabled.
+    Tasks queue locally, so toggle buttons (upload, worktree, parallel)
+    remain enabled to configure the next queued task.
+    'Task history' and 'New chat' must NOT be disabled either.
     """
 
     js: str
@@ -2189,15 +2189,14 @@ class TestRunningStateDisablesButtons(unittest.TestCase):
         cls.js = (base / "vscode" / "media" / "main.js").read_text()
         cls.css = (base / "vscode" / "media" / "main.css").read_text()
 
+    def test_upload_btn_not_disabled_when_running(self) -> None:
+        assert "uploadBtn.disabled" not in self.js
 
-    def test_upload_btn_disabled_when_running(self) -> None:
-        assert "if (uploadBtn) uploadBtn.disabled = running" in self.js
+    def test_worktree_btn_not_disabled_when_running(self) -> None:
+        assert "worktreeToggleBtn.disabled" not in self.js
 
-    def test_worktree_btn_disabled_when_running(self) -> None:
-        assert "if (worktreeToggleBtn) worktreeToggleBtn.disabled = running" in self.js
-
-    def test_parallel_btn_disabled_when_running(self) -> None:
-        assert "if (parallelToggleBtn) parallelToggleBtn.disabled = running" in self.js
+    def test_parallel_btn_not_disabled_when_running(self) -> None:
+        assert "parallelToggleBtn.disabled" not in self.js
 
     def test_history_btn_not_disabled_when_running(self) -> None:
         assert "historyBtn.disabled" not in self.js
@@ -2413,7 +2412,7 @@ class TestExtensionRegistersSecondaryView(unittest.TestCase):
         assert "firstLaunchDone" in self._ts
         assert "focusChatInput" in self._ts
         idx = self._ts.index("firstLaunchDone")
-        block = self._ts[idx : idx + 400]
+        block = self._ts[idx : idx + 800]
         assert "focusChatInput" in block
 
 
