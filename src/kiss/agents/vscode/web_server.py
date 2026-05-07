@@ -1293,7 +1293,7 @@ H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 \
             Use web browser
           </label>
           <label class="config-label">Remote password
-            <input type="password" id="cfg-remote-password"
+            <input type="text" id="cfg-remote-password"
              placeholder="Remote access password">
           </label>
           <label class="config-label">Working directory

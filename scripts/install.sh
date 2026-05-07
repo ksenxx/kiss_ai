@@ -2,13 +2,30 @@
 set -e
 
 cd
-if command -v git &> /dev/null; then
-  git clone https://github.com/ksenxx/kiss_ai.git ~/kiss_ai
+if [ -d ~/kiss_ai ]; then
+  if [ -d ~/kiss_ai/.git ]; then
+    cd ~/kiss_ai
+    git pull
+  else
+    rm -rf ~/kiss_ai
+    if command -v git &> /dev/null; then
+      git clone https://github.com/ksenxx/kiss_ai.git ~/kiss_ai
+    else
+      curl -L -o main.zip https://github.com/ksenxx/kiss_ai/archive/refs/heads/main.zip
+      unzip main.zip
+      rm main.zip
+      mv kiss_ai-main ~/kiss_ai
+    fi
+  fi
 else
-  curl -L -o main.zip https://github.com/ksenxx/kiss_ai/archive/refs/heads/main.zip
-  unzip main.zip
-  rm main.zip
-  mv kiss_ai-main ~/kiss_ai
+  if command -v git &> /dev/null; then
+    git clone https://github.com/ksenxx/kiss_ai.git ~/kiss_ai
+  else
+    curl -L -o main.zip https://github.com/ksenxx/kiss_ai/archive/refs/heads/main.zip
+    unzip main.zip
+    rm main.zip
+    mv kiss_ai-main ~/kiss_ai
+  fi
 fi
 cd ~/kiss_ai
 ./install.sh
