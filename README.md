@@ -4,7 +4,7 @@
 
 # When Simplicity Becomes Your Superpower: Meet KISS Sorcar, a General-purpose and Software engineering AI Assistant and IDE
 
-[![Version](https://img.shields.io/badge/version-2026.5.21-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
+[![Version](https://img.shields.io/badge/version-2026.5.22-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
 [![Website](https://img.shields.io/badge/website-kisssorcar.github.io-1976d2?style=flat-square)](https://kisssorcar.github.io/)
@@ -24,6 +24,7 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 <summary><strong>Table of Contents</strong></summary>
 
 - [Introduction to KISS Sorcar](#introduction-to-kiss-sorcar)
+- [See It in Action](#-see-it-in-action)
 - [Full Installation](#full-installation)
 - [KISS Sorcar Extension Installation](#kiss-sorcar-extension-installation)
 - [CLI Interface](#cli-interface)
@@ -39,7 +40,7 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 # Introduction to KISS Sorcar
 
 ![KISS Sorcar](assets/KISS-Sorcar-UI.png)
-**KISS Sorcar** (named after [P. C. Sorcar, the legendary Bengali magician](https://en.wikipedia.org/wiki/P._C._Sorcar), evoking the idea of an agent that performs feats that appear magical yet are grounded in disciplined engineering) is a **general-purpose assistant** and **integrated development environment** (IDE) built on top of the **KISS Agent Framework**, a stupidly-simple agentic framework. It **codes really well** and **works pretty fast**. It can do research for you without much AI slop using the internet. The agent can **run relentlessly for hours**. KISS Sorcar is implemented as a **Visual Studio Code extension** that runs **locally**. It has **full browser** support (using open-source Chromium browser and Playwright), **multimodal** support, **Docker container** support, and OpenClaw like features (whose functionality will be posted later in the social media). The good part is that KISS Sorcar is **completely free** and **open-source**; all one needs is a model API key from a major LLM provider, such as Anthropic (highly recommended). A paper on KISS Sorcar can be found at [papers/kisssorcar/kiss_sorcar.pdf](papers/kisssorcar/kiss_sorcar.pdf).
+**KISS Sorcar** (named after [P. C. Sorcar, the legendary Bengali magician](https://en.wikipedia.org/wiki/P._C._Sorcar), evoking the idea of an agent that performs feats that appear magical yet are grounded in disciplined engineering) is a **general-purpose assistant** and **integrated development environment** (IDE) built on top of the **KISS Agent Framework**, a stupidly-simple agentic framework. It **codes really well** and **works pretty fast**. It can do research for you without much AI slop using the internet. The agent can **run relentlessly for hours**. KISS Sorcar is implemented as a **Visual Studio Code extension** that runs **locally** and as a Web/mobile app. It has **full browser** support (using open-source Chromium browser and Playwright), **multimodal** support, **Docker container** support, and OpenClaw like features (whose functionality will be posted later in the social media). The good part is that KISS Sorcar is **completely free** and **open-source**; all one needs is a model API key from a major LLM provider, such as Anthropic (highly recommended). A paper on KISS Sorcar can be found at [papers/kisssorcar/kiss_sorcar.pdf](papers/kisssorcar/kiss_sorcar.pdf). If you have Claude Code or OpenAI Codex in your PATH, you can use cc/\* or codex/\* models for chat.
 
 **KISS Sorcar scored 62.2% on Terminal Bench 2.0, beating both Cursor agent (61.7%) and Claude Code (58%).**
 
@@ -48,6 +49,49 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 An old video on KISS Sorcar can be found at [https://www.youtube.com/watch?v=xnYxWvRqACE](https://www.youtube.com/watch?v=xnYxWvRqACE). We **no longer** recommend to explicitly create a plan in KISS Sorcar. See the paper for details.
 
 <scriptsize>Note that **Sorcar** also means government in Bengali.</scriptsize>
+
+## 🎬 See It in Action
+
+From writing production-grade code to planning your next vacation, KISS Sorcar handles a wide range of tasks end-to-end. Here are a few glimpses of the agent at work:
+
+<div align="center">
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="assets/sorcar-coding.gif" alt="KISS Sorcar writing and refactoring code" width="100%" />
+      <br />
+      <strong>💻 Coding & Software Engineering</strong>
+      <br />
+      <sub>Writes, debugs, and refactors code with disciplined engineering principles.</sub>
+    </td>
+    <td align="center" width="50%">
+      <img src="assets/sorcar-trip.gif" alt="KISS Sorcar planning a trip" width="100%" />
+      <br />
+      <strong>✈️ Trip Planning & Research</strong>
+      <br />
+      <sub>Browses the web, compares options, and assembles itineraries — without the AI slop.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <img src="assets/sorcar-slack.gif" alt="KISS Sorcar sending a Slack message" width="100%" />
+      <br />
+      <strong>💬 Desktop & Messaging Apps</strong>
+      <br />
+      <sub>Drives native apps like Slack via the desktop, end-to-end.</sub>
+    </td>
+    <td align="center" width="50%">
+      <img src="assets/sorcar-mobile.gif" alt="KISS Sorcar controlling a mobile device" width="100%" />
+      <br />
+      <strong>📱 Mobile/Web App</strong>
+      <br />
+      <sub>You can use KISS Sorcar as a mobile/web app.</sub>
+    </td>
+  </tr>
+</table>
+
+</div>
 
 ## Full Installation
 
