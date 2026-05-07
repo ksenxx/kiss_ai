@@ -120,18 +120,11 @@ class TestAutocommitButtonJS(unittest.TestCase):
         assert "action: 'commit'" in snippet or \
                'action: "commit"' in snippet
 
-    def test_disabled_when_running(self) -> None:
-        """The button is disabled in setRunningState when running."""
+    def test_not_disabled_when_running(self) -> None:
+        """The button stays enabled during running (tasks queue locally)."""
         js = _read("media/main.js")
         assert "autocommitBtn" in js
-        idx = js.index("function setRunningState")
-        end = js.index("\n  function ", idx + 1)
-        fn_body = js[idx:end]
-        assert "autocommitBtn" in fn_body, (
-            "setRunningState should reference autocommitBtn"
-        )
-        assert "autocommitBtn.disabled" in fn_body or \
-               "autocommitBtn) autocommitBtn.disabled" in fn_body
+        assert "autocommitBtn.disabled" not in js
 
 
 class TestAutocommitButtonBackend(unittest.TestCase):
