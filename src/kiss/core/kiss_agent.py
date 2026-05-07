@@ -36,6 +36,7 @@ _NON_RETRYABLE_PHRASES = (
     "could not resolve authentication",
 )
 MAX_CONSECUTIVE_ERRORS = 3
+MAX_CONSECUTIVE_NO_TOOL_CALLS = 2
 
 
 def _is_retryable_error(e: Exception) -> bool:
@@ -102,6 +103,7 @@ class KISSAgent(Base):
         self.total_tokens_used = 0
         self.budget_used = 0.0
         self.run_start_timestamp = int(time.time())
+        self._consecutive_no_tool_calls = 0
 
     def _set_prompt(
         self,
@@ -313,10 +315,13 @@ class KISSAgent(Base):
                 total_steps=self.step_count,
             )
 
-        if not function_calls:  # pragma: no cover – requires LLM returning zero tool calls
+        if not function_calls:
+            self._consecutive_no_tool_calls += 1
             self._add_message(
                 "model", response_text + "\n```text\n" + usage_info + "\n```\n", start_timestamp
             )
+            if self._consecutive_no_tool_calls >= MAX_CONSECUTIVE_NO_TOOL_CALLS:
+                return str(response_text)
             retry_msg = (
                 "**Your response MUST have at least one function call. "
                 "Your response has 0 function calls.**"
@@ -325,6 +330,7 @@ class KISSAgent(Base):
             self.model.add_message_to_conversation("user", retry_msg)
             return None
 
+        self._consecutive_no_tool_calls = 0
         call_reprs = []
         function_results: list[tuple[str, dict[str, Any]]] = []
         finish_result: str | None = None
