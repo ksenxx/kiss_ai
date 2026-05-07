@@ -139,7 +139,7 @@ class ClaudeCodeModel(Model):
         args = [
             cli,
             "--print",
-            "--tools",
+            "--tools", "",
             "--no-session-persistence",
             "--model", self._cli_model,
         ]
