@@ -2986,19 +2986,9 @@
     sendBtn.style.display = 'flex';
     stopBtn.style.display = running ? 'flex' : 'none';
 
-    if (uploadBtn) uploadBtn.disabled = running;
-    if (autocommitBtn) autocommitBtn.disabled = running;
-    if (worktreeToggleBtn) worktreeToggleBtn.disabled = running;
-    if (parallelToggleBtn) parallelToggleBtn.disabled = running;
-    if (demoToggleBtn) demoToggleBtn.disabled = running;
-    const mb = document.getElementById('menu-btn');
-    if (mb) mb.disabled = running;
     const md = document.getElementById('menu-dropdown');
     if (running && md) md.classList.remove('open');
-    if (modelBtn) {
-      modelBtn.disabled = running;
-      if (running) closeModelDD();
-    }
+    if (modelBtn && running) closeModelDD();
     updateInputDisabled();
     updateQueueIndicator();
     if (running) {
