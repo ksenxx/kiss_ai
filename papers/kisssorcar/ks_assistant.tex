@@ -36,7 +36,7 @@
   \lstset{language={},basicstyle=\ttfamily\scriptsize,frame=single,framesep=2mm,breaklines=true,columns=fullflexible}%
 }{}
 
-\title{KS Assistant: A Simple General-Purpose AI Agent for Software Engineering}
+\title{KS Assistant: A Compact AI Agent for Software Engineering}
 
 
 \begin{document}
@@ -44,11 +44,11 @@
 \maketitle
 
 \begin{abstract}
-Large language models can generate code and call tools with remarkable fluency, yet deploying them as practical software engineering assistants still exposes stubborn gaps: finite context windows, a single mistake that can derail entire sessions, agents that get stuck in dead ends, AI slop, and generated changes that are difficult to review or revert.
+Large language models can generate code and call tools effectively, yet deploying them as practical software engineering assistants still exposes persistent gaps: finite context windows, errors that can derail entire sessions, agents that get stuck in dead ends, low-quality generated output, and generated changes that are difficult to review or revert.
 
-We present \textbf{KS Assistant}, a general-purpose assistant and integrated development environment (IDE) built on top of the \textbf{KS Agent Framework}, a simple AI agent framework of roughly 1,900~lines of code for the core agents.  The framework addresses these gaps through a robust system prompt and a five-layer agent hierarchy in which each layer adds exactly one concern: budget-tracked ReAct execution, automatic continuation across sub-sessions via summarization, coding, and browser tools with parallel sub-agents, persistent multi-turn chat with history recall, and git worktree isolation so every task runs on its own branch.  Both KS Assistant and the KS Agent Framework are grounded in disciplined software engineering practice; these principles are encoded directly into the agent's system prompt, enabling KS Assistant to write code that is simple, elegant, maintainable, and bug-free.
+We present \textbf{KS Assistant}, a software engineering assistant and integrated development environment (IDE) built on top of the \textbf{KS Agent Framework}, a compact AI agent framework of roughly 1,900~lines of code for the core agents.  The framework addresses these gaps through a structured system prompt and a five-layer agent hierarchy in which each layer adds one concern: budget-tracked ReAct execution, automatic continuation across sub-sessions via summarization, coding and browser tools with parallel sub-agents, persistent multi-turn chat with history recall, and git worktree isolation so every task runs on its own branch.  Both KS Assistant and the KS Agent Framework encode disciplined software engineering practices directly into the agent's system prompt, including file review, test-first bug fixing, and pre-finish verification.
 
-We implemented KS Assistant as a free, open-source Visual Studio Code extension that runs locally, is effective for long-horizon tasks, and supports browser automation, multimodal input, and Docker containers.  We deliberately prioritize output quality over speed: giving a frontier model adequate time to validate its own output---running linters, type checkers, and tests---dramatically reduces the low-quality code that plagues faster but less thorough agents.  The entire system was built using itself over four months, providing a continuous stress test in which any bug was patched immediately after its manifestation.  On Terminal-Bench~2.0, KS Assistant achieves a 62.2\% overall pass rate with Claude Opus~4.6~\citep{anthropic2026opus46}, comparing favorably to Claude~Code (58\%) and Cursor Composer~2 (61.7\%).  These results are achieved without benchmark-specific prompt tuning or model fine-tuning.
+We implemented KS Assistant as a local Visual Studio Code extension that supports browser automation, multimodal input, Docker containers, and web/mobile access.  The system prioritizes verification over latency by giving the model time to check its own output with linters, type checkers, and tests before reporting success.  The codebase was developed with assistance from KS Assistant over four months, providing a longitudinal self-hosting case study.  On Terminal-Bench~2.0, KS Assistant achieves a 62.2\% overall pass rate with Claude Opus~4.6~\citep{anthropic2026opus46}; for context, the public leaderboard reports Claude~Code at 58\% and Cursor Composer~2 at 61.7\%.  These results are achieved without benchmark-specific prompt tuning or model fine-tuning.
 \end{abstract}
 
 %----------------------------------------------------------------------
@@ -56,9 +56,9 @@ We implemented KS Assistant as a free, open-source Visual Studio Code extension 
 \label{sec:intro}
 %----------------------------------------------------------------------
 
-Modern large language models (LLMs), such as Claude Opus 4.7~\citep{anthropic2026opus47}, GPT 5.5~\citep{openai2026gpt55}, and Gemini 3.1~\citep{google2026gemini31}, have demonstrated a remarkable ability to generate code, reason about software architecture, and use developer tools~\citep{chen2021evaluating,roziere2023code}.  A growing body of work has explored how to harness these capabilities for autonomous software engineering, from single-session agents that resolve GitHub issues~\citep{yang2024sweagent,wang2024openhands} to industrial products marketed as AI software and general assistants~\citep{copilot2021,cursor2024,devin2024,claudecode2025,codex2025,openclaw2025}.  Yet using an LLM as a practical software engineering assistant still exposes several stubborn gaps: context windows are finite, a single mistake can derail an entire session, agents get stuck in dead ends, models generate AI slop, and generated changes are difficult to review or revert once applied to a live codebase.
+Modern large language models (LLMs), such as Claude Opus 4.7~\citep{anthropic2026opus47}, GPT 5.5~\citep{openai2026gpt55}, and Gemini 3.1~\citep{google2026gemini31}, can generate code, reason about software architecture, and use developer tools~\citep{chen2021evaluating,roziere2023code}.  A growing body of work has explored how to harness these capabilities for autonomous software engineering, from single-session agents that resolve GitHub issues~\citep{yang2024sweagent,wang2024openhands} to industrial products marketed as AI software and general assistants~\citep{copilot2021,cursor2024,devin2024,claudecode2025,codex2025,openclaw2025}.  Yet using an LLM as a practical software engineering assistant still exposes several persistent gaps: context windows are finite, errors can derail an entire session, agents get stuck in dead ends, models generate low-quality output, and generated changes are difficult to review or revert once applied to a live codebase.
 
-We propose the \emph{KS Agent Framework}, a simple AI agent framework containing around 1,900 lines of code for the core agent implementation.  The name ``KS'' reflects the \emph{Keep Simple} design philosophy: each layer is small, each concern is isolated, and the overall system avoids unnecessary abstraction.  We address the above-mentioned gaps through a robust system prompt (Section~\ref{sec:system-prompt} and Appendix~\ref{app:full-prompt}) and a five-layer agent hierarchy in which each layer solves exactly one concern:
+We propose the \emph{KS Agent Framework}, a compact AI agent framework containing around 1,900 lines of code for the core agent implementation.  The name ``KS'' reflects the \emph{Keep Simple} design philosophy: each layer is small, each concern is isolated, and the overall system avoids unnecessary abstraction.  We address the above-mentioned gaps through a structured system prompt (Section~\ref{sec:system-prompt} and Appendix~\ref{app:full-prompt}) and a five-layer agent hierarchy in which each layer handles one concern:
 
 \begin{enumerate}[nosep]
   \item \textbf{KS Agent} --- budget-tracked ReAct~\citep{yao2023react} loop with native function calling.
@@ -68,13 +68,13 @@ We propose the \emph{KS Agent Framework}, a simple AI agent framework containing
   \item \textbf{Worktree Agent} --- git worktree isolation so every task runs on its own branch.
 \end{enumerate}
 
-To demonstrate the power of the KS Agent Framework, we implemented KS Assistant as a Visual Studio Code extension that runs locally.  It has full browser support (using open-source Chromium and Playwright), multimodal support, Docker container support, and a mobile/web app.  KS Assistant is completely free and open-source; all one needs is a model API key from a major LLM provider.  The open-source repository link is withheld to respect double-blind review.
+We implemented KS Assistant as a Visual Studio Code extension that runs locally.  It includes browser support (using open-source Chromium and Playwright), multimodal support, Docker container support, and a mobile/web app.  The system is intended to be released as open-source software; the repository link is withheld to respect double-blind review.
 
-KS Assistant has been built using itself.  The entire codebase---the KS Agent framework, the agent layers, the VS~Code extension, and the system prompt---was developed by KS Assistant operating on its own repository.  This self-hosting discipline provides a continuous-integration-style stress test: if the agent introduces a bug that impairs its ability to function, the developers immediately ask the agent to fix it by analyzing the trajectory and code.  The simplicity of the framework enabled the agent to implement features confidently without bugs and AI slop.  The five core agent classes are remarkably compact: the KS Agent comprises 413~lines, the Relentless Agent 321~lines, the Tool Agent 322~lines, the Chat Agent 125~lines, and the Worktree Agent 704~lines---a total of roughly 1,885~lines of code (excluding empty lines and comments).
+KS Assistant has been used to develop its own codebase.  The KS Agent framework, the agent layers, the VS~Code extension, and the system prompt were developed with KS Assistant operating on its own repository.  This self-hosting process served as a continuous stress test: when the agent introduced a bug that impaired its ability to function, the developers asked the agent to analyze the trajectory and code and propose a fix.  The five core agent classes remain compact: the KS Agent comprises 413~lines, the Relentless Agent 321~lines, the Tool Agent 322~lines, the Chat Agent 125~lines, and the Worktree Agent 704~lines---a total of roughly 1,885~lines of code (excluding empty lines and comments).
 
-We deliberately prioritize output quality over speed.  Using a weaker or cheaper model often forces the developer to discard the agent's work and retry, ultimately increasing the total cost.  Conversely, giving a frontier model adequate time to validate its own output---running linters, type checkers, and tests before declaring success---dramatically reduces slop.  We expect token costs and inference latencies to continue to fall~\citep{gao2025trae}, making this quality-first posture increasingly practical.
+We prioritize output quality over speed.  Using a weaker or cheaper model can force the developer to discard the agent's work and retry, increasing total cost.  Conversely, giving a frontier model time to validate its own output---running linters, type checkers, and tests before declaring success---can reduce low-quality changes.  We expect token costs and inference latencies to continue to fall~\citep{gao2025trae}, making this verification-first posture increasingly practical.
 
-We evaluate on Terminal-Bench~2.0 and achieve a 62.2\% overall pass rate using Claude Opus~4.6~\citep{anthropic2026opus46}, comparing favorably to Claude~Code (58\%) and Cursor Composer~2 (61.7\%)~\citep{cursor2026composer2} on the same benchmark (Section~\ref{sec:evaluation}).  These results are achieved without benchmark-specific prompt tuning or model fine-tuning.  We show that a simple agent framework, without sophisticated agent technologies such as trajectory compaction and asynchronous multi-agent orchestration, is sufficient to build a competitive software engineering assistant.  By building KS Assistant using itself and matching or beating both the Cursor and Claude Code agents, we demonstrate that time-tested software engineering principles and techniques are invaluable for building reliable, practical agent systems.
+We evaluate on Terminal-Bench~2.0 and achieve a 62.2\% overall pass rate using Claude Opus~4.6~\citep{anthropic2026opus46}; for context, the public leaderboard reports Claude~Code at 58\% and Cursor Composer~2 at 61.7\%~\citep{cursor2026composer2} on the same benchmark (Section~\ref{sec:evaluation}).  These results are achieved without benchmark-specific prompt tuning or model fine-tuning.  The results suggest that a compact layered framework, even without trajectory compaction or asynchronous multi-agent orchestration, can be competitive on this benchmark.  The self-hosting case study further suggests that conventional software engineering practices can be useful when expressed as concrete instructions for LLM agents.
 
 %----------------------------------------------------------------------
 \section{Agent architecture}
@@ -82,7 +82,7 @@ We evaluate on Terminal-Bench~2.0 and achieve a 62.2\% overall pass rate using C
 %----------------------------------------------------------------------
 
 
-The KS Agent Framework was originally built to rapidly prototype and experiment with prompt optimization techniques~\citep{agrawal2025gepa} and evolutionary algorithms for algorithmic optimization~\citep{novikov2025alphaevolve,openevolve2025}.  The emphasis on simplicity enabled coding agents to write simple, bug-free code.  Eventually, no prompt optimization techniques were used when creating the system prompt for KS Assistant; it was hand-tuned based on long-term experience with the agent and its behavior.  The framework uses five agent layers combining composition and inheritance.  Each layer delegates upward for concerns it does not own.
+The KS Agent Framework was originally built to rapidly prototype and experiment with prompt optimization techniques~\citep{agrawal2025gepa} and evolutionary algorithms for algorithmic optimization~\citep{novikov2025alphaevolve,openevolve2025}.  The emphasis on simplicity made the framework easier for coding agents to inspect and modify.  Eventually, no prompt optimization techniques were used when creating the system prompt for KS Assistant; it was hand-tuned based on long-term experience with the agent and its behavior.  The framework uses five agent layers combining composition and inheritance.  Each layer delegates upward for concerns it does not own.
 
 %......................................................................
 \subsection{KS Agent}
@@ -156,7 +156,7 @@ The KS Agent is stateless across runs: each call resets the conversation, token 
 
 The Relentless Agent wraps a KS Agent in a continuation loop.  Its core contribution is executing tasks that exceed a single context window by breaking them into sub-sessions.
 
-Rather than investing in context-compaction techniques, we adopt a simple continuation protocol: when a sub-session exhausts its context window or step budget, the agent produces a \emph{structured summary} of every action taken so far---chronologically ordered, with explanations and relevant code snippets---and a fresh sub-session resumes from that summary.  This approach is related to Reflexion~\citep{shinn2023reflexion}, which feeds verbal self-critiques back into subsequent trials, but uses a Reflexion-like technique to \emph{continue} a task rather than retry it.  We found that a na\"ive instruction to ``summarize the current context'' produced poor continuations; requiring a \emph{step-by-step chronological account with code snippets} dramatically improved coherence across sub-sessions.  A potential limitation is that summaries may grow unwieldy for multi-day tasks; in practice, we have not encountered this problem even for tasks spanning several hours, but a thorough evaluation of summary scaling remains future work. 
+Rather than investing in context-compaction techniques, we adopt a simple continuation protocol: when a sub-session exhausts its context window or step budget, the agent produces a \emph{structured summary} of every action taken so far---chronologically ordered, with explanations and relevant code snippets---and a fresh sub-session resumes from that summary.  This approach is related to Reflexion~\citep{shinn2023reflexion}, which feeds verbal self-critiques back into subsequent trials, but uses a Reflexion-like technique to \emph{continue} a task rather than retry it.  We found that a na\"ive instruction to ``summarize the current context'' produced poor continuations; requiring a \emph{step-by-step chronological account with code snippets} improved coherence across sub-sessions in our development use.  A potential limitation is that summaries may grow unwieldy for multi-day tasks; in practice, we have not encountered this problem even for tasks spanning several hours, but a thorough evaluation of summary scaling remains future work. 
 
 \textbf{Continuation protocol.}  The \texttt{finish} tool accepts three fields: a success flag, a continue flag, and a summary.  When \texttt{is\_continue=True}, the Relentless Agent starts a new sub-session with a fresh context window.  The prompt for the new session includes a chronologically ordered list of all prior attempt summaries, instructs the agent not to redo completed work, and advises it to step back and rethink the strategy from scratch if it has been retrying the same approach without progress.
 
@@ -230,17 +230,17 @@ We run 5 independent trials per task.  The agent is a thin Harbor adapter that i
 
 Table~\ref{tab:tb2-aggregate} (shown earlier alongside Listing~\ref{lst:simple-agent}) summarizes the aggregate statistics.
 
-The 62.2\% overall pass rate compares favorably to other agents using the same underlying model: at the time of writing, Claude~Code (also Opus~4.6) scores approximately 58\% on the Terminal-Bench~2.0 leaderboard, and Cursor's Composer~2---a custom fine-tuned model trained with large-scale reinforcement learning~\citep{cursor2026composer2}---achieves 61.7\%.  Our result suggests that the layered architecture and the structured system prompt contribute meaningfully beyond what the base model provides.
+The 62.2\% overall pass rate is close to or above two public leaderboard entries: at the time of writing, Claude~Code (also Opus~4.6) scores approximately 58\% on the Terminal-Bench~2.0 leaderboard, and Cursor's Composer~2---a custom fine-tuned model trained with large-scale reinforcement learning~\citep{cursor2026composer2}---achieves 61.7\%.  Because we did not run these systems under a controlled protocol, these numbers should be interpreted as leaderboard context rather than a causal comparison.
 
 \subsection{Task-level breakdown}
 
-\textbf{Consistently solved tasks (39 of 89).} These include cryptanalysis (FEAL differential), game-playing (chess best move), git operations (leak recovery), server configuration (gRPC key-value store, PyPI server, NGINX logging), data processing (resharding), formal verification (Coq~\texttt{plus\_comm}), ML inference (HuggingFace model serving, LLM batching scheduler), and system emulation (QEMU startup).  The breadth of this set demonstrates that the agent's generality is not limited to a single domain.
+\textbf{Consistently solved tasks (39 of 89).} These include cryptanalysis (FEAL differential), game-playing (chess best move), git operations (leak recovery), server configuration (gRPC key-value store, PyPI server, NGINX logging), data processing (resharding), formal verification (Coq~\texttt{plus\_comm}), ML inference (HuggingFace model serving, LLM batching scheduler), and system emulation (QEMU startup).  The breadth of this set indicates that the benchmark successes are not concentrated in a single task category.
 
 \textbf{Consistently failed tasks (19 of 89).} The failures cluster into three categories: (1)~tasks requiring graphical or multimedia capabilities unavailable in the container (video processing, Windows~3.11 GUI installation, MTEB leaderboard scraping), (2)~tasks demanding very long or resource-intensive builds that exceed time or memory limits (CompCert compilation, Doom for MIPS, Caffe CIFAR-10, training fastText on Yelp data), and (3)~tasks with niche domain-specific requirements that the model struggles to satisfy (DNA insertion, OCaml GC patching, polyglot C/Python binaries, protein assembly, cell segmentation).
 
 \textbf{Mixed-result tasks (31 of 89).} Tasks such as \texttt{write-compressor} (3/5), \texttt{crack-7z-hash} (4/5), and \texttt{feal-linear-cryptanalysis} (4/5) succeed in most trials but occasionally fail due to non-determinism in the model's reasoning or timing-sensitive environment interactions.  Conversely, \texttt{cancel-async-tasks} (1/5) and \texttt{dna-assembly} (1/5) succeed rarely, suggesting they are at the boundary of the model's capability.
 
-\textbf{Leaderboard context.}  KS Assistant does not score as high as some coding agents on the Terminal-Bench~2.0 leaderboard, but we believe that our results are significant because we didn't tune our prompts or any model specifically for the Terminal Bench 2.0.  We simply used the general system prompt and the Claude Opus 4.6 model.  Regarding low score compared to other coding agents, we wanted to note that recent analysis has found widespread cheating on popular agent benchmarks, including Terminal-Bench~2.0: the top three submissions commit harness-level cheating (e.g., leaking verifier code or answer keys into the agent's environment), and task-level cheating (e.g., Googling answers, mining git history, hardcoding test outputs) affects 28+ submissions across 9 benchmarks~\citep{stein2026cheatingblog,stein2026detecting}.  Separately, an automated benchmark audit found 45 confirmed hacking solutions across 13 widely used benchmarks exhibiting process-isolation failures, answer leakage, and weak test assertions that allow perfect scores without solving a single problem~\citep{wang2026trustworthyblog}.
+\textbf{Leaderboard context.}  KS Assistant does not score as high as some agents on the Terminal-Bench~2.0 leaderboard.  We report the result because the evaluation used the general system prompt and Claude Opus~4.6 without benchmark-specific prompt tuning or model fine-tuning.  Leaderboard comparisons should be interpreted cautiously: recent analyses report benchmark-gaming and harness-leakage problems on several agent benchmarks, including Terminal-Bench~2.0~\citep{stein2026cheatingblog,stein2026detecting,wang2026trustworthyblog}.
 
 %----------------------------------------------------------------------
 \section{The system prompt}
@@ -255,7 +255,7 @@ The system prompt is a structured document that governs the agent's behavior acr
 \label{sec:execution-mindset}
 %......................................................................
 
-The prompt opens with two directives that set the tone for the entire session:
+The prompt opens with two directives that define the expected execution style:
 
 \begin{prompt}
 # FOCUS ON THE GIVEN TASK. ITS COMPLETION IS YOUR SOLE GOAL.
@@ -279,7 +279,7 @@ The prompt opens with two directives that set the tone for the entire session:
 \textbf{``NO AI SLOP.''}  ``AI slop'' refers to the low-quality, generic, hedging text that LLMs produce when they lack confidence: filler phrases like ``certainly!'', unnecessary caveats, and boilerplate explanations.  This directive encourages the model to be concise and substantive.
 
 \medskip
-\noindent These two sentences occupy only two lines, yet they establish a behavioral contract that permeates every subsequent interaction.  We observe that removing any single directive degrades the agent's behavior along the corresponding dimension during KS Assistant development (e.g., removing ``BE RELENTLESS'' causes the agent to give up after the first error more frequently).
+\noindent These two sentences define a behavioral contract used throughout later prompt sections.  During development, we observed failures that corresponded to these directives (e.g., stopping after the first error when the persistence instruction was absent), but we have not yet performed a controlled ablation of each phrase.
 
 %......................................................................
 \subsection{Web research protocol}
@@ -301,7 +301,7 @@ When the agent needs external knowledge, the prompt prescribes a structured rese
 - Ask the user for login help when needed.
 \end{prompt}
 
-\noindent The rationale is a two-phase separation between \emph{collection} and \emph{synthesis}.  LLMs tend to anchor on the first few results they encounter, biasing their solutions toward a narrow slice of the design space.  By forcing the agent to accumulate a broad set of information into a file \emph{before} reasoning about it, the protocol counteracts anchoring bias and encourages the model to consider diverse approaches. The ``visit $\geq$30 websites'' threshold is deliberately aggressive: it ensures the agent does not shortcut the research phase after two or three hits, and the resulting information file serves as an auditable artifact of what the agent considered.  
+\noindent The rationale is a two-phase separation between \emph{collection} and \emph{synthesis}.  LLMs tend to anchor on the first few results they encounter, biasing their solutions toward a narrow slice of the design space.  By forcing the agent to accumulate a broad set of information into a file \emph{before} reasoning about it, the protocol counteracts anchoring bias and encourages the model to consider diverse approaches. The ``visit $\geq$30 websites'' threshold is a conservative guardrail: it discourages the agent from stopping the research phase after two or three hits, and the resulting information file serves as an auditable artifact of what the agent considered.  
 
 % The structured procedure with a counter header and per-site entries addresses an empirically observed failure mode in which the model claims to have ``visited many sites'' after only a handful of fetches; a concrete counter forces the model to verify the actual number visited before declaring the collection phase complete.  The instruction to try ``different queries, synonyms, official docs'' when results dry up prevents the agent from giving up prematurely on a narrow set of search terms.
 
@@ -310,24 +310,24 @@ This two-phase collect-then-synthesize discipline is also applied to local file 
 Analysis happens in the second phase, when the agent reads its own summary and reasons about the collected information as a whole.
 
 %----------------------------------------------------------------------
-\section{VS~Code extension: unique features}
+\section{VS~Code extension features}
 \label{sec:vscode-features}
 %----------------------------------------------------------------------
 
-We release our system as a VS~Code extension and a web app.  While the underlying agent architecture already differs from existing AI coding assistants, the extension introduces several features that, to our knowledge, are not present in competing assistants---including GitHub Copilot~\citep{copilot2021}, Cursor~\citep{cursor2024}, Windsurf~\citep{windsurf2024}, Devin~\citep{devin2024}, and Aider~\citep{aider2023}.
+We release our system as a VS~Code extension and a web app.  The extension emphasizes several mechanisms that are less central in many existing AI coding assistants, including persistent preference files, real-time budget accounting, and integrated browser automation.
 
-\textbf{Cross-session self-improvement.}  The extension maintains a \texttt{USER\_PREFS.md} file that the agent reads at the start of each task and \emph{updates} at the end.  When the agent discovers a new preference or project invariant during task execution, it writes it to the file.  The agent also resolves conflicts: if a new preference contradicts an existing one, the old entry is removed.  Over time, the file accumulates a curated set of project-specific knowledge, making the agent progressively more effective without any manual configuration.  This mechanism is detailed in Appendix~\ref{app:self-improvement}.
+\textbf{Cross-session self-improvement.}  The extension maintains a \texttt{USER\_PREFS.md} file that the agent reads at the start of each task and \emph{updates} at the end.  When the agent discovers a new preference or project invariant during task execution, it writes it to the file.  The agent also resolves conflicts: if a new preference contradicts an existing one, the old entry is removed.  Over time, the file accumulates project-specific knowledge that can be reused in later sessions.  This mechanism is detailed in Appendix~\ref{app:self-improvement}.
 
 \textbf{Real-time budget accountability.}  The extension displays real-time cost tracking in the sidebar: input tokens, output tokens, cache hits, dollar cost, and elapsed time are updated at every agent step.  Both per-task and global budget ceilings are enforced.
 
 \textbf{Integrated browser automation.}  The extension includes a browser automation tool that allows the agent to navigate URLs, read accessibility trees, click elements, type text, press keys, scroll, and take screenshots---all controlled programmatically from within a VS~Code task.
 
 %----------------------------------------------------------------------
-\section{Painless software engineering with KS Assistant}
+\section{Conversational development case study}
 \label{sec:painless}
 %----------------------------------------------------------------------
 
-A central claim of our system is that natural-language interaction can replace manual code inspection and ad hoc scripting to understand and evolve nontrivial subsystems.  While developing KS Assistant, we found a particular workflow to be useful.  In the workflow, we first ask KS Assistant to generate a detailed, step-by-step description of a workflow or algorithm we found buggy, and then we ask KS Assistant to revise some of the buggy steps in natural language.  We illustrate this with a real development session drawn from the project's own history, in which the worktree merge workflow (Section~\ref{sec:worktree-agent}) was first understood and then redesigned entirely through conversational prompts.  The session comprises four consecutive tasks; we reproduce the prompts verbatim and summarize the agent's responses.
+During development, we used natural-language interaction to inspect and revise nontrivial subsystems.  One recurring workflow was to ask KS Assistant for a detailed, step-by-step description of a buggy workflow or algorithm, then issue a follow-up request that revised specific steps in natural language.  We illustrate this with a development session drawn from the project's own history, in which the worktree merge workflow (Section~\ref{sec:worktree-agent}) was first described and then redesigned through conversational prompts.  The session comprises four consecutive tasks; we reproduce the prompts verbatim and summarize the agent's responses.
 
 \paragraph{Step~1: Understanding the existing workflow.} The developer begins by asking the agent to explain the current post-task git lifecycle:
 
@@ -351,7 +351,7 @@ original branch.
 
 \noindent The agent modifies six files across Python and TypeScript: it updates \texttt{discard()} to check out the original branch before deleting the task branch, removes the \texttt{manual\_merge()} method entirely, simplifies \texttt{merge\_instructions()} to show only two options, updates the webview UI to replace the three-button toolbar with a two-button ``Commit and Merge or Discard?'' bar, removes the \texttt{manual} action type from the TypeScript type definitions, and removes the corresponding handler from the Python backend.  Three tests for the deleted manual-merge path have been removed, and one routing test has been updated.  All 28 worktree tests pass after the change.
 
-We skip the description of the remaining 2 tasks in the paper for space reasons, but they can be found in the Appendix.
+We omit the remaining two tasks from the main text for space; they appear in Appendix~\ref{app:painless}.
 
 % \paragraph{Step~3: Investigating unexpected post-merge state.} After testing the simplified flow, the developer notices that files appear in the Source Control panel of VS~Code on the original branch after pressing ``Commit and Merge'' and asks:
 
@@ -395,7 +395,7 @@ We skip the description of the remaining 2 tasks in the paper for space reasons,
 \label{sec:conclusion}
 %----------------------------------------------------------------------
 
-A simple, layered, single-concern architecture, combined with a system prompt that encodes an engineering discipline, addresses the practical challenges of deploying LLM agents for real-world software development.  On Terminal-Bench~2.0, our system reaches 62.2\% (277/445), outperforming Claude~Code (58\%) and Cursor Composer~2 (61.7\%) on the same benchmark and base model~\citep{anthropic2026opus46} without benchmark-specific tuning, fine-tuning, or reinforcement learning.  By building KS Assistant using itself and matching or beating both the Cursor and Claude Code agents, we demonstrate that time-tested software engineering principles, expressed as concrete instructions an LLM can follow, are invaluable for building simple, reliable, practical agent systems.
+A layered, single-concern architecture, combined with a system prompt that encodes an engineering discipline, addresses several practical challenges in deploying LLM agents for software development.  On Terminal-Bench~2.0, our system reaches 62.2\% (277/445) with Claude Opus~4.6~\citep{anthropic2026opus46}, without benchmark-specific tuning, fine-tuning, or reinforcement learning.  This result is competitive with two public leaderboard entries, but should not be read as a controlled head-to-head comparison.  The self-hosting case study suggests that conventional software engineering practices can be useful when expressed as concrete instructions an LLM can follow.
 
 \textbf{Limitations.}  Our evaluation uses a single model and benchmark; broader evaluation (e.g., on SWE-bench Pro) is future work.  Continuation summaries may lose fidelity, and our quality-over-speed posture may not suit latency-sensitive workflows.
 
@@ -609,7 +609,7 @@ The testing section is perhaps the most opinionated:
 
 \noindent Each testing instruction addresses a specific concern:
 
-\textbf{``Run lint/typecheckers; fix all errors.\ Achieve 100\% branch coverage.''}  Before committing any change, the agent must ensure it does not introduce lint violations or type errors.  This catches a broad class of issues---unused imports, type mismatches, style violations---that would otherwise accumulate across tasks.  Full branch coverage ensures that every conditional path in the code under test has been exercised.  LLMs tend to write happy-path tests that cover the main code path but ignore error handling, edge cases, and early-return branches.  The 100\% target forces the model to write tests for every branch, including error paths and boundary conditions.  Moreover, such tests help with regression---developers can confidently use AI coding agents without fear that changes will break existing program behavior.
+\textbf{``Run lint/typecheckers; fix all errors.\ Achieve 100\% branch coverage.''}  Before committing any change, the agent must ensure it does not introduce lint violations or type errors.  This catches a broad class of issues---unused imports, type mismatches, style violations---that would otherwise accumulate across tasks.  Full branch coverage ensures that every conditional path in the code under test has been exercised.  LLMs tend to write happy-path tests that cover the main code path but ignore error handling, edge cases, and early-return branches.  The 100\% target pushes the model to write tests for every branch, including error paths and boundary conditions.  Such tests help with regression by making failures visible before changes are accepted.
 
 \textbf{``Every error, including pre-existing ones, is yours---don't skip.''}  Without this clause, the model frequently rationalizes pre-existing lint or type errors as ``not my problem'' and calls \texttt{finish} with a passing result despite a broken build.  The instruction makes the agent responsible for the entire codebase health, not just the delta it introduced.
 
@@ -694,7 +694,7 @@ When the agent needs external knowledge, the prompt prescribes a structured rese
 - Ask user for login help when needed.
 \end{prompt}
 
-\noindent The rationale is a two-phase separation between \emph{collection} and \emph{synthesis}.  LLMs tend to anchor on the first few results they encounter, which biases their solutions toward a narrow slice of the design space.  By forcing the agent to accumulate a broad set of information into a file \emph{before} reasoning about it, the protocol counteracts anchoring bias and encourages the model to consider diverse approaches.  The ``visit $\geq$30 websites'' threshold is deliberately aggressive: it ensures the agent does not shortcut the research phase after two or three hits, and the resulting information file serves as an auditable artifact of what the agent considered.  The structured procedure with a counter header (\texttt{\# Web Research --- Websites visited: 0/30}) and per-site entries (\texttt{\#\# [N/30] URL}) addresses an empirically observed failure mode in which the model claims to have ``visited many sites'' after only a handful of fetches; a concrete counter forces the model to verify the actual number visited before declaring the collection phase complete.  The instruction to try ``different queries, synonyms, official docs'' when results dry up prevents the agent from giving up prematurely on a narrow set of search terms.
+\noindent The rationale is a two-phase separation between \emph{collection} and \emph{synthesis}.  LLMs tend to anchor on the first few results they encounter, which biases their solutions toward a narrow slice of the design space.  By forcing the agent to accumulate a broad set of information into a file \emph{before} reasoning about it, the protocol counteracts anchoring bias and encourages the model to consider diverse approaches.  The ``visit $\geq$30 websites'' threshold is a conservative guardrail: it discourages the agent from stopping the research phase after two or three hits, and the resulting information file serves as an auditable artifact of what the agent considered.  The structured procedure with a counter header (\texttt{\# Web Research --- Websites visited: 0/30}) and per-site entries (\texttt{\#\# [N/30] URL}) addresses an empirically observed failure mode in which the model claims to have ``visited many sites'' after only a handful of fetches; a concrete counter forces the model to verify the actual number visited before declaring the collection phase complete.  The instruction to try ``different queries, synonyms, official docs'' when results dry up prevents the agent from giving up prematurely on a narrow set of search terms.
 
 The login instruction addresses a practical obstacle in web research: many websites require authentication before revealing their content.  Rather than silently skipping gated pages or hallucinating their contents, we instruct the agent to ask the user for help with login.
 
@@ -750,10 +750,10 @@ A final section provides project-specific instructions that are injected when th
 - Read PWD/Assistant.md as overriding instructions.
 \end{prompt}
 
-These overrides serve seven purposes.  First, they specify the exact toolchain commands for the KS project itself (\texttt{uv run check -{}-full}, \texttt{uv run pytest}), eliminating guesswork about which linter, formatter, or test runner to use.  Second, they prevent dangerous self-modification: just as a surgeon should not operate on themselves, the agent must not install or reinstall the VS~Code extension it is running inside, since doing so would terminate its own process.  Third, they provide navigation instructions for the agent's own source: when the user asks to edit the system prompt, the agent knows the exact file path within the installed VS~Code extension directory, avoiding guesswork about where the file lives.  Moreover, it does not create unnecessary UI components in KS Assistant just to edit the system prompt.  Fourth, the agent is given a URL to its own paper's source as a source of self-knowledge: when a user asks the agent about its own capabilities, design, or identity, it can retrieve and read the paper rather than hallucinating an answer.  This creates a self-referential loop in which the documentation describing the agent is also consumed by the agent.  Fifth, the instructions expose a third-party agent integration layer: the agent is told where third-party agents live (\texttt{KS/agents/third\_party\_agents}).  When a third-party agent requires authentication, the agent handles it autonomously and only prompts the user when a page genuinely requires user credentials---reducing unnecessary interruptions while maintaining security.  Sixth, official Claude SKILLS~\citep{claudecode2025} are bundled in \texttt{KS/agents/claude\_skills}, giving the agent access to Anthropic's curated skill library for common software engineering patterns; by indicating where these skills reside, the agent can reference and apply them when relevant tasks arise.  Seventh, the \texttt{Assistant.md} override mechanism allows per-repository instructions to further customize the agent's behavior, forming a hierarchy: general system prompt $\rightarrow$ Assistant-specific instructions $\rightarrow$ repository-specific \texttt{Assistant.md}.  This approach also enables us to not hardcode \texttt{Assistant.md} in the KS Assistant code, removing one more dependency.  In the \texttt{Assistant.md}, one can include more markdown files for further instructions.
+These overrides serve seven purposes.  First, they specify the exact toolchain commands for the KS project itself (\texttt{uv run check -{}-full}, \texttt{uv run pytest}), eliminating guesswork about which linter, formatter, or test runner to use.  Second, they prevent dangerous self-modification: just as a surgeon should not operate on themselves, the agent must not install or reinstall the VS~Code extension it is running inside, since doing so would terminate its own process.  Third, they provide navigation instructions for the agent's own source: when the user asks to edit the system prompt, the agent knows the exact file path within the installed VS~Code extension directory, avoiding guesswork about where the file lives.  Moreover, it does not create unnecessary UI components in KS Assistant just to edit the system prompt.  Fourth, the agent is given a URL to its own paper's source as a source of self-knowledge: when a user asks the agent about its own capabilities, design, or identity, it can retrieve and read the paper rather than hallucinating an answer.  This creates a self-referential loop in which the documentation describing the agent is also consumed by the agent.  Fifth, the instructions expose a third-party agent integration layer: the agent is told where third-party agents live (\texttt{KS/agents/third\_party\_agents}).  When a third-party agent requires authentication, the agent handles it autonomously and only prompts the user when a page genuinely requires user credentials---reducing unnecessary interruptions while maintaining security.  Sixth, official Claude SKILLS~\citep{claudecode2025} are bundled in \texttt{KS/agents/claude\_skills}, giving the agent access to Anthropic's curated skill library for common software engineering patterns; by indicating where these skills reside, the agent can reference and apply them when relevant tasks arise.  Seventh, the \texttt{Assistant.md} override mechanism allows per-repository instructions to further customize the agent's behavior, forming a hierarchy: general system prompt $\rightarrow$ Assistant-specific instructions $\rightarrow$ repository-specific \texttt{Assistant.md}.  This approach avoids hard-coding repository-specific instructions in the KS Assistant code.  The \texttt{Assistant.md} file can include additional markdown files for further instructions.
 
 %......................................................................
-\section{Painless software engineering (continued)}
+\section{Conversational development case study (continued)}
 \label{app:painless}
 %......................................................................
 
@@ -795,7 +795,7 @@ to review the modified and new files in the original branch. Fix it.
 \item {\bf Claims}
     \item[] Question: Do the main claims made in the abstract and introduction accurately reflect the paper's contributions and scope?
     \item[] Answer: \answerYes{}
-    \item[] Justification: The abstract and introduction (Section~\ref{sec:intro}) clearly state the contributions---a five-layer agent architecture, a structured system prompt, a VS~Code extension, and a 62.2\% pass rate on Terminal-Bench~2.0---and the scope is limited to software engineering tasks.  The conclusion's claim that KS~Assistant matches or beats both the Cursor Composer~2 and Claude~Code agents is directly supported by the head-to-head Terminal-Bench~2.0 results in Section~\ref{sec:evaluation} (62.2\% vs.\ 61.7\% and 58\%, on the same benchmark and base model), and the claim that KS~Assistant was built using itself is documented in Section~\ref{sec:intro} and discussed throughout Sections~\ref{sec:architecture}--\ref{sec:evaluation}.
+    \item[] Justification: The abstract and introduction (Section~\ref{sec:intro}) state the contributions---a five-layer agent architecture, a structured system prompt, a VS~Code extension, and a 62.2\% pass rate on Terminal-Bench~2.0---and limit the empirical scope to software engineering tasks evaluated on this benchmark with Claude Opus~4.6.  The paper now treats Claude~Code and Cursor Composer~2 numbers as public leaderboard context rather than a controlled head-to-head comparison.  The self-hosting claim is presented as a development case study rather than causal evidence of performance.
     \item[] Guidelines:
     \begin{itemize}
         \item The answer \answerNA{} means that the abstract and introduction do not include the claims made in the paper.
@@ -837,7 +837,7 @@ to review the modified and new files in the original branch. Fix it.
     \item {\bf Experimental result reproducibility}
     \item[] Question: Does the paper fully disclose all the information needed to reproduce the main experimental results of the paper to the extent that it affects the main claims and/or conclusions of the paper (regardless of whether the code and data are provided or not)?
     \item[] Answer: \answerYes{}
-    \item[] Justification: Section~\ref{sec:evaluation} describes the benchmark (Terminal-Bench~2.0), the evaluation framework (Harbor), the model (Claude Opus~4.6), the hardware (2025 MacBook Air M4, 24\,GB RAM), the number of trials (5 per task), and the 9 skipped tasks. The full agent architecture is described in Section~\ref{sec:architecture} and the system prompt in Section~\ref{sec:system-prompt} and Appendix~\ref{app:full-prompt}.
+    \item[] Justification: Section~\ref{sec:evaluation} describes the benchmark (Terminal-Bench~2.0), the evaluation framework (Harbor), the model (Claude Opus~4.6), the hardware (2025 MacBook Air M4, 24\,GB RAM), the number of trials (5 per task), and the 9 skipped tasks. The full agent architecture is described in Section~\ref{sec:architecture} and the system prompt in Section~\ref{sec:system-prompt} and Appendix~\ref{app:full-prompt}.  Because the code is not included with the submission, reproduction would require reimplementing the described system or obtaining the released code later.
     \item[] Guidelines:
     \begin{itemize}
         \item The answer \answerNA{} means that the paper does not include experiments.
@@ -856,8 +856,8 @@ to review the modified and new files in the original branch. Fix it.
 
 \item {\bf Open access to data and code}
     \item[] Question: Does the paper provide open access to the data and code, with sufficient instructions to faithfully reproduce the main experimental results, as described in supplemental material?
-    \item[] Answer: \answerNo{The code repository link is withheld to preserve double-blind review. The system is open-source and the code will be made available upon acceptance.}
-    \item[] Justification: The open-source repository link is withheld to respect double-blind review (stated in Section~\ref{sec:intro}). The system will be publicly released upon acceptance.
+    \item[] Answer: \answerNo{}
+    \item[] Justification: The repository link is withheld to respect double-blind review (stated in Section~\ref{sec:intro}).  No anonymized code package or reproduction scripts are currently provided with the submission.
     \item[] Guidelines:
     \begin{itemize}
         \item The answer \answerNA{} means that paper does not include experiments requiring code.
@@ -884,8 +884,8 @@ to review the modified and new files in the original branch. Fix it.
 
 \item {\bf Experiment statistical significance}
     \item[] Question: Does the paper report error bars suitably and correctly defined or other appropriate information about the statistical significance of the experiments?
-    \item[] Answer: \answerYes{}
-    \item[] Justification: We run 5 independent trials per task (445 total runs) and report pass@any (78.7\%), pass@all (43.8\%), and overall pass rate (62.2\%), as well as the distribution of always-pass, always-fail, and mixed-result tasks. Median and mean cost and duration are reported.
+    \item[] Answer: \answerNo{}
+    \item[] Justification: We report 5 independent trials per task (445 total runs), pass@any (78.7\%), pass@all (43.8\%), overall pass rate (62.2\%), always-pass/always-fail/mixed-result counts, and median/mean cost and duration.  However, the paper does not report confidence intervals, error bars, or statistical significance tests, so the checklist answer is No.
     \item[] Guidelines:
     \begin{itemize}
         \item The answer \answerNA{} means that the paper does not include experiments.
@@ -925,8 +925,8 @@ to review the modified and new files in the original branch. Fix it.
 
 \item {\bf Broader impacts}
     \item[] Question: Does the paper discuss both potential positive societal impacts and negative societal impacts of the work performed?
-    \item[] Answer: \answerYes{}
-    \item[] Justification: The paper discusses positive impacts (making software development more accessible, reducing developer toil). Potential negative impacts include job displacement for routine programming tasks and the risk of generating vulnerable code if the system prompt's verification disciplines are removed. The system mitigates the latter through mandatory pre-finish verification (Appendix~\ref{app:prefinish}) and test-first discipline (Appendix~\ref{app:testing}).
+    \item[] Answer: \answerNo{}
+    \item[] Justification: The paper focuses on architecture and benchmark evaluation.  It does not include a dedicated broader-impact discussion covering both potential benefits and potential harms, so the checklist answer is No.
     \item[] Guidelines:
     \begin{itemize}
         \item The answer \answerNA{} means that there is no societal impact of the work performed.
@@ -951,8 +951,8 @@ to review the modified and new files in the original branch. Fix it.
 
 \item {\bf Licenses for existing assets}
     \item[] Question: Are the creators or original owners of assets (e.g., code, data, models), used in the paper, properly credited and are the license and terms of use explicitly mentioned and properly respected?
-    \item[] Answer: \answerYes{}
-    \item[] Justification: All tools, benchmarks, and models used are cited: Terminal-Bench~2.0, Harbor, Claude Opus~4.6, Playwright, VS~Code, and all related works. The system is open-source.
+    \item[] Answer: \answerNo{}
+    \item[] Justification: The paper cites the main tools, benchmarks, and models used, including Terminal-Bench~2.0, Harbor, Claude Opus~4.6, Playwright, VS~Code, and related work.  It does not yet explicitly list the license names or terms of use for each existing asset, so the checklist answer is No.
     \item[] Guidelines:
     \begin{itemize}
         \item The answer \answerNA{} means that the paper does not use existing assets.
@@ -967,8 +967,8 @@ to review the modified and new files in the original branch. Fix it.
 
 \item {\bf New assets}
     \item[] Question: Are new assets introduced in the paper well documented and is the documentation provided alongside the assets?
-    \item[] Answer: \answerNA{}
-    \item[] Justification: No new datasets or pretrained models are released. The open-source code will be documented upon release.
+    \item[] Answer: \answerNo{}
+    \item[] Justification: The paper introduces a software system, but the anonymized code package and accompanying documentation are not included with the submission.  No new datasets or pretrained models are released.
     \item[] Guidelines:
     \begin{itemize}
         \item The answer \answerNA{} means that the paper does not release new assets.
@@ -1003,7 +1003,7 @@ to review the modified and new files in the original branch. Fix it.
 \item {\bf Declaration of LLM usage}
     \item[] Question: Does the paper describe the usage of LLMs if it is an important, original, or non-standard component of the core methods in this research? Note that if the LLM is used only for writing, editing, or formatting purposes and does \emph{not} impact the core methodology, scientific rigor, or originality of the research, a declaration is not required.
     \item[] Answer: \answerYes{}
-    \item[] Justification: The entire system is built around LLM usage. The paper also discloses that the system was built using itself (Section~\ref{sec:intro}). An initial rough draft of the paper was generated from the code of KS Asistant and it README.md.
+    \item[] Justification: The entire system is built around LLM usage. The paper also discloses that the system was used to develop its own codebase (Section~\ref{sec:intro}). An initial rough draft of the paper was generated from the code of KS Assistant and its README.md.
     \item[] Guidelines:
     \begin{itemize}
         \item The answer \answerNA{} means that the core method development in this research does not involve LLMs as any important, original, or non-standard components.
