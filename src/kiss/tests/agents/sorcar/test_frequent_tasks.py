@@ -140,6 +140,20 @@ class TestFrequentTasks:
         finally:
             th._MAX_FREQUENT_TASKS = original_max
 
+    def test_default_limit_is_50(self) -> None:
+        """_load_frequent_tasks default limit returns up to 50 rows."""
+        for i in range(60):
+            th._record_frequent_task(f"task-{i:03d}")
+        rows = th._load_frequent_tasks()
+        assert len(rows) == 50
+
+    def test_returns_all_50_when_exactly_50_exist(self) -> None:
+        """When exactly 50 tasks are recorded, all 50 are returned."""
+        for i in range(50):
+            th._record_frequent_task(f"task-{i:03d}")
+        rows = th._load_frequent_tasks()
+        assert len(rows) == 50
+
     def test_chat_run_records_frequent_task(self) -> None:
         """ChatSorcarAgent.run wires ``_record_frequent_task`` for each task."""
         th._add_task("integration task", chat_id="")

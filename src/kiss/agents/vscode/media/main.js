@@ -4409,7 +4409,7 @@
     if (!frequentSidebar) return;
     closeSidebar();
     closeConfigSidebar();
-    vscode.postMessage({type: 'getFrequentTasks', limit: 20});
+    vscode.postMessage({type: 'getFrequentTasks', limit: 50});
     frequentSidebar.classList.add('open');
     if (frequentSidebarOverlay) frequentSidebarOverlay.classList.add('open');
     if (frequentBtn) frequentBtn.classList.add('active');
