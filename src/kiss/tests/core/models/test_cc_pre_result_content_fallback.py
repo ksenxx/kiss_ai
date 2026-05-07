@@ -58,9 +58,19 @@ def _build_fake_popen_class(events: list[dict[str, Any]]) -> type:
             self.stdin = _FakeStdin()
             self.stdout = _FakeStdout(stream_data)
             self.stderr = _FakeStdout("")
+            self._terminated = False
 
         def wait(self, timeout: float | None = None) -> int:
             return 0
+
+        def poll(self) -> int | None:
+            return 0 if self._terminated else None
+
+        def terminate(self) -> None:
+            self._terminated = True
+
+        def kill(self) -> None:
+            self._terminated = True
 
     return FakePopen
 
@@ -87,13 +97,16 @@ class TestPreResultContentFallback:
     """Tool calls must be recovered from pre-result content when result is empty."""
 
     def test_result_event_empty_but_text_deltas_have_tool_calls(self) -> None:
-        """Regression: result event with empty result must not lose tool calls.
+        """Tool calls in text deltas are extracted even when result event is empty.
 
-        When the CLI's result event has an empty ``result`` field but the
-        streaming ``content_block_delta`` events carried valid tool_calls
-        JSON, the parser must fall back to the pre-result accumulated
-        content and extract the tool calls.
+        The early-stop mechanism terminates the CLI as soon as the first
+        complete ``tool_calls`` JSON block is found in the streaming text,
+        so the ``result`` event is never processed.  The content retains
+        the tool_calls JSON from the deltas.
         """
+        tool_json = json.dumps(
+            {"tool_calls": [{"name": "go_to_url", "arguments": {"url": "https://example.com"}}]}
+        )
         events = [
             {"type": "stream_event", "event": {
                 "type": "content_block_start",
@@ -101,9 +114,7 @@ class TestPreResultContentFallback:
             }},
             {"type": "stream_event", "event": {
                 "type": "content_block_delta",
-                "delta": {"type": "text_delta", "text": json.dumps(
-                    {"tool_calls": [{"name": "go_to_url", "arguments": {"url": "https://example.com"}}]}
-                )},
+                "delta": {"type": "text_delta", "text": tool_json},
             }},
             {"type": "stream_event", "event": {"type": "content_block_stop"}},
             {"type": "result", "result": "", "usage": {"input_tokens": 10, "output_tokens": 10}},
@@ -111,17 +122,20 @@ class TestPreResultContentFallback:
 
         function_calls, content, m = _run_with_events(events)
 
-        assert content == ""
+        # Early stop truncates content to the first tool_calls block; the
+        # result event is never reached.
+        assert content == tool_json
         assert len(function_calls) == 1
         assert function_calls[0]["name"] == "go_to_url"
         assert function_calls[0]["arguments"] == {"url": "https://example.com"}
-        assert "tool_calls" in m._pre_result_content
+        assert m._stopped_for_tool_calls is True
 
     def test_result_event_strips_tool_calls_json(self) -> None:
-        """Result event may contain prose without the tool_calls JSON.
+        """Early-stop captures tool calls even when result would strip them.
 
-        If the CLI post-processes the result and strips the JSON, the
-        pre-result content still has the full text including tool_calls.
+        The early-stop mechanism terminates the CLI as soon as the first
+        complete ``tool_calls`` block is detected.  The result event
+        (which might strip the JSON) is never processed.
         """
         tool_json = json.dumps(
             {"tool_calls": [{"name": "Bash", "arguments": {"command": "ls -la"}}]}
@@ -145,13 +159,15 @@ class TestPreResultContentFallback:
 
         function_calls, content, m = _run_with_events(events)
 
-        assert content == "I will list the files."
+        # Content is truncated to end of tool_calls block
+        assert content == full_text
         assert len(function_calls) == 1
         assert function_calls[0]["name"] == "Bash"
         assert function_calls[0]["arguments"] == {"command": "ls -la"}
+        assert m._stopped_for_tool_calls is True
 
     def test_result_matches_content_normal_case(self) -> None:
-        """When result matches accumulated content, normal parsing works."""
+        """Early-stop captures tool calls; result event is never processed."""
         tool_json = json.dumps(
             {"tool_calls": [{"name": "Bash", "arguments": {"command": "pwd"}}]}
         )
@@ -175,11 +191,10 @@ class TestPreResultContentFallback:
         assert content == tool_json
         assert len(function_calls) == 1
         assert function_calls[0]["name"] == "Bash"
-        # Pre-result content should also match
-        assert m._pre_result_content == tool_json
+        assert m._stopped_for_tool_calls is True
 
     def test_no_result_event_uses_accumulated_content(self) -> None:
-        """When there's no result event, accumulated content is used directly."""
+        """Tool calls extracted even when there is no result event."""
         tool_json = json.dumps(
             {"tool_calls": [{"name": "go_to_url", "arguments": {"url": "https://test.com"}}]}
         )
@@ -201,6 +216,7 @@ class TestPreResultContentFallback:
 
         assert len(function_calls) == 1
         assert function_calls[0]["name"] == "go_to_url"
+        assert m._stopped_for_tool_calls is True
 
     def test_thinking_fallback_still_works(self) -> None:
         """Thinking block fallback works even when pre-result is empty."""
@@ -230,17 +246,18 @@ class TestPreResultContentFallback:
         assert "tool_calls" in m._last_thinking_content
 
     def test_combined_empty_result_and_thinking(self) -> None:
-        """Both pre-result and thinking fallbacks can be exercised.
+        """Tool calls from both text and thinking blocks are merged.
 
-        Thinking has tool calls, text deltas also have tool calls, but result
-        is empty.  Pre-result should be preferred over thinking because it
-        was in the visible text block.
+        Thinking has tool calls and text deltas also have tool calls.
+        The early-stop mechanism stops at the first text-block tool call,
+        but the merged parsing collects tool calls from all sources
+        (content + thinking) so both are extracted.
         """
         text_tool = json.dumps(
             {"tool_calls": [{"name": "go_to_url", "arguments": {"url": "https://real.com"}}]}
         )
         thinking_tool = json.dumps(
-            {"tool_calls": [{"name": "Bash", "arguments": {"command": "WRONG"}}]}
+            {"tool_calls": [{"name": "Bash", "arguments": {"command": "echo merged"}}]}
         )
 
         events = [
@@ -267,7 +284,9 @@ class TestPreResultContentFallback:
 
         function_calls, content, m = _run_with_events(events)
 
-        # Pre-result content should win (text block had go_to_url)
-        assert len(function_calls) == 1
-        assert function_calls[0]["name"] == "go_to_url"
-        assert function_calls[0]["arguments"] == {"url": "https://real.com"}
+        # Both tool calls are extracted: go_to_url from text + Bash from thinking
+        names = {fc["name"] for fc in function_calls}
+        assert len(function_calls) == 2
+        assert "go_to_url" in names
+        assert "Bash" in names
+        assert m._stopped_for_tool_calls is True

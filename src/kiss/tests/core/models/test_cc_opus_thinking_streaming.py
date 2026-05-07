@@ -224,9 +224,19 @@ def _build_fake_popen_class(events: list[dict[str, Any]]) -> type:
             self.stdin = _FakeStdin()
             self.stdout = _FakeStdout(stream_data)
             self.stderr = _FakeStdout("")
+            self._terminated = False
 
         def wait(self, timeout: float | None = None) -> int:
             return 0
+
+        def poll(self) -> int | None:
+            return 0 if self._terminated else None
+
+        def terminate(self) -> None:
+            self._terminated = True
+
+        def kill(self) -> None:
+            self._terminated = True
 
     return FakePopen
 

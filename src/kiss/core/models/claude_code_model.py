@@ -28,6 +28,8 @@ from kiss.core.models.model import (
     ThinkingCallback,
     TokenCallback,
     _build_text_based_tools_prompt,
+    _iter_balanced_json_objects,
+    _iter_tool_calls_lists,
     _parse_text_based_tool_calls,
 )
 
@@ -50,6 +52,27 @@ def _find_claude_cli() -> str:
             "Install it from https://docs.anthropic.com/en/docs/claude-code"
         )
     return path
+
+
+def _find_first_tool_calls_end(content: str) -> int:
+    """Return the end position of the first balanced ``tool_calls`` JSON object.
+
+    Scans *content* for balanced JSON objects using
+    :func:`_iter_balanced_json_objects` and returns the end position of the
+    first one that contains a ``tool_calls`` list.  Returns ``-1`` if no
+    complete tool_calls block is found.
+
+    Args:
+        content: The accumulated text to scan.
+
+    Returns:
+        End position (exclusive) of the first tool_calls JSON object,
+        or ``-1`` if none found.
+    """
+    for _start, end, parsed in _iter_balanced_json_objects(content):
+        if _iter_tool_calls_lists(parsed):
+            return end
+    return -1
 
 
 class ClaudeCodeModel(Model):
@@ -102,6 +125,9 @@ class ClaudeCodeModel(Model):
         # lets :meth:`generate_and_process_with_tools` recover tool calls
         # that would otherwise be lost.
         self._pre_result_content: str = ""
+        # Set by :meth:`_parse_stream_events` when it exits early because
+        # a complete ``tool_calls`` JSON block was found in the stream.
+        self._stopped_for_tool_calls: bool = False
 
     def initialize(self, prompt: str, attachments: list[Attachment] | None = None) -> None:
         """Initialize the conversation with an initial user prompt.
@@ -175,11 +201,18 @@ class ClaudeCodeModel(Model):
         ])
         return args
 
-    def generate(self) -> tuple[str, Any]:
+    def generate(self, stop_on_tool_calls: bool = False) -> tuple[str, Any]:
         """Generate a response using the Claude Code CLI.
 
         Always uses streaming so tokens are delivered incrementally and the
         process is terminated before a second assistant message is produced.
+
+        Args:
+            stop_on_tool_calls: When ``True``, terminate the CLI process as
+                soon as a complete ``tool_calls`` JSON block is detected in
+                the streaming text.  This prevents reasoning models from
+                hallucinating tool results and generating an unbounded
+                response.
 
         Returns:
             tuple[str, Any]: (generated_text, parsed_json_response).
@@ -206,20 +239,41 @@ class ClaudeCodeModel(Model):
         proc.stdin.write(prompt)
         proc.stdin.close()
 
+        self._stopped_for_tool_calls = False
         assert proc.stdout is not None
-        content, result_json = self._parse_stream_events(proc.stdout)
+        content, result_json = self._parse_stream_events(
+            proc.stdout, stop_on_tool_calls=stop_on_tool_calls
+        )
 
-        proc.wait(timeout=timeout)
-        if proc.returncode != 0:  # pragma: no cover – requires CLI failure
-            stderr = proc.stderr.read() if proc.stderr else ""
-            raise KISSError(
-                f"Claude Code CLI failed (exit {proc.returncode}): {stderr.strip()}"
-            )
+        if self._stopped_for_tool_calls and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:  # pragma: no cover
+                proc.kill()
+                proc.wait()
+        else:
+            proc.wait(timeout=timeout)
+            # Allow -15 (SIGTERM) which can happen if the process was
+            # terminated slightly before we reach wait().
+            if proc.returncode not in (
+                0,
+                -15,
+            ):  # pragma: no cover – requires CLI failure
+                stderr = proc.stderr.read() if proc.stderr else ""
+                raise KISSError(
+                    f"Claude Code CLI failed (exit {proc.returncode}): "
+                    f"{stderr.strip()}"
+                )
 
         self.conversation.append({"role": "assistant", "content": content})
         return content, result_json
 
-    def _parse_stream_events(self, lines: Iterable[str]) -> tuple[str, dict[str, Any]]:
+    def _parse_stream_events(
+        self,
+        lines: Iterable[str],
+        stop_on_tool_calls: bool = False,
+    ) -> tuple[str, dict[str, Any]]:
         """Parse stream-json events, stopping before a second assistant message.
 
         Iterates over newline-delimited JSON events from the Claude CLI.
@@ -235,8 +289,16 @@ class ClaudeCodeModel(Model):
         A ``result`` event (if received before a second assistant) is used
         as the authoritative final content.
 
+        When *stop_on_tool_calls* is ``True``, the parser watches for
+        complete ``{"tool_calls": [...]}`` JSON blocks in the accumulated
+        text content.  As soon as one is found the content is truncated to
+        the end of that first block and parsing stops, preventing reasoning
+        models from hallucinating tool results in an unbounded stream.
+
         Args:
             lines: An iterable of JSON strings (one event per line).
+            stop_on_tool_calls: When ``True``, stop as soon as a complete
+                ``tool_calls`` JSON block is detected in the text content.
 
         Returns:
             Tuple of ``(content, result_json)`` where *content* is the text
@@ -252,6 +314,9 @@ class ClaudeCodeModel(Model):
         seen_assistant_id: str | None = None
         saw_content_block = False
         thinking_started = False
+        # Fast-path guard: only start expensive JSON parsing once we have
+        # seen the ``"tool_calls"`` substring somewhere in the content.
+        seen_tool_calls_hint = False
 
         for line in lines:
             line = line.strip()
@@ -292,6 +357,12 @@ class ClaudeCodeModel(Model):
                         if text:
                             content += text
                             self._invoke_token_callback(text)
+                if stop_on_tool_calls and content:
+                    tc_end = _find_first_tool_calls_end(content)
+                    if tc_end > 0:
+                        content = content[:tc_end]
+                        self._stopped_for_tool_calls = True
+                        break
             elif event_type == "content_block_start":
                 saw_content_block = True
                 block = event.get("content_block", {})
@@ -313,6 +384,17 @@ class ClaudeCodeModel(Model):
                     if text:
                         content += text
                         self._invoke_token_callback(text)
+                        if stop_on_tool_calls:
+                            if not seen_tool_calls_hint and "tool_calls" in text:
+                                seen_tool_calls_hint = True
+                            if seen_tool_calls_hint and "}" in text:
+                                tc_end = _find_first_tool_calls_end(content)
+                                if tc_end > 0:
+                                    content = content[:tc_end]
+                                    self._stopped_for_tool_calls = True
+                                    break
+            if self._stopped_for_tool_calls:
+                break
             elif event_type == "content_block_stop":
                 if current_block_type == "thinking" and thinking_started:
                     self._invoke_thinking_callback(False)
@@ -362,31 +444,22 @@ class ClaudeCodeModel(Model):
         self.model_config = config
 
         try:
-            content, response = self.generate()
+            content, response = self.generate(stop_on_tool_calls=True)
         finally:
             self.model_config = original_config
 
-        function_calls = _parse_text_based_tool_calls(content)
-
-        # The ``result`` event can replace the accumulated content from
-        # ``content_block_delta`` events with a different (or empty) string.
-        # When the post-result content yields no tool calls, fall back to
-        # the pre-result accumulated content which may still contain the
-        # ``tool_calls`` JSON that was streamed via text deltas.
-        if not function_calls and self._pre_result_content:
-            function_calls = _parse_text_based_tool_calls(
-                self._pre_result_content
-            )
-
-        # Reasoning-capable CLI models (e.g. ``cc/opus``) sometimes emit the
-        # ``tool_calls`` JSON inside an extended-thinking block instead of a
-        # text block.  When the visible ``content`` yields no tool calls,
-        # fall back to parsing the captured thinking text so the agent
-        # actually receives the function calls and does not stall.
-        if not function_calls and self._last_thinking_content:
-            function_calls = _parse_text_based_tool_calls(
-                self._last_thinking_content
-            )
+        # Merge tool calls from all content sources.  The ``result`` event
+        # can replace accumulated content with a version missing some tool
+        # calls, and reasoning models may emit tool_calls inside thinking
+        # blocks.  Parsing all three sources and de-duplicating ensures
+        # nothing is lost.
+        all_sources = [content]
+        if self._pre_result_content:
+            all_sources.append(self._pre_result_content)
+        if self._last_thinking_content:
+            all_sources.append(self._last_thinking_content)
+        combined = "\n".join(all_sources)
+        function_calls = _parse_text_based_tool_calls(combined)
 
         if function_calls:
             self._replace_last_assistant_with_tool_calls(content, function_calls)

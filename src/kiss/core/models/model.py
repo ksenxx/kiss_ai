@@ -607,9 +607,12 @@ You can call multiple tools at once by including multiple objects in the tool_ca
 ### Tools:
 {chr(10).join(tools_desc)}
 
-IMPORTANT: When you want to call a tool, output ONLY the JSON object with tool_calls.
-Do not include any other text before or after the JSON.
-When you have the final answer, call the `finish` tool with your result.
+CRITICAL RULES:
+1. When you want to call a tool, output ONLY the JSON object with tool_calls.
+2. STOP IMMEDIATELY after outputting the tool_calls JSON. Do NOT continue generating.
+3. Do NOT predict, simulate, or hallucinate what the tool results will be.
+4. The system will execute the tools and provide actual results in the next message.
+5. When you have the final answer, call the `finish` tool with your result.
 """
 
 
