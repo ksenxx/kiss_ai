@@ -381,10 +381,13 @@ def find_deprecated_models(
     anthropic: dict[str, dict],
     gemini: dict[str, dict],
     openai: dict[str, dict],
+    codex_slugs: set[str] | None = None,
 ) -> list[dict]:
     """Identify models in current MODEL_INFO that are deprecated upstream.
 
     A model is considered deprecated if:
+    - It's a codex/ model whose slug is not in the Codex CLI's official
+      models.json (except ``codex/default`` which is always kept).
     - It's an openrouter/ model not present in the fetched OpenRouter list
       (which already filters out expired models).
     - It's a claude- model not returned by the Anthropic models API and not an
@@ -399,6 +402,12 @@ def find_deprecated_models(
 
     for name in current:  # pragma: no branch
         if name.startswith("codex/"):  # pragma: no branch
+            if codex_slugs and name != "codex/default":
+                slug = name.removeprefix("codex/")
+                if slug not in codex_slugs:
+                    deprecated.append(
+                        {"name": name, "reason": "not in Codex CLI models.json"}
+                    )
             continue
         if name.startswith("openrouter/"):  # pragma: no branch
             if openrouter and name not in openrouter:  # pragma: no branch
@@ -453,47 +462,57 @@ _VENDOR_OR_PREFIX: dict[str, str] = {
     "gemini": "openrouter/google/",
 }
 
-_CODEX_GPT_PATTERN = re.compile(r"^gpt-([5-9]|\d{2,})(\.\d+)?(-.*)?$")
-_CODEX_GPT_SKIP_FRAGMENTS = (
-    "image",
-    "audio",
-    "tts",
-    "search",
-    "transcribe",
-    "whisper",
-    "embedding",
+_CODEX_MODELS_JSON_URL = (
+    "https://raw.githubusercontent.com/openai/codex/main/"
+    "codex-rs/models-manager/models.json"
 )
-_CODEX_GPT_DATE_SUFFIX = re.compile(r"-(\d{8}|\d{4}-\d{2}-\d{2})$")
+
+
+def fetch_codex_supported_slugs(verbose: bool = False) -> set[str]:
+    """Fetch the list of model slugs the Codex CLI actually supports.
+
+    Reads the official ``models.json`` from the openai/codex repository on
+    GitHub. Returns a set of slug strings (e.g. ``{"gpt-5.5", "gpt-5.4"}``).
+    Returns an empty set on network failure so the caller can skip codex
+    candidate generation rather than adding unsupported models.
+    """
+    if verbose:  # pragma: no branch
+        print("  Fetching Codex supported models...")
+    try:
+        data = api_get(_CODEX_MODELS_JSON_URL)
+        slugs = {m["slug"] for m in data.get("models", []) if m.get("slug")}
+        if verbose:  # pragma: no branch
+            print(f"    Found {len(slugs)} supported Codex slugs")
+        return slugs
+    except Exception:
+        logger.debug("Failed to fetch Codex models.json", exc_info=True)
+        if verbose:  # pragma: no branch
+            print("    WARNING: Could not fetch Codex models.json, skipping codex candidates")
+        return set()
 
 
 def _add_codex_candidates(
-    openai: dict[str, dict],
+    codex_slugs: set[str],
     current: dict[str, dict],
     openrouter: dict[str, dict],
     new_models: list[dict],
 ) -> None:
-    """Add ``codex/<gpt-model>`` entries for every OpenAI GPT-5+ model.
+    """Add ``codex/<slug>`` entries for models the Codex CLI supports.
 
-    The codex CLI accepts any model name via ``-m`` and is billed via the
-    user's ChatGPT subscription, so all such entries get $0/0 pricing.
+    Only models whose slug appears in the official Codex CLI ``models.json``
+    are added. This avoids adding models that the Codex CLI rejects at
+    runtime (e.g. ``gpt-5.5-pro`` is not supported with a ChatGPT account).
+
     Context length is taken from the matching OpenRouter entry when
     available, falling back to 400000 (the default for codex/* models).
-
-    Date-suffixed snapshots (e.g. ``gpt-5-2025-08-07``) are skipped because
-    the un-suffixed alias already covers them. Multimodal/embedding/search
-    variants are filtered out because they are not useful with codex.
+    All entries get $0/0 pricing since Codex is billed via the user's
+    ChatGPT subscription.
     """
-    for name in openai:  # pragma: no branch
-        if not _CODEX_GPT_PATTERN.match(name):  # pragma: no branch
-            continue
-        if any(s in name for s in _CODEX_GPT_SKIP_FRAGMENTS):  # pragma: no branch
-            continue
-        if _CODEX_GPT_DATE_SUFFIX.search(name):  # pragma: no branch
-            continue
-        codex_name = f"codex/{name}"
+    for slug in codex_slugs:  # pragma: no branch
+        codex_name = f"codex/{slug}"
         if codex_name in current:  # pragma: no branch
             continue
-        or_info = _lookup_openrouter_pricing(name, "openai", openrouter)
+        or_info = _lookup_openrouter_pricing(slug, "openai", openrouter)
         ctx = or_info["context_length"] if or_info and or_info.get("context_length") else 400000
         new_models.append(
             {
@@ -542,6 +561,7 @@ def compute_changes(
     gemini: dict[str, dict],
     anthropic: dict[str, dict],
     openai: dict[str, dict],
+    codex_slugs: set[str] | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Compare fetched data with current MODEL_INFO.
 
@@ -682,7 +702,8 @@ def compute_changes(
                 }
             )
 
-    _add_codex_candidates(openai, current, openrouter, new_models)
+    if codex_slugs:  # pragma: no branch
+        _add_codex_candidates(codex_slugs, current, openrouter, new_models)
 
     from kiss.core.models.model_info import _OPENAI_PREFIXES
 
@@ -933,6 +954,7 @@ def main() -> None:
     gemini_models = fetch_gemini(verbose=args.verbose)
     anthropic_models = fetch_anthropic(verbose=args.verbose)
     openai_models = fetch_openai(verbose=args.verbose)
+    codex_slugs = fetch_codex_supported_slugs(verbose=args.verbose)
 
     print("\n[3/6] Detecting deprecated models...")
     deprecated = find_deprecated_models(
@@ -941,6 +963,7 @@ def main() -> None:
         anthropic_models,
         gemini_models,
         openai_models,
+        codex_slugs=codex_slugs,
     )
     if deprecated:  # pragma: no branch
         print(f"\n  Deprecated models in MODEL_INFO ({len(deprecated)}):")
@@ -957,6 +980,7 @@ def main() -> None:
         gemini_models,
         anthropic_models,
         openai_models,
+        codex_slugs=codex_slugs,
     )
 
     if updates:  # pragma: no branch
