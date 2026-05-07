@@ -613,112 +613,184 @@ When you have the final answer, call the `finish` tool with your result.
 """
 
 
+def _iter_balanced_json_objects(
+    content: str,
+) -> "list[tuple[int, int, Any]]":
+    """Find every balanced ``{...}`` substring that parses as valid JSON.
+
+    Scans *content* character by character.  At every ``{`` that is not
+    inside a JSON string, walks forward tracking brace depth and string
+    state (with ``\\`` escape handling) until the matching ``}`` is found,
+    then attempts to parse the substring with :func:`json.loads`.  This
+    correctly handles nested objects, arrays, and brackets/braces embedded
+    inside JSON string values — cases the previous regex-based approach
+    silently dropped.
+
+    Args:
+        content: The text to scan.
+
+    Returns:
+        A list of ``(start, end_exclusive, parsed)`` tuples in left-to-right
+        order, one per successfully parsed top-level balanced object.
+    """
+    results: list[tuple[int, int, Any]] = []
+    i, n = 0, len(content)
+    while i < n:
+        if content[i] != "{":
+            i += 1
+            continue
+        depth = 0
+        j = i
+        in_str = False
+        esc = False
+        end = -1
+        while j < n:
+            ch = content[j]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+            elif ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end = j + 1
+                    break
+            j += 1
+        if end == -1:
+            # Unbalanced — no more complete objects can start here.
+            break
+        try:
+            # ``strict=False`` permits raw control characters (e.g. literal
+            # newlines, tabs) inside JSON string values.  Reasoning models
+            # such as ``cc/opus`` routinely emit unescaped newlines inside
+            # ``summary`` arguments, which strict JSON would reject.
+            parsed = json.loads(content[i:end], strict=False)
+        except json.JSONDecodeError:
+            i += 1
+            continue
+        results.append((i, end, parsed))
+        i = end
+    return results
+
+
+def _iter_tool_calls_lists(obj: Any) -> "list[list[Any]]":
+    """Recursively collect every ``tool_calls`` list inside *obj*.
+
+    Walks dicts and lists looking for any ``"tool_calls"`` key whose value
+    is a list.  This supports both top-level ``{"tool_calls": [...]}``
+    objects and tool_calls nested inside an outer wrapper such as
+    ``{"outer": {"tool_calls": [...]}}``.
+
+    Args:
+        obj: A parsed JSON value (dict, list, scalar).
+
+    Returns:
+        Lists of tool-call entries in encounter order.
+    """
+    out: list[list[Any]] = []
+    if isinstance(obj, dict):
+        tcs = obj.get("tool_calls")
+        if isinstance(tcs, list):
+            out.append(tcs)
+        for v in obj.values():
+            out.extend(_iter_tool_calls_lists(v))
+    elif isinstance(obj, list):
+        for item in obj:
+            out.extend(_iter_tool_calls_lists(item))
+    return out
+
+
 def _parse_text_based_tool_calls(content: str) -> list[dict[str, Any]]:
     """Parse tool calls from text-based model output.
 
-    Scans the content for every ``{"tool_calls": [...]}`` JSON object —
-    fenced ```json``` blocks, fenced bare blocks, inline objects, and a
-    final fallback that parses the entire content as a single JSON object.
-    Tool calls from all matches are accumulated in encounter order, and
-    duplicates (same ``name`` + same ``arguments``) are deduplicated so a
-    single logical call emitted multiple times collapses to one entry.
+    Uses a brace-balanced JSON scanner (see
+    :func:`_iter_balanced_json_objects`) to find every valid JSON object in
+    *content*, then collects every nested ``tool_calls`` list.  Duplicates
+    (same ``name`` + same ``arguments``) are removed so a single logical
+    call emitted multiple times collapses to one entry.
 
-    This handles reasoning models (e.g. ``cc/opus``) that emit multiple
-    distinct ``{"tool_calls": [...]}`` blocks in one response — for
-    example a Bash call followed by a separate go_to_url call — which the
-    earlier first-match-wins implementation dropped.
+    This robustly handles reasoning models (e.g. ``cc/opus``) that:
+
+    - emit bare ``{"tool_calls": [...]}`` JSON without code fences,
+    - include arguments containing nested objects, arrays, or strings with
+      ``[]``/``{}`` characters (e.g. markdown links inside a finish summary),
+    - emit several distinct ``tool_calls`` blocks in one response.
 
     Args:
         content: The text content to parse for tool calls.
 
     Returns:
-        A list of function call dictionaries, each containing 'id', 'name',
-        and 'arguments' keys. Returns empty list if no valid tool calls found.
+        A list of function call dictionaries, each containing ``id``,
+        ``name``, and ``arguments`` keys.  Returns an empty list if no
+        valid tool calls are found.
     """
     function_calls: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
 
-    def _add_calls_from(data: Any) -> None:
-        if not (
-            isinstance(data, dict)
-            and "tool_calls" in data
-            and isinstance(data["tool_calls"], list)
-        ):
-            return
-        for tc in data["tool_calls"]:
-            if not (isinstance(tc, dict) and "name" in tc):
-                continue
-            arguments = tc.get("arguments", {})
-            try:
-                key = (tc["name"], json.dumps(arguments, sort_keys=True))
-            except TypeError:
-                # Non-JSON-serializable args — fall back to repr for keying.
-                key = (tc["name"], repr(arguments))
-            if key in seen:
-                continue
-            seen.add(key)
-            function_calls.append(
-                {
-                    "id": f"call_{uuid.uuid4().hex[:8]}",
-                    "name": tc["name"],
-                    "arguments": arguments,
-                }
-            )
-
-    json_patterns = [
-        r"```json\s*(\{.*?\})\s*```",
-        r"```\s*(\{.*?\})\s*```",
-        r"(\{[^{}]*\"tool_calls\"[^{}]*\[[^\]]*\][^{}]*\})",
-    ]
-
-    for pattern in json_patterns:
-        for match in re.findall(pattern, content, re.DOTALL):
-            try:
-                _add_calls_from(json.loads(match))
-            except json.JSONDecodeError:
-                logger.debug("Exception caught", exc_info=True)
-                continue
-
-    if not function_calls:
-        try:
-            _add_calls_from(json.loads(content.strip()))
-        except json.JSONDecodeError:
-            logger.debug("Exception caught", exc_info=True)
+    for _start, _end, parsed in _iter_balanced_json_objects(content):
+        for tcs in _iter_tool_calls_lists(parsed):
+            for tc in tcs:
+                if not (isinstance(tc, dict) and "name" in tc):
+                    continue
+                arguments = tc.get("arguments", {})
+                try:
+                    key = (tc["name"], json.dumps(arguments, sort_keys=True))
+                except TypeError:
+                    # Non-JSON-serializable args — fall back to repr for keying.
+                    key = (tc["name"], repr(arguments))
+                if key in seen:
+                    continue
+                seen.add(key)
+                function_calls.append(
+                    {
+                        "id": f"call_{uuid.uuid4().hex[:8]}",
+                        "name": tc["name"],
+                        "arguments": arguments,
+                    }
+                )
 
     return function_calls
 
 
-_STRIP_PATTERNS = [
-    r"```json\s*\{[^`]*?\"tool_calls\"[^`]*?\}\s*```",
-    r"```\s*\{[^`]*?\"tool_calls\"[^`]*?\}\s*```",
-    r"\{[^{}]*\"tool_calls\"\s*:\s*\[.*?\][^{}]*\}",
-]
+# Matches an empty fenced code block left behind after the JSON inside it
+# has been stripped — e.g. ``"```json\n\n```"`` or ``"```\n\n```"``.
+_EMPTY_FENCE_PATTERN = re.compile(r"```(?:json)?\s*```", re.DOTALL)
 
 
 def _strip_text_based_tool_calls(content: str) -> str:
     """Remove tool_calls JSON blocks from *content*, keeping surrounding text.
 
-    Uses the same heuristics as :func:`_parse_text_based_tool_calls` so that
-    exactly the blocks that would be parsed as tool calls are stripped.
-
-    If the entire content is a single JSON object with ``tool_calls``, an
-    empty string is returned.
+    Uses :func:`_iter_balanced_json_objects` to find every balanced JSON
+    object and strips those that contain a ``tool_calls`` list.  Empty
+    fenced code blocks left behind (e.g. ``"```json\\n\\n```"``) are also
+    cleaned up so the visible Thoughts panel does not show stray fences.
 
     Args:
         content: The full model response text.
 
     Returns:
         The text with tool_calls JSON removed, stripped of leading/trailing
-        whitespace.
+        whitespace.  Returns ``""`` if the entire content was a tool_calls
+        wrapper.
     """
-    try:
-        data = json.loads(content.strip())
-        if isinstance(data, dict) and "tool_calls" in data:
-            return ""
-    except (json.JSONDecodeError, ValueError):
-        pass
-
-    result = content
-    for pattern in _STRIP_PATTERNS:
-        result = re.sub(pattern, "", result, flags=re.DOTALL)
-    return result.strip()
+    spans = [
+        (start, end)
+        for start, end, parsed in _iter_balanced_json_objects(content)
+        if _iter_tool_calls_lists(parsed)
+    ]
+    if not spans:
+        return content.strip()
+    parts: list[str] = []
+    cursor = 0
+    for start, end in spans:
+        parts.append(content[cursor:start])
+        cursor = end
+    parts.append(content[cursor:])
+    return _EMPTY_FENCE_PATTERN.sub("", "".join(parts)).strip()

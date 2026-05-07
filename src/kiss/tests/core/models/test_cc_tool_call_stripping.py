@@ -127,14 +127,16 @@ class TestCCModelTokenStreaming(unittest.TestCase):
 class TestStripEdgeCases(unittest.TestCase):
     """Edge cases for _strip_text_based_tool_calls."""
 
-    def test_invalid_json_in_fenced_block_stripped_by_regex(self) -> None:
-        """Fenced blocks matching the pattern are stripped even if invalid JSON.
+    def test_invalid_json_in_fenced_block_not_stripped(self) -> None:
+        """Invalid JSON is not a tool call — it must NOT be stripped.
 
-        The regex is a heuristic — it does NOT validate JSON.
+        The brace-balanced scanner validates each candidate object via
+        :func:`json.loads`, so heuristic matches that fail to parse are
+        preserved verbatim in the visible Thoughts panel.
         """
         content = '```json\n{not valid "tool_calls": broken}\n```'
         result = _strip_text_based_tool_calls(content)
-        assert result == ""
+        assert result == content.strip()
 
     def test_tool_calls_in_prose_not_stripped(self) -> None:
         """The word 'tool_calls' in prose is not stripped."""
