@@ -128,26 +128,22 @@ def test_existing_model_not_duplicated():
     assert len(updates) == 0
 
 
-def test_codex_candidates_added_for_gpt5_plus_models():
-    """Every GPT-5+ model from OpenAI should produce a codex/ counterpart."""
+def test_codex_candidates_added_from_codex_models_json():
+    """Only models in the Codex CLI models.json get codex/ entries."""
     current = _make_current()
-    openai = {
-        "gpt-5": {"source": "openai"},
-        "gpt-5-codex": {"source": "openai"},
-        "gpt-5.1-codex-max": {"source": "openai"},
-        "gpt-5.5": {"source": "openai"},
-        "gpt-6": {"source": "openai"},
-    }
-    _, new_models = compute_changes(current, {}, {}, {}, {}, openai)
+    codex_slugs = {"gpt-5.5", "gpt-5.4", "gpt-5.4-mini"}
+    _, new_models = compute_changes(
+        current, {}, {}, {}, {}, {}, codex_slugs=codex_slugs
+    )
     names = {m["name"] for m in new_models}
     for expected in (
-        "codex/gpt-5",
-        "codex/gpt-5-codex",
-        "codex/gpt-5.1-codex-max",
         "codex/gpt-5.5",
-        "codex/gpt-6",
+        "codex/gpt-5.4",
+        "codex/gpt-5.4-mini",
     ):
         assert expected in names
+    # Unsupported models like gpt-5.5-pro should NOT appear
+    assert "codex/gpt-5.5-pro" not in names
     for nm in new_models:
         if nm["name"].startswith("codex/"):
             assert nm["input_price_per_1M"] == 0.0
@@ -163,7 +159,7 @@ def test_codex_candidates_added_for_gpt5_plus_models():
 def test_codex_candidate_uses_openrouter_context_when_available():
     """Context length for codex/<name> should come from OpenRouter when present."""
     current: dict[str, dict] = {}
-    openai = {"gpt-5.5": {"source": "openai"}}
+    codex_slugs = {"gpt-5.5"}
     openrouter = {
         "openrouter/openai/gpt-5.5": {
             "context_length": 1050000,
@@ -173,46 +169,35 @@ def test_codex_candidate_uses_openrouter_context_when_available():
         },
     }
     new_models: list[dict] = []
-    _add_codex_candidates(openai, current, openrouter, new_models)
+    _add_codex_candidates(codex_slugs, current, openrouter, new_models)
     [entry] = [m for m in new_models if m["name"] == "codex/gpt-5.5"]
     assert entry["context_length"] == 1050000
 
 
-def test_codex_candidate_skips_pre_gpt5_models():
-    """Old GPT families must not get codex/ entries."""
+def test_codex_candidate_only_adds_supported_slugs():
+    """Only slugs from the Codex CLI models.json should get entries."""
     current: dict[str, dict] = {}
-    openai = {
-        "gpt-3.5-turbo": {"source": "openai"},
-        "gpt-4": {"source": "openai"},
-        "gpt-4o": {"source": "openai"},
-        "gpt-4.1-mini": {"source": "openai"},
-        "gpt-4-turbo-2024-04-09": {"source": "openai"},
-    }
+    codex_slugs = {"gpt-5.5", "gpt-5.4"}
     new_models: list[dict] = []
-    _add_codex_candidates(openai, current, {}, new_models)
-    assert new_models == []
+    _add_codex_candidates(codex_slugs, current, {}, new_models)
+    names = {m["name"] for m in new_models}
+    assert names == {"codex/gpt-5.5", "codex/gpt-5.4"}
 
 
-def test_codex_candidate_skips_dated_snapshots_and_multimodal():
-    """Date-suffixed snapshots and image/audio variants must be skipped."""
+def test_codex_candidate_skips_unsupported_models():
+    """Models not in the Codex models.json must not get codex/ entries."""
     current: dict[str, dict] = {}
-    openai = {
-        "gpt-5-2025-08-07": {"source": "openai"},
-        "gpt-5.1-2025-11-13": {"source": "openai"},
-        "gpt-5-image": {"source": "openai"},
-        "gpt-5-audio-preview": {"source": "openai"},
-        "gpt-5-search-preview": {"source": "openai"},
-        "gpt-5-mini-tts": {"source": "openai"},
-    }
+    # Empty slug set means no codex models should be added
+    codex_slugs: set[str] = set()
     new_models: list[dict] = []
-    _add_codex_candidates(openai, current, {}, new_models)
+    _add_codex_candidates(codex_slugs, current, {}, new_models)
     assert new_models == []
 
 
 def test_codex_candidate_not_added_when_already_present():
     """codex/<name> already in current MODEL_INFO must not be re-added."""
     current = {
-        "codex/gpt-5": {
+        "codex/gpt-5.4": {
             "context_length": 400000,
             "input_price_per_1M": 0.0,
             "output_price_per_1M": 0.0,
@@ -221,11 +206,11 @@ def test_codex_candidate_not_added_when_already_present():
             "gen": True,
         },
     }
-    openai = {"gpt-5": {"source": "openai"}, "gpt-5.5": {"source": "openai"}}
+    codex_slugs = {"gpt-5.4", "gpt-5.5"}
     new_models: list[dict] = []
-    _add_codex_candidates(openai, current, {}, new_models)
+    _add_codex_candidates(codex_slugs, current, {}, new_models)
     names = {m["name"] for m in new_models}
-    assert "codex/gpt-5" not in names
+    assert "codex/gpt-5.4" not in names
     assert "codex/gpt-5.5" in names
 
 
@@ -245,25 +230,44 @@ def test_openrouter_preview_zero_context_not_added():
     assert "openrouter/acme/cool-model-preview" not in names
 
 
-def test_find_deprecated_skips_codex_entries():
-    """codex/* entries must NOT be flagged deprecated based on the OpenAI API.
+def test_find_deprecated_codex_entries_with_slugs():
+    """codex/* models not in the Codex CLI models.json should be deprecated.
 
-    They are aliases accepted by the codex CLI's -m flag, billed via the
-    ChatGPT subscription, and intentionally absent from OpenAI's REST model
-    listing. They are managed separately by _add_codex_candidates.
+    codex/default is always kept. When codex_slugs is provided, only models
+    whose slug appears in the set are kept; all others are deprecated.
+    When codex_slugs is None (fetch failed), no codex models are deprecated.
     """
     current = {
         "codex/default": {"source": "codex"},
-        "codex/gpt-5": {"source": "codex"},
-        "codex/gpt-5-codex": {"source": "codex"},
+        "codex/gpt-5.5": {"source": "codex"},
         "codex/gpt-5.5-pro": {"source": "codex"},
+        "codex/gpt-5.4": {"source": "codex"},
         "gpt-foo-removed": {"source": "openai"},
     }
+    codex_slugs = {"gpt-5.5", "gpt-5.4"}
     openai = {"gpt-5": {"source": "openai"}, "gpt-5-2025-08-07": {"source": "openai"}}
-    deprecated = find_deprecated_models(current, {}, {}, {}, openai)
+    deprecated = find_deprecated_models(
+        current, {}, {}, {}, openai, codex_slugs=codex_slugs
+    )
+    names = {d["name"] for d in deprecated}
+    # codex/default is always kept
+    assert "codex/default" not in names
+    # Supported slugs are kept
+    assert "codex/gpt-5.5" not in names
+    assert "codex/gpt-5.4" not in names
+    # Unsupported slug is deprecated
+    assert "codex/gpt-5.5-pro" in names
+
+
+def test_find_deprecated_codex_entries_without_slugs():
+    """When codex_slugs is None (fetch failed), no codex models are deprecated."""
+    current = {
+        "codex/default": {"source": "codex"},
+        "codex/gpt-5.5-pro": {"source": "codex"},
+    }
+    deprecated = find_deprecated_models(
+        current, {}, {}, {}, {}, codex_slugs=None
+    )
     names = {d["name"] for d in deprecated}
     assert "codex/default" not in names
-    assert "codex/gpt-5" not in names
-    assert "codex/gpt-5-codex" not in names
     assert "codex/gpt-5.5-pro" not in names
-    assert "gpt-foo-removed" in names

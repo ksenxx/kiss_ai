@@ -360,31 +360,23 @@ class TestModelRouting:
 
 class TestModelInfoEntries:
     def test_codex_models_in_model_info(self) -> None:
+        assert "codex/codex-auto-review" in MODEL_INFO
         assert "codex/default" in MODEL_INFO
-        assert "codex/gpt-5" in MODEL_INFO
-        assert "codex/gpt-5-codex" in MODEL_INFO
-        assert "codex/gpt-5.1-codex" in MODEL_INFO
-        assert "codex/gpt-5.1-codex-max" in MODEL_INFO
-        assert "codex/gpt-5.1-codex-mini" in MODEL_INFO
-        assert "codex/gpt-5.2-codex" in MODEL_INFO
+        assert "codex/gpt-5.2" in MODEL_INFO
         assert "codex/gpt-5.3-codex" in MODEL_INFO
+        assert "codex/gpt-5.4" in MODEL_INFO
+        assert "codex/gpt-5.4-mini" in MODEL_INFO
         assert "codex/gpt-5.5" in MODEL_INFO
-        assert "codex/gpt-5.5-codex" in MODEL_INFO
-        assert "codex/gpt-5.5-pro" in MODEL_INFO
 
     def test_codex_models_support_function_calling(self) -> None:
         for name in (
+            "codex/codex-auto-review",
             "codex/default",
-            "codex/gpt-5",
-            "codex/gpt-5-codex",
-            "codex/gpt-5.1-codex",
-            "codex/gpt-5.1-codex-max",
-            "codex/gpt-5.1-codex-mini",
-            "codex/gpt-5.2-codex",
+            "codex/gpt-5.2",
             "codex/gpt-5.3-codex",
+            "codex/gpt-5.4",
+            "codex/gpt-5.4-mini",
             "codex/gpt-5.5",
-            "codex/gpt-5.5-codex",
-            "codex/gpt-5.5-pro",
         ):
             assert MODEL_INFO[name].is_function_calling_supported
 

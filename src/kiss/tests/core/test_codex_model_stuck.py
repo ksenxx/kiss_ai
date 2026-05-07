@@ -85,14 +85,15 @@ class TestCodexModelStuckBug:
         old_db = (th._DB_PATH, th._db_conn, th._KISS_DIR)
         tmpdir = tempfile.mkdtemp()
         try:
-            os.environ["PATH"] = ""
             codex_module._UI_CANDIDATE_PATHS = ()
-            # Force codex/gpt-5.5 into the available set by faking the CLI
+            # Force codex/gpt-5.5 into the available set by faking the CLI.
+            # Keep /usr/bin on PATH so git (needed by the task runner's
+            # pre-snapshot step) remains available.
             fake_codex = Path(tmpdir) / "bin" / "codex"
             fake_codex.parent.mkdir(parents=True, exist_ok=True)
             fake_codex.write_text("#!/bin/sh\nexit 1\n")
             fake_codex.chmod(0o755)
-            os.environ["PATH"] = str(fake_codex.parent)
+            os.environ["PATH"] = str(fake_codex.parent) + ":/usr/bin"
 
             kiss_dir = Path(tmpdir) / ".kiss"
             kiss_dir.mkdir(parents=True, exist_ok=True)
@@ -142,6 +143,25 @@ class TestCodexModelStuckBug:
             assert len(status_false) >= 1, (
                 "Expected status:running:False event. Events: "
                 + str([e.get("type") for e in events])
+            )
+
+            # The fix for the "no response in webview" bug:
+            # A result event must be broadcast so the user sees the error.
+            with lock:
+                result_events = [
+                    e for e in events if e.get("type") == "result"
+                ]
+            assert len(result_events) >= 1, (
+                "Expected at least one result event so the error is visible "
+                "in the chat webview. Events: "
+                + str([e.get("type") for e in events])
+            )
+            last_result = result_events[-1]
+            assert last_result.get("success") is False, (
+                "Result event should indicate failure"
+            )
+            assert last_result.get("summary") or last_result.get("text"), (
+                "Result event must contain an error message"
             )
         finally:
             os.environ["PATH"] = saved_path
