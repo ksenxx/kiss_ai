@@ -111,11 +111,8 @@ class _CommandsMixin:
     def _cmd_run(self, cmd: dict[str, Any]) -> None:
         """Start an agent task in a background thread."""
         tab_id = cmd.get("tabId", "")
+        tab = self._get_tab(tab_id)
         with self._state_lock:
-            tab = self._tab_states.get(tab_id)
-            if tab is None:
-                tab = _TabState(tab_id, self._default_model)
-                self._tab_states[tab_id] = tab
             if tab.task_thread is not None and tab.task_thread.is_alive():
                 self.printer.broadcast({
                     "type": "error",
