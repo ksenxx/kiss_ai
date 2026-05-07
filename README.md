@@ -24,6 +24,7 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 <summary><strong>Table of Contents</strong></summary>
 
 - [Introduction to KISS Sorcar](#introduction-to-kiss-sorcar)
+- [See It in Action](#-see-it-in-action)
 - [Full Installation](#full-installation)
 - [KISS Sorcar Extension Installation](#kiss-sorcar-extension-installation)
 - [CLI Interface](#cli-interface)
@@ -48,6 +49,49 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 An old video on KISS Sorcar can be found at [https://www.youtube.com/watch?v=xnYxWvRqACE](https://www.youtube.com/watch?v=xnYxWvRqACE). We **no longer** recommend to explicitly create a plan in KISS Sorcar. See the paper for details.
 
 <scriptsize>Note that **Sorcar** also means government in Bengali.</scriptsize>
+
+## 🎬 See It in Action
+
+From writing production-grade code to planning your next vacation, KISS Sorcar handles a wide range of tasks end-to-end. Here are a few glimpses of the agent at work:
+
+<div align="center">
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="assets/sorcar-coding.gif" alt="KISS Sorcar writing and refactoring code" width="100%" />
+      <br />
+      <strong>💻 Coding & Software Engineering</strong>
+      <br />
+      <sub>Writes, debugs, and refactors code with disciplined engineering principles.</sub>
+    </td>
+    <td align="center" width="50%">
+      <img src="assets/sorcar-trip.gif" alt="KISS Sorcar planning a trip" width="100%" />
+      <br />
+      <strong>✈️ Trip Planning & Research</strong>
+      <br />
+      <sub>Browses the web, compares options, and assembles itineraries — without the AI slop.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <img src="assets/sorcar-slack.gif" alt="KISS Sorcar sending a Slack message" width="100%" />
+      <br />
+      <strong>💬 Desktop & Messaging Apps</strong>
+      <br />
+      <sub>Drives native apps like Slack via the desktop, end-to-end.</sub>
+    </td>
+    <td align="center" width="50%">
+      <img src="assets/sorcar-mobile.gif" alt="KISS Sorcar controlling a mobile device" width="100%" />
+      <br />
+      <strong>📱 Mobile Device Control</strong>
+      <br />
+      <sub>Reaches beyond the desktop to operate mobile apps and workflows.</sub>
+    </td>
+  </tr>
+</table>
+
+</div>
 
 ## Full Installation
 
