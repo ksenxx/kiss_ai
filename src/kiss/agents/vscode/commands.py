@@ -9,7 +9,10 @@ class-level ``_HANDLERS`` dispatch table consumed by
 from __future__ import annotations
 
 import logging
+import os
 import queue
+import subprocess
+import sys
 import threading
 from typing import TYPE_CHECKING, Any
 
@@ -23,6 +26,38 @@ if TYPE_CHECKING:
     from kiss.agents.vscode.printer import VSCodePrinter
 
 logger = logging.getLogger(__name__)
+
+
+def _restart_kiss_web_daemon() -> None:
+    """Restart the ``kiss-web`` daemon so it picks up config changes.
+
+    On macOS, uses ``launchctl kickstart -k`` to restart the
+    ``com.kiss.web-server`` LaunchAgent.  On Linux, uses
+    ``systemctl --user restart kiss-web``.  Runs asynchronously in
+    a background thread so the caller does not block.
+    """
+    def _do_restart() -> None:
+        try:
+            if sys.platform == "darwin":
+                uid = os.getuid()
+                subprocess.run(
+                    [
+                        "launchctl", "kickstart", "-k",
+                        f"gui/{uid}/com.kiss.web-server",
+                    ],
+                    capture_output=True,
+                    timeout=10,
+                )
+            elif sys.platform == "linux":
+                subprocess.run(
+                    ["systemctl", "--user", "restart", "kiss-web"],
+                    capture_output=True,
+                    timeout=10,
+                )
+        except Exception:
+            logger.debug("Failed to restart kiss-web daemon", exc_info=True)
+
+    threading.Thread(target=_do_restart, daemon=True).start()
 
 
 class _CommandsMixin:
@@ -279,7 +314,12 @@ class _CommandsMixin:
         self.printer.broadcast({"type": "configData", "config": cfg, "apiKeys": api_keys})
 
     def _cmd_save_config(self, cmd: dict[str, Any]) -> None:
-        """Save configuration and API keys from the frontend."""
+        """Save configuration and API keys from the frontend.
+
+        When a non-empty ``remote_password`` is saved, restarts the
+        ``kiss-web`` daemon so it picks up the new password and starts
+        (or restarts) its Cloudflare tunnel.
+        """
         from kiss.agents.vscode.vscode_config import (
             apply_config_to_env,
             load_config,
@@ -304,6 +344,9 @@ class _CommandsMixin:
 
         new_cfg = load_config()
         self.printer.broadcast({"type": "configData", "config": new_cfg})
+
+        if cfg.get("remote_password", ""):
+            _restart_kiss_web_daemon()
 
     def _cmd_set_skip_merge(self, cmd: dict[str, Any]) -> None:
         """Set the skip_merge flag on a tab.
