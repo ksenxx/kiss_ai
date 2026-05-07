@@ -40,7 +40,7 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 # Introduction to KISS Sorcar
 
 ![KISS Sorcar](assets/KISS-Sorcar-UI.png)
-**KISS Sorcar** (named after [P. C. Sorcar, the legendary Bengali magician](https://en.wikipedia.org/wiki/P._C._Sorcar), evoking the idea of an agent that performs feats that appear magical yet are grounded in disciplined engineering) is a **general-purpose assistant** and **integrated development environment** (IDE) built on top of the **KISS Agent Framework**, a stupidly-simple agentic framework. It **codes really well** and **works pretty fast**. It can do research for you without much AI slop using the internet. The agent can **run relentlessly for hours**. KISS Sorcar is implemented as a **Visual Studio Code extension** that runs **locally**. It has **full browser** support (using open-source Chromium browser and Playwright), **multimodal** support, **Docker container** support, and OpenClaw like features (whose functionality will be posted later in the social media). The good part is that KISS Sorcar is **completely free** and **open-source**; all one needs is a model API key from a major LLM provider, such as Anthropic (highly recommended). A paper on KISS Sorcar can be found at [papers/kisssorcar/kiss_sorcar.pdf](papers/kisssorcar/kiss_sorcar.pdf).
+**KISS Sorcar** (named after [P. C. Sorcar, the legendary Bengali magician](https://en.wikipedia.org/wiki/P._C._Sorcar), evoking the idea of an agent that performs feats that appear magical yet are grounded in disciplined engineering) is a **general-purpose assistant** and **integrated development environment** (IDE) built on top of the **KISS Agent Framework**, a stupidly-simple agentic framework. It **codes really well** and **works pretty fast**. It can do research for you without much AI slop using the internet. The agent can **run relentlessly for hours**. KISS Sorcar is implemented as a **Visual Studio Code extension** that runs **locally** and as a Web/mobile app. It has **full browser** support (using open-source Chromium browser and Playwright), **multimodal** support, **Docker container** support, and OpenClaw like features (whose functionality will be posted later in the social media). The good part is that KISS Sorcar is **completely free** and **open-source**; all one needs is a model API key from a major LLM provider, such as Anthropic (highly recommended). A paper on KISS Sorcar can be found at [papers/kisssorcar/kiss_sorcar.pdf](papers/kisssorcar/kiss_sorcar.pdf).  If you have Claude Code or OpenAI Codex in your PATH, you can use cc/* or codex/* models for chat.
 
 **KISS Sorcar scored 62.2% on Terminal Bench 2.0, beating both Cursor agent (61.7%) and Claude Code (58%).**
 
@@ -84,9 +84,9 @@ From writing production-grade code to planning your next vacation, KISS Sorcar h
     <td align="center" width="50%">
       <img src="assets/sorcar-mobile.gif" alt="KISS Sorcar controlling a mobile device" width="100%" />
       <br />
-      <strong>📱 Mobile Device Control</strong>
+      <strong>📱 Mobile/Web App</strong>
       <br />
-      <sub>Reaches beyond the desktop to operate mobile apps and workflows.</sub>
+      <sub>You can use KISS Sorcar as a mobile/web app.</sub>
     </td>
   </tr>
 </table>

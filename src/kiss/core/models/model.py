@@ -616,7 +616,17 @@ When you have the final answer, call the `finish` tool with your result.
 def _parse_text_based_tool_calls(content: str) -> list[dict[str, Any]]:
     """Parse tool calls from text-based model output.
 
-    Looks for JSON objects with tool_calls array in the content.
+    Scans the content for every ``{"tool_calls": [...]}`` JSON object —
+    fenced ```json``` blocks, fenced bare blocks, inline objects, and a
+    final fallback that parses the entire content as a single JSON object.
+    Tool calls from all matches are accumulated in encounter order, and
+    duplicates (same ``name`` + same ``arguments``) are deduplicated so a
+    single logical call emitted multiple times collapses to one entry.
+
+    This handles reasoning models (e.g. ``cc/opus``) that emit multiple
+    distinct ``{"tool_calls": [...]}`` blocks in one response — for
+    example a Bash call followed by a separate go_to_url call — which the
+    earlier first-match-wins implementation dropped.
 
     Args:
         content: The text content to parse for tool calls.
@@ -626,6 +636,34 @@ def _parse_text_based_tool_calls(content: str) -> list[dict[str, Any]]:
         and 'arguments' keys. Returns empty list if no valid tool calls found.
     """
     function_calls: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _add_calls_from(data: Any) -> None:
+        if not (
+            isinstance(data, dict)
+            and "tool_calls" in data
+            and isinstance(data["tool_calls"], list)
+        ):
+            return
+        for tc in data["tool_calls"]:
+            if not (isinstance(tc, dict) and "name" in tc):
+                continue
+            arguments = tc.get("arguments", {})
+            try:
+                key = (tc["name"], json.dumps(arguments, sort_keys=True))
+            except TypeError:
+                # Non-JSON-serializable args — fall back to repr for keying.
+                key = (tc["name"], repr(arguments))
+            if key in seen:
+                continue
+            seen.add(key)
+            function_calls.append(
+                {
+                    "id": f"call_{uuid.uuid4().hex[:8]}",
+                    "name": tc["name"],
+                    "arguments": arguments,
+                }
+            )
 
     json_patterns = [
         r"```json\s*(\{.*?\})\s*```",
@@ -634,41 +672,18 @@ def _parse_text_based_tool_calls(content: str) -> list[dict[str, Any]]:
     ]
 
     for pattern in json_patterns:
-        matches = re.findall(pattern, content, re.DOTALL)
-        for match in matches:
+        for match in re.findall(pattern, content, re.DOTALL):
             try:
-                data = json.loads(match)
-                if "tool_calls" in data and isinstance(data["tool_calls"], list):
-                    for tc in data["tool_calls"]:
-                        if "name" in tc:
-                            function_calls.append(
-                                {
-                                    "id": f"call_{uuid.uuid4().hex[:8]}",
-                                    "name": tc["name"],
-                                    "arguments": tc.get("arguments", {}),
-                                }
-                            )
-                    if function_calls:
-                        return function_calls
+                _add_calls_from(json.loads(match))
             except json.JSONDecodeError:
                 logger.debug("Exception caught", exc_info=True)
                 continue
 
-    try:
-        data = json.loads(content.strip())
-        if "tool_calls" in data and isinstance(data["tool_calls"], list):
-            for tc in data["tool_calls"]:
-                if "name" in tc:
-                    function_calls.append(
-                        {
-                            "id": f"call_{uuid.uuid4().hex[:8]}",
-                            "name": tc["name"],
-                            "arguments": tc.get("arguments", {}),
-                        }
-                    )
-    except json.JSONDecodeError:
-        logger.debug("Exception caught", exc_info=True)
-        pass
+    if not function_calls:
+        try:
+            _add_calls_from(json.loads(content.strip()))
+        except json.JSONDecodeError:
+            logger.debug("Exception caught", exc_info=True)
 
     return function_calls
 

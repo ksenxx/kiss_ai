@@ -141,9 +141,18 @@ class ClaudeCodeModel(Model):
             List of CLI arguments.
         """
         cli = _find_claude_cli()
+        # ``--bare`` and ``--disable-slash-commands`` make the CLI behave as
+        # a pure single-shot LLM: no hooks, LSP, plugin sync, auto-memory,
+        # background prefetches, keychain reads, CLAUDE.md auto-discovery,
+        # skills, or agents.  Combined with ``--tools ""`` and
+        # ``--no-session-persistence`` the CLI does a single API call and
+        # returns the raw model response — exactly what we want when the
+        # Sorcar agent is the one orchestrating tools.
         args = [
             cli,
             "--print",
+            "--bare",
+            "--disable-slash-commands",
             "--tools", "",
             "--no-session-persistence",
             "--model", self._cli_model,
