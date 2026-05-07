@@ -187,13 +187,7 @@ class _MergeFlowMixin:
         self._present_pending_worktree(tab_id, try_merge_review=False)
 
         if not tab.use_worktree:
-            changed = self._main_dirty_files()
-            if changed:
-                self.printer.broadcast({
-                    "type": "autocommit_prompt",
-                    "tabId": tab_id,
-                    "changedFiles": changed,
-                })
+            self._broadcast_autocommit_prompt(tab_id)
 
     def _main_dirty_files(self) -> list[str]:
         """List modified, staged and untracked files in the main working tree.
@@ -222,6 +216,23 @@ class _MergeFlowMixin:
             if path and path not in files:
                 files.append(path)
         return files
+
+    def _broadcast_autocommit_prompt(self, tab_id: str) -> None:
+        """Broadcast an ``autocommit_prompt`` if the main tree has dirty files.
+
+        Shared by ``_finish_merge`` (after merge review ends) and
+        ``_run_task_inner`` (when no merge view was opened).
+
+        Args:
+            tab_id: Frontend tab identifier to include in the event.
+        """
+        changed = self._main_dirty_files()
+        if changed:
+            self.printer.broadcast({
+                "type": "autocommit_prompt",
+                "tabId": tab_id,
+                "changedFiles": changed,
+            })
 
     def _broadcast_autocommit_done(
         self,

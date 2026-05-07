@@ -204,9 +204,21 @@ class RelentlessAgent(Base):
                     self.total_tokens_used += executor.total_tokens_used
                     self.total_steps += executor.step_count
                     error_result: str = yaml.dump(
-                        {"success": False, "is_continue": False, "summary": str(exc)},
+                        {
+                            "success": False,
+                            "is_continue": False,
+                            "summary": str(exc),
+                        },
                         sort_keys=False,
                     )
+                    if self.printer:
+                        self.printer.print(
+                            error_result,
+                            type="result",
+                            step_count=executor.step_count,
+                            total_tokens=executor.total_tokens_used,
+                            cost=f"${executor.budget_used:.4f}",
+                        )
                     return error_result
                 trajectory_path: Path | None = None
                 try:

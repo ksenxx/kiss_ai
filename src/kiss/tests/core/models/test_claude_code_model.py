@@ -68,6 +68,33 @@ class TestModelRouting:
         assert m._cli_model == "opus"
 
 
+class TestBuildCliArgs:
+    """Verify CLI argument construction — especially ``--tools ""``."""
+
+    def test_tools_flag_disables_builtin_tools(self) -> None:
+        """``--tools ""`` must appear in CLI args to disable built-in tools.
+
+        Without the empty-string value, the CLI would run in agentic mode
+        (Bash/Edit/Read), causing the model to loop without producing the
+        JSON tool_calls that the text-based tool-calling parser expects.
+        """
+        m = ClaudeCodeModel("cc/opus")
+        m.initialize("test")
+        args = m._build_cli_args()
+        idx = args.index("--tools")
+        assert args[idx + 1] == "", (
+            f"Expected '--tools \"\"' but got '--tools {args[idx + 1]}'; "
+            "built-in tools would be active, breaking text-based tool calling"
+        )
+
+    def test_no_session_persistence_is_separate_flag(self) -> None:
+        """``--no-session-persistence`` must not be consumed by ``--tools``."""
+        m = ClaudeCodeModel("cc/opus")
+        m.initialize("test")
+        args = m._build_cli_args()
+        assert "--no-session-persistence" in args
+
+
 class TestModelInfoEntries:
     def test_cc_models_in_model_info(self) -> None:
         assert "cc/opus" in MODEL_INFO
