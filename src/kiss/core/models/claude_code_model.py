@@ -54,25 +54,40 @@ def _find_claude_cli() -> str:
     return path
 
 
-def _find_first_tool_calls_end(content: str) -> int:
-    """Return the end position of the first balanced ``tool_calls`` JSON object.
+def _find_consecutive_tool_calls_end(content: str) -> int:
+    """Return the end position of the last consecutive ``tool_calls`` JSON block.
 
-    Scans *content* for balanced JSON objects using
-    :func:`_iter_balanced_json_objects` and returns the end position of the
-    first one that contains a ``tool_calls`` list.  Returns ``-1`` if no
-    complete tool_calls block is found.
+    Scans *content* for balanced JSON objects containing ``tool_calls``
+    lists.  Consecutive blocks (separated only by whitespace) are all
+    included.  The sequence stops when non-whitespace text appears between
+    blocks or a non-tool-calls JSON object is encountered after the first
+    tool_calls block.
+
+    This lets the parser collect **all** tool calls the model outputs
+    back-to-back, rather than only the first block.  Blocks separated by
+    hallucinated text (e.g. ``(no output)``) are *not* consecutive, so
+    only the first group is captured.
 
     Args:
         content: The accumulated text to scan.
 
     Returns:
-        End position (exclusive) of the first tool_calls JSON object,
-        or ``-1`` if none found.
+        End position (exclusive) of the last consecutive tool_calls JSON
+        object, or ``-1`` if none found.
     """
-    for _start, end, parsed in _iter_balanced_json_objects(content):
+    last_tc_end = -1
+    for start, end, parsed in _iter_balanced_json_objects(content):
         if _iter_tool_calls_lists(parsed):
-            return end
-    return -1
+            if last_tc_end == -1:
+                last_tc_end = end
+            else:
+                between = content[last_tc_end:start]
+                if between.strip():
+                    break  # Non-whitespace between blocks → stop
+                last_tc_end = end
+        elif last_tc_end != -1:
+            break  # Non-tool-calls JSON after tool_calls → stop
+    return last_tc_end
 
 
 class ClaudeCodeModel(Model):
@@ -317,6 +332,11 @@ class ClaudeCodeModel(Model):
         # Fast-path guard: only start expensive JSON parsing once we have
         # seen the ``"tool_calls"`` substring somewhere in the content.
         seen_tool_calls_hint = False
+        # Two-phase tool-calls collection: after the first tool_calls block
+        # is found, keep streaming to collect consecutive blocks.  Stop when
+        # non-JSON trailing content appears.
+        found_tool_calls = False
+        last_tc_end = -1
 
         for line in lines:
             line = line.strip()
@@ -358,7 +378,7 @@ class ClaudeCodeModel(Model):
                             content += text
                             self._invoke_token_callback(text)
                 if stop_on_tool_calls and content:
-                    tc_end = _find_first_tool_calls_end(content)
+                    tc_end = _find_consecutive_tool_calls_end(content)
                     if tc_end > 0:
                         content = content[:tc_end]
                         self._stopped_for_tool_calls = True
@@ -385,12 +405,17 @@ class ClaudeCodeModel(Model):
                         content += text
                         self._invoke_token_callback(text)
                         if stop_on_tool_calls:
-                            if not seen_tool_calls_hint and "tool_calls" in text:
+                            if not seen_tool_calls_hint and "tool_calls" in content:
                                 seen_tool_calls_hint = True
                             if seen_tool_calls_hint and "}" in text:
-                                tc_end = _find_first_tool_calls_end(content)
+                                tc_end = _find_consecutive_tool_calls_end(content)
                                 if tc_end > 0:
-                                    content = content[:tc_end]
+                                    last_tc_end = tc_end
+                                    found_tool_calls = True
+                            if found_tool_calls:
+                                trailing = content[last_tc_end:].strip()
+                                if trailing and not trailing.startswith("{"):
+                                    content = content[:last_tc_end]
                                     self._stopped_for_tool_calls = True
                                     break
             if self._stopped_for_tool_calls:
@@ -403,7 +428,19 @@ class ClaudeCodeModel(Model):
             elif event_type == "result":
                 result_json = event
                 pre_result_content = content
-                content = event.get("result", content)
+                # When tool_calls were found during streaming, keep the
+                # accumulated content (which contains the JSON) instead of
+                # replacing it with the result event text (which may be
+                # empty or stripped).
+                if not found_tool_calls:
+                    content = event.get("result", content)
+
+        # Post-loop fixup: if tool_calls were detected but no trailing
+        # hallucinated text caused an early stop (model finished normally),
+        # truncate to the last tool_calls block and set the flag.
+        if found_tool_calls and not self._stopped_for_tool_calls:
+            content = content[:last_tc_end]
+            self._stopped_for_tool_calls = True
 
         self._last_thinking_content = thinking_content
         self._pre_result_content = pre_result_content

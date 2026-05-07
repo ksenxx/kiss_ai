@@ -11,7 +11,7 @@ import json
 import subprocess
 from typing import Any
 
-from kiss.core.models.claude_code_model import ClaudeCodeModel, _find_first_tool_calls_end
+from kiss.core.models.claude_code_model import ClaudeCodeModel, _find_consecutive_tool_calls_end
 
 
 class _FakeStdin:
@@ -90,38 +90,63 @@ def _run_with_events(
     return function_calls, content, m
 
 
-class TestFindFirstToolCallsEnd:
-    """Unit tests for _find_first_tool_calls_end helper."""
+class TestFindConsecutiveToolCallsEnd:
+    """Unit tests for _find_consecutive_tool_calls_end helper."""
 
     def test_no_tool_calls(self) -> None:
-        assert _find_first_tool_calls_end("just some text") == -1
+        assert _find_consecutive_tool_calls_end("just some text") == -1
 
     def test_incomplete_json(self) -> None:
-        assert _find_first_tool_calls_end('{"tool_calls": [{"name": "Bash"') == -1
+        assert _find_consecutive_tool_calls_end('{"tool_calls": [{"name": "Bash"') == -1
 
     def test_single_complete_block(self) -> None:
         text = '{"tool_calls": [{"name": "Bash", "arguments": {"command": "ls"}}]}'
-        assert _find_first_tool_calls_end(text) == len(text)
+        assert _find_consecutive_tool_calls_end(text) == len(text)
 
     def test_text_before_block(self) -> None:
         prefix = "I will list files.\n"
         tool = '{"tool_calls": [{"name": "Bash", "arguments": {"command": "ls"}}]}'
         text = prefix + tool
-        end = _find_first_tool_calls_end(text)
+        end = _find_consecutive_tool_calls_end(text)
         assert end == len(text)
 
-    def test_text_after_block_returns_first_end(self) -> None:
+    def test_text_after_block_returns_block_end(self) -> None:
         tool = '{"tool_calls": [{"name": "Bash", "arguments": {"command": "ls"}}]}'
         text = tool + "\n\nHallucinated result"
-        end = _find_first_tool_calls_end(text)
+        end = _find_consecutive_tool_calls_end(text)
         assert end == len(tool)
 
-    def test_two_blocks_returns_first_end(self) -> None:
+    def test_two_blocks_with_text_between_returns_first_end(self) -> None:
         tool1 = '{"tool_calls": [{"name": "Bash", "arguments": {"command": "ls"}}]}'
         tool2 = '{"tool_calls": [{"name": "go_to_url", "arguments": {"url": "x"}}]}'
         text = tool1 + "\nfake result\n" + tool2
-        end = _find_first_tool_calls_end(text)
+        end = _find_consecutive_tool_calls_end(text)
         assert end == len(tool1)
+
+    def test_two_consecutive_blocks_returns_last_end(self) -> None:
+        """Consecutive blocks (only whitespace between) → end of last block."""
+        tool1 = '{"tool_calls": [{"name": "Bash", "arguments": {"command": "ls"}}]}'
+        tool2 = '{"tool_calls": [{"name": "go_to_url", "arguments": {"url": "x"}}]}'
+        text = tool1 + "\n" + tool2
+        end = _find_consecutive_tool_calls_end(text)
+        assert end == len(text)
+
+    def test_three_consecutive_blocks(self) -> None:
+        """Three consecutive blocks all captured."""
+        t1 = '{"tool_calls": [{"name": "A", "arguments": {}}]}'
+        t2 = '{"tool_calls": [{"name": "B", "arguments": {}}]}'
+        t3 = '{"tool_calls": [{"name": "C", "arguments": {}}]}'
+        text = t1 + "\n" + t2 + "\n" + t3
+        end = _find_consecutive_tool_calls_end(text)
+        assert end == len(text)
+
+    def test_non_tool_calls_json_after_block_stops(self) -> None:
+        """A non-tool-calls JSON object after tool_calls stops the sequence."""
+        tool = '{"tool_calls": [{"name": "Bash", "arguments": {}}]}'
+        other = '{"result": "ok"}'
+        text = tool + "\n" + other
+        end = _find_consecutive_tool_calls_end(text)
+        assert end == len(tool)
 
 
 class TestEarlyStopOnToolCalls:
@@ -212,7 +237,8 @@ class TestEarlyStopOnToolCalls:
 
         function_calls, content, m = _run_with_events(events)
 
-        assert m._stopped_for_tool_calls is True
+        # No trailing content after tool_calls → model finishes normally
+        # (early stop is only triggered by trailing hallucinated text)
         assert len(function_calls) == 1
         assert function_calls[0]["name"] == "Bash"
 
@@ -289,3 +315,69 @@ class TestEarlyStopOnToolCalls:
         assert m._stopped_for_tool_calls is False
         assert function_calls == []
         assert content == "Hello, I can help you."
+
+    def test_two_consecutive_blocks_both_extracted(self) -> None:
+        """Two consecutive tool_calls blocks (only whitespace between) both collected."""
+        tool1 = json.dumps(
+            {"tool_calls": [{"name": "Bash", "arguments": {"command": "ls"}}]}
+        )
+        tool2 = json.dumps(
+            {"tool_calls": [{"name": "go_to_url", "arguments": {"url": "https://x.com"}}]}
+        )
+        events = [
+            {"type": "stream_event", "event": {
+                "type": "content_block_start",
+                "content_block": {"type": "text", "text": ""},
+            }},
+            {"type": "stream_event", "event": {
+                "type": "content_block_delta",
+                "delta": {"type": "text_delta", "text": tool1},
+            }},
+            {"type": "stream_event", "event": {
+                "type": "content_block_delta",
+                "delta": {"type": "text_delta", "text": "\n" + tool2},
+            }},
+            {"type": "stream_event", "event": {
+                "type": "content_block_delta",
+                "delta": {"type": "text_delta", "text": "\nDone."},
+            }},
+            {"type": "stream_event", "event": {"type": "content_block_stop"}},
+        ]
+
+        function_calls, content, m = _run_with_events(events)
+
+        assert m._stopped_for_tool_calls is True
+        assert len(function_calls) == 2
+        names = {fc["name"] for fc in function_calls}
+        assert "Bash" in names
+        assert "go_to_url" in names
+        assert "Done." not in content
+
+    def test_consecutive_blocks_without_trailing_text(self) -> None:
+        """Consecutive blocks followed by content_block_stop (no trailing text)."""
+        tool1 = json.dumps(
+            {"tool_calls": [{"name": "Bash", "arguments": {"command": "ls"}}]}
+        )
+        tool2 = json.dumps(
+            {"tool_calls": [{"name": "go_to_url", "arguments": {"url": "https://x.com"}}]}
+        )
+        events = [
+            {"type": "stream_event", "event": {
+                "type": "content_block_start",
+                "content_block": {"type": "text", "text": ""},
+            }},
+            {"type": "stream_event", "event": {
+                "type": "content_block_delta",
+                "delta": {"type": "text_delta", "text": tool1 + "\n" + tool2},
+            }},
+            {"type": "stream_event", "event": {"type": "content_block_stop"}},
+            {"type": "result", "result": tool1 + "\n" + tool2,
+             "usage": {"input_tokens": 10, "output_tokens": 20}},
+        ]
+
+        function_calls, content, m = _run_with_events(events)
+
+        assert len(function_calls) == 2
+        names = {fc["name"] for fc in function_calls}
+        assert "Bash" in names
+        assert "go_to_url" in names
