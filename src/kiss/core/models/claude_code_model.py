@@ -200,7 +200,6 @@ class ClaudeCodeModel(Model):
         args = [
             cli,
             "--print",
-            "--bare",
             "--disable-slash-commands",
             "--tools", "",
             "--no-session-persistence",
