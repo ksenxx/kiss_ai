@@ -585,6 +585,53 @@ SERVICE
     fi
     echo ""
 
+    # --- Post remote URL to ntfy.sh message board ----------------------------
+    # Wait briefly for the daemon to start and get a tunnel URL, then
+    # post it to a machine-stable ntfy.sh topic so the user can retrieve
+    # it from any device by subscribing to that topic.
+    echo ">>> Posting remote URL to ntfy.sh..."
+    (
+        sleep 15  # give the daemon time to start and get a tunnel URL
+        _TOPIC=""
+        if [ -f "$HOME/.kiss/ntfy_topic" ]; then
+            _TOPIC="$(cat "$HOME/.kiss/ntfy_topic")"
+        fi
+        if [ -z "$_TOPIC" ]; then
+            _TOPIC="$(uv run python -c "
+import hashlib, platform, uuid
+identity = f'{platform.node()}:{uuid.getnode()}'
+topic = 'kiss-' + hashlib.sha256(identity.encode()).hexdigest()[:32]
+print(topic)
+" 2>/dev/null || true)"
+            if [ -n "$_TOPIC" ]; then
+                mkdir -p "$HOME/.kiss"
+                printf '%s\n' "$_TOPIC" > "$HOME/.kiss/ntfy_topic"
+            fi
+        fi
+        if [ -n "$_TOPIC" ] && [ -f "$HOME/.kiss/remote-url.json" ]; then
+            _REMOTE_URL="$(uv run python -c "
+import json, pathlib
+try:
+    d = json.loads((pathlib.Path.home() / '.kiss' / 'remote-url.json').read_text())
+    url = d.get('tunnel') or d.get('local', '')
+    if url and not url.startswith('https://localhost'):
+        print(url)
+except Exception:
+    pass
+" 2>/dev/null || true)"
+            if [ -n "$_REMOTE_URL" ]; then
+                curl -fsSL -X POST "https://ntfy.sh/$_TOPIC" \
+                    -H "Title: KISS Sorcar Remote URL" \
+                    -H "Tags: link,kiss-sorcar" \
+                    -d "$_REMOTE_URL" >/dev/null 2>&1 || true
+                echo "   Remote URL posted to https://ntfy.sh/$_TOPIC"
+                echo "   Subscribe at https://ntfy.sh/$_TOPIC to receive URL updates"
+            fi
+        fi
+    ) &
+    echo "   (posting in background — will complete in ~15 seconds)"
+    echo ""
+
     # --- Write install_dir marker (used by env.py) ----------------------------
     printf '%s\n' "$PROJECT_DIR" > "$HOME/.kiss/install_dir"
 

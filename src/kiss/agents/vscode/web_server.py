@@ -36,11 +36,13 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import hashlib
 import ipaddress
 import json
 import logging
 import mimetypes
 import os
+import platform
 import re
 import secrets
 import shutil
@@ -51,6 +53,7 @@ import sys
 import threading
 import time
 import urllib.request
+import uuid
 from collections.abc import Callable
 from concurrent.futures import Future as ConcurrentFuture
 from functools import partial
@@ -681,6 +684,61 @@ def _remove_url_file() -> None:
         _URL_FILE.unlink(missing_ok=True)
     except OSError:
         pass
+
+
+def _get_machine_topic() -> str:
+    """Return a deterministic ntfy.sh topic derived from machine identity.
+
+    Combines the hostname and MAC address into a SHA-256 hash so the
+    topic stays the same across process restarts on the same machine
+    but is not guessable by outsiders.
+
+    Returns:
+        A hex string suitable for use as an ntfy.sh topic name.
+    """
+    topic_file = _KISS_HOME / "ntfy_topic"
+    if topic_file.is_file():
+        stored = topic_file.read_text().strip()
+        if stored:
+            return stored
+    identity = f"{platform.node()}:{uuid.getnode()}"
+    topic = "kiss-" + hashlib.sha256(identity.encode()).hexdigest()[:32]
+    topic_file.parent.mkdir(parents=True, exist_ok=True)
+    topic_file.write_text(topic + "\n")
+    return topic
+
+
+def _post_url_to_message_board(url: str) -> None:
+    """Post the active Cloudflare URL to ntfy.sh as a private message.
+
+    Uses the machine-stable topic from :func:`_get_machine_topic` so
+    the URL can be retrieved by subscribing to the same topic.  The
+    message is posted with a title indicating it is a KISS Sorcar
+    remote URL update.  Failures are logged but never raised.
+
+    Args:
+        url: The ``https://`` URL to publish.
+    """
+    if not url or url.startswith("https://localhost"):
+        return
+    try:
+        topic = _get_machine_topic()
+        data = url.encode("utf-8")
+        req = urllib.request.Request(
+            f"https://ntfy.sh/{topic}",
+            data=data,
+            method="POST",
+            headers={
+                "Title": "KISS Sorcar Remote URL",
+                "Tags": "link,kiss-sorcar",
+                "User-Agent": "kiss-web",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=10):
+            pass
+        logger.info("Posted remote URL to ntfy.sh/%s", topic)
+    except Exception:
+        logger.debug("Failed to post URL to ntfy.sh", exc_info=True)
 
 
 def _get_local_ips() -> frozenset[str]:
@@ -2359,6 +2417,10 @@ class RemoteAccessServer:
         self._printer.broadcast(
             {"type": "remote_url", "url": self._active_url},
         )
+        assert self._loop is not None
+        await self._loop.run_in_executor(
+            None, _post_url_to_message_board, self._active_url,
+        )
 
     def _terminate_tunnel_proc(self) -> None:
         """Terminate ``_tunnel_proc`` and reset per-process state.
@@ -2535,6 +2597,9 @@ class RemoteAccessServer:
 
         _save_url_file(self._local_url, tunnel_url)
         self._active_url = tunnel_url or self._local_url
+        await self._loop.run_in_executor(
+            None, _post_url_to_message_board, self._active_url,
+        )
 
         self._last_ips = _get_local_ips()
         self._watchdog_task = asyncio.create_task(self._watchdog())
