@@ -672,6 +672,41 @@ except Exception:
     esac
     echo ""
 
+    # --- Tell the user where to find the remote URL ----------------------------
+    _NTFY_TOPIC=""
+    if [ -f "$HOME/.kiss/ntfy_topic" ]; then
+        _NTFY_TOPIC="$(cat "$HOME/.kiss/ntfy_topic")"
+    fi
+    if [ -z "$_NTFY_TOPIC" ]; then
+        _NTFY_TOPIC="$(uv run python -c "
+import hashlib, platform, uuid
+identity = f'{platform.node()}:{uuid.getnode()}'
+topic = 'kiss-' + hashlib.sha256(identity.encode()).hexdigest()[:32]
+print(topic)
+" 2>/dev/null || true)"
+        if [ -n "$_NTFY_TOPIC" ]; then
+            mkdir -p "$HOME/.kiss"
+            printf '%s\n' "$_NTFY_TOPIC" > "$HOME/.kiss/ntfy_topic"
+        fi
+    fi
+    echo ""
+    echo "----------------------------------------------------------------------"
+    echo "  REMOTE ACCESS URL"
+    echo "----------------------------------------------------------------------"
+    echo "  Your KISS Sorcar remote URL will be available shortly."
+    echo ""
+    echo "  Find it in any of these places:"
+    echo "    • File:  ~/.kiss/remote-url.json"
+    if [ -n "$_NTFY_TOPIC" ]; then
+        echo "    • Web:   https://ntfy.sh/$_NTFY_TOPIC"
+        echo "    • CLI:   curl -s https://ntfy.sh/$_NTFY_TOPIC/json?poll=1 | tail -1 | python3 -m json.tool"
+    fi
+    echo ""
+    echo "  The URL is automatically posted to the ntfy.sh topic above"
+    echo "  whenever it changes (e.g. after a tunnel restart)."
+    echo "----------------------------------------------------------------------"
+    echo ""
+
     echo "=== Installation Complete ==="
     echo "Date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     echo "Project: $PROJECT_DIR"
