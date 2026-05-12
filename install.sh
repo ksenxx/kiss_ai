@@ -461,6 +461,44 @@ find_code_cli() {
     fi
     echo ""
 
+    # --- Ensure remote_password is set before starting kiss-web ---------------
+    KISS_CONFIG="$HOME/.kiss/config.json"
+    _current_password=""
+    if [ -f "$KISS_CONFIG" ]; then
+        _current_password="$(uv run python -c "
+import json, pathlib, sys
+try:
+    cfg = json.loads(pathlib.Path(pathlib.Path.home() / '.kiss' / 'config.json').read_text())
+    sys.stdout.write(cfg.get('remote_password', ''))
+except Exception:
+    pass
+" 2>/dev/null || true)"
+    fi
+    if [ -z "$_current_password" ]; then
+        echo ">>> kiss-web requires a remote_password for authentication."
+        echo "   This password protects your KISS web interface from unauthorized access."
+        if [ -r /dev/tty ]; then
+            read -r -p "   Enter a remote_password: " _new_password </dev/tty
+        else
+            read -r -p "   Enter a remote_password: " _new_password
+        fi
+        if [ -z "$_new_password" ]; then
+            echo "   WARNING: No password entered. kiss-web will run without authentication."
+        else
+            # Write remote_password into ~/.kiss/config.json (pass via env to avoid injection)
+            mkdir -p "$HOME/.kiss"
+            _KISS_NEW_PW="$_new_password" uv run python -c "
+import json, os, pathlib
+p = pathlib.Path.home() / '.kiss' / 'config.json'
+cfg = json.loads(p.read_text()) if p.exists() else {}
+cfg['remote_password'] = os.environ['_KISS_NEW_PW']
+p.write_text(json.dumps(cfg, indent=2))
+" 2>/dev/null
+            echo "   remote_password saved to $KISS_CONFIG"
+        fi
+        echo ""
+    fi
+
     # --- 11. Start kiss-web daemon service ------------------------------------
     echo ">>> [11/11] Setting up kiss-web daemon service..."
     KISS_WEB_BIN="$PROJECT_DIR/.venv/bin/kiss-web"
