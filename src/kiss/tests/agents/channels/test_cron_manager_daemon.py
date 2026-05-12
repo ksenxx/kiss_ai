@@ -728,8 +728,16 @@ class TestClientEdgeCases:
         try:
             s.settimeout(10.0)
             s.connect(str(crontab_env["sock"]))
-            s.sendall(b"x" * (1_048_576 + 10))
-            s.shutdown(socket.SHUT_WR)
+            # The daemon closes its end once the message exceeds _MAX_MSG,
+            # so sendall/shutdown may raise if the pipe breaks mid-send.
+            try:
+                s.sendall(b"x" * (1_048_576 + 10))
+            except (OSError, BrokenPipeError):
+                pass
+            try:
+                s.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
             data = b""
             while True:
                 chunk = s.recv(4096)
