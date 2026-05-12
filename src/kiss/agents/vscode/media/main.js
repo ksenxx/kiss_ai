@@ -1839,7 +1839,11 @@
       lastToolName = ev.name || '';
       llmPanel = null;
       llmPanelState = mkS();
-      pendingPanel = false;
+      // Set true (not false) so that non-core tools (screenshot,
+      // go_to_url, scroll, etc.) whose tool_result is suppressed by
+      // the backend still trigger Thoughts-panel creation for the
+      // subsequent thinking/text block.
+      pendingPanel = true;
     }
     if (t === 'tool_result' && lastToolName !== 'finish') {
       pendingPanel = true;
@@ -1936,7 +1940,7 @@
       bgLastToolName = ev.name || '';
       bgLlmPanel = null;
       bgLlmPanelState = mkS();
-      bgPendingPanel = false;
+      bgPendingPanel = true;
     }
     if (t === 'tool_result' && bgLastToolName !== 'finish') {
       bgPendingPanel = true;
@@ -2589,7 +2593,7 @@
             const t = e.type;
             if (t === 'tool_call') {
               bgLastTool = e.name || '';
-              bgPending = false;
+              bgPending = true;
             }
             if (t === 'tool_result' && bgLastTool !== 'finish')
               bgPending = true;
@@ -3142,7 +3146,7 @@
         rLastToolName = ev.name || '';
         rLlmPanel = null;
         rLlmPanelState = mkS();
-        rPendingPanel = false;
+        rPendingPanel = true;
       }
       if (t === 'tool_result' && rLastToolName !== 'finish') {
         rPendingPanel = true;
@@ -3194,7 +3198,7 @@
       const t = ev.type;
       if (t === 'tool_call') {
         rLastTool = ev.name || '';
-        rPending = false;
+        rPending = true;
       }
       if (t === 'tool_result' && rLastTool !== 'finish') rPending = true;
       if (rSteps === 0 && (t === 'thinking_start' || t === 'text_delta'))
