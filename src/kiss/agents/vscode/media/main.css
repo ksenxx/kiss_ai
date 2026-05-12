@@ -219,6 +219,7 @@ body {
   min-width: 28px;
   max-width: 28px;
   padding: 4px 0;
+  margin-right: 8px;
   flex-shrink: 0;
 }
 
