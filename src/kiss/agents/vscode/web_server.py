@@ -79,9 +79,16 @@ TUNNEL_CHECK_INTERVAL = 30
 
 _WS_PING_TIMEOUT = 10
 
-_TUNNEL_UNHEALTHY_LIMIT = 3
+_TUNNEL_UNHEALTHY_LIMIT_NAMED = 3
 
-_TUNNEL_STARTUP_GRACE = 60
+# Quick tunnels get a new random URL on every restart, so be much more
+# conservative before force-restarting.  20 ticks × 30s = 10 minutes of
+# readyConnections=0 before the watchdog kills cloudflared.  This gives
+# cloudflared ample time to re-register a temporarily-dropped tunnel
+# without burning through dozens of distinct *.trycloudflare.com URLs.
+_TUNNEL_UNHEALTHY_LIMIT_QUICK = 20
+
+_TUNNEL_STARTUP_GRACE = 120
 
 _TUNNEL_BACKOFF_INITIAL = 60
 
@@ -2319,7 +2326,9 @@ class RemoteAccessServer:
            hostname stops resolving (NXDOMAIN), but the local
            subprocess keeps retrying ``register_connection``.
            Detected by polling the ``/ready`` metrics endpoint for
-           ``readyConnections > 0``; after :data:`_TUNNEL_UNHEALTHY_LIMIT`
+           ``readyConnections > 0``; after
+           :data:`_TUNNEL_UNHEALTHY_LIMIT_NAMED` (named tunnel) or
+           :data:`_TUNNEL_UNHEALTHY_LIMIT_QUICK` (quick tunnel)
            consecutive zero-ticks the subprocess is force-terminated.
 
         During the first :data:`_TUNNEL_STARTUP_GRACE` seconds the
@@ -2367,14 +2376,19 @@ class RemoteAccessServer:
             return
 
         self._tunnel_unhealthy_ticks += 1
+        unhealthy_limit = (
+            _TUNNEL_UNHEALTHY_LIMIT_NAMED
+            if self.tunnel_token
+            else _TUNNEL_UNHEALTHY_LIMIT_QUICK
+        )
         logger.info(
             "cloudflared tunnel reports zero ready edge connections "
             "(tick %d/%d on metrics port %d)",
             self._tunnel_unhealthy_ticks,
-            _TUNNEL_UNHEALTHY_LIMIT,
+            unhealthy_limit,
             self._tunnel_metrics_port,
         )
-        if self._tunnel_unhealthy_ticks < _TUNNEL_UNHEALTHY_LIMIT:
+        if self._tunnel_unhealthy_ticks < unhealthy_limit:
             return
 
         logger.warning(
@@ -2523,15 +2537,30 @@ class RemoteAccessServer:
             try:
                 current_ips = _get_local_ips()
                 if current_ips != self._last_ips:
-                    logger.info(
-                        "IP address changed: %s → %s, restarting server…",
-                        self._last_ips,
-                        current_ips,
-                    )
                     self._last_ips = current_ips
-                    if self._ws_server is not None:
-                        self._ws_server.close()
-                    return
+                    if self.use_tunnel and self._tunnel_proc is not None:
+                        # In tunnel mode, cloudflared handles edge
+                        # reconnection automatically.  Restarting the
+                        # entire daemon would assign a new random
+                        # *.trycloudflare.com URL — avoid that.  Just
+                        # log and let cloudflared recover on its own.
+                        logger.info(
+                            "IP address changed: %s → %s; tunnel mode "
+                            "— cloudflared will re-register "
+                            "automatically",
+                            self._last_ips,
+                            current_ips,
+                        )
+                    else:
+                        logger.info(
+                            "IP address changed: %s → %s, "
+                            "restarting server…",
+                            self._last_ips,
+                            current_ips,
+                        )
+                        if self._ws_server is not None:
+                            self._ws_server.close()
+                        return
             except asyncio.CancelledError:
                 raise
             except Exception:
