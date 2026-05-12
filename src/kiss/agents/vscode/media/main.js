@@ -2469,7 +2469,7 @@
         renderWelcomeSuggestions(ev.suggestions);
         break;
       case 'remote_url':
-        renderRemoteUrl(ev.url);
+        renderRemoteUrl(ev.url, ev.ntfyUrl);
         break;
       case 'followup_suggestion': {
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) break;
@@ -3051,23 +3051,24 @@
   }
 
   // --- Remote URL (dynamic) ---
-  function renderRemoteUrl(url) {
+  function renderRemoteUrl(url, ntfyUrl) {
     const container = document.getElementById('remote-url');
     if (!container) return;
     container.innerHTML = '';
-    if (!url) return;
+    const displayUrl = ntfyUrl || url;
+    if (!displayUrl) return;
     const wrapper = document.createElement('div');
     wrapper.className = 'remote-url-bar';
     const label = document.createElement('div');
     label.className = 'remote-url-label';
-    label.textContent = 'Web/mobile app';
+    label.textContent = ntfyUrl ? 'Remote URL (ntfy.sh)' : 'Web/mobile app';
     const row = document.createElement('div');
     row.className = 'remote-url-row';
     const link = document.createElement('a');
-    link.href = url;
+    link.href = displayUrl;
     link.target = '_blank';
     link.rel = 'noopener noreferrer';
-    link.textContent = url;
+    link.textContent = displayUrl;
     link.className = 'remote-url-link';
     const copyBtn = document.createElement('button');
     copyBtn.className = 'remote-url-copy';
@@ -3079,7 +3080,7 @@
     copyBtn.innerHTML = copySvg;
     copyBtn.addEventListener('click', e => {
       e.preventDefault();
-      navigator.clipboard.writeText(url).then(() => {
+      navigator.clipboard.writeText(displayUrl).then(() => {
         copyBtn.innerHTML = checkSvg;
         setTimeout(() => {
           copyBtn.innerHTML = copySvg;

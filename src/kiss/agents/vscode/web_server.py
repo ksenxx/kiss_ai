@@ -708,6 +708,20 @@ def _get_machine_topic() -> str:
     return topic
 
 
+def _get_ntfy_url() -> str:
+    """Return the ``https://ntfy.sh/{topic}`` URL for this machine.
+
+    Returns an empty string if the topic cannot be determined.
+    """
+    try:
+        topic = _get_machine_topic()
+        if topic:
+            return f"https://ntfy.sh/{topic}"
+    except Exception:
+        logger.debug("Failed to build ntfy URL", exc_info=True)
+    return ""
+
+
 def _post_url_to_message_board(url: str) -> None:
     """Post the active Cloudflare URL to ntfy.sh as a private message.
 
@@ -1923,7 +1937,11 @@ class RemoteAccessServer:
                 self._active_url = discovered
                 url = discovered
         if url:
-            self._printer.broadcast({"type": "remote_url", "url": url})
+            ntfy_url = _get_ntfy_url()
+            msg: dict[str, object] = {"type": "remote_url", "url": url}
+            if ntfy_url:
+                msg["ntfyUrl"] = ntfy_url
+            self._printer.broadcast(msg)
 
     @staticmethod
     def _read_url_from_file() -> str | None:
@@ -2414,9 +2432,13 @@ class RemoteAccessServer:
             self._tunnel_next_retry = time.monotonic() + delay
         _save_url_file(self._local_url, tunnel_url)
         self._active_url = tunnel_url or self._local_url
-        self._printer.broadcast(
-            {"type": "remote_url", "url": self._active_url},
-        )
+        ntfy_url = _get_ntfy_url()
+        msg: dict[str, object] = {
+            "type": "remote_url", "url": self._active_url,
+        }
+        if ntfy_url:
+            msg["ntfyUrl"] = ntfy_url
+        self._printer.broadcast(msg)
         assert self._loop is not None
         await self._loop.run_in_executor(
             None, _post_url_to_message_board, self._active_url,

@@ -160,7 +160,7 @@ type ToWebviewMessageBody =
   | {type: 'followup_suggestion'; text: string}
   | {type: 'tasks_updated'}
   | {type: 'welcome_suggestions'; suggestions: Array<{text: string}>}
-  | {type: 'remote_url'; url: string}
+  | {type: 'remote_url'; url: string; ntfyUrl?: string}
   | {type: 'task_events'; events: unknown[]; task?: string; chat_id?: number}
   | {type: 'ghost'; suggestion: string; query: string}
   | {type: 'merge_data'; data: MergeData; hunk_count: number}

@@ -531,14 +531,33 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       const url = data.tunnel || data.local || '';
       if (url && url !== this._lastSentUrl) {
         this._lastSentUrl = url;
-        this._sendToWebview({
-          type: 'remote_url',
-          url,
-        } as ToWebviewMessage);
+        const msg: ToWebviewMessage = {type: 'remote_url', url};
+        const ntfyUrl = this._getNtfyUrl();
+        if (ntfyUrl) {
+          msg.ntfyUrl = ntfyUrl;
+        }
+        this._sendToWebview(msg);
       }
     } catch {
       /* file missing or malformed */
     }
+  }
+
+  /**
+   * Build the ``https://ntfy.sh/{topic}`` URL from ``~/.kiss/ntfy_topic``.
+   * Returns an empty string if the file is missing or empty.
+   */
+  private _getNtfyUrl(): string {
+    try {
+      const topicFile = path.join(os.homedir(), '.kiss', 'ntfy_topic');
+      const topic = fs.readFileSync(topicFile, 'utf-8').trim();
+      if (topic) {
+        return `https://ntfy.sh/${topic}`;
+      }
+    } catch {
+      /* file missing */
+    }
+    return '';
   }
 
   private _urlFileWatchTimer?: ReturnType<typeof setInterval>;
