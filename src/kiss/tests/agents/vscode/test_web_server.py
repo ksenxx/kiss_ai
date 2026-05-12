@@ -26,7 +26,7 @@ from websockets.asyncio.client import connect
 
 from kiss.agents.vscode.vscode_config import CONFIG_PATH, save_config
 from kiss.agents.vscode.web_server import (
-    _TUNNEL_UNHEALTHY_LIMIT,
+    _TUNNEL_UNHEALTHY_LIMIT_QUICK,
     _URL_FILE,
     TUNNEL_CHECK_INTERVAL,
     RemoteAccessServer,
@@ -5677,7 +5677,7 @@ class TestWatchdogEdgeDeregistration(IsolatedAsyncioTestCase):
     Cloudflare's edge has dropped the tunnel registration so
     ``readyConnections`` stays at 0.  The watchdog must count
     consecutive failures and force-restart after
-    :data:`_TUNNEL_UNHEALTHY_LIMIT` ticks.
+    :data:`_TUNNEL_UNHEALTHY_LIMIT_QUICK` ticks (no token → quick tunnel).
     """
 
     async def asyncSetUp(self) -> None:
@@ -5748,7 +5748,7 @@ class TestWatchdogEdgeDeregistration(IsolatedAsyncioTestCase):
     async def test_unhealthy_below_limit_only_increments(self) -> None:
         """Below the threshold, the counter increments without restart."""
         _FakeMetricsHandler.ready_connections = 0
-        for tick in range(1, _TUNNEL_UNHEALTHY_LIMIT):
+        for tick in range(1, _TUNNEL_UNHEALTHY_LIMIT_QUICK):
             await self.server._check_and_restart_tunnel()
             self.assertEqual(self.server._tunnel_unhealthy_ticks, tick)
             self.assertIs(
@@ -5765,7 +5765,7 @@ class TestWatchdogEdgeDeregistration(IsolatedAsyncioTestCase):
         and the counter MUST be reset.
         """
         _FakeMetricsHandler.ready_connections = 0
-        for _ in range(_TUNNEL_UNHEALTHY_LIMIT):
+        for _ in range(_TUNNEL_UNHEALTHY_LIMIT_QUICK):
             await self.server._check_and_restart_tunnel()
         self.assertEqual(self.server._tunnel_unhealthy_ticks, 0)
         self.assertIsNot(self.server._tunnel_proc, self.fake_proc)
