@@ -1209,6 +1209,14 @@
     clearTimeout(tooltipTimer);
     tooltipEl.classList.remove('visible');
   });
+  document.addEventListener(
+    'scroll',
+    () => {
+      clearTimeout(tooltipTimer);
+      tooltipEl.classList.remove('visible');
+    },
+    true,
+  );
   function mkEl(tag, cls) {
     const e = document.createElement(tag);
     if (cls) e.className = cls;
