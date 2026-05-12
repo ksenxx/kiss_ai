@@ -4395,13 +4395,14 @@
     closeConfigSidebar();
     closeSidebar();
     closeFrequentSidebar();
+    configFormPopulated = false;
     vscode.postMessage({type: 'getConfig'});
     configSidebar.classList.add('open');
     configSidebarOverlay.classList.add('open');
     configBtn.classList.add('active');
   }
   function closeConfigSidebar() {
-    if (configSidebar.classList.contains('open')) {
+    if (configSidebar.classList.contains('open') && configFormPopulated) {
       const data = collectConfigForm();
       vscode.postMessage({type: 'saveConfig', ...data});
     }
@@ -4462,6 +4463,7 @@
       frequentList.appendChild(div);
     });
   }
+  let configFormPopulated = false;
   function populateConfigForm(cfg, apiKeys) {
     const el = id => document.getElementById(id);
     el('cfg-max-budget').value = cfg.max_budget != null ? cfg.max_budget : 100;
@@ -4470,6 +4472,7 @@
     el('cfg-use-web-browser').checked = cfg.use_web_browser !== false;
     el('cfg-remote-password').value = cfg.remote_password || '';
     el('cfg-work-dir').value = cfg.work_dir || '';
+    configFormPopulated = true;
     // Populate API key fields from current environment values
     const keyIds = [
       'GEMINI_API_KEY',
