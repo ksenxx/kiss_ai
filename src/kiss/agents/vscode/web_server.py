@@ -46,6 +46,7 @@ import platform
 import re
 import secrets
 import shutil
+import signal
 import socket
 import ssl
 import subprocess
@@ -503,6 +504,142 @@ def _pick_free_local_port() -> int:
     return port
 
 
+_CLOUDFLARED_PIDFILE = Path.home() / ".kiss" / "cloudflared.pid"
+
+
+def _is_pid_alive(pid: int) -> bool:
+    """Return True iff a process with *pid* currently exists.
+
+    Uses ``os.kill(pid, 0)`` which sends signal 0 (no-op) and either
+    succeeds (process exists and we have permission), raises
+    :class:`ProcessLookupError` (process is gone — return False),
+    or raises :class:`PermissionError` (process exists but is owned
+    by another user — still alive, so return True).
+    """
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _save_cloudflared_pidfile(
+    pid: int, metrics_port: int, url: str | None,
+) -> None:
+    """Persist cloudflared's pid + metrics port + URL to disk.
+
+    Written atomically via tmp + ``Path.replace`` so concurrent readers
+    (a sibling ``kiss-web`` restarted by ``launchd``) never observe a
+    partially-written file.  Best-effort: write failures are logged at
+    DEBUG and do not propagate, since the worst case is that the next
+    ``kiss-web`` startup falls back to spawning a fresh cloudflared.
+    """
+    data: dict[str, Any] = {"pid": pid, "metrics_port": metrics_port}
+    if url:
+        data["url"] = url
+    try:
+        _CLOUDFLARED_PIDFILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _CLOUDFLARED_PIDFILE.with_name(
+            f"cloudflared.pid.tmp.{os.getpid()}",
+        )
+        tmp.write_text(json.dumps(data) + "\n")
+        tmp.replace(_CLOUDFLARED_PIDFILE)
+    except OSError as exc:
+        logger.debug("Failed to write cloudflared pidfile: %s", exc)
+
+
+def _load_cloudflared_pidfile() -> dict[str, Any] | None:
+    """Read and validate the cloudflared pidfile.
+
+    Returns the parsed dict (with at least an integer ``pid`` key) or
+    ``None`` if the file is missing, malformed, or invalid.
+    """
+    try:
+        raw = _CLOUDFLARED_PIDFILE.read_text()
+    except OSError:
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("pid"), int):
+        return None
+    return data
+
+
+def _try_adopt_existing_cloudflared() -> tuple[int, int, str] | None:
+    """Look for a healthy cloudflared started by a previous kiss-web.
+
+    Reads ``~/.kiss/cloudflared.pid``, verifies the pid is alive and
+    the metrics ``/ready`` endpoint reports ``readyConnections > 0``,
+    and re-discovers the public URL via the ``/quicktunnel`` endpoint
+    (falling back to the URL recorded in the pidfile when the metrics
+    endpoint doesn't expose one — e.g. named tunnels).
+
+    This is how the daemon preserves a single quick-tunnel URL across
+    its own restarts: ``cloudflared`` is spawned in its own process
+    group (``start_new_session=True``) so it survives ``kiss-web``'s
+    SIGTERM, the VS Code extension's ``pkill kiss-web`` no longer
+    targets it, and the next ``kiss-web`` startup adopts it here
+    instead of spawning a fresh quick-tunnel with a new hostname.
+
+    Returns:
+        ``(pid, metrics_port, url)`` if adoption succeeded, else
+        ``None`` (caller spawns a fresh cloudflared).
+    """
+    data = _load_cloudflared_pidfile()
+    if data is None:
+        return None
+    pid = int(data["pid"])
+    metrics_port = data.get("metrics_port")
+    if not isinstance(metrics_port, int):
+        return None
+    if not _is_pid_alive(pid):
+        logger.info(
+            "cloudflared pidfile points to dead pid %d; ignoring", pid,
+        )
+        return None
+    if not _probe_tunnel_ready(metrics_port):
+        logger.info(
+            "cloudflared pid %d alive but metrics port %d reports "
+            "no ready connections; not adopting",
+            pid, metrics_port,
+        )
+        return None
+    # Prefer a freshly-probed URL so we recover from URL rotation
+    # between adoption attempts; fall back to the saved one.
+    url: str | None = None
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{metrics_port}/quicktunnel",
+            headers={"User-Agent": "kiss-web"},
+        )
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            doc = json.loads(resp.read())
+            hostname = doc.get("hostname", "")
+            if hostname and not hostname.startswith("api."):
+                url = f"https://{hostname}"
+    except Exception:
+        url = None
+    if url is None:
+        saved = data.get("url")
+        if isinstance(saved, str) and saved.startswith("https://"):
+            url = saved
+    if url is None:
+        return None
+    logger.info(
+        "Adopted existing cloudflared pid=%d metrics_port=%d url=%s",
+        pid, metrics_port, url,
+    )
+    return pid, metrics_port, url
+
+
 def _probe_tunnel_ready(metrics_port: int) -> bool:
     """Return True if ``cloudflared`` has at least one live edge connection.
 
@@ -723,6 +860,34 @@ def _parse_named_tunnel_url(line: str, configured_url: str | None) -> str | None
             "dashboard)"
         )
     return None
+
+
+def _wait_for_remote_password(timeout: float = 30.0) -> str:
+    """Block up to *timeout* seconds for ``remote_password`` to appear.
+
+    Polls ``~/.kiss/config.json`` every 500 ms.  This eliminates the
+    boot-time race where ``kiss-web`` is restarted by the VS Code
+    extension *before* the extension's ``ensureRemotePassword`` flow
+    has written the password back to disk: instead of refusing to start
+    the tunnel and exiting (which causes ``launchd`` to respawn the
+    daemon and mint a brand-new ``*.trycloudflare.com`` URL), the
+    daemon waits patiently for the password to arrive.
+
+    Args:
+        timeout: Maximum seconds to wait for a non-empty password.
+
+    Returns:
+        The non-empty ``remote_password`` value, or ``""`` if the
+        timeout elapses without one appearing.
+    """
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        pw = str(load_config().get("remote_password", "") or "")
+        if pw:
+            return pw
+        if time.monotonic() >= deadline:
+            return ""
+        time.sleep(0.5)
 
 
 def _save_url_file(
@@ -1771,6 +1936,15 @@ class RemoteAccessServer:
         self._tunnel_started_at: float | None = None
         self._tunnel_failure_count = 0
         self._tunnel_next_retry = 0.0
+        # Pid of a cloudflared spawned by a *previous* ``kiss-web``
+        # process that this instance adopted on startup (see
+        # :func:`_try_adopt_existing_cloudflared`).  When non-None,
+        # ``self._tunnel_proc`` is None (we don't own the process) but
+        # ``self._tunnel_metrics_port`` and the URL file are populated
+        # as if we had spawned it ourselves.  The watchdog treats an
+        # adopted pid as equivalent to a self-spawned proc for
+        # health-check purposes.
+        self._tunnel_adopted_pid: int | None = None
         # Set by ``_start_quick_tunnel`` when cloudflared's stderr
         # reports a Cloudflare quick-tunnel rate-limit (HTTP 429 /
         # error 1015).  ``_restart_tunnel_url`` reads (and clears) it
@@ -2278,6 +2452,14 @@ class RemoteAccessServer:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 text=True,
+                # Detach cloudflared into its own process group / session
+                # so it survives ``kiss-web``'s SIGTERM / SIGINT.  Combined
+                # with the pidfile written below and adoption logic in
+                # :func:`_try_adopt_existing_cloudflared`, this keeps the
+                # public quick-tunnel URL stable across ``kiss-web``
+                # restarts that would otherwise mint a brand-new
+                # ``*.trycloudflare.com`` hostname every time.
+                start_new_session=True,
             )
             # Give cloudflared a brief moment to fail-fast on a bind
             # collision.  Healthy cloudflared takes seconds to start
@@ -2286,6 +2468,11 @@ class RemoteAccessServer:
             if proc.poll() is None:
                 self._tunnel_proc = proc
                 self._tunnel_started_at = time.monotonic()
+                self._tunnel_adopted_pid = None
+                # Best-effort pidfile (URL added later once known).
+                _save_cloudflared_pidfile(
+                    proc.pid, self._tunnel_metrics_port, None,
+                )
                 return
             last_proc = proc
             logger.info(
@@ -2346,12 +2533,20 @@ class RemoteAccessServer:
             rate_limit_flag=rate_limit_flag,
         )
         if url:
+            assert self._tunnel_metrics_port is not None
+            _save_cloudflared_pidfile(
+                self._tunnel_proc.pid, self._tunnel_metrics_port, url,
+            )
             return url
         for _ in range(20):
             if self._tunnel_proc.poll() is not None:
                 break
             url = _discover_tunnel_url_from_metrics()
             if url:
+                assert self._tunnel_metrics_port is not None
+                _save_cloudflared_pidfile(
+                    self._tunnel_proc.pid, self._tunnel_metrics_port, url,
+                )
                 return url
             time.sleep(1)
         # Rate-limit detection: if cloudflared's stderr named HTTP
@@ -2386,11 +2581,16 @@ class RemoteAccessServer:
         """
         self._spawn_cloudflared(["run", "--token", self.tunnel_token or ""])
         assert self._tunnel_proc is not None
-        return _read_url_from_stderr(
+        url = _read_url_from_stderr(
             self._tunnel_proc,
             partial(_parse_named_tunnel_url, configured_url=self.tunnel_url),
             timeout=30,
         )
+        if url and self._tunnel_metrics_port is not None:
+            _save_cloudflared_pidfile(
+                self._tunnel_proc.pid, self._tunnel_metrics_port, url,
+            )
+        return url
 
     async def _check_and_restart_tunnel(self) -> None:
         """Check tunnel health and restart if dead or deregistered.
@@ -2418,6 +2618,7 @@ class RemoteAccessServer:
         """
         now = time.monotonic()
         proc = self._tunnel_proc
+        adopted_pid = self._tunnel_adopted_pid
 
         if proc is not None and proc.poll() is not None:
             logger.info(
@@ -2427,7 +2628,22 @@ class RemoteAccessServer:
             self._terminate_tunnel_proc()
             proc = None
 
-        if proc is None:
+        # When we adopted an externally-owned cloudflared, treat a
+        # vanished pid the same as a self-spawned proc that exited:
+        # clear the adopted-pid bookkeeping so the no-process branch
+        # below kicks in and a fresh cloudflared is spawned.
+        if adopted_pid is not None and not _is_pid_alive(adopted_pid):
+            logger.info(
+                "Adopted cloudflared (pid=%d) is gone; restarting…",
+                adopted_pid,
+            )
+            self._tunnel_adopted_pid = None
+            self._tunnel_metrics_port = None
+            self._tunnel_started_at = None
+            self._tunnel_unhealthy_ticks = 0
+            adopted_pid = None
+
+        if proc is None and adopted_pid is None:
             # Don't (re)start the tunnel when the auth password is
             # unset — see H1 in the security review.  The watchdog
             # mirrors the guard in _setup_server so a runtime config
@@ -2475,7 +2691,10 @@ class RemoteAccessServer:
             "edge (readyConnections=0 for %d ticks); force-restarting",
             self._tunnel_unhealthy_ticks,
         )
-        self._terminate_tunnel_proc()
+        # Kill the adopted cloudflared too — it is the unhealthy one
+        # we are replacing; leaving it running would leak metrics
+        # ports and confuse the next adoption attempt.
+        self._terminate_tunnel_proc(kill_adopted=True)
         if now >= self._tunnel_next_retry:
             await self._restart_tunnel_url()
 
@@ -2538,7 +2757,7 @@ class RemoteAccessServer:
                 None, _post_url_to_message_board, self._active_url,
             )
 
-    def _terminate_tunnel_proc(self) -> None:
+    def _terminate_tunnel_proc(self, kill_adopted: bool = False) -> None:
         """Terminate ``_tunnel_proc`` and reset per-process state.
 
         Resets :attr:`_tunnel_proc`, :attr:`_tunnel_metrics_port`,
@@ -2546,6 +2765,17 @@ class RemoteAccessServer:
         so the next restart starts cleanly.  Leaves
         :attr:`_active_url` and the URL file alone so the file is not
         removed before a replacement tunnel writes its own URL.
+
+        When *kill_adopted* is False (default — used on graceful
+        kiss-web shutdown) and the current tunnel was *adopted* from a
+        previous kiss-web, this method leaves the adopted cloudflared
+        running so the next kiss-web can re-adopt it (this is the core
+        of how the public URL survives kiss-web restarts).
+
+        When *kill_adopted* is True (used by the unhealthy-tunnel
+        watchdog before respawning a replacement), the adopted pid is
+        sent SIGTERM, then SIGKILL after a short grace period if it is
+        still alive, and the pidfile is removed.
         """
         proc = self._tunnel_proc
         if proc is not None:
@@ -2554,7 +2784,33 @@ class RemoteAccessServer:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
+            # Pidfile is stale now that we killed our own cloudflared.
+            try:
+                _CLOUDFLARED_PIDFILE.unlink(missing_ok=True)
+            except OSError:
+                pass
+        elif kill_adopted and self._tunnel_adopted_pid is not None:
+            adopted_pid = self._tunnel_adopted_pid
+            try:
+                os.kill(adopted_pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+            else:
+                for _ in range(50):
+                    if not _is_pid_alive(adopted_pid):
+                        break
+                    time.sleep(0.1)
+                else:
+                    try:
+                        os.kill(adopted_pid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError, OSError):
+                        pass
+            try:
+                _CLOUDFLARED_PIDFILE.unlink(missing_ok=True)
+            except OSError:
+                pass
         self._tunnel_proc = None
+        self._tunnel_adopted_pid = None
         self._tunnel_metrics_port = None
         self._tunnel_started_at = None
         self._tunnel_unhealthy_ticks = 0
@@ -2711,7 +2967,35 @@ class RemoteAccessServer:
             # configured.  Without a password every WS client is
             # admitted, which would let anyone on the internet drive
             # the local agent.  Local connections still work.
-            password = load_config().get("remote_password", "")
+            #
+            # Wait up to 30 s for the password to be written.  When the
+            # VS Code extension restarts ``kiss-web``, its
+            # ``ensureRemotePassword`` prompt may not finish until a
+            # few seconds after the daemon starts; polling here avoids
+            # a launchd respawn that would mint a new tunnel URL.
+            password = await self._loop.run_in_executor(  # type: ignore[union-attr]
+                None, _wait_for_remote_password, 30.0,
+            )
+            if password:
+                # Before spawning a fresh cloudflared, try to adopt one
+                # left running by a previous ``kiss-web`` (detached via
+                # ``start_new_session=True``).  Adoption keeps the
+                # same public URL across kiss-web restarts.
+                adopted = await self._loop.run_in_executor(  # type: ignore[union-attr]
+                    None, _try_adopt_existing_cloudflared,
+                )
+                if adopted is not None:
+                    adopted_pid, adopted_port, adopted_url = adopted
+                    self._tunnel_adopted_pid = adopted_pid
+                    self._tunnel_metrics_port = adopted_port
+                    self._tunnel_started_at = time.monotonic()
+                    tunnel_url = adopted_url
+                    # Refresh pidfile with the freshly-probed URL so
+                    # subsequent adoption attempts see the current
+                    # hostname even when cloudflared has rotated it.
+                    _save_cloudflared_pidfile(
+                        adopted_pid, adopted_port, adopted_url,
+                    )
             if not password:
                 logger.warning(
                     "remote_password is not set in ~/.kiss/config.json; "
@@ -2725,7 +3009,11 @@ class RemoteAccessServer:
                     "remote access.",
                     file=sys.stderr,
                 )
-            else:
+            elif tunnel_url is None:
+                # No existing cloudflared was adopted — spawn a fresh
+                # one.  When ``tunnel_url`` was already set by the
+                # adoption branch above we deliberately skip this
+                # call to avoid starting a duplicate cloudflared.
                 tunnel_url = await self._loop.run_in_executor(  # type: ignore[union-attr]
                     None, self._start_tunnel,
                 )
