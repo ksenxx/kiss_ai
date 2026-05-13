@@ -1111,15 +1111,28 @@ function playwrightBrowsersPath(): string {
  * Check if the kiss-web daemon is running by probing port 8787.
  * Returns true if port 8787 has a listener (macOS/Linux only).
  * On Windows the daemon is not supported, so always returns false.
+ *
+ * The probe is retried up to 3 times with 300 ms gaps before
+ * returning false.  A single ``lsof`` call races with the
+ * LaunchAgent's ~1-3 s respawn window after a previous kiss-web
+ * restart; without the retry the extension would nuke a healthy
+ * daemon that was merely mid-startup, burning the current Cloudflare
+ * tunnel URL on every VS Code activation that lost that race.
  */
 function isDaemonRunning(): boolean {
   if (process.platform === 'win32') return false;
-  try {
-    execSync('lsof -i :8787 -t', {stdio: 'ignore', timeout: 3000});
-    return true;
-  } catch {
-    return false;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      execSync('lsof -i :8787 -t', {stdio: 'ignore', timeout: 3000});
+      return true;
+    } catch {
+      // not listening yet; fall through to retry
+    }
+    if (attempt < 2) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
+    }
   }
+  return false;
 }
 
 /**
