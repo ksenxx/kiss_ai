@@ -462,19 +462,41 @@ find_code_cli() {
     echo ""
 
     # --- Ensure remote_password is set before starting kiss-web ---------------
+    # Read remote_password from ~/.kiss/config.json WITHOUT using `uv run`,
+    # which can race with the parent install, re-resolve the venv, or emit
+    # warnings that pollute stdout. Use the system python3 directly; if it is
+    # somehow missing, fall back to a grep-based parser.
     KISS_CONFIG="$HOME/.kiss/config.json"
     _current_password=""
+    _password_read_error=""
     if [ -f "$KISS_CONFIG" ]; then
-        _current_password="$(uv run python -c "
-import json, pathlib, sys
+        if command -v python3 >/dev/null 2>&1; then
+            _current_password="$(KISS_CONFIG="$KISS_CONFIG" python3 -c "
+import json, os, sys
 try:
-    cfg = json.loads(pathlib.Path(pathlib.Path.home() / '.kiss' / 'config.json').read_text())
-    sys.stdout.write(cfg.get('remote_password', ''))
-except Exception:
-    pass
-" 2>/dev/null || true)"
+    with open(os.environ['KISS_CONFIG']) as f:
+        cfg = json.load(f)
+    sys.stdout.write(str(cfg.get('remote_password', '')))
+except Exception as e:
+    sys.stderr.write(f'{type(e).__name__}: {e}')
+    sys.exit(2)
+" 2>/tmp/.kiss_pw_err)" || _password_read_error="$(cat /tmp/.kiss_pw_err 2>/dev/null || true)"
+            rm -f /tmp/.kiss_pw_err
+        else
+            # Fallback parser: extract "remote_password": "<value>" from JSON.
+            _current_password="$(grep -o '"remote_password"[[:space:]]*:[[:space:]]*"[^"]*"' "$KISS_CONFIG" \
+                | sed -E 's/.*"remote_password"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/' \
+                | head -n1)"
+        fi
     fi
     if [ -z "$_current_password" ]; then
+        if [ -n "$_password_read_error" ]; then
+            echo ">>> Could not parse $KISS_CONFIG ($_password_read_error)"
+        elif [ ! -f "$KISS_CONFIG" ]; then
+            echo ">>> $KISS_CONFIG does not exist yet."
+        else
+            echo ">>> remote_password is missing or empty in $KISS_CONFIG."
+        fi
         echo ">>> kiss-web requires a remote_password for authentication."
         echo "   This password protects your KISS web interface from unauthorized access."
         if [ -r /dev/tty ]; then
@@ -485,16 +507,21 @@ except Exception:
         if [ -z "$_new_password" ]; then
             echo "   WARNING: No password entered. kiss-web will run without authentication."
         else
-            # Write remote_password into ~/.kiss/config.json (pass via env to avoid injection)
+            # Write remote_password into ~/.kiss/config.json (pass via env to avoid injection).
+            # Use system python3 directly, same reason as the read path above.
             mkdir -p "$HOME/.kiss"
-            _KISS_NEW_PW="$_new_password" uv run python -c "
+            if command -v python3 >/dev/null 2>&1; then
+                _KISS_NEW_PW="$_new_password" KISS_CONFIG="$KISS_CONFIG" python3 -c "
 import json, os, pathlib
-p = pathlib.Path.home() / '.kiss' / 'config.json'
+p = pathlib.Path(os.environ['KISS_CONFIG'])
 cfg = json.loads(p.read_text()) if p.exists() else {}
 cfg['remote_password'] = os.environ['_KISS_NEW_PW']
 p.write_text(json.dumps(cfg, indent=2))
-" 2>/dev/null
-            echo "   remote_password saved to $KISS_CONFIG"
+"
+                echo "   remote_password saved to $KISS_CONFIG"
+            else
+                echo "   ERROR: python3 not found; cannot persist remote_password."
+            fi
         fi
         echo ""
     fi

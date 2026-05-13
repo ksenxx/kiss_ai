@@ -1936,7 +1936,9 @@ async function ensureRemotePassword(): Promise<void> {
 
   // The daemon was just restarted; config.json may be mid-write by a
   // concurrent process (install.sh or kiss-web).  Wait briefly and retry.
-  log('ensureRemotePassword: password not found on first read — retrying after 2 s');
+  log(
+    'ensureRemotePassword: password not found on first read — retrying after 2 s',
+  );
   await new Promise(resolve => setTimeout(resolve, 2000));
 
   if (getStoredRemotePassword()) {
