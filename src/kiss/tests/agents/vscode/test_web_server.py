@@ -1458,6 +1458,81 @@ class TestRemoteAccessServerMerge(IsolatedAsyncioTestCase):
                 content = f.read()
             self.assertEqual(content, "line1\nmodified_line2\nline3\nnew_line4\n")
 
+    async def test_merge_nav_payload_includes_cur_and_resolved(self) -> None:
+        """merge_nav events should include cur={fi,hi} and resolved list.
+
+        The browser webview needs these fields to scroll Prev/Next into
+        view and to render accepted/rejected hunks differently.
+        """
+        tab_id = "merge-nav-payload-tab"
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+            await self._auth(ws)
+            await self._trigger_merge(tab_id)
+            await self._collect_until(ws, "merge_started")
+
+            # "next" navigation should produce a merge_nav with cur set
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "mergeAction",
+                        "action": "next",
+                        "tabId": tab_id,
+                    }
+                )
+            )
+            events = await self._collect_until(ws, "merge_nav", timeout=5)
+            navs = [e for e in events if e.get("type") == "merge_nav"]
+            self.assertTrue(len(navs) > 0)
+            nav = navs[-1]
+            self.assertIn("cur", nav)
+            self.assertIn("resolved", nav)
+            self.assertIsNotNone(nav["cur"])
+            self.assertIn("fi", nav["cur"])
+            self.assertIn("hi", nav["cur"])
+            self.assertEqual(nav["resolved"], [])
+
+            # Accept one hunk -> resolved should grow by one with
+            # status="accepted".
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "mergeAction",
+                        "action": "accept",
+                        "tabId": tab_id,
+                    }
+                )
+            )
+            events = await self._collect_until(ws, "merge_nav", timeout=5)
+            navs = [e for e in events if e.get("type") == "merge_nav"]
+            self.assertTrue(len(navs) > 0)
+            nav = navs[-1]
+            self.assertEqual(len(nav["resolved"]), 1)
+            self.assertEqual(nav["resolved"][0]["status"], "accepted")
+
+    async def test_merge_nav_reject_status_in_resolved(self) -> None:
+        """rejected hunks should appear in resolved with status='rejected'."""
+        tab_id = "merge-nav-reject-tab"
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+            await self._auth(ws)
+            await self._trigger_merge(tab_id)
+            await self._collect_until(ws, "merge_started")
+
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "mergeAction",
+                        "action": "reject",
+                        "tabId": tab_id,
+                    }
+                )
+            )
+            events = await self._collect_until(ws, "merge_nav", timeout=5)
+            navs = [e for e in events if e.get("type") == "merge_nav"]
+            self.assertTrue(len(navs) > 0)
+            nav = navs[-1]
+            self.assertEqual(len(nav["resolved"]), 1)
+            self.assertEqual(nav["resolved"][0]["status"], "rejected")
+
     async def test_merge_reject_individual_hunk(self) -> None:
         """mergeAction reject should revert hunks one by one."""
         tab_id = "merge-single-reject-tab"

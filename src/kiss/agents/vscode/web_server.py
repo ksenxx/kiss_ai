@@ -280,7 +280,10 @@ class _WebMergeState:
             for hi in range(len(f.get("hunks", [])))
         ]
         self._pos = 0
-        self._resolved: set[tuple[int, int]] = set()
+        # Maps (file_idx, hunk_idx) -> resolution status ("accepted" or
+        # "rejected"); used so the browser can render accepted hunks
+        # dimmed and rejected hunks struck-through.
+        self._resolved: dict[tuple[int, int], str] = {}
 
     @property
     def total_hunks(self) -> int:
@@ -308,9 +311,17 @@ class _WebMergeState:
             self._pos = len(self._all_hunks) - 1
         return self._all_hunks[self._pos]
 
-    def mark_resolved(self, fi: int, hi: int) -> None:
-        """Mark a hunk as resolved."""
-        self._resolved.add((fi, hi))
+    def mark_resolved(self, fi: int, hi: int, status: str = "accepted") -> None:
+        """Mark a hunk as resolved with the given *status*.
+
+        Args:
+            fi: File index in :attr:`files`.
+            hi: Hunk index within the file.
+            status: ``"accepted"`` or ``"rejected"``.  Used by the web
+                frontend to render accepted hunks dimmed and rejected
+                hunks struck-through after the user acts on them.
+        """
+        self._resolved[(fi, hi)] = status
 
     def is_resolved(self, fi: int, hi: int) -> bool:
         """Return True if hunk ``(fi, hi)`` has been marked resolved.
@@ -320,6 +331,18 @@ class _WebMergeState:
         breaking callers.
         """
         return (fi, hi) in self._resolved
+
+    def resolutions(self) -> list[dict[str, Any]]:
+        """Return the full list of resolved hunks for the browser.
+
+        Each entry is a dict ``{"fi": ..., "hi": ..., "status": ...}``
+        suitable for inclusion in a ``merge_nav`` broadcast so the
+        webview can visually mark every resolved hunk.
+        """
+        return [
+            {"fi": fi, "hi": hi, "status": status}
+            for (fi, hi), status in self._resolved.items()
+        ]
 
     def _seek(self, step: int) -> None:
         """Move *step* (+1 or -1) to the next unresolved hunk."""
@@ -2148,7 +2171,7 @@ class RemoteAccessServer:
         cur = state.current()
         if action == "accept":
             if cur is not None:
-                state.mark_resolved(*cur)
+                state.mark_resolved(*cur, "accepted")
                 state.advance()
         elif action == "reject":
             if cur is not None:
@@ -2162,7 +2185,7 @@ class RemoteAccessServer:
                 for later_hi in range(hi + 1, len(fd["hunks"])):
                     if not state.is_resolved(fi, later_hi):
                         fd["hunks"][later_hi]["cs"] += delta
-                state.mark_resolved(fi, hi)
+                state.mark_resolved(fi, hi, "rejected")
                 state.advance()
         elif action == "prev":
             state.go_prev()
@@ -2176,28 +2199,36 @@ class RemoteAccessServer:
                     await self._loop.run_in_executor(
                         None, _reject_all_hunks_in_file, fd,
                     )
+                file_status = "rejected" if action == "reject-file" else "accepted"
                 for hi in state.unresolved_in_file(fi):
-                    state.mark_resolved(fi, hi)
+                    state.mark_resolved(fi, hi, file_status)
                 state.advance()
         elif action == "accept-all":
             for fi, hi in state.all_unresolved():
-                state.mark_resolved(fi, hi)
+                state.mark_resolved(fi, hi, "accepted")
         elif action == "reject-all":
             unresolved_files: set[int] = set()
             for fi, hi in state.all_unresolved():
                 unresolved_files.add(fi)
-                state.mark_resolved(fi, hi)
+                state.mark_resolved(fi, hi, "rejected")
             for fi in unresolved_files:
                 fd = state.files[fi]
                 await self._loop.run_in_executor(
                     None, _reject_all_hunks_in_file, fd,
                 )
 
+        cur_after = state.current()
         self._printer.broadcast({
             "type": "merge_nav",
             "tabId": tab_id,
             "remaining": state.remaining,
             "total": state.total_hunks,
+            "cur": (
+                {"fi": cur_after[0], "hi": cur_after[1]}
+                if cur_after is not None
+                else None
+            ),
+            "resolved": state.resolutions(),
         })
 
         if not state.remaining:

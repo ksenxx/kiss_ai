@@ -1211,6 +1211,97 @@ body.remote-chat #welcome > #input-area {
   background: color-mix(in srgb, var(--yellow) 4%, transparent);
 }
 
+.merge-info-hdr {
+  color: var(--yellow); font-weight: 600;
+  font-size: var(--fs-base); margin-bottom: 4px;
+}
+
+.merge-info-body {
+  font-size: var(--fs-md); color: var(--dim);
+}
+
+/* Per-file diff container inside a merge-info panel */
+.merge-file-diff { margin-top: 10px; }
+
+.merge-file-name {
+  font-weight: 600;
+  color: var(--vscode-textLink-foreground, var(--accent));
+  margin-bottom: 4px;
+}
+
+/* Context lines between hunks */
+.merge-ctx {
+  margin: 0; padding: 2px 8px;
+  background: var(--vscode-input-background, var(--surface2));
+  color: var(--dim); opacity: 0.65;
+  font-size: 12px; line-height: 1.4;
+  white-space: pre-wrap; word-break: break-word;
+  overflow-x: auto; border-radius: 0;
+}
+
+/* A single reviewable hunk (block) */
+.merge-hunk {
+  display: block; margin: 4px 0; padding: 6px 8px;
+  background: var(--vscode-input-background, var(--surface2));
+  border: 1px solid transparent; border-radius: 4px;
+  font-size: 12px; line-height: 1.4;
+  white-space: pre-wrap; word-break: break-word;
+  overflow-x: auto;
+  transition: border-color 0.15s, opacity 0.15s, background 0.15s;
+}
+
+.merge-hunk-label {
+  display: block; font-size: var(--fs-sm); font-weight: 600;
+  color: var(--dim); margin-bottom: 4px;
+  text-transform: uppercase; letter-spacing: 0.04em;
+}
+
+/* Currently-selected hunk (driven by Prev/Next) */
+.merge-hunk.current {
+  border-color: var(--yellow);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--yellow) 25%, transparent);
+}
+
+/* Accepted: dim + thin green check stripe */
+.merge-hunk.accepted {
+  opacity: 0.45;
+  border-color: color-mix(in srgb, var(--green) 40%, transparent);
+  background: color-mix(in srgb, var(--green) 6%, var(--surface2));
+}
+
+.merge-hunk.accepted .merge-hunk-label::after {
+  content: ' · ACCEPTED'; color: var(--green);
+}
+
+/* Rejected: dim + red stripe + strikethrough on the +/- lines */
+.merge-hunk.rejected {
+  opacity: 0.45;
+  border-color: color-mix(in srgb, var(--red) 40%, transparent);
+  background: color-mix(in srgb, var(--red) 6%, var(--surface2));
+}
+
+.merge-hunk.rejected .diff-del,
+.merge-hunk.rejected .diff-add {
+  text-decoration: line-through;
+}
+
+.merge-hunk.rejected .merge-hunk-label::after {
+  content: ' · REJECTED'; color: var(--red);
+}
+
+/* Inline +/- lines inside a hunk (used in web view) */
+.merge-hunk .diff-del {
+  display: block; color: var(--red);
+  background: color-mix(in srgb, var(--red) 12%, transparent);
+  padding: 0 2px;
+}
+
+.merge-hunk .diff-add {
+  display: block; color: var(--green);
+  background: color-mix(in srgb, var(--green) 12%, transparent);
+  padding: 0 2px;
+}
+
 /* ── Syntax highlighting overrides ───────────────────── */
 code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', monospace); }
 .hljs { background: var(--surface2) !important; border-radius: 6px; padding: 10px !important; }
