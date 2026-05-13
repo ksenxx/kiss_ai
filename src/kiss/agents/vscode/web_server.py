@@ -2538,12 +2538,16 @@ class RemoteAccessServer:
                 current_ips = _get_local_ips()
                 if current_ips != self._last_ips:
                     self._last_ips = current_ips
-                    if self.use_tunnel and self._tunnel_proc is not None:
+                    if self.use_tunnel:
                         # In tunnel mode, cloudflared handles edge
                         # reconnection automatically.  Restarting the
                         # entire daemon would assign a new random
                         # *.trycloudflare.com URL — avoid that.  Just
                         # log and let cloudflared recover on its own.
+                        # N.B. Check use_tunnel only — NOT
+                        # _tunnel_proc, which can be None during
+                        # startup, when remote_password is empty, or
+                        # between a force-restart.
                         logger.info(
                             "IP address changed: %s → %s; tunnel mode "
                             "— cloudflared will re-register "
