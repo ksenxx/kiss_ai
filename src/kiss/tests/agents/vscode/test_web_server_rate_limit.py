@@ -301,7 +301,10 @@ class TestStartQuickTunnelMarksRateLimit(IsolatedAsyncioTestCase):
         save_config({"remote_password": "rl-test"})
         self._tmpdir = tempfile.mkdtemp()
         self._old_path = os.environ.get("PATH", "")
-        os.environ["PATH"] = self._tmpdir + ":" + self._old_path
+        # Use a minimal PATH so any real cloudflared installed on the
+        # developer's machine (e.g. ~/.local/bin/cloudflared) cannot
+        # shadow our fake under full-suite test pollution.
+        os.environ["PATH"] = self._tmpdir + ":/usr/bin:/bin"
         self.port = _find_free_port()
         self.server = RemoteAccessServer(
             host="127.0.0.1",
@@ -400,7 +403,10 @@ class TestRestartTunnelUrlBackoff(IsolatedAsyncioTestCase):
             f.write("#!/bin/bash\nexit 1\n")
         os.chmod(cf, 0o755)
         self._old_path = os.environ.get("PATH", "")
-        os.environ["PATH"] = self._tmpdir + ":" + self._old_path
+        # Use a minimal PATH so any real cloudflared installed on the
+        # developer's machine (e.g. ~/.local/bin/cloudflared) cannot
+        # shadow our fake under full-suite test pollution.
+        os.environ["PATH"] = self._tmpdir + ":/usr/bin:/bin"
         self.port = _find_free_port()
         self.server = RemoteAccessServer(
             host="127.0.0.1",

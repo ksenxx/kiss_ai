@@ -36,14 +36,17 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import hashlib
 import ipaddress
 import json
 import logging
 import mimetypes
 import os
+import platform
 import re
 import secrets
 import shutil
+import signal
 import socket
 import ssl
 import subprocess
@@ -51,6 +54,7 @@ import sys
 import threading
 import time
 import urllib.request
+import uuid
 from collections.abc import Callable
 from concurrent.futures import Future as ConcurrentFuture
 from functools import partial
@@ -76,9 +80,16 @@ TUNNEL_CHECK_INTERVAL = 30
 
 _WS_PING_TIMEOUT = 10
 
-_TUNNEL_UNHEALTHY_LIMIT = 3
+_TUNNEL_UNHEALTHY_LIMIT_NAMED = 3
 
-_TUNNEL_STARTUP_GRACE = 60
+# Quick tunnels get a new random URL on every restart, so be much more
+# conservative before force-restarting.  20 ticks × 30s = 10 minutes of
+# readyConnections=0 before the watchdog kills cloudflared.  This gives
+# cloudflared ample time to re-register a temporarily-dropped tunnel
+# without burning through dozens of distinct *.trycloudflare.com URLs.
+_TUNNEL_UNHEALTHY_LIMIT_QUICK = 20
+
+_TUNNEL_STARTUP_GRACE = 120
 
 _TUNNEL_BACKOFF_INITIAL = 60
 
@@ -270,7 +281,10 @@ class _WebMergeState:
             for hi in range(len(f.get("hunks", [])))
         ]
         self._pos = 0
-        self._resolved: set[tuple[int, int]] = set()
+        # Maps (file_idx, hunk_idx) -> resolution status ("accepted" or
+        # "rejected"); used so the browser can render accepted hunks
+        # dimmed and rejected hunks struck-through.
+        self._resolved: dict[tuple[int, int], str] = {}
 
     @property
     def total_hunks(self) -> int:
@@ -298,9 +312,17 @@ class _WebMergeState:
             self._pos = len(self._all_hunks) - 1
         return self._all_hunks[self._pos]
 
-    def mark_resolved(self, fi: int, hi: int) -> None:
-        """Mark a hunk as resolved."""
-        self._resolved.add((fi, hi))
+    def mark_resolved(self, fi: int, hi: int, status: str = "accepted") -> None:
+        """Mark a hunk as resolved with the given *status*.
+
+        Args:
+            fi: File index in :attr:`files`.
+            hi: Hunk index within the file.
+            status: ``"accepted"`` or ``"rejected"``.  Used by the web
+                frontend to render accepted hunks dimmed and rejected
+                hunks struck-through after the user acts on them.
+        """
+        self._resolved[(fi, hi)] = status
 
     def is_resolved(self, fi: int, hi: int) -> bool:
         """Return True if hunk ``(fi, hi)`` has been marked resolved.
@@ -310,6 +332,18 @@ class _WebMergeState:
         breaking callers.
         """
         return (fi, hi) in self._resolved
+
+    def resolutions(self) -> list[dict[str, Any]]:
+        """Return the full list of resolved hunks for the browser.
+
+        Each entry is a dict ``{"fi": ..., "hi": ..., "status": ...}``
+        suitable for inclusion in a ``merge_nav`` broadcast so the
+        webview can visually mark every resolved hunk.
+        """
+        return [
+            {"fi": fi, "hi": hi, "status": status}
+            for (fi, hi), status in self._resolved.items()
+        ]
 
     def _seek(self, step: int) -> None:
         """Move *step* (+1 or -1) to the next unresolved hunk."""
@@ -470,6 +504,142 @@ def _pick_free_local_port() -> int:
     return port
 
 
+_CLOUDFLARED_PIDFILE = Path.home() / ".kiss" / "cloudflared.pid"
+
+
+def _is_pid_alive(pid: int) -> bool:
+    """Return True iff a process with *pid* currently exists.
+
+    Uses ``os.kill(pid, 0)`` which sends signal 0 (no-op) and either
+    succeeds (process exists and we have permission), raises
+    :class:`ProcessLookupError` (process is gone — return False),
+    or raises :class:`PermissionError` (process exists but is owned
+    by another user — still alive, so return True).
+    """
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _save_cloudflared_pidfile(
+    pid: int, metrics_port: int, url: str | None,
+) -> None:
+    """Persist cloudflared's pid + metrics port + URL to disk.
+
+    Written atomically via tmp + ``Path.replace`` so concurrent readers
+    (a sibling ``kiss-web`` restarted by ``launchd``) never observe a
+    partially-written file.  Best-effort: write failures are logged at
+    DEBUG and do not propagate, since the worst case is that the next
+    ``kiss-web`` startup falls back to spawning a fresh cloudflared.
+    """
+    data: dict[str, Any] = {"pid": pid, "metrics_port": metrics_port}
+    if url:
+        data["url"] = url
+    try:
+        _CLOUDFLARED_PIDFILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _CLOUDFLARED_PIDFILE.with_name(
+            f"cloudflared.pid.tmp.{os.getpid()}",
+        )
+        tmp.write_text(json.dumps(data) + "\n")
+        tmp.replace(_CLOUDFLARED_PIDFILE)
+    except OSError as exc:
+        logger.debug("Failed to write cloudflared pidfile: %s", exc)
+
+
+def _load_cloudflared_pidfile() -> dict[str, Any] | None:
+    """Read and validate the cloudflared pidfile.
+
+    Returns the parsed dict (with at least an integer ``pid`` key) or
+    ``None`` if the file is missing, malformed, or invalid.
+    """
+    try:
+        raw = _CLOUDFLARED_PIDFILE.read_text()
+    except OSError:
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("pid"), int):
+        return None
+    return data
+
+
+def _try_adopt_existing_cloudflared() -> tuple[int, int, str] | None:
+    """Look for a healthy cloudflared started by a previous kiss-web.
+
+    Reads ``~/.kiss/cloudflared.pid``, verifies the pid is alive and
+    the metrics ``/ready`` endpoint reports ``readyConnections > 0``,
+    and re-discovers the public URL via the ``/quicktunnel`` endpoint
+    (falling back to the URL recorded in the pidfile when the metrics
+    endpoint doesn't expose one — e.g. named tunnels).
+
+    This is how the daemon preserves a single quick-tunnel URL across
+    its own restarts: ``cloudflared`` is spawned in its own process
+    group (``start_new_session=True``) so it survives ``kiss-web``'s
+    SIGTERM, the VS Code extension's ``pkill kiss-web`` no longer
+    targets it, and the next ``kiss-web`` startup adopts it here
+    instead of spawning a fresh quick-tunnel with a new hostname.
+
+    Returns:
+        ``(pid, metrics_port, url)`` if adoption succeeded, else
+        ``None`` (caller spawns a fresh cloudflared).
+    """
+    data = _load_cloudflared_pidfile()
+    if data is None:
+        return None
+    pid = int(data["pid"])
+    metrics_port = data.get("metrics_port")
+    if not isinstance(metrics_port, int):
+        return None
+    if not _is_pid_alive(pid):
+        logger.info(
+            "cloudflared pidfile points to dead pid %d; ignoring", pid,
+        )
+        return None
+    if not _probe_tunnel_ready(metrics_port):
+        logger.info(
+            "cloudflared pid %d alive but metrics port %d reports "
+            "no ready connections; not adopting",
+            pid, metrics_port,
+        )
+        return None
+    # Prefer a freshly-probed URL so we recover from URL rotation
+    # between adoption attempts; fall back to the saved one.
+    url: str | None = None
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{metrics_port}/quicktunnel",
+            headers={"User-Agent": "kiss-web"},
+        )
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            doc = json.loads(resp.read())
+            hostname = doc.get("hostname", "")
+            if hostname and not hostname.startswith("api."):
+                url = f"https://{hostname}"
+    except Exception:
+        url = None
+    if url is None:
+        saved = data.get("url")
+        if isinstance(saved, str) and saved.startswith("https://"):
+            url = saved
+    if url is None:
+        return None
+    logger.info(
+        "Adopted existing cloudflared pid=%d metrics_port=%d url=%s",
+        pid, metrics_port, url,
+    )
+    return pid, metrics_port, url
+
+
 def _probe_tunnel_ready(metrics_port: int) -> bool:
     """Return True if ``cloudflared`` has at least one live edge connection.
 
@@ -517,8 +687,9 @@ def _stderr_reader_loop(
     proc: subprocess.Popen[str],
     stop_event: threading.Event | None = None,
     rate_limit_flag: list[bool] | None = None,
+    url_found_event: threading.Event | None = None,
 ) -> None:
-    """Read *stderr* lines until *parse* returns a URL or stderr hits EOF.
+    """Read *stderr* lines, parse for a URL, and keep draining until EOF.
 
     Stores the discovered URL in ``result[0]``.  Top-level helper so
     :func:`_read_url_from_stderr` does not need a closure.
@@ -530,6 +701,14 @@ def _stderr_reader_loop(
     writing all its output and exit before the reader has drained the
     pipe, causing the reader to bail out with stderr buffered data
     unread (and the URL therefore missed).
+
+    **Critically**, after finding the URL the loop does **not** return.
+    It continues draining stderr so the pipe buffer never fills up.
+    If the buffer were to fill (~64 KiB), ``cloudflared`` would block
+    on its next stderr write, which in Go deadlocks the whole process
+    (the logging mutex prevents any goroutine from making progress).
+    The result is an unhealthy tunnel that the watchdog force-restarts,
+    giving a new URL every few minutes.
 
     Args:
         stderr: A line-buffered text-mode file-like object.
@@ -550,8 +729,13 @@ def _stderr_reader_loop(
             rate-limited tunnel start (HTTP 429 / Cloudflare error
             1015) from a generic failure so the watchdog can apply a
             much longer backoff.
+        url_found_event: Optional event set when a URL is first
+            discovered.  Signals :func:`_read_url_from_stderr` to
+            return the URL immediately while this thread keeps
+            draining.
     """
     del proc
+    found = False
     for line in iter(stderr.readline, ""):
         if (
             rate_limit_flag is not None
@@ -559,10 +743,15 @@ def _stderr_reader_loop(
             and _is_rate_limit_line(line)
         ):
             rate_limit_flag[0] = True
-        url = parse(line)
-        if url is not None:
-            result[0] = url
-            return
+        if not found:
+            url = parse(line)
+            if url is not None:
+                result[0] = url
+                found = True
+                if url_found_event is not None:
+                    url_found_event.set()
+                # Keep draining stderr — do NOT return.
+                continue
         if stop_event is not None and stop_event.is_set():
             return
 
@@ -599,25 +788,41 @@ def _read_url_from_stderr(
     assert stderr is not None
     result: list[str | None] = [None]
     stop_event = threading.Event()
+    url_found_event = threading.Event()
     reader = threading.Thread(
         target=_stderr_reader_loop,
         args=(
             stderr, parse, result, proc, stop_event, rate_limit_flag,
+            url_found_event,
         ),
         daemon=True,
     )
     reader.start()
-    reader.join(timeout=timeout)
-    # H6: Signal the reader to exit on its next iteration.  The reader
-    # may still be blocked inside readline() (closing stderr from
-    # another thread does not unblock the in-flight read on every
-    # platform), but the moment the next log line arrives — or the
-    # subprocess dies and readline() returns "" — the loop will
-    # observe stop_event and exit, instead of running forever.  This
-    # bounds the leak to "one extra line consumed after timeout"
-    # rather than "thread leaks on every timed-out restart".
+    # Wait until the reader finds a URL *or* the timeout elapses.
+    # Unlike the previous reader.join(timeout), this unblocks as soon
+    # as the URL is discovered (the reader thread keeps running in the
+    # background to drain stderr so the pipe buffer never fills).
+    url_found_event.wait(timeout=timeout)
+    if result[0] is not None:
+        # URL found.  The reader daemon thread continues draining
+        # stderr in the background until cloudflared exits.  This is
+        # essential: if nobody reads stderr, the ~64 KiB OS pipe
+        # buffer fills, cloudflared blocks on write(), and in Go the
+        # logging mutex deadlocks the whole process — making the
+        # tunnel unresponsive and triggering a watchdog restart (with
+        # a new URL) every few minutes.
+        return result[0]
+    # H6: No URL found within *timeout*.  Signal the reader to exit on
+    # its next iteration.  The reader may still be blocked inside
+    # readline() (closing stderr from another thread does not unblock
+    # the in-flight read on every platform), but the moment the next
+    # log line arrives — or the subprocess dies and readline() returns
+    # "" — the loop will observe stop_event and exit, instead of
+    # running forever.  This bounds the leak to "one extra line
+    # consumed after timeout" rather than "thread leaks on every
+    # timed-out restart".
     stop_event.set()
-    return result[0]
+    return None
 
 
 def _parse_quick_tunnel_url(line: str) -> str | None:
@@ -657,30 +862,149 @@ def _parse_named_tunnel_url(line: str, configured_url: str | None) -> str | None
     return None
 
 
-def _save_url_file(local_url: str, tunnel_url: str | None = None) -> None:
-    """Write the active server URLs to ``~/.kiss/remote-url.json``.
+def _wait_for_remote_password(timeout: float = 30.0) -> str:
+    """Block up to *timeout* seconds for ``remote_password`` to appear.
 
-    Creates the parent directory if needed.  The file is read by
-    ``kiss-web --url`` so users can discover the remote URL without
-    digging through log files.
+    Polls ``~/.kiss/config.json`` every 500 ms.  This eliminates the
+    boot-time race where ``kiss-web`` is restarted by the VS Code
+    extension *before* the extension's ``ensureRemotePassword`` flow
+    has written the password back to disk: instead of refusing to start
+    the tunnel and exiting (which causes ``launchd`` to respawn the
+    daemon and mint a brand-new ``*.trycloudflare.com`` URL), the
+    daemon waits patiently for the password to arrive.
 
     Args:
+        timeout: Maximum seconds to wait for a non-empty password.
+
+    Returns:
+        The non-empty ``remote_password`` value, or ``""`` if the
+        timeout elapses without one appearing.
+    """
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        pw = str(load_config().get("remote_password", "") or "")
+        if pw:
+            return pw
+        if time.monotonic() >= deadline:
+            return ""
+        time.sleep(0.5)
+
+
+def _save_url_file(
+    url_file: Path, local_url: str, tunnel_url: str | None = None,
+) -> None:
+    """Write the active server URLs to ``url_file``.
+
+    Creates the parent directory if needed.  The default file location
+    is ``~/.kiss/remote-url.json``, which is read by ``kiss-web --url``
+    so users can discover the remote URL without digging through log
+    files.  Tests inject a temporary path to avoid touching the live
+    file that the VS Code extension and the ``kiss-web`` daemon watch.
+
+    Args:
+        url_file: Path to the JSON file to write.
         local_url: The local ``https://localhost:PORT`` URL.
         tunnel_url: The Cloudflare tunnel URL, or None.
     """
     data: dict[str, str] = {"local": local_url}
     if tunnel_url:
         data["tunnel"] = tunnel_url
-    _URL_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _URL_FILE.write_text(json.dumps(data, indent=2) + "\n")
+    url_file.parent.mkdir(parents=True, exist_ok=True)
+    url_file.write_text(json.dumps(data, indent=2) + "\n")
 
 
-def _remove_url_file() -> None:
-    """Delete ``~/.kiss/remote-url.json`` if it exists."""
+def _remove_url_file(url_file: Path) -> None:
+    """Delete ``url_file`` if it exists."""
     try:
-        _URL_FILE.unlink(missing_ok=True)
+        url_file.unlink(missing_ok=True)
     except OSError:
         pass
+
+
+def _read_url_from_file(url_file: Path) -> str | None:
+    """Read the active remote URL from ``url_file``.
+
+    Synchronous helper invoked from
+    :meth:`RemoteAccessServer._send_welcome_info` via
+    ``run_in_executor`` so the disk read does not block the asyncio
+    event loop.  Returns ``None`` on missing file, parse error, or
+    empty content.
+    """
+    try:
+        data = json.loads(url_file.read_text())
+    except Exception:
+        return None
+    url = data.get("tunnel") or data.get("local", "")
+    return url or None
+
+
+def _get_machine_topic() -> str:
+    """Return a deterministic ntfy.sh topic derived from machine identity.
+
+    Combines the hostname and MAC address into a SHA-256 hash so the
+    topic stays the same across process restarts on the same machine
+    but is not guessable by outsiders.
+
+    Returns:
+        A hex string suitable for use as an ntfy.sh topic name.
+    """
+    topic_file = _KISS_HOME / "ntfy_topic"
+    if topic_file.is_file():
+        stored = topic_file.read_text().strip()
+        if stored:
+            return stored
+    identity = f"{platform.node()}:{uuid.getnode()}"
+    topic = "kiss-" + hashlib.sha256(identity.encode()).hexdigest()[:32]
+    topic_file.parent.mkdir(parents=True, exist_ok=True)
+    topic_file.write_text(topic + "\n")
+    return topic
+
+
+def _get_ntfy_url() -> str:
+    """Return the ``https://ntfy.sh/{topic}`` URL for this machine.
+
+    Returns an empty string if the topic cannot be determined.
+    """
+    try:
+        topic = _get_machine_topic()
+        if topic:
+            return f"https://ntfy.sh/{topic}"
+    except Exception:
+        logger.debug("Failed to build ntfy URL", exc_info=True)
+    return ""
+
+
+def _post_url_to_message_board(url: str) -> None:
+    """Post the active Cloudflare URL to ntfy.sh as a private message.
+
+    Uses the machine-stable topic from :func:`_get_machine_topic` so
+    the URL can be retrieved by subscribing to the same topic.  The
+    message is posted with a title indicating it is a KISS Sorcar
+    remote URL update.  Failures are logged but never raised.
+
+    Args:
+        url: The ``https://`` URL to publish.
+    """
+    if not url or url.startswith("https://localhost"):
+        return
+    try:
+        topic = _get_machine_topic()
+        data = url.encode("utf-8")
+        req = urllib.request.Request(
+            f"https://ntfy.sh/{topic}",
+            data=data,
+            method="POST",
+            headers={
+                "Title": "KISS Sorcar Remote URL",
+                "Tags": "link,kiss-sorcar",
+                "User-Agent": "kiss-web",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=10):
+            pass
+        logger.info("Posted remote URL to ntfy.sh/%s", topic)
+    except Exception:
+        logger.debug("Failed to post URL to ntfy.sh", exc_info=True)
 
 
 def _get_local_ips() -> frozenset[str]:
@@ -1343,6 +1667,20 @@ H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 \
         <div id="ask-user-slot"></div>
       </div>
     </div>
+
+    <div id="auth-modal" style="display:none;">
+      <div class="auth-modal-content">
+        <div class="auth-modal-title">Remote access password</div>
+        <input type="password" id="auth-modal-input" class="auth-modal-input"
+               autocomplete="current-password" placeholder="Enter password">
+        <div class="auth-modal-actions">
+          <button id="auth-modal-cancel" class="auth-modal-btn auth-modal-cancel"
+                  type="button">Cancel</button>
+          <button id="auth-modal-ok" class="auth-modal-btn auth-modal-ok"
+                  type="button">OK</button>
+        </div>
+      </div>
+    </div>
   </div>
 
   <script src="/media/highlight.min.js"></script>
@@ -1375,6 +1713,42 @@ _WS_SHIM_JS = r"""
   var _authenticated = false;
   var _needsPassword = false;
 
+  // Custom auth modal — replaces the browser-native prompt(), which is
+  // rendered tall with wasted space below its buttons on most desktop
+  // browsers.  Falls back to prompt() when the modal nodes are not in
+  // the DOM (e.g. unit tests that load the shim in isolation).
+  function _showAuthModal() {
+    return new Promise(function(resolve) {
+      var modal  = document.getElementById('auth-modal');
+      var input  = document.getElementById('auth-modal-input');
+      var okBtn  = document.getElementById('auth-modal-ok');
+      var cnclBtn = document.getElementById('auth-modal-cancel');
+      if (!modal || !input || !okBtn || !cnclBtn) {
+        resolve(prompt('Enter remote access password:'));
+        return;
+      }
+      input.value = '';
+      modal.style.display = 'flex';
+      setTimeout(function() { try { input.focus(); } catch(e) {} }, 0);
+
+      function cleanup() {
+        modal.style.display = 'none';
+        okBtn.removeEventListener('click', onOk);
+        cnclBtn.removeEventListener('click', onCancel);
+        input.removeEventListener('keydown', onKey);
+      }
+      function onOk()     { var v = input.value; cleanup(); resolve(v); }
+      function onCancel() { cleanup(); resolve(null); }
+      function onKey(e) {
+        if (e.key === 'Enter')        { e.preventDefault(); onOk();     }
+        else if (e.key === 'Escape')  { e.preventDefault(); onCancel(); }
+      }
+      okBtn.addEventListener('click', onOk);
+      cnclBtn.addEventListener('click', onCancel);
+      input.addEventListener('keydown', onKey);
+    });
+  }
+
   window.acquireVsCodeApi = function() {
     return {
       postMessage: function(msg) {
@@ -1398,7 +1772,8 @@ _WS_SHIM_JS = r"""
     _authenticated = false;
 
     _ws.onopen = function() {
-      var pwd = sessionStorage.getItem('sorcar-remote-pwd') || '';
+      var pwd = '';
+      try { pwd = localStorage.getItem('sorcar-remote-pwd') || ''; } catch(e) {}
       _ws.send(JSON.stringify({type: 'auth', password: pwd}));
     };
 
@@ -1413,11 +1788,16 @@ _WS_SHIM_JS = r"""
       }
       if (msg.type === 'auth_required') {
         _needsPassword = true;
-        var pwd = prompt('Enter remote access password:');
-        if (pwd !== null) {
-          sessionStorage.setItem('sorcar-remote-pwd', pwd);
-          _ws.send(JSON.stringify({type: 'auth', password: pwd}));
-        }
+        // Stored password (if any) was rejected; drop it so a refresh
+        // re-prompts instead of silently retrying the bad value.
+        try { localStorage.removeItem('sorcar-remote-pwd'); } catch(e) {}
+        _showAuthModal().then(function(pwd) {
+          if (pwd === null || pwd === undefined) return;
+          try { localStorage.setItem('sorcar-remote-pwd', pwd); } catch(e) {}
+          if (_ws && _ws.readyState === WebSocket.OPEN) {
+            _ws.send(JSON.stringify({type: 'auth', password: pwd}));
+          }
+        });
         return;
       }
       window.dispatchEvent(new MessageEvent('message', {data: msg}));
@@ -1570,6 +1950,7 @@ class RemoteAccessServer:
         work_dir: str | None = None,
         certfile: str | None = None,
         keyfile: str | None = None,
+        url_file: str | Path | None = None,
     ) -> None:
         source_shell_env()
 
@@ -1579,6 +1960,11 @@ class RemoteAccessServer:
         self.tunnel_token = tunnel_token
         self.tunnel_url = tunnel_url
         self._ssl_context: ssl.SSLContext = _create_ssl_context(certfile, keyfile)
+        # Path to the JSON file used to publish the active URL.  Tests
+        # override this to a per-test temporary path to avoid racing
+        # the live ``~/.kiss/remote-url.json`` watched by the VS Code
+        # extension and the ``kiss-web`` daemon.
+        self._url_file: Path = Path(url_file) if url_file else _URL_FILE
 
         if not work_dir:
             from kiss.agents.vscode.vscode_config import load_config
@@ -1606,6 +1992,15 @@ class RemoteAccessServer:
         self._tunnel_started_at: float | None = None
         self._tunnel_failure_count = 0
         self._tunnel_next_retry = 0.0
+        # Pid of a cloudflared spawned by a *previous* ``kiss-web``
+        # process that this instance adopted on startup (see
+        # :func:`_try_adopt_existing_cloudflared`).  When non-None,
+        # ``self._tunnel_proc`` is None (we don't own the process) but
+        # ``self._tunnel_metrics_port`` and the URL file are populated
+        # as if we had spawned it ourselves.  The watchdog treats an
+        # adopted pid as equivalent to a self-spawned proc for
+        # health-check purposes.
+        self._tunnel_adopted_pid: int | None = None
         # Set by ``_start_quick_tunnel`` when cloudflared's stderr
         # reports a Cloudflare quick-tunnel rate-limit (HTTP 429 /
         # error 1015).  ``_restart_tunnel_url`` reads (and clears) it
@@ -1852,7 +2247,7 @@ class RemoteAccessServer:
         assert loop is not None
         if not url:
             url = await loop.run_in_executor(
-                None, self._read_url_from_file,
+                None, _read_url_from_file, self._url_file,
             )
         if not url:
             discovered = await loop.run_in_executor(
@@ -1860,28 +2255,17 @@ class RemoteAccessServer:
             )
             if discovered:
                 await loop.run_in_executor(
-                    None, _save_url_file, self._local_url, discovered,
+                    None, _save_url_file,
+                    self._url_file, self._local_url, discovered,
                 )
                 self._active_url = discovered
                 url = discovered
         if url:
-            self._printer.broadcast({"type": "remote_url", "url": url})
-
-    @staticmethod
-    def _read_url_from_file() -> str | None:
-        """Read the active remote URL from ``~/.kiss/remote-url.json``.
-
-        Synchronous helper invoked from
-        :meth:`_send_welcome_info` via ``run_in_executor`` so the disk
-        read does not block the asyncio event loop.  Returns ``None``
-        on missing file, parse error, or empty content.
-        """
-        try:
-            data = json.loads(_URL_FILE.read_text())
-        except Exception:
-            return None
-        url = data.get("tunnel") or data.get("local", "")
-        return url or None
+            ntfy_url = _get_ntfy_url()
+            msg: dict[str, object] = {"type": "remote_url", "url": url}
+            if ntfy_url:
+                msg["ntfyUrl"] = ntfy_url
+            self._printer.broadcast(msg)
 
     async def _handle_ready(
         self, cmd: dict[str, Any], websocket: ServerConnection,
@@ -2017,7 +2401,7 @@ class RemoteAccessServer:
         cur = state.current()
         if action == "accept":
             if cur is not None:
-                state.mark_resolved(*cur)
+                state.mark_resolved(*cur, "accepted")
                 state.advance()
         elif action == "reject":
             if cur is not None:
@@ -2031,7 +2415,7 @@ class RemoteAccessServer:
                 for later_hi in range(hi + 1, len(fd["hunks"])):
                     if not state.is_resolved(fi, later_hi):
                         fd["hunks"][later_hi]["cs"] += delta
-                state.mark_resolved(fi, hi)
+                state.mark_resolved(fi, hi, "rejected")
                 state.advance()
         elif action == "prev":
             state.go_prev()
@@ -2045,28 +2429,36 @@ class RemoteAccessServer:
                     await self._loop.run_in_executor(
                         None, _reject_all_hunks_in_file, fd,
                     )
+                file_status = "rejected" if action == "reject-file" else "accepted"
                 for hi in state.unresolved_in_file(fi):
-                    state.mark_resolved(fi, hi)
+                    state.mark_resolved(fi, hi, file_status)
                 state.advance()
         elif action == "accept-all":
             for fi, hi in state.all_unresolved():
-                state.mark_resolved(fi, hi)
+                state.mark_resolved(fi, hi, "accepted")
         elif action == "reject-all":
             unresolved_files: set[int] = set()
             for fi, hi in state.all_unresolved():
                 unresolved_files.add(fi)
-                state.mark_resolved(fi, hi)
+                state.mark_resolved(fi, hi, "rejected")
             for fi in unresolved_files:
                 fd = state.files[fi]
                 await self._loop.run_in_executor(
                     None, _reject_all_hunks_in_file, fd,
                 )
 
+        cur_after = state.current()
         self._printer.broadcast({
             "type": "merge_nav",
             "tabId": tab_id,
             "remaining": state.remaining,
             "total": state.total_hunks,
+            "cur": (
+                {"fi": cur_after[0], "hi": cur_after[1]}
+                if cur_after is not None
+                else None
+            ),
+            "resolved": state.resolutions(),
         })
 
         if not state.remaining:
@@ -2116,6 +2508,14 @@ class RemoteAccessServer:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 text=True,
+                # Detach cloudflared into its own process group / session
+                # so it survives ``kiss-web``'s SIGTERM / SIGINT.  Combined
+                # with the pidfile written below and adoption logic in
+                # :func:`_try_adopt_existing_cloudflared`, this keeps the
+                # public quick-tunnel URL stable across ``kiss-web``
+                # restarts that would otherwise mint a brand-new
+                # ``*.trycloudflare.com`` hostname every time.
+                start_new_session=True,
             )
             # Give cloudflared a brief moment to fail-fast on a bind
             # collision.  Healthy cloudflared takes seconds to start
@@ -2124,6 +2524,11 @@ class RemoteAccessServer:
             if proc.poll() is None:
                 self._tunnel_proc = proc
                 self._tunnel_started_at = time.monotonic()
+                self._tunnel_adopted_pid = None
+                # Best-effort pidfile (URL added later once known).
+                _save_cloudflared_pidfile(
+                    proc.pid, self._tunnel_metrics_port, None,
+                )
                 return
             last_proc = proc
             logger.info(
@@ -2184,12 +2589,20 @@ class RemoteAccessServer:
             rate_limit_flag=rate_limit_flag,
         )
         if url:
+            assert self._tunnel_metrics_port is not None
+            _save_cloudflared_pidfile(
+                self._tunnel_proc.pid, self._tunnel_metrics_port, url,
+            )
             return url
         for _ in range(20):
             if self._tunnel_proc.poll() is not None:
                 break
             url = _discover_tunnel_url_from_metrics()
             if url:
+                assert self._tunnel_metrics_port is not None
+                _save_cloudflared_pidfile(
+                    self._tunnel_proc.pid, self._tunnel_metrics_port, url,
+                )
                 return url
             time.sleep(1)
         # Rate-limit detection: if cloudflared's stderr named HTTP
@@ -2224,11 +2637,16 @@ class RemoteAccessServer:
         """
         self._spawn_cloudflared(["run", "--token", self.tunnel_token or ""])
         assert self._tunnel_proc is not None
-        return _read_url_from_stderr(
+        url = _read_url_from_stderr(
             self._tunnel_proc,
             partial(_parse_named_tunnel_url, configured_url=self.tunnel_url),
             timeout=30,
         )
+        if url and self._tunnel_metrics_port is not None:
+            _save_cloudflared_pidfile(
+                self._tunnel_proc.pid, self._tunnel_metrics_port, url,
+            )
+        return url
 
     async def _check_and_restart_tunnel(self) -> None:
         """Check tunnel health and restart if dead or deregistered.
@@ -2243,7 +2661,9 @@ class RemoteAccessServer:
            hostname stops resolving (NXDOMAIN), but the local
            subprocess keeps retrying ``register_connection``.
            Detected by polling the ``/ready`` metrics endpoint for
-           ``readyConnections > 0``; after :data:`_TUNNEL_UNHEALTHY_LIMIT`
+           ``readyConnections > 0``; after
+           :data:`_TUNNEL_UNHEALTHY_LIMIT_NAMED` (named tunnel) or
+           :data:`_TUNNEL_UNHEALTHY_LIMIT_QUICK` (quick tunnel)
            consecutive zero-ticks the subprocess is force-terminated.
 
         During the first :data:`_TUNNEL_STARTUP_GRACE` seconds the
@@ -2254,6 +2674,7 @@ class RemoteAccessServer:
         """
         now = time.monotonic()
         proc = self._tunnel_proc
+        adopted_pid = self._tunnel_adopted_pid
 
         if proc is not None and proc.poll() is not None:
             logger.info(
@@ -2263,7 +2684,22 @@ class RemoteAccessServer:
             self._terminate_tunnel_proc()
             proc = None
 
-        if proc is None:
+        # When we adopted an externally-owned cloudflared, treat a
+        # vanished pid the same as a self-spawned proc that exited:
+        # clear the adopted-pid bookkeeping so the no-process branch
+        # below kicks in and a fresh cloudflared is spawned.
+        if adopted_pid is not None and not _is_pid_alive(adopted_pid):
+            logger.info(
+                "Adopted cloudflared (pid=%d) is gone; restarting…",
+                adopted_pid,
+            )
+            self._tunnel_adopted_pid = None
+            self._tunnel_metrics_port = None
+            self._tunnel_started_at = None
+            self._tunnel_unhealthy_ticks = 0
+            adopted_pid = None
+
+        if proc is None and adopted_pid is None:
             # Don't (re)start the tunnel when the auth password is
             # unset — see H1 in the security review.  The watchdog
             # mirrors the guard in _setup_server so a runtime config
@@ -2291,14 +2727,19 @@ class RemoteAccessServer:
             return
 
         self._tunnel_unhealthy_ticks += 1
+        unhealthy_limit = (
+            _TUNNEL_UNHEALTHY_LIMIT_NAMED
+            if self.tunnel_token
+            else _TUNNEL_UNHEALTHY_LIMIT_QUICK
+        )
         logger.info(
             "cloudflared tunnel reports zero ready edge connections "
             "(tick %d/%d on metrics port %d)",
             self._tunnel_unhealthy_ticks,
-            _TUNNEL_UNHEALTHY_LIMIT,
+            unhealthy_limit,
             self._tunnel_metrics_port,
         )
-        if self._tunnel_unhealthy_ticks < _TUNNEL_UNHEALTHY_LIMIT:
+        if self._tunnel_unhealthy_ticks < unhealthy_limit:
             return
 
         logger.warning(
@@ -2306,7 +2747,10 @@ class RemoteAccessServer:
             "edge (readyConnections=0 for %d ticks); force-restarting",
             self._tunnel_unhealthy_ticks,
         )
-        self._terminate_tunnel_proc()
+        # Kill the adopted cloudflared too — it is the unhealthy one
+        # we are replacing; leaving it running would leak metrics
+        # ports and confuse the next adoption attempt.
+        self._terminate_tunnel_proc(kill_adopted=True)
         if now >= self._tunnel_next_retry:
             await self._restart_tunnel_url()
 
@@ -2354,13 +2798,22 @@ class RemoteAccessServer:
                     delay,
                 )
             self._tunnel_next_retry = time.monotonic() + delay
-        _save_url_file(self._local_url, tunnel_url)
+        _save_url_file(self._url_file, self._local_url, tunnel_url)
         self._active_url = tunnel_url or self._local_url
-        self._printer.broadcast(
-            {"type": "remote_url", "url": self._active_url},
-        )
+        ntfy_url = _get_ntfy_url()
+        msg: dict[str, object] = {
+            "type": "remote_url", "url": self._active_url,
+        }
+        if ntfy_url:
+            msg["ntfyUrl"] = ntfy_url
+        self._printer.broadcast(msg)
+        if self.use_tunnel:
+            assert self._loop is not None
+            await self._loop.run_in_executor(
+                None, _post_url_to_message_board, self._active_url,
+            )
 
-    def _terminate_tunnel_proc(self) -> None:
+    def _terminate_tunnel_proc(self, kill_adopted: bool = False) -> None:
         """Terminate ``_tunnel_proc`` and reset per-process state.
 
         Resets :attr:`_tunnel_proc`, :attr:`_tunnel_metrics_port`,
@@ -2368,6 +2821,17 @@ class RemoteAccessServer:
         so the next restart starts cleanly.  Leaves
         :attr:`_active_url` and the URL file alone so the file is not
         removed before a replacement tunnel writes its own URL.
+
+        When *kill_adopted* is False (default — used on graceful
+        kiss-web shutdown) and the current tunnel was *adopted* from a
+        previous kiss-web, this method leaves the adopted cloudflared
+        running so the next kiss-web can re-adopt it (this is the core
+        of how the public URL survives kiss-web restarts).
+
+        When *kill_adopted* is True (used by the unhealthy-tunnel
+        watchdog before respawning a replacement), the adopted pid is
+        sent SIGTERM, then SIGKILL after a short grace period if it is
+        still alive, and the pidfile is removed.
         """
         proc = self._tunnel_proc
         if proc is not None:
@@ -2376,7 +2840,33 @@ class RemoteAccessServer:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
+            # Pidfile is stale now that we killed our own cloudflared.
+            try:
+                _CLOUDFLARED_PIDFILE.unlink(missing_ok=True)
+            except OSError:
+                pass
+        elif kill_adopted and self._tunnel_adopted_pid is not None:
+            adopted_pid = self._tunnel_adopted_pid
+            try:
+                os.kill(adopted_pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+            else:
+                for _ in range(50):
+                    if not _is_pid_alive(adopted_pid):
+                        break
+                    time.sleep(0.1)
+                else:
+                    try:
+                        os.kill(adopted_pid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError, OSError):
+                        pass
+            try:
+                _CLOUDFLARED_PIDFILE.unlink(missing_ok=True)
+            except OSError:
+                pass
         self._tunnel_proc = None
+        self._tunnel_adopted_pid = None
         self._tunnel_metrics_port = None
         self._tunnel_started_at = None
         self._tunnel_unhealthy_ticks = 0
@@ -2421,16 +2911,16 @@ class RemoteAccessServer:
                 except Exception:
                     logger.debug("Watchdog tunnel check error", exc_info=True)
             try:
-                if not _URL_FILE.is_file():
+                if not self._url_file.is_file():
                     tunnel_url = (
                         self._active_url
                         if self._active_url and self._active_url != self._local_url
                         else None
                     )
-                    _save_url_file(self._local_url, tunnel_url)
+                    _save_url_file(self._url_file, self._local_url, tunnel_url)
                     logger.info(
                         "Re-wrote missing URL file %s (tunnel=%s)",
-                        _URL_FILE, tunnel_url,
+                        self._url_file, tunnel_url,
                     )
             except asyncio.CancelledError:
                 raise
@@ -2439,15 +2929,34 @@ class RemoteAccessServer:
             try:
                 current_ips = _get_local_ips()
                 if current_ips != self._last_ips:
-                    logger.info(
-                        "IP address changed: %s → %s, restarting server…",
-                        self._last_ips,
-                        current_ips,
-                    )
                     self._last_ips = current_ips
-                    if self._ws_server is not None:
-                        self._ws_server.close()
-                    return
+                    if self.use_tunnel:
+                        # In tunnel mode, cloudflared handles edge
+                        # reconnection automatically.  Restarting the
+                        # entire daemon would assign a new random
+                        # *.trycloudflare.com URL — avoid that.  Just
+                        # log and let cloudflared recover on its own.
+                        # N.B. Check use_tunnel only — NOT
+                        # _tunnel_proc, which can be None during
+                        # startup, when remote_password is empty, or
+                        # between a force-restart.
+                        logger.info(
+                            "IP address changed: %s → %s; tunnel mode "
+                            "— cloudflared will re-register "
+                            "automatically",
+                            self._last_ips,
+                            current_ips,
+                        )
+                    else:
+                        logger.info(
+                            "IP address changed: %s → %s, "
+                            "restarting server…",
+                            self._last_ips,
+                            current_ips,
+                        )
+                        if self._ws_server is not None:
+                            self._ws_server.close()
+                        return
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -2514,7 +3023,35 @@ class RemoteAccessServer:
             # configured.  Without a password every WS client is
             # admitted, which would let anyone on the internet drive
             # the local agent.  Local connections still work.
-            password = load_config().get("remote_password", "")
+            #
+            # Wait up to 30 s for the password to be written.  When the
+            # VS Code extension restarts ``kiss-web``, its
+            # ``ensureRemotePassword`` prompt may not finish until a
+            # few seconds after the daemon starts; polling here avoids
+            # a launchd respawn that would mint a new tunnel URL.
+            password = await self._loop.run_in_executor(  # type: ignore[union-attr]
+                None, _wait_for_remote_password, 30.0,
+            )
+            if password:
+                # Before spawning a fresh cloudflared, try to adopt one
+                # left running by a previous ``kiss-web`` (detached via
+                # ``start_new_session=True``).  Adoption keeps the
+                # same public URL across kiss-web restarts.
+                adopted = await self._loop.run_in_executor(  # type: ignore[union-attr]
+                    None, _try_adopt_existing_cloudflared,
+                )
+                if adopted is not None:
+                    adopted_pid, adopted_port, adopted_url = adopted
+                    self._tunnel_adopted_pid = adopted_pid
+                    self._tunnel_metrics_port = adopted_port
+                    self._tunnel_started_at = time.monotonic()
+                    tunnel_url = adopted_url
+                    # Refresh pidfile with the freshly-probed URL so
+                    # subsequent adoption attempts see the current
+                    # hostname even when cloudflared has rotated it.
+                    _save_cloudflared_pidfile(
+                        adopted_pid, adopted_port, adopted_url,
+                    )
             if not password:
                 logger.warning(
                     "remote_password is not set in ~/.kiss/config.json; "
@@ -2528,13 +3065,21 @@ class RemoteAccessServer:
                     "remote access.",
                     file=sys.stderr,
                 )
-            else:
+            elif tunnel_url is None:
+                # No existing cloudflared was adopted — spawn a fresh
+                # one.  When ``tunnel_url`` was already set by the
+                # adoption branch above we deliberately skip this
+                # call to avoid starting a duplicate cloudflared.
                 tunnel_url = await self._loop.run_in_executor(  # type: ignore[union-attr]
                     None, self._start_tunnel,
                 )
 
-        _save_url_file(self._local_url, tunnel_url)
+        _save_url_file(self._url_file, self._local_url, tunnel_url)
         self._active_url = tunnel_url or self._local_url
+        if self.use_tunnel:
+            await self._loop.run_in_executor(
+                None, _post_url_to_message_board, self._active_url,
+            )
 
         self._last_ips = _get_local_ips()
         self._watchdog_task = asyncio.create_task(self._watchdog())
@@ -2585,7 +3130,7 @@ class RemoteAccessServer:
             except TimeoutError:
                 pass
         self._stop_tunnel()
-        _remove_url_file()
+        _remove_url_file(self._url_file)
 
 
 def _resolve_tunnel_settings() -> tuple[str | None, str | None]:

@@ -26,7 +26,7 @@ from websockets.asyncio.client import connect
 
 from kiss.agents.vscode.vscode_config import CONFIG_PATH, save_config
 from kiss.agents.vscode.web_server import (
-    _TUNNEL_UNHEALTHY_LIMIT,
+    _TUNNEL_UNHEALTHY_LIMIT_QUICK,
     _URL_FILE,
     TUNNEL_CHECK_INTERVAL,
     RemoteAccessServer,
@@ -578,7 +578,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
     async def test_ws_remote_url_from_active_url(self) -> None:
         """remote_url event uses in-memory _active_url even when URL file is missing."""
         self.server._active_url = "https://test-dynamic.trycloudflare.com"
-        _remove_url_file()
+        _remove_url_file(_URL_FILE)
         async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
@@ -599,7 +599,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
     async def test_ws_ready_includes_remote_url(self) -> None:
         """ready command broadcasts remote_url when _active_url is set."""
         self.server._active_url = "https://ready-test.trycloudflare.com"
-        _remove_url_file()
+        _remove_url_file(_URL_FILE)
         async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
@@ -1458,6 +1458,81 @@ class TestRemoteAccessServerMerge(IsolatedAsyncioTestCase):
                 content = f.read()
             self.assertEqual(content, "line1\nmodified_line2\nline3\nnew_line4\n")
 
+    async def test_merge_nav_payload_includes_cur_and_resolved(self) -> None:
+        """merge_nav events should include cur={fi,hi} and resolved list.
+
+        The browser webview needs these fields to scroll Prev/Next into
+        view and to render accepted/rejected hunks differently.
+        """
+        tab_id = "merge-nav-payload-tab"
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+            await self._auth(ws)
+            await self._trigger_merge(tab_id)
+            await self._collect_until(ws, "merge_started")
+
+            # "next" navigation should produce a merge_nav with cur set
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "mergeAction",
+                        "action": "next",
+                        "tabId": tab_id,
+                    }
+                )
+            )
+            events = await self._collect_until(ws, "merge_nav", timeout=5)
+            navs = [e for e in events if e.get("type") == "merge_nav"]
+            self.assertTrue(len(navs) > 0)
+            nav = navs[-1]
+            self.assertIn("cur", nav)
+            self.assertIn("resolved", nav)
+            self.assertIsNotNone(nav["cur"])
+            self.assertIn("fi", nav["cur"])
+            self.assertIn("hi", nav["cur"])
+            self.assertEqual(nav["resolved"], [])
+
+            # Accept one hunk -> resolved should grow by one with
+            # status="accepted".
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "mergeAction",
+                        "action": "accept",
+                        "tabId": tab_id,
+                    }
+                )
+            )
+            events = await self._collect_until(ws, "merge_nav", timeout=5)
+            navs = [e for e in events if e.get("type") == "merge_nav"]
+            self.assertTrue(len(navs) > 0)
+            nav = navs[-1]
+            self.assertEqual(len(nav["resolved"]), 1)
+            self.assertEqual(nav["resolved"][0]["status"], "accepted")
+
+    async def test_merge_nav_reject_status_in_resolved(self) -> None:
+        """rejected hunks should appear in resolved with status='rejected'."""
+        tab_id = "merge-nav-reject-tab"
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+            await self._auth(ws)
+            await self._trigger_merge(tab_id)
+            await self._collect_until(ws, "merge_started")
+
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "mergeAction",
+                        "action": "reject",
+                        "tabId": tab_id,
+                    }
+                )
+            )
+            events = await self._collect_until(ws, "merge_nav", timeout=5)
+            navs = [e for e in events if e.get("type") == "merge_nav"]
+            self.assertTrue(len(navs) > 0)
+            nav = navs[-1]
+            self.assertEqual(len(nav["resolved"]), 1)
+            self.assertEqual(nav["resolved"][0]["status"], "rejected")
+
     async def test_merge_reject_individual_hunk(self) -> None:
         """mergeAction reject should revert hunks one by one."""
         tab_id = "merge-single-reject-tab"
@@ -1711,34 +1786,34 @@ class TestUrlFile(unittest.TestCase):
 
     def test_save_url_file_local_only(self) -> None:
         """Saving with local URL only writes valid JSON."""
-        _save_url_file("https://localhost:8787")
+        _save_url_file(_URL_FILE, "https://localhost:8787")
         data = json.loads(_URL_FILE.read_text())
         self.assertEqual(data["local"], "https://localhost:8787")
         self.assertNotIn("tunnel", data)
 
     def test_save_url_file_with_tunnel(self) -> None:
         """Saving with both local and tunnel URLs writes both."""
-        _save_url_file("https://localhost:8787", "https://abc.trycloudflare.com")
+        _save_url_file(_URL_FILE, "https://localhost:8787", "https://abc.trycloudflare.com")
         data = json.loads(_URL_FILE.read_text())
         self.assertEqual(data["local"], "https://localhost:8787")
         self.assertEqual(data["tunnel"], "https://abc.trycloudflare.com")
 
     def test_remove_url_file(self) -> None:
         """Removing the URL file deletes it."""
-        _save_url_file("https://localhost:8787")
+        _save_url_file(_URL_FILE, "https://localhost:8787")
         self.assertTrue(_URL_FILE.is_file())
-        _remove_url_file()
+        _remove_url_file(_URL_FILE)
         self.assertFalse(_URL_FILE.is_file())
 
     def test_remove_url_file_missing(self) -> None:
         """Removing when file doesn't exist is a no-op."""
         _URL_FILE.unlink(missing_ok=True)
-        _remove_url_file()
+        _remove_url_file(_URL_FILE)
         self.assertFalse(_URL_FILE.is_file())
 
     def test_print_url_tunnel(self) -> None:
         """When tunnel URL exists, _print_url prints it."""
-        _save_url_file("https://localhost:8787", "https://abc.trycloudflare.com")
+        _save_url_file(_URL_FILE, "https://localhost:8787", "https://abc.trycloudflare.com")
         import io
         from contextlib import redirect_stdout
 
@@ -1749,7 +1824,7 @@ class TestUrlFile(unittest.TestCase):
 
     def test_print_url_local_only(self) -> None:
         """When no tunnel URL, _print_url prints local URL."""
-        _save_url_file("https://localhost:8787")
+        _save_url_file(_URL_FILE, "https://localhost:8787")
         import io
         from contextlib import redirect_stdout
 
@@ -2894,7 +2969,7 @@ class TestSendWelcomeInfoFallbacks(IsolatedAsyncioTestCase):
 
     async def test_welcome_info_uses_url_file_fallback(self) -> None:
         """When _active_url is None, _send_welcome_info reads URL file."""
-        _save_url_file(
+        _save_url_file(_URL_FILE,
             "https://localhost:8787",
             "https://test.trycloudflare.com",
         )
@@ -4003,7 +4078,7 @@ class TestRemoveUrlFileOSError(unittest.TestCase):
         original = ws_mod._URL_FILE
         ws_mod._URL_FILE = Path("/nonexistent_dir_abc/remote-url.json")
         try:
-            _remove_url_file()
+            _remove_url_file(_URL_FILE)
         finally:
             ws_mod._URL_FILE = original
 
@@ -5222,7 +5297,7 @@ class TestSendWelcomeInfoDiscoverUrl(IsolatedAsyncioTestCase):
 
     async def test_welcome_info_discovers_and_broadcasts_url(self) -> None:
         """When URL file exists, URL is broadcast (1280->exit covers)."""
-        _save_url_file(
+        _save_url_file(_URL_FILE,
             self.server._local_url,
             "https://test-discovered.trycloudflare.com",
         )
@@ -5532,7 +5607,7 @@ class TestRemoveUrlFileReadOnly(unittest.TestCase):
 
             os.chmod(str(fake_url_file.parent), 0o444)
             try:
-                _remove_url_file()
+                _remove_url_file(_URL_FILE)
             finally:
                 os.chmod(str(fake_url_file.parent), 0o755)
                 ws_mod._URL_FILE = old_url_file  # type: ignore[misc]
@@ -5677,7 +5752,7 @@ class TestWatchdogEdgeDeregistration(IsolatedAsyncioTestCase):
     Cloudflare's edge has dropped the tunnel registration so
     ``readyConnections`` stays at 0.  The watchdog must count
     consecutive failures and force-restart after
-    :data:`_TUNNEL_UNHEALTHY_LIMIT` ticks.
+    :data:`_TUNNEL_UNHEALTHY_LIMIT_QUICK` ticks (no token → quick tunnel).
     """
 
     async def asyncSetUp(self) -> None:
@@ -5748,7 +5823,7 @@ class TestWatchdogEdgeDeregistration(IsolatedAsyncioTestCase):
     async def test_unhealthy_below_limit_only_increments(self) -> None:
         """Below the threshold, the counter increments without restart."""
         _FakeMetricsHandler.ready_connections = 0
-        for tick in range(1, _TUNNEL_UNHEALTHY_LIMIT):
+        for tick in range(1, _TUNNEL_UNHEALTHY_LIMIT_QUICK):
             await self.server._check_and_restart_tunnel()
             self.assertEqual(self.server._tunnel_unhealthy_ticks, tick)
             self.assertIs(
@@ -5765,7 +5840,7 @@ class TestWatchdogEdgeDeregistration(IsolatedAsyncioTestCase):
         and the counter MUST be reset.
         """
         _FakeMetricsHandler.ready_connections = 0
-        for _ in range(_TUNNEL_UNHEALTHY_LIMIT):
+        for _ in range(_TUNNEL_UNHEALTHY_LIMIT_QUICK):
             await self.server._check_and_restart_tunnel()
         self.assertEqual(self.server._tunnel_unhealthy_ticks, 0)
         self.assertIsNot(self.server._tunnel_proc, self.fake_proc)

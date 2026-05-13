@@ -1,6 +1,60 @@
 #!/bin/bash
 set -e
 
+install_git() {
+  if command -v git &> /dev/null; then
+    return 0
+  fi
+  echo "git not found in PATH; attempting to install git..."
+  case "$(uname -s)" in
+    Darwin)
+      if command -v brew &> /dev/null; then
+        brew install git
+      elif command -v xcode-select &> /dev/null; then
+        # xcode-select --install opens a GUI dialog to install Command Line Tools (which include git)
+        xcode-select --install 2> /dev/null || true
+        echo "A GUI dialog should have appeared to install the Xcode Command Line Tools."
+        echo "After it finishes, re-run this script."
+      else
+        echo "Neither 'brew' nor 'xcode-select' is available on this macOS system."
+        echo "Attempting to install Homebrew non-interactively..."
+        if command -v curl &> /dev/null; then
+          NONINTERACTIVE=1 /bin/bash -c \
+            "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" \
+            && eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null || /usr/local/bin/brew shellenv 2>/dev/null)" \
+            && brew install git \
+            || echo "Homebrew bootstrap failed. Please install git manually from https://git-scm.com/download/mac"
+        else
+          echo "curl is also unavailable; please install git manually from https://git-scm.com/download/mac"
+        fi
+      fi
+      ;;
+    Linux)
+      if command -v apt-get &> /dev/null; then
+        sudo apt-get update && sudo apt-get install -y git
+      elif command -v dnf &> /dev/null; then
+        sudo dnf install -y git
+      elif command -v yum &> /dev/null; then
+        sudo yum install -y git
+      elif command -v pacman &> /dev/null; then
+        sudo pacman -Sy --noconfirm git
+      elif command -v zypper &> /dev/null; then
+        sudo zypper install -y git
+      elif command -v apk &> /dev/null; then
+        sudo apk add git
+      else
+        echo "No supported package manager found; cannot install git automatically."
+      fi
+      ;;
+    *)
+      echo "Unsupported OS for automatic git install."
+      ;;
+  esac
+  command -v git &> /dev/null
+}
+
+install_git || true
+
 cd
 if [ -d ~/kiss_ai ]; then
   if [ -d ~/kiss_ai/.git ]; then

@@ -1209,6 +1209,14 @@
     clearTimeout(tooltipTimer);
     tooltipEl.classList.remove('visible');
   });
+  document.addEventListener(
+    'scroll',
+    () => {
+      clearTimeout(tooltipTimer);
+      tooltipEl.classList.remove('visible');
+    },
+    true,
+  );
   function mkEl(tag, cls) {
     const e = document.createElement(tag);
     if (cls) e.className = cls;
@@ -1839,7 +1847,11 @@
       lastToolName = ev.name || '';
       llmPanel = null;
       llmPanelState = mkS();
-      pendingPanel = false;
+      // Set true (not false) so that non-core tools (screenshot,
+      // go_to_url, scroll, etc.) whose tool_result is suppressed by
+      // the backend still trigger Thoughts-panel creation for the
+      // subsequent thinking/text block.
+      pendingPanel = true;
     }
     if (t === 'tool_result' && lastToolName !== 'finish') {
       pendingPanel = true;
@@ -1936,7 +1948,7 @@
       bgLastToolName = ev.name || '';
       bgLlmPanel = null;
       bgLlmPanelState = mkS();
-      bgPendingPanel = false;
+      bgPendingPanel = true;
     }
     if (t === 'tool_result' && bgLastToolName !== 'finish') {
       bgPendingPanel = true;
@@ -2465,7 +2477,7 @@
         renderWelcomeSuggestions(ev.suggestions);
         break;
       case 'remote_url':
-        renderRemoteUrl(ev.url);
+        renderRemoteUrl(ev.url, ev.ntfyUrl);
         break;
       case 'followup_suggestion': {
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) break;
@@ -2589,7 +2601,7 @@
             const t = e.type;
             if (t === 'tool_call') {
               bgLastTool = e.name || '';
-              bgPending = false;
+              bgPending = true;
             }
             if (t === 'tool_result' && bgLastTool !== 'finish')
               bgPending = true;
@@ -2731,71 +2743,7 @@
         break;
 
       case 'merge_data': {
-        const mdEl = mkEl('div', 'ev merge-info');
-        let mergeHtml =
-          '<div class="merge-info-hdr" style="color:var(--yellow);font-weight:600;font-size:var(--fs-base);margin-bottom:4px">' +
-          '\u2731 Reviewing ' +
-          (ev.hunk_count || 0) +
-          ' change(s)</div>' +
-          '<div class="merge-info-body" style="font-size:var(--fs-md);color:var(--dim)">Red = old lines, Green = new lines. ' +
-          'Use the merge toolbar to accept or reject changes.</div>';
-        // Render inline diff for web clients (when file contents are present)
-        const mergeFiles = (ev.data && ev.data.files) || [];
-        for (let mfi = 0; mfi < mergeFiles.length; mfi++) {
-          const mf = mergeFiles[mfi];
-          if (mf.base_text !== undefined && mf.current_text !== undefined) {
-            mergeHtml +=
-              '<div class="merge-file-diff" style="margin-top:8px;">';
-            mergeHtml +=
-              '<div style="font-weight:600;color:var(--vscode-textLink-foreground);margin-bottom:4px;">' +
-              (mf.name || 'unknown') +
-              '</div>';
-            mergeHtml +=
-              '<pre style="font-size:12px;line-height:1.4;overflow-x:auto;background:var(--vscode-input-background);padding:8px;border-radius:4px;margin:0;">';
-            const baseLines = (mf.base_text || '').split('\n');
-            const curLines = (mf.current_text || '').split('\n');
-            const hunks = mf.hunks || [];
-            // Build a unified diff view
-            let curIdx = 0;
-            for (let mhi = 0; mhi < hunks.length; mhi++) {
-              const h = hunks[mhi];
-              // Context lines before hunk
-              while (curIdx < h.cs) {
-                mergeHtml +=
-                  '<span style="color:var(--dim);">' +
-                  esc(' ' + curLines[curIdx]) +
-                  '</span>\n';
-                curIdx++;
-              }
-              // Old (base) lines - red
-              for (let bi = h.bs; bi < h.bs + h.bc; bi++) {
-                mergeHtml +=
-                  '<span style="color:#f44;background:rgba(255,60,60,0.15);">-' +
-                  esc(baseLines[bi] || '') +
-                  '</span>\n';
-              }
-              // New (current) lines - green
-              for (let ci = h.cs; ci < h.cs + h.cc; ci++) {
-                mergeHtml +=
-                  '<span style="color:#4c4;background:rgba(60,255,60,0.15);">+' +
-                  esc(curLines[ci] || '') +
-                  '</span>\n';
-              }
-              curIdx = h.cs + h.cc;
-            }
-            // Remaining context
-            while (curIdx < curLines.length) {
-              mergeHtml +=
-                '<span style="color:var(--dim);">' +
-                esc(' ' + curLines[curIdx]) +
-                '</span>\n';
-              curIdx++;
-            }
-            mergeHtml += '</pre></div>';
-          }
-        }
-        mdEl.innerHTML = mergeHtml;
-        addCollapse(mdEl, mdEl.querySelector('.merge-info-hdr'));
+        const mdEl = renderMergeData(ev);
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
           // Background tab: append to saved output fragment
           const bgMdTab = tabs.find(t => t.id === ev.tabId);
@@ -2805,6 +2753,11 @@
           break;
         }
         O.appendChild(mdEl);
+        // Highlight the first hunk by default; the server confirms or
+        // updates the selection on each subsequent prev/next/accept/reject
+        // via merge_nav.
+        setCurrentMergeHunk(mdEl, 0, 0);
+        scrollHunkIntoView(mdEl, 0, 0);
         collapseOlderPanels();
         break;
       }
@@ -2847,6 +2800,30 @@
         if (mergeTitle && ev.remaining !== undefined) {
           mergeTitle.textContent =
             'Review Changes (' + ev.remaining + '/' + ev.total + ' remaining)';
+        }
+        // Apply resolved-hunk styles + scroll/highlight the current hunk.
+        // The most recent merge_data panel for the targeted tab owns the
+        // hunk DOM; for the active tab it's in O, for a background tab
+        // it's inside that tab's outputFragment.
+        const navTabId = ev.tabId || activeTabId;
+        const navHost =
+          navTabId === activeTabId
+            ? O
+            : (tabs.find(t => t.id === navTabId) || {}).outputFragment;
+        if (!navHost) break;
+        // Find the most recent merge-info panel that contains hunks.
+        const mergePanels = navHost.querySelectorAll('.merge-info');
+        const mergePanel = mergePanels[mergePanels.length - 1];
+        if (!mergePanel) break;
+        applyMergeResolutions(mergePanel, ev.resolved || []);
+        if (ev.cur && ev.cur.fi !== undefined && ev.cur.hi !== undefined) {
+          setCurrentMergeHunk(mergePanel, ev.cur.fi, ev.cur.hi);
+          scrollHunkIntoView(mergePanel, ev.cur.fi, ev.cur.hi);
+        } else {
+          // No remaining hunks: clear .current highlight.
+          mergePanel.querySelectorAll('.merge-hunk.current').forEach(el => {
+            el.classList.remove('current');
+          });
         }
         break;
       }
@@ -3047,23 +3024,24 @@
   }
 
   // --- Remote URL (dynamic) ---
-  function renderRemoteUrl(url) {
+  function renderRemoteUrl(url, ntfyUrl) {
     const container = document.getElementById('remote-url');
     if (!container) return;
     container.innerHTML = '';
-    if (!url) return;
+    const displayUrl = ntfyUrl || url;
+    if (!displayUrl) return;
     const wrapper = document.createElement('div');
     wrapper.className = 'remote-url-bar';
     const label = document.createElement('div');
     label.className = 'remote-url-label';
-    label.textContent = 'Web/mobile app';
+    label.textContent = ntfyUrl ? 'Remote URL (ntfy.sh)' : 'Web/mobile app';
     const row = document.createElement('div');
     row.className = 'remote-url-row';
     const link = document.createElement('a');
-    link.href = url;
+    link.href = displayUrl;
     link.target = '_blank';
     link.rel = 'noopener noreferrer';
-    link.textContent = url;
+    link.textContent = displayUrl;
     link.className = 'remote-url-link';
     const copyBtn = document.createElement('button');
     copyBtn.className = 'remote-url-copy';
@@ -3075,7 +3053,7 @@
     copyBtn.innerHTML = copySvg;
     copyBtn.addEventListener('click', e => {
       e.preventDefault();
-      navigator.clipboard.writeText(url).then(() => {
+      navigator.clipboard.writeText(displayUrl).then(() => {
         copyBtn.innerHTML = checkSvg;
         setTimeout(() => {
           copyBtn.innerHTML = copySvg;
@@ -3142,7 +3120,7 @@
         rLastToolName = ev.name || '';
         rLlmPanel = null;
         rLlmPanelState = mkS();
-        rPendingPanel = false;
+        rPendingPanel = true;
       }
       if (t === 'tool_result' && rLastToolName !== 'finish') {
         rPendingPanel = true;
@@ -3194,7 +3172,7 @@
       const t = ev.type;
       if (t === 'tool_call') {
         rLastTool = ev.name || '';
-        rPending = false;
+        rPending = true;
       }
       if (t === 'tool_result' && rLastTool !== 'finish') rPending = true;
       if (rSteps === 0 && (t === 'thinking_start' || t === 'text_delta'))
@@ -3383,6 +3361,142 @@
     O.appendChild(div);
     sb();
     focusInputWithRetry();
+  }
+
+  // --- Merge diff rendering (web view) ---
+  /** Build the DOM for a ``merge_data`` event.
+   *
+   * Each hunk is wrapped in its own ``<div class="merge-hunk"
+   * data-fi=... data-hi=...>`` so the merge toolbar's Prev/Next can
+   * scroll a specific hunk into view and Accept/Reject can mark a
+   * specific hunk visually (via ``applyMergeResolutions``).  Context
+   * lines are interleaved between hunks so the diff still reads
+   * naturally.
+   */
+  function renderMergeData(ev) {
+    const mdEl = mkEl('div', 'ev merge-info');
+    const hdr = mkEl('div', 'merge-info-hdr');
+    hdr.textContent = '✱ Reviewing ' + (ev.hunk_count || 0) + ' change(s)';
+    mdEl.appendChild(hdr);
+
+    const body = mkEl('div', 'merge-info-body');
+    body.textContent =
+      'Red = old lines, Green = new lines. Use the merge toolbar to ' +
+      'navigate and accept or reject changes.';
+    mdEl.appendChild(body);
+
+    const mergeFiles = (ev.data && ev.data.files) || [];
+    for (let mfi = 0; mfi < mergeFiles.length; mfi++) {
+      const mf = mergeFiles[mfi];
+      if (mf.base_text === undefined || mf.current_text === undefined) continue;
+      const fileEl = mkEl('div', 'merge-file-diff');
+      fileEl.dataset.fi = String(mfi);
+      const fileName = mkEl('div', 'merge-file-name');
+      fileName.textContent = mf.name || 'unknown';
+      fileEl.appendChild(fileName);
+
+      const baseLines = (mf.base_text || '').split('\n');
+      const curLines = (mf.current_text || '').split('\n');
+      const hunks = mf.hunks || [];
+      let curIdx = 0;
+      for (let mhi = 0; mhi < hunks.length; mhi++) {
+        const h = hunks[mhi];
+        // Context lines before the hunk (rendered outside the
+        // hunk container so we never scroll context into the
+        // highlight box).
+        if (curIdx < h.cs) {
+          const ctxBefore = mkEl('pre', 'merge-ctx');
+          let ctxText = '';
+          while (curIdx < h.cs) {
+            ctxText += ' ' + (curLines[curIdx] || '') + '\n';
+            curIdx++;
+          }
+          ctxBefore.textContent = ctxText;
+          fileEl.appendChild(ctxBefore);
+        }
+        const hunkEl = mkEl('pre', 'merge-hunk');
+        hunkEl.dataset.fi = String(mfi);
+        hunkEl.dataset.hi = String(mhi);
+        const hunkHdr = mkEl('span', 'merge-hunk-label');
+        hunkHdr.textContent =
+          'Hunk ' + (mhi + 1) + ' / ' + hunks.length + ' @ line ' + (h.cs + 1);
+        hunkEl.appendChild(hunkHdr);
+        // Old (base) lines - red
+        for (let bi = h.bs; bi < h.bs + h.bc; bi++) {
+          const oldLine = mkEl('span', 'diff-del');
+          oldLine.textContent = '-' + (baseLines[bi] || '') + '\n';
+          hunkEl.appendChild(oldLine);
+        }
+        // New (current) lines - green
+        for (let ci = h.cs; ci < h.cs + h.cc; ci++) {
+          const newLine = mkEl('span', 'diff-add');
+          newLine.textContent = '+' + (curLines[ci] || '') + '\n';
+          hunkEl.appendChild(newLine);
+        }
+        fileEl.appendChild(hunkEl);
+        curIdx = h.cs + h.cc;
+      }
+      // Trailing context (after last hunk).
+      if (curIdx < curLines.length) {
+        const ctxAfter = mkEl('pre', 'merge-ctx');
+        let ctxText = '';
+        while (curIdx < curLines.length) {
+          ctxText += ' ' + (curLines[curIdx] || '') + '\n';
+          curIdx++;
+        }
+        ctxAfter.textContent = ctxText;
+        fileEl.appendChild(ctxAfter);
+      }
+      mdEl.appendChild(fileEl);
+    }
+    addCollapse(mdEl, hdr);
+    return mdEl;
+  }
+
+  /** Mark the hunk identified by ``(fi, hi)`` as the active one. */
+  function setCurrentMergeHunk(mergePanel, fi, hi) {
+    mergePanel.querySelectorAll('.merge-hunk.current').forEach(el => {
+      el.classList.remove('current');
+    });
+    const hunk = mergePanel.querySelector(
+      '.merge-hunk[data-fi="' + fi + '"][data-hi="' + hi + '"]',
+    );
+    if (hunk) hunk.classList.add('current');
+  }
+
+  /** Scroll the hunk identified by ``(fi, hi)`` into view. */
+  function scrollHunkIntoView(mergePanel, fi, hi) {
+    const hunk = mergePanel.querySelector(
+      '.merge-hunk[data-fi="' + fi + '"][data-hi="' + hi + '"]',
+    );
+    if (hunk && typeof hunk.scrollIntoView === 'function') {
+      hunk.scrollIntoView({block: 'center', behavior: 'smooth'});
+    }
+  }
+
+  /** Apply ``accepted`` / ``rejected`` classes to every resolved hunk.
+   *
+   * resolutions is an array of ``{fi, hi, status}`` objects sent by
+   * the server in each ``merge_nav`` event.  Classes are cleared from
+   * hunks no longer in the list so undo-like behaviour (if added
+   * later) works correctly.
+   */
+  function applyMergeResolutions(mergePanel, resolutions) {
+    mergePanel
+      .querySelectorAll('.merge-hunk.accepted, .merge-hunk.rejected')
+      .forEach(el => {
+        el.classList.remove('accepted');
+        el.classList.remove('rejected');
+      });
+    for (let i = 0; i < resolutions.length; i++) {
+      const r = resolutions[i];
+      if (!r || r.fi === undefined || r.hi === undefined) continue;
+      const hunk = mergePanel.querySelector(
+        '.merge-hunk[data-fi="' + r.fi + '"][data-hi="' + r.hi + '"]',
+      );
+      if (hunk)
+        hunk.classList.add(r.status === 'rejected' ? 'rejected' : 'accepted');
+    }
   }
 
   // --- Merge toolbar (shown in input area, replacing textarea) ---
@@ -4390,13 +4504,14 @@
     closeConfigSidebar();
     closeSidebar();
     closeFrequentSidebar();
+    configFormPopulated = false;
     vscode.postMessage({type: 'getConfig'});
     configSidebar.classList.add('open');
     configSidebarOverlay.classList.add('open');
     configBtn.classList.add('active');
   }
   function closeConfigSidebar() {
-    if (configSidebar.classList.contains('open')) {
+    if (configSidebar.classList.contains('open') && configFormPopulated) {
       const data = collectConfigForm();
       vscode.postMessage({type: 'saveConfig', ...data});
     }
@@ -4457,6 +4572,7 @@
       frequentList.appendChild(div);
     });
   }
+  let configFormPopulated = false;
   function populateConfigForm(cfg, apiKeys) {
     const el = id => document.getElementById(id);
     el('cfg-max-budget').value = cfg.max_budget != null ? cfg.max_budget : 100;
@@ -4465,6 +4581,7 @@
     el('cfg-use-web-browser').checked = cfg.use_web_browser !== false;
     el('cfg-remote-password').value = cfg.remote_password || '';
     el('cfg-work-dir').value = cfg.work_dir || '';
+    configFormPopulated = true;
     // Populate API key fields from current environment values
     const keyIds = [
       'GEMINI_API_KEY',

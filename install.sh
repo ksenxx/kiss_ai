@@ -391,31 +391,7 @@ find_code_cli() {
     # --- 8. Download official Claude Code skills ------------------------------
     echo ">>> [8/11] Downloading official Claude Code skills..."
     CLAUDE_SKILLS_DIR="$PROJECT_DIR/src/kiss/agents/claude_skills"
-    if [ -d "$CLAUDE_SKILLS_DIR" ] && [ "$(ls -d "$CLAUDE_SKILLS_DIR"/*/ 2>/dev/null)" ]; then
-        echo "   Claude skills already present — skipping download"
-    else
-        mkdir -p "$CLAUDE_SKILLS_DIR"
-        SKILLS_TMP="$(mktemp -d)"
-        echo "   Cloning anthropics/claude-code plugins..."
-        if git clone --depth 1 --filter=blob:none --sparse \
-            https://github.com/anthropics/claude-code.git "$SKILLS_TMP/claude-code" 2>&1; then
-            cd "$SKILLS_TMP/claude-code"
-            git sparse-checkout set plugins 2>&1
-            # Copy each plugin directory into claude_skills
-            for plugin_dir in plugins/*/; do
-                if [ -d "$plugin_dir" ]; then
-                    plugin_name="$(basename "$plugin_dir")"
-                    cp -R "$plugin_dir" "$CLAUDE_SKILLS_DIR/$plugin_name"
-                fi
-            done
-            cd "$PROJECT_DIR"
-            SKILL_COUNT="$(ls -d "$CLAUDE_SKILLS_DIR"/*/ 2>/dev/null | wc -l | tr -d ' ')"
-            echo "   Installed $SKILL_COUNT Claude skills to $CLAUDE_SKILLS_DIR"
-        else
-            echo "   WARNING: Failed to download Claude Code skills"
-        fi
-        rm -rf "$SKILLS_TMP"
-    fi
+    bash "$PROJECT_DIR/scripts/fetch-claude-skills.sh"
     echo ""
 
     # --- 9. Build VS Code extension ------------------------------------------
@@ -454,12 +430,73 @@ find_code_cli() {
     else
         echo "   WARNING: VSIX not found — skipping extension install"
     fi
-    # Clean up source claude_skills now that they are bundled in the extension
-    if [ -d "$CLAUDE_SKILLS_DIR" ]; then
-        rm -rf "$CLAUDE_SKILLS_DIR"
-        echo "   Cleaned up $CLAUDE_SKILLS_DIR (bundled in extension)"
-    fi
+    # Keep $CLAUDE_SKILLS_DIR in place — do not delete after extension install.
     echo ""
+
+    # --- Ensure remote_password is set before starting kiss-web ---------------
+    # Read remote_password from ~/.kiss/config.json WITHOUT using `uv run`,
+    # which can race with the parent install, re-resolve the venv, or emit
+    # warnings that pollute stdout. Use the system python3 directly; if it is
+    # somehow missing, fall back to a grep-based parser.
+    KISS_CONFIG="$HOME/.kiss/config.json"
+    _current_password=""
+    _password_read_error=""
+    if [ -f "$KISS_CONFIG" ]; then
+        if command -v python3 >/dev/null 2>&1; then
+            _current_password="$(KISS_CONFIG="$KISS_CONFIG" python3 -c "
+import json, os, sys
+try:
+    with open(os.environ['KISS_CONFIG']) as f:
+        cfg = json.load(f)
+    sys.stdout.write(str(cfg.get('remote_password', '')))
+except Exception as e:
+    sys.stderr.write(f'{type(e).__name__}: {e}')
+    sys.exit(2)
+" 2>/tmp/.kiss_pw_err)" || _password_read_error="$(cat /tmp/.kiss_pw_err 2>/dev/null || true)"
+            rm -f /tmp/.kiss_pw_err
+        else
+            # Fallback parser: extract "remote_password": "<value>" from JSON.
+            _current_password="$(grep -o '"remote_password"[[:space:]]*:[[:space:]]*"[^"]*"' "$KISS_CONFIG" \
+                | sed -E 's/.*"remote_password"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/' \
+                | head -n1)"
+        fi
+    fi
+    if [ -z "$_current_password" ]; then
+        if [ -n "$_password_read_error" ]; then
+            echo ">>> Could not parse $KISS_CONFIG ($_password_read_error)"
+        elif [ ! -f "$KISS_CONFIG" ]; then
+            echo ">>> $KISS_CONFIG does not exist yet."
+        else
+            echo ">>> remote_password is missing or empty in $KISS_CONFIG."
+        fi
+        echo ">>> kiss-web requires a remote_password for authentication."
+        echo "   This password protects your KISS web interface from unauthorized access."
+        if [ -r /dev/tty ]; then
+            read -r -p "   Enter a remote_password: " _new_password </dev/tty
+        else
+            read -r -p "   Enter a remote_password: " _new_password
+        fi
+        if [ -z "$_new_password" ]; then
+            echo "   WARNING: No password entered. kiss-web will run without authentication."
+        else
+            # Write remote_password into ~/.kiss/config.json (pass via env to avoid injection).
+            # Use system python3 directly, same reason as the read path above.
+            mkdir -p "$HOME/.kiss"
+            if command -v python3 >/dev/null 2>&1; then
+                _KISS_NEW_PW="$_new_password" KISS_CONFIG="$KISS_CONFIG" python3 -c "
+import json, os, pathlib
+p = pathlib.Path(os.environ['KISS_CONFIG'])
+cfg = json.loads(p.read_text()) if p.exists() else {}
+cfg['remote_password'] = os.environ['_KISS_NEW_PW']
+p.write_text(json.dumps(cfg, indent=2))
+"
+                echo "   remote_password saved to $KISS_CONFIG"
+            else
+                echo "   ERROR: python3 not found; cannot persist remote_password."
+            fi
+        fi
+        echo ""
+    fi
 
     # --- 11. Start kiss-web daemon service ------------------------------------
     echo ">>> [11/11] Setting up kiss-web daemon service..."
@@ -547,6 +584,53 @@ SERVICE
     fi
     echo ""
 
+    # --- Post remote URL to ntfy.sh message board ----------------------------
+    # Wait briefly for the daemon to start and get a tunnel URL, then
+    # post it to a machine-stable ntfy.sh topic so the user can retrieve
+    # it from any device by subscribing to that topic.
+    echo ">>> Posting remote URL to ntfy.sh..."
+    (
+        sleep 15  # give the daemon time to start and get a tunnel URL
+        _TOPIC=""
+        if [ -f "$HOME/.kiss/ntfy_topic" ]; then
+            _TOPIC="$(cat "$HOME/.kiss/ntfy_topic")"
+        fi
+        if [ -z "$_TOPIC" ]; then
+            _TOPIC="$(uv run python -c "
+import hashlib, platform, uuid
+identity = f'{platform.node()}:{uuid.getnode()}'
+topic = 'kiss-' + hashlib.sha256(identity.encode()).hexdigest()[:32]
+print(topic)
+" 2>/dev/null || true)"
+            if [ -n "$_TOPIC" ]; then
+                mkdir -p "$HOME/.kiss"
+                printf '%s\n' "$_TOPIC" > "$HOME/.kiss/ntfy_topic"
+            fi
+        fi
+        if [ -n "$_TOPIC" ] && [ -f "$HOME/.kiss/remote-url.json" ]; then
+            _REMOTE_URL="$(uv run python -c "
+import json, pathlib
+try:
+    d = json.loads((pathlib.Path.home() / '.kiss' / 'remote-url.json').read_text())
+    url = d.get('tunnel') or d.get('local', '')
+    if url and not url.startswith('https://localhost'):
+        print(url)
+except Exception:
+    pass
+" 2>/dev/null || true)"
+            if [ -n "$_REMOTE_URL" ]; then
+                curl -fsSL -X POST "https://ntfy.sh/$_TOPIC" \
+                    -H "Title: KISS Sorcar Remote URL" \
+                    -H "Tags: link,kiss-sorcar" \
+                    -d "$_REMOTE_URL" >/dev/null 2>&1 || true
+                echo "   Remote URL posted to https://ntfy.sh/$_TOPIC"
+                echo "   Subscribe at https://ntfy.sh/$_TOPIC to receive URL updates"
+            fi
+        fi
+    ) &
+    echo "   (posting in background — will complete in ~15 seconds)"
+    echo ""
+
     # --- Write install_dir marker (used by env.py) ----------------------------
     printf '%s\n' "$PROJECT_DIR" > "$HOME/.kiss/install_dir"
 
@@ -585,6 +669,41 @@ SERVICE
         *)      _add_path_to_rc "$HOME/.zshrc"
                 _add_path_to_rc "$HOME/.bashrc" ;;
     esac
+    echo ""
+
+    # --- Tell the user where to find the remote URL ----------------------------
+    _NTFY_TOPIC=""
+    if [ -f "$HOME/.kiss/ntfy_topic" ]; then
+        _NTFY_TOPIC="$(cat "$HOME/.kiss/ntfy_topic")"
+    fi
+    if [ -z "$_NTFY_TOPIC" ]; then
+        _NTFY_TOPIC="$(uv run python -c "
+import hashlib, platform, uuid
+identity = f'{platform.node()}:{uuid.getnode()}'
+topic = 'kiss-' + hashlib.sha256(identity.encode()).hexdigest()[:32]
+print(topic)
+" 2>/dev/null || true)"
+        if [ -n "$_NTFY_TOPIC" ]; then
+            mkdir -p "$HOME/.kiss"
+            printf '%s\n' "$_NTFY_TOPIC" > "$HOME/.kiss/ntfy_topic"
+        fi
+    fi
+    echo ""
+    echo "----------------------------------------------------------------------"
+    echo "  REMOTE ACCESS URL"
+    echo "----------------------------------------------------------------------"
+    echo "  Your KISS Sorcar remote URL will be available shortly."
+    echo ""
+    echo "  Find it in any of these places:"
+    echo "    • File:  ~/.kiss/remote-url.json"
+    if [ -n "$_NTFY_TOPIC" ]; then
+        echo "    • Web:   https://ntfy.sh/$_NTFY_TOPIC"
+        echo "    • CLI:   curl -s https://ntfy.sh/$_NTFY_TOPIC/json?poll=1 | tail -1 | python3 -m json.tool"
+    fi
+    echo ""
+    echo "  The URL is automatically posted to the ntfy.sh topic above"
+    echo "  whenever it changes (e.g. after a tunnel restart)."
+    echo "----------------------------------------------------------------------"
     echo ""
 
     echo "=== Installation Complete ==="

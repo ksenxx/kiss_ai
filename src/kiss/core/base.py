@@ -152,7 +152,7 @@ class Base:
             "budget_used": self.budget_used,
             "total_budget": getattr(self, "max_budget", 10.0),
             "global_budget_used": Base.global_budget_used,
-            "global_max_budget": 200.0,
+            "global_max_budget": 2000.0,
             "tokens_used": self.total_tokens_used,
             "max_tokens": max_tokens,
             "step_count": self.step_count,
