@@ -1868,37 +1868,109 @@ async function ensureApiKeys(): Promise<boolean> {
 /**
  * Read ``~/.kiss/config.json`` and return the parsed object, or an empty
  * object when the file is missing / unreadable.
+ *
+ * Retries up to ``RETRIES`` times with a small backoff to defend against
+ * a concurrent writer (the Python ``save_config`` or ``install.sh``)
+ * briefly truncating the file mid-write.  Only ``ENOENT`` (file does
+ * not exist) short-circuits without retrying — every other failure
+ * mode (empty file, ``SyntaxError`` from a half-written JSON document,
+ * EBUSY, etc.) is treated as transient.
  */
+function readKissConfigOnce():
+  | {
+      ok: true;
+      value: Record<string, unknown>;
+    }
+  | {
+      ok: false;
+      reason: 'missing' | 'empty' | 'parse' | 'shape' | 'io';
+      err?: unknown;
+    } {
+  const configPath = path.join(LOG_DIR, 'config.json');
+  let raw: string;
+  try {
+    raw = fs.readFileSync(configPath, 'utf-8');
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    if (code === 'ENOENT') {
+      return {ok: false, reason: 'missing', err};
+    }
+    return {ok: false, reason: 'io', err};
+  }
+  if (!raw.trim()) {
+    return {ok: false, reason: 'empty'};
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    return {ok: false, reason: 'parse', err};
+  }
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    return {ok: true, value: parsed as Record<string, unknown>};
+  }
+  return {ok: false, reason: 'shape'};
+}
+
 function readKissConfig(): Record<string, unknown> {
   const configPath = path.join(LOG_DIR, 'config.json');
-  try {
-    const raw = fs.readFileSync(configPath, 'utf-8');
-    if (!raw.trim()) {
-      log(`readKissConfig: ${configPath} exists but is empty`);
+  const RETRIES = 5;
+  const BACKOFF_MS = 100;
+  let last: ReturnType<typeof readKissConfigOnce> = {ok: false, reason: 'io'};
+  for (let attempt = 0; attempt < RETRIES; attempt++) {
+    last = readKissConfigOnce();
+    if (last.ok) {
+      return last.value;
+    }
+    if (last.reason === 'missing') {
+      // The file genuinely does not exist — no point retrying.
+      log(`readKissConfig: ${configPath} does not exist`);
       return {};
     }
-    const parsed: unknown = JSON.parse(raw);
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      return parsed as Record<string, unknown>;
+    if (attempt < RETRIES - 1) {
+      // Busy-wait briefly to let any concurrent writer finish.
+      const deadline = Date.now() + BACKOFF_MS;
+      while (Date.now() < deadline) {
+        /* spin */
+      }
     }
-    log(`readKissConfig: ${configPath} parsed but not a plain object`);
-  } catch (err) {
+  }
+  if (last.reason === 'empty') {
     log(
-      `readKissConfig: failed to read ${configPath}: ${err instanceof Error ? err.message : err}`,
+      `readKissConfig: ${configPath} exists but is empty after ${RETRIES} retries`,
+    );
+  } else if (last.reason === 'parse') {
+    log(
+      `readKissConfig: failed to parse ${configPath} after ${RETRIES} retries: ${
+        last.err instanceof Error ? last.err.message : String(last.err)
+      }`,
+    );
+  } else if (last.reason === 'shape') {
+    log(`readKissConfig: ${configPath} parsed but not a plain object`);
+  } else {
+    log(
+      `readKissConfig: failed to read ${configPath} after ${RETRIES} retries: ${
+        last.err instanceof Error ? last.err.message : String(last.err)
+      }`,
     );
   }
   return {};
 }
 
 /**
- * Write ``cfg`` to ``~/.kiss/config.json``, creating the directory if needed.
+ * Write ``cfg`` to ``~/.kiss/config.json`` atomically: stage in a
+ * sibling temp file and then ``rename`` into place so that concurrent
+ * readers never observe an empty or half-written ``config.json``.
  */
 function writeKissConfig(cfg: Record<string, unknown>): void {
   fs.mkdirSync(LOG_DIR, {recursive: true});
-  fs.writeFileSync(
-    path.join(LOG_DIR, 'config.json'),
-    JSON.stringify(cfg, null, 2) + '\n',
+  const target = path.join(LOG_DIR, 'config.json');
+  const tmp = path.join(
+    LOG_DIR,
+    `.config.json.${process.pid}.${Date.now()}.tmp`,
   );
+  fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2) + '\n');
+  fs.renameSync(tmp, target);
 }
 
 /**

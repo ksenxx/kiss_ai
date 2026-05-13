@@ -692,3 +692,91 @@ class TestApiKeyEnvVarsConstant:
             "MINIMAX_API_KEY",
         }
         assert API_KEY_ENV_VARS == expected
+
+
+class TestSaveConfigAtomicity:
+    """``save_config`` must replace ``config.json`` atomically.
+
+    The VS Code extension's ``readKissConfig`` reads ``config.json``
+    while the Python ``save_config`` may be writing it.  If the writer
+    truncates the file before populating it (i.e. uses ``open(path, "w")``
+    + incremental ``json.dump``), concurrent readers see an empty or
+    half-written file and silently fall back to ``{}``, which then makes
+    the extension prompt the user for a ``remote_password`` that is
+    actually already set.
+    """
+
+    def test_concurrent_reader_never_sees_empty_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A reader hammering the file during ``save_config`` calls
+        must always observe a valid JSON object with ``remote_password``
+        set — never an empty file, partial bytes, or ``JSONDecodeError``.
+        """
+        import threading
+
+        from kiss.agents.vscode import vscode_config as vc
+
+        # Seed config.json with a valid value (the autouse fixture
+        # already redirected CONFIG_PATH to a tmp dir).
+        save_config({"remote_password": "secret-1", "max_budget": 1})
+        assert vc.CONFIG_PATH.exists()
+
+        stop = threading.Event()
+        bad_reads: list[str] = []
+
+        def reader() -> None:
+            while not stop.is_set():
+                try:
+                    raw = vc.CONFIG_PATH.read_bytes()
+                except FileNotFoundError:
+                    bad_reads.append("FileNotFoundError")
+                    continue
+                if not raw.strip():
+                    bad_reads.append("empty")
+                    continue
+                try:
+                    parsed = json.loads(raw)
+                except json.JSONDecodeError as e:
+                    bad_reads.append(f"parse:{e.msg}")
+                    continue
+                if not isinstance(parsed, dict):
+                    bad_reads.append("not-dict")
+                    continue
+                pw = parsed.get("remote_password")
+                if pw not in ("secret-1", "secret-2"):
+                    bad_reads.append(f"bad-pw:{pw!r}")
+
+        t = threading.Thread(target=reader, daemon=True)
+        t.start()
+
+        # Flip the file between two valid states many times.
+        try:
+            for i in range(200):
+                save_config({
+                    "remote_password": "secret-2" if i % 2 else "secret-1",
+                    "max_budget": i,
+                })
+        finally:
+            stop.set()
+            t.join(timeout=5)
+
+        assert not bad_reads, (
+            f"Concurrent reader observed invalid states during save_config: "
+            f"{bad_reads[:10]} (total {len(bad_reads)})"
+        )
+
+    def test_remote_password_preserved_when_other_fields_saved(
+        self,
+    ) -> None:
+        """Saving a config dict that omits ``remote_password`` must
+        preserve the existing ``remote_password`` value (regression
+        guard for the ``save_config`` merge behaviour relied on by
+        the install flow).
+        """
+        save_config({"remote_password": "sensca95", "max_budget": 10})
+        # Simulate a later partial save (e.g. only max_budget changed).
+        save_config({"max_budget": 25})
+        cfg = load_config()
+        assert cfg["remote_password"] == "sensca95"
+        assert cfg["max_budget"] == 25
