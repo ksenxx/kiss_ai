@@ -17,7 +17,13 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-CONFIG_DIR = Path.home() / ".kiss"
+# ``KISS_HOME`` overrides the default ``~/.kiss`` location so that
+# tests (see ``src/kiss/tests/conftest.py``) can redirect persistent
+# state into a temporary directory without clobbering the user's real
+# ``~/.kiss/config.json`` — which the running ``kiss-web`` daemon
+# watches and would otherwise restart its cloudflared tunnel for every
+# time a test calls ``save_config({"remote_password": ...})``.
+CONFIG_DIR = Path(os.environ.get("KISS_HOME") or (Path.home() / ".kiss"))
 CONFIG_PATH = CONFIG_DIR / "config.json"
 
 DEFAULTS: dict[str, Any] = {
