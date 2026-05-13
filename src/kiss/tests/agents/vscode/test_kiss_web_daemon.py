@@ -36,7 +36,7 @@ class TestDaemonUrlFileLifecycle(IsolatedAsyncioTestCase):
 
     async def test_server_writes_url_file_on_start(self) -> None:
         """Starting the server creates ~/.kiss/remote-url.json with the local URL."""
-        _remove_url_file()
+        _remove_url_file(_URL_FILE)
         self.assertFalse(_URL_FILE.is_file())
 
         server = RemoteAccessServer(
@@ -52,7 +52,7 @@ class TestDaemonUrlFileLifecycle(IsolatedAsyncioTestCase):
         server.port = port
         await server.start_async()
 
-        _save_url_file(f"https://localhost:{port}")
+        _save_url_file(_URL_FILE, f"https://localhost:{port}")
 
         try:
             self.assertTrue(_URL_FILE.is_file())
@@ -62,12 +62,12 @@ class TestDaemonUrlFileLifecycle(IsolatedAsyncioTestCase):
             self.assertNotIn("tunnel", data)
         finally:
             await server.stop_async()
-            _remove_url_file()
+            _remove_url_file(_URL_FILE)
 
     async def test_server_url_file_includes_tunnel(self) -> None:
         """When a tunnel URL is saved, it appears in remote-url.json."""
-        _remove_url_file()
-        _save_url_file("https://localhost:8787", "https://example.trycloudflare.com")
+        _remove_url_file(_URL_FILE)
+        _save_url_file(_URL_FILE, "https://localhost:8787", "https://example.trycloudflare.com")
 
         try:
             self.assertTrue(_URL_FILE.is_file())
@@ -75,11 +75,11 @@ class TestDaemonUrlFileLifecycle(IsolatedAsyncioTestCase):
             self.assertEqual(data["local"], "https://localhost:8787")
             self.assertEqual(data["tunnel"], "https://example.trycloudflare.com")
         finally:
-            _remove_url_file()
+            _remove_url_file(_URL_FILE)
 
     async def test_stop_removes_url_file(self) -> None:
         """Stopping the server removes the URL file."""
-        _save_url_file("https://localhost:8787")
+        _save_url_file(_URL_FILE, "https://localhost:8787")
         self.assertTrue(_URL_FILE.is_file())
 
         server = RemoteAccessServer(
@@ -96,16 +96,16 @@ class TestDaemonDetection(IsolatedAsyncioTestCase):
 
     async def test_url_file_indicates_running(self) -> None:
         """Presence of remote-url.json indicates the daemon is running."""
-        _remove_url_file()
+        _remove_url_file(_URL_FILE)
         self.assertFalse(_URL_FILE.is_file())
 
-        _save_url_file("https://localhost:8787")
+        _save_url_file(_URL_FILE, "https://localhost:8787")
         self.assertTrue(_URL_FILE.is_file())
 
         data = json.loads(_URL_FILE.read_text())
         self.assertIn("local", data)
 
-        _remove_url_file()
+        _remove_url_file(_URL_FILE)
         self.assertFalse(_URL_FILE.is_file())
 
     async def test_server_responds_to_http(self) -> None:
@@ -146,7 +146,7 @@ class TestDaemonDetection(IsolatedAsyncioTestCase):
             host="127.0.0.1", port=port, use_tunnel=False
         )
         await server1.start_async()
-        _save_url_file(f"https://localhost:{port}")
+        _save_url_file(_URL_FILE, f"https://localhost:{port}")
 
         try:
             self.assertTrue(_URL_FILE.is_file())
@@ -154,7 +154,7 @@ class TestDaemonDetection(IsolatedAsyncioTestCase):
             self.assertEqual(data["local"], f"https://localhost:{port}")
         finally:
             await server1.stop_async()
-            _remove_url_file()
+            _remove_url_file(_URL_FILE)
 
 
 class TestDaemonRestart(IsolatedAsyncioTestCase):
@@ -177,7 +177,7 @@ class TestDaemonRestart(IsolatedAsyncioTestCase):
             host="127.0.0.1", port=port, use_tunnel=False
         )
         await server1.start_async()
-        _save_url_file(f"https://localhost:{port}")
+        _save_url_file(_URL_FILE, f"https://localhost:{port}")
 
         loop = asyncio.get_event_loop()
         ctx = _no_verify_ssl()
@@ -190,13 +190,13 @@ class TestDaemonRestart(IsolatedAsyncioTestCase):
         self.assertEqual(resp.status, 200)
 
         await server1.stop_async()
-        _remove_url_file()
+        _remove_url_file(_URL_FILE)
 
         server2 = RemoteAccessServer(
             host="127.0.0.1", port=port, use_tunnel=False
         )
         await server2.start_async()
-        _save_url_file(f"https://localhost:{port}")
+        _save_url_file(_URL_FILE, f"https://localhost:{port}")
 
         try:
             ctx2 = _no_verify_ssl()
@@ -215,19 +215,19 @@ class TestDaemonRestart(IsolatedAsyncioTestCase):
             self.assertEqual(data["local"], f"https://localhost:{port}")
         finally:
             await server2.stop_async()
-            _remove_url_file()
+            _remove_url_file(_URL_FILE)
 
     async def test_restart_cleans_url_file(self) -> None:
         """A restart cycle removes and recreates the URL file."""
-        _save_url_file("https://localhost:8787", "https://old.trycloudflare.com")
+        _save_url_file(_URL_FILE, "https://localhost:8787", "https://old.trycloudflare.com")
         self.assertTrue(_URL_FILE.is_file())
 
-        _remove_url_file()
+        _remove_url_file(_URL_FILE)
         self.assertFalse(_URL_FILE.is_file())
 
-        _save_url_file("https://localhost:8787", "https://new.trycloudflare.com")
+        _save_url_file(_URL_FILE, "https://localhost:8787", "https://new.trycloudflare.com")
         self.assertTrue(_URL_FILE.is_file())
         data = json.loads(_URL_FILE.read_text())
         self.assertEqual(data["tunnel"], "https://new.trycloudflare.com")
 
-        _remove_url_file()
+        _remove_url_file(_URL_FILE)

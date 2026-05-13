@@ -408,7 +408,7 @@ class KISSAgent(Base):
         """
         if self.budget_used > self.max_budget:
             raise KISSError(f"Agent {self.name} budget exceeded.")
-        if Base.get_global_budget_used() > 200.0:
+        if Base.get_global_budget_used() > 2000.0:
             raise KISSError("Global budget exceeded.")
         if self.step_count > self.max_steps:
             raise KISSError(f"Agent {self.name} exceeded {self.max_steps} steps.")
@@ -455,7 +455,7 @@ class KISSAgent(Base):
         try:
             max_tokens = get_max_context_length(self.model.model_name)
             capped_tokens = self.total_tokens_used % max_tokens
-            global_max = 200.0
+            global_max = 2000.0
             global_budget_used = Base.get_global_budget_used()
             return (
                 f"Steps: {self.step_count}/{self.max_steps}, "

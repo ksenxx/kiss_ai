@@ -8,6 +8,9 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 EXT_DIR="$PROJECT_ROOT/src/kiss/agents/vscode"
 CODE="/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"
 
+echo "==> Ensuring Claude Code skills are present..."
+"$SCRIPT_DIR/fetch-claude-skills.sh"
+
 cd "$EXT_DIR"
 
 echo "==> Compiling TypeScript..."
