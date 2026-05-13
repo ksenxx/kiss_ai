@@ -702,30 +702,52 @@ def _parse_named_tunnel_url(line: str, configured_url: str | None) -> str | None
     return None
 
 
-def _save_url_file(local_url: str, tunnel_url: str | None = None) -> None:
-    """Write the active server URLs to ``~/.kiss/remote-url.json``.
+def _save_url_file(
+    url_file: Path, local_url: str, tunnel_url: str | None = None,
+) -> None:
+    """Write the active server URLs to ``url_file``.
 
-    Creates the parent directory if needed.  The file is read by
-    ``kiss-web --url`` so users can discover the remote URL without
-    digging through log files.
+    Creates the parent directory if needed.  The default file location
+    is ``~/.kiss/remote-url.json``, which is read by ``kiss-web --url``
+    so users can discover the remote URL without digging through log
+    files.  Tests inject a temporary path to avoid touching the live
+    file that the VS Code extension and the ``kiss-web`` daemon watch.
 
     Args:
+        url_file: Path to the JSON file to write.
         local_url: The local ``https://localhost:PORT`` URL.
         tunnel_url: The Cloudflare tunnel URL, or None.
     """
     data: dict[str, str] = {"local": local_url}
     if tunnel_url:
         data["tunnel"] = tunnel_url
-    _URL_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _URL_FILE.write_text(json.dumps(data, indent=2) + "\n")
+    url_file.parent.mkdir(parents=True, exist_ok=True)
+    url_file.write_text(json.dumps(data, indent=2) + "\n")
 
 
-def _remove_url_file() -> None:
-    """Delete ``~/.kiss/remote-url.json`` if it exists."""
+def _remove_url_file(url_file: Path) -> None:
+    """Delete ``url_file`` if it exists."""
     try:
-        _URL_FILE.unlink(missing_ok=True)
+        url_file.unlink(missing_ok=True)
     except OSError:
         pass
+
+
+def _read_url_from_file(url_file: Path) -> str | None:
+    """Read the active remote URL from ``url_file``.
+
+    Synchronous helper invoked from
+    :meth:`RemoteAccessServer._send_welcome_info` via
+    ``run_in_executor`` so the disk read does not block the asyncio
+    event loop.  Returns ``None`` on missing file, parse error, or
+    empty content.
+    """
+    try:
+        data = json.loads(url_file.read_text())
+    except Exception:
+        return None
+    url = data.get("tunnel") or data.get("local", "")
+    return url or None
 
 
 def _get_machine_topic() -> str:
@@ -1684,6 +1706,7 @@ class RemoteAccessServer:
         work_dir: str | None = None,
         certfile: str | None = None,
         keyfile: str | None = None,
+        url_file: str | Path | None = None,
     ) -> None:
         source_shell_env()
 
@@ -1693,6 +1716,11 @@ class RemoteAccessServer:
         self.tunnel_token = tunnel_token
         self.tunnel_url = tunnel_url
         self._ssl_context: ssl.SSLContext = _create_ssl_context(certfile, keyfile)
+        # Path to the JSON file used to publish the active URL.  Tests
+        # override this to a per-test temporary path to avoid racing
+        # the live ``~/.kiss/remote-url.json`` watched by the VS Code
+        # extension and the ``kiss-web`` daemon.
+        self._url_file: Path = Path(url_file) if url_file else _URL_FILE
 
         if not work_dir:
             from kiss.agents.vscode.vscode_config import load_config
@@ -1966,7 +1994,7 @@ class RemoteAccessServer:
         assert loop is not None
         if not url:
             url = await loop.run_in_executor(
-                None, self._read_url_from_file,
+                None, _read_url_from_file, self._url_file,
             )
         if not url:
             discovered = await loop.run_in_executor(
@@ -1974,7 +2002,8 @@ class RemoteAccessServer:
             )
             if discovered:
                 await loop.run_in_executor(
-                    None, _save_url_file, self._local_url, discovered,
+                    None, _save_url_file,
+                    self._url_file, self._local_url, discovered,
                 )
                 self._active_url = discovered
                 url = discovered
@@ -1984,22 +2013,6 @@ class RemoteAccessServer:
             if ntfy_url:
                 msg["ntfyUrl"] = ntfy_url
             self._printer.broadcast(msg)
-
-    @staticmethod
-    def _read_url_from_file() -> str | None:
-        """Read the active remote URL from ``~/.kiss/remote-url.json``.
-
-        Synchronous helper invoked from
-        :meth:`_send_welcome_info` via ``run_in_executor`` so the disk
-        read does not block the asyncio event loop.  Returns ``None``
-        on missing file, parse error, or empty content.
-        """
-        try:
-            data = json.loads(_URL_FILE.read_text())
-        except Exception:
-            return None
-        url = data.get("tunnel") or data.get("local", "")
-        return url or None
 
     async def _handle_ready(
         self, cmd: dict[str, Any], websocket: ServerConnection,
@@ -2479,7 +2492,7 @@ class RemoteAccessServer:
                     delay,
                 )
             self._tunnel_next_retry = time.monotonic() + delay
-        _save_url_file(self._local_url, tunnel_url)
+        _save_url_file(self._url_file, self._local_url, tunnel_url)
         self._active_url = tunnel_url or self._local_url
         ntfy_url = _get_ntfy_url()
         msg: dict[str, object] = {
@@ -2555,16 +2568,16 @@ class RemoteAccessServer:
                 except Exception:
                     logger.debug("Watchdog tunnel check error", exc_info=True)
             try:
-                if not _URL_FILE.is_file():
+                if not self._url_file.is_file():
                     tunnel_url = (
                         self._active_url
                         if self._active_url and self._active_url != self._local_url
                         else None
                     )
-                    _save_url_file(self._local_url, tunnel_url)
+                    _save_url_file(self._url_file, self._local_url, tunnel_url)
                     logger.info(
                         "Re-wrote missing URL file %s (tunnel=%s)",
-                        _URL_FILE, tunnel_url,
+                        self._url_file, tunnel_url,
                     )
             except asyncio.CancelledError:
                 raise
@@ -2686,7 +2699,7 @@ class RemoteAccessServer:
                     None, self._start_tunnel,
                 )
 
-        _save_url_file(self._local_url, tunnel_url)
+        _save_url_file(self._url_file, self._local_url, tunnel_url)
         self._active_url = tunnel_url or self._local_url
         if self.use_tunnel:
             await self._loop.run_in_executor(
@@ -2742,7 +2755,7 @@ class RemoteAccessServer:
             except TimeoutError:
                 pass
         self._stop_tunnel()
-        _remove_url_file()
+        _remove_url_file(self._url_file)
 
 
 def _resolve_tunnel_settings() -> tuple[str | None, str | None]:
