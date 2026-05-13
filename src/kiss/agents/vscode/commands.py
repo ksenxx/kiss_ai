@@ -328,6 +328,12 @@ class _CommandsMixin:
         )
 
         cfg = cmd.get("config", {})
+        # Guard: never overwrite a non-empty remote_password with an
+        # empty one from the frontend.  An empty value typically comes
+        # from a race condition (config sidebar closed before the async
+        # getConfig response populated the form fields).
+        if not cfg.get("remote_password") and load_config().get("remote_password"):
+            cfg.pop("remote_password", None)
         save_config(cfg)
         apply_config_to_env(cfg)
 
