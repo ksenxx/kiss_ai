@@ -728,18 +728,67 @@ function restartKissWebDaemon(kissProjectPath: string): void {
 
   const binDir = path.join(HOME_DIR, '.local', 'bin');
 
-  // Kill existing kiss-web and cloudflared processes before restarting.
-  // Use ``pkill -x`` (exact comm match) and pass the name as a separate
+  // Skip the kill+restart when the kiss-web binary and the editable
+  // kiss source tree are byte-for-byte identical to the last time the
+  // daemon was started AND the daemon is currently healthy on port
+  // 8787.  This preserves any running ``cloudflared`` quick-tunnel
+  // across VS Code window reloads / re-activations, which would
+  // otherwise mint a brand-new random ``*.trycloudflare.com`` URL
+  // every time the extension activates.
+  //
+  // The fingerprint changes whenever the user rebuilds, reinstalls,
+  // or edits any Python source under ``src/kiss/`` — so the
+  // editable-install code-pickup behavior is preserved on real
+  // changes.
+  const fpFile = path.join(LOG_DIR, '.kiss-web.fingerprint');
+  const currentFp = computeKissWebFingerprint(kissProjectPath, kissWebBin);
+  let savedFp = '';
+  try {
+    savedFp = fs.readFileSync(fpFile, 'utf-8').trim();
+  } catch {
+    /* missing or unreadable — treat as mismatch */
+  }
+  const daemonAlive = (() => {
+    try {
+      execSync('lsof -i :8787 -t', {stdio: 'ignore', timeout: 2000});
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+  if (currentFp && currentFp === savedFp && daemonAlive) {
+    log(
+      `kiss-web fingerprint unchanged (${currentFp.slice(0, 8)}) and ` +
+        'daemon healthy on :8787 — skipping restart to preserve tunnel URL',
+    );
+    return;
+  }
+  log(
+    `kiss-web restart: fingerprint ${savedFp.slice(0, 8) || '<none>'} → ` +
+      `${currentFp.slice(0, 8) || '<none>'}, daemonAlive=${daemonAlive}`,
+  );
+
+  // Kill the existing kiss-web process before restarting.  Use
+  // ``pkill -x`` (exact comm match) and pass the name as a separate
   // argv element via ``execFileSync`` so the shell never interpolates
   // the value.  We deliberately avoid the substring-match flag, which
   // would otherwise kill unrelated processes (e.g. a user editing
   // kiss-web.py in another VS Code window).
-  for (const procName of ['kiss-web', 'cloudflared']) {
-    try {
-      execFileSync('pkill', ['-x', procName], {stdio: 'ignore', timeout: 5000});
-    } catch {
-      /* no matching process — ok */
-    }
+  //
+  // ``cloudflared`` is intentionally NOT killed here: the Python
+  // ``web_server`` adopts the existing cloudflared on startup
+  // (matching pid in ``~/.kiss/cloudflared.pid`` and a healthy
+  // metrics endpoint), keeping the same public URL across kiss-web
+  // restarts.  When the kiss-web binary genuinely changed we still
+  // restart kiss-web; the surviving cloudflared keeps forwarding to
+  // ``https://localhost:8787``, which the new kiss-web re-binds.
+  try {
+    execFileSync('pkill', ['-x', 'kiss-web'], {
+      stdio: 'ignore',
+      timeout: 5000,
+    });
+  } catch {
+    /* no matching process — ok */
   }
 
   // Wait for port 8787 to be free (up to 5 seconds)
@@ -894,6 +943,75 @@ WantedBy=default.target
         `Failed to restart kiss-web daemon (Linux): ${err instanceof Error ? err.message : err}`,
       );
     }
+  }
+
+  // Record the fingerprint so the next activation can skip the
+  // restart when nothing has changed.  Best-effort: a write failure
+  // simply forces an unconditional restart next time, which is safe.
+  try {
+    fs.writeFileSync(fpFile, currentFp + '\n');
+  } catch (err) {
+    log(
+      `Failed to write kiss-web fingerprint: ${err instanceof Error ? err.message : err}`,
+    );
+  }
+}
+
+/**
+ * Compute a fingerprint of the installed kiss-web binary and the
+ * editable kiss source tree.
+ *
+ * The fingerprint is the SHA-256 of:
+ *   - the bytes of the ``kiss-web`` entrypoint script, and
+ *   - the latest mtime (in nanoseconds) across all ``*.py`` files
+ *     under ``${kissProjectPath}/src/kiss/``, excluding ``__pycache__``
+ *     and ``tests/`` directories.
+ *
+ * This changes whenever the user rebuilds kiss-web, reinstalls the
+ * package, or edits any source file picked up by the editable install
+ * — exactly the situations where the daemon needs to restart to pick
+ * up new code.  Returns ``""`` if the fingerprint cannot be computed
+ * (caller treats this as a mismatch and restarts unconditionally).
+ */
+function computeKissWebFingerprint(
+  kissProjectPath: string,
+  kissWebBin: string,
+): string {
+  try {
+    const hash = crypto.createHash('sha256');
+    hash.update(fs.readFileSync(kissWebBin));
+    const srcDir = path.join(kissProjectPath, 'src', 'kiss');
+    let latestMtimeNs = BigInt(0);
+    const walk = (dir: string): void => {
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(dir, {withFileTypes: true});
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        if (entry.name === '__pycache__' || entry.name === 'tests') continue;
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          walk(full);
+        } else if (entry.isFile() && entry.name.endsWith('.py')) {
+          try {
+            const st = fs.statSync(full, {bigint: true});
+            if (st.mtimeNs > latestMtimeNs) latestMtimeNs = st.mtimeNs;
+          } catch {
+            /* skip unreadable file */
+          }
+        }
+      }
+    };
+    walk(srcDir);
+    hash.update(latestMtimeNs.toString());
+    return hash.digest('hex');
+  } catch (err) {
+    log(
+      `computeKissWebFingerprint failed: ${err instanceof Error ? err.message : err}`,
+    );
+    return '';
   }
 }
 
