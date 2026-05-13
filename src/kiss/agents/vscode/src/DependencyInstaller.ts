@@ -1873,12 +1873,19 @@ function readKissConfig(): Record<string, unknown> {
   const configPath = path.join(LOG_DIR, 'config.json');
   try {
     const raw = fs.readFileSync(configPath, 'utf-8');
+    if (!raw.trim()) {
+      log(`readKissConfig: ${configPath} exists but is empty`);
+      return {};
+    }
     const parsed: unknown = JSON.parse(raw);
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
       return parsed as Record<string, unknown>;
     }
-  } catch {
-    /* missing or malformed — return empty */
+    log(`readKissConfig: ${configPath} parsed but not a plain object`);
+  } catch (err) {
+    log(
+      `readKissConfig: failed to read ${configPath}: ${err instanceof Error ? err.message : err}`,
+    );
   }
   return {};
 }
@@ -1895,21 +1902,49 @@ function writeKissConfig(cfg: Record<string, unknown>): void {
 }
 
 /**
+ * Return the ``remote_password`` value from ``~/.kiss/config.json``,
+ * or an empty string when it is missing / not a non-empty string.
+ */
+function getStoredRemotePassword(): string {
+  const cfg = readKissConfig();
+  const existing = cfg['remote_password'];
+  if (typeof existing === 'string' && existing.length > 0) {
+    return existing;
+  }
+  return '';
+}
+
+/**
  * Ensure the remote-access password for the KISS Sorcar web / mobile app
  * is configured.  Reads ``remote_password`` from ``~/.kiss/config.json``;
  * if it is empty or missing, prompts the user to set one.
+ *
+ * To guard against transient file-read failures (e.g. a concurrent
+ * writer holding the file or the daemon restart briefly truncating it),
+ * the config is re-read after a short delay before prompting the user.
  *
  * When the user provides a password it is persisted to ``config.json``.
  * When the user cancels, an informational message tells them the password
  * can be set later from the KISS Sorcar settings panel.
  */
 async function ensureRemotePassword(): Promise<void> {
-  const cfg = readKissConfig();
-  const existing = cfg['remote_password'];
-  if (typeof existing === 'string' && existing.length > 0) {
-    return; // already configured
+  // First read — fast path when password is already set.
+  if (getStoredRemotePassword()) {
+    log('ensureRemotePassword: password already set — skipping prompt');
+    return;
   }
 
+  // The daemon was just restarted; config.json may be mid-write by a
+  // concurrent process (install.sh or kiss-web).  Wait briefly and retry.
+  log('ensureRemotePassword: password not found on first read — retrying after 2 s');
+  await new Promise(resolve => setTimeout(resolve, 2000));
+
+  if (getStoredRemotePassword()) {
+    log('ensureRemotePassword: password found on retry — skipping prompt');
+    return;
+  }
+
+  log('ensureRemotePassword: password still empty — prompting user');
   const password = await vscode.window.showInputBox({
     title: 'KISS Sorcar — Remote Access Password',
     prompt:
@@ -1927,6 +1962,9 @@ async function ensureRemotePassword(): Promise<void> {
     return;
   }
 
+  // Re-read config before writing so we don't clobber keys added by
+  // a concurrent process between our read and this write.
+  const cfg = readKissConfig();
   cfg['remote_password'] = password.trim();
   writeKissConfig(cfg);
   log('Remote access password saved to ~/.kiss/config.json');
