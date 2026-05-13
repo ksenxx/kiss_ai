@@ -1722,7 +1722,8 @@ _WS_SHIM_JS = r"""
     _authenticated = false;
 
     _ws.onopen = function() {
-      var pwd = sessionStorage.getItem('sorcar-remote-pwd') || '';
+      var pwd = '';
+      try { pwd = localStorage.getItem('sorcar-remote-pwd') || ''; } catch(e) {}
       _ws.send(JSON.stringify({type: 'auth', password: pwd}));
     };
 
@@ -1737,9 +1738,12 @@ _WS_SHIM_JS = r"""
       }
       if (msg.type === 'auth_required') {
         _needsPassword = true;
+        // Stored password (if any) was rejected; drop it so a refresh
+        // re-prompts instead of silently retrying the bad value.
+        try { localStorage.removeItem('sorcar-remote-pwd'); } catch(e) {}
         var pwd = prompt('Enter remote access password:');
         if (pwd !== null) {
-          sessionStorage.setItem('sorcar-remote-pwd', pwd);
+          try { localStorage.setItem('sorcar-remote-pwd', pwd); } catch(e) {}
           _ws.send(JSON.stringify({type: 'auth', password: pwd}));
         }
         return;
