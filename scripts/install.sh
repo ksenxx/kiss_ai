@@ -10,10 +10,23 @@ install_git() {
     Darwin)
       if command -v brew &> /dev/null; then
         brew install git
-      else
-        # xcode-select --install opens a GUI dialog; fall back if brew is absent
+      elif command -v xcode-select &> /dev/null; then
+        # xcode-select --install opens a GUI dialog to install Command Line Tools (which include git)
         xcode-select --install 2> /dev/null || true
-        echo "Please install Homebrew or Xcode Command Line Tools to get git."
+        echo "A GUI dialog should have appeared to install the Xcode Command Line Tools."
+        echo "After it finishes, re-run this script."
+      else
+        echo "Neither 'brew' nor 'xcode-select' is available on this macOS system."
+        echo "Attempting to install Homebrew non-interactively..."
+        if command -v curl &> /dev/null; then
+          NONINTERACTIVE=1 /bin/bash -c \
+            "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" \
+            && eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null || /usr/local/bin/brew shellenv 2>/dev/null)" \
+            && brew install git \
+            || echo "Homebrew bootstrap failed. Please install git manually from https://git-scm.com/download/mac"
+        else
+          echo "curl is also unavailable; please install git manually from https://git-scm.com/download/mac"
+        fi
       fi
       ;;
     Linux)
