@@ -132,6 +132,66 @@ class TestShimEmbeddedInHtml(unittest.TestCase):
         self.assertIn("localStorage.setItem('sorcar-remote-pwd', pwd)", html)
 
 
+class TestCustomAuthModal(unittest.TestCase):
+    """The password dialog is a compact in-page modal, not native prompt().
+
+    The browser-native ``prompt()`` renders an elongated dialog with
+    wasted vertical space below the OK/Cancel buttons on Chrome,
+    Safari and Firefox.  The auth UI must therefore be a custom HTML
+    modal sized tightly around its contents.
+    """
+
+    def test_html_carries_auth_modal_container(self) -> None:
+        """The HTML body must include the ``#auth-modal`` element."""
+        html = _build_html()
+        self.assertIn('id="auth-modal"', html)
+        self.assertIn('id="auth-modal-input"', html)
+        self.assertIn('id="auth-modal-ok"', html)
+        self.assertIn('id="auth-modal-cancel"', html)
+
+    def test_auth_modal_input_is_password_type(self) -> None:
+        """The password input must be masked (``type="password"``)."""
+        html = _build_html()
+        # Locate the input declaration and confirm it is type=password.
+        self.assertRegex(
+            html,
+            r'<input\s+type="password"\s+id="auth-modal-input"',
+        )
+
+    def test_shim_invokes_custom_auth_modal(self) -> None:
+        """The auth_required handler must drive ``_showAuthModal``."""
+        self.assertIn("_showAuthModal", _WS_SHIM_JS)
+        # The auth_required branch should call _showAuthModal(...).then(...)
+        # — not the bare prompt() that produced the elongated dialog.
+        self.assertRegex(_WS_SHIM_JS, r"_showAuthModal\(\)\.then\(")
+
+    def test_shim_keeps_prompt_only_as_fallback(self) -> None:
+        """``prompt()`` remains only as the modal-absent fallback path.
+
+        The shim is still loaded by tests that don't render the HTML
+        body, so the fallback must exist; but it must NOT be the path
+        used when the modal nodes are present.  We pin this by
+        verifying that every occurrence of ``prompt(`` in the shim
+        appears after the modal-presence guard.
+        """
+        idx_guard = _WS_SHIM_JS.find("if (!modal || !input")
+        self.assertGreater(
+            idx_guard, -1,
+            "Shim must contain a modal-presence guard before falling "
+            "back to prompt().",
+        )
+        # Every actual prompt('...') invocation (i.e. with a string
+        # literal argument — not a doc-comment mention) must appear
+        # after the modal-presence guard line.
+        import re
+        for match in re.finditer(r"""prompt\(['"]""", _WS_SHIM_JS):
+            self.assertGreater(
+                match.start(), idx_guard,
+                "prompt() may only be invoked as the fallback path "
+                "inside _showAuthModal, after the modal-presence guard.",
+            )
+
+
 class TestCachedPasswordReauthenticates(IsolatedAsyncioTestCase):
     """End-to-end: replaying the cached password succeeds without prompt."""
 

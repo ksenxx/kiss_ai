@@ -1667,6 +1667,20 @@ H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 \
         <div id="ask-user-slot"></div>
       </div>
     </div>
+
+    <div id="auth-modal" style="display:none;">
+      <div class="auth-modal-content">
+        <div class="auth-modal-title">Remote access password</div>
+        <input type="password" id="auth-modal-input" class="auth-modal-input"
+               autocomplete="current-password" placeholder="Enter password">
+        <div class="auth-modal-actions">
+          <button id="auth-modal-cancel" class="auth-modal-btn auth-modal-cancel"
+                  type="button">Cancel</button>
+          <button id="auth-modal-ok" class="auth-modal-btn auth-modal-ok"
+                  type="button">OK</button>
+        </div>
+      </div>
+    </div>
   </div>
 
   <script src="/media/highlight.min.js"></script>
@@ -1698,6 +1712,42 @@ _WS_SHIM_JS = r"""
   var _pending = [];
   var _authenticated = false;
   var _needsPassword = false;
+
+  // Custom auth modal — replaces the browser-native prompt(), which is
+  // rendered tall with wasted space below its buttons on most desktop
+  // browsers.  Falls back to prompt() when the modal nodes are not in
+  // the DOM (e.g. unit tests that load the shim in isolation).
+  function _showAuthModal() {
+    return new Promise(function(resolve) {
+      var modal  = document.getElementById('auth-modal');
+      var input  = document.getElementById('auth-modal-input');
+      var okBtn  = document.getElementById('auth-modal-ok');
+      var cnclBtn = document.getElementById('auth-modal-cancel');
+      if (!modal || !input || !okBtn || !cnclBtn) {
+        resolve(prompt('Enter remote access password:'));
+        return;
+      }
+      input.value = '';
+      modal.style.display = 'flex';
+      setTimeout(function() { try { input.focus(); } catch(e) {} }, 0);
+
+      function cleanup() {
+        modal.style.display = 'none';
+        okBtn.removeEventListener('click', onOk);
+        cnclBtn.removeEventListener('click', onCancel);
+        input.removeEventListener('keydown', onKey);
+      }
+      function onOk()     { var v = input.value; cleanup(); resolve(v); }
+      function onCancel() { cleanup(); resolve(null); }
+      function onKey(e) {
+        if (e.key === 'Enter')        { e.preventDefault(); onOk();     }
+        else if (e.key === 'Escape')  { e.preventDefault(); onCancel(); }
+      }
+      okBtn.addEventListener('click', onOk);
+      cnclBtn.addEventListener('click', onCancel);
+      input.addEventListener('keydown', onKey);
+    });
+  }
 
   window.acquireVsCodeApi = function() {
     return {
@@ -1741,11 +1791,13 @@ _WS_SHIM_JS = r"""
         // Stored password (if any) was rejected; drop it so a refresh
         // re-prompts instead of silently retrying the bad value.
         try { localStorage.removeItem('sorcar-remote-pwd'); } catch(e) {}
-        var pwd = prompt('Enter remote access password:');
-        if (pwd !== null) {
+        _showAuthModal().then(function(pwd) {
+          if (pwd === null || pwd === undefined) return;
           try { localStorage.setItem('sorcar-remote-pwd', pwd); } catch(e) {}
-          _ws.send(JSON.stringify({type: 'auth', password: pwd}));
-        }
+          if (_ws && _ws.readyState === WebSocket.OPEN) {
+            _ws.send(JSON.stringify({type: 'auth', password: pwd}));
+          }
+        });
         return;
       }
       window.dispatchEvent(new MessageEvent('message', {data: msg}));

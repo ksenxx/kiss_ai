@@ -1116,6 +1116,53 @@ body.remote-chat #welcome > #input-area {
 }
 .ask-user-submit:hover { opacity: 0.9; }
 
+/* ── Remote-Access Password (Auth) Modal ──────────────
+   Replaces the browser-native prompt(), which renders elongated with
+   wasted vertical space below its buttons.  Sized tightly around its
+   contents — no min-height on the input, no padding after the button
+   row. */
+#auth-modal {
+  position: fixed; inset: 0; background: rgb(0 0 0 / 70%);
+  display: flex; align-items: center; justify-content: center; z-index: 400;
+}
+
+.auth-modal-content {
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: 12px; padding: 20px; width: 90%; max-width: 360px;
+  box-sizing: border-box;
+}
+
+.auth-modal-title {
+  font-size: var(--fs-xl); font-weight: 600; color: var(--fg); margin-bottom: 12px;
+}
+
+.auth-modal-input {
+  width: 100%; box-sizing: border-box;
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+  border: 1px solid var(--border); border-radius: 6px; color: var(--fg);
+  font-size: var(--fs-lg); padding: 8px 10px; outline: none; margin-bottom: 12px;
+}
+.auth-modal-input:focus { border-color: var(--accent); }
+
+.auth-modal-actions {
+  display: flex; justify-content: flex-end; gap: 8px;
+}
+
+.auth-modal-btn {
+  border-radius: 6px; font-size: var(--fs-base); font-weight: 500;
+  padding: 6px 14px; cursor: pointer; transition: opacity 0.15s, background 0.15s;
+}
+.auth-modal-btn:hover { opacity: 0.9; }
+
+.auth-modal-cancel {
+  background: transparent; border: 1px solid var(--border); color: var(--fg);
+}
+
+.auth-modal-ok {
+  background: var(--accent); border: 1px solid var(--accent);
+  color: var(--vscode-button-foreground);
+}
+
 /* ── Markdown content rendering (shared via .md-body on system-prompt-body, prompt-body, rc-body) ── */
 .md-body p { margin: 4px 0; }
 .md-body :is(h1,h2,h3,h4,h5,h6) { margin: 8px 0 4px; font-weight: 600; color: var(--fg); }
@@ -1379,6 +1426,7 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 }
 
 /* ── Adjacent task (thread scroll) ──────────────────── */
+
 .adjacent-loader {
   text-align: center;
   padding: 10px;
