@@ -454,11 +454,7 @@ find_code_cli() {
     else
         echo "   WARNING: VSIX not found — skipping extension install"
     fi
-    # Clean up source claude_skills now that they are bundled in the extension
-    if [ -d "$CLAUDE_SKILLS_DIR" ]; then
-        rm -rf "$CLAUDE_SKILLS_DIR"
-        echo "   Cleaned up $CLAUDE_SKILLS_DIR (bundled in extension)"
-    fi
+    # Keep $CLAUDE_SKILLS_DIR in place — do not delete after extension install.
     echo ""
 
     # --- Ensure remote_password is set before starting kiss-web ---------------
