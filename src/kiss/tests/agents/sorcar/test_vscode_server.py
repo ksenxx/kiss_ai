@@ -1642,8 +1642,24 @@ class TestCollapsiblePanelsJS(unittest.TestCase):
         assert "merge-info-body" in self._js
 
     def test_merge_info_calls_add_collapse(self) -> None:
-        """Merge info calls addCollapse with the header."""
-        assert "addCollapse(mdEl, mdEl.querySelector('.merge-info-hdr'))" in self._js
+        """Merge info calls addCollapse with the header.
+
+        The renderMergeData function builds ``hdr`` as a local ``mkEl('div',
+        'merge-info-hdr')`` and passes it directly to addCollapse, so the
+        check accepts either the inline ``querySelector`` form or the
+        equivalent local-variable form.
+        """
+        inline_form = "addCollapse(mdEl, mdEl.querySelector('.merge-info-hdr'))"
+        local_var_form = "addCollapse(mdEl, hdr)"
+        if local_var_form in self._js:
+            # Verify hdr is in fact the .merge-info-hdr element.
+            idx = self._js.index("function renderMergeData(")
+            end = self._js.index("\n  }", idx) + 4
+            body = self._js[idx:end]
+            assert "const hdr = mkEl('div', 'merge-info-hdr')" in body
+            assert local_var_form in body
+        else:
+            assert inline_form in self._js
 
 
     def test_followup_bar_not_collapsible(self) -> None:
