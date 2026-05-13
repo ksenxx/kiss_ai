@@ -46,6 +46,7 @@ import ssl
 import tempfile
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 from typing import Any
 from unittest import IsolatedAsyncioTestCase
@@ -387,24 +388,30 @@ class TestM5SpawnRetriesOnImmediateExit(IsolatedAsyncioTestCase):
         Path(self._counter_file).write_text("0")
         # Fake cloudflared: exits with code 7 on the first invocation,
         # then runs successfully (sleeps).  Uses a counter file so the
-        # test is robust against argv differences.
+        # test is robust against argv differences.  Implemented as a
+        # /bin/bash script because bash startup has very low and
+        # consistent latency, ensuring the first invocation reliably
+        # exits within the production code's 250ms fail-fast window
+        # in ``_spawn_cloudflared``.
         cf = os.path.join(self._tmpdir, "cloudflared")
         Path(cf).write_text(
             "#!/bin/bash\n"
-            f'COUNTER_FILE="{self._counter_file}"\n'
-            'COUNT=$(cat "$COUNTER_FILE")\n'
-            'NEXT=$((COUNT+1))\n'
-            'echo -n "$NEXT" > "$COUNTER_FILE"\n'
-            'if [ "$COUNT" -lt 1 ]; then\n'
-            '    echo "INF bind: address already in use" >&2\n'
-            '    exit 7\n'
-            'fi\n'
-            'echo "INF https://m5-ok.trycloudflare.com" >&2\n'
-            'sleep 30\n'
+            f"COUNTER={self._counter_file}\n"
+            "COUNT=$(cat \"$COUNTER\" 2>/dev/null || echo 0)\n"
+            "echo $((COUNT + 1)) > \"$COUNTER\"\n"
+            "if [ \"$COUNT\" -lt 1 ]; then\n"
+            "  echo 'INF bind: address already in use' >&2\n"
+            "  exit 7\n"
+            "fi\n"
+            "echo 'INF https://m5-ok.trycloudflare.com' >&2\n"
+            "sleep 30\n"
         )
         os.chmod(cf, 0o755)
         self._old_path = os.environ.get("PATH", "")
-        os.environ["PATH"] = self._tmpdir + ":" + self._old_path
+        # Use a minimal PATH so any real cloudflared installed on the
+        # developer's machine (e.g. ~/.local/bin/cloudflared) cannot
+        # shadow our fake under full-suite test pollution.
+        os.environ["PATH"] = self._tmpdir + ":/usr/bin:/bin"
         self.port = _find_free_port()
         self.server = RemoteAccessServer(
             host="127.0.0.1", port=self.port, use_tunnel=False,
@@ -429,10 +436,21 @@ class TestM5SpawnRetriesOnImmediateExit(IsolatedAsyncioTestCase):
 
     async def test_spawn_retries_on_immediate_exit(self) -> None:
         """First spawn exits with rc=7, second succeeds; final proc is alive."""
+        # Widen the 250ms fail-fast window in production code so this
+        # test is not race-prone against bash startup latency: 2s is
+        # long enough for the fake to exit reliably, but still much
+        # less than real cloudflared's startup time.
+        real_sleep = time.sleep
+
+        def _wider_sleep(seconds: float) -> None:
+            real_sleep(2.0 if 0.2 < seconds < 0.3 else seconds)
+
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(
-            None, self.server._spawn_cloudflared, ["--url", "https://x"], 3,
-        )
+        with unittest.mock.patch.object(ws_mod.time, "sleep", _wider_sleep):
+            await loop.run_in_executor(
+                None, self.server._spawn_cloudflared,
+                ["--url", "https://x"], 3,
+            )
         proc = self.server._tunnel_proc
         self.assertIsNotNone(proc)
         assert proc is not None

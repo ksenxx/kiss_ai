@@ -121,7 +121,7 @@ class TestExceptionPaths(unittest.TestCase):
         """
         original_used = Base.global_budget_used
         try:
-            Base.global_budget_used = 201.0
+            Base.global_budget_used = 2001.0
 
             agent = RelentlessAgent("ExcSum-Fail")
             with tempfile.TemporaryDirectory() as td:
