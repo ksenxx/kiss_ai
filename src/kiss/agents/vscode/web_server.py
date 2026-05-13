@@ -2453,10 +2453,11 @@ class RemoteAccessServer:
         if ntfy_url:
             msg["ntfyUrl"] = ntfy_url
         self._printer.broadcast(msg)
-        assert self._loop is not None
-        await self._loop.run_in_executor(
-            None, _post_url_to_message_board, self._active_url,
-        )
+        if self.use_tunnel:
+            assert self._loop is not None
+            await self._loop.run_in_executor(
+                None, _post_url_to_message_board, self._active_url,
+            )
 
     def _terminate_tunnel_proc(self) -> None:
         """Terminate ``_tunnel_proc`` and reset per-process state.
@@ -2652,9 +2653,10 @@ class RemoteAccessServer:
 
         _save_url_file(self._local_url, tunnel_url)
         self._active_url = tunnel_url or self._local_url
-        await self._loop.run_in_executor(
-            None, _post_url_to_message_board, self._active_url,
-        )
+        if self.use_tunnel:
+            await self._loop.run_in_executor(
+                None, _post_url_to_message_board, self._active_url,
+            )
 
         self._last_ips = _get_local_ips()
         self._watchdog_task = asyncio.create_task(self._watchdog())
