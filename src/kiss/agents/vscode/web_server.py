@@ -527,8 +527,9 @@ def _stderr_reader_loop(
     proc: subprocess.Popen[str],
     stop_event: threading.Event | None = None,
     rate_limit_flag: list[bool] | None = None,
+    url_found_event: threading.Event | None = None,
 ) -> None:
-    """Read *stderr* lines until *parse* returns a URL or stderr hits EOF.
+    """Read *stderr* lines, parse for a URL, and keep draining until EOF.
 
     Stores the discovered URL in ``result[0]``.  Top-level helper so
     :func:`_read_url_from_stderr` does not need a closure.
@@ -540,6 +541,14 @@ def _stderr_reader_loop(
     writing all its output and exit before the reader has drained the
     pipe, causing the reader to bail out with stderr buffered data
     unread (and the URL therefore missed).
+
+    **Critically**, after finding the URL the loop does **not** return.
+    It continues draining stderr so the pipe buffer never fills up.
+    If the buffer were to fill (~64 KiB), ``cloudflared`` would block
+    on its next stderr write, which in Go deadlocks the whole process
+    (the logging mutex prevents any goroutine from making progress).
+    The result is an unhealthy tunnel that the watchdog force-restarts,
+    giving a new URL every few minutes.
 
     Args:
         stderr: A line-buffered text-mode file-like object.
@@ -560,8 +569,13 @@ def _stderr_reader_loop(
             rate-limited tunnel start (HTTP 429 / Cloudflare error
             1015) from a generic failure so the watchdog can apply a
             much longer backoff.
+        url_found_event: Optional event set when a URL is first
+            discovered.  Signals :func:`_read_url_from_stderr` to
+            return the URL immediately while this thread keeps
+            draining.
     """
     del proc
+    found = False
     for line in iter(stderr.readline, ""):
         if (
             rate_limit_flag is not None
@@ -569,10 +583,15 @@ def _stderr_reader_loop(
             and _is_rate_limit_line(line)
         ):
             rate_limit_flag[0] = True
-        url = parse(line)
-        if url is not None:
-            result[0] = url
-            return
+        if not found:
+            url = parse(line)
+            if url is not None:
+                result[0] = url
+                found = True
+                if url_found_event is not None:
+                    url_found_event.set()
+                # Keep draining stderr — do NOT return.
+                continue
         if stop_event is not None and stop_event.is_set():
             return
 
@@ -609,25 +628,41 @@ def _read_url_from_stderr(
     assert stderr is not None
     result: list[str | None] = [None]
     stop_event = threading.Event()
+    url_found_event = threading.Event()
     reader = threading.Thread(
         target=_stderr_reader_loop,
         args=(
             stderr, parse, result, proc, stop_event, rate_limit_flag,
+            url_found_event,
         ),
         daemon=True,
     )
     reader.start()
-    reader.join(timeout=timeout)
-    # H6: Signal the reader to exit on its next iteration.  The reader
-    # may still be blocked inside readline() (closing stderr from
-    # another thread does not unblock the in-flight read on every
-    # platform), but the moment the next log line arrives — or the
-    # subprocess dies and readline() returns "" — the loop will
-    # observe stop_event and exit, instead of running forever.  This
-    # bounds the leak to "one extra line consumed after timeout"
-    # rather than "thread leaks on every timed-out restart".
+    # Wait until the reader finds a URL *or* the timeout elapses.
+    # Unlike the previous reader.join(timeout), this unblocks as soon
+    # as the URL is discovered (the reader thread keeps running in the
+    # background to drain stderr so the pipe buffer never fills).
+    url_found_event.wait(timeout=timeout)
+    if result[0] is not None:
+        # URL found.  The reader daemon thread continues draining
+        # stderr in the background until cloudflared exits.  This is
+        # essential: if nobody reads stderr, the ~64 KiB OS pipe
+        # buffer fills, cloudflared blocks on write(), and in Go the
+        # logging mutex deadlocks the whole process — making the
+        # tunnel unresponsive and triggering a watchdog restart (with
+        # a new URL) every few minutes.
+        return result[0]
+    # H6: No URL found within *timeout*.  Signal the reader to exit on
+    # its next iteration.  The reader may still be blocked inside
+    # readline() (closing stderr from another thread does not unblock
+    # the in-flight read on every platform), but the moment the next
+    # log line arrives — or the subprocess dies and readline() returns
+    # "" — the loop will observe stop_event and exit, instead of
+    # running forever.  This bounds the leak to "one extra line
+    # consumed after timeout" rather than "thread leaks on every
+    # timed-out restart".
     stop_event.set()
-    return result[0]
+    return None
 
 
 def _parse_quick_tunnel_url(line: str) -> str | None:

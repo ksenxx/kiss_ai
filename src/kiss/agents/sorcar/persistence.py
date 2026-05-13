@@ -364,7 +364,12 @@ def _resolve_task_id(
     Returns:
         The resolved row id, or ``None`` if not found.
     """
-    return task_id if task_id is not None else _most_recent_task_id(db, task)
+    if task_id is not None:
+        row = db.execute(
+            "SELECT id FROM task_history WHERE id = ?", (task_id,)
+        ).fetchone()
+        return row["id"] if row else None
+    return _most_recent_task_id(db, task)
 
 
 def _save_task_result(
