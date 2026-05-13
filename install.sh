@@ -391,31 +391,7 @@ find_code_cli() {
     # --- 8. Download official Claude Code skills ------------------------------
     echo ">>> [8/11] Downloading official Claude Code skills..."
     CLAUDE_SKILLS_DIR="$PROJECT_DIR/src/kiss/agents/claude_skills"
-    if [ -d "$CLAUDE_SKILLS_DIR" ] && [ "$(ls -d "$CLAUDE_SKILLS_DIR"/*/ 2>/dev/null)" ]; then
-        echo "   Claude skills already present — skipping download"
-    else
-        mkdir -p "$CLAUDE_SKILLS_DIR"
-        SKILLS_TMP="$(mktemp -d)"
-        echo "   Cloning anthropics/claude-code plugins..."
-        if git clone --depth 1 --filter=blob:none --sparse \
-            https://github.com/anthropics/claude-code.git "$SKILLS_TMP/claude-code" 2>&1; then
-            cd "$SKILLS_TMP/claude-code"
-            git sparse-checkout set plugins 2>&1
-            # Copy each plugin directory into claude_skills
-            for plugin_dir in plugins/*/; do
-                if [ -d "$plugin_dir" ]; then
-                    plugin_name="$(basename "$plugin_dir")"
-                    cp -R "$plugin_dir" "$CLAUDE_SKILLS_DIR/$plugin_name"
-                fi
-            done
-            cd "$PROJECT_DIR"
-            SKILL_COUNT="$(ls -d "$CLAUDE_SKILLS_DIR"/*/ 2>/dev/null | wc -l | tr -d ' ')"
-            echo "   Installed $SKILL_COUNT Claude skills to $CLAUDE_SKILLS_DIR"
-        else
-            echo "   WARNING: Failed to download Claude Code skills"
-        fi
-        rm -rf "$SKILLS_TMP"
-    fi
+    bash "$PROJECT_DIR/scripts/fetch-claude-skills.sh"
     echo ""
 
     # --- 9. Build VS Code extension ------------------------------------------
