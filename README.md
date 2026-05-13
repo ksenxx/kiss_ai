@@ -2,7 +2,13 @@
 
 ![KISS Framework](assets/KISS-Sorcar.png)
 
-# KISS Sorcar: A General-Purpose and Software Engineering AI Assistant and IDE
+# KISS Sorcar
+
+### The open-source AI coding agent that beats Cursor and Claude Code on Terminal Bench.
+
+**Terminal Bench 2.0:  KISS Sorcar 62.2%  •  Cursor agent 61.7%  •  Claude Code 58%**
+
+*Free. Local. Bring your own API key. Runs as a VS Code extension and as a web/mobile app.*
 
 [![Version](https://img.shields.io/badge/version-2026.5.24-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
@@ -17,8 +23,6 @@
 </div>
 
 ______________________________________________________________________
-
-KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_principle), a well-known software engineering principle.
 
 <details>
 <summary><strong>Table of Contents</strong></summary>
@@ -39,9 +43,12 @@ KISS stands for ["Keep it Simple, Stupid"](https://en.wikipedia.org/wiki/KISS_pr
 # Introduction to KISS Sorcar
 
 ![KISS Sorcar](assets/KISS-Sorcar-UI.png)
-**KISS Sorcar** (named after [P. C. Sorcar, the Bengali magician](https://en.wikipedia.org/wiki/P._C._Sorcar)) is a **general-purpose assistant** and **integrated development environment** (IDE) built on top of the **KISS Agent Framework**, a simple agentic framework. It is implemented as a **Visual Studio Code extension** that runs **locally** and as a web/mobile app. It has **browser** support (using Chromium and Playwright), **multimodal** support, **Docker container** support, and can research topics using the internet. The agent can **run for hours** across multiple sessions. KISS Sorcar is **free** and **open-source**; all you need is a model API key from a provider such as Anthropic (recommended). A paper on KISS Sorcar is at [papers/kisssorcar/kiss_sorcar.pdf](papers/kisssorcar/kiss_sorcar.pdf). If you have Claude Code or OpenAI Codex in your PATH, you can use `cc/*` or `codex/*` models for chat.
 
-**KISS Sorcar scored 62.2% on Terminal Bench 2.0, compared with Cursor agent (61.7%) and Claude Code (58%).**
+**KISS Sorcar is the open-source AI coding agent that beats Cursor and Claude Code on Terminal Bench.** On Terminal Bench 2.0 it scored **62.2%**, ahead of **Cursor agent (61.7%)** and **Claude Code (58%)** — while remaining **free**, **open-source**, and **fully local**. You bring your own model API key (Anthropic recommended); nothing about your code or prompts is sent through our servers.
+
+It runs as a **Visual Studio Code extension** and as a **web/mobile app**, and is built on the **KISS Agent Framework** — a deliberately simple agent runtime that follows the [KISS principle](https://en.wikipedia.org/wiki/KISS_principle) ("Keep it Simple, Stupid"). The agent has **browser** support (Chromium + Playwright), **multimodal** support, **Docker container** support, can **research topics on the web**, and can **run for hours** across multiple sessions. If you have Claude Code or OpenAI Codex in your PATH, you can also use `cc/*` or `codex/*` models for chat.
+
+KISS Sorcar is named after [P. C. Sorcar, the Bengali magician](https://en.wikipedia.org/wiki/P._C._Sorcar). The paper is at [papers/kisssorcar/kiss_sorcar.pdf](papers/kisssorcar/kiss_sorcar.pdf).
 
 > Engineering principles are encoded in the agent's system prompt. See Section 5 of the [paper](papers/kisssorcar/kiss_sorcar.pdf) for details.
 
