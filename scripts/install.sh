@@ -1,6 +1,47 @@
 #!/bin/bash
 set -e
 
+install_git() {
+  if command -v git &> /dev/null; then
+    return 0
+  fi
+  echo "git not found in PATH; attempting to install git..."
+  case "$(uname -s)" in
+    Darwin)
+      if command -v brew &> /dev/null; then
+        brew install git
+      else
+        # xcode-select --install opens a GUI dialog; fall back if brew is absent
+        xcode-select --install 2> /dev/null || true
+        echo "Please install Homebrew or Xcode Command Line Tools to get git."
+      fi
+      ;;
+    Linux)
+      if command -v apt-get &> /dev/null; then
+        sudo apt-get update && sudo apt-get install -y git
+      elif command -v dnf &> /dev/null; then
+        sudo dnf install -y git
+      elif command -v yum &> /dev/null; then
+        sudo yum install -y git
+      elif command -v pacman &> /dev/null; then
+        sudo pacman -Sy --noconfirm git
+      elif command -v zypper &> /dev/null; then
+        sudo zypper install -y git
+      elif command -v apk &> /dev/null; then
+        sudo apk add git
+      else
+        echo "No supported package manager found; cannot install git automatically."
+      fi
+      ;;
+    *)
+      echo "Unsupported OS for automatic git install."
+      ;;
+  esac
+  command -v git &> /dev/null
+}
+
+install_git || true
+
 cd
 if [ -d ~/kiss_ai ]; then
   if [ -d ~/kiss_ai/.git ]; then
