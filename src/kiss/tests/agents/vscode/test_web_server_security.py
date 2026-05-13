@@ -674,6 +674,51 @@ class TestH6StderrReaderCleanup(unittest.TestCase):
         finally:
             proc.wait(timeout=2)
 
+    def test_reader_keeps_draining_stderr_after_url_found(self) -> None:
+        """The reader thread must keep draining stderr after finding URL.
+
+        If the reader exits after finding the URL, cloudflared's
+        stderr pipe buffer fills (~64 KiB), blocking the Go process
+        and causing a tunnel restart (new URL) every ~8 minutes.
+        """
+        # Subprocess emits URL early, then keeps writing to stderr.
+        # If reader stops draining, the pipe buffer fills and the
+        # subprocess blocks on write() — we detect that as a timeout.
+        proc = subprocess.Popen(
+            [
+                sys.executable, "-u", "-c",
+                "import sys, time\n"
+                "sys.stderr.write('INF https://drain-test.trycloudflare.com\\n')\n"
+                "sys.stderr.flush()\n"
+                # Write enough data to fill a 64 KiB pipe buffer if
+                # nobody is reading.  Each line is ~80 bytes; 2000
+                # lines ≈ 160 KiB, well over the buffer limit.
+                "for i in range(2000):\n"
+                "    sys.stderr.write(f'log line {i} padding' + 'x' * 50 + '\\n')\n"
+                "    sys.stderr.flush()\n"
+                "    time.sleep(0.001)\n"
+                "sys.stderr.write('DONE\\n')\n"
+                "sys.stderr.flush()\n",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            url = _read_url_from_stderr(
+                proc, _parse_quick_tunnel_url, timeout=5,
+            )
+            self.assertEqual(url, "https://drain-test.trycloudflare.com")
+            # The subprocess should finish writing all 2000 lines
+            # within a few seconds.  If the reader stopped draining,
+            # the subprocess would block and never exit.
+            exit_code = proc.wait(timeout=10)
+            self.assertEqual(exit_code, 0, "subprocess should exit cleanly")
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+                proc.wait(timeout=2)
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

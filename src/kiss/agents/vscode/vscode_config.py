@@ -17,7 +17,13 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-CONFIG_DIR = Path.home() / ".kiss"
+# ``KISS_HOME`` overrides the default ``~/.kiss`` location so that
+# tests (see ``src/kiss/tests/conftest.py``) can redirect persistent
+# state into a temporary directory without clobbering the user's real
+# ``~/.kiss/config.json`` — which the running ``kiss-web`` daemon
+# watches and would otherwise restart its cloudflared tunnel for every
+# time a test calls ``save_config({"remote_password": ...})``.
+CONFIG_DIR = Path(os.environ.get("KISS_HOME") or (Path.home() / ".kiss"))
 CONFIG_PATH = CONFIG_DIR / "config.json"
 
 DEFAULTS: dict[str, Any] = {
@@ -77,6 +83,11 @@ def save_config(data: dict[str, Any]) -> None:
     ``tunnel_token``) are preserved.  API keys are never written to
     the config file.
 
+    The write is **atomic** — content is staged in a sibling temp file
+    and then ``os.replace``-d into position so that concurrent readers
+    (e.g. the VS Code extension's ``readKissConfig``) never observe an
+    empty or partially-written ``config.json``.
+
     Args:
         data: Configuration dict.
     """
@@ -93,8 +104,13 @@ def save_config(data: dict[str, Any]) -> None:
     for k in DEFAULTS:
         if k in data:
             existing[k] = data[k]
-    with open(CONFIG_PATH, "w") as f:
-        json.dump(existing, f, indent=2)
+    serialized = json.dumps(existing, indent=2)
+    fd, tmp = tempfile.mkstemp(prefix=".kiss-config-", dir=str(CONFIG_DIR))
+    try:
+        os.write(fd, serialized.encode("utf-8"))
+    finally:
+        os.close(fd)
+    os.replace(tmp, CONFIG_PATH)
 
 
 def _get_user_shell() -> str:
