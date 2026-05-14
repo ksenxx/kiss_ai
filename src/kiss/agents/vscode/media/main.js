@@ -2969,6 +2969,17 @@
     updateQueueIndicator();
     if (running) {
       startTimer();
+    } else {
+      // Safety net: ensure the timer always stops when the running
+      // state flips to false.  Without this, if a ``status: running:
+      // false`` event arrives without a matching ``task_done`` (e.g.
+      // an ill-formed task_done with a non-matching tabId), the
+      // header keeps showing "Running …" forever.
+      stopTimer();
+      removeSpinner();
+      if (statusText.textContent.startsWith('Running')) {
+        statusText.textContent = 'Done';
+      }
     }
   }
 
