@@ -24,6 +24,9 @@ KEY = os.environ.get("GOVEE_API_KEY")
 if not KEY:
     sys.exit("error: GOVEE_API_KEY not set")
 
+# Devices to hide from `list` and from name lookups.
+EXCLUDED_NAMES = {"permanent outdoor lights", "string lights"}
+
 
 def _request(path: str, payload: dict | None = None) -> dict:
     url = f"{API}{path}"
@@ -35,8 +38,9 @@ def _request(path: str, payload: dict | None = None) -> dict:
 
 
 def list_devices() -> list[dict]:
-    """Return raw device list from /user/devices."""
-    return _request("/user/devices")["data"]
+    """Return device list from /user/devices, excluding EXCLUDED_NAMES."""
+    devs = _request("/user/devices")["data"]
+    return [d for d in devs if d["deviceName"].lower() not in EXCLUDED_NAMES]
 
 
 def find_device(name: str) -> dict:
