@@ -330,6 +330,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/anthropic/claude-opus-4.6": _mi(1000000, 5.00, 25.00),
     "openrouter/anthropic/claude-opus-4.6-fast": _mi(1000000, 30.00, 150.00),
     "openrouter/anthropic/claude-opus-4.7": _mi(1000000, 5.00, 25.00),
+    "openrouter/anthropic/claude-opus-4.7-fast": _mi(1000000, 30.00, 150.00),  # NEW
     "openrouter/anthropic/claude-sonnet-4": _mi(1000000, 3.00, 15.00),
     "openrouter/anthropic/claude-sonnet-4.5": _mi(1000000, 3.00, 15.00),
     "openrouter/anthropic/claude-sonnet-4.6": _mi(1000000, 3.00, 15.00),
@@ -369,7 +370,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/deepseek/deepseek-v4-flash": _mi(1048576, 0.126, 0.252),
     "openrouter/deepseek/deepseek-v4-pro": _mi(1048576, 0.435, 0.87, fc=False),
     "openrouter/essentialai/rnj-1-instruct": _mi(32768, 0.15, 0.15, fc=False),
-    "openrouter/google/gemini-2.0-flash-001": _mi(1048576, 0.10, 0.40),
+    "openrouter/google/gemini-2.0-flash-001": _mi(1000000, 0.10, 0.40),
     "openrouter/google/gemini-2.0-flash-lite-001": _mi(1048576, 0.075, 0.30),
     "openrouter/google/gemini-2.5-flash": _mi(1048576, 0.30, 2.50),
     "openrouter/google/gemini-2.5-flash-image": _mi(32768, 0.30, 2.50, fc=False, gen=False),
