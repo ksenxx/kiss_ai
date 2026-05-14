@@ -43,11 +43,11 @@ ______________________________________________________________________
 # Introduction to KISS Sorcar
 
 <div align="center">
-  <a href="https://github.com/ksenxx/kiss_ai/blob/main/assets/sorcar-main.mp4">
+  <a href="https://github.com/user-attachments/assets/9bc4e8ee-ead1-4611-8bed-7a84cbdeb9b5">
     <img src="assets/KISS-Sorcar-UI.png" alt="KISS Sorcar demo — click to play video" width="100%">
   </a>
   <br>
-  <em>▶ <a href="https://github.com/ksenxx/kiss_ai/blob/main/assets/sorcar-main.mp4">Click to watch the KISS Sorcar demo video</a></em>
+  <em>▶ <a href="https://github.com/user-attachments/assets/9bc4e8ee-ead1-4611-8bed-7a84cbdeb9b5">Click to watch the KISS Sorcar demo video</a></em>
 </div>
 
 **KISS Sorcar is the open-source AI coding agent that beats Cursor and Claude Code on Terminal Bench.** On Terminal Bench 2.0 it scored **62.2%**, ahead of **Cursor agent (61.7%)** and **Claude Code (58%)** — while remaining **free**, **open-source**, and **fully local**. You bring your own model API key (Anthropic recommended); nothing about your code or prompts is sent through our servers.
