@@ -62,6 +62,7 @@ build-backend = "hatchling.build"
 path = "src/kiss/_version.py"
 
 [tool.hatch.build.targets.sdist]
+exclude = ["bin/"]
 # Keep the sdist small enough for PyPI's 100 MB per-file limit. The directories
 # below are demo media (assets/), academic write-ups (papers/), local dev state
 # (sorcar.db, sorcar_reported_frauds/, jobs/), and the built VSIX (which is
