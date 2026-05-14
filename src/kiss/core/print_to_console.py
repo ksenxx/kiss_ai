@@ -71,8 +71,15 @@ class ConsolePrinter(Printer):
             str: Always the empty string.
         """
         if type == "text":
+            # Match BaseBrowserPrinter: silently drop empty / whitespace-only
+            # text so a blank line never appears in the terminal when nothing
+            # would have been shown in the browser.
+            if not str(content).strip():
+                return ""
             self._flush_newline()
-            self._console.print(content, markup=False, **kwargs)
+            # Default ``markup=True`` to mirror the browser printer, which
+            # also lets Rich parse markup before flattening to plain text.
+            self._console.print(content, **kwargs)
             return ""
         if type == "system_prompt":
             self._flush_newline()
@@ -111,9 +118,25 @@ class ConsolePrinter(Printer):
             self._format_tool_call(str(content), kwargs.get("tool_input", {}))
             return ""
         if type == "tool_result":
-            if kwargs.get("is_error", False):
+            # Match BaseBrowserPrinter: show the result for core tools
+            # (Bash/Read/Edit/Write) and for any error result, regardless
+            # of tool name.  Other tools stay silent on the success path.
+            is_error = bool(kwargs.get("is_error", False))
+            tool_name = kwargs.get("tool_name", "")
+            core_tools = {"Bash", "Read", "Edit", "Write"}
+            if is_error or tool_name in core_tools:
                 self._flush_newline()
-                self._print_tool_result(str(content))
+                self._print_tool_result(str(content), is_error=is_error)
+            return ""
+        if type == "usage_info":
+            # Match BaseBrowserPrinter: surface per-step usage info so the
+            # terminal user sees the same token / cost / step updates as
+            # the webview status bar.  The ``content`` string is already
+            # a human-readable summary built by KISSAgent.
+            text = str(content)
+            if text.strip():
+                self._flush_newline()
+                self._console.print(text, style="dim", highlight=False)
             return ""
         if type == "result":
             self._flush_newline()
@@ -197,15 +220,17 @@ class ConsolePrinter(Printer):
             )
         )
 
-    def _print_tool_result(self, content: str) -> None:
-        self._console.rule("FAILED", style="red", align="center")
+    def _print_tool_result(self, content: str, is_error: bool = False) -> None:
+        label = "FAILED" if is_error else "RESULT"
+        style = "red" if is_error else "green"
+        self._console.rule(label, style=style, align="center")
         if not self._bash_streamed:
             display = truncate_result(content)
             for line in display.splitlines():
                 self._file.write(line + "\n")
                 self._file.flush()
         self._bash_streamed = False
-        self._console.rule(style="red")
+        self._console.rule(style=style)
 
     def _handle_message(self, message: Any, **kwargs: Any) -> None:
         if hasattr(message, "subtype") and hasattr(message, "data"):
@@ -232,9 +257,9 @@ class ConsolePrinter(Printer):
             )
         elif hasattr(message, "content"):
             for block in message.content:
-                if hasattr(block, "is_error") and hasattr(block, "content") and block.is_error:
+                if hasattr(block, "is_error") and hasattr(block, "content"):
                     content = (
                         block.content if isinstance(block.content, str) else str(block.content)
                     )
                     self._flush_newline()
-                    self._print_tool_result(content)
+                    self._print_tool_result(content, is_error=bool(block.is_error))

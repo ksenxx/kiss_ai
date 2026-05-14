@@ -369,29 +369,69 @@ class PrinterEquivalenceTest(unittest.TestCase):
         for frag in fragments:
             self._assert_in_both(frag, pair)
 
+    def test_empty_text_is_dropped_in_both(self) -> None:
+        """Whitespace-only ``type="text"`` must not produce output in
+        either sink.  Previously the ConsolePrinter wrote a blank line
+        while the BaseBrowserPrinter dropped the event silently.
+        """
+        pair = _make_pair()
+        pair.both_print("   ", type="text")
+        pair.both_print("\n", type="text")
+        pair.both_print("", type="text")
+        self.assertEqual(pair.console_buf.getvalue(), "")
+        text_deltas = [
+            ev for ev in pair.browser.events if ev.get("type") == "text_delta"
+        ]
+        self.assertEqual(text_deltas, [])
+
+    def test_message_with_non_error_content_block_appears_in_both(self) -> None:
+        """A ``message`` carrying ``content`` blocks with ``is_error=False``
+        must reach both sinks.  Previously the ConsolePrinter only
+        rendered the block when ``is_error`` was truthy, hiding
+        successful tool blocks that the browser surfaces.
+        """
+        pair = _make_pair()
+
+        class _Block:
+            def __init__(self, content: str, is_error: bool) -> None:
+                self.content = content
+                self.is_error = is_error
+
+        class _Msg:
+            def __init__(self, blocks: list[_Block]) -> None:
+                self.content = blocks
+
+        block_text = "tool finished successfully"
+        msg = _Msg([_Block(block_text, is_error=False)])
+        pair.both_print(msg, type="message")
+        self._assert_in_both(block_text, pair)
+        tool_results = [
+            ev for ev in pair.browser.events if ev.get("type") == "tool_result"
+        ]
+        self.assertEqual(len(tool_results), 1)
+        self.assertIs(tool_results[0]["is_error"], False)
+        self.assertIn(block_text, tool_results[0]["content"])
+
     # ------------------------------------------------------------------
-    # Known divergences — pin current behaviour so unintentional changes
-    # in either printer are caught.  When the divergences are fixed,
-    # these tests should be updated or deleted.
+    # Previously-known divergences — now fixed.  These tests assert
+    # that the content reaches both sinks.  They retain their previous
+    # names so blame/history is preserved.
     # ------------------------------------------------------------------
 
     def test_known_divergence_non_error_tool_result(self) -> None:
-        """Console hides success ``tool_result``; browser shows it for
-        core tools (Bash/Read/Edit/Write).
+        """``tool_result`` with ``is_error=False`` for a core tool
+        (Bash/Read/Edit/Write) must reach both sinks.
 
-        This is a known divergence (see analysis in chat history).  This
-        test pins both behaviours so an accidental change in either is
-        caught.  When the divergence is fixed, update this test to use
-        ``_assert_in_both``.
+        Previously the ConsolePrinter hid the success path; that
+        divergence has been fixed so the terminal user now sees the
+        same Read/Edit/Write success body that the browser shows.
         """
         pair = _make_pair()
         result_content = "file contents go here"
         pair.both_print(
             result_content, type="tool_result", is_error=False, tool_name="Read",
         )
-        # Console: silent.
-        self.assertNotIn(result_content, pair.console_text())
-        # Browser: emitted.
+        self._assert_in_both(result_content, pair)
         tool_results = [
             ev for ev in pair.browser.events if ev.get("type") == "tool_result"
         ]
@@ -400,17 +440,18 @@ class PrinterEquivalenceTest(unittest.TestCase):
         self.assertIs(tool_results[0]["is_error"], False)
 
     def test_known_divergence_usage_info(self) -> None:
-        """``usage_info`` is broadcast by the browser printer but the
-        console printer has no branch for it (it returns silently).
-        Pin the current behaviour.
+        """``usage_info`` content must reach both sinks.
+
+        Previously the ConsolePrinter had no branch for ``usage_info``
+        and silently dropped the call; that divergence has been fixed
+        so the terminal user now sees the same per-step token / cost /
+        step summary that the browser status bar shows.
         """
         pair = _make_pair()
         pair.both_print(
             "step 3", type="usage_info", total_tokens=100, cost="$0.0010", total_steps=3,
         )
-        # Console: nothing was written.
-        self.assertEqual(pair.console_buf.getvalue(), "")
-        # Browser: a usage_info event was broadcast.
+        self._assert_in_both("step 3", pair)
         usage = [ev for ev in pair.browser.events if ev.get("type") == "usage_info"]
         self.assertEqual(len(usage), 1)
         self.assertEqual(usage[0]["total_tokens"], 100)
