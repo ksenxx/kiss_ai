@@ -138,6 +138,7 @@ sorcar -t 'Can you show me the detailed step-by-step workflow of gepa.py?'
 | `-f`, `--file` | Path to a file whose contents to use as the task |
 | `-m`, `--model_name` | LLM model name (default: `claude-opus-4-6`) |
 | `-e`, `--endpoint` | Custom endpoint for a local model |
+| `--header` | Custom HTTP header in `Key:Value` form; may be repeated |
 | `-b`, `--max_budget` | Maximum budget in USD |
 | `-w`, `--work_dir` | Working directory |
 | `-v`, `--verbose` | Print output to console (default: true) |

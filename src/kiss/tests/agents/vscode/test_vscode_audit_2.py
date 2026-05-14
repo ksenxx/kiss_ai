@@ -269,12 +269,11 @@ class TestRunTaskStatusBroadcastInsideLock(unittest.TestCase):
             if finally_idx is not None and "_state_lock" in line and "with" in line:
                 if lock_idx is None:
                     lock_idx = i
-            if (
-                lock_idx is not None
-                and "broadcast" in line
-                and "running" in line
-                and "False" in line
-            ):
+            # The ``broadcast(...)`` call is split across multiple source
+            # lines, so look for the unique ``"running": False`` payload
+            # token (always on the dict-literal line) instead of trying to
+            # match call + payload on the same line.
+            if lock_idx is not None and '"running": False' in line:
                 broadcast_idx = i
                 break
 
