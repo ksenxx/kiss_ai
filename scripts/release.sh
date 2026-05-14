@@ -219,7 +219,10 @@ build_vscode_extension() {
     cp "$README_FILE" "$VSCODE_EXT_DIR/README.md"
     print_info "Copied $README_FILE to $VSCODE_EXT_DIR/README.md"
     cd "$VSCODE_EXT_DIR"
-    npm ci
+    # --no-audit/--no-fund: silence post-install audit summary and funding nag
+    # (vulnerabilities live in transitive dev-deps of gts/inquirer with no fix
+    # available; users were seeing the audit summary at the end of every release).
+    npm ci --no-audit --no-fund
     npm run package
 
     if [[ ! -f "kiss-sorcar.vsix" ]]; then
