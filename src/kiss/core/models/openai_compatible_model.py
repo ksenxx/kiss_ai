@@ -152,10 +152,12 @@ class OpenAICompatibleModel(Model):
             prompt: The initial user prompt to start the conversation.
             attachments: Optional list of file attachments (images, PDFs) to include.
         """
+        extra_headers = self.model_config.get("extra_headers") or {}
         self.client = OpenAI(
             base_url=self.base_url,
             api_key=self.api_key,
             timeout=1800.0,
+            default_headers=extra_headers,
         )
         self.conversation = []
         system_instruction = self.model_config.get("system_instruction")
