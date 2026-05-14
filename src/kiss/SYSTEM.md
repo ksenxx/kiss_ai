@@ -125,7 +125,7 @@ Before calling `finish(success=True)`:
 - Do not install the KISS Sorcar extension from inside Sorcar.
 - KISS Sorcar paper: https://github.com/ksenxx/kiss_ai/blob/main/papers/kisssorcar/kiss_sorcar.tex
 - Third-party agents: kiss/agents/third_party_agents
-- Claude SKILLS: kiss/agents/claude_skills.  You can use them as necessary.
+- Claude SKILLS: kiss/agents/claude_skills. You can use them as necessary.
 - Authenticate unauthenticated third-party agents; ask the user only when a page requires human authentication.
 - Read PWD/SORCAR.md for overriding project-specific instructions.
   \</sorcar_specific>
