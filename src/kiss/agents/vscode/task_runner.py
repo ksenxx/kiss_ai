@@ -81,7 +81,9 @@ class _TaskRunnerMixin:
         tab_id = cmd.get("tabId", "")
         self.printer._thread_local.tab_id = tab_id
         try:
-            self.printer.broadcast({"type": "status", "running": True})
+            self.printer.broadcast(
+                {"type": "status", "running": True, "tabId": tab_id},
+            )
             self._run_task_inner(cmd)
         finally:
             with self._state_lock:
@@ -92,7 +94,9 @@ class _TaskRunnerMixin:
                     tab.user_answer_queue = None
                     tab.is_task_active = False
                     tab.is_running_non_wt = False
-                self.printer.broadcast({"type": "status", "running": False})
+                self.printer.broadcast(
+                    {"type": "status", "running": False, "tabId": tab_id},
+                )
 
     @staticmethod
     def _capture_pre_snapshot(
