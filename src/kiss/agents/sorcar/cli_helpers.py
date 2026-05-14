@@ -55,6 +55,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "-e", "--endpoint", type=str, default=None, help="Custom endpoint for local model"
     )
     parser.add_argument(
+        "--header", action="append", type=str, default=None,
+        help="Custom HTTP header (format: 'Key:Value'). Can be used multiple times.",
+    )
+    parser.add_argument(
         "-b", "--max_budget", type=float, default=DEFAULT_CONFIG.max_budget,
         help="Maximum budget in USD",
     )
@@ -129,6 +133,14 @@ def _build_run_kwargs(args: argparse.Namespace) -> dict[str, Any]:
     model_config: dict[str, Any] = {}
     if args.endpoint:
         model_config["base_url"] = args.endpoint
+    if args.header:
+        headers = {}
+        for h in args.header:
+            if ":" in h:
+                key, value = h.split(":", 1)
+                headers[key.strip()] = value.strip()
+        if headers:
+            model_config["extra_headers"] = headers
 
     return {
         "prompt_template": task_description,
