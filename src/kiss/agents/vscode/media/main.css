@@ -282,7 +282,9 @@ body {
   align-items: center;
   justify-content: center;
   transition: color 0.15s;
+  user-select: none;
 }
+#task-panel-chevron * { user-select: none; }
 #task-panel-chevron:hover { color: var(--fg); }
 #task-panel-chevron svg { transition: transform 0.2s ease; }
 #task-panel-chevron.expanded svg { transform: rotate(90deg); }
