@@ -149,12 +149,11 @@ class TestRunTaskStatusBroadcastFixed(unittest.TestCase):
                 finally_idx = i
             if finally_idx is not None and "_state_lock" in line and "with" in line:
                 lock_idx = i
-            if (
-                finally_idx is not None
-                and "running" in line
-                and "False" in line
-                and "broadcast" in line
-            ):
+            # The ``broadcast(...)`` call is split across multiple source
+            # lines, so anchor on the unique ``"running": False`` payload
+            # token (always on the dict-literal line) instead of expecting
+            # call + payload on the same line.
+            if finally_idx is not None and '"running": False' in line:
                 broadcast_false_idx = i
 
         assert lock_idx is not None, "Found _state_lock in finally"
