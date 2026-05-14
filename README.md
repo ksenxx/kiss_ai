@@ -10,7 +10,7 @@
 
 *Free. Local. Bring your own API key. Runs as a VS Code extension and as a web/mobile app.*
 
-[![Version](https://img.shields.io/badge/version-2026.5.27-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
+[![Version](https://img.shields.io/badge/version-2026.5.28-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
 [![Website](https://img.shields.io/badge/website-kisssorcar.github.io-1976d2?style=flat-square)](https://kisssorcar.github.io/)
@@ -43,9 +43,7 @@ ______________________________________________________________________
 # Introduction to KISS Sorcar
 
 <div align="center">
-  <video src="assets/sorcar-main.mp4" controls muted loop playsinline poster="assets/KISS-Sorcar-UI.png" width="100%">
-    <a href="assets/sorcar-main.mp4">Watch the KISS Sorcar demo video</a>
-  </video>
+  <img src="assets/sorcar-main.gif" alt="KISS Sorcar demo" width="100%">
 </div>
 
 **KISS Sorcar is the open-source AI coding agent that beats Cursor and Claude Code on Terminal Bench.** On Terminal Bench 2.0 it scored **62.2%**, ahead of **Cursor agent (61.7%)** and **Claude Code (58%)** — while remaining **free**, **open-source**, and **fully local**. You bring your own model API key (Anthropic recommended); nothing about your code or prompts is sent through our servers.
