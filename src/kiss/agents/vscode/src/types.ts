@@ -214,7 +214,7 @@ type ToWebviewMessageBody =
     }
   | {type: 'measureSize'}
   | {type: 'updateSetting'; key: string; value: unknown}
-  | {type: 'openSubagentTab'; tabId?: string; parentTabId?: string; taskDescription?: string; taskIndex?: number}
+  | {type: 'openSubagentTab'; subTabId?: string; parentTabId?: string; taskDescription?: string; taskIndex?: number}
   | {type: 'subagentDone'; tabId?: string; success?: boolean};
 
 /** Command sent to Python backend */
