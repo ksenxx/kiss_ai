@@ -51,14 +51,6 @@ and rethink the strategy from scratch.
 SUMMARIZER_PROMPT = """
 # Summarizer
 
-<<<<<<< HEAD
-The trajectory of the agent is stored in the file: {trajectory_file}
-
-# Instructions
-- Read the trajectory file and analyze it.  The trajectory file could be large.
-- Return a precise chronologically-ordered list of things the agent did
-  with the reason for doing that along with relevant code snippets
-=======
 The executor's trajectory is saved at: {trajectory_path}
 
 Read relevant portions of the file using your tools:
@@ -66,7 +58,11 @@ Read relevant portions of the file using your tools:
 - Read the last ~200 lines to see the most recent steps and outcomes.
 - Do NOT read the entire file; it may be very large.
 
-Synthesize what was accomplished and call finish(success=True, summary="detailed summary of work done so far").
+# Instructions
+- Analyze the trajectory file.
+- Return a precise chronologically-ordered list of things the agent did
+  with the reason for doing that along with relevant code snippets.
+- Call finish(success=True, summary="detailed summary of work done so far").
 """
 
 JUDGE_PROMPT = """
@@ -230,28 +226,8 @@ class RelentlessAgent(Base):
                     max_budget=remaining_budget,
                     model_config=self.model_config,
                     printer=self.printer,
-<<<<<<< HEAD
                     verbose=self.verbose,
                     attachments=attachments if session == 0 else None,
-=======
-                    attachments=attachments if trial == 0 else None,
-                )
-            except Exception:
-                summarizer_agent = KISSAgent(f"{self.name} Summarizer")
-                summarizer_result = summarizer_agent.run(
-                    model_name=self.summarizer_model_name,
-                    prompt_template=SUMMARIZER_PROMPT,
-                    tools=all_tools,
-                    max_steps=self.max_steps,
-                    max_budget=self.max_budget,
-                    printer=self.printer,
-                    arguments={
-                        "trajectory_path": str(executor.get_trajectory_path()),
-                    },
-                )
-                summary_text = yaml.safe_load(summarizer_result).get(
-                    "summary", "No summary available."
->>>>>>> features-for-main
                 )
             except Exception as exc:
                 logger.debug("Exception caught", exc_info=True)
