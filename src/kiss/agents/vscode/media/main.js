@@ -435,17 +435,15 @@
       label.textContent = tab.title;
       el.appendChild(label);
 
-      // Show close button for regular tabs and completed subagent tabs
-      if (!tab.isSubagentTab || tab.isDone) {
-        const closeBtn = document.createElement('span');
-        closeBtn.className = 'chat-tab-close';
-        closeBtn.textContent = '\u00d7';
-        closeBtn.addEventListener('click', e => {
-          e.stopPropagation();
-          closeTab(tab.id);
-        });
-        el.appendChild(closeBtn);
-      }
+      // Show close button for all tabs (regular and subagent)
+      const closeBtn = document.createElement('span');
+      closeBtn.className = 'chat-tab-close';
+      closeBtn.textContent = '\u00d7';
+      closeBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        closeTab(tab.id);
+      });
+      el.appendChild(closeBtn);
 
       el.addEventListener('click', () => {
         switchToTab(tab.id);
