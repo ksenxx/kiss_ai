@@ -5,18 +5,20 @@ accumulate tasks and results in the same chat session history.  Uses a
 real HTTP server (no mocks/patches) that returns ``finish`` tool-call
 responses in the OpenAI chat-completion format.
 
-Note: concurrent agent tests are avoided because the persistence module's
-singleton SQLite connection is not fully thread-safe for concurrent
-reads and writes (``_load_chat_context`` doesn't hold ``_db_lock``).
-Instead, we run agents sequentially and verify shared-chat_id behavior.
+Includes both sequential and concurrent (``ThreadPoolExecutor``) tests.
+The persistence module uses per-thread SQLite connections with a
+read-write lock, making concurrent access safe.
 """
 
 from __future__ import annotations
 
 import json
+import random
 import shutil
 import tempfile
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -79,7 +81,7 @@ class _FinishHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def log_message(self, fmt: str, *args: object) -> None:  # noqa: A002
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
         pass
 
 
@@ -378,3 +380,194 @@ class TestChatContextVisibleToSubAgents:
         assert "task-b" in prompt2
         assert "result-a" in prompt2
         assert "result-b" in prompt2
+
+
+class TestConcurrentThreadPoolExecutor:
+    """Concurrent sub-agents via ThreadPoolExecutor with shared chat_id.
+
+    These tests verify that the persistence module's per-thread SQLite
+    connections and read-write lock correctly handle concurrent reads
+    and writes from multiple agent threads.
+    """
+
+    def setup_method(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.saved = _redirect(self.tmpdir)
+        self.srv, self.url = _start_server()
+
+    def teardown_method(self) -> None:
+        self.srv.shutdown()
+        th._close_db()
+        _restore(self.saved)
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_concurrent_agents_accumulate_in_shared_chat(self) -> None:
+        """Multiple agents run concurrently via ThreadPoolExecutor.
+
+        All tasks must appear in the shared chat_id's history.
+        """
+        model_config = {"base_url": self.url, "api_key": "test-key"}
+
+        # Parent establishes the chat session
+        parent = ChatSorcarAgent("parent")
+        parent.run(
+            prompt_template="parent task",
+            model_name="gpt-4o-mini",
+            model_config=model_config,
+            work_dir=self.tmpdir,
+        )
+        chat_id = parent.chat_id
+        assert chat_id
+
+        sub_tasks = [f"concurrent-task-{i}" for i in range(5)]
+
+        def run_sub(task_name: str) -> str:
+            # Random sleep < 0.1s to surface race conditions
+            time.sleep(random.uniform(0.01, 0.08))
+            agent = ChatSorcarAgent(f"P-{task_name}")
+            agent.resume_chat_by_id(chat_id)
+            return agent.run(
+                prompt_template=task_name,
+                model_name="gpt-4o-mini",
+                model_config=model_config,
+                work_dir=self.tmpdir,
+            )
+
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            results = list(pool.map(run_sub, sub_tasks))
+
+        # All sub-agents should have returned results
+        assert len(results) == 5
+
+        # All tasks (parent + 5 concurrent) in the same chat
+        context = _load_chat_context(chat_id)
+        assert len(context) == 6  # 1 parent + 5 sub-tasks
+        recorded_tasks = {e["task"] for e in context}
+        assert "parent task" in recorded_tasks
+        for st in sub_tasks:
+            assert st in recorded_tasks
+        # All results should be "done"
+        for entry in context:
+            assert entry["result"] == "done"
+
+    def test_concurrent_db_writes_no_errors(self) -> None:
+        """Direct concurrent writes to the DB don't raise errors.
+
+        Exercises the write lock under contention by adding tasks and
+        saving results from multiple threads simultaneously.
+        """
+        chat_id = _allocate_chat_id()
+        errors: list[str] = []
+
+        def writer(idx: int) -> None:
+            time.sleep(random.uniform(0.01, 0.05))
+            try:
+                task_id, _ = _add_task(
+                    f"concurrent-write-{idx}", chat_id=chat_id
+                )
+                time.sleep(random.uniform(0.005, 0.02))
+                _save_task_result(
+                    result=f"result-{idx}", task_id=task_id
+                )
+            except Exception as exc:
+                errors.append(f"writer-{idx}: {exc}")
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(writer, range(10)))
+
+        assert not errors, f"Concurrent write errors: {errors}"
+
+        context = _load_chat_context(chat_id)
+        assert len(context) == 10
+        results = {e["result"] for e in context}
+        assert results == {f"result-{i}" for i in range(10)}
+
+    def test_concurrent_reads_while_writing(self) -> None:
+        """Concurrent reads don't fail while writes are happening.
+
+        Spawns writer and reader threads simultaneously to verify the
+        read-write lock allows safe concurrent access.
+        """
+        chat_id = _allocate_chat_id()
+        read_errors: list[str] = []
+        write_errors: list[str] = []
+
+        def writer(idx: int) -> None:
+            time.sleep(random.uniform(0.005, 0.03))
+            try:
+                task_id, _ = _add_task(
+                    f"rw-task-{idx}", chat_id=chat_id
+                )
+                _save_task_result(
+                    result=f"rw-result-{idx}", task_id=task_id
+                )
+            except Exception as exc:
+                write_errors.append(f"writer-{idx}: {exc}")
+
+        def reader(idx: int) -> None:
+            time.sleep(random.uniform(0.005, 0.03))
+            try:
+                ctx = _load_chat_context(chat_id)
+                # Every entry that has been committed should have
+                # consistent task/result pairs
+                for entry in ctx:
+                    assert entry["task"] is not None
+            except Exception as exc:
+                read_errors.append(f"reader-{idx}: {exc}")
+
+        with ThreadPoolExecutor(max_workers=12) as pool:
+            # 8 writers + 8 readers interleaved
+            futures = []
+            for i in range(8):
+                futures.append(pool.submit(writer, i))
+                futures.append(pool.submit(reader, i))
+            for f in futures:
+                f.result()
+
+        assert not write_errors, f"Write errors: {write_errors}"
+        assert not read_errors, f"Read errors: {read_errors}"
+
+        context = _load_chat_context(chat_id)
+        assert len(context) == 8
+
+    def test_concurrent_agents_with_random_sleep(self) -> None:
+        """Stress test: 8 concurrent agents with random delays.
+
+        Each agent adds a random sleep before persisting to maximize
+        the chance of interleaved DB operations.
+        """
+        model_config = {"base_url": self.url, "api_key": "test-key"}
+        chat_id = _allocate_chat_id()
+        # Seed one task so the chat exists
+        t0, chat_id = _add_task("seed-task", chat_id=chat_id)
+        _save_task_result(result="seed-result", task_id=t0)
+
+        task_names = [f"stress-{i}" for i in range(8)]
+        errors: list[str] = []
+
+        def run_agent(name: str) -> None:
+            time.sleep(random.uniform(0.01, 0.08))
+            try:
+                agent = ChatSorcarAgent(f"S-{name}")
+                agent.resume_chat_by_id(chat_id)
+                agent.run(
+                    prompt_template=name,
+                    model_name="gpt-4o-mini",
+                    model_config=model_config,
+                    work_dir=self.tmpdir,
+                )
+            except Exception as exc:
+                errors.append(f"{name}: {exc}")
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(run_agent, task_names))
+
+        assert not errors, f"Agent errors: {errors}"
+
+        context = _load_chat_context(chat_id)
+        # seed-task + 8 stress tasks
+        assert len(context) == 9
+        recorded = {e["task"] for e in context}
+        assert "seed-task" in recorded
+        for tn in task_names:
+            assert tn in recorded
