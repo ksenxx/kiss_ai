@@ -22,7 +22,6 @@ import pytest
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.vscode.server import VSCodeServer
-from kiss.models.openai import AnthropicModel
 
 
 class MockPrinter:
