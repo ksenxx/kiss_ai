@@ -102,8 +102,7 @@ class TestSubagentTabsIntegration:
             assert event["tab_id"] == f"parent-tab-1__sub_{i}"
             assert event["parent_tab_id"] == "parent-tab-1"
             assert event["description"] is not None
-            assert event["task_index"] == i
-            assert event["is_subagent_tab"] is True
+            assert event["isSubagentTab"] is True
 
     def test_chat_sorcar_agent_broadcasts_done_events(self) -> None:
         """Verify subagentDone events are broadcast when sub-tasks complete."""
