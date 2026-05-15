@@ -131,8 +131,8 @@ class ChatSorcarAgent(SorcarAgent):
                     "type": "openSubagentTab",
                     "tab_id": sub_tab_id,
                     "parent_tab_id": parent_tab_id,
-                    "task_description": task[:200],
-                    "task_index": i,
+                    "description": task[:200],
+                    "taskIndex": i,
                     "isSubagentTab": True,
                 })
 
