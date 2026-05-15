@@ -2753,6 +2753,30 @@
           demoToggleBtn.classList.toggle('active', demoMode);
         } else if (sKey === 'auto_commit') {
           // Auto-commit triggered server-side
+        } else if (sKey === 'custom_endpoint' && typeof sVal === 'string') {
+          const epEl = document.getElementById('cfg-custom-endpoint');
+          if (epEl) epEl.value = sVal;
+        } else if (sKey === 'custom_api_key' && sVal === true) {
+          // Custom API key updated server-side; mask in UI
+          const akEl = document.getElementById('cfg-custom-api-key');
+          if (akEl && !akEl.value) akEl.value = '••••••••';
+        } else if (sKey === 'custom_headers' && sVal === true) {
+          // Custom headers updated server-side
+        } else if (sKey.endsWith('_api_key') && sVal === true) {
+          // API key updated server-side; map param name to env var
+          const envMap = {
+            gemini_api_key: 'GEMINI_API_KEY',
+            openai_api_key: 'OPENAI_API_KEY',
+            anthropic_api_key: 'ANTHROPIC_API_KEY',
+            together_api_key: 'TOGETHER_API_KEY',
+            openrouter_api_key: 'OPENROUTER_API_KEY',
+            minimax_api_key: 'MINIMAX_API_KEY',
+          };
+          const envVar = envMap[sKey];
+          if (envVar) {
+            const keyEl = document.getElementById('cfg-key-' + envVar);
+            if (keyEl && !keyEl.value) keyEl.value = '••••••••';
+          }
         }
         break;
       }
