@@ -53,7 +53,7 @@ def setup_cron_job() -> None:
         print(f"\n✓ Cron job created: {job_id}")
         print(f"\nCron entry:")
         print(f"  {cron_entry}")
-        
+
         # List all jobs
         jobs = client.list_jobs()
         print(f"\nTotal KISS jobs installed: {len(jobs)}")
@@ -69,23 +69,23 @@ def show_next_steps() -> None:
     print("\n" + "=" * 70)
     print("NEXT STEPS - Manual Authentication Required")
     print("=" * 70)
-    
+
     print("\n1. SLACK AUTHENTICATION (learningsystems workspace):")
     print("   Run this command in a terminal:")
     print("   $ python -m kiss.agents.third_party_agents.slack_agent --workspace learningsystems")
     print("   Follow the prompts to authenticate with Slack.")
-    
+
     print("\n2. IMESSAGE AUTHENTICATION:")
     print("   On macOS, run this command:")
     print("   $ python -m kiss.agents.third_party_agents.imessage_agent")
     print("   OR use BlueBubbles:")
     print("   $ python -m kiss.agents.third_party_agents.bluebubbles_agent")
-    
+
     print("\n3. SEND TEST MESSAGE:")
     print("   After authentication, run:")
     print("   $ python -m kiss.agents.third_party_agents.imessage_agent")
     print("   Then use prompt: 'send \"Hello\" to 5102893391'")
-    
+
     print("\n4. MONITOR THE POLLER:")
     print("   View logs at: ~/.kiss/slack_channel_sorcar_poller/poller.log")
     print("   Check cron logs: log stream --predicate 'process == \"cron\"'")
