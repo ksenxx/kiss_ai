@@ -4,6 +4,8 @@ Each test runs a real LLM call with a focused task and inspects the agent's
 tool-call sequence to confirm compliance with a specific SYSTEM.md rule.
 
 Violations confirmed by database analysis of 91 tasks from 2026-05-14:
+
+  Round 1 (tool-call sequence violations):
   - USER_PREFS.md read first via Read(): 10% compliance (54/60 violated)
   - SORCAR.md read: 8% compliance (55/60 violated)
   - Agent uses Bash(cat) instead of Read(): 11 tasks
@@ -11,6 +13,13 @@ Violations confirmed by database analysis of 91 tasks from 2026-05-14:
   - Edit without prior Read: 12% violation rate (7/60)
   - No uv run check for code tasks: 70% skip rate (7/10)
   - Web research under 30 sites: 4 tasks (1-5 URLs, curl used to evade)
+
+  Round 2 (result-quality violations):
+  - Self-Improvement Loop: 0/91 tasks proactively updated USER_PREFS.md
+  - Web research info file: 0/4 research tasks created information-*.md
+  - Fabricated source claims: task 1180 claims "30+ sources" with 4 URLs
+  - Real-time data hallucinations: tasks 1231/1234 wrong year (2025 vs 2026)
+  - Visibility meta-descriptions: tasks 1177/1205 "Greeted the user" in summary
 """
 
 from __future__ import annotations
@@ -400,6 +409,227 @@ def test_web_research_creates_information_file() -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Test 8: Self-Improvement Loop — agent must update USER_PREFS.md when learning
+# SYSTEM.md: "Before calling finish, check whether you learned anything new"
+# DB evidence: 0/91 tasks proactively updated USER_PREFS.md
+# ---------------------------------------------------------------------------
+
+def test_user_prefs_updated_after_learning() -> None:
+    """Agent must update USER_PREFS.md when it discovers new project info."""
+    work_dir = tempfile.mkdtemp()
+    prefs_path = os.path.join(work_dir, "USER_PREFS.md")
+    with open(prefs_path, "w") as f:
+        f.write("## User Preferences\n")
+    sorcar_path = os.path.join(work_dir, "SORCAR.md")
+    with open(sorcar_path, "w") as f:
+        f.write("## Project\n")
+    # Create a config file the agent will discover
+    config_dir = os.path.join(work_dir, "config")
+    os.makedirs(config_dir)
+    with open(os.path.join(config_dir, "settings.json"), "w") as f:
+        f.write('{"database_port": 5433, "max_connections": 50, "log_level": "debug"}\n')
+
+    _, calls = _run_agent(
+        task=(
+            f"Read {config_dir}/settings.json and tell me what database port "
+            "the project uses. This is an important project convention."
+        ),
+        work_dir=work_dir,
+        max_steps=12,
+    )
+
+    # Agent should have edited USER_PREFS.md to record the discovered convention
+    prefs_edits = [
+        c for c in calls
+        if _get_tool_name(c) in ("Edit", "Write")
+        and "USER_PREFS" in _get_tool_input(c).get("file_path", "")
+    ]
+    assert len(prefs_edits) >= 1, (
+        "Agent did not update USER_PREFS.md after discovering project info. "
+        f"Tool calls: {[_get_tool_name(c) for c in calls]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 9: Visibility constraint — no meta-descriptions for greetings
+# SYSTEM.md: "not a meta-description of what was done"
+# DB evidence: Tasks 1177, 1205 said "Greeted the user" in summary
+# ---------------------------------------------------------------------------
+
+def test_visibility_no_meta_description_for_greeting() -> None:
+    """For a greeting, the summary must be the actual greeting, not a narration."""
+    work_dir = tempfile.mkdtemp()
+    prefs_path = os.path.join(work_dir, "USER_PREFS.md")
+    with open(prefs_path, "w") as f:
+        f.write("## Prefs\n")
+    sorcar_path = os.path.join(work_dir, "SORCAR.md")
+    with open(sorcar_path, "w") as f:
+        f.write("## Project\n")
+
+    result, _ = _run_agent(
+        task="Hi!",
+        work_dir=work_dir,
+        max_steps=5,
+        max_budget=0.5,
+    )
+
+    summary = str(result.get("summary", ""))
+    # The summary should be the actual greeting, not a description of greeting
+    meta_patterns = [
+        "greeted the user",
+        "asked what they",
+        "awaiting a",
+        "offered examples",
+        "the agent",
+    ]
+    for pattern in meta_patterns:
+        assert pattern.lower() not in summary.lower(), (
+            f"Summary contains meta-description pattern '{pattern}': {summary[:200]}"
+        )
+    # It should contain some actual greeting content
+    assert len(summary) > 5, f"Summary too short for a greeting: {summary}"
+
+
+# ---------------------------------------------------------------------------
+# Test 10: Real-time data must use tools, not training data
+# SYSTEM.md: "For questions about current events, weather ... MUST use tools"
+# DB evidence: Task 1231 (weather) had 0 tool calls, task 1234 wrong year
+# ---------------------------------------------------------------------------
+
+def test_realtime_question_uses_tools() -> None:
+    """Agent must use tools (go_to_url or Bash) for weather/current-events questions."""
+    work_dir = tempfile.mkdtemp()
+    prefs_path = os.path.join(work_dir, "USER_PREFS.md")
+    with open(prefs_path, "w") as f:
+        f.write("## Prefs\n")
+    sorcar_path = os.path.join(work_dir, "SORCAR.md")
+    with open(sorcar_path, "w") as f:
+        f.write("## Project\n")
+
+    _, calls = _run_agent(
+        task="What is the current weather in San Francisco right now?",
+        work_dir=work_dir,
+        max_steps=10,
+        max_budget=1.0,
+        web_tools=True,
+    )
+
+    # Agent must have used at least one tool to look up real-time data
+    lookup_tools = [
+        c for c in calls
+        if _get_tool_name(c) in ("go_to_url", "Bash")
+        and _get_tool_name(c) != "finish"
+    ]
+    # Filter out Bash calls that aren't lookups (like reading USER_PREFS)
+    real_lookups = [
+        c for c in lookup_tools
+        if _get_tool_name(c) == "go_to_url"
+        or (
+            _get_tool_name(c) == "Bash"
+            and any(
+                kw in _get_tool_input(c).get("command", "")
+                for kw in ["curl", "weather", "http", "api."]
+            )
+        )
+    ]
+    assert len(real_lookups) >= 1, (
+        "Agent answered real-time weather question without any lookup tools. "
+        f"Tool calls: {[_get_tool_name(c) for c in calls]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 11: No fabricated source counts in research results
+# SYSTEM.md: "Do NOT fabricate or exaggerate source counts"
+# DB evidence: Task 1180 claimed "30+ sources" with only 4 URLs
+# ---------------------------------------------------------------------------
+
+def test_no_fabricated_source_count() -> None:
+    """Agent must not claim more sources than it actually visited."""
+    work_dir = tempfile.mkdtemp()
+    prefs_path = os.path.join(work_dir, "USER_PREFS.md")
+    with open(prefs_path, "w") as f:
+        f.write("## Prefs\n")
+    sorcar_path = os.path.join(work_dir, "SORCAR.md")
+    with open(sorcar_path, "w") as f:
+        f.write("## Project\n")
+
+    result, calls = _run_agent(
+        task="What is the capital of France? Do a quick web search.",
+        work_dir=work_dir,
+        max_steps=10,
+        max_budget=1.0,
+        web_tools=True,
+    )
+
+    summary = str(result.get("summary", ""))
+    # Count actual go_to_url calls
+    actual_urls = sum(1 for c in calls if _get_tool_name(c) == "go_to_url")
+
+    # Check for inflated claims like "30+ sources", "dozens of sources"
+    import re
+
+    source_claims = re.findall(r"(\d+)\+?\s*(?:sources|websites|sites)", summary.lower())
+    for claim in source_claims:
+        claimed_num = int(claim)
+        assert claimed_num <= actual_urls + 2, (
+            f"Agent claimed {claimed_num} sources but only visited {actual_urls} URLs. "
+            f"Summary excerpt: {summary[:200]}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Test 12: Web research must create the information file (0% compliance)
+# SYSTEM.md: "The information file is mandatory. You MUST create the file."
+# DB evidence: 0/4 research tasks created information-*.md
+# ---------------------------------------------------------------------------
+
+def test_web_research_info_file_mandatory() -> None:
+    """Research task must create PWD/tmp/information-*.md with counter tracking."""
+    work_dir = tempfile.mkdtemp()
+    prefs_path = os.path.join(work_dir, "USER_PREFS.md")
+    with open(prefs_path, "w") as f:
+        f.write("## Prefs\n")
+    sorcar_path = os.path.join(work_dir, "SORCAR.md")
+    with open(sorcar_path, "w") as f:
+        f.write("## Project\n")
+    tmp_dir = os.path.join(work_dir, "tmp")
+    os.makedirs(tmp_dir, exist_ok=True)
+
+    _, calls = _run_agent(
+        task=(
+            "Research: What are the three tallest buildings in the world? "
+            "Search the internet for this information."
+        ),
+        work_dir=work_dir,
+        max_steps=20,
+        max_budget=2.0,
+        web_tools=True,
+    )
+
+    # Must have created information-*.md in tmp/
+    write_or_edit_calls = [
+        c for c in calls
+        if _get_tool_name(c) in ("Write", "Edit")
+        and "information" in _get_tool_input(c).get("file_path", "").lower()
+    ]
+    assert len(write_or_edit_calls) >= 1, (
+        "Agent did not create/edit an information-*.md file during research. "
+        f"Tool calls: {[(_get_tool_name(c), _get_tool_input(c).get('file_path', '')[:50]) for c in calls]}"  # noqa: E501
+    )
+
+    # Also check the file actually exists on disk
+    info_files = [
+        f for f in os.listdir(tmp_dir)
+        if "information" in f.lower() and f.endswith(".md")
+    ] if os.path.exists(tmp_dir) else []
+    assert len(info_files) >= 1, (
+        f"No information-*.md file found in {tmp_dir}. "
+        f"Files: {os.listdir(tmp_dir) if os.path.exists(tmp_dir) else 'dir missing'}"
+    )
+
+
 if __name__ == "__main__":
     import sys
     test_name = sys.argv[1] if len(sys.argv) > 1 else None
@@ -411,6 +641,14 @@ if __name__ == "__main__":
         ("test_lint_check_before_finish", test_lint_check_before_finish),
         ("test_visibility_constraint_full_answer", test_visibility_constraint_full_answer),
         ("test_web_research_creates_information_file", test_web_research_creates_information_file),
+        ("test_user_prefs_updated_after_learning", test_user_prefs_updated_after_learning),
+        (
+            "test_visibility_no_meta_description_for_greeting",
+            test_visibility_no_meta_description_for_greeting,
+        ),
+        ("test_realtime_question_uses_tools", test_realtime_question_uses_tools),
+        ("test_no_fabricated_source_count", test_no_fabricated_source_count),
+        ("test_web_research_info_file_mandatory", test_web_research_info_file_mandatory),
     ]
     for name, func in tests:
         if test_name and test_name != name:
