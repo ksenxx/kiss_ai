@@ -11,12 +11,13 @@ Tests verify that:
 from __future__ import annotations
 
 import threading
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
 
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.core.printer import Printer
 
 
 class MockPrinter:
@@ -74,8 +75,9 @@ class TestSubagentTabsIntegration:
         """Verify openSubagentTab events are broadcast for each sub-task."""
         # Setup
         agent = ChatSorcarAgent("test-agent")
-        agent.printer = MockPrinter()
-        agent.printer._thread_local.tab_id = "parent-tab-1"
+        mock_printer = MockPrinter()
+        agent.printer = cast(Printer, mock_printer)
+        mock_printer._thread_local.tab_id = "parent-tab-1"
 
         # Mock run() to avoid actual API calls
         with patch.object(agent, "run", return_value='{"result": "done"}'):
@@ -88,8 +90,7 @@ class TestSubagentTabsIntegration:
 
         # Verify
         assert len(results) == 3
-        printer = agent.printer
-        assert isinstance(printer, MockPrinter)
+        printer = cast(MockPrinter, agent.printer)
 
         # Check openSubagentTab events
         open_events = [
@@ -108,8 +109,9 @@ class TestSubagentTabsIntegration:
         """Verify subagentDone events are broadcast when sub-tasks complete."""
         # Setup
         agent = ChatSorcarAgent("test-agent")
-        agent.printer = MockPrinter()
-        agent.printer._thread_local.tab_id = "parent-tab-2"
+        mock_printer = MockPrinter()
+        agent.printer = cast(Printer, mock_printer)
+        mock_printer._thread_local.tab_id = "parent-tab-2"
 
         # Mock run() to avoid actual API calls
         with patch.object(agent, "run", return_value='{"result": "success"}'):
@@ -180,7 +182,7 @@ class TestSubagentTabsIntegration:
         with patch.object(ChatSorcarAgent, "run", return_value='{"ok": true}'):
             with patch.object(ChatSorcarAgent, "resume_chat_by_id") as mock_resume:
                 tasks = ["Task 1"]
-                results = agent._run_tasks_parallel(tasks, max_workers=1)
+                agent._run_tasks_parallel(tasks, max_workers=1)
 
                 # Verify resume_chat_by_id was called with correct chat_id
                 assert mock_resume.called
