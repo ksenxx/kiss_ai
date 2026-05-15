@@ -131,7 +131,8 @@ class ChatSorcarAgent(SorcarAgent):
                     "type": "openSubagentTab",
                     "tab_id": sub_tab_id,
                     "parent_tab_id": parent_tab_id,
-                    "description": task[:200],
+                    "task_description": task[:200],
+                    "task_index": i,
                     "isSubagentTab": True,
                 })
 
@@ -166,7 +167,7 @@ class ChatSorcarAgent(SorcarAgent):
                 if broadcast:
                     broadcast({
                         "type": "subagentDone",
-                        "tabId": sub_tab_id,
+                        "tab_id": sub_tab_id,
                         "success": success,
                     })
 
