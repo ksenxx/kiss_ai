@@ -622,7 +622,7 @@ def run_tasks_parallel(
                 "type": "openSubagentTab",
                 "tab_id": sub_tab_id,
                 "parent_tab_id": parent_tab_id,
-                "description": task[:200],
+                "task_description": task[:200],
                 "isSubagentTab": True,
             })
 
