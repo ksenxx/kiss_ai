@@ -1,26 +1,54 @@
-# Awaiting Task Specification
+# KISS Sorcar — Awaiting Task Clarification
 
-**Session**: Continuation 3
-**Time**: Task received with incomplete/empty message
-**Git Status**: Clean, up-to-date with origin/main
+**User Input**: "A" (incomplete — cannot determine intent)
 
-## What I Need From You
+## Repository Status
+- ✅ Branch: main (up to date with origin/main)
+- ✅ Working tree: CLEAN (no pending changes)
+- ✅ Last commit: 537e0930 (docs: improve API.md formatting)
 
-Please provide a complete task description. Examples:
+## Possible Interpretations of "A"
+1. **File A** → Modify/delete/analyze `/Users/ksen/work/kiss/file_a.py`
+2. **Action** → Analyze, Audit, Archive, Append, Activate, etc.
+3. **Incomplete message** → User meant to provide more text
 
-1. **"Commit the pending changes"** — Commit work to git with a message
-2. **"Run all tests"** — Execute test suite and report results
-3. **"Fix the bug in [file]"** — Debug and fix a specific issue
-4. **"Implement feature X"** — Build new functionality
-5. **"Review and refactor [module]"** — Code review and optimization
-6. **"Research topic Z"** — Web research and synthesis
-7. **"Analyze [file/code]"** — Code analysis and recommendations
-8. **"Deploy/Release"** — Deployment or release procedures
+## What I'm Ready to Do
+Provide ANY of these complete instructions:
 
-## Current Project State
-- ✅ Working tree: clean
-- ✅ Branch: up-to-date with origin/main
-- ✅ Tests: 3,408 available
-- ✅ Ready to proceed immediately
+### Code Work
+- "Implement feature [name]"
+- "Fix bug in [file/module]"
+- "Refactor [component]"
+- "Add test for [feature]"
 
-**Please provide your complete task now.**
+### Testing & Quality
+- "Run tests"
+- "Run tests for [module]"
+- "Lint code"
+- "Type check"
+- "Full check (lint + typecheck)"
+
+### Git Operations
+- "Commit with message: [message]"
+- "Push to [branch]"
+- "Show status"
+- "Show log"
+
+### Analysis & Research
+- "Analyze [file/module]"
+- "Review [code]"
+- "Research [topic]"
+- "Compare [file1] vs [file2]"
+
+### File Operations
+- "Delete file_a.py"
+- "Edit file_a.py to [action]"
+- "Create file [name] with [content]"
+- "Copy [source] to [destination]"
+
+## Status
+**BLOCKED** — Awaiting clear, specific task instructions from user.
+
+---
+*Generated: 2025-05-15 12:25 UTC*
+*Agent: KISS Sorcar v2026.5.32*
