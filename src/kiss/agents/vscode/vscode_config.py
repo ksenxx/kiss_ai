@@ -30,6 +30,7 @@ DEFAULTS: dict[str, Any] = {
     "max_budget": 100,
     "custom_endpoint": "",
     "custom_api_key": "",
+    "custom_headers": "",
     "use_web_browser": True,
     "remote_password": "",
     "work_dir": "",
@@ -268,7 +269,14 @@ def get_custom_model_entry(cfg: dict[str, Any]) -> dict[str, Any] | None:
     endpoint = cfg.get("custom_endpoint", "")
     if not endpoint:
         return None
-    return {
+    headers: dict[str, str] = {}
+    raw_headers = cfg.get("custom_headers", "")
+    if raw_headers:
+        for line in raw_headers.splitlines():
+            if ":" in line:
+                key, value = line.split(":", 1)
+                headers[key.strip()] = value.strip()
+    entry: dict[str, Any] = {
         "name": f"custom/{endpoint.rstrip('/').split('/')[-1]}",
         "inp": 0,
         "out": 0,
@@ -276,7 +284,42 @@ def get_custom_model_entry(cfg: dict[str, Any]) -> dict[str, Any] | None:
         "vendor": "Custom",
         "endpoint": endpoint,
         "api_key": cfg.get("custom_api_key", ""),
+        "extra_headers": headers,
     }
+    return entry
+
+
+def build_model_config(cfg: dict[str, Any]) -> dict[str, Any] | None:
+    """Build a model_config dict from the settings panel configuration.
+
+    Constructs the ``model_config`` dictionary that can be passed to
+    ``agent.run()`` so that the custom endpoint and any custom HTTP
+    headers are forwarded to the underlying model client.
+
+    Args:
+        cfg: The configuration dict (from :func:`load_config`).
+
+    Returns:
+        A model_config dict with ``base_url`` and optionally
+        ``extra_headers``, or ``None`` if no custom endpoint is set.
+    """
+    endpoint = cfg.get("custom_endpoint", "")
+    if not endpoint:
+        return None
+    result: dict[str, Any] = {"base_url": endpoint}
+    api_key = cfg.get("custom_api_key", "")
+    if api_key:
+        result["api_key"] = api_key
+    raw_headers = cfg.get("custom_headers", "")
+    if raw_headers:
+        headers: dict[str, str] = {}
+        for line in raw_headers.splitlines():
+            if ":" in line:
+                key, value = line.split(":", 1)
+                headers[key.strip()] = value.strip()
+        if headers:
+            result["extra_headers"] = headers
+    return result
 
 
 def source_shell_env() -> None:
