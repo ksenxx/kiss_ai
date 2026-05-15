@@ -587,31 +587,48 @@ class CronClient:
     def _send(self, data: dict[str, Any]) -> dict[str, Any]:
         """Send ``data`` to the daemon and return the decoded response.
 
+        Retries on ECONNREFUSED (socket exists but not listening yet) to
+        handle daemon startup race conditions.
+
         Raises:
             ConnectionError: If the socket cannot be reached or the
                 response is not valid JSON.
         """
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        try:
-            sock.settimeout(10.0)
-            sock.connect(str(self.sock_path))
-            sock.sendall(json.dumps(data).encode())
-            sock.shutdown(socket.SHUT_WR)
-            chunks: list[bytes] = []
-            while True:
-                chunk = sock.recv(4096)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-            raw = b"".join(chunks)
-            if not raw:
-                return {"status": "error", "message": "Empty response"}
-            result: dict[str, Any] = json.loads(raw)
-            return result
-        except (OSError, json.JSONDecodeError) as e:
-            raise ConnectionError(f"Cannot reach daemon at {self.sock_path}: {e}") from e
-        finally:
-            sock.close()
+        import errno
+
+        last_error: Exception | None = None
+        for attempt in range(10):
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                sock.settimeout(10.0)
+                sock.connect(str(self.sock_path))
+                sock.sendall(json.dumps(data).encode())
+                sock.shutdown(socket.SHUT_WR)
+                chunks: list[bytes] = []
+                while True:
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                raw = b"".join(chunks)
+                if not raw:
+                    return {"status": "error", "message": "Empty response"}
+                result: dict[str, Any] = json.loads(raw)
+                return result
+            except OSError as e:
+                last_error = e
+                # ECONNREFUSED (errno 61) means socket exists but not listening yet
+                if e.errno == errno.ECONNREFUSED and attempt < 9:
+                    time.sleep(0.05)
+                    continue
+                raise ConnectionError(f"Cannot reach daemon at {self.sock_path}: {e}") from e
+            except json.JSONDecodeError as e:
+                raise ConnectionError(f"Cannot reach daemon at {self.sock_path}: {e}") from e
+            finally:
+                sock.close()
+        # Should not reach here, but safety fallback
+        msg = f"Cannot reach daemon at {self.sock_path}: {last_error}"
+        raise ConnectionError(msg) from last_error
 
     def add_job(self, entry: str) -> str:
         """Add a cron job and return its identifier.
