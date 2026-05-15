@@ -104,6 +104,10 @@ class AnthropicModel(Model):
     def _normalize_content_blocks(self, content: Any) -> list[dict[str, Any]]:
         """Normalize Anthropic content blocks to JSON-serializable dicts.
 
+        Drops text blocks whose text is empty or whitespace-only, because
+        the Anthropic API rejects them with ``invalid_request_error:
+        messages: text content blocks must contain non-whitespace text``.
+
         Args:
             content: The content blocks from an Anthropic response.
 
@@ -115,11 +119,17 @@ class AnthropicModel(Model):
             return blocks
         for block in content:
             if isinstance(block, dict):
+                # Drop pre-existing whitespace-only text dicts too.
+                if block.get("type") == "text" and not block.get("text", "").strip():
+                    continue
                 blocks.append(block)
                 continue
             block_type = getattr(block, "type", None)
             if block_type == "text":
-                blocks.append({"type": "text", "text": getattr(block, "text", "")})
+                text = getattr(block, "text", "")
+                if not text.strip():
+                    continue
+                blocks.append({"type": "text", "text": text})
             elif block_type == "tool_use":
                 blocks.append(
                     {
@@ -139,9 +149,15 @@ class AnthropicModel(Model):
                     thinking_block["signature"] = signature
                 blocks.append(thinking_block)
             elif hasattr(block, "model_dump"):
-                blocks.append(block.model_dump(exclude_none=True))
+                dumped = block.model_dump(exclude_none=True)
+                if dumped.get("type") == "text" and not dumped.get("text", "").strip():
+                    continue
+                blocks.append(dumped)
             else:
-                blocks.append({"type": "text", "text": str(block)})
+                text = str(block)
+                if not text.strip():
+                    continue
+                blocks.append({"type": "text", "text": text})
         return blocks
 
     def _extract_text_from_blocks(self, blocks: list[dict[str, Any]]) -> str:
