@@ -263,8 +263,10 @@ class TestSubagentTabCSS:
         content = _MAIN_CSS.read_text()
         assert ".done" in content or "done" in content
 
-    def test_js_close_button_for_done_subagent_tabs(self) -> None:
-        """Completed subagent tabs show a close button."""
+    def test_js_close_button_for_all_subagent_tabs(self) -> None:
+        """All subagent tabs (running and done) show a close button."""
         content = _MAIN_JS.read_text()
-        # Verify close button logic allows subagent tabs when done
+        # The close button is now always rendered (no isDone guard)
+        assert "chat-tab-close" in content
+        # isDone is still used for the indicator (✓ vs ◉), not the close button
         assert "tab.isDone" in content
