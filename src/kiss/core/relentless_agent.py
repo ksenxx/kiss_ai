@@ -310,7 +310,6 @@ class RelentlessAgent(Base):
             if not isinstance(payload, dict):  # pragma: no cover
                 payload = {}
 
-<<<<<<< HEAD
             success = _str_to_bool(payload.get("success", False))
             is_continue = _str_to_bool(payload.get("is_continue", False))
 
@@ -324,47 +323,6 @@ class RelentlessAgent(Base):
                     )
                     result = yaml.dump(payload, sort_keys=False)
                 return result
-=======
-            success = payload.get("success", False)
-            if isinstance(success, str):
-                success = success.lower() in ("true", "1", "yes")
-
-            if success:
-                judge = KISSAgent(f"{self.name} Judge-{trial}")
-                judge_result = judge.run(
-                    model_name=self.model_name,
-                    prompt_template=JUDGE_PROMPT,
-                    system_prompt=self.system_instructions,
-                    tools=[finish, *tools],
-                    max_steps=self.max_steps,
-                    max_budget=self.max_budget,
-                    printer=self.printer,
-                    arguments={
-                        "task_description": self.task_description,
-                        "executor_result": payload.get("summary", result),
-                        "trajectory_path": str(executor.get_trajectory_path()),
-                        "work_dir": self.work_dir,
-                    },
-                )
-                self.budget_used += judge.budget_used
-                self.total_tokens_used += judge.total_tokens_used
-                try:
-                    judge_payload = yaml.safe_load(judge_result)
-                except Exception:
-                    judge_payload = {}
-                if not isinstance(judge_payload, dict):
-                    judge_payload = {}
-                judge_pass = judge_payload.get("success", True)
-                if isinstance(judge_pass, str):
-                    judge_pass = judge_pass.lower() in ("true", "1", "yes")
-                if judge_pass:
-                    return result
-                reason = judge_payload.get("summary", "")
-                summary = payload.get("summary", "")
-                combined = f"{summary}\n\nJudge feedback: {reason}".strip()
-                progress_section = CONTINUATION_PROMPT.format(progress_text=combined)
-                continue
->>>>>>> features-for-main
 
             summary = payload.get("summary", "")
             if summary:  # pragma: no branch
