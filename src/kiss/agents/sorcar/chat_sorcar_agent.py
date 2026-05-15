@@ -7,6 +7,7 @@ management — the same workflow that the VS Code extension performs in
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import yaml
@@ -90,6 +91,48 @@ class ChatSorcarAgent(SorcarAgent):
                 parts.append(f"### Result {i}\n{entry['result']}")
         parts.append("---\n")
         return "\n\n".join(parts) + "# Task (work on it now)\n\n" + prompt
+
+    def _run_tasks_parallel(
+        self,
+        tasks: list[str],
+        max_workers: int | None = None,
+    ) -> list[str]:
+        """Execute parallel tasks using ChatSorcarAgent sub-agents.
+
+        Each sub-agent shares this agent's ``chat_id`` so that parallel
+        tasks contribute to the same chat session history.
+
+        Args:
+            tasks: List of self-contained task description strings.
+            max_workers: Maximum concurrent threads (``None`` = auto).
+
+        Returns:
+            List of YAML result strings in the same order as *tasks*.
+        """
+        model = getattr(self, "model_name", None)
+        work_dir = getattr(self, "work_dir", None)
+        chat_id = self._chat_id
+
+        def _run_single(task: str) -> str:
+            agent = ChatSorcarAgent(f"Parallel-{task[:40]}")
+            if chat_id:
+                agent.resume_chat_by_id(chat_id)
+            try:
+                result: str = agent.run(
+                    prompt_template=task,
+                    model_name=model,
+                    work_dir=work_dir,
+                )
+                return result
+            except Exception as exc:
+                error_result: str = yaml.dump(
+                    {"success": False, "summary": f"Unhandled exception: {exc}"},
+                    sort_keys=False,
+                )
+                return error_result
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            return list(pool.map(_run_single, tasks))
 
     def run(  # type: ignore[override]
         self,
