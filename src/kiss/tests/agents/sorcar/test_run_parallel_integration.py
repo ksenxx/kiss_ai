@@ -14,7 +14,11 @@ from pathlib import Path
 import pytest
 import yaml
 
+import threading
+from typing import Any
+
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent, run_tasks_parallel
+from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 
 FAST_MODEL = "claude-haiku-4-5"
 TINY_BUDGET = 0.50  # $0.50 per test — enough for simple tasks
@@ -250,3 +254,124 @@ class TestParallelFileIO:
             assert "shared" in summary.lower(), (
                 f"Expected 'shared' in: {summary}"
             )
+
+
+# ---------------------------------------------------------------------------
+# 4. Subagent tab events — E2E with real LLM calls and a real printer
+# ---------------------------------------------------------------------------
+
+
+class _CapturePrinter(BaseBrowserPrinter):
+    """Real BaseBrowserPrinter subclass that captures all broadcast events."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.captured: list[dict[str, Any]] = []
+        self._capture_lock = threading.Lock()
+
+    def broadcast(self, event: dict[str, Any]) -> None:
+        """Capture event then delegate to parent for recording logic."""
+        event = self._inject_tab_id(event)
+        with self._capture_lock:
+            self.captured.append(event)
+        super().broadcast(event)
+
+
+@skip_no_key
+class TestSubagentTabEventsE2E:
+    """E2E tests verifying subagent tab events with real LLM calls."""
+
+    def test_subagent_tab_events_broadcast(self) -> None:
+        """run_tasks_parallel with a printer broadcasts open/done tab events."""
+        printer = _CapturePrinter()
+        printer._thread_local.tab_id = "parent-e2e"
+
+        results = run_tasks_parallel(
+            [
+                "Reply with just the word 'ALPHA'.",
+                "Reply with just the word 'BETA'.",
+            ],
+            max_workers=2,
+            model=FAST_MODEL,
+            printer=printer,
+        )
+        assert len(results) == 2
+
+        open_events = [
+            e for e in printer.captured if e.get("type") == "openSubagentTab"
+        ]
+        assert len(open_events) == 2, (
+            f"Expected 2 openSubagentTab events, got {len(open_events)}"
+        )
+        for i, ev in enumerate(open_events):
+            assert ev["tab_id"] == f"parent-e2e__sub_{i}"
+            assert ev["parent_tab_id"] == "parent-e2e"
+            assert ev["isSubagentTab"] is True
+            assert ev.get("description"), "description should be non-empty"
+
+        done_events = [
+            e for e in printer.captured if e.get("type") == "subagentDone"
+        ]
+        assert len(done_events) == 2, (
+            f"Expected 2 subagentDone events, got {len(done_events)}"
+        )
+        done_tab_ids = {e["tab_id"] for e in done_events}
+        assert done_tab_ids == {
+            "parent-e2e__sub_0", "parent-e2e__sub_1",
+        }
+
+    def test_subagent_streaming_events_have_tab_ids(self) -> None:
+        """Streaming events from sub-agents carry the correct tabId."""
+        printer = _CapturePrinter()
+        printer._thread_local.tab_id = "parent-stream"
+
+        run_tasks_parallel(
+            ["Reply with just 'hello'."],
+            max_workers=1,
+            model=FAST_MODEL,
+            printer=printer,
+        )
+
+        sub_tab_id = "parent-stream__sub_0"
+        routed = [
+            e for e in printer.captured
+            if e.get("tabId") == sub_tab_id
+            and e.get("type") not in ("openSubagentTab", "subagentDone")
+        ]
+        assert len(routed) > 0, (
+            "Expected streaming events routed to subagent tab"
+        )
+
+    def test_subagent_tabs_not_counted_in_max_tabs(self) -> None:
+        """Subagent tabs are excluded from MAX_TABS trimming in frontend JS."""
+        # This test verifies the JS logic by checking that the
+        # trimOldestTabs function filters out isSubagentTab.
+        main_js = (
+            Path(__file__).resolve().parents[3]
+            / "agents" / "vscode" / "media" / "main.js"
+        )
+        content = main_js.read_text()
+        assert "!t.isSubagentTab" in content, (
+            "trimOldestTabs must exclude subagent tabs"
+        )
+
+    def test_description_field_in_open_event(self) -> None:
+        """openSubagentTab event carries 'description' field for JS frontend."""
+        printer = _CapturePrinter()
+        printer._thread_local.tab_id = "parent-desc"
+
+        run_tasks_parallel(
+            ["Reply with the word DELTA."],
+            max_workers=1,
+            model=FAST_MODEL,
+            printer=printer,
+        )
+
+        open_ev = [
+            e for e in printer.captured if e.get("type") == "openSubagentTab"
+        ]
+        assert len(open_ev) == 1
+        assert "description" in open_ev[0], (
+            "openSubagentTab must have 'description' field"
+        )
+        assert "DELTA" in open_ev[0]["description"]
