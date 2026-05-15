@@ -112,7 +112,7 @@ class TestSubagentTabEvents:
 
         sub_events = [
             e for e in events
-            if e.get("tabId") in sub_tab_ids
+            if e.get("tab_id") in sub_tab_ids
             and e.get("type") not in ("openSubagentTab", "subagentDone")
         ]
         assert len(sub_events) > 0, (
