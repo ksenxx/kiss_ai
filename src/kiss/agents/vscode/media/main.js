@@ -4614,6 +4614,7 @@
     el('cfg-max-budget').value = cfg.max_budget != null ? cfg.max_budget : 100;
     el('cfg-custom-endpoint').value = cfg.custom_endpoint || '';
     el('cfg-custom-api-key').value = cfg.custom_api_key || '';
+    el('cfg-custom-headers').value = cfg.custom_headers || '';
     el('cfg-use-web-browser').checked = cfg.use_web_browser !== false;
     el('cfg-remote-password').value = cfg.remote_password || '';
     el('cfg-work-dir').value = cfg.work_dir || '';
@@ -4637,6 +4638,7 @@
       max_budget: parseFloat(el('cfg-max-budget').value) || 100,
       custom_endpoint: el('cfg-custom-endpoint').value.trim(),
       custom_api_key: el('cfg-custom-api-key').value.trim(),
+      custom_headers: el('cfg-custom-headers').value.trim(),
       use_web_browser: el('cfg-use-web-browser').checked,
       remote_password: el('cfg-remote-password').value.trim(),
       work_dir: el('cfg-work-dir').value.trim(),
