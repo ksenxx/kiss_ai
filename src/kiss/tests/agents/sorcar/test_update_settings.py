@@ -579,6 +579,267 @@ class TestNoPrinterBroadcast:
         assert agent._is_parallel is True
 
 
+class TestWorktreeSorcarAgentNoPrinter:
+    """Verify update_settings works on WorktreeSorcarAgent without a printer.
+
+    Mirrors the Slack channel poller's ``_run_sorcar()`` which creates a
+    ``WorktreeSorcarAgent`` and calls ``agent.run()`` without passing a
+    printer.  All config-level settings must persist; no errors should
+    occur when ``self.printer is None``.
+    """
+
+    def test_update_settings_in_tools(self) -> None:
+        """Tool is present even without a printer."""
+        from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+
+        agent = WorktreeSorcarAgent("test-slack-poller")
+        agent.printer = None
+        agent._use_web_tools = False
+        tools = agent._get_tools()
+        names = [t.__name__ for t in tools if callable(t)]
+        assert "update_settings" in names
+
+    def test_config_persists_without_printer(self, tmp_path: Path) -> None:
+        """Config-level settings persist to disk even without a printer."""
+        from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+
+        agent = WorktreeSorcarAgent("test-slack-persist")
+        agent.printer = None
+        agent._use_web_tools = False
+        tools = agent._get_tools()
+        update = _find_tool(tools, "update_settings")
+
+        wd = tmp_path / "slack_workdir"
+        result = update(
+            is_parallel=True,
+            is_worktree=True,
+            model="gemini-2.5-pro",
+            max_budget=5.0,
+            working_directory=str(wd),
+            use_web_browser=False,
+            custom_endpoint="http://localhost:11434/v1",
+            custom_api_key="sk-slack-test",
+            custom_headers="X-Slack:true",
+        )
+
+        # Agent attributes updated
+        assert agent._is_parallel is True
+        assert agent.model_name == "gemini-2.5-pro"
+        assert agent.max_budget == 5.0
+        assert agent.work_dir == str(wd.resolve())
+        assert agent._use_web_tools is False
+
+        # Verify result message
+        assert "is_parallel=True" in result
+        assert "is_worktree=True" in result
+        assert "model=gemini-2.5-pro" in result
+        assert "max_budget=5.0" in result
+        assert "use_web_browser=False" in result
+        assert "custom_endpoint=http://localhost:11434/v1" in result
+        assert "custom_api_key=<updated>" in result
+        assert "custom_headers=<updated>" in result
+
+        # Config file should contain persisted values (only DEFAULTS keys)
+        # is_worktree is NOT in DEFAULTS, so save_config drops it.
+        cfg = json.loads(vscode_config.CONFIG_PATH.read_text())
+        assert cfg["max_budget"] == 5.0
+        assert cfg["work_dir"] == str(wd.resolve())
+        assert cfg["use_web_browser"] is False
+        assert cfg["custom_endpoint"] == "http://localhost:11434/v1"
+        assert cfg["custom_api_key"] == "sk-slack-test"
+        assert cfg["custom_headers"] == "X-Slack:true"
+
+    def test_api_key_persists_without_printer(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """API keys set via shell RC persist even without a printer."""
+        import os
+
+        from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+        agent = WorktreeSorcarAgent("test-slack-apikey")
+        agent.printer = None
+        agent._use_web_tools = False
+        tools = agent._get_tools()
+        update = _find_tool(tools, "update_settings")
+
+        result = update(gemini_api_key="slack-gem-key")
+        assert "gemini_api_key=<updated>" in result
+        assert os.environ.get("GEMINI_API_KEY") == "slack-gem-key"
+
+    def test_remote_password_and_demo_mode(self) -> None:
+        """remote_password and demo_mode work without a printer."""
+        from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+
+        agent = WorktreeSorcarAgent("test-slack-misc")
+        agent.printer = None
+        agent._use_web_tools = False
+        tools = agent._get_tools()
+        update = _find_tool(tools, "update_settings")
+
+        result = update(remote_password="pw123", demo_mode=True, auto_commit=True)
+        assert "remote_password=<updated>" in result
+        assert "demo_mode=True" in result
+        assert "auto_commit=triggered" in result
+
+        cfg = json.loads(vscode_config.CONFIG_PATH.read_text())
+        assert cfg["remote_password"] == "pw123"
+
+    def test_no_args_returns_no_change(self) -> None:
+        """Calling with no args returns 'no change' message without error."""
+        from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+
+        agent = WorktreeSorcarAgent("test-slack-noargs")
+        agent.printer = None
+        agent._use_web_tools = False
+        tools = agent._get_tools()
+        update = _find_tool(tools, "update_settings")
+
+        result = update()
+        assert "No settings were changed" in result
+
+
+class TestWebPrinterBroadcast:
+    """Verify update_settings events are recorded by WebPrinter.
+
+    Mirrors the web app context where ``WebPrinter`` is used as the
+    printer.  Events should be recorded via ``_record_event`` and be
+    retrievable through ``stop_recording``.
+    """
+
+    def test_events_recorded(self) -> None:
+        """updateSetting events are captured in WebPrinter's recording."""
+        from kiss.agents.vscode.web_server import WebPrinter
+
+        agent = SorcarAgent("test-web-printer")
+        printer = WebPrinter()
+        agent.printer = printer
+        agent._use_web_tools = False
+
+        # Start recording (mimics what the web server does per-tab)
+        printer.start_recording()
+
+        tools = agent._get_tools()
+        update = _find_tool(tools, "update_settings")
+
+        result = update(is_parallel=True, model="claude-sonnet-4-20250514")
+        assert "is_parallel=True" in result
+        assert "model=claude-sonnet-4-20250514" in result
+
+        # Peek at the raw recording (unfiltered)
+        with printer._lock:
+            key = printer._tab_key()
+            raw = list(printer._recordings.get(key, []))
+
+        setting_evts = [e for e in raw if e.get("type") == "updateSetting"]
+        assert len(setting_evts) == 2
+        keys = {e["key"] for e in setting_evts}
+        assert keys == {"is_parallel", "model"}
+
+    def test_all_settings_recorded(self, tmp_path: Path) -> None:
+        """All 12 setting types are recorded by WebPrinter."""
+        from kiss.agents.vscode.web_server import WebPrinter
+
+        agent = SorcarAgent("test-web-all")
+        printer = WebPrinter()
+        agent.printer = printer
+        agent._use_web_tools = False
+        printer.start_recording()
+
+        tools = agent._get_tools()
+        update = _find_tool(tools, "update_settings")
+
+        wd = tmp_path / "web_workdir"
+        update(
+            is_parallel=True,
+            is_worktree=True,
+            model="o3",
+            max_budget=10.0,
+            working_directory=str(wd),
+            use_web_browser=False,
+            remote_password="pw",
+            demo_mode=True,
+            auto_commit=True,
+            custom_endpoint="http://localhost:8080/v1",
+            custom_api_key="sk-web",
+            custom_headers="X-Web:true",
+        )
+
+        with printer._lock:
+            key = printer._tab_key()
+            raw = list(printer._recordings.get(key, []))
+
+        setting_evts = [e for e in raw if e.get("type") == "updateSetting"]
+        assert len(setting_evts) == 12
+
+        expected_keys = {
+            "is_parallel", "is_worktree", "model", "max_budget",
+            "working_directory", "use_web_browser", "remote_password",
+            "demo_mode", "auto_commit", "custom_endpoint",
+            "custom_api_key", "custom_headers",
+        }
+        actual_keys = {e["key"] for e in setting_evts}
+        assert actual_keys == expected_keys
+
+    def test_secret_values_masked(self) -> None:
+        """Secret settings broadcast True, not the actual value."""
+        from kiss.agents.vscode.web_server import WebPrinter
+
+        agent = SorcarAgent("test-web-secrets")
+        printer = WebPrinter()
+        agent.printer = printer
+        agent._use_web_tools = False
+        printer.start_recording()
+
+        tools = agent._get_tools()
+        update = _find_tool(tools, "update_settings")
+
+        update(
+            remote_password="top-secret",
+            custom_api_key="sk-secret",
+            custom_headers="Authorization:Bearer xyz",
+        )
+
+        with printer._lock:
+            key = printer._tab_key()
+            raw = list(printer._recordings.get(key, []))
+
+        setting_evts = [e for e in raw if e.get("type") == "updateSetting"]
+        for evt in setting_evts:
+            assert evt["value"] is True, (
+                f"{evt['key']} should broadcast True, got {evt['value']!r}"
+            )
+            # The actual secret value must NOT appear in the event
+            assert "top-secret" not in json.dumps(evt)
+            assert "sk-secret" not in json.dumps(evt)
+            assert "Bearer xyz" not in json.dumps(evt)
+
+    def test_config_persists_with_web_printer(self) -> None:
+        """Config-level settings persist to disk when using WebPrinter."""
+        from kiss.agents.vscode.web_server import WebPrinter
+
+        agent = SorcarAgent("test-web-persist")
+        printer = WebPrinter()
+        agent.printer = printer
+        agent._use_web_tools = False
+
+        tools = agent._get_tools()
+        update = _find_tool(tools, "update_settings")
+
+        update(max_budget=25.0, custom_endpoint="http://local:1234/v1")
+
+        cfg = json.loads(vscode_config.CONFIG_PATH.read_text())
+        assert cfg["max_budget"] == 25.0
+        assert cfg["custom_endpoint"] == "http://local:1234/v1"
+        assert agent.max_budget == 25.0
+
+
 class TestConfigPersistenceIsolation:
     """Config writes are isolated between tests via the fixture."""
 
