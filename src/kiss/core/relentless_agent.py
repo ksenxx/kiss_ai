@@ -51,12 +51,52 @@ and rethink the strategy from scratch.
 SUMMARIZER_PROMPT = """
 # Summarizer
 
+<<<<<<< HEAD
 The trajectory of the agent is stored in the file: {trajectory_file}
 
 # Instructions
 - Read the trajectory file and analyze it.  The trajectory file could be large.
 - Return a precise chronologically-ordered list of things the agent did
   with the reason for doing that along with relevant code snippets
+=======
+The executor's trajectory is saved at: {trajectory_path}
+
+Read relevant portions of the file using your tools:
+- Read the first ~50 lines to understand the task and system instructions.
+- Read the last ~200 lines to see the most recent steps and outcomes.
+- Do NOT read the entire file; it may be very large.
+
+Synthesize what was accomplished and call finish(success=True, summary="detailed summary of work done so far").
+"""
+
+JUDGE_PROMPT = """
+# Task Requirements
+
+{task_description}
+
+# Claimed Result
+
+{executor_result}
+
+# Executor Trajectory
+
+The executor's trajectory is saved at: {trajectory_path}
+
+Read relevant portions of the trajectory file using your tools:
+- Read the first ~50 lines to understand the task and system instructions.
+- Read the last ~200 lines to see the most recent steps and outcomes.
+- Do NOT read the entire file; it may be very large.
+
+# Instructions
+
+You are a judge assessing whether the task was fully completed.
+- Work dir: {work_dir}
+- Use your tools to explore the work dir and verify actual outputs on disk.
+- Do NOT redo any work; only inspect and assess.
+- When done, call finish() with:
+  - success=true if every requirement is met, false otherwise
+  - summary: concise explanation of what is missing or why it passes
+>>>>>>> features-for-main
 """
 
 def _str_to_bool(value: str | bool) -> bool:
@@ -190,8 +230,28 @@ class RelentlessAgent(Base):
                     max_budget=remaining_budget,
                     model_config=self.model_config,
                     printer=self.printer,
+<<<<<<< HEAD
                     verbose=self.verbose,
                     attachments=attachments if session == 0 else None,
+=======
+                    attachments=attachments if trial == 0 else None,
+                )
+            except Exception:
+                summarizer_agent = KISSAgent(f"{self.name} Summarizer")
+                summarizer_result = summarizer_agent.run(
+                    model_name=self.summarizer_model_name,
+                    prompt_template=SUMMARIZER_PROMPT,
+                    tools=all_tools,
+                    max_steps=self.max_steps,
+                    max_budget=self.max_budget,
+                    printer=self.printer,
+                    arguments={
+                        "trajectory_path": str(executor.get_trajectory_path()),
+                    },
+                )
+                summary_text = yaml.safe_load(summarizer_result).get(
+                    "summary", "No summary available."
+>>>>>>> features-for-main
                 )
             except Exception as exc:
                 logger.debug("Exception caught", exc_info=True)
@@ -275,6 +335,7 @@ class RelentlessAgent(Base):
             if not isinstance(payload, dict):  # pragma: no cover
                 payload = {}
 
+<<<<<<< HEAD
             success = _str_to_bool(payload.get("success", False))
             is_continue = _str_to_bool(payload.get("is_continue", False))
 
@@ -288,6 +349,47 @@ class RelentlessAgent(Base):
                     )
                     result = yaml.dump(payload, sort_keys=False)
                 return result
+=======
+            success = payload.get("success", False)
+            if isinstance(success, str):
+                success = success.lower() in ("true", "1", "yes")
+
+            if success:
+                judge = KISSAgent(f"{self.name} Judge-{trial}")
+                judge_result = judge.run(
+                    model_name=self.model_name,
+                    prompt_template=JUDGE_PROMPT,
+                    system_prompt=self.system_instructions,
+                    tools=[finish, *tools],
+                    max_steps=self.max_steps,
+                    max_budget=self.max_budget,
+                    printer=self.printer,
+                    arguments={
+                        "task_description": self.task_description,
+                        "executor_result": payload.get("summary", result),
+                        "trajectory_path": str(executor.get_trajectory_path()),
+                        "work_dir": self.work_dir,
+                    },
+                )
+                self.budget_used += judge.budget_used
+                self.total_tokens_used += judge.total_tokens_used
+                try:
+                    judge_payload = yaml.safe_load(judge_result)
+                except Exception:
+                    judge_payload = {}
+                if not isinstance(judge_payload, dict):
+                    judge_payload = {}
+                judge_pass = judge_payload.get("success", True)
+                if isinstance(judge_pass, str):
+                    judge_pass = judge_pass.lower() in ("true", "1", "yes")
+                if judge_pass:
+                    return result
+                reason = judge_payload.get("summary", "")
+                summary = payload.get("summary", "")
+                combined = f"{summary}\n\nJudge feedback: {reason}".strip()
+                progress_section = CONTINUATION_PROMPT.format(progress_text=combined)
+                continue
+>>>>>>> features-for-main
 
             summary = payload.get("summary", "")
             if summary:  # pragma: no branch
