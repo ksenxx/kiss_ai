@@ -21,7 +21,7 @@ from kiss.agents.sorcar.persistence import (
     _save_task_extra,
     _save_task_result,
 )
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent, _coerce_tasks
 
 MAX_TASKS = 10
 
@@ -111,7 +111,14 @@ class ChatSorcarAgent(SorcarAgent):
 
         Returns:
             List of YAML result strings in the same order as *tasks*.
+
+        Raises:
+            TypeError: If *tasks* is neither a ``str`` nor a ``list[str]``.
         """
+        # Coerce ``str`` → ``[str]``; otherwise ``enumerate(tasks)`` would
+        # iterate a bare-string ``tasks`` character-by-character and create
+        # one sub-agent tab per character (LLM tool-call bug).
+        tasks = _coerce_tasks(tasks)
         model = getattr(self, "model_name", None)
         work_dir = getattr(self, "work_dir", None)
         chat_id = self._chat_id

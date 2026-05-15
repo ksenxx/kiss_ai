@@ -560,6 +560,32 @@ class SorcarAgent(RelentlessAgent):
             self._ask_user_question_callback = None
 
 
+def _coerce_tasks(tasks: Any) -> list[str]:
+    """Normalize the ``tasks`` argument to a ``list[str]``.
+
+    LLM tool calls sometimes pass a bare string instead of a one-element
+    list.  Without this guard, ``enumerate(tasks)`` would iterate the
+    string character-by-character and create one sub-agent (and one
+    ``openSubagentTab`` event) per character.
+
+    Args:
+        tasks: Either a ``list[str]`` or a single ``str``.
+
+    Returns:
+        A ``list[str]``.  ``str`` inputs are wrapped in a one-element list.
+
+    Raises:
+        TypeError: If *tasks* is neither a ``str`` nor a ``list[str]``.
+    """
+    if isinstance(tasks, str):
+        return [tasks]
+    if isinstance(tasks, list) and all(isinstance(t, str) for t in tasks):
+        return tasks
+    raise TypeError(
+        f"tasks must be list[str], got {type(tasks).__name__}: {tasks!r}"
+    )
+
+
 def run_tasks_parallel(
     tasks: list[str],
     max_workers: int | None = None,
@@ -611,18 +637,7 @@ def run_tasks_parallel(
             for LLM tool callers that mistakenly pass a bare string,
             ``str`` is coerced to a one-element list.
     """
-    # Guard against a common LLM tool-calling mistake: passing ``tasks`` as
-    # a bare string instead of ``list[str]``.  Without this check,
-    # ``enumerate(tasks)`` iterates the string character-by-character and
-    # spawns one sub-agent per character.
-    if isinstance(tasks, str):
-        tasks = [tasks]
-    elif not isinstance(tasks, list) or not all(
-        isinstance(t, str) for t in tasks
-    ):
-        raise TypeError(
-            f"tasks must be list[str], got {type(tasks).__name__}: {tasks!r}"
-        )
+    tasks = _coerce_tasks(tasks)
 
     broadcast = getattr(printer, "broadcast", None) if printer else None
     thread_local = getattr(printer, "_thread_local", None) if printer else None
