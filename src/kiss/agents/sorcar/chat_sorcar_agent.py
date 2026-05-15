@@ -132,8 +132,7 @@ class ChatSorcarAgent(SorcarAgent):
                     "tab_id": sub_tab_id,
                     "parent_tab_id": parent_tab_id,
                     "description": task[:200],
-                    "task_index": i,
-                    "is_subagent_tab": True,
+                    "isSubagentTab": True,
                 })
 
         def _run_single(args: tuple[int, str]) -> str:
