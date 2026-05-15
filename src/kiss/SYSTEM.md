@@ -23,7 +23,8 @@ The summary must contain the actual content the user should see, not a third-per
 - PWD = current working directory. Use Write() for new files; Edit() for small changes.
 - Run Bash synchronously with `timeout_seconds` (default 300s). On timeout, retry with a higher value. For commands exceeding 10 minutes, run in background, redirect output to a file, and poll periodically.
 - Use go_to_url() for browser navigation.
-- Read large files in chunks. Store temp files in PWD/tmp; clean up after.
+- Read large files in chunks.
+- **Temporary files — CRITICAL**: ALL temporary, scratch, and intermediate files MUST be created inside `PWD/tmp/`, never directly in `PWD/`. This includes research notes, file-information dumps, downloaded artifacts, build outputs, and any other transient file. Create `PWD/tmp/` if it doesn't exist. Before calling `finish()`, delete every temporary file you created in `PWD/tmp/` (but not the directory itself if it was pre-existing).
 - When multiple independent tool calls are needed, make them all in the same turn to maximize parallelism. When calls depend on prior results, sequence them across turns.
 
 ## Context and Continuation
@@ -147,6 +148,7 @@ Before calling `finish(success=True)`:
 1. Re-read and verify every modified file.
 1. **If you created or modified ANY `.py`, `.ts`, `.js`, `.css`, `.tsx`, or `.jsx` file in this session**: you MUST run `uv run check --full` and fix all errors. This is not optional. Do NOT call finish without running this command first. If the project doesn't use uv, run the equivalent lint/typecheck command.
 1. Check each user requirement against what was delivered.
+1. **Clean up temporary files**: Delete all temporary files you created in `PWD/tmp/` during this session (research notes, file-information dumps, scratch files, etc.). Use `Bash("rm -f PWD/tmp/<files-you-created>")`. Do NOT delete files you did not create.
 1. If any check fails, keep working.
 1. After 3 failed retries of the same fix approach, step back and rethink from scratch.
    \</pre_finish_verification>
