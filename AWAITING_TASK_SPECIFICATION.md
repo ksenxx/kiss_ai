@@ -1,21 +1,20 @@
-# Task Specification Required — User Input: "r"
+# Task Specification Required — User Input: "a"
 
 **Current Time**: Latest Session
-**User Message**: "r" (single character - too vague)
+**User Message**: "a" (single character - too vague)
 **Repository State**: ✅ CLEAN (no uncommitted changes)
 
 ---
 
-## What "r" Could Mean
+## What "a" Could Mean
 
 | Interpretation | Full Command | Time Est. |
 |---|---|---|
-| **Run tests** | `uv run pytest -v` | 5-15 min |
-| **Report status** | Git analysis + stats | < 1 min |
-| **Review code** | Detailed code review | 10-30 min |
-| **Revert changes** | `git reset --hard HEAD~2` | < 1 min |
-| **Refactor** | Code refactoring | 30-60 min |
-| **Release** | Version bump & tag | 5-10 min |
+| **Add features** | Feature implementation | 10-60 min |
+| **Analyze code** | Code analysis | 10-30 min |
+| **Audit** | Code audit/security check | 20-40 min |
+| **Assess performance** | Performance review | 15-30 min |
+| **API documentation** | Auto-generate docs | 5-15 min |
 
 ---
 
@@ -36,7 +35,7 @@ Please choose **ONE** specific task:
 - "Reset to origin/main"
 
 ### 💻 Code Operations
-- "Review sorcar_agent.py"
+- "Review [module name].py"
 - "Analyze the codebase"
 - "Generate API docs"
 - "Refactor [module name]"
@@ -44,6 +43,7 @@ Please choose **ONE** specific task:
 ### 🔍 Research/Analysis
 - "Research [topic]"
 - "Compare [file1] vs [file2]"
+- "Audit code for [issue type]"
 
 ### 🚀 Custom Task
 - "Implement [feature]"
@@ -68,6 +68,7 @@ Examples of clear requests:
 - ✅ "Run all tests and show results"
 - ✅ "Push the 2 pending commits to origin/main"
 - ✅ "Run lint checks and fix errors"
-- ✅ "Generate a comprehensive status report"
+- ✅ "Check code lint and types"
+- ✅ "Analyze the sorcar_agent.py module"
 
 I'm ready to execute immediately once you clarify your intent.
