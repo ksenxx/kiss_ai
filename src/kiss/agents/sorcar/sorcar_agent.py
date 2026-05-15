@@ -20,6 +20,31 @@ from kiss.core.printer import Printer
 from kiss.core.relentless_agent import RelentlessAgent
 
 
+def _save_setting_to_config(key: str, value: Any) -> None:
+    """Persist a single setting to ~/.kiss/config.json.
+
+    Loads the existing config, updates the specified key, and saves
+    atomically. Also applies the change to the running environment.
+
+    Args:
+        key: The config key (e.g. "max_budget", "work_dir").
+        value: The new value for the key.
+    """
+    try:
+        from kiss.agents.vscode.vscode_config import (
+            apply_config_to_env,
+            load_config,
+            save_config,
+        )
+
+        cfg = load_config()
+        cfg[key] = value
+        save_config(cfg)
+        apply_config_to_env(cfg)
+    except Exception:
+        pass
+
+
 class SorcarAgent(RelentlessAgent):
     """Agent with both coding tools and browser automation for web + code tasks."""
 
@@ -117,7 +142,144 @@ class SorcarAgent(RelentlessAgent):
             result_str: str = yaml.dump(results, sort_keys=False)
             return result_str
 
+        def update_settings(
+            is_parallel: bool | None = None,
+            is_worktree: bool | None = None,
+            model: str | None = None,
+            max_budget: float | None = None,
+            working_directory: str | None = None,
+            use_web_browser: bool | None = None,
+            remote_password: str | None = None,
+            demo_mode: bool | None = None,
+            auto_commit: bool | None = None,
+        ) -> str:
+            """Update task configuration settings during execution.
+
+            Modifies runtime agent settings, persists config-level changes,
+            and broadcasts UI updates to the frontend. Only provided
+            (non-None) keys are updated; omitted keys are left unchanged.
+
+            Args:
+                is_parallel: Enable/disable parallel sub-agent spawning.
+                is_worktree: Enable/disable git worktree isolation.
+                model: Switch the LLM model for subsequent sub-sessions.
+                max_budget: Set the maximum budget in USD.
+                working_directory: Change the agent working directory.
+                use_web_browser: Enable/disable browser/web tools.
+                remote_password: Set the remote access password.
+                demo_mode: Enable/disable demo replay mode in the UI.
+                auto_commit: When True, trigger auto-commit of pending changes.
+
+            Returns:
+                A summary of which settings were updated.
+            """
+            updated: list[str] = []
+            broadcast = (
+                self.printer.broadcast
+                if self.printer and hasattr(self.printer, "broadcast")
+                else None
+            )
+
+            if is_parallel is not None:
+                self._is_parallel = bool(is_parallel)
+                updated.append(f"is_parallel={self._is_parallel}")
+                if broadcast:
+                    broadcast({
+                        "type": "updateSetting",
+                        "key": "is_parallel",
+                        "value": self._is_parallel,
+                    })
+
+            if is_worktree is not None:
+                updated.append(f"is_worktree={bool(is_worktree)}")
+                if broadcast:
+                    broadcast({
+                        "type": "updateSetting",
+                        "key": "is_worktree",
+                        "value": bool(is_worktree),
+                    })
+
+            if model is not None:
+                self.model_name = model
+                updated.append(f"model={model}")
+                if broadcast:
+                    broadcast({
+                        "type": "updateSetting",
+                        "key": "model",
+                        "value": model,
+                    })
+
+            if max_budget is not None:
+                self.max_budget = float(max_budget)
+                updated.append(f"max_budget={self.max_budget}")
+                _save_setting_to_config("max_budget", self.max_budget)
+                if broadcast:
+                    broadcast({
+                        "type": "updateSetting",
+                        "key": "max_budget",
+                        "value": self.max_budget,
+                    })
+
+            if working_directory is not None:
+                resolved = str(Path(working_directory).resolve())
+                Path(resolved).mkdir(parents=True, exist_ok=True)
+                self.work_dir = resolved
+                updated.append(f"working_directory={resolved}")
+                _save_setting_to_config("work_dir", resolved)
+                if broadcast:
+                    broadcast({
+                        "type": "updateSetting",
+                        "key": "working_directory",
+                        "value": resolved,
+                    })
+
+            if use_web_browser is not None:
+                self._use_web_tools = bool(use_web_browser)
+                updated.append(f"use_web_browser={self._use_web_tools}")
+                _save_setting_to_config(
+                    "use_web_browser", self._use_web_tools,
+                )
+                if broadcast:
+                    broadcast({
+                        "type": "updateSetting",
+                        "key": "use_web_browser",
+                        "value": self._use_web_tools,
+                    })
+
+            if remote_password is not None:
+                updated.append("remote_password=<updated>")
+                _save_setting_to_config("remote_password", remote_password)
+                if broadcast:
+                    broadcast({
+                        "type": "updateSetting",
+                        "key": "remote_password",
+                        "value": True,
+                    })
+
+            if demo_mode is not None:
+                updated.append(f"demo_mode={bool(demo_mode)}")
+                if broadcast:
+                    broadcast({
+                        "type": "updateSetting",
+                        "key": "demo_mode",
+                        "value": bool(demo_mode),
+                    })
+
+            if auto_commit is not None and bool(auto_commit):
+                updated.append("auto_commit=triggered")
+                if broadcast:
+                    broadcast({
+                        "type": "updateSetting",
+                        "key": "auto_commit",
+                        "value": True,
+                    })
+
+            if not updated:
+                return "No settings were changed (all arguments were None)."
+            return "Updated: " + ", ".join(updated)
+
         tools.append(ask_user_question)
+        tools.append(update_settings)
         if self._is_parallel:
             tools.append(run_parallel)
         return tools

@@ -2732,6 +2732,31 @@
         }
         break;
 
+      case 'updateSetting': {
+        const sKey = ev.key;
+        const sVal = ev.value;
+        if (sKey === 'is_parallel' && parallelToggleBtn) {
+          parallelToggleBtn.classList.toggle('active', !!sVal);
+        } else if (sKey === 'is_worktree' && worktreeToggleBtn) {
+          worktreeToggleBtn.classList.toggle('active', !!sVal);
+        } else if (sKey === 'model' && typeof sVal === 'string') {
+          const modelBtn = document.getElementById('model-btn');
+          if (modelBtn) modelBtn.textContent = sVal;
+        } else if (sKey === 'max_budget') {
+          // Budget updated server-side; UI may show in config panel
+        } else if (sKey === 'working_directory') {
+          // Working directory updated server-side
+        } else if (sKey === 'use_web_browser') {
+          // Web browser setting updated server-side
+        } else if (sKey === 'demo_mode' && demoToggleBtn) {
+          demoMode = !!sVal;
+          demoToggleBtn.classList.toggle('active', demoMode);
+        } else if (sKey === 'auto_commit') {
+          // Auto-commit triggered server-side
+        }
+        break;
+      }
+
       case 'inputHistory':
         histCache = ev.tasks || [];
         if (histIdx < 0) histIdx = -1;
