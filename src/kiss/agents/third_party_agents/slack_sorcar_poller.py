@@ -146,7 +146,8 @@ def _find_user_id(client: WebClient, username: str) -> str:
         if cursor:
             kwargs["cursor"] = cursor
         resp = client.users_list(**kwargs)
-        for u in resp.get("members", []):
+        members: list[dict[str, Any]] = resp.get("members", [])
+        for u in members:
             names = {
                 str(u.get("name", "")).lower(),
                 str(u.get("real_name", "")).lower(),
@@ -163,7 +164,8 @@ def _find_user_id(client: WebClient, username: str) -> str:
 def _open_dm(client: WebClient, user_id: str) -> str:
     """Open (or fetch) the DM channel ID with ``user_id``."""
     resp = client.conversations_open(users=user_id)
-    return str(resp["channel"]["id"])
+    channel: dict[str, Any] = resp["channel"]  # type: ignore[index]
+    return str(channel["id"])
 
 
 def _markdown_to_mrkdwn(text: str) -> str:
@@ -274,7 +276,7 @@ def _handle_thread_replies(
     except SlackApiError:
         logging.exception("Failed to fetch thread replies ts=%s", parent_ts)
         return
-    messages = list(resp.get("messages", []))
+    messages: list[dict[str, Any]] = list(resp.get("messages", []))
     last_bot = _latest_bot_ts(messages, bot_id)
     new_user_msgs = [
         m
@@ -319,7 +321,9 @@ def _poll_once(
     except SlackApiError:
         logging.exception("Failed to fetch channel history")
         return
-    messages = sorted(resp.get("messages", []), key=lambda m: float(m.get("ts", "0")))
+    messages: list[dict[str, Any]] = sorted(
+        resp.get("messages", []), key=lambda m: float(m.get("ts", "0"))
+    )
 
     for msg in messages:
         ts = str(msg.get("ts", ""))

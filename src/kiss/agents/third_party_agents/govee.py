@@ -17,10 +17,11 @@ import json
 import os
 import sys
 import uuid
+from typing import Any
 from urllib.request import Request, urlopen
 
 API = "https://openapi.api.govee.com/router/api/v1"
-KEY = os.environ.get("GOVEE_API_KEY")
+KEY: str = os.environ.get("GOVEE_API_KEY", "")
 if not KEY:
     sys.exit("error: GOVEE_API_KEY not set")
 
@@ -34,7 +35,8 @@ def _request(path: str, payload: dict | None = None) -> dict:
     data = json.dumps(payload).encode() if payload else None
     req = Request(url, data=data, headers=headers, method="POST" if data else "GET")
     with urlopen(req, timeout=60) as resp:
-        return json.loads(resp.read())
+        result: dict[str, Any] = json.loads(resp.read())
+        return result
 
 
 def list_devices() -> list[dict]:
@@ -57,7 +59,12 @@ def find_device(name: str) -> dict:
     sys.exit("error: ambiguous: " + ", ".join(m["deviceName"] for m in matches))
 
 
-def control(device: dict, capability_type: str, instance: str, value) -> dict:
+def control(
+    device: dict[str, Any],
+    capability_type: str,
+    instance: str,
+    value: Any,
+) -> dict[str, Any]:
     """Send a /device/control command for one capability."""
     payload = {
         "requestId": str(uuid.uuid4()),
