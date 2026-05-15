@@ -3,6 +3,14 @@
 All data is stored in a single SQLite database at ``~/.kiss/sorcar.db``
 using WAL mode for concurrent access.  Four tables hold task history,
 chat events, model usage counters, and file usage counters.
+
+Thread safety is achieved with:
+- **Per-thread connections** via ``threading.local()`` so concurrent
+  threads never share a Python ``sqlite3.Connection`` object (which
+  avoids cursor-state interference).
+- A **read-write lock** (``_rw_lock``) that allows concurrent readers
+  but gives writers exclusive access, matching SQLite's own WAL
+  constraint of at most one writer at a time.
 """
 
 from __future__ import annotations
@@ -13,10 +21,70 @@ import os
 import sqlite3
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Read-write lock
+# ---------------------------------------------------------------------------
+
+class _RWLock:
+    """Writer-preferring read-write lock.
+
+    Multiple readers can hold the lock concurrently.  A writer gets
+    exclusive access — no readers or other writers may proceed while a
+    write lock is held.  Pending writers block new readers to prevent
+    writer starvation.
+    """
+
+    def __init__(self) -> None:
+        self._cond = threading.Condition(threading.Lock())
+        self._readers = 0
+        self._writer = False
+        self._pending_writers = 0
+
+    @contextmanager
+    def read_lock(self) -> Iterator[None]:
+        """Acquire shared read access."""
+        with self._cond:
+            while self._writer or self._pending_writers > 0:
+                self._cond.wait()
+            self._readers += 1
+        try:
+            yield
+        finally:
+            with self._cond:
+                self._readers -= 1
+                if self._readers == 0:
+                    self._cond.notify_all()
+
+    @contextmanager
+    def write_lock(self) -> Iterator[None]:
+        """Acquire exclusive write access."""
+        with self._cond:
+            self._pending_writers += 1
+            while self._writer or self._readers > 0:
+                self._cond.wait()
+            self._pending_writers -= 1
+            self._writer = True
+        try:
+            yield
+        finally:
+            with self._cond:
+                self._writer = False
+                self._cond.notify_all()
+
+
+_rw_lock = _RWLock()
+
+
+# ---------------------------------------------------------------------------
+# Paths and constants
+# ---------------------------------------------------------------------------
 
 def _default_kiss_dir() -> Path:
     """Return the KISS data directory, respecting ``KISS_HOME`` env var."""
@@ -39,18 +107,43 @@ def _ensure_kiss_dir() -> None:
 _HistoryEntry = dict[str, object]
 
 
+# ---------------------------------------------------------------------------
+# Per-thread connection management
+# ---------------------------------------------------------------------------
+
+# Legacy backward-compat variable: tests save/restore/None-ify this.
+# Setting to None signals _get_db() to reconnect on the next call.
 _db_conn: sqlite3.Connection | None = None
+
+# Kept for backward compatibility — some callers import it directly.
 _db_lock = threading.Lock()
+
+# Per-thread connection storage.  Each thread gets its own
+# sqlite3.Connection keyed by (_db_generation, _DB_PATH).
+_thread_local = threading.local()
+_db_generation: int = 0
 
 
 def _close_db() -> None:
-    """Close the singleton database connection and clear the cached handle."""
-    global _db_conn
-    with _db_lock:
-        if _db_conn is None:
-            return
-        _db_conn.close()
-        _db_conn = None
+    """Close all database connections and invalidate cached handles.
+
+    Bumps the generation counter so that thread-local connections in
+    other threads are detected as stale on their next ``_get_db()``
+    call and replaced with fresh connections.
+    """
+    global _db_conn, _db_generation
+    _db_generation += 1
+    # Close current thread's connection
+    tl_conn: sqlite3.Connection | None = getattr(_thread_local, "conn", None)
+    if tl_conn is not None:
+        try:
+            tl_conn.close()
+        except Exception:
+            pass
+    _thread_local.conn = None
+    _thread_local.gen = -1
+    _thread_local.path = None
+    _db_conn = None
 
 
 _HISTORY_SELECT = (
@@ -111,32 +204,57 @@ def _init_tables(conn: sqlite3.Connection) -> None:
 
 
 def _get_db() -> sqlite3.Connection:
-    """Return the singleton database connection, creating it on first call.
+    """Return a per-thread database connection, creating one if needed.
 
-    Sets WAL journal mode, enables foreign keys, and creates tables
-    if they do not already exist.
+    Each calling thread gets its own ``sqlite3.Connection`` so that
+    concurrent threads never share cursor state.  Connections are
+    cached in ``threading.local()`` and invalidated when:
+
+    * ``_db_generation`` is bumped (via ``_close_db()``),
+    * ``_DB_PATH`` changes (test redirects), or
+    * ``_db_conn`` is set to ``None`` (legacy test pattern).
     """
     global _db_conn
-    if _db_conn is not None:
-        return _db_conn
-    with _db_lock:
-        if _db_conn is not None:  # pragma: no cover — double-check lock race
-            return _db_conn
-        _ensure_kiss_dir()
-        if not _DB_PATH.exists():
-            for suffix in ("-wal", "-shm"):
-                stale = _DB_PATH.with_name(_DB_PATH.name + suffix)
-                stale.unlink(missing_ok=True)
-        conn = sqlite3.connect(
-            str(_DB_PATH), check_same_thread=False, timeout=10,
-        )
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.row_factory = sqlite3.Row
-        _init_tables(conn)
-        _db_conn = conn
-        return _db_conn
+    tl = _thread_local
+    tl_conn: sqlite3.Connection | None = getattr(tl, "conn", None)
+    tl_gen: int = getattr(tl, "gen", -1)
+    tl_path: str | None = getattr(tl, "path", None)
+    current_path = str(_DB_PATH)
+
+    if (
+        tl_conn is not None
+        and tl_gen == _db_generation
+        and tl_path == current_path
+        and _db_conn is not None
+    ):
+        return tl_conn
+
+    # Stale or missing — close old thread-local connection
+    if tl_conn is not None:
+        try:
+            tl_conn.close()
+        except Exception:
+            pass
+
+    _ensure_kiss_dir()
+    if not _DB_PATH.exists():
+        for suffix in ("-wal", "-shm"):
+            stale_file = _DB_PATH.with_name(_DB_PATH.name + suffix)
+            stale_file.unlink(missing_ok=True)
+    conn = sqlite3.connect(
+        current_path, check_same_thread=False, timeout=10,
+    )
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.row_factory = sqlite3.Row
+    _init_tables(conn)
+
+    tl.conn = conn
+    tl.gen = _db_generation
+    tl.path = current_path
+    _db_conn = conn  # backward compat: expose last-created connection
+    return conn
 
 
 def _most_recent_task_id(db: sqlite3.Connection, task: str | None) -> int | None:
@@ -161,7 +279,7 @@ def _add_task(task: str, chat_id: str = "") -> tuple[int, str]:
     is generated as the chat session identifier.
     Otherwise the given *chat_id* is stored directly (continuation task).
 
-    Thread-safe: all writes are protected by ``_db_lock``.
+    Thread-safe: all writes are protected by ``_rw_lock.write_lock()``.
 
     Args:
         task: The task description string.
@@ -173,7 +291,7 @@ def _add_task(task: str, chat_id: str = "") -> tuple[int, str]:
     """
     import uuid
     db = _get_db()
-    with _db_lock:
+    with _rw_lock.write_lock():
         if chat_id == "":
             chat_id = uuid.uuid4().hex
         cursor = db.execute(
@@ -213,11 +331,12 @@ def _get_task_chat_id(task_id: int) -> str:
         The chat_id string, or ``""`` if the row is not found or its
         chat_id column is empty.
     """
-    db = _get_db()
-    row = db.execute(
-        "SELECT chat_id FROM task_history WHERE id = ?", (task_id,),
-    ).fetchone()
-    return str(row["chat_id"]) if row and row["chat_id"] else ""
+    with _rw_lock.read_lock():
+        db = _get_db()
+        row = db.execute(
+            "SELECT chat_id FROM task_history WHERE id = ?", (task_id,),
+        ).fetchone()
+        return str(row["chat_id"]) if row and row["chat_id"] else ""
 
 
 def _chat_has_tasks(chat_id: str) -> bool:
@@ -232,11 +351,12 @@ def _chat_has_tasks(chat_id: str) -> bool:
     """
     if not chat_id:
         return False
-    db = _get_db()
-    row = db.execute(
-        "SELECT 1 FROM task_history WHERE chat_id = ? LIMIT 1", (chat_id,),
-    ).fetchone()
-    return row is not None
+    with _rw_lock.read_lock():
+        db = _get_db()
+        row = db.execute(
+            "SELECT 1 FROM task_history WHERE chat_id = ? LIMIT 1", (chat_id,),
+        ).fetchone()
+        return row is not None
 
 
 def _delete_task(task_id: int) -> bool:
@@ -252,7 +372,7 @@ def _delete_task(task_id: int) -> bool:
         True if the task existed and was deleted, False otherwise.
     """
     db = _get_db()
-    with _db_lock:
+    with _rw_lock.write_lock():
         row = db.execute(
             "SELECT id FROM task_history WHERE id = ?", (task_id,)
         ).fetchone()
@@ -276,11 +396,12 @@ def _load_history(limit: int = 0, offset: int = 0) -> list[_HistoryEntry]:
         List of history entry dicts with ``id``, ``timestamp``,
         ``task``, ``has_events``, ``result``, and ``chat_id`` keys.
     """
-    db = _get_db()
-    effective_limit = limit if limit > 0 else -1
-    sql = _HISTORY_SELECT + "ORDER BY timestamp DESC LIMIT ? OFFSET ?"
-    rows = db.execute(sql, (effective_limit, offset)).fetchall()
-    return [dict(r) for r in rows]
+    with _rw_lock.read_lock():
+        db = _get_db()
+        effective_limit = limit if limit > 0 else -1
+        sql = _HISTORY_SELECT + "ORDER BY timestamp DESC LIMIT ? OFFSET ?"
+        rows = db.execute(sql, (effective_limit, offset)).fetchall()
+        return [dict(r) for r in rows]
 
 
 def _prefix_match_task(query: str) -> str:
@@ -297,15 +418,16 @@ def _prefix_match_task(query: str) -> str:
     """
     if not query:
         return ""
-    db = _get_db()
-    escaped = query.replace("[", "[[]").replace("*", "[*]").replace("?", "[?]")
-    row = db.execute(
-        "SELECT task FROM task_history "
-        "WHERE task GLOB ? AND LENGTH(task) > ? "
-        "ORDER BY timestamp DESC LIMIT 1",
-        (escaped + "*", len(query)),
-    ).fetchone()
-    return row["task"] if row else ""
+    with _rw_lock.read_lock():
+        db = _get_db()
+        escaped = query.replace("[", "[[]").replace("*", "[*]").replace("?", "[?]")
+        row = db.execute(
+            "SELECT task FROM task_history "
+            "WHERE task GLOB ? AND LENGTH(task) > ? "
+            "ORDER BY timestamp DESC LIMIT 1",
+            (escaped + "*", len(query)),
+        ).fetchone()
+        return row["task"] if row else ""
 
 
 def _search_history(
@@ -323,13 +445,15 @@ def _search_history(
     """
     if not query:
         return _load_history(limit=limit, offset=offset)
-    db = _get_db()
-    escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    rows = db.execute(
-        _HISTORY_SELECT + "WHERE task LIKE ? ESCAPE '\\' ORDER BY timestamp DESC LIMIT ? OFFSET ?",
-        (f"%{escaped}%", limit, offset),
-    ).fetchall()
-    return [dict(r) for r in rows]
+    with _rw_lock.read_lock():
+        db = _get_db()
+        escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        rows = db.execute(
+            _HISTORY_SELECT
+            + "WHERE task LIKE ? ESCAPE '\\' ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+            (f"%{escaped}%", limit, offset),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
 def _get_history_entry(idx: int) -> _HistoryEntry | None:
@@ -341,12 +465,13 @@ def _get_history_entry(idx: int) -> _HistoryEntry | None:
     Returns:
         The entry dict, or ``None`` if the index is out of range.
     """
-    db = _get_db()
-    row = db.execute(
-        _HISTORY_SELECT + "ORDER BY timestamp DESC LIMIT 1 OFFSET ?",
-        (idx,),
-    ).fetchone()
-    return dict(row) if row else None
+    with _rw_lock.read_lock():
+        db = _get_db()
+        row = db.execute(
+            _HISTORY_SELECT + "ORDER BY timestamp DESC LIMIT 1 OFFSET ?",
+            (idx,),
+        ).fetchone()
+        return dict(row) if row else None
 
 
 def _resolve_task_id(
@@ -385,7 +510,7 @@ def _save_task_result(
         task: Fallback task description string for legacy callers.
     """
     db = _get_db()
-    with _db_lock:
+    with _rw_lock.write_lock():
         resolved = _resolve_task_id(db, task_id, task)
         if resolved is None:
             return
@@ -413,7 +538,7 @@ def _save_task_extra(
         task: Fallback task description string for legacy callers.
     """
     db = _get_db()
-    with _db_lock:
+    with _rw_lock.write_lock():
         resolved = _resolve_task_id(db, task_id, task)
         if resolved is None:
             return
@@ -437,7 +562,7 @@ def _append_chat_event(
         task: Fallback task description string for legacy callers.
     """
     db = _get_db()
-    with _db_lock:
+    with _rw_lock.write_lock():
         resolved = _resolve_task_id(db, task_id, task)
         if resolved is None:
             return
@@ -466,14 +591,15 @@ def _load_task_chat_id(task: str) -> str:
     Returns:
         The string chat_id, or ``""`` if not found.
     """
-    db = _get_db()
-    task_id = _most_recent_task_id(db, task)
-    if task_id is None:
-        return ""
-    row = db.execute(
-        "SELECT chat_id FROM task_history WHERE id = ?", (task_id,)
-    ).fetchone()
-    return str(row["chat_id"]) if row and row["chat_id"] else ""
+    with _rw_lock.read_lock():
+        db = _get_db()
+        task_id = _most_recent_task_id(db, task)
+        if task_id is None:
+            return ""
+        row = db.execute(
+            "SELECT chat_id FROM task_history WHERE id = ?", (task_id,)
+        ).fetchone()
+        return str(row["chat_id"]) if row and row["chat_id"] else ""
 
 
 def _load_last_chat_id() -> str:
@@ -482,11 +608,12 @@ def _load_last_chat_id() -> str:
     Useful for resuming the last CLI session without manually tracking
     the chat_id.
     """
-    db = _get_db()
-    row = db.execute(
-        "SELECT chat_id FROM task_history ORDER BY timestamp DESC LIMIT 1"
-    ).fetchone()
-    return str(row["chat_id"]) if row and row["chat_id"] else ""
+    with _rw_lock.read_lock():
+        db = _get_db()
+        row = db.execute(
+            "SELECT chat_id FROM task_history ORDER BY timestamp DESC LIMIT 1"
+        ).fetchone()
+        return str(row["chat_id"]) if row and row["chat_id"] else ""
 
 
 def _list_recent_chats(limit: int = 10) -> list[dict[str, object]]:
@@ -504,30 +631,31 @@ def _list_recent_chats(limit: int = 10) -> list[dict[str, object]]:
         List of dicts, each with ``chat_id`` (str) and ``tasks``
         (list of dicts with ``task``, ``result``, ``timestamp``).
     """
-    db = _get_db()
-    chat_rows = db.execute(
-        "SELECT chat_id, MAX(timestamp) AS latest "
-        "FROM task_history WHERE chat_id != '' "
-        "GROUP BY chat_id ORDER BY latest DESC LIMIT ?",
-        (limit,),
-    ).fetchall()
-    result: list[dict[str, object]] = []
-    for cr in chat_rows:
-        cid = cr["chat_id"]
-        tasks = db.execute(
-            "SELECT task, result, timestamp FROM task_history "
-            "WHERE chat_id = ? ORDER BY timestamp ASC",
-            (cid,),
+    with _rw_lock.read_lock():
+        db = _get_db()
+        chat_rows = db.execute(
+            "SELECT chat_id, MAX(timestamp) AS latest "
+            "FROM task_history WHERE chat_id != '' "
+            "GROUP BY chat_id ORDER BY latest DESC LIMIT ?",
+            (limit,),
         ).fetchall()
-        result.append({
-            "chat_id": cid,
-            "tasks": [
-                {"task": t["task"], "result": t["result"],
-                 "timestamp": t["timestamp"]}
-                for t in tasks
-            ],
-        })
-    return result
+        result: list[dict[str, object]] = []
+        for cr in chat_rows:
+            cid = cr["chat_id"]
+            tasks = db.execute(
+                "SELECT task, result, timestamp FROM task_history "
+                "WHERE chat_id = ? ORDER BY timestamp ASC",
+                (cid,),
+            ).fetchall()
+            result.append({
+                "chat_id": cid,
+                "tasks": [
+                    {"task": t["task"], "result": t["result"],
+                     "timestamp": t["timestamp"]}
+                    for t in tasks
+                ],
+            })
+        return result
 
 
 def _load_latest_chat_events_by_chat_id(
@@ -549,36 +677,37 @@ def _load_latest_chat_events_by_chat_id(
     """
     if not chat_id:
         return None
-    db = _get_db()
-    row = db.execute(
-        "SELECT id, task, extra FROM task_history "
-        "WHERE chat_id = ? ORDER BY timestamp DESC LIMIT 1",
-        (chat_id,),
-    ).fetchone()
-    if not row:
-        return None
-    task_id = row["id"]
-    task = row["task"]
-    extra_str = row["extra"] or ""
-    event_rows = db.execute(
-        "SELECT event_json, timestamp FROM events WHERE task_id = ? ORDER BY seq",
-        (task_id,),
-    ).fetchall()
-    events: list[dict[str, object]] = []
-    for r in event_rows:
-        try:
-            ev = json.loads(r["event_json"])
-            ev["_timestamp"] = r["timestamp"]
-            events.append(ev)
-        except (json.JSONDecodeError, TypeError):
-            logger.debug("Exception caught", exc_info=True)
-    return {
-        "task": task,
-        "task_id": task_id,
-        "events": events,
-        "chat_id": chat_id,
-        "extra": extra_str,
-    }
+    with _rw_lock.read_lock():
+        db = _get_db()
+        row = db.execute(
+            "SELECT id, task, extra FROM task_history "
+            "WHERE chat_id = ? ORDER BY timestamp DESC LIMIT 1",
+            (chat_id,),
+        ).fetchone()
+        if not row:
+            return None
+        task_id = row["id"]
+        task = row["task"]
+        extra_str = row["extra"] or ""
+        event_rows = db.execute(
+            "SELECT event_json, timestamp FROM events WHERE task_id = ? ORDER BY seq",
+            (task_id,),
+        ).fetchall()
+        events: list[dict[str, object]] = []
+        for r in event_rows:
+            try:
+                ev = json.loads(r["event_json"])
+                ev["_timestamp"] = r["timestamp"]
+                events.append(ev)
+            except (json.JSONDecodeError, TypeError):
+                logger.debug("Exception caught", exc_info=True)
+        return {
+            "task": task,
+            "task_id": task_id,
+            "events": events,
+            "chat_id": chat_id,
+            "extra": extra_str,
+        }
 
 
 def _load_chat_events_by_task_id(
@@ -598,35 +727,36 @@ def _load_chat_events_by_task_id(
         (list of event dicts), ``chat_id`` (str), and ``extra`` (str,
         JSON metadata), or ``None`` if no such row exists.
     """
-    db = _get_db()
-    row = db.execute(
-        "SELECT id, task, chat_id, extra FROM task_history WHERE id = ?",
-        (task_id,),
-    ).fetchone()
-    if not row:
-        return None
-    task = row["task"]
-    chat_id = str(row["chat_id"] or "")
-    extra_str = row["extra"] or ""
-    event_rows = db.execute(
-        "SELECT event_json, timestamp FROM events WHERE task_id = ? ORDER BY seq",
-        (task_id,),
-    ).fetchall()
-    events: list[dict[str, object]] = []
-    for r in event_rows:
-        try:
-            ev = json.loads(r["event_json"])
-            ev["_timestamp"] = r["timestamp"]
-            events.append(ev)
-        except (json.JSONDecodeError, TypeError):
-            logger.debug("Exception caught", exc_info=True)
-    return {
-        "task": task,
-        "task_id": task_id,
-        "events": events,
-        "chat_id": chat_id,
-        "extra": extra_str,
-    }
+    with _rw_lock.read_lock():
+        db = _get_db()
+        row = db.execute(
+            "SELECT id, task, chat_id, extra FROM task_history WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if not row:
+            return None
+        task = row["task"]
+        chat_id = str(row["chat_id"] or "")
+        extra_str = row["extra"] or ""
+        event_rows = db.execute(
+            "SELECT event_json, timestamp FROM events WHERE task_id = ? ORDER BY seq",
+            (task_id,),
+        ).fetchall()
+        events: list[dict[str, object]] = []
+        for r in event_rows:
+            try:
+                ev = json.loads(r["event_json"])
+                ev["_timestamp"] = r["timestamp"]
+                events.append(ev)
+            except (json.JSONDecodeError, TypeError):
+                logger.debug("Exception caught", exc_info=True)
+        return {
+            "task": task,
+            "task_id": task_id,
+            "events": events,
+            "chat_id": chat_id,
+            "extra": extra_str,
+        }
 
 
 def _get_adjacent_task_by_chat_id(
@@ -647,50 +777,51 @@ def _get_adjacent_task_by_chat_id(
     """
     if not chat_id or not current_task:
         return None
-    db = _get_db()
-    row = db.execute(
-        "SELECT id, timestamp FROM task_history "
-        "WHERE chat_id = ? AND task = ? "
-        "ORDER BY timestamp DESC LIMIT 1",
-        (chat_id, current_task),
-    ).fetchone()
-    if not row:
-        return None
-    ts = row["timestamp"]
-
-    if direction == "prev":
-        adj = db.execute(
-            "SELECT id, task FROM task_history "
-            "WHERE chat_id = ? AND timestamp < ? "
+    with _rw_lock.read_lock():
+        db = _get_db()
+        row = db.execute(
+            "SELECT id, timestamp FROM task_history "
+            "WHERE chat_id = ? AND task = ? "
             "ORDER BY timestamp DESC LIMIT 1",
-            (chat_id, ts),
+            (chat_id, current_task),
         ).fetchone()
-    else:
-        adj = db.execute(
-            "SELECT id, task FROM task_history "
-            "WHERE chat_id = ? AND timestamp > ? "
-            "ORDER BY timestamp ASC LIMIT 1",
-            (chat_id, ts),
-        ).fetchone()
+        if not row:
+            return None
+        ts = row["timestamp"]
 
-    if not adj:
-        return None
+        if direction == "prev":
+            adj = db.execute(
+                "SELECT id, task FROM task_history "
+                "WHERE chat_id = ? AND timestamp < ? "
+                "ORDER BY timestamp DESC LIMIT 1",
+                (chat_id, ts),
+            ).fetchone()
+        else:
+            adj = db.execute(
+                "SELECT id, task FROM task_history "
+                "WHERE chat_id = ? AND timestamp > ? "
+                "ORDER BY timestamp ASC LIMIT 1",
+                (chat_id, ts),
+            ).fetchone()
 
-    adj_id = adj["id"]
-    adj_task = adj["task"]
-    event_rows = db.execute(
-        "SELECT event_json, timestamp FROM events WHERE task_id = ? ORDER BY seq",
-        (adj_id,),
-    ).fetchall()
-    events: list[dict[str, object]] = []
-    for r in event_rows:
-        try:
-            ev = json.loads(r["event_json"])
-            ev["_timestamp"] = r["timestamp"]
-            events.append(ev)
-        except (json.JSONDecodeError, TypeError):
-            logger.debug("Exception caught", exc_info=True)
-    return {"task": adj_task, "task_id": adj_id, "events": events}
+        if not adj:
+            return None
+
+        adj_id = adj["id"]
+        adj_task = adj["task"]
+        event_rows = db.execute(
+            "SELECT event_json, timestamp FROM events WHERE task_id = ? ORDER BY seq",
+            (adj_id,),
+        ).fetchall()
+        events: list[dict[str, object]] = []
+        for r in event_rows:
+            try:
+                ev = json.loads(r["event_json"])
+                ev["_timestamp"] = r["timestamp"]
+                events.append(ev)
+            except (json.JSONDecodeError, TypeError):
+                logger.debug("Exception caught", exc_info=True)
+        return {"task": adj_task, "task_id": adj_id, "events": events}
 
 
 def _load_chat_context(chat_id: str) -> list[_HistoryEntry]:
@@ -705,29 +836,32 @@ def _load_chat_context(chat_id: str) -> list[_HistoryEntry]:
     """
     if not chat_id:
         return []
-    db = _get_db()
-    rows = db.execute(
-        "SELECT task, result FROM task_history "
-        "WHERE chat_id = ? ORDER BY timestamp ASC",
-        (chat_id,),
-    ).fetchall()
-    return [{"task": r["task"], "result": r["result"]} for r in rows]
+    with _rw_lock.read_lock():
+        db = _get_db()
+        rows = db.execute(
+            "SELECT task, result FROM task_history "
+            "WHERE chat_id = ? ORDER BY timestamp ASC",
+            (chat_id,),
+        ).fetchall()
+        return [{"task": r["task"], "result": r["result"]} for r in rows]
 
 
 def _load_model_usage() -> dict[str, int]:
     """Return model usage counts as ``{model_name: count}``."""
-    db = _get_db()
-    rows = db.execute("SELECT model, count FROM model_usage").fetchall()
-    return {r["model"]: r["count"] for r in rows}
+    with _rw_lock.read_lock():
+        db = _get_db()
+        rows = db.execute("SELECT model, count FROM model_usage").fetchall()
+        return {r["model"]: r["count"] for r in rows}
 
 
 def _load_last_model() -> str:
     """Return the name of the most recently selected model, or ``""``."""
-    db = _get_db()
-    row = db.execute(
-        "SELECT model FROM model_usage WHERE is_last = 1 LIMIT 1"
-    ).fetchone()
-    return row["model"] if row else ""
+    with _rw_lock.read_lock():
+        db = _get_db()
+        row = db.execute(
+            "SELECT model FROM model_usage WHERE is_last = 1 LIMIT 1"
+        ).fetchone()
+        return row["model"] if row else ""
 
 
 def _save_last_model(model: str) -> None:
@@ -739,7 +873,7 @@ def _save_last_model(model: str) -> None:
         model: The model name to save as the last-selected model.
     """
     db = _get_db()
-    with _db_lock:
+    with _rw_lock.write_lock():
         db.execute(_CLEAR_LAST_MODEL)
         db.execute(
             "INSERT INTO model_usage (model, count, is_last) VALUES (?, 0, 1) "
@@ -752,7 +886,7 @@ def _save_last_model(model: str) -> None:
 def _record_model_usage(model: str) -> None:
     """Increment a model's usage counter and mark it as last-used."""
     db = _get_db()
-    with _db_lock:
+    with _rw_lock.write_lock():
         db.execute(_CLEAR_LAST_MODEL)
         db.execute(
             "INSERT INTO model_usage (model, count, is_last) VALUES (?, 1, 1) "
@@ -768,18 +902,19 @@ def _load_file_usage() -> dict[str, int]:
     The returned dict preserves insertion order so that callers can
     derive recency from key position.
     """
-    db = _get_db()
-    rows = db.execute(
-        "SELECT path, count FROM file_usage ORDER BY last_used ASC"
-    ).fetchall()
-    return {r["path"]: r["count"] for r in rows}
+    with _rw_lock.read_lock():
+        db = _get_db()
+        rows = db.execute(
+            "SELECT path, count FROM file_usage ORDER BY last_used ASC"
+        ).fetchall()
+        return {r["path"]: r["count"] for r in rows}
 
 
 def _record_file_usage(path: str) -> None:
     """Increment the access count for a file path atomically."""
     db = _get_db()
     now = time.time()
-    with _db_lock:
+    with _rw_lock.write_lock():
         db.execute(
             "INSERT INTO file_usage (path, count, last_used) VALUES (?, 1, ?) "
             "ON CONFLICT(path) DO UPDATE SET count = count + 1, last_used = ?",
@@ -814,7 +949,7 @@ def _record_frequent_task(task: str) -> None:
         return
     db = _get_db()
     now = time.time()
-    with _db_lock:
+    with _rw_lock.write_lock():
         existing = db.execute(
             "SELECT 1 FROM frequent_tasks WHERE task = ?", (task,),
         ).fetchone()
@@ -849,15 +984,16 @@ def _load_frequent_tasks(limit: int = 50) -> list[dict[str, object]]:
         A list of dicts with keys ``task`` (str), ``count`` (int) and
         ``timestamp`` (float), ordered by ``count`` descending.
     """
-    db = _get_db()
-    rows = db.execute(
-        "SELECT task, count, timestamp FROM frequent_tasks "
-        "ORDER BY count DESC, timestamp DESC LIMIT ?",
-        (limit,),
-    ).fetchall()
-    return [
-        {"task": r["task"], "count": r["count"], "timestamp": r["timestamp"]}
-        for r in rows
-    ]
+    with _rw_lock.read_lock():
+        db = _get_db()
+        rows = db.execute(
+            "SELECT task, count, timestamp FROM frequent_tasks "
+            "ORDER BY count DESC, timestamp DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [
+            {"task": r["task"], "count": r["count"], "timestamp": r["timestamp"]}
+            for r in rows
+        ]
 
 
