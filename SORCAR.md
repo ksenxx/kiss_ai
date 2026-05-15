@@ -1,4 +1,3 @@
-# KISS Sorcar Session Info
+# KISS Sorcar Configuration
 
-Version: 2026.5.32
-Repo: https://github.com/ksenxx/kiss_ai
+(No configuration recorded yet)
