@@ -365,6 +365,27 @@ class CodexModel(Model):
                         self._invoke_thinking_callback(True)
                         self._invoke_token_callback(output)
                         self._invoke_thinking_callback(False)
+            elif event_type == "text_delta":
+                # New streaming format for newer models like gpt-5.5-codex
+                delta = event.get("delta", {})
+                if isinstance(delta, dict) and delta.get("type") == "text_delta":
+                    text = delta.get("text", "")
+                    if text:
+                        content += text
+                        self._invoke_token_callback(text)
+            elif event_type == "thinking_delta":
+                # Thinking content in new streaming format
+                delta = event.get("delta", {})
+                if isinstance(delta, dict) and delta.get("type") == "thinking_delta":
+                    text = delta.get("text", "")
+                    if text:
+                        self._invoke_thinking_callback(True)
+                        self._invoke_token_callback(text)
+                        self._invoke_thinking_callback(False)
+            elif event_type == "thinking_start":
+                self._invoke_thinking_callback(True)
+            elif event_type == "thinking_end":
+                self._invoke_thinking_callback(False)
             elif event_type == "turn.completed":
                 result_json["usage"] = event.get("usage", {})
             elif event_type in ("error", "turn.failed"):

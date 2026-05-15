@@ -153,9 +153,9 @@
    * collected.
    */
   function trimOldestTabs() {
-    while (tabs.length > MAX_TABS) {
+    while (tabs.filter(t => !t.isSubagentTab).length > MAX_TABS) {
       const idx = tabs.findIndex(t => {
-        return t.id !== activeTabId;
+        return t.id !== activeTabId && !t.isSubagentTab;
       });
       if (idx < 0) return;
       const removed = tabs.splice(idx, 1)[0];
@@ -374,12 +374,13 @@
     } else if (isMerging) {
       showMergeToolbar(tab.id);
     }
-    // Set inputContainer visibility based on active bars
-    if (
+    // Set inputContainer visibility based on active bars and subagent tab status
+    const hideInput =
       worktreeBar ||
       autocommitBar ||
-      document.getElementById('merge-toolbar')
-    ) {
+      document.getElementById('merge-toolbar') ||
+      tab.isSubagentTab;
+    if (hideInput) {
       if (inputContainer) inputContainer.style.display = 'none';
     } else {
       if (inputContainer) inputContainer.style.display = '';
@@ -2995,6 +2996,27 @@
         const isErr = t === 'task_error';
         markTabDone(ev.tabId, true);
         setReady(isErr ? 'Error' : 'Stopped', ev.tabId);
+        break;
+      }
+      case 'openSubagentTab': {
+        const subTab = makeTab('⚡ ' + (ev.taskDescription || 'Sub-agent').substring(0, 40));
+        subTab.id = ev.subTabId;
+        subTab.isSubagentTab = true;
+        subTab.isDone = false;
+        subTab.isRunning = true;
+        subTab.taskPanelHTML = ev.taskDescription || '';
+        subTab.taskPanelVisible = true;
+        tabs.push(subTab);
+        renderTabBar();
+        break;
+      }
+      case 'subagentDone': {
+        const doneTab = tabs.find(t => t.id === ev.tabId);
+        if (doneTab) {
+          doneTab.isDone = true;
+          doneTab.isRunning = false;
+          renderTabBar();
+        }
         break;
       }
       default:

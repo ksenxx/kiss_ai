@@ -213,7 +213,9 @@ type ToWebviewMessageBody =
       chatHasMoreTasks: boolean;
     }
   | {type: 'measureSize'}
-  | {type: 'updateSetting'; key: string; value: unknown};
+  | {type: 'updateSetting'; key: string; value: unknown}
+  | {type: 'openSubagentTab'; subTabId: string; taskDescription?: string; taskIndex?: number}
+  | {type: 'subagentDone'; success?: boolean};
 
 /** Command sent to Python backend */
 export interface AgentCommand {

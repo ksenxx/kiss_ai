@@ -368,10 +368,17 @@ class OpenAICompatibleModel(Model):
         """
         kwargs = self.model_config.copy()
         kwargs.pop("system_instruction", None)
+        normalized_messages = self._normalize_conversation_for_api(self.conversation)
+        if not normalized_messages:
+            raise KISSError(
+                "Cannot generate response: all messages have whitespace-only "
+                "content that was filtered out. At least one message with "
+                "non-whitespace content is required."
+            )
         kwargs.update(
             {
                 "model": self._api_model_name,
-                "messages": self.conversation,
+                "messages": normalized_messages,
             }
         )
         self._apply_cache_control_for_openrouter_anthropic(kwargs)
