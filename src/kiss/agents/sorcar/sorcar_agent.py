@@ -656,7 +656,7 @@ def run_tasks_parallel(
             if broadcast:
                 broadcast({
                     "type": "subagentDone",
-                    "tabId": sub_tab_id,
+                    "tab_id": sub_tab_id,
                     "success": success,
                 })
 
