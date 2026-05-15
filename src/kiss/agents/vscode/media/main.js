@@ -410,7 +410,8 @@
       if (tab.isSubagentTab) {
         // Subagent tab indicator
         const subIndicator = document.createElement('span');
-        subIndicator.className = 'subagent-indicator' + (tab.isDone ? ' done' : '');
+        subIndicator.className =
+          'subagent-indicator' + (tab.isDone ? ' done' : '');
         subIndicator.textContent = tab.isDone ? '✓' : '◉';
         subIndicator.title = tab.isDone ? 'Done' : 'Running';
         el.appendChild(subIndicator);
@@ -2999,7 +3000,9 @@
         break;
       }
       case 'openSubagentTab': {
-        const subTab = makeTab('⚡ ' + (ev.task_description || 'Sub-agent').substring(0, 40));
+        const subTab = makeTab(
+          '⚡ ' + (ev.task_description || 'Sub-agent').substring(0, 40),
+        );
         subTab.id = ev.tab_id;
         subTab.isSubagentTab = true;
         subTab.isDone = false;
