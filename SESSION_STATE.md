@@ -4,6 +4,7 @@
 **User Input**: "t" (ambiguous)
 
 ## Repository Status
+
 - **Branch**: main
 - **Status**: Clean working tree
 - **Commits ahead**: 3 commits ahead of origin/main
@@ -11,20 +12,24 @@
 - **Python syntax**: ✓ All files compile
 
 ## Recent Work
+
 - sorcar_agent.py: Updated with improvements
 - test_subagent_tabs.py: Test file modifications
 - API.md: Formatting and structure improvements
 
 ## What "t" Could Mean
+
 1. **Test** → Run pytest on modified files
-2. **Type** → Run Pyright type checking
-3. **Tag** → Create git tag with version
-4. **Trace** → Show git history/diff
-5. **Task** → Begin new task (needs description)
-6. **Timeout** → Tests timing out (need optimization)
+1. **Type** → Run Pyright type checking
+1. **Tag** → Create git tag with version
+1. **Trace** → Show git history/diff
+1. **Task** → Begin new task (needs description)
+1. **Timeout** → Tests timing out (need optimization)
 
 ## Action Needed
+
 Please provide complete task specification:
+
 - "Run tests for [module]"
 - "Type check"
 - "Tag [version]"
