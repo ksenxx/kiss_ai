@@ -623,7 +623,6 @@ def run_tasks_parallel(
                 "tab_id": sub_tab_id,
                 "parent_tab_id": parent_tab_id,
                 "description": task[:200],
-                "taskIndex": i,
                 "isSubagentTab": True,
             })
 
