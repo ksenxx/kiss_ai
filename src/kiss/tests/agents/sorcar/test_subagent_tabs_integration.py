@@ -11,11 +11,8 @@ Tests verify that:
 from __future__ import annotations
 
 import threading
-import time
-import uuid
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import patch
 
 import pytest
 
