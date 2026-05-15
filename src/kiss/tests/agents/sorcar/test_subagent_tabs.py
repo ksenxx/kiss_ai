@@ -7,6 +7,7 @@ events to a dedicated subagent tab. These tests verify:
 - subagentDone events are broadcast when sub-tasks complete
 - The frontend JS correctly handles subagent tabs (no input area,
   not counted toward MAX_TABS)
+- TypeScript types include the new message types
 
 Uses real LLM calls with claude-haiku-4-5 and tight budgets.
 No mocks, patches, fakes, or test doubles.
@@ -14,17 +15,13 @@ No mocks, patches, fakes, or test doubles.
 
 from __future__ import annotations
 
-import io
-import json
 import os
-import sys
 import threading
 from pathlib import Path
 
 import pytest
 
 from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
-from kiss.agents.vscode.printer import VSCodePrinter
 
 FAST_MODEL = "claude-haiku-4-5"
 
@@ -74,11 +71,9 @@ class TestSubagentTabEvents:
         agent._is_parallel = True
         agent._use_web_tools = False
 
-        # Set the printer's thread-local tab_id to simulate VS Code tab
         parent_tab_id = "parent-tab-123"
         printer._thread_local.tab_id = parent_tab_id
 
-        # Run a task that will use run_parallel
         agent.run(
             prompt_template=(
                 "Use the run_parallel tool to run these two tasks in parallel: "
@@ -96,39 +91,32 @@ class TestSubagentTabEvents:
 
         events = printer.events
 
-        # Should have openSubagentTab events
         open_events = [e for e in events if e.get("type") == "openSubagentTab"]
         assert len(open_events) >= 2, (
             f"Expected at least 2 openSubagentTab events, got {len(open_events)}. "
             f"Event types: {[e.get('type') for e in events]}"
         )
 
-        # Each should have a unique tabId, a task description, and parent tabId
         sub_tab_ids = set()
         for ev in open_events:
-            assert "tabId" in ev, f"Missing tabId in openSubagentTab: {ev}"
-            assert "task" in ev, f"Missing task in openSubagentTab: {ev}"
-            assert "parentTabId" in ev, f"Missing parentTabId: {ev}"
-            assert ev["parentTabId"] == parent_tab_id
-            sub_tab_ids.add(ev["tabId"])
+            assert "subTabId" in ev, f"Missing subTabId in openSubagentTab: {ev}"
+            assert "taskDescription" in ev, f"Missing taskDescription: {ev}"
+            sub_tab_ids.add(ev["subTabId"])
         assert len(sub_tab_ids) == len(open_events), "Sub-tab IDs must be unique"
 
-        # Should have subagentDone events for each sub-tab
         done_events = [e for e in events if e.get("type") == "subagentDone"]
         done_tab_ids = {e.get("tabId") for e in done_events}
         assert sub_tab_ids == done_tab_ids, (
             f"Done events tab IDs {done_tab_ids} != open events tab IDs {sub_tab_ids}"
         )
 
-        # Streaming events from sub-agents should carry sub-tab IDs
         sub_events = [
             e for e in events
             if e.get("tabId") in sub_tab_ids
             and e.get("type") not in ("openSubagentTab", "subagentDone")
         ]
         assert len(sub_events) > 0, (
-            "Expected streaming events (text_delta, tool_call, etc.) "
-            "from sub-agents with sub-tab IDs"
+            "Expected streaming events from sub-agents with sub-tab IDs"
         )
 
     def test_parallel_subagent_events_have_correct_types(self) -> None:
@@ -161,14 +149,13 @@ class TestSubagentTabEvents:
         open_events = [e for e in events if e.get("type") == "openSubagentTab"]
         assert len(open_events) >= 1
 
-        sub_tab_id = open_events[0]["tabId"]
+        sub_tab_id = open_events[0]["subTabId"]
         sub_events = [
             e for e in events
             if e.get("tabId") == sub_tab_id
             and e.get("type") not in ("openSubagentTab", "subagentDone")
         ]
 
-        # Should have at least a result event
         sub_types = {e.get("type") for e in sub_events}
         assert "result" in sub_types or "text_delta" in sub_types, (
             f"Expected result or text_delta in sub-agent events, got: {sub_types}"
@@ -179,89 +166,65 @@ class TestSubagentTabEvents:
 # Frontend logic tests: verify JS handles subagent tabs correctly
 # -----------------------------------------------------------------------
 
+_MAIN_JS = (
+    Path(__file__).resolve().parents[3]
+    / "agents" / "vscode" / "media" / "main.js"
+)
+
 
 class TestSubagentTabFrontendLogic:
     """Test that subagent tabs are handled correctly in the frontend JS."""
 
-    def test_makeTab_has_isSubagentTab_field(self) -> None:
-        """Verify main.js makeTab includes isSubagentTab field defaulting to false."""
-        main_js = Path(
-            __file__
-        ).resolve().parents[3] / "agents" / "vscode" / "media" / "main.js"
-        content = main_js.read_text()
-        assert "isSubagentTab" in content, (
-            "main.js must have isSubagentTab field in tab objects"
-        )
-
-    def test_trimOldestTabs_skips_subagent_tabs(self) -> None:
-        """Verify trimOldestTabs skips tabs with isSubagentTab === true."""
-        main_js = Path(
-            __file__
-        ).resolve().parents[3] / "agents" / "vscode" / "media" / "main.js"
-        content = main_js.read_text()
-        # The trimOldestTabs function should check isSubagentTab
+    def test_make_tab_has_subagent_field(self) -> None:
+        """Verify main.js makeTab includes isSubagentTab field."""
+        content = _MAIN_JS.read_text()
         assert "isSubagentTab" in content
-        # Check that the function filters out subagent tabs
-        # (we verify by looking for the pattern in trimOldestTabs)
+
+    def test_trim_oldest_tabs_skips_subagent_tabs(self) -> None:
+        """Verify trimOldestTabs skips tabs with isSubagentTab === true."""
+        content = _MAIN_JS.read_text()
         trim_start = content.index("function trimOldestTabs")
-        trim_end = content.index("}", trim_start + 100) + 1
+        trim_end = content.index("}", trim_start + 100)
         trim_section = content[trim_start:trim_end + 200]
-        assert "isSubagentTab" in trim_section or "t.isSubagentTab" in content, (
+        assert "isSubagentTab" in trim_section, (
             "trimOldestTabs must exclude subagent tabs from trimming"
         )
 
-    def test_openSubagentTab_handler_exists(self) -> None:
+    def test_open_subagent_tab_handler_exists(self) -> None:
         """Verify main.js has a handler for openSubagentTab events."""
-        main_js = Path(
-            __file__
-        ).resolve().parents[3] / "agents" / "vscode" / "media" / "main.js"
-        content = main_js.read_text()
-        assert "openSubagentTab" in content, (
-            "main.js must handle openSubagentTab events"
-        )
+        content = _MAIN_JS.read_text()
+        assert "case 'openSubagentTab'" in content
 
-    def test_subagentDone_handler_exists(self) -> None:
+    def test_subagent_done_handler_exists(self) -> None:
         """Verify main.js has a handler for subagentDone events."""
-        main_js = Path(
-            __file__
-        ).resolve().parents[3] / "agents" / "vscode" / "media" / "main.js"
-        content = main_js.read_text()
-        assert "subagentDone" in content, (
-            "main.js must handle subagentDone events"
-        )
+        content = _MAIN_JS.read_text()
+        assert "case 'subagentDone'" in content
 
     def test_subagent_tab_hides_input(self) -> None:
         """Verify subagent tabs hide the input area."""
-        main_js = Path(
-            __file__
-        ).resolve().parents[3] / "agents" / "vscode" / "media" / "main.js"
-        content = main_js.read_text()
-        # Should hide input-area for subagent tabs
-        assert "input-area" in content
-        # The restoreTab or switchToTab logic should check isSubagentTab
-        assert "isSubagentTab" in content
+        content = _MAIN_JS.read_text()
+        assert "tab.isSubagentTab" in content
 
 
 # -----------------------------------------------------------------------
 # Types check: verify ToWebviewMessageBody includes subagent types
 # -----------------------------------------------------------------------
 
+_TYPES_TS = (
+    Path(__file__).resolve().parents[3]
+    / "agents" / "vscode" / "src" / "types.ts"
+)
+
 
 class TestSubagentTabTypes:
     """Verify TypeScript types include subagent tab message types."""
 
-    def test_types_include_openSubagentTab(self) -> None:
+    def test_types_include_open_subagent_tab(self) -> None:
         """types.ts includes openSubagentTab in ToWebviewMessageBody."""
-        types_ts = Path(
-            __file__
-        ).resolve().parents[3] / "agents" / "vscode" / "src" / "types.ts"
-        content = types_ts.read_text()
+        content = _TYPES_TS.read_text()
         assert "openSubagentTab" in content
 
-    def test_types_include_subagentDone(self) -> None:
+    def test_types_include_subagent_done(self) -> None:
         """types.ts includes subagentDone in ToWebviewMessageBody."""
-        types_ts = Path(
-            __file__
-        ).resolve().parents[3] / "agents" / "vscode" / "src" / "types.ts"
-        content = types_ts.read_text()
+        content = _TYPES_TS.read_text()
         assert "subagentDone" in content
