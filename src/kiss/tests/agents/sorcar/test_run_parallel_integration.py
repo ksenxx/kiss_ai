@@ -9,13 +9,12 @@ No mocks, patches, fakes, or test doubles.
 from __future__ import annotations
 
 import os
+import threading
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
-
-import threading
-from typing import Any
 
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent, run_tasks_parallel
 from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
