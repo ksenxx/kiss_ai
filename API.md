@@ -115,12 +115,13 @@ ______________________________________________________________________
   - `ask_user_question_callback`: Optional callback used by the ask_user_question tool to collect a text response from the user.
   - **Returns:** YAML string with 'success' and 'summary' keys.
 
-**`run_tasks_parallel`** — Execute multiple SorcarAgent tasks concurrently using threads. Each task gets its own `SorcarAgent` instance and runs in a separate thread via :class:`~concurrent.futures.ThreadPoolExecutor`. This is ideal for I/O-bound workloads (LLM API calls, network requests) where the GIL is released during I/O waits.<br/>`def run_tasks_parallel(tasks: list[str], max_workers: int | None = None, model: str | None = None, work_dir: str | None = None) -> list[str]`
+**`run_tasks_parallel`** — Execute multiple SorcarAgent tasks concurrently using threads. Each task gets its own `SorcarAgent` instance and runs in a separate thread via :class:`~concurrent.futures.ThreadPoolExecutor`. This is ideal for I/O-bound workloads (LLM API calls, network requests) where the GIL is released during I/O waits. When *printer* is a browser-based printer (has `broadcast` and `_thread_local`), each sub-agent gets a dedicated UI tab. An `openSubagentTab` event creates the read-only tab, the sub-agent's streaming events are routed there via its thread-local `tab_id`, and a `subagentDone` event marks completion.<br/>`def run_tasks_parallel(tasks: list[str], max_workers: int | None = None, model: str | None = None, work_dir: str | None = None, printer: Printer | None = None) -> list[str]`
 
 - `tasks`: List of task description strings. Each string is passed as the `prompt_template` argument to :meth:`SorcarAgent.run`. Example:: [ "Summarize file A", "Summarize file B", ]
 - `max_workers`: Maximum number of threads. `None` lets :class:`~concurrent.futures.ThreadPoolExecutor` pick a default (typically `min(32, cpu_count + 4)`).
 - `model`: LLM model name for all parallel agents. `None` uses the default from persistence (same as :meth:`SorcarAgent.run`).
 - `work_dir`: Working directory for all parallel agents. `None` uses the default (`artifact_dir/kiss_workdir`).
+- `printer`: Optional printer from the parent agent. When a browser-based printer is supplied, sub-agent tabs are created in the UI for live monitoring.
 - **Returns:** List of YAML result strings in the **same order** as *tasks*. Each string contains `success` and `summary` keys. If a task raises an unhandled exception the corresponding entry is a YAML string with `success: false` and the traceback in `summary`.
 
 **`cli_ask_user_question`** — CLI callback for agent questions (prints and reads from stdin).<br/>`def cli_ask_user_question(question: str) -> str`

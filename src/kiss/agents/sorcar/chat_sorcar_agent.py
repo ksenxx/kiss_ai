@@ -7,6 +7,7 @@ management — the same workflow that the VS Code extension performs in
 
 from __future__ import annotations
 
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -100,7 +101,9 @@ class ChatSorcarAgent(SorcarAgent):
         """Execute parallel tasks using ChatSorcarAgent sub-agents.
 
         Each sub-agent shares this agent's ``chat_id`` so that parallel
-        tasks contribute to the same chat session history.
+        tasks contribute to the same chat session history.  When the
+        parent has a browser-based printer, dedicated read-only tabs
+        are opened for each sub-agent.
 
         Args:
             tasks: List of self-contained task description strings.
@@ -112,27 +115,57 @@ class ChatSorcarAgent(SorcarAgent):
         model = getattr(self, "model_name", None)
         work_dir = getattr(self, "work_dir", None)
         chat_id = self._chat_id
+        printer = self.printer
+        broadcast = getattr(printer, "broadcast", None) if printer else None
+        sub_tab_ids: list[str] = []
+        for i, task in enumerate(tasks):
+            sub_tab_id = f"sub-{uuid.uuid4().hex[:12]}"
+            sub_tab_ids.append(sub_tab_id)
+            if broadcast:
+                broadcast({
+                    "type": "openSubagentTab",
+                    "subTabId": sub_tab_id,
+                    "taskDescription": task[:200],
+                    "taskIndex": i,
+                })
 
-        def _run_single(task: str) -> str:
+        def _run_single(args: tuple[int, str]) -> str:
+            idx, task = args
+            sub_tab_id = sub_tab_ids[idx]
+            tl = getattr(printer, "_thread_local", None) if printer else None
+            if tl is not None:
+                tl.tab_id = sub_tab_id
             agent = ChatSorcarAgent(f"Parallel-{task[:40]}")
             if chat_id:
                 agent.resume_chat_by_id(chat_id)
+            success = True
             try:
                 result: str = agent.run(
                     prompt_template=task,
                     model_name=model,
                     work_dir=work_dir,
+                    printer=printer,
                 )
                 return result
             except Exception as exc:
+                success = False
                 error_result: str = yaml.dump(
                     {"success": False, "summary": f"Unhandled exception: {exc}"},
                     sort_keys=False,
                 )
                 return error_result
+            finally:
+                if tl is not None:
+                    tl.tab_id = sub_tab_id
+                if broadcast:
+                    broadcast({
+                        "type": "subagentDone",
+                        "tabId": sub_tab_id,
+                        "success": success,
+                    })
 
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            return list(pool.map(_run_single, tasks))
+            return list(pool.map(_run_single, enumerate(tasks)))
 
     def run(  # type: ignore[override]
         self,

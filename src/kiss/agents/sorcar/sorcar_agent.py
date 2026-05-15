@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -66,6 +67,12 @@ class SorcarAgent(RelentlessAgent):
         override this method to change the agent type or pass extra context
         (e.g. ``ChatSorcarAgent`` propagates ``chat_id``).
 
+        When the parent agent has a browser-based printer, each sub-agent
+        gets its own tab in the UI so users can monitor progress.  The
+        ``openSubagentTab`` event creates a read-only tab and each
+        sub-agent's events are routed there via its thread-local
+        ``tab_id``.  A ``subagentDone`` event marks the tab complete.
+
         Args:
             tasks: List of self-contained task description strings.
             max_workers: Maximum concurrent threads (``None`` = auto).
@@ -78,6 +85,7 @@ class SorcarAgent(RelentlessAgent):
             max_workers=max_workers,
             model=getattr(self, "model_name", None),
             work_dir=getattr(self, "work_dir", None),
+            printer=self.printer,
         )
 
     def _get_tools(self) -> list:
@@ -557,6 +565,7 @@ def run_tasks_parallel(
     max_workers: int | None = None,
     model: str | None = None,
     work_dir: str | None = None,
+    printer: Printer | None = None,
 ) -> list[str]:
     """Execute multiple SorcarAgent tasks concurrently using threads.
 
@@ -564,6 +573,12 @@ def run_tasks_parallel(
     thread via :class:`~concurrent.futures.ThreadPoolExecutor`.  This is
     ideal for I/O-bound workloads (LLM API calls, network requests) where
     the GIL is released during I/O waits.
+
+    When *printer* is a browser-based printer (has ``broadcast`` and
+    ``_thread_local``), each sub-agent gets a dedicated UI tab.  An
+    ``openSubagentTab`` event creates the read-only tab, the sub-agent's
+    streaming events are routed there via its thread-local ``tab_id``,
+    and a ``subagentDone`` event marks completion.
 
     Args:
         tasks: List of task description strings.  Each string is passed as
@@ -581,6 +596,9 @@ def run_tasks_parallel(
             default from persistence (same as :meth:`SorcarAgent.run`).
         work_dir: Working directory for all parallel agents.  ``None`` uses
             the default (``artifact_dir/kiss_workdir``).
+        printer: Optional printer from the parent agent.  When a
+            browser-based printer is supplied, sub-agent tabs are created
+            in the UI for live monitoring.
 
     Returns:
         List of YAML result strings in the **same order** as *tasks*.
@@ -588,25 +606,55 @@ def run_tasks_parallel(
         raises an unhandled exception the corresponding entry is a YAML
         string with ``success: false`` and the traceback in ``summary``.
     """
+    broadcast = getattr(printer, "broadcast", None) if printer else None
 
-    def _run_single(task: str) -> str:
+    sub_tab_ids: list[str] = []
+    for i, task in enumerate(tasks):
+        sub_tab_id = f"sub-{uuid.uuid4().hex[:12]}"
+        sub_tab_ids.append(sub_tab_id)
+        if broadcast:
+            broadcast({
+                "type": "openSubagentTab",
+                "subTabId": sub_tab_id,
+                "taskDescription": task[:200],
+                "taskIndex": i,
+            })
+
+    def _run_single(args: tuple[int, str]) -> str:
+        idx, task = args
+        sub_tab_id = sub_tab_ids[idx]
+        tl = getattr(printer, "_thread_local", None) if printer else None
+        if tl is not None:
+            tl.tab_id = sub_tab_id
         agent = SorcarAgent(f"Parallel-{task[:40]}")
+        success = True
         try:
             result: str = agent.run(
                 prompt_template=task,
                 model_name=model,
                 work_dir=work_dir,
+                printer=printer,
             )
             return result
         except Exception as exc:
+            success = False
             error_result: str = yaml.dump(
                 {"success": False, "summary": f"Unhandled exception: {exc}"},
                 sort_keys=False,
             )
             return error_result
+        finally:
+            if tl is not None:
+                tl.tab_id = sub_tab_id
+            if broadcast:
+                broadcast({
+                    "type": "subagentDone",
+                    "tabId": sub_tab_id,
+                    "success": success,
+                })
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        results = list(pool.map(_run_single, tasks))
+        results = list(pool.map(_run_single, enumerate(tasks)))
     return results
 
 
