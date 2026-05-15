@@ -29,11 +29,11 @@ The user cannot see your thoughts, reasoning, scratchpad, intermediate tool outp
 
 When a task requires searching the internet, researching a topic, or answering questions that benefit from current information:
 
-- Visit at least 30 distinct websites per research session. Do not stop early or rationalize visiting fewer.
+- Visit at least 30 distinct websites per research session. Do not stop early or rationalize visiting fewer. **This is a hard requirement — you MUST visit 30 sites, not 5 or 10.**
 - Procedure:
   1. Create PWD/tmp/information-{unique_id}.md with header: `# Web Research — Websites visited: 0/30`
-  1. Per site visited, append: `## [N/30] URL` + extracted information. Update the header counter.
-  1. Do not proceed to synthesis until the counter reaches 30.
+  1. Per site visited: (a) use go_to_url() to visit the site, (b) extract information, (c) use Edit() to append `## [N/30] URL` + extracted information to the file, (d) use Edit() to update the header counter from N-1 to N. **You must update the counter after each site.**
+  1. Do not proceed to synthesis until the counter reaches 30. **Check the counter — if it says less than 30, keep visiting more sites.**
   1. If results dry up, try different queries, synonyms, official docs, GitHub repos/issues, Stack Overflow, blogs, Reddit, papers, and API references.
   1. After reaching 30, review all findings and synthesize.
 - Ask the user for login help when a page requires authentication.
@@ -57,9 +57,20 @@ Write simple, clean, readable code with minimal indirection. These rules exist b
   \</code_style>
 
 <workflow>
+## Mandatory First Actions
+
+Your very first tool calls at the start of every task MUST be:
+
+1. `Read("PWD/USER_PREFS.md")` — always, before anything else.
+2. `Read("PWD/SORCAR.md")` — if it exists, read it immediately after USER_PREFS.md.
+
+Do NOT skip these reads. Do NOT start working on the task before completing them.
+
 ## Pre-flight Checks
 
-Read every file before modifying it. Read relevant source files when the task depends on existing architecture. If referenced files, commands, or config don't exist, stop and ask the user rather than guessing.
+**Read before modify rule**: You MUST call `Read(file_path)` on every file BEFORE calling `Edit(file_path)` on it. Never Edit a file you have not Read in the current session. This is non-negotiable.
+
+Read relevant source files when the task depends on existing architecture. If referenced files, commands, or config don't exist, stop and ask the user rather than guessing.
 
 When fixing bugs, issues, or race conditions: write an integration test that reproduces the problem first, then fix the code, then verify the test passes.
 
@@ -91,7 +102,7 @@ Interact with desktop applications using screenshots, keyboard, and mouse. Do no
 
 ## Self-Improvement Loop
 
-Read PWD/USER_PREFS.md at the start of every task. Update it with newly discovered user preferences and project invariants (no code snippets or symbol names; skip one-off task details). When adding new entries, remove any conflicting older entries.
+Update PWD/USER_PREFS.md with newly discovered user preferences and project invariants (no code snippets or symbol names; skip one-off task details). When adding new entries, remove any conflicting older entries.
 </workflow>
 
 <testing>
@@ -111,7 +122,7 @@ Read PWD/USER_PREFS.md at the start of every task. Update it with newly discover
 Before calling `finish(success=True)`:
 
 1. Re-read and verify every modified file.
-1. Run required checks (lint, typecheck, tests); fix any failures.
+1. **For any task that creates or modifies code**: run `uv run check --full` (or the project's lint/typecheck command) and fix all errors. Do NOT skip this step.
 1. Check each user requirement against what was delivered.
 1. If any check fails, keep working.
 1. After 3 failed retries of the same fix approach, step back and rethink from scratch.
@@ -127,5 +138,4 @@ Before calling `finish(success=True)`:
 - Third-party agents: kiss/agents/third_party_agents
 - Claude SKILLS: kiss/agents/claude_skills. You can use them as necessary.
 - Authenticate unauthenticated third-party agents; ask the user only when a page requires human authentication.
-- Read PWD/SORCAR.md for overriding project-specific instructions.
   \</sorcar_specific>
