@@ -607,7 +607,8 @@ def run_tasks_parallel(
         string with ``success: false`` and the traceback in ``summary``.
     """
     broadcast = getattr(printer, "broadcast", None) if printer else None
-    parent_tab_id = getattr(getattr(printer, "_thread_local", None), "tab_id", None) if printer else None
+    thread_local = getattr(printer, "_thread_local", None) if printer else None
+    parent_tab_id = getattr(thread_local, "tab_id", None) if thread_local else None
 
     sub_tab_ids: list[str] = []
     for i, task in enumerate(tasks):
