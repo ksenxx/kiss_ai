@@ -311,7 +311,7 @@ class TestDemoMode:
         assert evts[0]["key"] == "demo_mode"
         assert evts[0]["value"] is True
 
-        # No config persistence for demo_mode
+        # demo_mode is not in DEFAULTS, so save_config silently drops it
         assert not vscode_config.CONFIG_PATH.exists() or \
             "demo_mode" not in json.loads(vscode_config.CONFIG_PATH.read_text())
 
@@ -373,6 +373,9 @@ class TestMultipleSettings:
             remote_password="pw",
             demo_mode=True,
             auto_commit=True,
+            custom_endpoint="http://localhost:8080/v1",
+            custom_api_key="sk-custom",
+            custom_headers="X-Custom:val",
         )
 
         assert "is_parallel=True" in result
@@ -384,10 +387,153 @@ class TestMultipleSettings:
         assert "remote_password=<updated>" in result
         assert "demo_mode=True" in result
         assert "auto_commit=triggered" in result
+        assert "custom_endpoint=http://localhost:8080/v1" in result
+        assert "custom_api_key=<updated>" in result
+        assert "custom_headers=<updated>" in result
 
-        # 9 settings → 9 broadcast events
+        # 12 settings → 12 broadcast events
         evts = _setting_events(printer)
-        assert len(evts) == 9
+        assert len(evts) == 12
+
+
+class TestCustomEndpoint:
+    """custom_endpoint persists to config and broadcasts."""
+
+    def test_set_endpoint(self) -> None:
+        _agent, printer, tools = _make_agent_and_printer()
+        update = _find_tool(tools, "update_settings")
+
+        result = update(custom_endpoint="http://localhost:8080/v1")
+        assert "custom_endpoint=http://localhost:8080/v1" in result
+
+        cfg = json.loads(vscode_config.CONFIG_PATH.read_text())
+        assert cfg["custom_endpoint"] == "http://localhost:8080/v1"
+
+        evts = _setting_events(printer)
+        assert len(evts) == 1
+        assert evts[0]["key"] == "custom_endpoint"
+        assert evts[0]["value"] == "http://localhost:8080/v1"
+
+    def test_clear_endpoint(self) -> None:
+        _agent, printer, tools = _make_agent_and_printer()
+        update = _find_tool(tools, "update_settings")
+
+        update(custom_endpoint="http://example.com")
+        printer.all_events.clear()
+
+        result = update(custom_endpoint="")
+        assert "custom_endpoint=" in result
+
+        cfg = json.loads(vscode_config.CONFIG_PATH.read_text())
+        assert cfg["custom_endpoint"] == ""
+
+
+class TestCustomApiKey:
+    """custom_api_key persists to config; broadcast value is True (secret)."""
+
+    def test_set_key(self) -> None:
+        _agent, printer, tools = _make_agent_and_printer()
+        update = _find_tool(tools, "update_settings")
+
+        result = update(custom_api_key="sk-test-12345")
+        assert "custom_api_key=<updated>" in result
+
+        cfg = json.loads(vscode_config.CONFIG_PATH.read_text())
+        assert cfg["custom_api_key"] == "sk-test-12345"
+
+        evts = _setting_events(printer)
+        assert len(evts) == 1
+        assert evts[0]["key"] == "custom_api_key"
+        assert evts[0]["value"] is True
+
+    def test_clear_key(self) -> None:
+        _agent, _printer, tools = _make_agent_and_printer()
+        update = _find_tool(tools, "update_settings")
+
+        update(custom_api_key="sk-test")
+        result = update(custom_api_key="")
+        assert "custom_api_key=<updated>" in result
+
+        cfg = json.loads(vscode_config.CONFIG_PATH.read_text())
+        assert cfg["custom_api_key"] == ""
+
+
+class TestCustomHeaders:
+    """custom_headers persists to config and broadcasts."""
+
+    def test_set_headers(self) -> None:
+        _agent, printer, tools = _make_agent_and_printer()
+        update = _find_tool(tools, "update_settings")
+
+        result = update(custom_headers="X-Custom:val1\nX-Other:val2")
+        assert "custom_headers=<updated>" in result
+
+        cfg = json.loads(vscode_config.CONFIG_PATH.read_text())
+        assert cfg["custom_headers"] == "X-Custom:val1\nX-Other:val2"
+
+        evts = _setting_events(printer)
+        assert len(evts) == 1
+        assert evts[0]["key"] == "custom_headers"
+        assert evts[0]["value"] is True
+
+
+class TestApiKeys:
+    """API key settings persist via save_api_key_to_shell and broadcast True."""
+
+    @pytest.fixture(autouse=True)
+    def _isolate_shell_rc(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Point HOME to tmp_path so shell RC writes go to a temp dir."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+
+    @pytest.mark.parametrize("param,env_var", [
+        ("gemini_api_key", "GEMINI_API_KEY"),
+        ("openai_api_key", "OPENAI_API_KEY"),
+        ("anthropic_api_key", "ANTHROPIC_API_KEY"),
+        ("together_api_key", "TOGETHER_API_KEY"),
+        ("openrouter_api_key", "OPENROUTER_API_KEY"),
+        ("minimax_api_key", "MINIMAX_API_KEY"),
+    ])
+    def test_set_api_key(
+        self,
+        param: str,
+        env_var: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Remove existing env var if present
+        monkeypatch.delenv(env_var, raising=False)
+        _agent, printer, tools = _make_agent_and_printer()
+        update = _find_tool(tools, "update_settings")
+
+        result = update(**{param: "test-key-value-123"})
+        assert f"{param}=<updated>" in result
+
+        # Env var should be set
+        import os
+        assert os.environ.get(env_var) == "test-key-value-123"
+
+        # Broadcast uses True, not the actual key
+        evts = _setting_events(printer)
+        assert len(evts) == 1
+        assert evts[0]["key"] == param
+        assert evts[0]["value"] is True
+
+    def test_multiple_api_keys_at_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        _agent, printer, tools = _make_agent_and_printer()
+        update = _find_tool(tools, "update_settings")
+
+        result = update(gemini_api_key="gem-123", openai_api_key="oai-456")
+        assert "gemini_api_key=<updated>" in result
+        assert "openai_api_key=<updated>" in result
+
+        import os
+        assert os.environ.get("GEMINI_API_KEY") == "gem-123"
+        assert os.environ.get("OPENAI_API_KEY") == "oai-456"
+
+        evts = _setting_events(printer)
+        assert len(evts) == 2
 
 
 class TestNoPrinterBroadcast:
