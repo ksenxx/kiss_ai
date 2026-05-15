@@ -10,14 +10,17 @@ Tasks:
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
-from kiss.agents.third_party_agents.cron_manager_daemon import CronClient, start_daemon, daemon_status
+from kiss.agents.third_party_agents.cron_manager_daemon import (
+    CronClient,
+    daemon_status,
+    start_daemon,
+)
 
 
 def setup_cron_job() -> None:
@@ -51,7 +54,7 @@ def setup_cron_job() -> None:
         client = CronClient()
         job_id = client.add_job(cron_entry)
         print(f"\n✓ Cron job created: {job_id}")
-        print(f"\nCron entry:")
+        print("\nCron entry:")
         print(f"  {cron_entry}")
 
         # List all jobs
