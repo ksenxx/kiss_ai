@@ -212,7 +212,8 @@ type ToWebviewMessageBody =
       taskId: number;
       chatHasMoreTasks: boolean;
     }
-  | {type: 'measureSize'};
+  | {type: 'measureSize'}
+  | {type: 'updateSetting'; key: string; value: unknown};
 
 /** Command sent to Python backend */
 export interface AgentCommand {
