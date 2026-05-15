@@ -134,8 +134,8 @@ class TestSubagentTabsIntegration:
 
         # Verify done event structure
         for i, event in enumerate(done_events):
-            assert event["tabId"] == f"parent-tab-2__sub_{i}"
-            assert "result" in event or "error" in event
+            assert event["tab_id"] == f"parent-tab-2__sub_{i}"
+            assert "success" in event
 
     def test_subagent_streaming_events_have_correct_tab_ids(self) -> None:
         """Verify that streaming events (tool_call, text_delta) have subagent tab_ids."""

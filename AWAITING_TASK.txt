@@ -1,0 +1,15 @@
+TASK CLARIFICATION REQUIRED
+
+User's message: ","
+
+The system requires a complete task specification.
+
+Please provide one of:
+- "Commit all changes"
+- "Run all tests" 
+- "Fix bug in [file]"
+- "Implement [feature]"
+- "Research [topic]"
+- Any other complete task description
+
+Awaiting user's complete task request.
