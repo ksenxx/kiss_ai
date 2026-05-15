@@ -400,20 +400,32 @@
     tabList.innerHTML = '';
     tabs.forEach(tab => {
       const el = document.createElement('div');
-      el.className = 'chat-tab' + (tab.id === activeTabId ? ' active' : '');
+      el.className =
+        'chat-tab' +
+        (tab.id === activeTabId ? ' active' : '') +
+        (tab.isSubagentTab ? ' subagent-tab' : '');
       el.dataset.tabId = tab.id;
 
-      if (tab.isRunning) {
-        const spinner = document.createElement('span');
-        spinner.className = 'chat-tab-spinner';
-        el.appendChild(spinner);
-      } else if (tab.hasRunTask) {
-        const icon = document.createElement('span');
-        icon.className = tab.lastTaskFailed
-          ? 'chat-tab-status chat-tab-fail'
-          : 'chat-tab-status chat-tab-ok';
-        icon.textContent = tab.lastTaskFailed ? '\u2717' : '\u2713';
-        el.appendChild(icon);
+      if (tab.isSubagentTab) {
+        // Subagent tab indicator
+        const subIndicator = document.createElement('span');
+        subIndicator.className = 'subagent-indicator';
+        subIndicator.textContent = tab.isDone ? '✓' : '◉';
+        subIndicator.title = tab.isDone ? 'Done' : 'Running';
+        el.appendChild(subIndicator);
+      } else {
+        if (tab.isRunning) {
+          const spinner = document.createElement('span');
+          spinner.className = 'chat-tab-spinner';
+          el.appendChild(spinner);
+        } else if (tab.hasRunTask) {
+          const icon = document.createElement('span');
+          icon.className = tab.lastTaskFailed
+            ? 'chat-tab-status chat-tab-fail'
+            : 'chat-tab-status chat-tab-ok';
+          icon.textContent = tab.lastTaskFailed ? '\u2717' : '\u2713';
+          el.appendChild(icon);
+        }
       }
 
       const label = document.createElement('span');
@@ -421,14 +433,17 @@
       label.textContent = tab.title;
       el.appendChild(label);
 
-      const closeBtn = document.createElement('span');
-      closeBtn.className = 'chat-tab-close';
-      closeBtn.textContent = '\u00d7';
-      closeBtn.addEventListener('click', e => {
-        e.stopPropagation();
-        closeTab(tab.id);
-      });
-      el.appendChild(closeBtn);
+      // Only show close button for non-subagent tabs
+      if (!tab.isSubagentTab) {
+        const closeBtn = document.createElement('span');
+        closeBtn.className = 'chat-tab-close';
+        closeBtn.textContent = '\u00d7';
+        closeBtn.addEventListener('click', e => {
+          e.stopPropagation();
+          closeTab(tab.id);
+        });
+        el.appendChild(closeBtn);
+      }
 
       el.addEventListener('click', () => {
         switchToTab(tab.id);

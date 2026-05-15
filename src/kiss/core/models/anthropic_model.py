@@ -286,6 +286,11 @@ class AnthropicModel(Model):
                 }
 
         normalized_messages = self._normalize_conversation_for_api(self.conversation)
+        if not normalized_messages:
+            raise KISSError(
+                "Cannot build API request: all messages are whitespace-only. "
+                "At least one message with non-whitespace text content is required."
+            )
         kwargs.update(
             {
                 "model": self.model_name,
