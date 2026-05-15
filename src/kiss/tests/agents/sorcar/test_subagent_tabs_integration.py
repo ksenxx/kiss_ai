@@ -219,7 +219,7 @@ class TestSubagentTabsIntegration:
         assert len(open_events) == 3
 
         # All tab IDs should be unique and start with 'sub-'
-        tab_ids = [e["tabId"] for e in open_events]
+        tab_ids = [e["tab_id"] for e in open_events]
         assert len(set(tab_ids)) == 3, "Tab IDs are not unique"
         assert all(tid.startswith("sub-") for tid in tab_ids)
 
