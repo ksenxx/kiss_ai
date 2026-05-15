@@ -136,7 +136,8 @@ body {
 
 .config-label input[type="text"],
 .config-label input[type="password"],
-.config-label input[type="number"] {
+.config-label input[type="number"],
+.config-label textarea {
   display: block;
   width: 100%;
   margin-top: 4px;
@@ -149,7 +150,11 @@ body {
   font-family: inherit;
   box-sizing: border-box;
 }
-.config-label input:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+
+.config-label textarea { resize: vertical; }
+
+.config-label input:focus,
+.config-label textarea:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
 .config-checkbox { display: flex; align-items: center; gap: 8px; flex-direction: row; }
 .config-checkbox input[type="checkbox"] { margin: 0; width: auto; }
 .config-divider { border-top: 1px solid var(--border); margin: 12px 0; }
