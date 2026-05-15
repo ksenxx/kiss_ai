@@ -192,6 +192,7 @@ class SorcarAgent(RelentlessAgent):
 
             if is_worktree is not None:
                 updated.append(f"is_worktree={bool(is_worktree)}")
+                _save_setting_to_config("is_worktree", bool(is_worktree))
                 if broadcast:
                     broadcast({
                         "type": "updateSetting",
@@ -258,6 +259,7 @@ class SorcarAgent(RelentlessAgent):
 
             if demo_mode is not None:
                 updated.append(f"demo_mode={bool(demo_mode)}")
+                _save_setting_to_config("demo_mode", bool(demo_mode))
                 if broadcast:
                     broadcast({
                         "type": "updateSetting",
@@ -267,6 +269,26 @@ class SorcarAgent(RelentlessAgent):
 
             if auto_commit is not None and bool(auto_commit):
                 updated.append("auto_commit=triggered")
+                try:
+                    from kiss.agents.sorcar.git_worktree import GitWorktreeOps
+
+                    wd = Path(self.work_dir).resolve()
+                    repo = GitWorktreeOps.discover_repo(wd)
+                    if repo:
+                        commit_dir = wd if wd != repo else repo
+                        GitWorktreeOps.stage_all(commit_dir)
+                        try:
+                            from kiss.agents.vscode.helpers import (
+                                generate_commit_message_from_diff,
+                            )
+
+                            diff = GitWorktreeOps.staged_diff(commit_dir)
+                            msg = generate_commit_message_from_diff(diff)
+                        except Exception:
+                            msg = "kiss: auto-commit agent changes"
+                        GitWorktreeOps.commit_staged(commit_dir, msg)
+                except Exception:
+                    pass
                 if broadcast:
                     broadcast({
                         "type": "updateSetting",
