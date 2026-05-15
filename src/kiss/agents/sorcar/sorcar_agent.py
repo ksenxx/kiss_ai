@@ -55,6 +55,31 @@ class SorcarAgent(RelentlessAgent):
         self._use_web_tools: bool = True
         self._is_parallel: bool = False
 
+    def _run_tasks_parallel(
+        self,
+        tasks: list[str],
+        max_workers: int | None = None,
+    ) -> list[str]:
+        """Execute multiple independent tasks concurrently using parallel agents.
+
+        Each task gets its own ``SorcarAgent`` instance.  Subclasses can
+        override this method to change the agent type or pass extra context
+        (e.g. ``ChatSorcarAgent`` propagates ``chat_id``).
+
+        Args:
+            tasks: List of self-contained task description strings.
+            max_workers: Maximum concurrent threads (``None`` = auto).
+
+        Returns:
+            List of YAML result strings in the same order as *tasks*.
+        """
+        return run_tasks_parallel(
+            tasks,
+            max_workers=max_workers,
+            model=getattr(self, "model_name", None),
+            work_dir=getattr(self, "work_dir", None),
+        )
+
     def _get_tools(self) -> list:
         """Build tool list, using DockerTools when docker_manager is active.
 
@@ -133,12 +158,7 @@ class SorcarAgent(RelentlessAgent):
                 objects, one per task, in the same order as the input.
                 Each result object has ``success`` and ``summary`` keys.
             """
-            results = run_tasks_parallel(
-                tasks,
-                max_workers=max_workers,
-                model=getattr(self, "model_name", None),
-                work_dir=getattr(self, "work_dir", None),
-            )
+            results = self._run_tasks_parallel(tasks, max_workers=max_workers)
             result_str: str = yaml.dump(results, sort_keys=False)
             return result_str
 
