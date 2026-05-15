@@ -129,10 +129,10 @@ class ChatSorcarAgent(SorcarAgent):
             if broadcast:
                 broadcast({
                     "type": "openSubagentTab",
-                    "tabId": sub_tab_id,
-                    "parentTabId": parent_tab_id,
-                    "taskDescription": task[:200],
-                    "taskIndex": i,
+                    "tab_id": sub_tab_id,
+                    "parent_tab_id": parent_tab_id,
+                    "task_description": task[:200],
+                    "task_index": i,
                 })
 
         def _run_single(args: tuple[int, str]) -> str:
@@ -166,7 +166,7 @@ class ChatSorcarAgent(SorcarAgent):
                 if broadcast:
                     broadcast({
                         "type": "subagentDone",
-                        "tabId": sub_tab_id,
+                        "tab_id": sub_tab_id,
                         "success": success,
                     })
 
