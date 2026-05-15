@@ -410,7 +410,7 @@
       if (tab.isSubagentTab) {
         // Subagent tab indicator
         const subIndicator = document.createElement('span');
-        subIndicator.className = 'subagent-indicator';
+        subIndicator.className = 'subagent-indicator' + (tab.isDone ? ' done' : '');
         subIndicator.textContent = tab.isDone ? '✓' : '◉';
         subIndicator.title = tab.isDone ? 'Done' : 'Running';
         el.appendChild(subIndicator);
@@ -434,8 +434,8 @@
       label.textContent = tab.title;
       el.appendChild(label);
 
-      // Only show close button for non-subagent tabs
-      if (!tab.isSubagentTab) {
+      // Show close button for regular tabs and completed subagent tabs
+      if (!tab.isSubagentTab || tab.isDone) {
         const closeBtn = document.createElement('span');
         closeBtn.className = 'chat-tab-close';
         closeBtn.textContent = '\u00d7';
