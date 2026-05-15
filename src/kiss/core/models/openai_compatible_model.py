@@ -499,7 +499,14 @@ class OpenAICompatibleModel(Model):
         """
         tools_prompt = _build_text_based_tools_prompt(function_map)
 
-        modified_conversation = list(self.conversation)
+        normalized_conv = self._normalize_conversation_for_api(self.conversation)
+        if not normalized_conv:
+            raise KISSError(
+                "Cannot generate response: all messages have whitespace-only "
+                "content that was filtered out. At least one message with "
+                "non-whitespace content is required."
+            )
+        modified_conversation = list(normalized_conv)
         if modified_conversation and modified_conversation[0]["role"] == "user":
             modified_conversation[0] = {
                 "role": "user",
