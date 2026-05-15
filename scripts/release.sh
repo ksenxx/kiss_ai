@@ -122,30 +122,47 @@ update_system_md_version() {
         print_warn "SYSTEM file not found: $SYSTEM_FILE - skipping"
         return
     fi
-    local old_version updated=false
+    local old_version updated=false found=false
 
-    # Replace "Your version is X.Y.Z"
-    old_version=$(grep -oP 'Your version is \K[0-9][0-9.]*' "$SYSTEM_FILE" 2>/dev/null || \
-                  grep 'Your version is ' "$SYSTEM_FILE" | sed 's/.*Your version is \([0-9][0-9.]*\).*/\1/' | head -1)
-    if [[ -n "$old_version" && "$old_version" != "$version" ]]; then
-        sed -i.bak "s/Your version is ${old_version}/Your version is ${version}/g" "$SYSTEM_FILE"
-        rm -f "${SYSTEM_FILE}.bak"
-        print_info "Updated 'Your version is' from $old_version to $version in $SYSTEM_FILE"
-        updated=true
+    # Replace "Version: X.Y.Z" (in the <identity> block: "... · Version: X.Y.Z").
+    # Use a portable POSIX BRE so this works on macOS BSD grep and Linux GNU grep alike.
+    old_version=$(grep 'Version: ' "$SYSTEM_FILE" | sed -n 's/.*Version: \([0-9][0-9.]*\).*/\1/p' | head -1)
+    if [[ -n "$old_version" ]]; then
+        found=true
+        if [[ "$old_version" != "$version" ]]; then
+            sed -i.bak "s/Version: ${old_version}/Version: ${version}/g" "$SYSTEM_FILE"
+            rm -f "${SYSTEM_FILE}.bak"
+            print_info "Updated 'Version:' from $old_version to $version in $SYSTEM_FILE"
+            updated=true
+        fi
     fi
 
-    # Replace "ksenxx.kiss-sorcar-X.Y.Z"
-    old_version=$(grep -oP 'ksenxx\.kiss-sorcar-\K[0-9][0-9.]*' "$SYSTEM_FILE" 2>/dev/null || \
-                  grep 'ksenxx\.kiss-sorcar-' "$SYSTEM_FILE" | sed 's/.*ksenxx\.kiss-sorcar-\([0-9][0-9.]*\).*/\1/' | head -1)
-    if [[ -n "$old_version" && "$old_version" != "$version" ]]; then
-        sed -i.bak "s/ksenxx\.kiss-sorcar-${old_version}/ksenxx.kiss-sorcar-${version}/g" "$SYSTEM_FILE"
-        rm -f "${SYSTEM_FILE}.bak"
-        print_info "Updated 'ksenxx.kiss-sorcar-' from $old_version to $version in $SYSTEM_FILE"
-        updated=true
+    # Replace "Your version is X.Y.Z" (legacy phrasing, kept for safety).
+    old_version=$(grep 'Your version is ' "$SYSTEM_FILE" | sed -n 's/.*Your version is \([0-9][0-9.]*\).*/\1/p' | head -1)
+    if [[ -n "$old_version" ]]; then
+        found=true
+        if [[ "$old_version" != "$version" ]]; then
+            sed -i.bak "s/Your version is ${old_version}/Your version is ${version}/g" "$SYSTEM_FILE"
+            rm -f "${SYSTEM_FILE}.bak"
+            print_info "Updated 'Your version is' from $old_version to $version in $SYSTEM_FILE"
+            updated=true
+        fi
+    fi
+
+    # Replace "ksenxx.kiss-sorcar-X.Y.Z" (used when SYSTEM.md references the VSIX filename).
+    old_version=$(grep 'ksenxx\.kiss-sorcar-' "$SYSTEM_FILE" | sed -n 's/.*ksenxx\.kiss-sorcar-\([0-9][0-9.]*\).*/\1/p' | head -1)
+    if [[ -n "$old_version" ]]; then
+        found=true
+        if [[ "$old_version" != "$version" ]]; then
+            sed -i.bak "s/ksenxx\.kiss-sorcar-${old_version}/ksenxx.kiss-sorcar-${version}/g" "$SYSTEM_FILE"
+            rm -f "${SYSTEM_FILE}.bak"
+            print_info "Updated 'ksenxx.kiss-sorcar-' from $old_version to $version in $SYSTEM_FILE"
+            updated=true
+        fi
     fi
 
     if [[ "$updated" == false ]]; then
-        if [[ -z "$old_version" ]]; then
+        if [[ "$found" == false ]]; then
             print_warn "Version not found in $SYSTEM_FILE - skipping"
         else
             print_info "SYSTEM.md already at version $version"
