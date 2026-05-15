@@ -2999,12 +2999,12 @@
         break;
       }
       case 'openSubagentTab': {
-        const subTab = makeTab('⚡ ' + (ev.description || 'Sub-agent').substring(0, 40));
+        const subTab = makeTab('⚡ ' + (ev.task_description || 'Sub-agent').substring(0, 40));
         subTab.id = ev.tab_id;
         subTab.isSubagentTab = true;
         subTab.isDone = false;
         subTab.isRunning = true;
-        subTab.taskPanelHTML = ev.taskDescription || '';
+        subTab.taskPanelHTML = ev.task_description || '';
         subTab.taskPanelVisible = true;
         tabs.push(subTab);
         renderTabBar();
