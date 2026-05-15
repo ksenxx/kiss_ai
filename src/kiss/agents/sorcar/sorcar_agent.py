@@ -175,8 +175,8 @@ class SorcarAgent(RelentlessAgent):
             """
             updated: list[str] = []
             broadcast = (
-                self.printer.broadcast
-                if self.printer and hasattr(self.printer, "broadcast")
+                getattr(self.printer, "broadcast", None)
+                if self.printer
                 else None
             )
 
