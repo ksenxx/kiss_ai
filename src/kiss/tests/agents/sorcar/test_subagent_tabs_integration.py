@@ -156,8 +156,8 @@ class TestSubagentTabsIntegration:
         printer.tool_call("bash", "ls -la")
 
         # Verify tab_ids
-        tab_id_events = [e for e in printer.events if e.get("tabId")]
-        assert all(e["tabId"] == sub_tab_id for e in tab_id_events), \
+        tab_id_events = [e for e in printer.events if e.get("tab_id")]
+        assert all(e["tab_id"] == sub_tab_id for e in tab_id_events), \
             "Not all events have correct sub_tab_id"
         assert len(tab_id_events) >= 3
 
