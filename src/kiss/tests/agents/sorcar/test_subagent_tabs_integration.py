@@ -76,7 +76,7 @@ class TestSubagentTabsIntegration:
         # Setup
         agent = ChatSorcarAgent("test-agent")
         mock_printer = MockPrinter()
-        agent.printer = cast(Printer, mock_printer)
+        agent.printer = cast(Printer | None, mock_printer)
         mock_printer._thread_local.tab_id = "parent-tab-1"
 
         # Mock run() to avoid actual API calls
@@ -110,7 +110,7 @@ class TestSubagentTabsIntegration:
         # Setup
         agent = ChatSorcarAgent("test-agent")
         mock_printer = MockPrinter()
-        agent.printer = cast(Printer, mock_printer)
+        agent.printer = cast(Printer | None, mock_printer)
         mock_printer._thread_local.tab_id = "parent-tab-2"
 
         # Mock run() to avoid actual API calls
@@ -138,7 +138,7 @@ class TestSubagentTabsIntegration:
         # Setup
         agent = ChatSorcarAgent("test-agent")
         printer = MockPrinter()
-        agent.printer = cast(Printer, printer)
+        agent.printer = cast(Printer | None, printer)
         printer._thread_local.tab_id = "parent-tab-3"
 
         # Manually simulate what happens in _run_single
@@ -176,7 +176,7 @@ class TestSubagentTabsIntegration:
         agent = ChatSorcarAgent("test-agent")
         agent._chat_id = "chat-session-123"
         mock_printer = MockPrinter()
-        agent.printer = cast(Printer, mock_printer)
+        agent.printer = cast(Printer | None, mock_printer)
 
         # Mock run() and ChatSorcarAgent init
         with patch.object(ChatSorcarAgent, "run", return_value='{"ok": true}'):
@@ -198,7 +198,7 @@ class TestSubagentTabsIntegration:
         # Setup
         agent = ChatSorcarAgent("test-agent")
         mock_printer = MockPrinter()
-        agent.printer = cast(Printer, mock_printer)
+        agent.printer = cast(Printer | None, mock_printer)
         # Don't set parent tab_id
 
         # Mock run()
