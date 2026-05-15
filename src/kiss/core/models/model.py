@@ -401,15 +401,6 @@ class Model(ABC):
         """
         self.usage_info_for_messages = usage_info
 
-<<<<<<< HEAD
-
-    def _resolve_openai_tools_schema(
-        self,
-        function_map: dict[str, Callable[..., Any]],
-        tools_schema: list[dict[str, Any]] | None,
-    ) -> list[dict[str, Any]]:
-        """Return pre-built tools_schema or build one from function_map.
-=======
     def _estimate_conversation_tokens(self, msgs: list[Any] | None = None) -> int:
         """Rough estimate of conversation size in tokens (chars / 4).
 
@@ -435,21 +426,7 @@ class Model(ABC):
         Preserves the initial user/human messages and keeps the last N messages,
         decrementing N from 50 until the conversation fits within half the token
         limit. Falls back to keeping only the initial messages if nothing fits.
->>>>>>> features-for-main
-
-        Args:
-            function_map: Dictionary mapping function names to callable functions.
-            tools_schema: Optional pre-built tool schema list. When provided,
-                returned as-is (skips schema rebuilding for performance).
-
-        Returns:
-            list[dict[str, Any]]: The resolved OpenAI-format tool schema list.
         """
-<<<<<<< HEAD
-        if tools_schema is not None:
-            return tools_schema
-        return self._build_openai_tools_schema(function_map)
-=======
         if self._estimate_conversation_tokens() <= int(max_context_tokens * 0.7):
             return
 
@@ -470,10 +447,28 @@ class Model(ABC):
 
         self.conversation = self.conversation[:keep_start]
 
+    def _resolve_openai_tools_schema(
+        self,
+        function_map: dict[str, Callable[..., Any]],
+        tools_schema: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        """Return pre-built tools_schema or build one from function_map.
+
+        Args:
+            function_map: Dictionary mapping function names to callable functions.
+            tools_schema: Optional pre-built tool schema list. When provided,
+                returned as-is (skips schema rebuilding for performance).
+
+        Returns:
+            list[dict[str, Any]]: The resolved OpenAI-format tool schema list.
+        """
+        if tools_schema is not None:
+            return tools_schema
+        return self._build_openai_tools_schema(function_map)
+
     # =========================================================================
     # Helper methods for building tool schemas (shared across implementations)
-    # =========================================================================
->>>>>>> features-for-main
+    # ========================================================================
 
     def _build_openai_tools_schema(
         self, function_map: dict[str, Callable[..., Any]]

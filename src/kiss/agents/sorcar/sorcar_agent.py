@@ -620,7 +620,7 @@ def run_tasks_parallel(
         if broadcast:
             broadcast({
                 "type": "openSubagentTab",
-                "tab_id": sub_tab_id,
+                "tabId": sub_tab_id,
                 "parent_tab_id": parent_tab_id,
                 "task_description": task[:200],
                 "isSubagentTab": True,

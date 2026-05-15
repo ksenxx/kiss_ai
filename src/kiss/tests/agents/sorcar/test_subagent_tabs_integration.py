@@ -102,7 +102,7 @@ class TestSubagentTabsIntegration:
             assert event["tab_id"] == f"parent-tab-1__sub_{i}"
             assert event["parent_tab_id"] == "parent-tab-1"
             assert event["description"] is not None
-            assert event["taskIndex"] == i
+            assert event["isSubagentTab"] is True
 
     def test_chat_sorcar_agent_broadcasts_done_events(self) -> None:
         """Verify subagentDone events are broadcast when sub-tasks complete."""
@@ -180,7 +180,7 @@ class TestSubagentTabsIntegration:
         with patch.object(ChatSorcarAgent, "run", return_value='{"ok": true}'):
             with patch.object(ChatSorcarAgent, "resume_chat_by_id") as mock_resume:
                 tasks = ["Task 1"]
-                agent._run_tasks_parallel(tasks, max_workers=1)
+                results = agent._run_tasks_parallel(tasks, max_workers=1)
 
                 # Verify resume_chat_by_id was called with correct chat_id
                 assert mock_resume.called
