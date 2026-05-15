@@ -92,7 +92,6 @@ You are a judge assessing whether the task was fully completed.
 - When done, call finish() with:
   - success=true if every requirement is met, false otherwise
   - summary: concise explanation of what is missing or why it passes
->>>>>>> features-for-main
 """
 
 def _str_to_bool(value: str | bool) -> bool:
