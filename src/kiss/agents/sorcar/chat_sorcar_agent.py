@@ -161,7 +161,7 @@ class ChatSorcarAgent(SorcarAgent):
                 return error_result
             finally:
                 if tl is not None:
-                    tl.tab_id = sub_tab_id
+                    tl.tab_id = None
                 if broadcast:
                     broadcast({
                         "type": "subagentDone",
