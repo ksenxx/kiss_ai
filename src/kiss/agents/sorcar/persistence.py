@@ -242,7 +242,10 @@ def _get_db() -> sqlite3.Connection:
             stale_file = _DB_PATH.with_name(_DB_PATH.name + suffix)
             stale_file.unlink(missing_ok=True)
     conn = sqlite3.connect(
-        current_path, check_same_thread=False, timeout=10,
+        current_path,
+        check_same_thread=False,
+        timeout=10,
+        isolation_level=None,  # true autocommit — no implicit BEGIN
     )
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
