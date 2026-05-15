@@ -3000,7 +3000,7 @@
       }
       case 'openSubagentTab': {
         const subTab = makeTab('⚡ ' + (ev.taskDescription || 'Sub-agent').substring(0, 40));
-        subTab.id = ev.subTabId;
+        subTab.id = ev.tabId || ev.subTabId;
         subTab.isSubagentTab = true;
         subTab.isDone = false;
         subTab.isRunning = true;
