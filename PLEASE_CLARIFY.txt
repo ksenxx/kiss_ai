@@ -1,0 +1,29 @@
+================================================================================
+                    TASK CLARIFICATION REQUIRED
+================================================================================
+
+YOUR MESSAGE: "y"
+STATUS: Incomplete - cannot be processed
+
+REPOSITORY STATE:
+  ✓ Branch: main (up to date with origin/main)
+  ✓ Syntax: All Python files valid
+  ✓ Git status: Clean working tree
+  ✓ Tests: Available (3,400+)
+
+PLEASE SEND ONE OF THESE:
+
+1. "Run all tests"
+2. "Run tests for sorcar agent"
+3. "Check code quality"
+4. "Lint and typecheck"
+5. "Push to origin"
+6. "Create release"
+7. "Fix bug in [filename]"
+8. "Implement feature [name]"
+9. "Review code in [module]"
+10. "Deploy to production"
+
+OR describe what you need in complete sentences.
+
+================================================================================
