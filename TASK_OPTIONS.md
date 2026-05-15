@@ -1,35 +1,31 @@
-# What Can I Help With? Choose One:
+# Available Tasks
 
-## 🔍 Review & Commit
-- `commit my changes` → Stage and commit pending changes
-- `show diff` → Show what changed in API.md and sorcar_agent.py
-- `discard changes` → Undo modifications
+Your message "w" is unclear. Please specify ONE of the following:
 
-## 🧪 Testing & Quality
-- `run tests` → Run full test suite
-- `run tests --coverage` → Full test suite with coverage
-- `lint` → Check code quality (uv run check --full)
-- `fix lint errors` → Auto-fix style issues
+## Quick Status
+- `status` — Show workspace status
+- `diff` — Show git diff
+- `recent` — Show recent commits
 
-## 📚 Documentation
-- `generate docs` → Create API documentation
-- `update README` → Refresh project readme
-- `explain [feature]` → Describe how something works
+## Testing
+- `test all` — Run all tests
+- `test coverage` — Run tests with coverage
+- `test quick` — Run fast tests only
 
-## 🐛 Bug Fixes & Features
-- `debug [issue]` → Fix a bug (describe the issue)
-- `implement [feature]` → Add new functionality (describe what)
-- `review [file]` → Code review of specific file
+## Code Review
+- `review chat_sorcar_agent.py` — Review modified file
+- `review [file]` — Review any file
 
-## 🚀 Deployment & Automation
-- `push to origin` → Git push
-- `deploy` → Build and deploy
-- `setup [something]` → Configure something
+## Documentation
+- `docs` — Generate project documentation
+- `api` — Generate API docs
 
-## 🌐 Other
-- `research [topic]` → Web research
-- `[Custom task]` → Describe anything else
+## Development
+- `implement [description]` — Add new feature
+- `fix [description]` — Fix a bug
+- `refactor [module]` — Refactor code
 
----
+## Research
+- `research [topic]` — Web research
 
-**Please reply with ONE clear task from above or describe your custom task.**
+**Please reply with your complete task.**
