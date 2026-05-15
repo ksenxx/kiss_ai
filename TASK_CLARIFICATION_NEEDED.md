@@ -10,7 +10,8 @@ This is too incomplete to determine what task you want completed.
 - Session 2: "p", "r"  
 - Session 3: "o"
 - Session 4: "t", "h"
-- Session 5: **"y"** ← current
+- Session 5: "y"
+- Session 6: **"d"** ← current
 
 ## Repository Status
 - Working directory: clean
