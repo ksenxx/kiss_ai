@@ -3011,7 +3011,7 @@
         break;
       }
       case 'subagentDone': {
-        const doneTab = tabs.find(t => t.id === ev.tabId);
+        const doneTab = tabs.find(t => t.id === ev.tab_id);
         if (doneTab) {
           doneTab.isDone = true;
           doneTab.isRunning = false;
