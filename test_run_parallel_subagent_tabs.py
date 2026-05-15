@@ -31,8 +31,16 @@ class MockPrinter(Printer):
         """Capture broadcast event."""
         self.broadcast_events.append(event)
 
-    def print(self, text: str, type: str = "text", **kwargs: Any) -> None:
+    def print(self, text: str, type: str = "text", **kwargs: Any) -> str:
         """Mock print method."""
+        return ""
+
+    def token_callback(self, token: str) -> None:
+        """Mock token callback method."""
+        pass
+
+    def reset(self) -> None:
+        """Mock reset method."""
         pass
 
 
@@ -47,12 +55,9 @@ def test_run_parallel_broadcasts_subagent_tab_events() -> None:
         "Return success message 2",
     ]
 
-    # Mock the underlying run_tasks_parallel to avoid actual LLM calls
-    with patch("kiss.agents.sorcar.sorcar_agent.run_tasks_parallel") as mock_run:
-        mock_run.return_value = [
-            "success: true\nsummary: task 1 done",
-            "success: true\nsummary: task 2 done",
-        ]
+    # Mock SorcarAgent.run to avoid actual LLM calls but let broadcast code run
+    with patch.object(SorcarAgent, "run") as mock_run:
+        mock_run.return_value = "success: true\nsummary: task done"
 
         # Call _run_tasks_parallel (instance method)
         results = agent._run_tasks_parallel(tasks, max_workers=2)
@@ -84,7 +89,7 @@ def test_run_parallel_broadcasts_subagent_tab_events() -> None:
         f"got {len(done_events)}"
     )
 
-    # Verify tab_ids are unique
+    # Verify tab_ids are unique and match between open and done events
     open_tab_ids = {e.get("tab_id") for e in open_events}
     done_tab_ids = {e.get("tab_id") for e in done_events}
     assert len(open_tab_ids) == len(tasks)
@@ -102,10 +107,8 @@ def test_subagent_tab_ids_match_task_index() -> None:
 
     tasks = ["Task 1", "Task 2", "Task 3"]
 
-    with patch("kiss.agents.sorcar.sorcar_agent.run_tasks_parallel") as mock_run:
-        mock_run.return_value = [
-            "success: true\nsummary: done" for _ in tasks
-        ]
+    with patch.object(SorcarAgent, "run") as mock_run:
+        mock_run.return_value = "success: true\nsummary: done"
         agent._run_tasks_parallel(tasks, max_workers=3)
 
     open_events = [
@@ -133,10 +136,8 @@ def test_subagent_tabs_excluded_from_max_tabs_trimming() -> None:
 
     tasks = ["Task A", "Task B"]
 
-    with patch("kiss.agents.sorcar.sorcar_agent.run_tasks_parallel") as mock_run:
-        mock_run.return_value = [
-            "success: true\nsummary: done" for _ in tasks
-        ]
+    with patch.object(SorcarAgent, "run") as mock_run:
+        mock_run.return_value = "success: true\nsummary: done"
         agent._run_tasks_parallel(tasks)
 
     open_events = [
@@ -159,8 +160,8 @@ def test_open_subagent_tab_event_contains_required_fields() -> None:
 
     tasks = ["Test task description"]
 
-    with patch("kiss.agents.sorcar.sorcar_agent.run_tasks_parallel") as mock_run:
-        mock_run.return_value = ["success: true\nsummary: done"]
+    with patch.object(SorcarAgent, "run") as mock_run:
+        mock_run.return_value = "success: true\nsummary: done"
         agent._run_tasks_parallel(tasks)
 
     open_events = [
