@@ -105,7 +105,7 @@ class TestSubagentTabEvents:
         assert len(sub_tab_ids) == len(open_events), "Sub-tab IDs must be unique"
 
         done_events = [e for e in events if e.get("type") == "subagentDone"]
-        done_tab_ids = {e.get("tabId") for e in done_events}
+        done_tab_ids = {e.get("tab_id") for e in done_events}
         assert sub_tab_ids == done_tab_ids, (
             f"Done events tab IDs {done_tab_ids} != open events tab IDs {sub_tab_ids}"
         )
