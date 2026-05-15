@@ -167,7 +167,7 @@ class ChatSorcarAgent(SorcarAgent):
                 if broadcast:
                     broadcast({
                         "type": "subagentDone",
-                        "tab_id": sub_tab_id,
+                        "tabId": sub_tab_id,
                         "success": success,
                     })
 
