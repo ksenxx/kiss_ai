@@ -1,0 +1,11 @@
+User sent: "e"
+
+System requires clear task specification. Examples:
+1. commit [message]
+2. test [module] 
+3. fix [issue]
+4. implement [feature]
+5. research [topic]
+6. run [command]
+
+Awaiting complete task instructions.

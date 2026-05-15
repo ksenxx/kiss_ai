@@ -1,31 +1,49 @@
-# ⏳ AWAITING COMPLETE TASK SPECIFICATION
+# Task Awaiting Clarification
 
-## Issue
-Your message was: **"e"**
+Your message was: **"o"** (incomplete)
 
-This is incomplete and I cannot determine what you need.
+## Current Repository Status
+- **Branch**: main
+- **Status**: Clean working tree ✓
+- **Latest commit**: dc525b79 (test: add integration tests for run_parallel subagent tabs feature)
+- **Remote sync**: Pushed to origin/main ✓
 
-## Required Information
-Please provide a **complete, clear task** including:
+## Please Provide a Complete Task
 
-1. **What action**: (e.g., "Fix", "Implement", "Debug", "Test", "Research", "Commit")
-2. **What file/module**: (if applicable)
-3. **Specific requirements**: (what should happen)
-4. **Any error details**: (if debugging)
+Examples of clear task specifications:
 
-## Example Valid Tasks
-- "Fix the whitespace normalization bug in openai_compatible_model.py"
-- "Run all tests and fix any failures"
-- "Implement a new caching feature in sorcar_agent.py"
-- "Commit all changes with message 'Complete message normalization'"
-- "Debug the VSCode subagent tabs feature"
-- "Research best practices for X"
+### Bug Fixes
+- "Fix bug in openai_compatible_model.py where..."
+- "Debug race condition in sorcar_agent.py"
+- "Fix failing test in test_subagent_tabs.py"
 
-## Status
-- ✅ Repository clean (working tree clean)
-- ✅ All changes committed
-- ✅ Up to date with origin/main
-- ⏳ **Awaiting your task instruction**
+### Features
+- "Implement feature X in module Y"
+- "Add new endpoint for Z"
+- "Refactor function A to support B"
 
----
-**Please reply with a complete task specification.**
+### Testing & Validation
+- "Run tests for sorcar agent"
+- "Add tests for new feature"
+- "Verify all tests pass"
+
+### Code Quality
+- "Fix linting errors in src/kiss/..."
+- "Add type hints to module X"
+- "Optimize performance in Y"
+
+### Research & Documentation
+- "Research how to implement X"
+- "Write documentation for Y"
+
+### Other
+- "Any other specific task description"
+
+## How to Proceed
+1. **Type a clear, complete task description**
+2. **Include specifics**: which files, what the problem is, what you want to achieve
+3. **I'll execute immediately**
+
+**Example**: "Fix the bug in src/kiss/core/models/openai_compatible_model.py where empty messages cause an error"
+
+Awaiting your complete task specification.

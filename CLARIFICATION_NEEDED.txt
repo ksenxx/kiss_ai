@@ -1,0 +1,28 @@
+== CLARIFICATION NEEDED ==
+
+Your message: "R"
+
+This is too brief. Please specify what you want me to do using one of these formats:
+
+POSSIBLE MEANINGS:
+- R = "Run" (tests, checks, linting)
+- R = "Rebase" (git operation)
+- R = "Reset" (git operation)
+- R = "Refactor" (code improvement)
+- R = "Review" (code review)
+- R = "Render" (build/compile)
+- R = "Retrieve" (pull from remote)
+- R = "Remove" (delete/revert)
+- Other?
+
+EXAMPLES OF CLEAR REQUESTS:
+- "run tests"
+- "run uv check"
+- "run pytest -v"
+- "git rebase main"
+- "git reset HEAD~1"
+- "refactor sorcar_agent.py"
+- "pull from origin"
+- "review and fix sorcar_agent.py"
+
+Please reply with a complete instruction.
