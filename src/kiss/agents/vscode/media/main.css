@@ -233,10 +233,12 @@ body {
   border-bottom-color: color-mix(in srgb, var(--purple) 40%, transparent);
   max-width: 160px;
 }
+
 .chat-tab.subagent-tab.active {
   border-bottom-color: var(--purple);
   color: var(--purple);
 }
+
 .subagent-indicator {
   font-size: 10px;
   flex-shrink: 0;
@@ -244,10 +246,12 @@ body {
   color: var(--purple);
   animation: subagent-pulse 1.5s ease-in-out infinite;
 }
+
 .chat-tab.subagent-tab .subagent-indicator.done {
   animation: none;
   color: var(--green);
 }
+
 @keyframes subagent-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.3; }
