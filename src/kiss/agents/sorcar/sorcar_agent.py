@@ -605,7 +605,25 @@ def run_tasks_parallel(
         Each string contains ``success`` and ``summary`` keys.  If a task
         raises an unhandled exception the corresponding entry is a YAML
         string with ``success: false`` and the traceback in ``summary``.
+
+    Raises:
+        TypeError: If *tasks* is not a list of strings.  As a convenience
+            for LLM tool callers that mistakenly pass a bare string,
+            ``str`` is coerced to a one-element list.
     """
+    # Guard against a common LLM tool-calling mistake: passing ``tasks`` as
+    # a bare string instead of ``list[str]``.  Without this check,
+    # ``enumerate(tasks)`` iterates the string character-by-character and
+    # spawns one sub-agent per character.
+    if isinstance(tasks, str):
+        tasks = [tasks]
+    elif not isinstance(tasks, list) or not all(
+        isinstance(t, str) for t in tasks
+    ):
+        raise TypeError(
+            f"tasks must be list[str], got {type(tasks).__name__}: {tasks!r}"
+        )
+
     broadcast = getattr(printer, "broadcast", None) if printer else None
     thread_local = getattr(printer, "_thread_local", None) if printer else None
     parent_tab_id = getattr(thread_local, "tab_id", None) if thread_local else None
