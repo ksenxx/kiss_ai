@@ -186,7 +186,7 @@ class Base:
         Returns:
             Path: The file path for the trajectory YAML file.
         """
-        folder_path = Path(config_module.DEFAULT_CONFIG.agent.artifact_dir) / "trajectories"
+        folder_path = Path(config_module.artifact_dir) / "trajectories"
         name_safe = self.name.replace(" ", "_").replace("/", "_")
         return folder_path / f"trajectory_{name_safe}_{self.id}_{self.run_start_timestamp}.yaml"
 
