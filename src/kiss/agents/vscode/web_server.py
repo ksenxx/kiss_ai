@@ -1612,6 +1612,10 @@ H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 \
             <input type="text" id="cfg-custom-api-key"
              placeholder="Optional API key for custom endpoint">
           </label>
+          <label class="config-label">Custom headers
+            <textarea id="cfg-custom-headers" rows="2"
+             placeholder="Key:Value (one per line)"></textarea>
+          </label>
           <label class="config-label config-checkbox">
             <input type="checkbox" id="cfg-use-web-browser" checked>
             Use web browser

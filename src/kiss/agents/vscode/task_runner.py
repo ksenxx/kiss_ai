@@ -261,6 +261,12 @@ class _TaskRunnerMixin:
             _cfg_budget = float(_vcfg.get("max_budget", 100))
             _cfg_web = _vcfg.get("use_web_browser", True)
 
+            from kiss.agents.vscode.vscode_config import (
+                build_model_config,
+            )
+
+            _model_config = build_model_config(_vcfg)
+
             for task_prompt in subtasks:
                 try:
                     tab.agent.run(
@@ -275,6 +281,7 @@ class _TaskRunnerMixin:
                         use_worktree=use_worktree,
                         max_budget=_cfg_budget,
                         web_tools=_cfg_web,
+                        model_config=_model_config,
                         _skip_persistence=True,
                     )
                     result_summary = self._extract_result_summary() or "No summary available"
