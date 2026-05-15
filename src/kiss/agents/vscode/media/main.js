@@ -689,6 +689,8 @@
         title: t.title,
         chatId: t.id,
         backendChatId: t.backendChatId || '',
+        isSubagentTab: !!t.isSubagentTab,
+        isDone: !!t.isDone,
       };
     });
     const activeIdx = tabs.findIndex(t => {
@@ -711,6 +713,14 @@
         // Restore tab.id from persisted chatId (frontend tab identifier)
         if (st.chatId) tab.id = st.chatId;
         if (st.backendChatId) tab.backendChatId = st.backendChatId;
+        // Preserve subagent flag so subagent tabs aren't reclassified
+        // as regular tabs (and thus eligible for MAX_TABS trimming) on
+        // webview reload.
+        if (st.isSubagentTab) {
+          tab.isSubagentTab = true;
+          tab.isDone = !!st.isDone;
+          tab.isRunning = !st.isDone;
+        }
         tabs.push(tab);
       });
       const idx = saved.activeTabIndex || 0;
@@ -2999,15 +3009,34 @@
       }
       case 'openSubagentTab': {
         const subDesc = ev.description || 'Sub-agent';
-        const subTab = makeTab('⚡ ' + subDesc.substring(0, 40));
-        subTab.id = ev.tab_id;
+        // Include the 1-based task index in the title so tabs whose
+        // descriptions share a long common prefix (e.g. "Research and
+        // summarize: ...") are visually distinct in the truncated tab
+        // bar — otherwise users see 3 tabs that look identical and
+        // count them as one (root cause of the "only 2 tabs got
+        // created" report).
+        const subIdx =
+          typeof ev.taskIndex === 'number' ? ev.taskIndex + 1 : null;
+        const titlePrefix = subIdx !== null ? '⚡' + subIdx + ' ' : '⚡ ';
+        const title = titlePrefix + subDesc.substring(0, 40);
+        // Idempotent: if a tab with the same id already exists, update
+        // it in place rather than pushing a duplicate.  Defends against
+        // accidental duplicate events from the backend.
+        let subTab = tabs.find(t => t.id === ev.tab_id);
+        if (!subTab) {
+          subTab = makeTab(title);
+          subTab.id = ev.tab_id;
+          tabs.push(subTab);
+        } else {
+          subTab.title = title;
+        }
         subTab.isSubagentTab = true;
         subTab.isDone = false;
         subTab.isRunning = true;
         subTab.taskPanelHTML = subDesc;
         subTab.taskPanelVisible = true;
-        tabs.push(subTab);
         renderTabBar();
+        persistTabState();
         break;
       }
       case 'subagentDone': {
@@ -3016,6 +3045,7 @@
           doneTab.isDone = true;
           doneTab.isRunning = false;
           renderTabBar();
+          persistTabState();
         }
         break;
       }
