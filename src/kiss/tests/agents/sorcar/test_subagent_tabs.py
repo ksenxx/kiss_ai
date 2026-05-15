@@ -99,9 +99,9 @@ class TestSubagentTabEvents:
 
         sub_tab_ids = set()
         for ev in open_events:
-            assert "subTabId" in ev, f"Missing subTabId in openSubagentTab: {ev}"
+            assert "tabId" in ev, f"Missing tabId in openSubagentTab: {ev}"
             assert "taskDescription" in ev, f"Missing taskDescription: {ev}"
-            sub_tab_ids.add(ev["subTabId"])
+            sub_tab_ids.add(ev["tabId"])
         assert len(sub_tab_ids) == len(open_events), "Sub-tab IDs must be unique"
 
         done_events = [e for e in events if e.get("type") == "subagentDone"]
@@ -149,7 +149,7 @@ class TestSubagentTabEvents:
         open_events = [e for e in events if e.get("type") == "openSubagentTab"]
         assert len(open_events) >= 1
 
-        sub_tab_id = open_events[0]["subTabId"]
+        sub_tab_id = open_events[0]["tabId"]
         sub_events = [
             e for e in events
             if e.get("tabId") == sub_tab_id
