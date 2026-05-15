@@ -1,0 +1,23 @@
+==================================================
+TASK CLARIFICATION NEEDED
+==================================================
+
+User Message: "p"
+
+Your message is too brief. Please provide a complete task, such as:
+
+EXAMPLES:
+  • "Run tests"
+  • "Fix bug in src/agents/mock_agent.py"
+  • "Push to main"
+  • "Project status"
+  • "Refactor the database module"
+  • "Research how to implement X"
+  • "Write integration tests for feature Y"
+  • "Deploy to production"
+
+CURRENT PROJECT STATUS:
+  Branch: main (1 commit ahead)
+  Modified: src/kiss/tests/agents/sorcar/test_subagent_tabs_integration.py
+  
+Ready to help once you clarify what "p" means!
