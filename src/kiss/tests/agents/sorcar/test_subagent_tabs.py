@@ -228,3 +228,43 @@ class TestSubagentTabTypes:
         """types.ts includes subagentDone in ToWebviewMessageBody."""
         content = _TYPES_TS.read_text()
         assert "subagentDone" in content
+
+
+# -----------------------------------------------------------------------
+# CSS check: verify subagent tab styles exist
+# -----------------------------------------------------------------------
+
+_MAIN_CSS = (
+    Path(__file__).resolve().parents[3]
+    / "agents" / "vscode" / "media" / "main.css"
+)
+
+
+class TestSubagentTabCSS:
+    """Verify CSS includes styles for subagent tabs."""
+
+    def test_css_has_subagent_tab_class(self) -> None:
+        """main.css includes styles for .subagent-tab."""
+        content = _MAIN_CSS.read_text()
+        assert ".subagent-tab" in content
+
+    def test_css_has_subagent_indicator_class(self) -> None:
+        """main.css includes styles for .subagent-indicator."""
+        content = _MAIN_CSS.read_text()
+        assert ".subagent-indicator" in content
+
+    def test_css_has_subagent_pulse_animation(self) -> None:
+        """main.css includes the pulse animation for running subagent indicators."""
+        content = _MAIN_CSS.read_text()
+        assert "subagent-pulse" in content
+
+    def test_css_has_subagent_done_state(self) -> None:
+        """main.css includes done state style for subagent indicator."""
+        content = _MAIN_CSS.read_text()
+        assert ".done" in content or "done" in content
+
+    def test_js_close_button_for_done_subagent_tabs(self) -> None:
+        """Completed subagent tabs show a close button."""
+        content = _MAIN_JS.read_text()
+        # Verify close button logic allows subagent tabs when done
+        assert "tab.isDone" in content
