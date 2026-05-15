@@ -50,7 +50,7 @@ class MockPrinter:
                 "type": "tool_call",
                 "tool": tool_name,
                 "args": args,
-                "tabId": getattr(self._thread_local, "tab_id", None),
+                "tab_id": getattr(self._thread_local, "tab_id", None),
             })
 
     def text_delta(self, delta: str) -> None:
@@ -59,7 +59,7 @@ class MockPrinter:
             self.events.append({
                 "type": "text_delta",
                 "delta": delta,
-                "tabId": getattr(self._thread_local, "tab_id", None),
+                "tab_id": getattr(self._thread_local, "tab_id", None),
             })
 
     def thinking(self, content: str) -> None:
@@ -68,7 +68,7 @@ class MockPrinter:
             self.events.append({
                 "type": "thinking",
                 "content": content,
-                "tabId": getattr(self._thread_local, "tab_id", None),
+                "tab_id": getattr(self._thread_local, "tab_id", None),
             })
 
 
