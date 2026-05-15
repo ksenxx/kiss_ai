@@ -620,10 +620,10 @@ def run_tasks_parallel(
         if broadcast:
             broadcast({
                 "type": "openSubagentTab",
-                "tab_id": sub_tab_id,
-                "parent_tab_id": parent_tab_id,
-                "task_description": task[:200],
-                "task_index": i,
+                "tabId": sub_tab_id,
+                "parentTabId": parent_tab_id,
+                "taskDescription": task[:200],
+                "taskIndex": i,
             })
 
     def _run_single(args: tuple[int, str]) -> str:
