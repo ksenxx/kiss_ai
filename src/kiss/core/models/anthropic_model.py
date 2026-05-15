@@ -195,6 +195,41 @@ class AnthropicModel(Model):
             )
         return tools
 
+    def _normalize_conversation_for_api(
+        self,
+        conversation: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Normalize all messages in a conversation before sending to the API.
+
+        Ensures that all text content blocks are non-whitespace and that no
+        messages contain only whitespace-only text blocks.
+
+        Args:
+            conversation: The conversation to normalize.
+
+        Returns:
+            list[dict[str, Any]]: The normalized conversation.
+        """
+        normalized: list[dict[str, Any]] = []
+        for msg in conversation:
+            msg_copy = msg.copy()
+            content = msg_copy.get("content")
+
+            # If content is a string, ensure it's non-whitespace
+            if isinstance(content, str):
+                if content.strip():
+                    normalized.append(msg_copy)
+                # Skip messages with whitespace-only string content
+            # If content is a list of blocks, normalize them
+            elif isinstance(content, list):
+                normalized_blocks = self._normalize_content_blocks(content)
+                if normalized_blocks:
+                    msg_copy["content"] = normalized_blocks
+                    normalized.append(msg_copy)
+                # Skip messages where all blocks were dropped
+
+        return normalized
+
     def _build_create_kwargs(self, tools: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         """Build keyword arguments for the Anthropic API create call.
 
@@ -250,10 +285,11 @@ class AnthropicModel(Model):
                     "anthropic-beta": merged_beta,
                 }
 
+        normalized_messages = self._normalize_conversation_for_api(self.conversation)
         kwargs.update(
             {
                 "model": self.model_name,
-                "messages": self.conversation,
+                "messages": normalized_messages,
                 "max_tokens": max_tokens,
             }
         )
@@ -317,7 +353,11 @@ class AnthropicModel(Model):
 
         blocks = self._normalize_content_blocks(getattr(response, "content", None))
         content = self._extract_text_from_blocks(blocks)
-        self.conversation.append({"role": "assistant", "content": blocks or content})
+        # Prefer blocks (which have been normalized) over content string
+        msg_content = blocks if blocks else content
+        # Only append non-empty messages
+        if msg_content:
+            self.conversation.append({"role": "assistant", "content": msg_content})
         return content, response
 
     def generate_and_process_with_tools(  # pragma: no cover – API call
@@ -359,7 +399,11 @@ class AnthropicModel(Model):
                     }
                 )
 
-        self.conversation.append({"role": "assistant", "content": blocks or content})
+        # Prefer blocks (which have been normalized) over content string
+        msg_content = blocks if blocks else content
+        # Only append non-empty messages
+        if msg_content:
+            self.conversation.append({"role": "assistant", "content": msg_content})
         return function_calls, content, response
 
     def add_function_results_to_conversation_and_return(
