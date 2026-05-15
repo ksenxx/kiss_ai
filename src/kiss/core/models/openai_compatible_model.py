@@ -214,6 +214,99 @@ class OpenAICompatibleModel(Model):
         """Check if this is an OpenRouter Anthropic model (Claude via OpenRouter)."""
         return self.model_name.startswith("openrouter/anthropic/")
 
+    def _normalize_content_blocks(self, content: Any) -> list[dict[str, Any]]:
+        """Normalize content blocks to JSON-serializable dicts.
+
+        Drops text blocks whose text is empty or whitespace-only, because
+        many APIs reject them with invalid_request_error about non-whitespace text.
+
+        Args:
+            content: The content blocks from a response.
+
+        Returns:
+            list[dict[str, Any]]: Normalized content blocks as dictionaries.
+        """
+        blocks: list[dict[str, Any]] = []
+        if content is None:
+            return blocks
+        for block in content:
+            if isinstance(block, dict):
+                # Drop pre-existing whitespace-only text dicts too.
+                if block.get("type") == "text" and not block.get("text", "").strip():
+                    continue
+                blocks.append(block)
+                continue
+            block_type = getattr(block, "type", None)
+            if block_type == "text":
+                text = getattr(block, "text", "")
+                if not text.strip():
+                    continue
+                blocks.append({"type": "text", "text": text})
+            elif block_type == "tool_use":
+                blocks.append(
+                    {
+                        "type": "tool_use",
+                        "id": getattr(block, "id", ""),
+                        "name": getattr(block, "name", ""),
+                        "input": getattr(block, "input", {}) or {},
+                    }
+                )
+            elif block_type == "thinking":
+                thinking_block: dict[str, Any] = {
+                    "type": "thinking",
+                    "thinking": getattr(block, "thinking", ""),
+                }
+                signature = getattr(block, "signature", None)
+                if signature is not None:
+                    thinking_block["signature"] = signature
+                blocks.append(thinking_block)
+            elif hasattr(block, "model_dump"):
+                dumped = block.model_dump(exclude_none=True)
+                if dumped.get("type") == "text" and not dumped.get("text", "").strip():
+                    continue
+                blocks.append(dumped)
+            else:
+                text = str(block)
+                if not text.strip():
+                    continue
+                blocks.append({"type": "text", "text": text})
+        return blocks
+
+    def _normalize_conversation_for_api(
+        self,
+        conversation: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Normalize all messages in a conversation before sending to the API.
+
+        Ensures that all text content blocks are non-whitespace and that no
+        messages contain only whitespace-only text blocks.
+
+        Args:
+            conversation: The conversation to normalize.
+
+        Returns:
+            list[dict[str, Any]]: The normalized conversation.
+        """
+        normalized: list[dict[str, Any]] = []
+        for msg in conversation:
+            msg_copy = msg.copy()
+            content = msg_copy.get("content")
+
+            # If content is a string, ensure it's non-whitespace
+            if isinstance(content, str):
+                if content.strip():
+                    normalized.append(msg_copy)
+                # Skip messages with whitespace-only string content
+            # If content is a list of blocks, normalize them
+            elif isinstance(content, list):
+                normalized_blocks = self._normalize_content_blocks(content)
+                if normalized_blocks:
+                    msg_copy["content"] = normalized_blocks
+                    normalized.append(msg_copy)
+                # Skip messages where all blocks were dropped
+
+        return normalized
+
     def _apply_cache_control_for_openrouter_anthropic(self, kwargs: dict[str, Any]) -> None:
         """Add top-level cache_control for OpenRouter Anthropic prompt caching.
 

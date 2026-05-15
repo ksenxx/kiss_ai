@@ -607,15 +607,20 @@ def run_tasks_parallel(
         string with ``success: false`` and the traceback in ``summary``.
     """
     broadcast = getattr(printer, "broadcast", None) if printer else None
+    parent_tab_id = getattr(getattr(printer, "_thread_local", None), "tab_id", None) if printer else None
 
     sub_tab_ids: list[str] = []
     for i, task in enumerate(tasks):
-        sub_tab_id = f"sub-{uuid.uuid4().hex[:12]}"
+        if parent_tab_id:
+            sub_tab_id = f"{parent_tab_id}__sub_{i}"
+        else:
+            sub_tab_id = f"sub-{uuid.uuid4().hex[:12]}"
         sub_tab_ids.append(sub_tab_id)
         if broadcast:
             broadcast({
                 "type": "openSubagentTab",
-                "subTabId": sub_tab_id,
+                "tabId": sub_tab_id,
+                "parentTabId": parent_tab_id,
                 "taskDescription": task[:200],
                 "taskIndex": i,
             })
@@ -645,7 +650,7 @@ def run_tasks_parallel(
             return error_result
         finally:
             if tl is not None:
-                tl.tab_id = sub_tab_id
+                tl.tab_id = None
             if broadcast:
                 broadcast({
                     "type": "subagentDone",
