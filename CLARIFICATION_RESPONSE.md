@@ -1,30 +1,37 @@
-# Task Requires Clarification
+# Clarification Request — "R"
 
-**User input received**: "e"
+Your input: **"R"**
 
-This is too brief to interpret. "e" could mean many things:
-- **E**xit — Stop the current process
-- **E**dit — Edit a file
-- **E**xecute — Run a command
-- **E**xplain — Explain something
-- **E**nhance — Improve code or features
-- Something else entirely
+This single character is ambiguous. Please clarify which action you want:
 
-## Please Provide Clear Instructions
+| Option | Action |
+|--------|--------|
+| **R**un | Run tests (`uv run pytest -v`) or run a specific script |
+| **R**ead | Read a specific file (please specify filename) |
+| **R**eview | Review code or pull changes |
+| **R**eleases | Show release history or version tags |
+| **R**uff | Run ruff linter (`ruff check .`) |
+| **R**estart | Restart a service or process |
+| **R**ebase | Git rebase operation |
+| **R**efactor | Refactor code in a module |
+| **R**emote | Check remote status or push/pull |
+| **R**eport | Generate a report |
+| **R**evert | Revert a change or commit |
 
-Send a **complete task description** with specific details, such as:
+## Common Complete Instructions
 
-**Examples:**
-- "Run the full test suite and show me the summary"
-- "Fix the bug in src/agents/ where XYZ is broken"
-- "Lint the codebase and fix all errors"
-- "Show me the project structure and recent commits"
-- "Research how to implement feature X"
-- "Create a new file called X that does Y"
-- "Update the API documentation"
-- "Explain how the authentication system works"
-- "Edit the README to add new section on setup"
+- "Run tests" → executes `uv run pytest -v`
+- "Read README.md" → displays the README
+- "Review src/kiss/main.py" → analyzes the main module
+- "Run check --full" → runs lint and type checking
+- "Show git log" → displays commit history
 
-**Current Status**: ⏸️ BLOCKED — Awaiting complete task specification.
+## Status
+**AWAITING CLARIFICATION**: Please provide a complete, specific instruction.
 
-Please provide a clear, actionable task description so I can help you effectively!
+Examples:
+- "Fix [bug description]"
+- "Implement [feature]"
+- "Run tests"
+- "Show [component] status"
+- "Deploy release"

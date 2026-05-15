@@ -17,8 +17,6 @@ from unittest.mock import patch
 import pytest
 
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.vscode.server import VSCodeServer
 
 
 class MockPrinter:
@@ -183,7 +181,7 @@ class TestSubagentTabsIntegration:
         with patch.object(ChatSorcarAgent, "run", return_value='{"ok": true}'):
             with patch.object(ChatSorcarAgent, "resume_chat_by_id") as mock_resume:
                 tasks = ["Task 1"]
-                results = agent._run_tasks_parallel(tasks, max_workers=1)
+                agent._run_tasks_parallel(tasks, max_workers=1)
 
                 # Verify resume_chat_by_id was called with correct chat_id
                 assert mock_resume.called
