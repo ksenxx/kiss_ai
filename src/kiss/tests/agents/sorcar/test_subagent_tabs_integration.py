@@ -120,8 +120,7 @@ class TestSubagentTabsIntegration:
 
         # Verify
         assert len(results) == 2
-        printer = agent.printer
-        assert isinstance(printer, MockPrinter)
+        printer = cast(MockPrinter, agent.printer)
 
         # Check subagentDone events
         done_events = [
@@ -139,7 +138,7 @@ class TestSubagentTabsIntegration:
         # Setup
         agent = ChatSorcarAgent("test-agent")
         printer = MockPrinter()
-        agent.printer = printer
+        agent.printer = cast(Printer, printer)
         printer._thread_local.tab_id = "parent-tab-3"
 
         # Manually simulate what happens in _run_single
@@ -176,7 +175,8 @@ class TestSubagentTabsIntegration:
         # Setup
         agent = ChatSorcarAgent("test-agent")
         agent._chat_id = "chat-session-123"
-        agent.printer = MockPrinter()
+        mock_printer = MockPrinter()
+        agent.printer = cast(Printer, mock_printer)
 
         # Mock run() and ChatSorcarAgent init
         with patch.object(ChatSorcarAgent, "run", return_value='{"ok": true}'):
@@ -197,7 +197,8 @@ class TestSubagentTabsIntegration:
         """Verify unique tab IDs are generated when no parent tab_id exists."""
         # Setup
         agent = ChatSorcarAgent("test-agent")
-        agent.printer = MockPrinter()
+        mock_printer = MockPrinter()
+        agent.printer = cast(Printer, mock_printer)
         # Don't set parent tab_id
 
         # Mock run()
@@ -207,8 +208,7 @@ class TestSubagentTabsIntegration:
 
         # Verify
         assert len(results) == 3
-        printer = agent.printer
-        assert isinstance(printer, MockPrinter)
+        printer = cast(MockPrinter, agent.printer)
 
         open_events = [
             e for e in printer.broadcast_calls if e.get("type") == "openSubagentTab"
