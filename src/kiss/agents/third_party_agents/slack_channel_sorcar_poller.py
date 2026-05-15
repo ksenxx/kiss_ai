@@ -29,7 +29,7 @@ Environment variables (all optional):
 * ``KISS_SLACK_USER`` — Slack handle or real name of the user whose
   messages to handle (default ``"ksen"``).
 * ``KISS_SLACK_CHANNEL`` — Channel name to poll (default
-  ``"kisssorcar"``).
+  ``"sorcar"``).
 * ``KISS_SLACK_MODEL`` — Model name passed to ``ChatSorcarAgent.run``.
 * ``KISS_SLACK_BUDGET`` — Per-task budget in USD (default ``5.0``).
 """
@@ -64,7 +64,7 @@ RUN_DURATION = 57.0
 
 WORKSPACE = os.environ.get("KISS_SLACK_WORKSPACE", "learningsystems")
 USER_NAME = os.environ.get("KISS_SLACK_USER", "ksen")
-CHANNEL_NAME = os.environ.get("KISS_SLACK_CHANNEL", "kisssorcar")
+CHANNEL_NAME = os.environ.get("KISS_SLACK_CHANNEL", "sorcar")
 MODEL_NAME = os.environ.get("KISS_SLACK_MODEL", "")
 MAX_BUDGET = float(os.environ.get("KISS_SLACK_BUDGET", "5.0"))
 
@@ -351,9 +351,15 @@ def _poll_once(
         return
     messages = sorted(resp.get("messages", []), key=lambda m: float(m.get("ts", "0")))
 
+    # Only process messages newer than the startup watermark so we never
+    # retroactively run old channel discussions as Sorcar tasks.
+    min_ts = float(state.get("min_ts", "0"))
+
     for msg in messages:
         ts = str(msg.get("ts", ""))
         if not ts:
+            continue
+        if float(ts) <= min_ts:
             continue
         if msg.get("user") != user_id:
             continue
@@ -402,6 +408,13 @@ def main() -> None:
     except Exception:
         logging.exception("Startup failed")
         raise
+
+    # On first run, set a watermark so we only process messages from now on.
+    state = _load_state()
+    if "min_ts" not in state:
+        state["min_ts"] = str(time.time())
+        _save_state(state)
+        logging.info("Initialized min_ts=%s (only new messages will be processed)", state["min_ts"])
 
     deadline = time.time() + RUN_DURATION
     while time.time() < deadline:
