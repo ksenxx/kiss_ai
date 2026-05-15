@@ -50,9 +50,9 @@ import yaml
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.third_party_agents.slack_agent import _load_token
-from kiss.agents.vscode.vscode_config import source_shell_env
+from kiss.agents.vscode.vscode_config import load_config, source_shell_env
 
 STATE_DIR = Path.home() / ".kiss" / "slack_channel_sorcar_poller"
 STATE_FILE = STATE_DIR / "state.json"
@@ -223,24 +223,38 @@ def _strip_bot_mention(text: str, bot_id: str) -> str:
 def _run_sorcar(prompt: str, chat_id: str) -> tuple[str, str]:
     """Run a Sorcar task and return ``(slack_text, chat_id)``.
 
+    Uses :class:`WorktreeSorcarAgent` so that ``update_settings`` calls
+    for ``is_worktree``, ``auto_commit``, and ``demo_mode`` have real
+    effects (git worktree isolation, actual git commits, persisted
+    config) even without a UI.
+
     Args:
         prompt: The user's Slack message text.
         chat_id: Existing chat to resume, or empty for a new chat.
     """
-    agent = ChatSorcarAgent("Slack Channel Sorcar Poller")
+    agent = WorktreeSorcarAgent("Slack Channel Sorcar Poller")
     if chat_id:
         agent.resume_chat_by_id(chat_id)
     else:
         agent.new_chat()
     full_prompt = prompt + SLACK_FORMATTING_HINT
+
+    cfg = load_config()
+    use_worktree = bool(cfg.get("is_worktree", False))
+
     run_kwargs: dict[str, Any] = {
         "prompt_template": full_prompt,
         "max_budget": MAX_BUDGET,
         "verbose": False,
+        "use_worktree": use_worktree,
     }
     if MODEL_NAME:
         run_kwargs["model_name"] = MODEL_NAME
-    result = agent.run(**run_kwargs)
+    try:
+        result = agent.run(**run_kwargs)
+    finally:
+        if agent._wt_pending:
+            agent._release_worktree()
     return _markdown_to_mrkdwn(_extract_summary(result)), agent.chat_id
 
 
