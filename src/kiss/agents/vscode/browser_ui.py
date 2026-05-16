@@ -638,8 +638,12 @@ class BaseBrowserPrinter(Printer):
         if type == "tool_result":
             self._flush_bash()
             tool_name = kwargs.get("tool_name", "")
-            core_tools = {"Bash", "Read", "Edit", "Write"}
-            show_result = tool_name in core_tools or kwargs.get("is_error", False)
+            # Show every tool's return value (so the user sees the output
+            # of run_parallel, ask_user_question, update_settings, the
+            # WebUseTool methods, etc.) EXCEPT ``finish`` -- the agentic
+            # loop renders that one as a dedicated "result" panel right
+            # after, so a tool_result here would just be a duplicate.
+            show_result = tool_name != "finish"
             with self._bash_lock:
                 streamed = self._bash_state.streamed
                 self._bash_state.streamed = False
