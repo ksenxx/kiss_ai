@@ -27,11 +27,20 @@ function isValidKissProject(dir: string): boolean {
 
 /**
  * Find the KISS project root directory.
+ *
+ * Direct VSIX install is the only supported installation model, so the
+ * embedded ``kiss_project`` bundled inside the VSIX is the default — even
+ * when the user originally installed from a cloned checkout via the
+ * top-level ``install.sh``.  The env-var / setting escape hatches remain
+ * for developers who want the extension to run against a working
+ * checkout, but they are only honoured in a trusted workspace.
+ *
  * Search order:
- * 1. Environment variable (explicit override, e.g. Docker containers)
- * 2. Configuration setting (kissSorcar.kissProjectPath)
- * 3. Source-install marker written by install.sh (~/.kiss/install_dir)
- * 4. Embedded kiss_project directory bundled with the extension
+ * 1. ``KISS_PROJECT_PATH`` environment variable (explicit override,
+ *    e.g. Docker containers).  Trusted workspaces only.
+ * 2. ``kissSorcar.kissProjectPath`` configuration setting.  Trusted
+ *    workspaces only.
+ * 3. Embedded ``kiss_project`` directory bundled with the extension.
  */
 export function findKissProject(): string | null {
   // H5 — only honour explicit workspace-scoped overrides (env var or
@@ -52,25 +61,13 @@ export function findKissProject(): string | null {
       .getConfiguration('kissSorcar')
       .get<string>('kissProjectPath');
     if (configPath && isValidKissProject(configPath)) return configPath;
-
-    // 3. Source install marker written by the repository install.sh.
-    const homeDir = process.env.HOME || process.env.USERPROFILE || '';
-    const installMarker = homeDir
-      ? path.join(homeDir, '.kiss', 'install_dir')
-      : '';
-    try {
-      const installDir = installMarker
-        ? fs.readFileSync(installMarker, 'utf-8').trim()
-        : '';
-      if (installDir && isValidKissProject(installDir)) return installDir;
-    } catch {
-      /* marker is optional */
-    }
   }
 
-  // 4. Embedded kiss_project bundled inside the extension directory
+  // 3. Embedded kiss_project bundled inside the extension directory
   // (always allowed; this is shipped with the extension and trusted by
-  //  installation).
+  //  installation).  Clone-based installs converge on this path too —
+  //  they get the VSIX-shipped copy unless they opt in to their
+  //  checkout via the env var / setting.
   const embeddedPath = path.join(__dirname, '..', 'kiss_project');
   if (isValidKissProject(embeddedPath)) return embeddedPath;
 
