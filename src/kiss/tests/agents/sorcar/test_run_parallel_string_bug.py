@@ -150,3 +150,73 @@ class TestRunParallelStringBug:
         assert count == 2, (
             f"Normal list input should produce 2 broadcasts, got {count}"
         )
+
+    def test_json_encoded_list_string_is_parsed(self) -> None:
+        """JSON-encoded list strings must be parsed into a real list.
+
+        LLMs sometimes serialize the list argument and pass it as a
+        single string like ``'["task A", "task B"]'`` instead of a real
+        list.  Without parsing, the entire JSON string would be wrapped
+        into a one-element list and dispatched to a *single* sub-agent.
+        After the fix, ``run_tasks_parallel`` must recover the 2 tasks
+        and broadcast 2 ``openSubagentTab`` events.
+        """
+        printer = _CapturePrinter()
+        printer._thread_local.tab_id = "parent-jsonstr"
+
+        try:
+            run_tasks_parallel(
+                '["task A", "task B"]',  # type: ignore[arg-type]
+                max_workers=0,
+                printer=printer,
+            )
+        except (ValueError, TypeError):
+            pass
+
+        count = _count_open_subagent_events(printer)
+        assert count == 2, (
+            "JSON-encoded list string should be parsed into 2 tasks, "
+            f"got {count} broadcasts"
+        )
+
+    def test_json_encoded_list_string_three_tasks(self) -> None:
+        """Three-element JSON-encoded list must yield 3 sub-agent tabs."""
+        printer = _CapturePrinter()
+        printer._thread_local.tab_id = "parent-jsonstr3"
+
+        try:
+            run_tasks_parallel(
+                '["a", "b", "c"]',  # type: ignore[arg-type]
+                max_workers=0,
+                printer=printer,
+            )
+        except (ValueError, TypeError):
+            pass
+
+        count = _count_open_subagent_events(printer)
+        assert count == 3, (
+            f"3-element JSON list should yield 3 broadcasts, got {count}"
+        )
+
+    def test_bracket_string_that_is_not_json_is_wrapped(self) -> None:
+        """A bare task that happens to start with ``[`` falls back to wrap.
+
+        e.g. ``"[bug] fix X"`` is *not* valid JSON; it must be treated as
+        a single task, not parsed.
+        """
+        printer = _CapturePrinter()
+        printer._thread_local.tab_id = "parent-bracket"
+
+        try:
+            run_tasks_parallel(
+                "[bug] fix X and reply [ok]",  # type: ignore[arg-type]
+                max_workers=0,
+                printer=printer,
+            )
+        except (ValueError, TypeError):
+            pass
+
+        count = _count_open_subagent_events(printer)
+        assert count == 1, (
+            f"Non-JSON bracket string should produce 1 broadcast, got {count}"
+        )
