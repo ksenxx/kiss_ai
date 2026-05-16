@@ -103,7 +103,8 @@ class BaseBrowserPrinter(Printer):
         The caller should hold ``_bash_lock`` when accessing this in
         multi-threaded production code.
         """
-        key = getattr(self._thread_local, "tab_id", None) or ""
+        raw = getattr(self._thread_local, "tab_id", None) or ""
+        key = self._resolve_tab_id(raw)
         bs = self._bash_states.get(key)
         if bs is None:
             bs = _BashState()
@@ -120,6 +121,77 @@ class BaseBrowserPrinter(Printer):
         self._steps_offsets: dict[str, int] = {}
         self._recordings: dict[str, list[dict[str, Any]]] = {}
         self._persist_agents: dict[str, Any] = {}
+        # ``_tab_id_alias`` maps an OLD tab id to a NEW tab id.  A
+        # running agent thread sets its ``threading.local`` tab id
+        # once and cannot be safely mutated from another thread; the
+        # alias lets the printer transparently re-route that thread's
+        # events to a newly opened frontend tab.  Used by
+        # ``rebind_tab`` and resolved by ``_resolve_tab_id``.
+        self._tab_id_alias: dict[str, str] = {}
+
+    def _resolve_tab_id(self, tab_id: str | None) -> str:
+        """Resolve *tab_id* through the alias chain.
+
+        Returns the final tab id after walking ``_tab_id_alias``.
+        Includes a cycle guard so a pathological alias loop returns
+        the last seen id rather than spinning forever.
+
+        Args:
+            tab_id: The tab id to resolve (may be ``None`` or ``""``).
+
+        Returns:
+            The final tab id, or ``""`` when input is falsy.
+        """
+        if not tab_id:
+            return ""
+        seen: set[str] = set()
+        cur = tab_id
+        while cur in self._tab_id_alias and cur not in seen:
+            seen.add(cur)
+            cur = self._tab_id_alias[cur]
+        return cur
+
+    def rebind_tab(self, old_tab_id: str, new_tab_id: str) -> None:
+        """Re-key all per-tab state from *old_tab_id* to *new_tab_id*.
+
+        Called by the server when the user opens a still-running task
+        from history in a freshly created tab: the agent thread keeps
+        running but its events must now flow to the new tab.  Migrates
+        ``_recordings``, ``_bash_states``, ``_tokens_offsets``,
+        ``_budget_offsets``, ``_steps_offsets``, and ``_persist_agents``
+        from the old key to the new one and installs an alias so the
+        agent thread's stored ``threading.local`` tab id keeps routing
+        correctly via ``_inject_tab_id`` and ``_record_event``.
+
+        Idempotent for ``old_tab_id == new_tab_id`` (no-op).
+
+        Args:
+            old_tab_id: The tab id the agent thread was started with.
+            new_tab_id: The freshly allocated frontend tab id.
+        """
+        if not old_tab_id or not new_tab_id or old_tab_id == new_tab_id:
+            return
+        with self._lock:
+            rec = self._recordings.pop(old_tab_id, None)
+            if rec is not None:
+                self._recordings[new_tab_id] = rec
+            tok = self._tokens_offsets.pop(old_tab_id, None)
+            if tok is not None:
+                self._tokens_offsets[new_tab_id] = tok
+            bud = self._budget_offsets.pop(old_tab_id, None)
+            if bud is not None:
+                self._budget_offsets[new_tab_id] = bud
+            steps = self._steps_offsets.pop(old_tab_id, None)
+            if steps is not None:
+                self._steps_offsets[new_tab_id] = steps
+            agent = self._persist_agents.pop(old_tab_id, None)
+            if agent is not None:
+                self._persist_agents[new_tab_id] = agent
+            self._tab_id_alias[old_tab_id] = new_tab_id
+        with self._bash_lock:
+            bs = self._bash_states.pop(old_tab_id, None)
+            if bs is not None:
+                self._bash_states[new_tab_id] = bs
 
     def _tab_key(self) -> str:
         """Return the thread-local tab key for per-tab state lookups.
@@ -127,15 +199,24 @@ class BaseBrowserPrinter(Printer):
         Used for per-tab usage offsets, recordings, and bash state.
         Falls back to the empty string for threads without a tab_id
         (e.g. unit tests that do not set ``_thread_local.tab_id``).
+        Resolves through ``_tab_id_alias`` so a thread whose
+        ``threading.local`` still points to the OLD tab id (because a
+        ``rebind_tab`` happened from another thread) reads/writes
+        state under the NEW tab id.
         """
-        return getattr(self._thread_local, "tab_id", None) or ""
+        return self._resolve_tab_id(
+            getattr(self._thread_local, "tab_id", None) or "",
+        )
 
     def _inject_tab_id(self, event: dict[str, Any]) -> dict[str, Any]:
         """Return *event* with ``tabId`` injected from thread-local storage.
 
         If the current thread has a ``tab_id`` set and the event does
         not already contain a ``tabId`` key, returns a shallow copy of
-        *event* with ``tabId`` added.  Otherwise returns *event* as-is.
+        *event* with the alias-resolved ``tabId`` added.  Otherwise,
+        if the event already carries a ``tabId``, it is resolved
+        through ``_tab_id_alias`` so events tagged with the OLD tab id
+        still reach the NEW tab.
 
         Args:
             event: The event dictionary.
@@ -143,9 +224,15 @@ class BaseBrowserPrinter(Printer):
         Returns:
             The (possibly augmented) event dictionary.
         """
+        existing = event.get("tabId")
+        if existing is not None:
+            resolved = self._resolve_tab_id(existing)
+            if resolved != existing:
+                return {**event, "tabId": resolved}
+            return event
         tab_id = getattr(self._thread_local, "tab_id", None)
-        if tab_id is not None and "tabId" not in event:
-            return {**event, "tabId": tab_id}
+        if tab_id is not None:
+            return {**event, "tabId": self._resolve_tab_id(tab_id)}
         return event
 
     def _persist_event(self, event: dict[str, Any]) -> None:
@@ -165,7 +252,7 @@ class BaseBrowserPrinter(Printer):
         evt_tab = event.get("tabId")
         if evt_tab is None:
             return
-        agent = self._persist_agents.get(evt_tab)
+        agent = self._persist_agents.get(self._resolve_tab_id(evt_tab))
         if agent is None:
             return
         task_id = agent._last_task_id
@@ -224,6 +311,13 @@ class BaseBrowserPrinter(Printer):
             self._tokens_offsets.pop(key, None)
             self._budget_offsets.pop(key, None)
             self._steps_offsets.pop(key, None)
+            # Drop alias entries that point AT or FROM this key so the
+            # alias map does not grow without bound.
+            self._tab_id_alias.pop(key, None)
+            for src in [
+                s for s, dst in self._tab_id_alias.items() if dst == key
+            ]:
+                self._tab_id_alias.pop(src, None)
 
     def reset(self) -> None:
         """Reset internal streaming state for a new turn."""
@@ -334,7 +428,12 @@ class BaseBrowserPrinter(Printer):
 
         Must be called with ``self._lock`` held.
         """
-        key = event.get("tabId") or getattr(self._thread_local, "tab_id", None) or ""
+        raw_key = (
+            event.get("tabId")
+            or getattr(self._thread_local, "tab_id", None)
+            or ""
+        )
+        key = self._resolve_tab_id(raw_key)
         rec = self._recordings.get(key)
         if rec is not None:
             rec.append(event)
