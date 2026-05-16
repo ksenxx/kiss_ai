@@ -3089,8 +3089,23 @@
         // when *switching* tabs, but the tab-switch ran BEFORE
         // ``isSubagentTab`` was set, so the input bar is still showing
         // for the active tab at this point.
-        if (subTab.id === activeTabId && inputContainer) {
-          inputContainer.style.display = 'none';
+        if (subTab.id === activeTabId) {
+          if (inputContainer) inputContainer.style.display = 'none';
+          // History-load case: the new tab was created and switched
+          // to before this handler fired, so ``restoreTab`` initialised
+          // the global running state from the brand-new tab's default
+          // ``isRunning=false``.  Sync the global state to the
+          // sub-agent's actual state now so a still-running sub-agent
+          // tab loaded from history shows the same "Running" status,
+          // timer and chevron-visible panels as the freshly-launched
+          // sub-agent tab the user originally clicked through to.
+          setRunningState(subTab.isRunning);
+          if (subTab.isRunning) {
+            applyChevronState(
+              !!subTab.panelsExpandedMap[currentTaskName],
+              currentTaskName,
+            );
+          }
         }
         persistTabState();
         break;
@@ -3101,6 +3116,16 @@
           doneTab.isDone = true;
           doneTab.isRunning = false;
           renderTabBar();
+          // Mirror the regular task's status:false handling when the
+          // finished sub-agent tab is the one the user is viewing.
+          // Without this the status header stays at "Running …" and
+          // the timer keeps ticking on a tab whose sub-agent has
+          // already completed — diverging from the fresh-launch path
+          // where ``restoreTab(setRunningState(false))`` would
+          // eventually run when the user clicks back to the tab.
+          if (doneTab.id === activeTabId) {
+            setRunningState(false);
+          }
           persistTabState();
         }
         break;
