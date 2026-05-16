@@ -115,8 +115,18 @@ export class AgentProcess extends EventEmitter {
   private process: ChildProcess | null = null;
   private kissProjectPath: string | null = null;
   private buffer: string = '';
-  /** Tab ID this process is associated with (empty for shared processes). */
-  public readonly tabId: string;
+  /**
+   * Tab ID this process is associated with (empty for shared processes).
+   *
+   * Mutable so the parent ``SorcarSidebarView`` can re-key a running
+   * task process from an old tab id to a new one when the user resumes
+   * a still-running task from the history panel (the original chat tab
+   * was closed and a fresh tab opened).  The event listener falls back
+   * to this id when stdout messages arrive without an explicit
+   * ``tabId``, so updating it routes future stray events to the new
+   * tab.
+   */
+  public tabId: string;
 
   constructor(tabId: string = '') {
     super();

@@ -392,8 +392,14 @@ class VSCodeServer(
             result = _load_latest_chat_events_by_chat_id(chat_id)
         if not result or not result.get("events"):
             return
+
+        # Reattach a still-running agent (under some other tab id) to
+        # the freshly opened tab so its live events flow here too.
+        rebound_running = self._reattach_running_chat(chat_id, tab_id)
+
         tab = self._get_tab(tab_id)
-        tab.agent.resume_chat_by_id(chat_id)
+        if not rebound_running:
+            tab.agent.resume_chat_by_id(chat_id)
 
         extra_str = str(result.get("extra", "") or "")
         if extra_str:
@@ -413,7 +419,70 @@ class VSCodeServer(
             "extra": result.get("extra", ""),
             "tabId": tab_id,
         })
+        if rebound_running:
+            # Make the resumed tab show the running spinner since the
+            # agent is still working.  Mirrors the broadcast that
+            # ``_run_task`` emits when a task starts.
+            self.printer.broadcast({
+                "type": "status",
+                "running": True,
+                "tabId": tab_id,
+            })
         self._emit_pending_worktree(tab_id)
+
+    def _reattach_running_chat(self, chat_id: str, new_tab_id: str) -> bool:
+        """Find a still-running ``_TabState`` for *chat_id* and re-key
+        it under *new_tab_id* so the live agent's events flow to the
+        newly opened tab.
+
+        Looks for an entry in ``_tab_states`` whose agent has the same
+        ``chat_id`` and whose ``task_thread`` is still alive (or whose
+        ``is_task_active`` flag is set).  If the entry is already keyed
+        by *new_tab_id*, returns ``True`` without rebinding.
+
+        On a successful rebind:
+        - The old ``_TabState`` is removed from ``_tab_states``.
+        - It is re-inserted under *new_tab_id*.
+        - ``printer.rebind_tab`` migrates per-tab printer state and
+          installs an alias so the agent thread's stored
+          ``threading.local`` tab id (still the old one) keeps routing
+          events to *new_tab_id*.
+
+        Args:
+            chat_id: The chat id of the task the user clicked in
+                history.
+            new_tab_id: The freshly allocated frontend tab id.
+
+        Returns:
+            ``True`` when a live agent for *chat_id* was bound to
+            *new_tab_id* (either freshly rebound or already there);
+            ``False`` when no live agent exists.
+        """
+        if not chat_id or not new_tab_id:
+            return False
+        with self._state_lock:
+            old_tab_id: str | None = None
+            for key, t in self._tab_states.items():
+                agent_chat_id = getattr(t.agent, "chat_id", "") or ""
+                if agent_chat_id != chat_id:
+                    continue
+                alive = (
+                    t.task_thread is not None and t.task_thread.is_alive()
+                )
+                if alive or t.is_task_active:
+                    old_tab_id = key
+                    break
+            if old_tab_id is None:
+                return False
+            if old_tab_id == new_tab_id:
+                return True
+            tab = self._tab_states.pop(old_tab_id)
+            # If a fresh tab state was speculatively created under
+            # new_tab_id by an earlier call, drop it before overwriting.
+            self._tab_states.pop(new_tab_id, None)
+            self._tab_states[new_tab_id] = tab
+        self.printer.rebind_tab(old_tab_id, new_tab_id)
+        return True
 
 
     def _generate_followup_async(
