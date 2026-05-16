@@ -1,6 +1,6 @@
 """Regression test: the "KISS Sorcar: Setting up" progress notification
 must stay visible from the start of the dependency install until the
-"Restart VS Code" notification is shown.
+final "Installation complete" notification is shown.
 
 Previously, ``vscode.window.withProgress`` ran ONLY around the
 dependency installation (uv, git, node, code-cli, python env,
@@ -15,7 +15,7 @@ playwright) and CLOSED before the post-install finalization steps:
 This created a visible UX gap: the "Installing dependencies..." toast
 disappeared, the user saw NO notification for several seconds (or
 much longer if ``ensureApiKeys`` resolved without prompting), and
-then the "Restart VS Code" toast finally appeared.
+then the post-install toast finally appeared.
 
 The fix is to run those finalization steps INSIDE the same
 ``withProgress`` callback so the notification stays open continuously.
@@ -66,7 +66,7 @@ def _extract_balanced_block(src: str, open_idx: int) -> tuple[int, int]:
 class TestInstallProgressIsContinuous(unittest.TestCase):
     """All post-install finalization runs INSIDE the slow-path
     ``withProgress`` callback so the user sees a single continuous
-    "KISS Sorcar: Setting up" notification from start to restart.
+    final "Installation complete" toast.
 
     The finalization steps are factored into a ``runFinalization``
     helper so the same code is reused by the fast path (which has no
@@ -185,16 +185,7 @@ class TestInstallProgressIsContinuous(unittest.TestCase):
         )
 
     def test_ensure_api_keys_runs_inside_finalization(self) -> None:
-        """``ensureApiKeys`` is the last step before the Restart VS
-        Code notification.  It MUST run inside the finalization
-        helper — and therefore inside the slow-path withProgress
-        callback — so the progress notification stays visible while
-        the user types an API key.  Without this the user sees the
-        install notification disappear, an input box appear, and
-        after the input box closes a fresh 'Restart VS Code'
-        notification appear — three disjoint UI events instead of
-        one continuous flow."""
-        self.assertRegex(
+        """``ensureApiKeys`` is the last step before the
             self.finalization_body,
             r"\bensureApiKeys\s*\(",
             "ensureApiKeys() is not awaited inside runFinalization() "
@@ -210,26 +201,24 @@ class TestInstallProgressIsContinuous(unittest.TestCase):
 
     def test_no_finalization_after_with_progress(self) -> None:
         """The region from the closing brace of ``ensureDependenciesImpl``'s
-        slow-path branch up to ``showInformationMessage('...Restart VS Code...')``
+        slow-path branch up to the post-install
+        ``showInformationMessage('KISS Sorcar: Installation complete...')``
         must not contain any blocking work that would reproduce the gap."""
-        # Locate the showInformationMessage with the Restart VS Code label.
-        restart_idx = self.src.find("'KISS Sorcar: Installation complete! Please restart VS Code")
+        # Locate the showInformationMessage with the installation-complete label.
+        restart_idx = self.src.find("'KISS Sorcar: Installation complete!")
         self.assertGreater(
             restart_idx,
             0,
-            "Could not find the restart-VS-Code information message in DependencyInstaller.ts.",
-        )
+            "Could not find the 'Installation complete' information "
+            "message in DependencyInstaller.ts.",
         # Locate the end of the slow-path withProgress call.  The
         # withProgress invocation ends at the matching `)` after the
         # callback's closing `}`.  We approximate by finding the
-        # callback's body end and walking forward to the next `;`.
-        title_idx = self.src.find("'KISS Sorcar: Setting up'")
         cb_match = re.search(r"async\s+progress\s*=>\s*\{", self.src[title_idx:])
         assert cb_match is not None
         cb_open = title_idx + cb_match.end() - 1
         _, body_end = _extract_balanced_block(self.src, cb_open)
         # Walk forward past the callback's `}`, the closing `)` of
-        # withProgress, and the trailing `;`.
         tail_after = self.src[body_end + 1 :]
         semi_off = tail_after.find(";")
         self.assertGreater(semi_off, 0)

@@ -24,6 +24,7 @@ from kiss.core.models.claude_code_model import ClaudeCodeModel
 class TestCCOpusLiveThinking:
     """Live test against the real claude CLI to verify thinking block behaviour."""
 
+    @pytest.mark.slow
     def test_no_empty_thinking_bar(self) -> None:
         """cc/opus must not produce thinking_start without thinking_delta content.
 

@@ -6,6 +6,7 @@ import tempfile
 import threading
 import unittest
 
+import pytest
 import yaml
 
 from kiss.core.base import Base
@@ -144,6 +145,7 @@ class TestExceptionPaths(unittest.TestCase):
 @requires_gemini_api_key
 @unittest.skipUnless(_docker_available(), "Docker daemon not available")
 class TestRunBranches(unittest.TestCase):
+    @pytest.mark.slow
     def test_with_docker(self) -> None:
         """Test the Docker path in run()."""
         agent = RelentlessAgent("Docker-Test")
@@ -174,6 +176,7 @@ class TestRunBranches(unittest.TestCase):
 class TestDockerStreamCallback(unittest.TestCase):
     """Test that docker_stream callback is invoked (covers line 292)."""
 
+    @pytest.mark.slow
     def test_stream_callback_invoked(self) -> None:
         from kiss.core.print_to_console import ConsolePrinter
 
@@ -379,6 +382,7 @@ class TestNonRetryableModelErrors(unittest.TestCase):
         thread.start()
         return server, port
 
+    @pytest.mark.slow
     def test_connection_error_returns_immediately(self) -> None:
         """Connection error (unreachable server) returns finish(False, False, cause)."""
         agent = RelentlessAgent("ConnError")

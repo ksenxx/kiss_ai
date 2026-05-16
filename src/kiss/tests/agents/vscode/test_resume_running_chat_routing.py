@@ -13,14 +13,13 @@ Two scenarios:
    no ``_TabState`` for the chat — live streaming is lost.  This
    test pins the synchronous ordering at the Python level.
 
-2. **TS-side fallback to ``_taskProcesses[chatId]``**: even when
-   ``_chatIdToTabId`` is missing the entry (e.g. the very first
-   command in a brand new extension session), the convention that a
-   task's initial chat id equals the tab id it was first submitted
-   under lets ``_reattachRunningChat`` resolve via
-   ``_taskProcesses.get(chatId)``.  The TS code path is exercised by
-   reading the source file and asserting the fallback is present —
-   we cannot import TypeScript directly here.
+2. **TS-side direct lookup via ``_taskProcesses[chatId]``**: with the
+   ``tab_id == chat_id`` invariant established at run-start in
+   ``_cmd_run``, ``_reattachRunningChat`` simply does
+   ``_taskProcesses.get(chatId)`` — no separate ``_chatIdToTabId``
+   index exists.  The TS code path is exercised by reading the source
+   file and asserting the direct lookup is present — we cannot import
+   TypeScript directly here.
 """
 
 from __future__ import annotations
@@ -227,29 +226,36 @@ class TestResumeRaceWithSyncClear:
         )
 
 
-class TestExtensionFallbackForStaleChatIndex:
-    """The extension layer's ``_reattachRunningChat`` must fall back to
-    ``_taskProcesses.get(chatId)`` when the chat-id → tab-id index is
-    missing — the convention that initial chat id equals the original
-    tab id is what makes the lookup work.
+class TestExtensionDirectLookupByChatId:
+    """The extension layer's ``_reattachRunningChat`` looks up the
+    live ``AgentProcess`` directly by ``chatId`` via
+    ``_taskProcesses.get(chatId)``.  The ``tab_id == chat_id``
+    invariant established at run-start in ``_cmd_run`` means the proc
+    is always keyed by the chat id (which is also the source tab id),
+    so no separate ``_chatIdToTabId`` index is required.
 
     This is a source-level guard: the TypeScript code path is
     exercised in the extension build, but we pin the implementation
     here so that future refactors cannot silently regress.
     """
 
-    def test_source_contains_fallback(self) -> None:
+    def test_source_contains_direct_lookup(self) -> None:
         src = Path(
             "src/kiss/agents/vscode/src/SorcarSidebarView.ts",
         ).read_text()
-        # The fallback must look up ``_taskProcesses`` by chatId when
-        # ``_chatIdToTabId.get(chatId)`` returned undefined.
+        # The reattach helper must look up ``_taskProcesses`` by
+        # chatId directly.
         assert "this._taskProcesses.get(chatId)" in src, (
-            "Missing _taskProcesses.get(chatId) fallback in "
-            "_reattachRunningChat — a fast history click during the "
-            "very first task of an extension session would fail to "
-            "route resumeSession to the live task proc and live "
-            "streaming would be lost."
+            "Missing _taskProcesses.get(chatId) lookup in "
+            "_reattachRunningChat — a history click during a still "
+            "running task would fail to route resumeSession to the "
+            "live task proc and live streaming would be lost."
+        )
+        # The translation index must NOT exist.
+        assert "_chatIdToTabId" not in src, (
+            "_chatIdToTabId map should have been removed: with "
+            "tab_id == chat_id invariant the translation is no "
+            "longer required."
         )
 
 

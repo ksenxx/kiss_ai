@@ -139,7 +139,14 @@ class _CommandsMixin:
                 tab.skip_merge = bool(cmd["skipMerge"])
             tab.stop_event = threading.Event()
             tab.user_answer_queue = queue.Queue(maxsize=1)
-            if tab_id and tab.agent.chat_id == "":
+            # Tab id IS the chat id from run-start.  For a brand-new
+            # chat tab the frontend allocates a random uuid as the
+            # tab id; for a tab opened by clicking a history row the
+            # frontend sets the tab id equal to the resumed chat id.
+            # Adopting the tab id as the agent's chat id here makes
+            # tab_id == chat_id an invariant throughout the lifecycle
+            # — no chat_id ↔ tab_id translation is required anywhere.
+            if tab_id:
                 tab.agent._chat_id = tab_id
             chat_id = tab.agent.chat_id
             thread = threading.Thread(

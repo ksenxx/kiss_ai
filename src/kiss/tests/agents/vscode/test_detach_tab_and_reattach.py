@@ -153,8 +153,10 @@ class TestCloseTabDoesNotStopRunningTask:
 
     def test_close_tab_keeps_thread_alive_and_finishes_task(self) -> None:
         server, _events = _make_server()
+        # With the ``tab_id == chat_id`` invariant, the running tab's
+        # id IS the chat id.
         chat_id = "chat-running-1"
-        tab_id_a = "tab-A"
+        tab_id_a = chat_id
         started, release, thread = _start_fake_running_task(
             server, tab_id_a, chat_id,
         )
@@ -210,7 +212,11 @@ class TestResumeRunningTaskReattachesLiveEvents:
         )
 
         server, events = _make_server()
-        tab_id_a = "tab-A"
+        # With the ``tab_id == chat_id`` invariant, the running tab's
+        # id IS the chat id; the viewer that joins from history uses
+        # a different tab id (the user opens a new chat tab keyed by
+        # ``s.id`` from the history row — same value as chat_id).
+        tab_id_a = chat_id
         tab_id_b = "tab-B"
 
         started, release, thread = _start_fake_running_task(
