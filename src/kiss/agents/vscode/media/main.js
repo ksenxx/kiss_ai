@@ -630,11 +630,30 @@
     if (e.key === 'Escape') closeTabContextMenu();
   });
 
-  function createNewTab() {
+  function createNewTab(presetId) {
     // Preserve any typed text so it carries over to the new tab
     const pendingText = inp.value || '';
+    // If a presetId is supplied (e.g. when a history row with a known
+    // chat_id is clicked) and a tab keyed by that id is already open,
+    // just focus it.  This keeps the invariant ``tab.id == chat_id``
+    // without duplicating tabs for the same chat.
+    if (presetId) {
+      const existingTab = tabs.find(t => t.id === presetId);
+      if (existingTab) {
+        switchToTab(presetId);
+        return;
+      }
+    }
     saveCurrentTab();
     const tab = makeTab('new chat');
+    // When ``presetId`` is supplied, force the new tab's id to it so
+    // that the tab id IS the chat id throughout the lifecycle (the
+    // backend treats ``tabId`` as the chat id in ``_cmd_run``).  When
+    // omitted, ``makeTab`` already minted a random uuid via
+    // ``genTabId``.
+    if (presetId) {
+      tab.id = presetId;
+    }
     tab.inputValue = pendingText;
     tabs.push(tab);
     activeTabId = tab.id;
@@ -4625,8 +4644,12 @@
             return;
           }
         }
-        createNewTab();
+        // When the clicked history row has a known chat_id (s.id) and
+        // persisted events, create the new tab WITH that chat_id as
+        // its tab id so the ``tab_id == chat_id`` invariant holds end
+        // to end (no chat_id ↔ tab_id translation is needed anywhere).
         if (s.has_events && s.id) {
+          createNewTab(s.id);
           setTaskText(s.preview || s.title || '');
           vscode.postMessage({
             type: 'resumeSession',
@@ -4635,6 +4658,7 @@
             tabId: activeTabId,
           });
         } else {
+          createNewTab();
           inp.value = s.preview || s.title || '';
           syncClearBtn();
           inp.focus();

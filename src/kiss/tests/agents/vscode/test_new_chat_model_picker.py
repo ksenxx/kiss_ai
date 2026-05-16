@@ -174,7 +174,7 @@ class TestFrontendSendsNewChatCommand:
         """createNewTab() in main.js must include vscode.postMessage({type: 'newChat', ...})."""
         source = MAIN_JS.read_text()
 
-        m = re.search(r"function\s+createNewTab\s*\(\s*\)", source)
+        m = re.search(r"function\s+createNewTab\s*\(", source)
         assert m is not None, "createNewTab function not found in main.js"
 
         start = source.index("{", m.start())

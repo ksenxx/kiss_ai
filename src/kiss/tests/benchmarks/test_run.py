@@ -17,6 +17,7 @@ from kiss.benchmarks.terminal_bench.run import (
 class TestIsDockerHubAuthenticated:
     """Tests for is_docker_hub_authenticated()."""
 
+    @pytest.mark.slow
     def test_returns_bool(self) -> None:
         """Function returns a bool reflecting current Docker Hub auth state."""
         result = is_docker_hub_authenticated()

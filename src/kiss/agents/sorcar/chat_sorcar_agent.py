@@ -238,6 +238,16 @@ class ChatSorcarAgent(SorcarAgent):
             YAML string with 'success' and 'summary' keys.
         """
         skip_persistence = kwargs.pop("_skip_persistence", False)
+        # Mint a fresh chat id at run-start when one is not already
+        # set (e.g. a brand-new chat tab that has never resumed a
+        # history entry).  Establishing the chat id BEFORE _add_task
+        # makes it the canonical identifier the frontend tab is
+        # keyed by: callers (commands.py _cmd_run) assign the tab
+        # id to this chat id so tab_id == chat_id throughout the
+        # lifecycle, removing the need for any chat_id ↔ tab_id
+        # translation in the extension layer.
+        if self._chat_id == "":
+            self._chat_id = uuid.uuid4().hex
         agent_prompt = self.build_chat_prompt(prompt_template)
         task_id, self._chat_id = _add_task(prompt_template, chat_id=self._chat_id)
         self._last_task_id = task_id

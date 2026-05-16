@@ -100,8 +100,12 @@ class VSCodeServer(
 
         Each tab gets its own agent instances so concurrent tabs never
         share mutable agent state (chat_id, task_id, worktree, etc.).
-        The tab_id is a frontend string identifier; the agent's chat_id
-        is a string assigned by the database on first task insertion.
+        With the ``tab_id == chat_id`` invariant established at
+        run-start in :meth:`_CommandsMixin._cmd_run`, the tab id IS
+        the agent's chat id once a task has started; before that
+        the tab id is whatever the frontend allocated (a random
+        uuid for a brand-new chat, or the chat id when a history
+        row is clicked).
 
         Thread-safe: acquires ``_state_lock`` to protect the
         get-or-create pattern against concurrent callers.
@@ -571,12 +575,13 @@ class VSCodeServer(
         opened tab — without stealing the stream from the original
         client.
 
-        Looks for an entry in ``_tab_states`` whose agent has the same
-        ``chat_id`` and whose ``task_thread`` is still alive (or whose
-        ``is_task_active`` flag is set).  Multi-viewer fan-out is
-        implemented in the printer: the original ``_TabState`` keeps
-        owning the running task and the agent thread keeps tagging
-        events with the original tab id, while
+        With the ``tab_id == chat_id`` invariant established at
+        run-start in :meth:`_CommandsMixin._cmd_run`, the source
+        ``_TabState`` is keyed by *chat_id* directly — no scan
+        required.  Multi-viewer fan-out is implemented in the
+        printer: the original ``_TabState`` keeps owning the running
+        task and the agent thread keeps tagging events with the
+        original (source) tab id, while
         :meth:`BaseBrowserPrinter.subscribe_tab` registers
         *new_tab_id* as an additional viewer so every broadcast is
         duplicated with ``tabId=new_tab_id``.  This means BOTH the
@@ -593,26 +598,16 @@ class VSCodeServer(
             *new_tab_id* is now subscribed to its event stream;
             ``False`` when no live agent exists.
         """
-        if not chat_id or not new_tab_id:
+        if not chat_id or not new_tab_id or chat_id == new_tab_id:
             return False
         with self._state_lock:
-            source_tab_id: str | None = None
-            for key, t in self._tab_states.items():
-                if key == new_tab_id:
-                    # Don't subscribe a tab to its own state.
-                    continue
-                agent_chat_id = getattr(t.agent, "chat_id", "") or ""
-                if agent_chat_id != chat_id:
-                    continue
-                alive = (
-                    t.task_thread is not None and t.task_thread.is_alive()
-                )
-                if alive or t.is_task_active:
-                    source_tab_id = key
-                    break
-            if source_tab_id is None:
+            t = self._tab_states.get(chat_id)
+            if t is None:
                 return False
-        self.printer.subscribe_tab(source_tab_id, new_tab_id)
+            alive = t.task_thread is not None and t.task_thread.is_alive()
+            if not (alive or t.is_task_active):
+                return False
+        self.printer.subscribe_tab(chat_id, new_tab_id)
         return True
 
 

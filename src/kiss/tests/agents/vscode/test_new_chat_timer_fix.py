@@ -30,7 +30,7 @@ class TestCreateNewTabStopsTimer(unittest.TestCase):
 
     def test_create_new_tab_stops_timer_when_not_running(self) -> None:
         source = MAIN_JS.read_text()
-        m = re.search(r"function createNewTab\(\)\s*\{", source)
+        m = re.search(r"function createNewTab\([^)]*\)\s*\{", source)
         assert m is not None, "createNewTab not found in main.js"
         start = m.start()
         depth = 0
