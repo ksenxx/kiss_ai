@@ -185,7 +185,8 @@ class TestInstallProgressIsContinuous(unittest.TestCase):
         )
 
     def test_ensure_api_keys_runs_inside_finalization(self) -> None:
-        """``ensureApiKeys`` is the last step before the
+        """``ensureApiKeys`` must happen inside the finalization helper."""
+        self.assertRegex(
             self.finalization_body,
             r"\bensureApiKeys\s*\(",
             "ensureApiKeys() is not awaited inside runFinalization() "
@@ -211,6 +212,9 @@ class TestInstallProgressIsContinuous(unittest.TestCase):
             0,
             "Could not find the 'Installation complete' information "
             "message in DependencyInstaller.ts.",
+        )
+        title_idx = self.src.find("'KISS Sorcar: Setting up'")
+        self.assertGreater(title_idx, 0)
         # Locate the end of the slow-path withProgress call.  The
         # withProgress invocation ends at the matching `)` after the
         # callback's closing `}`.  We approximate by finding the

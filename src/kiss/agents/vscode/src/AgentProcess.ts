@@ -30,7 +30,8 @@ function isValidKissProject(dir: string): boolean {
  * Search order:
  * 1. Environment variable (explicit override, e.g. Docker containers)
  * 2. Configuration setting (kissSorcar.kissProjectPath)
- * 3. Embedded kiss_project directory bundled with the extension
+ * 3. Source-install marker written by install.sh (~/.kiss/install_dir)
+ * 4. Embedded kiss_project directory bundled with the extension
  */
 export function findKissProject(): string | null {
   // H5 — only honour explicit workspace-scoped overrides (env var or
@@ -51,9 +52,23 @@ export function findKissProject(): string | null {
       .getConfiguration('kissSorcar')
       .get<string>('kissProjectPath');
     if (configPath && isValidKissProject(configPath)) return configPath;
+
+    // 3. Source install marker written by the repository install.sh.
+    const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+    const installMarker = homeDir
+      ? path.join(homeDir, '.kiss', 'install_dir')
+      : '';
+    try {
+      const installDir = installMarker
+        ? fs.readFileSync(installMarker, 'utf-8').trim()
+        : '';
+      if (installDir && isValidKissProject(installDir)) return installDir;
+    } catch {
+      /* marker is optional */
+    }
   }
 
-  // 3. Embedded kiss_project bundled inside the extension directory
+  // 4. Embedded kiss_project bundled inside the extension directory
   // (always allowed; this is shipped with the extension and trusted by
   //  installation).
   const embeddedPath = path.join(__dirname, '..', 'kiss_project');
