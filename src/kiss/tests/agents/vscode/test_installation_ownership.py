@@ -15,7 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parents[5]
 TOP_LEVEL_INSTALL = REPO_ROOT / "install.sh"
 VSCODE_DIR = REPO_ROOT / "src" / "kiss" / "agents" / "vscode"
 DEPENDENCY_INSTALLER = VSCODE_DIR / "src" / "DependencyInstaller.ts"
-AGENT_PROCESS = VSCODE_DIR / "src" / "AgentProcess.ts"
+KISS_PATHS = VSCODE_DIR / "src" / "kissPaths.ts"
 
 
 class TestInstallationOwnership(unittest.TestCase):
@@ -82,10 +82,10 @@ class TestInstallationOwnership(unittest.TestCase):
         against the VSIX-shipped ``kiss_project`` just like direct VSIX
         installs, so the marker would only create a divergent path.
         """
-        agent_text = AGENT_PROCESS.read_text()
+        paths_text = KISS_PATHS.read_text()
         self.assertNotIn(
             "install_dir",
-            agent_text,
+            paths_text,
             "findKissProject() must not read ~/.kiss/install_dir; the "
             "extension always uses the VSIX-bundled kiss_project.",
         )

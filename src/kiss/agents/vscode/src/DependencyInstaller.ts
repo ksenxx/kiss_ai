@@ -11,7 +11,7 @@ import * as fs from 'fs';
 import * as https from 'https';
 import * as crypto from 'crypto';
 import {exec, execSync, execFileSync, spawn} from 'child_process';
-import {findKissProject, findUvPath} from './AgentProcess';
+import {findKissProject, findUvPath} from './kissPaths';
 
 const HOME_DIR = process.env.HOME || process.env.USERPROFILE || '';
 const LOG_DIR = path.join(HOME_DIR, '.kiss');

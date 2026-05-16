@@ -13,7 +13,7 @@ Implementation lives in SorcarSidebarView.ts:
   - ``_preMergeOpenFiles`` field: ``Map<string, Set<string>>`` keyed by tabId
   - ``_getOpenEditorFiles()`` captures open editor tab file paths
   - ``_restorePreMergeEditors(tabId)`` closes tabs not in that tab's snapshot
-  - ``_setupProcessListeners`` calls snapshot before ``openMerge``
+  - ``_installClientListener`` calls snapshot before ``openMerge``
   - ``allDone`` handler calls ``_restorePreMergeEditors`` with the tab's id
 """
 
@@ -183,13 +183,13 @@ class TestRestorePreMergeEditorsMethod(unittest.TestCase):
 
 
 class TestMergeDataSnapshotsEditors(unittest.TestCase):
-    """When a ``merge_data`` message arrives in ``_setupProcessListeners``,
+    """When a ``merge_data`` message arrives in ``_installClientListener``,
     the handler must snapshot open editors per-tab before calling ``openMerge``.
     """
 
     def test_snapshot_before_open_merge(self) -> None:
         src = _extract_source()
-        body = _extract_method_body(src, "_setupProcessListeners")
+        body = _extract_method_body(src, "_installClientListener")
         merge_idx = body.find("merge_data")
         assert merge_idx != -1, "merge_data handling must exist"
         merge_block = body[merge_idx:]
@@ -209,7 +209,7 @@ class TestMergeDataSnapshotsEditors(unittest.TestCase):
     def test_snapshot_stored_in_map_with_set(self) -> None:
         """Snapshot must be stored via .set() on the per-tab Map."""
         src = _extract_source()
-        body = _extract_method_body(src, "_setupProcessListeners")
+        body = _extract_method_body(src, "_installClientListener")
         merge_idx = body.find("merge_data")
         merge_block = body[merge_idx:]
         assert "_preMergeOpenFiles" in merge_block, (
@@ -288,7 +288,7 @@ class TestSnapshotOnlyOncePerTab(unittest.TestCase):
 
     def test_guarded_by_map_has_check(self) -> None:
         src = _extract_source()
-        body = _extract_method_body(src, "_setupProcessListeners")
+        body = _extract_method_body(src, "_installClientListener")
         merge_idx = body.find("merge_data")
         merge_block = body[merge_idx:]
 

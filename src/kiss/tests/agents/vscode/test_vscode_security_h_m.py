@@ -2,7 +2,7 @@
 in src/kiss/agents/vscode/.  Each Python-side fix has a behavioural test
 that fails when the fix is reverted.
 
-TS-side fixes (DependencyInstaller, SorcarSidebarView, AgentProcess,
+TS-side fixes (DependencyInstaller, SorcarSidebarView, kissPaths,
 SorcarTab) are spot-checked via source-grep tests because the test
 harness has no TypeScript runtime.
 """
@@ -394,7 +394,7 @@ class TestH4OpenFileGuard(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# H5 — workspace-trust gate for env / setting in AgentProcess.findKissProject
+# H5 — workspace-trust gate for env / setting in kissPaths.findKissProject
 # ---------------------------------------------------------------------------
 
 
@@ -403,7 +403,7 @@ class TestH5WorkspaceTrustGate(unittest.TestCase):
     untrusted workspaces."""
 
     def test_findkissproject_consults_workspace_trust(self) -> None:
-        src = _ts_path("AgentProcess.ts").read_text()
+        src = _ts_path("kissPaths.ts").read_text()
         # The function must reference vscode.workspace.isTrusted (or use
         # the trust API equivalent) before returning the env / setting path.
         self.assertRegex(

@@ -77,8 +77,8 @@ def _all_done_body(source: str) -> str:
 
 
 def _merge_data_block(source: str) -> str:
-    """Extract the merge_data if-block from _setupProcessListeners."""
-    body = _method_body(source, "_setupProcessListeners")
+    """Extract the merge_data if-block from _installClientListener."""
+    body = _method_body(source, "_installClientListener")
     idx = body.find("merge_data")
     assert idx != -1, "merge_data handling not found"
     brace_start = body.index("{", idx)
