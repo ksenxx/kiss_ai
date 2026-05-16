@@ -558,7 +558,7 @@ class TestSourceGrepDependencyInstaller(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 6. Source-grep fuzz — AgentProcess.ts must consult workspace trust
+# 6. Source-grep fuzz — kissPaths.ts must consult workspace trust
 # ---------------------------------------------------------------------------
 
 
@@ -566,7 +566,7 @@ class TestSourceGrepAgentProcessTrust(unittest.TestCase):
     """``findKissProject`` must gate env / setting on ``isTrusted`` (H5)."""
 
     def test_findkissproject_consults_istrusted(self) -> None:
-        src = _ts("AgentProcess.ts")
+        src = _ts("kissPaths.ts")
         idx = src.find("export function findKissProject")
         self.assertGreater(idx, 0)
         # Find function end.
