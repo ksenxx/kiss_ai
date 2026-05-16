@@ -512,6 +512,14 @@ class VSCodeServer(
         tab.agent.resume_chat_by_id(chat_id)
         with self._state_lock:
             tab.use_worktree = is_worktree
+            # If a prior ``closeTab`` for this tab id had flipped the
+            # deferred-disposal flag (e.g. the web server's grace
+            # timer fired during a slow reload while a task was still
+            # running), the frontend has now explicitly re-claimed the
+            # tab via ``resumeSession``.  Clear the flag so the next
+            # lifecycle-end transition does not dispose a tab the user
+            # is actively viewing again.
+            tab.frontend_closed = False
 
         if subagent_info is not None:
             # Convert the freshly created regular tab into a sub-agent
