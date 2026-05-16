@@ -118,13 +118,14 @@ class ConsolePrinter(Printer):
             self._format_tool_call(str(content), kwargs.get("tool_input", {}))
             return ""
         if type == "tool_result":
-            # Match BaseBrowserPrinter: show the result for core tools
-            # (Bash/Read/Edit/Write) and for any error result, regardless
-            # of tool name.  Other tools stay silent on the success path.
+            # Match BaseBrowserPrinter: show every tool's return value
+            # so the console mirrors the webview.  Suppress only the
+            # ``finish`` tool result -- the agentic loop renders that as
+            # a dedicated "result" panel immediately after, so emitting
+            # it here would be a duplicate.
             is_error = bool(kwargs.get("is_error", False))
             tool_name = kwargs.get("tool_name", "")
-            core_tools = {"Bash", "Read", "Edit", "Write"}
-            if is_error or tool_name in core_tools:
+            if tool_name != "finish":
                 self._flush_newline()
                 self._print_tool_result(str(content), is_error=is_error)
             return ""
