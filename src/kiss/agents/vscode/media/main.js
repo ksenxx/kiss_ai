@@ -3036,6 +3036,17 @@
         subTab.taskPanelHTML = subDesc;
         subTab.taskPanelVisible = true;
         renderTabBar();
+        // If the backend converted the active tab into a sub-agent tab
+        // (e.g. the user clicked a sub-agent row in the history panel,
+        // which created a fresh chat tab that ``_replay_session`` then
+        // flips via ``openSubagentTab``), hide the input textbox + the
+        // buttons below it.  ``restoreTab`` already enforces this rule
+        // when *switching* tabs, but the tab-switch ran BEFORE
+        // ``isSubagentTab`` was set, so the input bar is still showing
+        // for the active tab at this point.
+        if (subTab.id === activeTabId && inputContainer) {
+          inputContainer.style.display = 'none';
+        }
         persistTabState();
         break;
       }
