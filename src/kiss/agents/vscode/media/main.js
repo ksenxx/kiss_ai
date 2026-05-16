@@ -630,6 +630,20 @@
     if (e.key === 'Escape') closeTabContextMenu();
   });
 
+  /**
+   * Create a new chat tab.
+   *
+   * If ``presetId`` is supplied AND a tab keyed by that id is already
+   * open, the existing tab is focused and the function returns
+   * ``false`` WITHOUT creating a new tab (no ``newChat`` message is
+   * sent, no inputValue carry-over, no ``setRunningState`` reset).
+   * Callers that follow ``createNewTab(presetId)`` with side effects
+   * meant for a fresh tab (e.g. ``setTaskText``, ``resumeSession``)
+   * MUST check the return value to avoid clobbering the live state
+   * of the already-open tab.
+   *
+   * Returns ``true`` when a new tab was actually created.
+   */
   function createNewTab(presetId) {
     // Preserve any typed text so it carries over to the new tab
     const pendingText = inp.value || '';
@@ -641,7 +655,6 @@
       const existingTab = tabs.find(t => t.id === presetId);
       if (existingTab) {
         switchToTab(presetId);
-        return;
       }
     }
     saveCurrentTab();
@@ -682,6 +695,7 @@
     vscode.postMessage({type: 'newChat', tabId: tab.id});
     vscode.postMessage({type: 'getWelcomeSuggestions'});
     focusInputWithRetry();
+    return true;
   }
 
   function updateActiveTabTitle(title) {
@@ -4684,9 +4698,8 @@
         // backend created the tab via ``openSubagentTab``), just
         // focus it — its events are already streaming live.
         // Otherwise allocate a new tab and ``resumeSession``; the
-        // backend's ``_replay_session`` will broadcast
-        // ``openSubagentTab`` to convert the new tab and call
-        // ``printer.rebind_tab`` to route live events here.
+        // call ``printer.rebind_tab`` to route live events here (when
+        // ``orig_sub_tab_id == new tab_id`` the rebind is a no-op).
         if (s.is_subagent && s.subagent_tab_id) {
           const existing = tabs.find(t => t.id === s.subagent_tab_id);
           if (existing) {
@@ -4694,23 +4707,42 @@
             closeSidebar();
             return;
           }
+          if (s.has_events && s.id) {
+            const created = createNewTab(s.subagent_tab_id);
+            if (created) {
+              setTaskText(s.preview || s.title || '');
+              vscode.postMessage({
+                type: 'resumeSession',
+                id: s.id,
+                taskId: s.task_id,
+                tabId: activeTabId,
+              });
+            }
+          } else {
+            createNewTab();
+            inp.value = s.preview || s.title || '';
+            syncClearBtn();
+            inp.focus();
+          }
+          closeSidebar();
+          return;
         }
         // When the clicked history row has a known chat_id (s.id) and
         // persisted events, create the new tab WITH that chat_id as
         // its tab id so the ``tab_id == chat_id`` invariant holds end
         // to end (no chat_id ↔ tab_id translation is needed anywhere).
+        // If a tab with that id is already open, ``createNewTab``
+        // short-circuits to ``switchToTab`` and returns false — in
+        // that case skip ``setTaskText`` and ``resumeSession`` so we
+        // do not clobber the panel text or trigger a redundant
+        // backend replay on a tab that is already live-streaming the
+        // same chat.
         if (s.has_events && s.id) {
           createNewTab(s.id);
-          setTaskText(s.preview || s.title || '');
-          vscode.postMessage({
-            type: 'resumeSession',
-            id: s.id,
-            taskId: s.task_id,
-            tabId: activeTabId,
-          });
-        } else {
-          createNewTab();
-          inp.value = s.preview || s.title || '';
+          if (created) {
+            setTaskText(s.preview || s.title || '');
+            vscode.postMessage({
+              type: 'resumeSession',
           syncClearBtn();
           inp.focus();
         }
