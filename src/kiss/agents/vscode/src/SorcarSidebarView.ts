@@ -231,7 +231,26 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     newTabId: string,
   ): AgentProcess | null {
     if (!chatId || !newTabId) return null;
-    const oldTabId = this._chatIdToTabId.get(chatId);
+    let oldTabId = this._chatIdToTabId.get(chatId);
+    // Fallback: when no ``clear``/``task_events`` event has populated
+    // ``_chatIdToTabId`` yet (rare race between submit and a very
+    // fast history click), try the convention that a task's initial
+    // chat id equals the tab id it was first submitted under.  This
+    // is the chat id the persistence layer writes for first-task
+    // chats, so ``_taskProcesses.get(chatId)`` resolves to the
+    // owning proc.  Without this fallback the routed
+    // ``resumeSession`` would go to the service process instead of
+    // the task process, the service process's ``_tab_states`` would
+    // not contain the running task, ``_reattach_running_chat`` would
+    // skip ``subscribe_tab`` and the new tab would only show
+    // persisted history — never the live stream.
+    if (!oldTabId) {
+      const candidate = this._taskProcesses.get(chatId);
+      if (candidate && candidate.isAlive) {
+        oldTabId = chatId;
+        this._chatIdToTabId.set(chatId, chatId);
+      }
+    }
     if (!oldTabId) return null;
     const proc = this._taskProcesses.get(oldTabId);
     if (!proc || !proc.isAlive) {

@@ -198,10 +198,11 @@ class _TaskRunnerMixin:
             use_worktree = tab.use_worktree
         self.printer._thread_local.stop_event = stop_event
 
-        if tab_id and tab.agent.chat_id == "":
-            tab.agent._chat_id = tab_id
-
-        self.printer.broadcast({"type": "clear", "chat_id": tab.agent.chat_id})
+        # ``chat_id`` initialisation and the ``clear`` broadcast now
+        # happen synchronously in ``_cmd_run`` (before the worker
+        # thread starts) so the extension layer's chat_id → tab_id
+        # index is populated before any subsequent command races the
+        # worker thread.  See ``_CommandsMixin._cmd_run``.
 
         if not use_worktree:
             with self._state_lock:

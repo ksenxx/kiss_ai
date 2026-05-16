@@ -109,7 +109,18 @@ class _CommandsMixin:
 
 
     def _cmd_run(self, cmd: dict[str, Any]) -> None:
-        """Start an agent task in a background thread."""
+        """Start an agent task in a background thread.
+
+        Initializes the tab's agent chat id (if empty) and broadcasts
+        the initial ``clear`` event **synchronously**, before starting
+        the worker thread.  Emitting ``clear`` here (rather than from
+        inside the worker thread) makes the chat-id → tab-id mapping
+        visible to the extension layer immediately after ``_cmd_run``
+        returns, so a subsequent ``resumeSession`` for the same chat
+        (e.g. a fast history click right after submit) can be routed
+        to the correct task process without racing the worker
+        thread's first broadcast.
+        """
         tab_id = cmd.get("tabId", "")
         with self._state_lock:
             tab = self._tab_states.get(tab_id)
@@ -128,11 +139,25 @@ class _CommandsMixin:
                 tab.skip_merge = bool(cmd["skipMerge"])
             tab.stop_event = threading.Event()
             tab.user_answer_queue = queue.Queue(maxsize=1)
+            if tab_id and tab.agent.chat_id == "":
+                tab.agent._chat_id = tab_id
+            chat_id = tab.agent.chat_id
             thread = threading.Thread(
                 target=self._run_task, args=(cmd,), daemon=True
             )
             tab.task_thread = thread
-            thread.start()
+        # Emit ``clear`` synchronously (outside the state lock) so the
+        # extension layer's chat_id → tab_id index is populated before
+        # this command returns.  Without this, a ``resumeSession``
+        # racing the worker thread's first broadcast would not find
+        # the live task process and live events would never reach the
+        # newly-opened tab.
+        self.printer.broadcast({
+            "type": "clear",
+            "chat_id": chat_id,
+            "tabId": tab_id,
+        })
+        thread.start()
 
     def _cmd_stop(self, cmd: dict[str, Any]) -> None:
         """Stop a running task."""
