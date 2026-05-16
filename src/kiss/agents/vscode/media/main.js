@@ -2393,6 +2393,26 @@
         // Update UI only when the event targets the active tab (or no tabId)
         if (!evTab || evTab.id === activeTabId) {
           setRunningState(ev.running);
+          // Refresh chevron-driven visibility so panels of the now-running
+          // task become visible even if the chevron is collapsed.  Needed
+          // after resuming a running task from history: the prior
+          // ``task_events`` replay called applyChevronState() while
+          // isRunning was still false, marking every replayed panel
+          // chv-hidden.  Re-applying it here (with isRunning=true) unhides
+          // panels of the running task per applyChevronState's
+          // ``inRunning`` branch, so subsequent live events from the
+          // re-attached agent are visible immediately.
+          if (ev.running) {
+            const aTab = tabs.find(t => {
+              return t.id === activeTabId;
+            });
+            if (aTab) {
+              applyChevronState(
+                !!aTab.panelsExpandedMap[currentTaskName],
+                currentTaskName,
+              );
+            }
+          }
         }
         renderTabBar();
         break;
