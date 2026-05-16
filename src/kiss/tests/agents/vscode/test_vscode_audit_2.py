@@ -112,13 +112,24 @@ class TestCloseTabMergeDataCleanup(unittest.TestCase):
     """
 
     def test_source_has_merge_cleanup_call(self) -> None:
-        """Structural: ``_close_tab`` now references cleanup functions."""
-        src = inspect.getsource(VSCodeServer._close_tab)
+        """Structural: the tab-disposal tail calls cleanup functions.
+
+        The B5 fix originally lived directly in ``_close_tab``; the
+        shared cleanup tail was later factored out to
+        ``_teardown_tab_resources`` so both the immediate and the
+        deferred disposal paths invoke it.  Either ``_close_tab`` or
+        ``_teardown_tab_resources`` may contain the calls — we just
+        require that the disposal path as a whole references them.
+        """
+        src = (
+            inspect.getsource(VSCodeServer._close_tab)
+            + inspect.getsource(VSCodeServer._teardown_tab_resources)
+        )
         assert "_cleanup_merge_data" in src, (
-            "B5 fix: _close_tab should call _cleanup_merge_data"
+            "B5 fix: tab disposal should call _cleanup_merge_data"
         )
         assert "_merge_data_dir" in src, (
-            "B5 fix: _close_tab should reference _merge_data_dir"
+            "B5 fix: tab disposal should reference _merge_data_dir"
         )
 
     def test_merge_data_removed_after_tab_close(self) -> None:

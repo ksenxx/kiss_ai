@@ -328,13 +328,20 @@ class VSCodeServer(
 
         Removes the tab from ``_tab_states``, cleans up per-tab printer
         state (bash buffers, recordings), and drops the persist-agent
-        reference.  Does nothing if the tab is currently running a task
-        or in a merge review — the frontend should stop/resolve those
-        first.
+        reference.
 
-        When the tab has a pending worktree, auto-merges it (just like
-        starting a new task would) before removing the tab, so the
-        worktree branch and directory are not orphaned.
+        When the tab is currently running a task or in a merge review,
+        the state is **not** removed immediately — the running agent
+        must be allowed to finish (per ``USER_PREFS.md``: "Closing a
+        chat tab does NOT stop a running agent task").  Instead the
+        tab is marked ``frontend_closed = True`` so that
+        :meth:`_dispose_if_closed` will tear it down later, once the
+        last lifecycle flag drops to false.
+
+        When the tab has a pending worktree (no active task / merge),
+        the worktree is released (just like starting a new task
+        would) before removing the tab, so the worktree branch and
+        directory are not orphaned.
 
         Args:
             tab_id: The frontend tab identifier to close.
@@ -346,8 +353,52 @@ class VSCodeServer(
                 or tab.is_merging
                 or (tab.task_thread is not None and tab.task_thread.is_alive())
             ):
+                tab.frontend_closed = True
                 return
             self._tab_states.pop(tab_id, None)
+        self._teardown_tab_resources(tab_id, tab)
+
+    def _dispose_if_closed(self, tab_id: str) -> None:
+        """Dispose *tab_id*'s state if the frontend already closed it.
+
+        Invoked at every lifecycle transition that can flip the last
+        lifecycle flag to false (task end, merge end).  Pops the state
+        only when ``frontend_closed`` is set AND no lifecycle flag is
+        still raised; otherwise leaves it alone.  Idempotent and safe
+        to call when no state exists for *tab_id*.
+
+        Args:
+            tab_id: The frontend tab identifier.
+        """
+        if not tab_id:
+            return
+        with self._state_lock:
+            tab = self._tab_states.get(tab_id)
+            if tab is None or not tab.frontend_closed:
+                return
+            if (
+                tab.is_task_active
+                or tab.is_merging
+                or (tab.task_thread is not None and tab.task_thread.is_alive())
+            ):
+                return
+            self._tab_states.pop(tab_id, None)
+        self._teardown_tab_resources(tab_id, tab)
+
+    def _teardown_tab_resources(
+        self, tab_id: str, tab: _TabState | None,
+    ) -> None:
+        """Release worktree, per-tab printer state and merge data dir.
+
+        Shared cleanup tail used by both the immediate (:meth:`_close_tab`)
+        and the deferred (:meth:`_dispose_if_closed`) disposal paths.
+        Caller must have already popped *tab* from ``_tab_states``.
+
+        Args:
+            tab_id: The frontend tab identifier being disposed.
+            tab: The popped tab state, or ``None`` when the tab was
+                never created (e.g. ``closeTab`` for an unknown id).
+        """
         if tab is not None and tab.agent._wt_pending:
             try:
                 tab.agent._release_worktree()

@@ -52,6 +52,7 @@ class _TaskRunnerMixin:
 
         def _get_tab(self, tab_id: str) -> _TabState: ...
         def _any_non_wt_running(self) -> bool: ...
+        def _dispose_if_closed(self, tab_id: str) -> None: ...
         def _prepare_and_start_merge(
             self,
             work_dir: str,
@@ -97,6 +98,9 @@ class _TaskRunnerMixin:
                 self.printer.broadcast(
                     {"type": "status", "running": False, "tabId": tab_id},
                 )
+            # If the user clicked closeTab while this task was still
+            # running, dispose the now-idle _TabState.  No-op otherwise.
+            self._dispose_if_closed(tab_id)
 
     @staticmethod
     def _capture_pre_snapshot(
