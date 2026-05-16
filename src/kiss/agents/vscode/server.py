@@ -446,13 +446,19 @@ class VSCodeServer(
 
         rebound_running = False
         if subagent_info is None:
-            # Reattach a still-running agent (under some other tab id)
-            # to the freshly opened tab so its live events flow here too.
+            # Subscribe the new tab to a still-running agent's event
+            # stream (under some other tab id) so its live events ALSO
+            # flow here — without stealing the stream from the original
+            # client.  See :meth:`_reattach_running_chat`.
             rebound_running = self._reattach_running_chat(chat_id, tab_id)
 
         tab = self._get_tab(tab_id)
-        if not rebound_running:
-            tab.agent.resume_chat_by_id(chat_id)
+        # Always attach the new tab's own agent to the resumed chat
+        # so a follow-up prompt typed in this tab continues the same
+        # chat session.  With multi-viewer subscribe semantics the
+        # source tab (running the live task) keeps its own _TabState,
+        # so the new tab needs its own agent linked to the chat too.
+        tab.agent.resume_chat_by_id(chat_id)
         with self._state_lock:
             tab.use_worktree = is_worktree
 
@@ -501,22 +507,22 @@ class VSCodeServer(
         self._emit_pending_worktree(tab_id)
 
     def _reattach_running_chat(self, chat_id: str, new_tab_id: str) -> bool:
-        """Find a still-running ``_TabState`` for *chat_id* and re-key
-        it under *new_tab_id* so the live agent's events flow to the
-        newly opened tab.
+        """Subscribe *new_tab_id* to a still-running ``_TabState`` for
+        *chat_id* so its live agent's events ALSO flow to the newly
+        opened tab — without stealing the stream from the original
+        client.
 
         Looks for an entry in ``_tab_states`` whose agent has the same
         ``chat_id`` and whose ``task_thread`` is still alive (or whose
-        ``is_task_active`` flag is set).  If the entry is already keyed
-        by *new_tab_id*, returns ``True`` without rebinding.
-
-        On a successful rebind:
-        - The old ``_TabState`` is removed from ``_tab_states``.
-        - It is re-inserted under *new_tab_id*.
-        - ``printer.rebind_tab`` migrates per-tab printer state and
-          installs an alias so the agent thread's stored
-          ``threading.local`` tab id (still the old one) keeps routing
-          events to *new_tab_id*.
+        ``is_task_active`` flag is set).  Multi-viewer fan-out is
+        implemented in the printer: the original ``_TabState`` keeps
+        owning the running task and the agent thread keeps tagging
+        events with the original tab id, while
+        :meth:`BaseBrowserPrinter.subscribe_tab` registers
+        *new_tab_id* as an additional viewer so every broadcast is
+        duplicated with ``tabId=new_tab_id``.  This means BOTH the
+        original client (if still connected) AND the freshly-opened
+        client see the streaming events.
 
         Args:
             chat_id: The chat id of the task the user clicked in
@@ -524,15 +530,18 @@ class VSCodeServer(
             new_tab_id: The freshly allocated frontend tab id.
 
         Returns:
-            ``True`` when a live agent for *chat_id* was bound to
-            *new_tab_id* (either freshly rebound or already there);
+            ``True`` when a live agent for *chat_id* exists and
+            *new_tab_id* is now subscribed to its event stream;
             ``False`` when no live agent exists.
         """
         if not chat_id or not new_tab_id:
             return False
         with self._state_lock:
-            old_tab_id: str | None = None
+            source_tab_id: str | None = None
             for key, t in self._tab_states.items():
+                if key == new_tab_id:
+                    # Don't subscribe a tab to its own state.
+                    continue
                 agent_chat_id = getattr(t.agent, "chat_id", "") or ""
                 if agent_chat_id != chat_id:
                     continue
@@ -540,18 +549,11 @@ class VSCodeServer(
                     t.task_thread is not None and t.task_thread.is_alive()
                 )
                 if alive or t.is_task_active:
-                    old_tab_id = key
+                    source_tab_id = key
                     break
-            if old_tab_id is None:
+            if source_tab_id is None:
                 return False
-            if old_tab_id == new_tab_id:
-                return True
-            tab = self._tab_states.pop(old_tab_id)
-            # If a fresh tab state was speculatively created under
-            # new_tab_id by an earlier call, drop it before overwriting.
-            self._tab_states.pop(new_tab_id, None)
-            self._tab_states[new_tab_id] = tab
-        self.printer.rebind_tab(old_tab_id, new_tab_id)
+        self.printer.subscribe_tab(source_tab_id, new_tab_id)
         return True
 
 
