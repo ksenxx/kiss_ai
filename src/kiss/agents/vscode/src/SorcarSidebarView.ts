@@ -43,6 +43,13 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _view?: vscode.WebviewView;
   /** Per-tab task processes. Created on submit, disposed on next submit. */
   private _taskProcesses: Map<string, AgentProcess> = new Map();
+  /**
+   * Chat-id → tab-id index used to find the task process that owns a
+   * still-running chat when the user resumes it from history in a new
+   * tab.  Populated as ``clear``/``task_events`` messages flow out of
+   * each proc and updated on rebind.
+   */
+  private _chatIdToTabId: Map<string, string> = new Map();
   /** Shared service process for non-task commands (getModels, etc.). */
   private _serviceProcess: AgentProcess | null = null;
   /** The currently active tab ID (updated on every message with tabId). */
@@ -204,6 +211,52 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   }
 
   /**
+   * Re-key a running task process from its old tab id to *newTabId*.
+   *
+   * Returns the live ``AgentProcess`` when the chat *chatId* is being
+   * driven by a still-running task in some other tab id; the proc is
+   * moved in ``_taskProcesses`` so future commands routed by tab id
+   * reach it.  Its ``tabId`` field is updated so stray events that
+   * arrive without an explicit ``tabId`` are tagged with *newTabId*
+   * and the proc's Python printer alias map (set up by the backend's
+   * own ``_reattach_running_chat``) handles events that were already
+   * tagged with the old id.
+   *
+   * Returns ``null`` when no running proc is found for *chatId* — the
+   * caller should then route ``resumeSession`` to the service process
+   * to load history.
+   */
+  private _reattachRunningChat(
+    chatId: string,
+    newTabId: string,
+  ): AgentProcess | null {
+    if (!chatId || !newTabId) return null;
+    const oldTabId = this._chatIdToTabId.get(chatId);
+    if (!oldTabId) return null;
+    const proc = this._taskProcesses.get(oldTabId);
+    if (!proc || !proc.isAlive) {
+      // Stale entry — clean it up.
+      this._chatIdToTabId.delete(chatId);
+      return null;
+    }
+    if (oldTabId === newTabId) return proc;
+    // Move the proc to the new tab id and drop any stale proc that
+    // might be parked under newTabId.
+    const stale = this._taskProcesses.get(newTabId);
+    if (stale && stale !== proc) stale.dispose();
+    this._taskProcesses.delete(oldTabId);
+    this._taskProcesses.set(newTabId, proc);
+    proc.tabId = newTabId;
+    this._chatIdToTabId.set(chatId, newTabId);
+    // Migrate running-tab tracking so the spinner is associated with
+    // the new tab id.
+    if (this._runningTabs.delete(oldTabId)) {
+      this._runningTabs.add(newTabId);
+    }
+    return proc;
+  }
+
+  /**
    * Create a fresh task process for a new task in the given tab.
    *
    * Disposes any existing task process for that tab first, ensuring
@@ -229,10 +282,26 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
    * don't already have one.
    */
   private _setupProcessListeners(proc: AgentProcess, tabId: string): void {
+    // Initialise the mutable tabId on the proc so subsequent rebinds
+    // (via ``_reattachRunningChat``) can re-route stray events that
+    // arrive without an explicit ``tabId``.
+    proc.tabId = tabId;
     proc.on('message', (msg: ToWebviewMessage) => {
-      // Inject tabId if the Python side didn't set it
-      if (msg.tabId === undefined && tabId) {
-        msg.tabId = tabId;
+      // Inject tabId if the Python side didn't set it.  Read the
+      // current proc.tabId (rather than the captured constructor
+      // argument) so re-keying a running proc to a new tab id takes
+      // effect immediately.
+      if (msg.tabId === undefined && proc.tabId) {
+        msg.tabId = proc.tabId;
+      }
+      // Remember which chat each proc currently owns so resumeSession
+      // for a still-running chat can find the live proc.
+      const evChatId =
+        msg.type === 'clear' || msg.type === 'task_events'
+          ? (msg as {chat_id?: string}).chat_id
+          : undefined;
+      if (typeof evChatId === 'string' && evChatId && proc.tabId) {
+        this._chatIdToTabId.set(evChatId, proc.tabId);
       }
 
       if (msg.type === 'commitMessage') {
@@ -886,9 +955,19 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
       case 'resumeSession': {
         const resumeTabId = message.tabId;
-        const resumeProc = resumeTabId
-          ? this._getTabProcess(resumeTabId)
-          : this._getServiceProcess();
+        // If the chat is still being driven by a running task proc
+        // under a different tab id, re-key that proc to the new tab
+        // id and let it handle the resume directly so its live events
+        // flow into the freshly opened tab.
+        const liveProc =
+          resumeTabId && message.id
+            ? this._reattachRunningChat(message.id, resumeTabId)
+            : null;
+        const resumeProc =
+          liveProc ??
+          (resumeTabId
+            ? this._getTabProcess(resumeTabId)
+            : this._getServiceProcess());
         resumeProc.sendCommand({
           type: 'resumeSession',
           chatId: message.id,
