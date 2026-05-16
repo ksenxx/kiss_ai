@@ -532,6 +532,24 @@ class VSCodeServer(
             # ``openSubagentTab``) and will simply flip the existing
             # tab's ``isSubagentTab`` / title in place.
             ti = subagent_info.get("task_index")
+            orig_sub_tab_id = str(subagent_info.get("tab_id", "") or "")
+            # The handler defaults to ``isRunning=true / isDone=false``
+            # so the tab pulses ◉ purple — but for sub-agents whose
+            # execution already finished there will be no later
+            # ``subagentDone`` event to flip it to ✓ green, so the
+            # tab would forever look like it's running.  Detect "done
+            # at history-load time" by checking the printer's
+            # ``_persist_agents`` map: an entry under the original
+            # sub_tab_id means the sub-agent thread is still running
+            # (registered just before ``agent.run()``, popped in the
+            # ``finally``).  If absent, the sub-agent has finished
+            # (success or failure) and the history-loaded tab should
+            # render with the same ✓ green indicator the originally
+            # spawned tab ended on.
+            persist_agents = getattr(self.printer, "_persist_agents", {})
+            is_done = not (
+                orig_sub_tab_id and orig_sub_tab_id in persist_agents
+            )
             self.printer.broadcast({
                 "type": "openSubagentTab",
                 "tab_id": tab_id,
@@ -541,11 +559,11 @@ class VSCodeServer(
                 ),
                 "taskIndex": int(ti) if isinstance(ti, int) else 0,
                 "isSubagentTab": True,
+                "isDone": is_done,
             })
             # Route any future events tagged with the sub-agent's
             # original sub_tab_id (the parent's running executor may
             # still be emitting them via thread-local) to the new tab.
-            orig_sub_tab_id = str(subagent_info.get("tab_id", "") or "")
             if orig_sub_tab_id and orig_sub_tab_id != tab_id:
                 self.printer.rebind_tab(orig_sub_tab_id, tab_id)
 
