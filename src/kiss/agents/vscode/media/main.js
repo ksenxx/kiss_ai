@@ -3070,8 +3070,14 @@
           subTab.title = title;
         }
         subTab.isSubagentTab = true;
-        subTab.isDone = false;
-        subTab.isRunning = true;
+        // ``isDone`` is set by the backend for history-loaded sub-agent
+        // tabs whose execution already completed — without this flag
+        // the tab would forever pulse the running ◉ indicator (no
+        // ``subagentDone`` event arrives for an already-finished
+        // sub-agent).  Default to "running" for fresh launches.
+        const subDone = !!ev.isDone;
+        subTab.isDone = subDone;
+        subTab.isRunning = !subDone;
         subTab.taskPanelHTML = subDesc;
         subTab.taskPanelVisible = true;
         renderTabBar();
