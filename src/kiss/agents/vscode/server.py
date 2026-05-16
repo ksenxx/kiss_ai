@@ -208,7 +208,7 @@ class VSCodeServer(
             has_events = bool(entry.get("has_events", False))
             chat_id = str(entry.get("chat_id", "") or "")
             result = str(entry.get("result", "") or "")
-            sessions.append({
+            session: dict[str, Any] = {
                 "id": chat_id,
                 "task_id": entry.get("id"),
                 "title": task[:50] + "..." if len(task) > 50 else task,
@@ -219,7 +219,36 @@ class VSCodeServer(
                     result.startswith("Task failed")
                     or result == "Agent Failed Abruptly"
                 ),
-            })
+            }
+            # Surface sub-agent metadata so the history sidebar can
+            # reopen the row as a sub-agent tab (⚡N indicator, no
+            # input bar) instead of reclassifying it as a regular
+            # chat tab.  Stored in ``extra`` under the ``subagent``
+            # key by ``ChatSorcarAgent.run`` for sub-agent rows.
+            extra_raw = str(entry.get("extra", "") or "")
+            if extra_raw:
+                try:
+                    extra_obj = json.loads(extra_raw)
+                except (json.JSONDecodeError, TypeError):
+                    extra_obj = None
+                if isinstance(extra_obj, dict):
+                    sub = extra_obj.get("subagent")
+                    if isinstance(sub, dict):
+                        session["is_subagent"] = True
+                        session["subagent_tab_id"] = str(
+                            sub.get("tab_id", "") or ""
+                        )
+                        session["parent_tab_id"] = str(
+                            sub.get("parent_tab_id", "") or ""
+                        )
+                        ti = sub.get("task_index")
+                        session["task_index"] = (
+                            int(ti) if isinstance(ti, int) else 0
+                        )
+                        session["description"] = str(
+                            sub.get("description", task) or task
+                        )
+            sessions.append(session)
         self.printer.broadcast({
             "type": "history", "sessions": sessions,
             "offset": offset, "generation": generation,
@@ -393,22 +422,63 @@ class VSCodeServer(
         if not result or not result.get("events"):
             return
 
-        # Reattach a still-running agent (under some other tab id) to
-        # the freshly opened tab so its live events flow here too.
-        rebound_running = self._reattach_running_chat(chat_id, tab_id)
+        # Inspect ``extra`` BEFORE re-attaching so we can detect a
+        # sub-agent row and skip ``_reattach_running_chat`` for it.
+        # Sub-agents share their parent's chat_id but run as threads
+        # inside the parent's executor — the parent's ``_TabState``
+        # owns the live thread, so rebinding it here would steal the
+        # parent's tab.  We only need to rebind the printer's per-tab
+        # alias so live events still tagged with the sub-agent's
+        # original ``sub_tab_id`` reach the newly opened tab.
+        extra_str = str(result.get("extra", "") or "")
+        subagent_info: dict[str, object] | None = None
+        is_worktree = False
+        if extra_str:
+            try:
+                extra = json.loads(extra_str)
+                if isinstance(extra, dict):
+                    is_worktree = bool(extra.get("is_worktree"))
+                    sub = extra.get("subagent")
+                    if isinstance(sub, dict):
+                        subagent_info = sub
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        rebound_running = False
+        if subagent_info is None:
+            # Reattach a still-running agent (under some other tab id)
+            # to the freshly opened tab so its live events flow here too.
+            rebound_running = self._reattach_running_chat(chat_id, tab_id)
 
         tab = self._get_tab(tab_id)
         if not rebound_running:
             tab.agent.resume_chat_by_id(chat_id)
+        with self._state_lock:
+            tab.use_worktree = is_worktree
 
-        extra_str = str(result.get("extra", "") or "")
-        if extra_str:
-            try:
-                extra = json.loads(extra_str)
-                with self._state_lock:
-                    tab.use_worktree = bool(extra.get("is_worktree"))
-            except (json.JSONDecodeError, TypeError):
-                pass
+        if subagent_info is not None:
+            # Convert the freshly created regular tab into a sub-agent
+            # tab on the frontend.  The ``openSubagentTab`` handler is
+            # idempotent on ``tab_id`` (see main.js case
+            # ``openSubagentTab``) and will simply flip the existing
+            # tab's ``isSubagentTab`` / title in place.
+            ti = subagent_info.get("task_index")
+            self.printer.broadcast({
+                "type": "openSubagentTab",
+                "tab_id": tab_id,
+                "parent_tab_id": subagent_info.get("parent_tab_id", "") or "",
+                "description": subagent_info.get(
+                    "description", result.get("task", "")
+                ),
+                "taskIndex": int(ti) if isinstance(ti, int) else 0,
+                "isSubagentTab": True,
+            })
+            # Route any future events tagged with the sub-agent's
+            # original sub_tab_id (the parent's running executor may
+            # still be emitting them via thread-local) to the new tab.
+            orig_sub_tab_id = str(subagent_info.get("tab_id", "") or "")
+            if orig_sub_tab_id and orig_sub_tab_id != tab_id:
+                self.printer.rebind_tab(orig_sub_tab_id, tab_id)
 
         self.printer.broadcast({
             "type": "task_events",

@@ -38,6 +38,13 @@ class ChatSorcarAgent(SorcarAgent):
         super().__init__(name)
         self._chat_id: str = ""
         self._last_task_id: int | None = None
+        # Populated by ``_run_tasks_parallel`` on each sub-agent before
+        # it runs so the sub-agent's task_history row records its
+        # original frontend sub-tab id, parent tab id, task index, and
+        # truncated description.  The history sidebar reads these to
+        # reopen the row as a sub-agent tab rather than a regular chat
+        # tab.  ``None`` on the top-level agent.
+        self._subagent_info: dict[str, object] | None = None
 
     @property
     def chat_id(self) -> str:
@@ -152,6 +159,16 @@ class ChatSorcarAgent(SorcarAgent):
             agent = ChatSorcarAgent(f"Parallel-{task[:40]}")
             if chat_id:
                 agent.resume_chat_by_id(chat_id)
+            # Persist the sub-agent's frontend identity into its own
+            # task_history row so the history sidebar can later reopen
+            # it as a sub-agent tab (⚡N indicator, no input bar)
+            # rather than reclassifying it as a regular chat tab.
+            agent._subagent_info = {
+                "tab_id": sub_tab_id,
+                "parent_tab_id": parent_tab_id or "",
+                "task_index": idx,
+                "description": task[:200],
+            }
             success = True
             try:
                 result: str = agent.run(
@@ -227,17 +244,17 @@ class ChatSorcarAgent(SorcarAgent):
                 _save_task_result(task_id=task_id, result=result_summary)
                 from kiss._version import __version__
 
-                _save_task_extra(
-                    {
-                        "model": getattr(self, "model_name", ""),
-                        "work_dir": getattr(self, "work_dir", ""),
-                        "version": __version__,
-                        "tokens": self.total_tokens_used,
-                        "cost": round(self.budget_used, 6),
-                        "is_parallel": self._is_parallel,
-                        "is_worktree": type(self).__name__ == "WorktreeSorcarAgent",
-                    },
-                    task_id=task_id,
-                )
+                extra_payload: dict[str, object] = {
+                    "model": getattr(self, "model_name", ""),
+                    "work_dir": getattr(self, "work_dir", ""),
+                    "version": __version__,
+                    "tokens": self.total_tokens_used,
+                    "cost": round(self.budget_used, 6),
+                    "is_parallel": self._is_parallel,
+                    "is_worktree": type(self).__name__ == "WorktreeSorcarAgent",
+                }
+                if self._subagent_info is not None:
+                    extra_payload["subagent"] = self._subagent_info
+                _save_task_extra(extra_payload, task_id=task_id)
 
 
