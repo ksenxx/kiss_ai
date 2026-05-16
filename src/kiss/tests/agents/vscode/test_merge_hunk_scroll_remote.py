@@ -75,7 +75,7 @@ class TestScrollHunkIntoView(unittest.TestCase):
         self.assertIn("getBoundingClientRect", self.body)
         self.assertIn("scrollTop", self.body)
 
-    def test_uses_container_scroll_not_only_native_scrollIntoView(self) -> None:
+    def test_uses_container_scroll_not_only_native_scroll_into_view(self) -> None:
         """Must use ``container.scrollTo``/``scrollTop`` for the active path.
 
         Native ``scrollIntoView`` is allowed only as a fallback when no

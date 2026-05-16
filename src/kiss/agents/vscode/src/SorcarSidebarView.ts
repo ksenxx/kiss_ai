@@ -328,7 +328,19 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         msg.config['work_dir'] = this._getWorkDir();
       }
 
-      this._sendToWebview(msg);
+      // ``merge_data`` is handled exclusively by the native VS Code
+      // ``MergeManager`` above.  The daemon's ``WebPrinter`` augments
+      // every ``merge_data`` event with ``base_text``/``current_text``
+      // so browser clients can render an inline diff in chat — but in
+      // the extension we already paint the native merge editor, so
+      // forwarding the augmented event to the webview would render the
+      // diff twice (native merge editor + in-chat inline diff).  Drop
+      // it.  ``merge_started`` / ``merge_ended`` / ``merge_nav`` still
+      // reach the webview so the in-input merge toolbar (Prev / Next /
+      // Accept / Reject buttons) keeps working.
+      if (msg.type !== 'merge_data') {
+        this._sendToWebview(msg);
+      }
       if (msg.type === 'status') {
         const statusTabId = msg.tabId;
         if (msg.running) {

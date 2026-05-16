@@ -209,6 +209,7 @@ class TestMergeDataSnapshotsEditors(unittest.TestCase):
         body = _extract_method_body(src, "_installClientListener")
         merge_idx = body.find("merge_data")
         merge_block = body[merge_idx:]
+        assert "_preMergeOpenFiles" in merge_block, (
             "merge_data handler must reference _preMergeOpenFiles"
         )
         assert re.search(
@@ -288,6 +289,7 @@ class TestSnapshotOnlyOncePerTab(unittest.TestCase):
         merge_idx = body.find("merge_data")
         merge_block = body[merge_idx:]
 
+        snapshot_idx = merge_block.find("_getOpenEditorFiles")
         preceding = merge_block[:snapshot_idx]
         assert re.search(
             r"_preMergeOpenFiles\.has\s*\(", preceding
