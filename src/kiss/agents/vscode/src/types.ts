@@ -221,6 +221,7 @@ type ToWebviewMessageBody =
       task_description?: string;
       task_index?: number;
       isSubagentTab?: boolean;
+      isDone?: boolean;
     }
   | {type: 'subagentDone'; tab_id?: string; success?: boolean};
 
