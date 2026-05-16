@@ -594,6 +594,7 @@ class TestDaemonStopViaClient:
 
 
 class TestDaemonRestart:
+    @pytest.mark.slow
     def test_jobs_persist_via_crontab_across_restart(
         self, crontab_env: dict[str, Path]
     ) -> None:

@@ -35,6 +35,7 @@ class TestBuildPrompt:
 
 class TestGenerateAndProcessWithTools:
 
+    @pytest.mark.slow
     def test_system_prompt_restored_when_originally_empty(self) -> None:
         m = ClaudeCodeModel("cc/opus")
         m.initialize("test")
@@ -107,6 +108,7 @@ class TestModelInfoEntries:
 
 
 @requires_claude_cli
+@pytest.mark.slow
 class TestGenerateIntegration:
     """Integration tests that actually call the claude CLI."""
 

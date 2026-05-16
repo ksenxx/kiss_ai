@@ -671,32 +671,37 @@ async function ensureDependenciesImpl(): Promise<void> {
 
   log('=== Dependency check finished ===');
 
-  // Show restart notification only after API key prompting has completed.
+  // Post-install notification.  A VS Code window reload is NOT
+  // required here:
+  //
+  //   * When a new VSIX was installed while VS Code was running, the
+  //     ``fs.watchFile`` watchers in ``extension.ts`` (on ``out/
+  //     extension.js`` and on ``~/.kiss/.extension-updated``) already
+  //     fired ``workbench.action.reloadWindow`` BEFORE this function
+  //     ran in the new activation — the extension code in memory is
+  //     already current.
+  //   * For a from-scratch install (slow path), the current Node host
+  //     already has the updated ``process.env.PATH`` (set by
+  //     ``ensureLocalBinInPath()`` at activation start) and the API
+  //     keys (set by ``ensureApiKeys`` / ``loadApiKeysFromShellRc``),
+  //     the Python venv exists on disk, and the kiss-web daemon was
+  //     just (re)started.  Child processes spawned for chat tasks
+  //     inherit all of this.
+  //
+  // The only thing a reload would refresh is already-open integrated
+  // terminals — and opening a new terminal achieves the same effect
+  // without disrupting an in-flight chat task.  So we now show a
+  // non-prompting info message instead of forcing a reload.
   if (showRestartNotification) {
     if (apiKeysReady) {
-      // Loop until the user explicitly clicks "Restart VS Code".  VS
-      // Code may auto-hide information notifications (depending on
-      // user settings or notification-center state) and the user may
-      // dismiss the toast with the close button — in either case
-      // ``showInformationMessage`` resolves to ``undefined`` and we
-      // re-show, guaranteeing the prompt stays visible until the
-      // restart button is clicked.
-      void (async () => {
-        for (;;) {
-          const choice = await vscode.window.showInformationMessage(
-            'KISS Sorcar: Installation complete! Please restart VS Code and any open terminal for changes to take effect.',
-            'Restart VS Code',
-          );
-          if (choice === 'Restart VS Code') {
-            vscode.commands.executeCommand('workbench.action.reloadWindow');
-            return;
-          }
-        }
-      })();
+      vscode.window.showInformationMessage(
+        'KISS Sorcar: Installation complete! You are ready to go. ' +
+          'Already-open terminals will not see the updated PATH until you open a new one.',
+      );
     } else {
       vscode.window.showWarningMessage(
         'KISS Sorcar: Installation complete, but at least one of Claude Code, ANTHROPIC_API_KEY, or OPENAI_API_KEY is required. ' +
-          'Set an API key in your environment or restart VS Code to be prompted again.',
+          'Set an API key in your environment, then reload the window (Developer: Reload Window) to be prompted again.',
       );
     }
   }

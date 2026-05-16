@@ -43,13 +43,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _view?: vscode.WebviewView;
   /** Per-tab task processes. Created on submit, disposed on next submit. */
   private _taskProcesses: Map<string, AgentProcess> = new Map();
-  /**
-   * Chat-id → tab-id index used to find the task process that owns a
-   * still-running chat when the user resumes it from history in a new
-   * tab.  Populated as ``clear``/``task_events`` messages flow out of
-   * each proc and updated on rebind.
-   */
-  private _chatIdToTabId: Map<string, string> = new Map();
   /** Shared service process for non-task commands (getModels, etc.). */
   private _serviceProcess: AgentProcess | null = null;
   /** The currently active tab ID (updated on every message with tabId). */
@@ -211,67 +204,32 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   }
 
   /**
-   * Re-key a running task process from its old tab id to *newTabId*.
+   * Return the live ``AgentProcess`` driving the chat *chatId* so a
+   * ``resumeSession`` from a freshly-opened tab can be routed to the
+   * same Python subprocess that already owns the task.
    *
-   * Returns the live ``AgentProcess`` when the chat *chatId* is being
-   * driven by a still-running task in some other tab id; the proc is
-   * moved in ``_taskProcesses`` so future commands routed by tab id
-   * reach it.  Its ``tabId`` field is updated so stray events that
-   * arrive without an explicit ``tabId`` are tagged with *newTabId*
-   * and the proc's Python printer alias map (set up by the backend's
-   * own ``_reattach_running_chat``) handles events that were already
-   * tagged with the old id.
+   * With the ``tab_id == chat_id`` invariant established at run-start
+   * (commands.py ``_cmd_run`` adopts the tab id as the agent's chat
+   * id, and ``ChatSorcarAgent.run`` mints a uuid into ``_chat_id``
+   * when the tab id was empty), the live proc is keyed under
+   * *chatId* in ``_taskProcesses`` directly — no chat_id ↔ tab_id
+   * translation map is required.
    *
-   * Returns ``null`` when no running proc is found for *chatId* — the
-   * caller should then route ``resumeSession`` to the service process
-   * to load history.
+   * When *newTabId* differs from *chatId* (multi-viewer fan-out —
+   * the original tab is still open and a second tab is being opened
+   * onto the same chat), the proc is left in place under *chatId*;
+   * the backend's :meth:`_reattach_running_chat` registers the new
+   * viewer with the printer's subscriber map so broadcasts reach
+   * both tab ids.  Returns the live proc on success (whether
+   * *newTabId* == *chatId* or not), ``null`` otherwise.
    */
   private _reattachRunningChat(
     chatId: string,
     newTabId: string,
   ): AgentProcess | null {
     if (!chatId || !newTabId) return null;
-    let oldTabId = this._chatIdToTabId.get(chatId);
-    // Fallback: when no ``clear``/``task_events`` event has populated
-    // ``_chatIdToTabId`` yet (rare race between submit and a very
-    // fast history click), try the convention that a task's initial
-    // chat id equals the tab id it was first submitted under.  This
-    // is the chat id the persistence layer writes for first-task
-    // chats, so ``_taskProcesses.get(chatId)`` resolves to the
-    // owning proc.  Without this fallback the routed
-    // ``resumeSession`` would go to the service process instead of
-    // the task process, the service process's ``_tab_states`` would
-    // not contain the running task, ``_reattach_running_chat`` would
-    // skip ``subscribe_tab`` and the new tab would only show
-    // persisted history — never the live stream.
-    if (!oldTabId) {
-      const candidate = this._taskProcesses.get(chatId);
-      if (candidate && candidate.isAlive) {
-        oldTabId = chatId;
-        this._chatIdToTabId.set(chatId, chatId);
-      }
-    }
-    if (!oldTabId) return null;
-    const proc = this._taskProcesses.get(oldTabId);
-    if (!proc || !proc.isAlive) {
-      // Stale entry — clean it up.
-      this._chatIdToTabId.delete(chatId);
-      return null;
-    }
-    if (oldTabId === newTabId) return proc;
-    // Move the proc to the new tab id and drop any stale proc that
-    // might be parked under newTabId.
-    const stale = this._taskProcesses.get(newTabId);
-    if (stale && stale !== proc) stale.dispose();
-    this._taskProcesses.delete(oldTabId);
-    this._taskProcesses.set(newTabId, proc);
-    proc.tabId = newTabId;
-    this._chatIdToTabId.set(chatId, newTabId);
-    // Migrate running-tab tracking so the spinner is associated with
-    // the new tab id.
-    if (this._runningTabs.delete(oldTabId)) {
-      this._runningTabs.add(newTabId);
-    }
+    const proc = this._taskProcesses.get(chatId);
+    if (!proc || !proc.isAlive) return null;
     return proc;
   }
 
@@ -301,26 +259,14 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
    * don't already have one.
    */
   private _setupProcessListeners(proc: AgentProcess, tabId: string): void {
-    // Initialise the mutable tabId on the proc so subsequent rebinds
-    // (via ``_reattachRunningChat``) can re-route stray events that
-    // arrive without an explicit ``tabId``.
+    // Initialise the mutable tabId on the proc.  With the
+    // ``tab_id == chat_id`` invariant this value is stable for the
+    // life of the proc.
     proc.tabId = tabId;
     proc.on('message', (msg: ToWebviewMessage) => {
-      // Inject tabId if the Python side didn't set it.  Read the
-      // current proc.tabId (rather than the captured constructor
-      // argument) so re-keying a running proc to a new tab id takes
-      // effect immediately.
+      // Inject tabId if the Python side didn't set it.
       if (msg.tabId === undefined && proc.tabId) {
         msg.tabId = proc.tabId;
-      }
-      // Remember which chat each proc currently owns so resumeSession
-      // for a still-running chat can find the live proc.
-      const evChatId =
-        msg.type === 'clear' || msg.type === 'task_events'
-          ? (msg as {chat_id?: string}).chat_id
-          : undefined;
-      if (typeof evChatId === 'string' && evChatId && proc.tabId) {
-        this._chatIdToTabId.set(evChatId, proc.tabId);
       }
 
       if (msg.type === 'commitMessage') {
