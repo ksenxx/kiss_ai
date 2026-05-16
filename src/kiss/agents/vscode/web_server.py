@@ -1268,7 +1268,27 @@ class WebPrinter(BaseBrowserPrinter):
 
         self._persist_event(event)
 
-        data = json.dumps(event)
+        self._send_to_ws_clients(json.dumps(event))
+        # Fan out additional copies (one per subscribed viewer tab id)
+        # so multiple concurrent web clients viewing the same running
+        # chat each render their own correctly-tagged stream.  The
+        # copies are NOT recorded and NOT persisted — only the primary
+        # source-tagged event is — so the recording buffer and DB are
+        # never duplicated.
+        for viewer in self._fanout_targets(event.get("tabId")):
+            copy = {**event, "tabId": viewer}
+            self._send_to_ws_clients(json.dumps(copy))
+
+    def _send_to_ws_clients(self, data: str) -> None:
+        """Send a pre-serialised JSON payload to every connected WS client.
+
+        Factored out of :meth:`broadcast` so fan-out copies for
+        subscribed viewer tab ids reuse the same dispatch and pending-
+        future tracking as the primary broadcast.
+
+        Args:
+            data: The JSON payload (already encoded with ``json.dumps``).
+        """
         with self._ws_lock:
             clients = list(self._ws_clients)
         loop = self._loop

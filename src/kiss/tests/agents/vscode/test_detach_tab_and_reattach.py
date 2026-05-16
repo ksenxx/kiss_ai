@@ -1,6 +1,7 @@
 """Integration tests: closing a chat tab does NOT stop a running agent
-task, and resuming a still-running task from history reattaches the
-live agent to the newly opened tab so events flow there dynamically.
+task, and resuming a still-running task from history subscribes the
+newly opened tab to the live agent's stream so events flow there
+dynamically — without stealing the stream from the original client.
 
 Spec
 ----
@@ -9,27 +10,27 @@ Spec
    the agent must keep running to completion.
 
 2. When the user clicks a still-running task in the task history panel
-   and the chat tab for it is not open, the frontend allocates a new
-   ``tabId`` and sends ``resumeSession``.  The backend must:
+   and the chat tab for it is not open (or is open in a different
+   web client), the frontend allocates a new ``tabId`` and sends
+   ``resumeSession``.  The backend must:
 
    a. Load and broadcast the persisted ``task_events`` for the chat
       (so the new tab shows the work-so-far history).
 
-   b. Detect that an agent is still running for ``chat_id`` under some
-      *other* tab id and re-key the ``_TabState`` from the old id to
-      the new id.
+   b. Detect that an agent is still running for ``chat_id`` under
+      some *other* tab id and subscribe the new tab id to that
+      agent's event stream via
+      :meth:`BaseBrowserPrinter.subscribe_tab` so every subsequent
+      broadcast is duplicated with ``tabId=new_id``.  The source
+      ``_TabState`` is NOT moved — both the original tab id and the
+      new tab id receive the stream, supporting multiple concurrent
+      viewers of the same running task.
 
-   c. Tell the printer's per-tab event routing to forward every
-      subsequent event emitted by the running agent to the new tab id
-      (via ``printer.rebind_tab(old, new)`` which migrates per-tab
-      state and installs an alias used by ``_inject_tab_id`` and
-      ``_record_event``).
-
-   d. Broadcast ``{"type": "status", "running": True, "tabId": new_id}``
+   c. Broadcast ``{"type": "status", "running": True, "tabId": new_id}``
       so the new tab shows the running spinner immediately.
 
-3. Resuming a *finished* task (no live thread) must NOT rebind — it
-   should just load history into the new tab.
+3. Resuming a *finished* task (no live thread) must NOT subscribe —
+   it should just load history into the new tab.
 """
 
 from __future__ import annotations
@@ -68,14 +69,21 @@ def _make_server() -> tuple[VSCodeServer, list[dict]]:
     real_broadcast = BaseBrowserPrinter.broadcast
 
     def capture(event: dict) -> None:
-        # Run the real machinery (tab-id injection, recording) so
-        # alias resolution is exercised in tests, then snapshot the
-        # injected event.
+        # Run the real machinery (tab-id injection, recording, and
+        # multi-viewer fan-out) so alias resolution and subscriber
+        # duplication are exercised in tests, then snapshot the
+        # injected event(s).
         ev = server.printer._inject_tab_id(event)
         with server.printer._lock:
             server.printer._record_event(ev)
         with lock:
             events.append(ev)
+        # Mirror VSCodePrinter.broadcast's fan-out so subscribed
+        # viewer tab ids receive their own tagged copy in the
+        # captured event log.
+        for viewer in server.printer._fanout_targets(ev.get("tabId")):
+            with lock:
+                events.append({**ev, "tabId": viewer})
 
     # Bind capture in place of the JSON-stdout-writing broadcast.
     server.printer.broadcast = capture  # type: ignore[assignment]
@@ -191,7 +199,7 @@ class TestResumeRunningTaskReattachesLiveEvents:
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_resume_running_task_rebinds_tab_state_and_routes_events(
+    def test_resume_running_task_subscribes_and_fans_out_events(
         self,
     ) -> None:
         # Seed history: one task row + one persisted event.
@@ -222,10 +230,14 @@ class TestResumeRunningTaskReattachesLiveEvents:
             "tabId": tab_id_b,
         })
 
-        # _TabState moved from A to B.
+        # Both tab states exist: the source (still owns the running
+        # thread) AND the new viewer tab.  Multi-viewer fan-out keeps
+        # both alive instead of moving the stream.
+        assert tab_id_a in server._tab_states
         assert tab_id_b in server._tab_states
-        assert tab_id_a not in server._tab_states
-        assert server._tab_states[tab_id_b].task_thread is thread
+        assert server._tab_states[tab_id_a].task_thread is thread
+        # The new viewer tab does not own a task thread.
+        assert server._tab_states[tab_id_b].task_thread is None
 
         # Replay broadcast went to the new tab id.
         replays = [e for e in events if e.get("type") == "task_events"]
@@ -245,12 +257,13 @@ class TestResumeRunningTaskReattachesLiveEvents:
             f"expected status running=True for {tab_id_b}, got {events}"
         )
 
-        # Capture the position so we can isolate post-rebind events.
+        # Capture the position so we can isolate post-subscribe events.
         post_replay_idx = len(events)
 
-        # Release the fake task; the second broadcast must be routed
-        # to tab_id_b (the new tab) even though the agent thread set
-        # its thread-local tab_id to tab_id_a originally.
+        # Release the fake task; the agent thread emits one 'post'
+        # event with thread-local tab id == tab_id_a.  Because tab_id_b
+        # is subscribed, the printer must fan out an additional copy
+        # tagged with tab_id_b.
         release.set()
         thread.join(timeout=5)
         assert not thread.is_alive()
@@ -260,12 +273,16 @@ class TestResumeRunningTaskReattachesLiveEvents:
             e for e in post_events
             if e.get("type") == "text_delta" and e.get("text") == "post"
         ]
-        assert len(post_deltas) == 1, (
-            f"expected one 'post' delta after rebind, got {post_events}"
+        post_delta_tab_ids = sorted(
+            {str(e.get("tabId") or "") for e in post_deltas},
         )
-        assert post_deltas[0]["tabId"] == tab_id_b, (
-            "Live event from running agent thread must carry the new "
-            f"tab id {tab_id_b}; got {post_deltas[0]}"
+        assert tab_id_a in post_delta_tab_ids, (
+            "Source-tagged 'post' delta missing — original client "
+            f"would not see it.  Got: {post_deltas}"
+        )
+        assert tab_id_b in post_delta_tab_ids, (
+            "Fan-out 'post' delta tagged with the new viewer tab id "
+            f"missing — multi-viewer broken.  Got: {post_deltas}"
         )
 
     def test_resume_finished_task_does_not_rebind(self) -> None:

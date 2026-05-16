@@ -55,3 +55,14 @@ class VSCodePrinter(BaseBrowserPrinter):
                 sys.stdout.write(json.dumps(event) + "\n")
                 sys.stdout.flush()
         self._persist_event(event)
+        # Fan out a JSON copy of the event to every subscribed viewer
+        # tab id so multiple chat tabs / clients viewing the same
+        # running task each receive their own correctly-tagged copy.
+        # The copies are NOT recorded and NOT persisted: only the
+        # primary (source-tagged) event is, so the recording buffer
+        # and database are never duplicated.
+        for viewer in self._fanout_targets(event.get("tabId")):
+            copy = {**event, "tabId": viewer}
+            with self._stdout_lock:
+                sys.stdout.write(json.dumps(copy) + "\n")
+                sys.stdout.flush()

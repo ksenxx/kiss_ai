@@ -128,6 +128,16 @@ class BaseBrowserPrinter(Printer):
         # events to a newly opened frontend tab.  Used by
         # ``rebind_tab`` and resolved by ``_resolve_tab_id``.
         self._tab_id_alias: dict[str, str] = {}
+        # ``_subscribers`` maps a canonical source tab id (the one the
+        # running agent thread's events are tagged with after alias
+        # resolution) to the set of additional viewer tab ids that
+        # should ALSO receive every broadcast.  Used by
+        # ``subscribe_tab`` to fan out streaming events to multiple
+        # concurrent web/VS Code clients viewing the same chat.  The
+        # fan-out copies are NOT recorded and NOT persisted: only the
+        # primary (source-tagged) event is, so the database/recording
+        # is never duplicated.
+        self._subscribers: dict[str, set[str]] = {}
 
     def _resolve_tab_id(self, tab_id: str | None) -> str:
         """Resolve *tab_id* through the alias chain.
@@ -192,6 +202,88 @@ class BaseBrowserPrinter(Printer):
             bs = self._bash_states.pop(old_tab_id, None)
             if bs is not None:
                 self._bash_states[new_tab_id] = bs
+
+    def subscribe_tab(self, source_tab_id: str, viewer_tab_id: str) -> None:
+        """Register *viewer_tab_id* to receive copies of events emitted
+        for *source_tab_id*.
+
+        Used by the server when a second client opens a chat whose
+        agent is already running under another tab id: instead of
+        moving the live stream to the new tab (and starving the
+        original client), each broadcast is duplicated — once tagged
+        with the original ``source_tab_id`` (recorded + persisted),
+        and once tagged with each subscribed ``viewer_tab_id``
+        (forwarded only, not recorded/persisted).
+
+        Idempotent.  No-op when *viewer_tab_id* equals
+        *source_tab_id*.  *source_tab_id* is alias-resolved first so
+        subscriptions are always stored under the canonical key.
+
+        Args:
+            source_tab_id: The original tab id whose events should be
+                duplicated.  Alias-resolved through ``_tab_id_alias``.
+            viewer_tab_id: The additional viewer tab id that should
+                also receive every broadcast.
+        """
+        if not source_tab_id or not viewer_tab_id:
+            return
+        with self._lock:
+            canonical = self._resolve_tab_id(source_tab_id)
+            if not canonical or canonical == viewer_tab_id:
+                return
+            viewers = self._subscribers.get(canonical)
+            if viewers is None:
+                viewers = set()
+                self._subscribers[canonical] = viewers
+            viewers.add(viewer_tab_id)
+
+    def unsubscribe_tab(self, source_tab_id: str, viewer_tab_id: str) -> None:
+        """Remove *viewer_tab_id* from the subscriber set of
+        *source_tab_id*.
+
+        Idempotent: silently does nothing when the subscription does
+        not exist.  Cleans up empty subscriber sets so
+        ``_subscribers`` does not grow without bound.
+
+        Args:
+            source_tab_id: The original tab id whose subscriber set is
+                being modified.  Alias-resolved.
+            viewer_tab_id: The viewer tab id to remove.
+        """
+        if not source_tab_id or not viewer_tab_id:
+            return
+        with self._lock:
+            canonical = self._resolve_tab_id(source_tab_id)
+            viewers = self._subscribers.get(canonical)
+            if viewers is None:
+                return
+            viewers.discard(viewer_tab_id)
+            if not viewers:
+                self._subscribers.pop(canonical, None)
+
+    def _fanout_targets(self, tab_id: str | None) -> list[str]:
+        """Return a snapshot of viewer tab ids subscribed to *tab_id*.
+
+        The lookup is alias-aware: the caller passes the (already
+        injected) event's ``tabId`` and this method resolves any alias
+        before looking up the subscriber set.  Returns an empty list
+        when no subscribers exist.
+
+        Args:
+            tab_id: The event's ``tabId`` to look up subscribers for.
+
+        Returns:
+            List of viewer tab ids that should receive a fan-out copy
+            of the event.  Snapshot under ``_lock``.
+        """
+        if not tab_id:
+            return []
+        with self._lock:
+            canonical = self._resolve_tab_id(tab_id)
+            viewers = self._subscribers.get(canonical)
+            if not viewers:
+                return []
+            return [v for v in viewers if v != canonical]
 
     def _tab_key(self) -> str:
         """Return the thread-local tab key for per-tab state lookups.
@@ -318,6 +410,14 @@ class BaseBrowserPrinter(Printer):
                 s for s, dst in self._tab_id_alias.items() if dst == key
             ]:
                 self._tab_id_alias.pop(src, None)
+            # Drop subscription entries that key on or fan out to this
+            # tab so ``_subscribers`` does not grow without bound.
+            self._subscribers.pop(key, None)
+            for src in list(self._subscribers.keys()):
+                viewers = self._subscribers[src]
+                viewers.discard(key)
+                if not viewers:
+                    self._subscribers.pop(src, None)
 
     def reset(self) -> None:
         """Reset internal streaming state for a new turn."""
