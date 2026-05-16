@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -563,21 +564,42 @@ class SorcarAgent(RelentlessAgent):
 def _coerce_tasks(tasks: Any) -> list[str]:
     """Normalize the ``tasks`` argument to a ``list[str]``.
 
-    LLM tool calls sometimes pass a bare string instead of a one-element
-    list.  Without this guard, ``enumerate(tasks)`` would iterate the
-    string character-by-character and create one sub-agent (and one
-    ``openSubagentTab`` event) per character.
+    LLM tool calls sometimes pass ``tasks`` in two malformed shapes that
+    we recover from here:
+
+    1. A JSON-encoded list string such as ``'["task A", "task B"]'``.
+       Without recovery, the entire JSON string would be treated as one
+       task and dispatched to a single sub-agent.  We parse it back into
+       a proper ``list[str]``.
+    2. A bare task string such as ``"hello"``.  Without this guard,
+       ``enumerate(tasks)`` would iterate the string character-by-
+       character and create one sub-agent (and one ``openSubagentTab``
+       event) per character.  We wrap it into ``["hello"]``.
 
     Args:
-        tasks: Either a ``list[str]`` or a single ``str``.
+        tasks: Either a ``list[str]``, a JSON-encoded ``list[str]`` string,
+            or a single task ``str``.
 
     Returns:
-        A ``list[str]``.  ``str`` inputs are wrapped in a one-element list.
+        A ``list[str]``.  JSON-encoded list strings are parsed; other
+        ``str`` inputs are wrapped in a one-element list.
 
     Raises:
         TypeError: If *tasks* is neither a ``str`` nor a ``list[str]``.
     """
     if isinstance(tasks, str):
+        stripped = tasks.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            try:
+                parsed = json.loads(stripped)
+            except (ValueError, TypeError):
+                parsed = None
+            if (
+                isinstance(parsed, list)
+                and parsed
+                and all(isinstance(t, str) for t in parsed)
+            ):
+                return parsed
         return [tasks]
     if isinstance(tasks, list) and all(isinstance(t, str) for t in tasks):
         return tasks
