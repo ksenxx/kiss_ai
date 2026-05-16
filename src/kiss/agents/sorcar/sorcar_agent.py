@@ -139,7 +139,7 @@ class SorcarAgent(RelentlessAgent):
             them in parallel threads.  Use this tool when you have two or
             more **independent** sub-tasks that do not depend on each
             other's results (e.g. summarising several files, researching
-nc            separate topics, running independent code changes, searching
+            separate topics, running independent code changes, searching
             multiple solutions).
 
             Each parallel agent inherits the current model and working
