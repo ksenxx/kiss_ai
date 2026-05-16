@@ -150,6 +150,10 @@ class ChatSorcarAgent(SorcarAgent):
                     "isSubagentTab": True,
                 })
 
+        persist_agents = (
+            getattr(printer, "_persist_agents", None) if printer else None
+        )
+
         def _run_single(args: tuple[int, str]) -> str:
             idx, task = args
             sub_tab_id = sub_tab_ids[idx]
@@ -169,6 +173,17 @@ class ChatSorcarAgent(SorcarAgent):
                 "task_index": idx,
                 "description": task[:200],
             }
+            # Register the sub-agent in the printer's ``_persist_agents``
+            # map keyed by ``sub_tab_id`` so events broadcast by this
+            # sub-agent thread (each tagged with ``sub_tab_id`` via the
+            # printer's thread-local) get persisted to the sub-agent's
+            # OWN ``task_history`` row instead of being silently dropped.
+            # Without this, the row's ``has_events`` stays 0 and the
+            # history-sidebar click handler can't replay the events —
+            # it falls through to setting the input text on a fresh
+            # chat tab, which looks like "the sub-task didn't open".
+            if persist_agents is not None:
+                persist_agents[sub_tab_id] = agent
             success = True
             try:
                 result: str = agent.run(
@@ -186,6 +201,8 @@ class ChatSorcarAgent(SorcarAgent):
                 )
                 return error_result
             finally:
+                if persist_agents is not None:
+                    persist_agents.pop(sub_tab_id, None)
                 if tl is not None:
                     tl.tab_id = None
                 if broadcast:
