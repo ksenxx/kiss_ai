@@ -3687,13 +3687,56 @@
     if (hunk) hunk.classList.add('current');
   }
 
-  /** Scroll the hunk identified by ``(fi, hi)`` into view. */
+  /** Scroll the hunk identified by ``(fi, hi)`` into view.
+   *
+   * The remote-web shell sets ``html, body { overflow: hidden }`` (so the
+   * page itself never scrolls) and delegates scrolling to ``#output``.
+   * Native ``Element.scrollIntoView`` is unreliable in that layout —
+   * Chromium/Webkit sometimes try to scroll the (non-scrollable) document
+   * instead of bubbling to the nearest scrollable ancestor, so clicking
+   * Accept/Reject/Prev/Next in the inline merge toolbar would highlight
+   * the new hunk but leave it off-screen.  We walk up to the nearest
+   * scrollable ancestor explicitly and animate ``scrollTop`` to centre
+   * the hunk ourselves.  Falls back to ``scrollIntoView`` if no
+   * scrollable ancestor is found (e.g. when the hunk lives in a detached
+   * background-tab fragment). */
   function scrollHunkIntoView(mergePanel, fi, hi) {
     const hunk = mergePanel.querySelector(
       '.merge-hunk[data-fi="' + fi + '"][data-hi="' + hi + '"]',
     );
-    if (hunk && typeof hunk.scrollIntoView === 'function') {
-      hunk.scrollIntoView({block: 'center', behavior: 'smooth'});
+    if (!hunk) return;
+    let container = hunk.parentElement;
+    while (container && container !== document.body) {
+      const style = window.getComputedStyle(container);
+      const oy = style.overflowY;
+      if (
+        (oy === 'auto' || oy === 'scroll') &&
+        container.scrollHeight > container.clientHeight
+      ) {
+        break;
+      }
+      container = container.parentElement;
+    }
+    if (!container || container === document.body) {
+      if (typeof hunk.scrollIntoView === 'function') {
+        hunk.scrollIntoView({block: 'center', behavior: 'smooth'});
+      }
+      return;
+    }
+    const containerRect = container.getBoundingClientRect();
+    const hunkRect = hunk.getBoundingClientRect();
+    const target =
+      container.scrollTop +
+      (hunkRect.top - containerRect.top) -
+      Math.max(0, (container.clientHeight - hunkRect.height) / 2);
+    const top = Math.max(
+      0,
+      Math.min(target, container.scrollHeight - container.clientHeight),
+    );
+    if (typeof container.scrollTo === 'function') {
+      container.scrollTo({top: top, behavior: 'smooth'});
+    } else {
+      container.scrollTop = top;
     }
   }
 
