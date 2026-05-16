@@ -567,6 +567,21 @@ class VSCodeServer(
             if orig_sub_tab_id and orig_sub_tab_id != tab_id:
                 self.printer.rebind_tab(orig_sub_tab_id, tab_id)
 
+        if rebound_running:
+            # Make the resumed tab show the running spinner since the
+            # agent is still working.  Mirrors the broadcast that
+            # ``_run_task`` emits when a task starts.  This is emitted
+            # BEFORE ``task_events`` so the frontend's ``isRunning``
+            # flag is true while ``replayTaskEvents`` runs — matching
+            # the fresh-run ordering (``status:true`` → events) so a
+            # resumed-running tab and a fresh-run tab initialise the
+            # webview to the same state (chevron visibility, send/stop
+            # buttons, timer, etc.).
+            self.printer.broadcast({
+                "type": "status",
+                "running": True,
+                "tabId": tab_id,
+            })
         self.printer.broadcast({
             "type": "task_events",
             "events": result["events"],
@@ -576,15 +591,6 @@ class VSCodeServer(
             "extra": result.get("extra", ""),
             "tabId": tab_id,
         })
-        if rebound_running:
-            # Make the resumed tab show the running spinner since the
-            # agent is still working.  Mirrors the broadcast that
-            # ``_run_task`` emits when a task starts.
-            self.printer.broadcast({
-                "type": "status",
-                "running": True,
-                "tabId": tab_id,
-            })
         self._emit_pending_worktree(tab_id)
 
     def _reattach_running_chat(self, chat_id: str, new_tab_id: str) -> bool:
