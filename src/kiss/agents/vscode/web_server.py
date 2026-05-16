@@ -2179,7 +2179,7 @@ class RemoteAccessServer:
 
 
     async def _process_request(
-        self, connection: ServerConnection, request: Request
+        self, _connection: ServerConnection, request: Request
     ) -> Response | None:
         """Serve HTTP requests for the HTML page and static assets.
 
@@ -2187,7 +2187,7 @@ class RemoteAccessServer:
         ``None`` to let the WebSocket handshake proceed for ``/ws``.
 
         Args:
-            connection: The server connection (unused for HTTP).
+            _connection: The server connection (unused for HTTP).
             request: The incoming HTTP request.
 
         Returns:
