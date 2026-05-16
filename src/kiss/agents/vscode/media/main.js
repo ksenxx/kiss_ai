@@ -655,6 +655,7 @@
       const existingTab = tabs.find(t => t.id === presetId);
       if (existingTab) {
         switchToTab(presetId);
+        return false;
       }
     }
     saveCurrentTab();

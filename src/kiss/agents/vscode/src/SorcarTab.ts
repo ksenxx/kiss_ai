@@ -7,7 +7,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import {findKissProject} from './AgentProcess';
+import {findKissProject} from './kissPaths';
 
 /** Read the KISS project version from ``_version.py`` on disk. */
 export function getVersion(): string {
