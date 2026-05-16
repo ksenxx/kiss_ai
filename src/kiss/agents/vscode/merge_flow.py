@@ -60,6 +60,7 @@ class _MergeFlowMixin:
 
         def _get_tab(self, tab_id: str) -> _TabState: ...
         def _any_non_wt_running(self) -> bool: ...
+        def _dispose_if_closed(self, tab_id: str) -> None: ...
 
     def _start_merge_session(
         self, merge_json_path: str, tab_id: str = "",
@@ -188,6 +189,9 @@ class _MergeFlowMixin:
 
         if not tab.use_worktree:
             self._broadcast_autocommit_prompt(tab_id)
+        # If the user closed the tab while the merge view was open,
+        # dispose the now-idle _TabState.  No-op otherwise.
+        self._dispose_if_closed(tab_id)
 
     def _main_dirty_files(self) -> list[str]:
         """List modified, staged and untracked files in the main working tree.

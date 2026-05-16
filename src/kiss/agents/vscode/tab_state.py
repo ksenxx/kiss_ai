@@ -67,6 +67,7 @@ class _TabState:
         "is_task_active",
         "skip_merge",
         "deferred_snapshot",
+        "frontend_closed",
     )
 
     def __init__(self, tab_id: str, default_model: str) -> None:
@@ -91,3 +92,10 @@ class _TabState:
             ]
             | None
         ) = None
+        # ``True`` once the frontend has issued ``closeTab`` for this
+        # tab while a task / merge was still in flight.  The tab state
+        # is then kept alive (so the running agent can finish) and
+        # disposed by :meth:`VSCodeServer._dispose_if_closed` when the
+        # last lifecycle flag (``is_task_active`` / ``is_merging`` /
+        # ``task_thread.is_alive()``) drops to false.
+        self.frontend_closed: bool = False
