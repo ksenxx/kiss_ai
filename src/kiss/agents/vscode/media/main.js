@@ -4596,6 +4596,24 @@
           window._startDemoReplay(allHistSessions);
           return;
         }
+        // Sub-agent history rows must reopen as sub-agent tabs (⚡N
+        // indicator, no input bar) rather than regular chat tabs.  If
+        // a tab keyed by the persisted sub-agent tab id is already
+        // open (because the sub-agent is currently running and the
+        // backend created the tab via ``openSubagentTab``), just
+        // focus it — its events are already streaming live.
+        // Otherwise allocate a new tab and ``resumeSession``; the
+        // backend's ``_replay_session`` will broadcast
+        // ``openSubagentTab`` to convert the new tab and call
+        // ``printer.rebind_tab`` to route live events here.
+        if (s.is_subagent && s.subagent_tab_id) {
+          const existing = tabs.find(t => t.id === s.subagent_tab_id);
+          if (existing) {
+            switchToTab(s.subagent_tab_id);
+            closeSidebar();
+            return;
+          }
+        }
         createNewTab();
         if (s.has_events && s.id) {
           setTaskText(s.preview || s.title || '');
