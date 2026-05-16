@@ -4738,11 +4738,19 @@
         // backend replay on a tab that is already live-streaming the
         // same chat.
         if (s.has_events && s.id) {
-          createNewTab(s.id);
+          const created = createNewTab(s.id);
           if (created) {
             setTaskText(s.preview || s.title || '');
             vscode.postMessage({
               type: 'resumeSession',
+              id: s.id,
+              taskId: s.task_id,
+              tabId: activeTabId,
+            });
+          }
+        } else {
+          createNewTab();
+          inp.value = s.preview || s.title || '';
           syncClearBtn();
           inp.focus();
         }

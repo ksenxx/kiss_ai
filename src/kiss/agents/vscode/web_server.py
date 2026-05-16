@@ -155,6 +155,17 @@ _MAX_PROMPT_BYTES = 1_000_000
 # letting an orphaned ``_TabState`` linger meaningfully.
 _TAB_CLOSE_GRACE = 10.0
 
+# Path to the localhost Unix-domain socket exposed by
+# :class:`RemoteAccessServer` in addition to the public WSS port.
+# Local clients (the VS Code extension) connect to this socket over
+# the SAME newline-delimited JSON protocol that browsers speak over
+# WSS — no password challenge is performed because POSIX filesystem
+# permissions (mode 0o600) restrict access to the owning user.  A
+# fresh ``RemoteAccessServer(uds_path=...)`` argument overrides this
+# location for tests so multiple instances do not race on the same
+# socket file.
+_UDS_PATH = Path.home() / ".kiss" / "sorcar.sock"
+
 
 def _tunnel_backoff_delay(failure_count: int) -> int:
     """Return the backoff delay for *failure_count* consecutive failures.
@@ -1231,6 +1242,12 @@ class WebPrinter(BaseBrowserPrinter):
     def __init__(self) -> None:
         super().__init__()
         self._ws_clients: set[ServerConnection] = set()
+        # Unix-domain socket writers (local extension clients).  Same
+        # newline-delimited JSON protocol as WSS clients; broadcasts
+        # fan out to both sets in lockstep so a browser viewer and a
+        # VS Code extension viewer of the same chat tab observe an
+        # identical event stream.
+        self._uds_writers: set[asyncio.StreamWriter] = set()
         self._ws_lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._merge_state_callback: (
@@ -1293,36 +1310,74 @@ class WebPrinter(BaseBrowserPrinter):
             self._send_to_ws_clients(json.dumps(copy))
 
     def _send_to_ws_clients(self, data: str) -> None:
-        """Send a pre-serialised JSON payload to every connected WS client.
+        """Send a pre-serialised JSON payload to every connected client.
 
         Factored out of :meth:`broadcast` so fan-out copies for
         subscribed viewer tab ids reuse the same dispatch and pending-
-        future tracking as the primary broadcast.
+        future tracking as the primary broadcast.  Fans out to BOTH
+        WSS clients and local Unix-domain socket writers in lockstep.
 
         Args:
             data: The JSON payload (already encoded with ``json.dumps``).
         """
         with self._ws_lock:
             clients = list(self._ws_clients)
+            writers = list(self._uds_writers)
         loop = self._loop
+        if loop is None or not loop.is_running():
+            return
         for ws in clients:
-            if loop is not None and loop.is_running():
-                try:
-                    fut = asyncio.run_coroutine_threadsafe(
-                        ws.send(data), loop,
-                    )
-                except Exception:
-                    logger.debug("Failed to send to WS client", exc_info=True)
-                    continue
-                # M8: track the future so a stuck/slow peer's pending
-                # sends can be cancelled when the client disconnects.
-                with self._ws_lock:
-                    pending = self._pending_sends.get(ws)
-                    if pending is not None:
-                        pending.add(fut)
-                fut.add_done_callback(
-                    partial(self._discard_pending_send, ws),
+            try:
+                fut = asyncio.run_coroutine_threadsafe(
+                    ws.send(data), loop,
                 )
+            except Exception:
+                logger.debug("Failed to send to WS client", exc_info=True)
+                continue
+            # M8: track the future so a stuck/slow peer's pending
+            # sends can be cancelled when the client disconnects.
+            with self._ws_lock:
+                pending = self._pending_sends.get(ws)
+                if pending is not None:
+                    pending.add(fut)
+            fut.add_done_callback(
+                partial(self._discard_pending_send, ws),
+            )
+        for writer in writers:
+            try:
+                fut = asyncio.run_coroutine_threadsafe(
+                    self._uds_send(writer, data), loop,
+                )
+            except Exception:
+                logger.debug("Failed to send to UDS client", exc_info=True)
+                continue
+            with self._ws_lock:
+                pending = self._pending_sends.get(writer)
+                if pending is not None:
+                    pending.add(fut)
+            fut.add_done_callback(
+                partial(self._discard_pending_send, writer),
+            )
+
+    async def _uds_send(
+        self, writer: asyncio.StreamWriter, data: str,
+    ) -> None:
+        """Write a newline-delimited JSON payload to a UDS client.
+
+        Mirrors ``ServerConnection.send`` for Unix-domain socket
+        peers.  On any write failure, the writer is removed from the
+        active set so subsequent broadcasts skip it.
+
+        Args:
+            writer: The asyncio stream writer for the UDS connection.
+            data: The JSON payload (already encoded with ``json.dumps``).
+        """
+        try:
+            writer.write(data.encode("utf-8") + b"\n")
+            await writer.drain()
+        except Exception:
+            logger.debug("Failed to write to UDS client", exc_info=True)
+            self.remove_uds_writer(writer)
 
     def add_client(self, ws: ServerConnection) -> None:
         """Register a WebSocket client for event broadcasting.
@@ -1353,16 +1408,50 @@ class WebPrinter(BaseBrowserPrinter):
             except Exception:
                 logger.debug("Failed to cancel pending send", exc_info=True)
 
-    def _discard_pending_send(self, ws: ServerConnection, fut: Any) -> None:
+    def add_uds_writer(self, writer: asyncio.StreamWriter) -> None:
+        """Register a Unix-domain socket writer for event broadcasting.
+
+        Args:
+            writer: The asyncio stream writer to add.
+        """
+        with self._ws_lock:
+            self._uds_writers.add(writer)
+            self._pending_sends.setdefault(writer, set())
+
+    def remove_uds_writer(self, writer: asyncio.StreamWriter) -> None:
+        """Remove a Unix-domain socket writer from event broadcasting.
+
+        Cancels any pending ``run_coroutine_threadsafe`` futures for
+        this writer so a permanently stuck send queue cannot keep the
+        underlying coroutine alive after the peer is gone.
+
+        Args:
+            writer: The asyncio stream writer to remove.
+        """
+        with self._ws_lock:
+            self._uds_writers.discard(writer)
+            pending = self._pending_sends.pop(writer, set())
+        for fut in pending:
+            try:
+                fut.cancel()
+            except Exception:
+                logger.debug(
+                    "Failed to cancel pending UDS send", exc_info=True,
+                )
+
+    def _discard_pending_send(self, client: Any, fut: Any) -> None:
         """Remove a completed send future from the per-client pending set.
 
         Called via :meth:`concurrent.futures.Future.add_done_callback`
         once the wrapped coroutine finishes (or errors).  Keeps the
         :attr:`_pending_sends` set bounded so it does not grow without
         limit on a long-running healthy connection.
+
+        ``client`` may be a :class:`ServerConnection` (WSS) or an
+        :class:`asyncio.StreamWriter` (UDS).
         """
         with self._ws_lock:
-            pending = self._pending_sends.get(ws)
+            pending = self._pending_sends.get(client)
             if pending is not None:
                 pending.discard(fut)
 
@@ -1988,6 +2077,7 @@ class RemoteAccessServer:
         certfile: str | None = None,
         keyfile: str | None = None,
         url_file: str | Path | None = None,
+        uds_path: str | Path | None = None,
     ) -> None:
         source_shell_env()
 
@@ -2046,6 +2136,15 @@ class RemoteAccessServer:
         self._tunnel_rate_limited = False
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ws_server: Any = None
+        # Unix-domain socket listener for local clients (the VS Code
+        # extension).  Bound in :meth:`_setup_server` and torn down
+        # in :meth:`stop_async`.  Tests pass an explicit
+        # ``uds_path`` so concurrent instances do not race on the
+        # shared default ``~/.kiss/sorcar.sock``.
+        self._uds_path: Path = (
+            Path(uds_path) if uds_path else _UDS_PATH
+        )
+        self._uds_server: asyncio.Server | None = None
         self._watchdog_task: asyncio.Task[None] | None = None
         self._local_url = f"https://localhost:{self.port}"
         self._merge_states: dict[str, _WebMergeState] = {}
@@ -2373,6 +2472,73 @@ class RemoteAccessServer:
                 self._schedule_tab_close(tab)
             self._printer.remove_client(websocket)
 
+    async def _uds_handler(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        """Handle a local Unix-domain socket client connection.
+
+        Speaks the SAME newline-delimited JSON protocol as
+        :meth:`_ws_handler` but skips the password challenge — POSIX
+        filesystem permissions (mode 0o600 on the socket file) gate
+        access to the owning user.  Used by the VS Code extension so
+        the same :class:`VSCodeServer` instance serves both local and
+        remote clients out of one process, eliminating the per-tab
+        Python subprocess plumbing.
+
+        Args:
+            reader: Asyncio stream reader for the connection.
+            writer: Asyncio stream writer for the connection.  Also
+                registered with :class:`WebPrinter` so backend
+                broadcasts reach this peer.
+        """
+        self._printer.add_uds_writer(writer)
+        tabs_seen: set[str] = set()
+        try:
+            while True:
+                line = await reader.readline()
+                if not line:
+                    break
+                try:
+                    cmd = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(cmd, dict):
+                    continue
+                tab_id = cmd.get("tabId", "")
+                if isinstance(tab_id, str) and tab_id:
+                    tabs_seen.add(tab_id)
+                cmd_type = cmd.get("type", "")
+                if cmd_type in _VSCODE_ONLY_COMMANDS:
+                    continue
+                if cmd_type == "ready":
+                    await self._handle_ready(cmd, writer)
+                    continue
+                if cmd_type == "submit":
+                    await self._handle_submit(cmd)
+                    continue
+                if cmd_type == "getWelcomeSuggestions":
+                    await self._send_welcome_info()
+                    continue
+                if cmd_type == "mergeAction":
+                    action = cmd.get("action", "")
+                    if action != "all-done":
+                        await self._handle_web_merge_action(cmd)
+                        continue
+                cmd = _translate_webview_command(cmd)
+                await self._run_cmd(cmd)
+        except Exception:
+            logger.debug("UDS handler error", exc_info=True)
+        finally:
+            for tab in tabs_seen:
+                self._schedule_tab_close(tab)
+            self._printer.remove_uds_writer(writer)
+            try:
+                writer.close()
+            except Exception:
+                logger.debug("UDS writer close failed", exc_info=True)
+
 
     async def _send_welcome_info(self) -> None:
         """Broadcast welcome suggestions and the active remote URL.
@@ -2419,8 +2585,27 @@ class RemoteAccessServer:
                 msg["ntfyUrl"] = ntfy_url
             self._printer.broadcast(msg)
 
+    @staticmethod
+    async def _endpoint_send(endpoint: Any, data: str) -> None:
+        """Send ``data`` to either a WSS or a UDS endpoint.
+
+        ``endpoint`` is either a :class:`ServerConnection` (WSS) or
+        an :class:`asyncio.StreamWriter` (UDS).  This helper hides
+        the protocol difference so :meth:`_handle_ready` and
+        :meth:`_uds_handler` share a single dispatch path.
+
+        Args:
+            endpoint: The connection to send to.
+            data: The JSON payload (already encoded with ``json.dumps``).
+        """
+        if isinstance(endpoint, asyncio.StreamWriter):
+            endpoint.write(data.encode("utf-8") + b"\n")
+            await endpoint.drain()
+        else:
+            await endpoint.send(data)
+
     async def _handle_ready(
-        self, cmd: dict[str, Any], websocket: ServerConnection,
+        self, cmd: dict[str, Any], websocket: Any,
     ) -> None:
         """Translate the webview ``ready`` command into backend commands.
 
@@ -2444,8 +2629,9 @@ class RemoteAccessServer:
             await self._run_cmd({"type": init_cmd})
         await self._send_welcome_info()
         try:
-            await websocket.send(
-                json.dumps({"type": "focusInput", "tabId": tab_id})
+            await self._endpoint_send(
+                websocket,
+                json.dumps({"type": "focusInput", "tabId": tab_id}),
             )
         except Exception:
             pass
@@ -3177,6 +3363,31 @@ class RemoteAccessServer:
             create_connection=_HeadAwareServerConnection,
         )
 
+        # Bind the local Unix-domain socket for the VS Code extension.
+        # File permissions (mode 0o600) restrict access to the owning
+        # user, replacing the WSS password challenge for local peers.
+        try:
+            self._uds_path.parent.mkdir(parents=True, exist_ok=True)
+            if self._uds_path.exists() or self._uds_path.is_symlink():
+                try:
+                    self._uds_path.unlink()
+                except OSError:
+                    logger.debug(
+                        "Could not unlink stale UDS socket at %s",
+                        self._uds_path, exc_info=True,
+                    )
+            self._uds_server = await asyncio.start_unix_server(
+                self._uds_handler, path=str(self._uds_path),
+            )
+            os.chmod(self._uds_path, 0o600)
+        except Exception:
+            logger.warning(
+                "Failed to bind UDS at %s; local extension clients "
+                "will fall back to WSS",
+                self._uds_path, exc_info=True,
+            )
+            self._uds_server = None
+
         tunnel_url: str | None = None
         if self.use_tunnel:
             # Refuse to expose the server to the public internet
@@ -3303,6 +3514,23 @@ class RemoteAccessServer:
                 await asyncio.wait_for(self._ws_server.wait_closed(), timeout=2)
             except TimeoutError:
                 pass
+        if self._uds_server is not None:
+            self._uds_server.close()
+            try:
+                await asyncio.wait_for(
+                    self._uds_server.wait_closed(), timeout=2,
+                )
+            except TimeoutError:
+                pass
+            self._uds_server = None
+            try:
+                self._uds_path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                logger.debug(
+                    "UDS unlink on shutdown failed", exc_info=True,
+                )
         self._stop_tunnel()
         _remove_url_file(self._url_file)
 
