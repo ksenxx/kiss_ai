@@ -142,6 +142,19 @@ _MAX_ATTACHMENTS = 32
 # JSON payload cannot push tens of MB through the broadcast pipeline.
 _MAX_PROMPT_BYTES = 1_000_000
 
+# Grace period (seconds) between a WebSocket connection dropping and
+# the deferred ``closeTab`` actually firing for every tab seen on
+# that connection.  Browsers do not reliably send a "closeTab" before
+# the WSS shuts down (and ``beforeunload``/``pagehide`` WebSocket
+# writes are routinely dropped), so a brief grace window is the
+# canonical way to distinguish a transient reconnect/reload from an
+# intentional browser close.  A fresh ``ready`` message that
+# re-claims a tab id (current ``tabId`` or any entry in
+# ``restoredTabs``) cancels the pending close before it fires.  10s
+# is long enough to cover typical reloads on a slow link without
+# letting an orphaned ``_TabState`` linger meaningfully.
+_TAB_CLOSE_GRACE = 10.0
+
 
 def _tunnel_backoff_delay(failure_count: int) -> int:
     """Return the backoff delay for *failure_count* consecutive failures.
@@ -2049,6 +2062,16 @@ class RemoteAccessServer:
         # belonging to those tabs so the dict does not grow unbounded
         # over many short-lived sessions.
         self._ws_tabs: dict[ServerConnection, set[str]] = {}
+        # Deferred-disposal state for tabs whose WebSocket connection
+        # has dropped but whose backend ``_TabState`` should survive a
+        # short grace window so a reload / transient reconnect can
+        # re-claim it.  See :meth:`_schedule_tab_close`.
+        self._pending_tab_closes: dict[str, asyncio.TimerHandle] = {}
+        self._pending_tab_closes_lock = threading.Lock()
+        # Strong references for in-flight ``closeTab`` tasks dispatched
+        # by :meth:`_fire_pending_tab_close`.  Without this set the
+        # asyncio runtime can GC the task while it is still pending.
+        self._pending_close_tasks: set[asyncio.Task[None]] = set()
         self._printer._merge_state_callback = self._register_merge_state
         self._active_url: str | None = None
         self._last_ips: frozenset[str] = frozenset()
@@ -2188,6 +2211,107 @@ class RemoteAccessServer:
             None, self._vscode_server._handle_command, cmd,
         )
 
+    def _schedule_tab_close(self, tab_id: str) -> None:
+        """Schedule a deferred ``closeTab`` for *tab_id* after a grace period.
+
+        Called from :meth:`_ws_handler`'s ``finally`` block whenever a
+        WebSocket connection drops, for every tab id that was seen on
+        that connection.  Because browsers cannot reliably emit a
+        ``closeTab`` before the WSS shuts down (``beforeunload`` /
+        ``pagehide`` WebSocket writes are commonly buffered then
+        dropped), the grace timer is the canonical way to detect that
+        the frontend tab is truly gone — a reload / transient
+        reconnect that re-claims the same tab id within
+        :data:`_TAB_CLOSE_GRACE` seconds calls
+        :meth:`_cancel_pending_tab_close` to abort the disposal.
+
+        If a previous timer was already armed for *tab_id*, it is
+        cancelled and replaced (extending the grace window each time
+        the same tab id appears on a new dropped connection).
+
+        Args:
+            tab_id: The frontend tab identifier whose backend state
+                should be torn down once the grace period elapses,
+                unless cancelled by a reconnect.
+        """
+        if not tab_id:
+            return
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            return
+        with self._pending_tab_closes_lock:
+            existing = self._pending_tab_closes.pop(tab_id, None)
+            if existing is not None:
+                try:
+                    existing.cancel()
+                except Exception:
+                    logger.debug(
+                        "Cancel of stale pending close failed",
+                        exc_info=True,
+                    )
+            handle = loop.call_later(
+                _TAB_CLOSE_GRACE,
+                self._fire_pending_tab_close,
+                tab_id,
+            )
+            self._pending_tab_closes[tab_id] = handle
+
+    def _cancel_pending_tab_close(self, tab_id: str) -> None:
+        """Cancel a pending deferred ``closeTab`` for *tab_id*.
+
+        Called from :meth:`_handle_ready` when a fresh WebSocket
+        connection re-claims a tab id (either as the current
+        ``tabId`` or as an entry in ``restoredTabs``).  Idempotent and
+        safe for unknown tab ids — if no timer was armed for *tab_id*
+        the call is a no-op.
+
+        Args:
+            tab_id: The frontend tab identifier being re-claimed.
+        """
+        if not tab_id:
+            return
+        with self._pending_tab_closes_lock:
+            handle = self._pending_tab_closes.pop(tab_id, None)
+        if handle is not None:
+            try:
+                handle.cancel()
+            except Exception:
+                logger.debug(
+                    "Cancel of pending tab close failed", exc_info=True,
+                )
+
+    def _fire_pending_tab_close(self, tab_id: str) -> None:
+        """Execute the deferred ``closeTab`` for *tab_id*.
+
+        Runs on the asyncio event loop after :data:`_TAB_CLOSE_GRACE`
+        seconds elapse without a reconnect cancelling the timer.
+        Pops the merge state (if any) for *tab_id* and dispatches the
+        ``closeTab`` command through :meth:`_run_cmd`, which routes
+        through :class:`VSCodeServer._close_tab`.  When the tab is
+        idle, ``_close_tab`` disposes the ``_TabState`` immediately;
+        when a task or merge review is still in flight, it flips
+        ``frontend_closed=True`` and lets the existing deferred-
+        disposal hook (:meth:`VSCodeServer._dispose_if_closed`) tear
+        down the state once the lifecycle ends — never interrupting
+        the running agent.
+
+        Args:
+            tab_id: The frontend tab identifier whose grace window
+                has elapsed.
+        """
+        with self._pending_tab_closes_lock:
+            self._pending_tab_closes.pop(tab_id, None)
+        with self._merge_states_lock:
+            self._merge_states.pop(tab_id, None)
+        if self._loop is None or not self._loop.is_running():
+            return
+        task = asyncio.ensure_future(
+            self._run_cmd({"type": "closeTab", "tabId": tab_id}),
+            loop=self._loop,
+        )
+        self._pending_close_tasks.add(task)
+        task.add_done_callback(self._pending_close_tasks.discard)
+
     async def _ws_handler(self, websocket: ServerConnection) -> None:
         """Handle a WebSocket client connection.
 
@@ -2237,12 +2361,16 @@ class RemoteAccessServer:
         except Exception:
             logger.debug("WS handler error", exc_info=True)
         finally:
-            # M6: drop merge states owned by this connection.
+            # Deferred disposal: schedule a ``closeTab`` for every
+            # tab id this connection touched, with a short grace
+            # window so a reload / transient reconnect can re-claim
+            # the same tab ids and cancel the pending close.  Merge
+            # state is also popped lazily inside
+            # :meth:`_fire_pending_tab_close` so a reconnect within
+            # the grace window keeps the merge review intact.
             tabs = self._ws_tabs.pop(websocket, set())
-            if tabs:
-                with self._merge_states_lock:
-                    for tab in tabs:
-                        self._merge_states.pop(tab, None)
+            for tab in tabs:
+                self._schedule_tab_close(tab)
             self._printer.remove_client(websocket)
 
 
@@ -2306,6 +2434,12 @@ class RemoteAccessServer:
             websocket: The client connection (for direct replies).
         """
         tab_id = cmd.get("tabId", "")
+        # A fresh ``ready`` is the unambiguous signal that the
+        # frontend has reconnected and is re-claiming whatever tab
+        # ids it carries.  Cancel the deferred ``closeTab`` for the
+        # current tab id (and every restored tab below) so a reload
+        # within :data:`_TAB_CLOSE_GRACE` keeps the backend state.
+        self._cancel_pending_tab_close(tab_id)
         for init_cmd in ("getModels", "getInputHistory", "getConfig"):
             await self._run_cmd({"type": init_cmd})
         await self._send_welcome_info()
@@ -2329,11 +2463,14 @@ class RemoteAccessServer:
             )
             restored = restored[:_MAX_RESTORED_TABS]
         for rt in restored:
+            rt_id = rt.get("tabId", "")
+            if rt_id:
+                self._cancel_pending_tab_close(rt_id)
             chat_id = rt.get("chatId", "")
             if chat_id:
                 await self._run_cmd(
                     {"type": "resumeSession", "chatId": chat_id,
-                     "tabId": rt.get("tabId", "")},
+                     "tabId": rt_id},
                 )
 
     async def _handle_submit(self, cmd: dict[str, Any]) -> None:
@@ -3147,6 +3284,19 @@ class RemoteAccessServer:
             except asyncio.CancelledError:
                 pass
             self._watchdog_task = None
+        # Cancel any armed deferred-close timers so a server shutdown
+        # does not leave dangling ``call_later`` handles in the loop.
+        with self._pending_tab_closes_lock:
+            handles = list(self._pending_tab_closes.values())
+            self._pending_tab_closes.clear()
+        for handle in handles:
+            try:
+                handle.cancel()
+            except Exception:
+                logger.debug(
+                    "Cancel of pending tab close on shutdown failed",
+                    exc_info=True,
+                )
         if self._ws_server is not None:
             self._ws_server.close()
             try:
