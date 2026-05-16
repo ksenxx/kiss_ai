@@ -322,7 +322,11 @@ launch_vscode() {
     "$CODE_CLI" --install-extension "$VSIX" --force 2>&1
     echo "   Extension installed into VS Code"
     date -u +%Y-%m-%dT%H:%M:%SZ > "$HOME/.kiss/.extension-updated"
-    printf '%s\n' "$PROJECT_DIR" > "$HOME/.kiss/install_dir"
+    # Remove any stale source-install marker from older versions of this
+    # installer.  The extension now always runs against the kiss_project
+    # bundled inside the VSIX, so the marker is no longer consulted and
+    # leaving it around would only mislead troubleshooting.
+    rm -f "$HOME/.kiss/install_dir"
     echo ""
 
     echo "=== Source bootstrap complete ==="

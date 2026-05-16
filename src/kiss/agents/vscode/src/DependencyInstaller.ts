@@ -331,10 +331,10 @@ export function getDefaultModel(): string {
 
 /**
  * Run the post-install finalization steps: install the ``sorcar`` CLI
- * wrapper, record the project directory, install cloudflared, restart the
- * kiss-web daemon, persist PATH entries to the user's shell rc file, and
- * prompt for any missing API keys.  Returns
- * whether at least one API key (or the Claude CLI) is available.
+ * wrapper, install cloudflared, restart the kiss-web daemon, persist
+ * PATH entries to the user's shell rc file, and prompt for any missing
+ * API keys.  Returns whether at least one API key (or the Claude CLI)
+ * is available.
  *
  * When called with a non-null ``progress`` reporter this function
  * publishes brief sub-step messages so the surrounding "KISS Sorcar:
@@ -352,9 +352,6 @@ async function runFinalization(
     if (progress) progress.report({message: 'Installing CLI wrapper...'});
     installCliScript(kissProjectPath, uvPath);
   }
-
-  if (progress) progress.report({message: 'Recording install location...'});
-  writeInstallDirMarker(kissProjectPath);
 
   if (progress) progress.report({message: 'Checking cloudflared...'});
   await installCloudflaredIfNeeded();
@@ -1024,24 +1021,6 @@ function computeKissWebFingerprint(
       `computeKissWebFingerprint failed: ${err instanceof Error ? err.message : err}`,
     );
     return '';
-  }
-}
-
-/**
- * Record the project directory selected by the installer.  Source installs
- * write the checkout path; direct VSIX installs write the bundled
- * ``kiss_project`` path.  ``findKissProject`` can then prefer the source tree
- * for clone-based installs while VSIX users keep using the embedded bundle.
- */
-function writeInstallDirMarker(kissProjectPath: string): void {
-  if (!HOME_DIR) return;
-  try {
-    fs.mkdirSync(LOG_DIR, {recursive: true});
-    fs.writeFileSync(path.join(LOG_DIR, 'install_dir'), kissProjectPath + '\n');
-  } catch (err) {
-    log(
-      `Failed to write install_dir marker: ${err instanceof Error ? err.message : err}`,
-    );
   }
 }
 

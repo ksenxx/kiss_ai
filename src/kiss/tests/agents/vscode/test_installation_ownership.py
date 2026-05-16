@@ -66,7 +66,6 @@ class TestInstallationOwnership(unittest.TestCase):
             "installNode()",
             "playwright",
             "installCloudflaredIfNeeded()",
-            "writeInstallDirMarker",
             "installCliScript",
             "restartKissWebDaemon",
             "ensurePathInShellRc",
@@ -75,16 +74,41 @@ class TestInstallationOwnership(unittest.TestCase):
         ]:
             self.assertIn(snippet, text)
 
-    def test_source_install_marker_is_honored_before_embedded_bundle(self) -> None:
-        """Clone-based installs should use the checkout rather than the bundle."""
-        text = AGENT_PROCESS.read_text()
-        install_marker_pos = text.index("install_dir")
-        embedded_pos = text.index("Embedded kiss_project")
-        self.assertLess(
-            install_marker_pos,
-            embedded_pos,
-            "findKissProject() must prefer ~/.kiss/install_dir before the "
-            "embedded kiss_project so source installs run from the checkout.",
+    def test_install_dir_marker_is_not_used(self) -> None:
+        """Direct VSIX install model: kissProjectPath is the VSIX-bundled copy.
+
+        ``findKissProject()`` must NOT consult ``~/.kiss/install_dir`` and
+        the extension must NOT write that marker.  Source installs run
+        against the VSIX-shipped ``kiss_project`` just like direct VSIX
+        installs, so the marker would only create a divergent path.
+        """
+        agent_text = AGENT_PROCESS.read_text()
+        self.assertNotIn(
+            "install_dir",
+            agent_text,
+            "findKissProject() must not read ~/.kiss/install_dir; the "
+            "extension always uses the VSIX-bundled kiss_project.",
+        )
+
+        installer_text = DEPENDENCY_INSTALLER.read_text()
+        self.assertNotIn(
+            "writeInstallDirMarker",
+            installer_text,
+            "DependencyInstaller must not write ~/.kiss/install_dir; "
+            "source installs converge on the embedded VSIX bundle.",
+        )
+        self.assertNotIn(
+            "'install_dir'",
+            installer_text,
+            "DependencyInstaller must not reference the install_dir marker.",
+        )
+
+        install_sh = TOP_LEVEL_INSTALL.read_text()
+        self.assertNotIn(
+            'printf \'%s\\n\' "$PROJECT_DIR" > "$HOME/.kiss/install_dir"',
+            install_sh,
+            "install.sh must not write the install_dir marker; the "
+            "embedded VSIX copy is the authoritative kiss_project.",
         )
 
 
