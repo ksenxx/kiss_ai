@@ -1,22 +1,25 @@
 #!/bin/bash
-# Install KISS Sorcar from source: downloads binary dependencies, creates a
-# Python virtualenv, and installs Playwright Chromium.
+# Install KISS Sorcar from source.
+#
+# This script's job is intentionally small: bootstrap only the tools needed to
+# build and install the VS Code extension from a cloned checkout, then launch
+# VS Code.  Runtime setup is owned by the extension's DependencyInstaller so
+# users get the same installation path whether they run this script or install
+# the VSIX directly.
+#
 # Log saved to ~/.kiss/install.log
 set -e
 
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# Standard install locations
 BIN_DIR="$HOME/.local/bin"
 LOG_DIR="$HOME/.kiss"
 LOG_FILE="$LOG_DIR/install.log"
 NODE_VERSION="v22.16.0"
-UV_VERSION="0.11.2"
 
 mkdir -p "$BIN_DIR" "$LOG_DIR"
 export PATH="$BIN_DIR:$PATH"
 
-# Detect OS / arch
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 case "$OS" in
@@ -29,20 +32,11 @@ case "$ARCH" in
     *)  echo "ERROR: Unsupported architecture: $ARCH"; exit 1 ;;
 esac
 
-# Require curl
 if ! command -v curl &>/dev/null; then
     echo "ERROR: curl is required but not found. Please install curl first."
     exit 1
 fi
 
-# ---------------------------------------------------------------------------
-# Helper: ensure Xcode Command Line Tools are installed (macOS only)
-#
-# Tries a non-interactive `softwareupdate` install first. If that does not
-# complete successfully, falls back to the GUI installer triggered by
-# `xcode-select --install` and waits for the user to press a key once the
-# install dialog finishes.
-# ---------------------------------------------------------------------------
 ensure_xcode_clt() {
     [ "$OS" = "Darwin" ] || return 0
 
@@ -53,8 +47,6 @@ ensure_xcode_clt() {
 
     echo "   Xcode Command Line Tools not found — attempting non-interactive install..."
 
-    # softwareupdate trick: a sentinel file makes the CLT package appear in
-    # the softwareupdate catalog, then install it by its label.
     local SENTINEL=/tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
     sudo touch "$SENTINEL" 2>/dev/null || true
     local PROD
@@ -77,13 +69,11 @@ ensure_xcode_clt() {
         return 0
     fi
 
-    # Fallback: trigger the GUI installer and wait for the user.
     echo "   Non-interactive install did not complete. Triggering GUI installer..."
     xcode-select --install 2>&1 || true
     echo ""
     echo "   A dialog has appeared to install the Xcode Command Line Tools."
     echo "   Complete the installation in that dialog, then return to this terminal."
-    # Read from the controlling terminal so this works inside `{ ... } | tee`.
     if [ -r /dev/tty ]; then
         read -n 1 -s -r -p "   Press any key to continue with the rest of installation..." </dev/tty
     else
@@ -99,9 +89,6 @@ ensure_xcode_clt() {
     fi
 }
 
-# ---------------------------------------------------------------------------
-# Helper: install git
-# ---------------------------------------------------------------------------
 install_git() {
     case "$OS" in
         Darwin)
@@ -134,42 +121,10 @@ install_git() {
     esac
 }
 
-# ---------------------------------------------------------------------------
-# Helper: install uv from binary tarball
-# ---------------------------------------------------------------------------
-install_uv() {
-    echo "   Downloading uv $UV_VERSION ..."
-    local TARGET
-    case "$OS" in
-        Darwin)
-            case "$ARCH" in
-                x86_64)         TARGET="x86_64-apple-darwin" ;;
-                aarch64|arm64)  TARGET="aarch64-apple-darwin" ;;
-            esac
-            ;;
-        Linux)
-            case "$ARCH" in
-                x86_64)         TARGET="x86_64-unknown-linux-gnu" ;;
-                aarch64|arm64)  TARGET="aarch64-unknown-linux-gnu" ;;
-            esac
-            ;;
-    esac
-    local URL="https://releases.astral.sh/github/uv/releases/download/${UV_VERSION}/uv-${TARGET}.tar.gz"
-    if curl -fsSL "$URL" | tar xz -C "$BIN_DIR" --strip-components=1; then
-        echo "   uv $UV_VERSION installed to $BIN_DIR"
-    else
-        echo "   ERROR: Failed to download uv from $URL"
-        exit 1
-    fi
-}
-
-# ---------------------------------------------------------------------------
-# Helper: install Node.js from binary tarball
-# ---------------------------------------------------------------------------
 install_node() {
     echo "   Downloading Node.js $NODE_VERSION ..."
     local OS_NODE ARCH_NODE
-    OS_NODE="$(echo "$OS" | tr '[:upper:]' '[:lower:]')"   # darwin / linux
+    OS_NODE="$(echo "$OS" | tr '[:upper:]' '[:lower:]')"
     case "$ARCH" in
         x86_64)         ARCH_NODE="x64" ;;
         aarch64|arm64)  ARCH_NODE="arm64" ;;
@@ -184,9 +139,6 @@ install_node() {
     fi
 }
 
-# ---------------------------------------------------------------------------
-# Helper: install VS Code and ensure CLI is on PATH
-# ---------------------------------------------------------------------------
 install_code_cli() {
     case "$OS" in
         Darwin)
@@ -244,9 +196,6 @@ REPO
     esac
 }
 
-# ---------------------------------------------------------------------------
-# Helper: locate VS Code CLI binary
-# ---------------------------------------------------------------------------
 find_code_cli() {
     CODE_CLI=""
     for candidate in \
@@ -264,488 +213,19 @@ find_code_cli() {
     return 1
 }
 
-# === Main install (logged to ~/.kiss/install.log) =========================
-{
-    echo "=== KISS Sorcar Install ==="
-    echo "Date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-    echo "Directory: $PROJECT_DIR"
-    echo "OS: $OS ($ARCH)"
-    echo ""
-
-    # --- 0. Xcode Command Line Tools (macOS only) ----------------------------
-    if [ "$OS" = "Darwin" ]; then
-        echo ">>> Checking Xcode Command Line Tools..."
-        ensure_xcode_clt
-        echo ""
-    fi
-
-    # --- 1. git ---------------------------------------------------------------
-    echo ">>> [1/11] Checking git..."
-    if ! command -v git &>/dev/null; then
-        install_git
-    fi
-    echo "   $(git --version) ready"
-    echo ""
-
-    # --- 2. uv ----------------------------------------------------------------
-    echo ">>> [2/11] Installing uv..."
-    if ! command -v uv &>/dev/null; then
-        install_uv
-    fi
-    echo "   $(uv --version) ready"
-    echo ""
-
-    # --- 3. Node.js -----------------------------------------------------------
-    echo ">>> [3/11] Installing Node.js..."
-    if ! command -v node &>/dev/null; then
-        install_node || true
-    fi
-    if command -v node &>/dev/null; then
-        echo "   node $(node --version) ready"
-    else
-        echo "   WARNING: Node.js not installed — some agent tools may be unavailable"
-    fi
-    echo ""
-
-    # --- 4. VS Code -----------------------------------------------------------
-    echo ">>> [4/11] Installing VS Code..."
-    if ! find_code_cli; then
-        install_code_cli || true
-        find_code_cli || true
-    fi
-    if [ -n "$CODE_CLI" ]; then
-        echo "   code CLI ready: $CODE_CLI"
-    else
-        echo "   WARNING: VS Code not installed — extension install will be skipped"
-    fi
-    echo ""
-
-    # --- 5. Python environment ------------------------------------------------
-    echo ">>> [5/11] Setting up Python environment..."
-    cd "$PROJECT_DIR"
-    if [ ! -d "$PROJECT_DIR/.venv" ]; then
-        echo "   Creating virtual environment with Python 3.13..."
-        uv venv --python 3.13
-    fi
-    uv sync
-
-    # Symlink entry-point scripts into bin
-    for script in sorcar check generate-api-docs kiss-web; do
-        if [ -f "$PROJECT_DIR/.venv/bin/$script" ]; then
-            ln -sf "$PROJECT_DIR/.venv/bin/$script" "$BIN_DIR/$script"
-        fi
-    done
-
-    echo "   Python environment ready"
-    echo ""
-
-    # --- 6. Playwright Chromium -----------------------------------------------
-    echo ">>> [6/11] Installing Playwright Chromium..."
-    uv run playwright install chromium
-    echo ""
-
-    # --- 7. cloudflared (for remote web server tunnel) -------------------------
-    echo ">>> [7/11] Installing cloudflared..."
-    if ! command -v cloudflared &>/dev/null; then
-        case "$OS" in
-            Darwin)
-                if command -v brew &>/dev/null; then
-                    brew install cloudflared
-                else
-                    CF_ARCH=""
-                    case "$ARCH" in
-                        x86_64)         CF_ARCH="amd64" ;;
-                        aarch64|arm64)  CF_ARCH="arm64" ;;
-                    esac
-                    CF_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-${CF_ARCH}.tgz"
-                    if curl -fsSL "$CF_URL" | tar xz -C "$BIN_DIR"; then
-                        echo "   cloudflared installed to $BIN_DIR"
-                    else
-                        echo "   WARNING: Failed to download cloudflared from $CF_URL"
-                    fi
-                fi
-                ;;
-            Linux)
-                CF_ARCH=""
-                case "$ARCH" in
-                    x86_64)         CF_ARCH="amd64" ;;
-                    aarch64|arm64)  CF_ARCH="arm64" ;;
-                esac
-                CF_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}"
-                if curl -fsSL -o "$BIN_DIR/cloudflared" "$CF_URL"; then
-                    chmod +x "$BIN_DIR/cloudflared"
-                    echo "   cloudflared installed to $BIN_DIR"
-                else
-                    echo "   WARNING: Failed to download cloudflared from $CF_URL"
-                fi
-                ;;
-        esac
-    fi
-    if command -v cloudflared &>/dev/null; then
-        echo "   $(cloudflared --version) ready"
-    else
-        echo "   WARNING: cloudflared not installed — kiss-web --tunnel will be unavailable"
-    fi
-    echo ""
-
-    # --- 8. Download official Claude Code skills ------------------------------
-    echo ">>> [8/11] Downloading official Claude Code skills..."
-    CLAUDE_SKILLS_DIR="$PROJECT_DIR/src/kiss/agents/claude_skills"
-    bash "$PROJECT_DIR/scripts/fetch-claude-skills.sh"
-    echo ""
-
-    # --- 9. Build VS Code extension ------------------------------------------
-    echo ">>> [9/11] Building VS Code extension..."
-    VSCODE_EXT_DIR="$PROJECT_DIR/src/kiss/agents/vscode"
-    VSIX="$VSCODE_EXT_DIR/kiss-sorcar.vsix"
-    if [ -f "$VSIX" ]; then
-        echo "   kiss-sorcar.vsix already exists — skipping build"
-    else
-        cd "$VSCODE_EXT_DIR"
-        npm ci
-        npm run package
-        cd "$PROJECT_DIR"
-        if [ -f "$VSIX" ]; then
-            echo "   Built $VSIX"
-        else
-            echo "   WARNING: Failed to build VSIX"
-        fi
-    fi
-    echo ""
-
-    # --- 10. Install VS Code extension ----------------------------------------
-    echo ">>> [10/11] Installing VS Code extension..."
-    if [ -f "$VSIX" ]; then
-        if find_code_cli && [ -n "$CODE_CLI" ]; then
-            "$CODE_CLI" --install-extension "$VSIX" --force 2>&1
-            echo "   Extension installed into VS Code"
-            # Write marker so the running extension (if VS Code is open)
-            # detects the update and reloads.  Also used by
-            # ensureDependencies() to bypass the early-exit guard.
-            date -u +%Y-%m-%dT%H:%M:%SZ > "$HOME/.kiss/.extension-updated"
-        else
-            echo "   WARNING: VS Code CLI not found — skipping extension install"
-            echo "   To install manually: code --install-extension $VSIX --force"
-        fi
-    else
-        echo "   WARNING: VSIX not found — skipping extension install"
-    fi
-    # Keep $CLAUDE_SKILLS_DIR in place — do not delete after extension install.
-    echo ""
-
-    # --- Ensure remote_password is set before starting kiss-web ---------------
-    # Read remote_password from ~/.kiss/config.json WITHOUT using `uv run`,
-    # which can race with the parent install, re-resolve the venv, or emit
-    # warnings that pollute stdout. Use the system python3 directly; if it is
-    # somehow missing, fall back to a grep-based parser.
-    KISS_CONFIG="$HOME/.kiss/config.json"
-    _current_password=""
-    _password_read_error=""
-    if [ -f "$KISS_CONFIG" ]; then
-        if command -v python3 >/dev/null 2>&1; then
-            _current_password="$(KISS_CONFIG="$KISS_CONFIG" python3 -c "
-import json, os, sys
-try:
-    with open(os.environ['KISS_CONFIG']) as f:
-        cfg = json.load(f)
-    sys.stdout.write(str(cfg.get('remote_password', '')))
-except Exception as e:
-    sys.stderr.write(f'{type(e).__name__}: {e}')
-    sys.exit(2)
-" 2>/tmp/.kiss_pw_err)" || _password_read_error="$(cat /tmp/.kiss_pw_err 2>/dev/null || true)"
-            rm -f /tmp/.kiss_pw_err
-        else
-            # Fallback parser: extract "remote_password": "<value>" from JSON.
-            _current_password="$(grep -o '"remote_password"[[:space:]]*:[[:space:]]*"[^"]*"' "$KISS_CONFIG" \
-                | sed -E 's/.*"remote_password"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/' \
-                | head -n1)"
-        fi
-    fi
-    if [ -z "$_current_password" ]; then
-        if [ -n "$_password_read_error" ]; then
-            echo ">>> Could not parse $KISS_CONFIG ($_password_read_error)"
-        elif [ ! -f "$KISS_CONFIG" ]; then
-            echo ">>> $KISS_CONFIG does not exist yet."
-        else
-            echo ">>> remote_password is missing or empty in $KISS_CONFIG."
-        fi
-        echo ">>> kiss-web requires a remote_password for authentication."
-        echo "   This password protects your KISS web interface from unauthorized access."
-        if [ -r /dev/tty ]; then
-            read -r -p "   Enter a remote_password: " _new_password </dev/tty
-        else
-            read -r -p "   Enter a remote_password: " _new_password
-        fi
-        if [ -z "$_new_password" ]; then
-            echo "   WARNING: No password entered. kiss-web will run without authentication."
-        else
-            # Write remote_password into ~/.kiss/config.json (pass via env to avoid injection).
-            # Use system python3 directly, same reason as the read path above.
-            mkdir -p "$HOME/.kiss"
-            if command -v python3 >/dev/null 2>&1; then
-                _KISS_NEW_PW="$_new_password" KISS_CONFIG="$KISS_CONFIG" python3 -c "
-import json, os, pathlib
-p = pathlib.Path(os.environ['KISS_CONFIG'])
-cfg = json.loads(p.read_text()) if p.exists() else {}
-cfg['remote_password'] = os.environ['_KISS_NEW_PW']
-p.write_text(json.dumps(cfg, indent=2))
-"
-                echo "   remote_password saved to $KISS_CONFIG"
-            else
-                echo "   ERROR: python3 not found; cannot persist remote_password."
-            fi
-        fi
-        echo ""
-    fi
-
-    # --- 11. Start kiss-web daemon service ------------------------------------
-    echo ">>> [11/11] Setting up kiss-web daemon service..."
-    KISS_WEB_BIN="$PROJECT_DIR/.venv/bin/kiss-web"
-    if [ -x "$KISS_WEB_BIN" ]; then
-        case "$OS" in
-            Darwin)
-                PLIST_LABEL="com.kiss.web-server"
-                PLIST_DIR="$HOME/Library/LaunchAgents"
-                PLIST_FILE="$PLIST_DIR/${PLIST_LABEL}.plist"
-                mkdir -p "$PLIST_DIR"
-                # Unload existing service if present
-                launchctl bootout "gui/$(id -u)/$PLIST_LABEL" 2>/dev/null || true
-                cat > "$PLIST_FILE" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>${PLIST_LABEL}</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>${KISS_WEB_BIN}</string>
-    </array>
-    <key>WorkingDirectory</key>
-    <string>${PROJECT_DIR}</string>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>${LOG_DIR}/kiss-web-stdout.log</string>
-    <key>StandardErrorPath</key>
-    <string>${LOG_DIR}/kiss-web-stderr.log</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>PATH</key>
-        <string>${BIN_DIR}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-    </dict>
-</dict>
-</plist>
-PLIST
-                launchctl bootstrap "gui/$(id -u)" "$PLIST_FILE" 2>/dev/null || \
-                    launchctl load -w "$PLIST_FILE" 2>/dev/null || true
-                echo "   macOS LaunchAgent installed: $PLIST_FILE"
-                echo "   kiss-web will start on login and restart if killed"
-                echo "   Logs: ${LOG_DIR}/kiss-web-stdout.log, ${LOG_DIR}/kiss-web-stderr.log"
-                ;;
-            Linux)
-                SYSTEMD_DIR="$HOME/.config/systemd/user"
-                SERVICE_FILE="$SYSTEMD_DIR/kiss-web.service"
-                mkdir -p "$SYSTEMD_DIR"
-                cat > "$SERVICE_FILE" <<SERVICE
-[Unit]
-Description=KISS Sorcar Remote Web Server
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=${KISS_WEB_BIN}
-WorkingDirectory=${PROJECT_DIR}
-Restart=always
-RestartSec=5
-Environment=PATH=${BIN_DIR}:/usr/local/bin:/usr/bin:/bin
-StandardOutput=append:${LOG_DIR}/kiss-web-stdout.log
-StandardError=append:${LOG_DIR}/kiss-web-stderr.log
-
-[Install]
-WantedBy=default.target
-SERVICE
-                systemctl --user daemon-reload
-                systemctl --user enable --now kiss-web
-                # Enable lingering so user services run without active login session
-                loginctl enable-linger "$(whoami)" 2>/dev/null || true
-                echo "   systemd user service installed: $SERVICE_FILE"
-                echo "   kiss-web will start on boot and restart if killed"
-                echo "   Logs: ${LOG_DIR}/kiss-web-stdout.log, ${LOG_DIR}/kiss-web-stderr.log"
-                echo "   Status: systemctl --user status kiss-web"
-                ;;
-        esac
-    else
-        echo "   WARNING: kiss-web binary not found — skipping daemon setup"
-    fi
-    echo ""
-
-    # --- Post remote URL to ntfy.sh message board ----------------------------
-    # Wait briefly for the daemon to start and get a tunnel URL, then
-    # post it to a machine-stable ntfy.sh topic so the user can retrieve
-    # it from any device by subscribing to that topic.
-    echo ">>> Posting remote URL to ntfy.sh..."
-    (
-        sleep 15  # give the daemon time to start and get a tunnel URL
-        _TOPIC=""
-        if [ -f "$HOME/.kiss/ntfy_topic" ]; then
-            _TOPIC="$(cat "$HOME/.kiss/ntfy_topic")"
-        fi
-        if [ -z "$_TOPIC" ]; then
-            _TOPIC="$(uv run python -c "
-import hashlib, platform, uuid
-identity = f'{platform.node()}:{uuid.getnode()}'
-topic = 'kiss-' + hashlib.sha256(identity.encode()).hexdigest()[:32]
-print(topic)
-" 2>/dev/null || true)"
-            if [ -n "$_TOPIC" ]; then
-                mkdir -p "$HOME/.kiss"
-                printf '%s\n' "$_TOPIC" > "$HOME/.kiss/ntfy_topic"
-            fi
-        fi
-        if [ -n "$_TOPIC" ] && [ -f "$HOME/.kiss/remote-url.json" ]; then
-            _REMOTE_URL="$(uv run python -c "
-import json, pathlib
-try:
-    d = json.loads((pathlib.Path.home() / '.kiss' / 'remote-url.json').read_text())
-    url = d.get('tunnel') or d.get('local', '')
-    if url and not url.startswith('https://localhost'):
-        print(url)
-except Exception:
-    pass
-" 2>/dev/null || true)"
-            if [ -n "$_REMOTE_URL" ]; then
-                curl -fsSL -X POST "https://ntfy.sh/$_TOPIC" \
-                    -H "Title: KISS Sorcar Remote URL" \
-                    -H "Tags: link,kiss-sorcar" \
-                    -d "$_REMOTE_URL" >/dev/null 2>&1 || true
-                echo "   Remote URL posted to https://ntfy.sh/$_TOPIC"
-                echo "   Subscribe at https://ntfy.sh/$_TOPIC to receive URL updates"
-            fi
-        fi
-    ) &
-    echo "   (posting in background — will complete in ~15 seconds)"
-    echo ""
-
-    # --- Write install_dir marker (used by env.py) ----------------------------
-    printf '%s\n' "$PROJECT_DIR" > "$HOME/.kiss/install_dir"
-
-    # --- Persist PATH in shell rc file ----------------------------------------
-    echo "--- Persist PATH in shell rc ---"
-    _add_path_to_rc() {
-        local rc_file="$1"
-        local path_line="export PATH=\"$BIN_DIR:\$PATH\""
-        if [ -f "$rc_file" ]; then
-            if ! grep -qF "$BIN_DIR" "$rc_file"; then
-                printf '\n# KISS Agent Framework\n%s\n' "$path_line" >> "$rc_file"
-                echo "   Added $BIN_DIR to $rc_file"
-            else
-                echo "   $BIN_DIR already in $rc_file"
-            fi
-        else
-            printf '# KISS Agent Framework\n%s\n' "$path_line" > "$rc_file"
-            echo "   Created $rc_file with PATH"
-        fi
-    }
-
-    case "${SHELL:-/bin/zsh}" in
-        */zsh)  _add_path_to_rc "$HOME/.zshrc" ;;
-        */bash) _add_path_to_rc "$HOME/.bashrc" ;;
-        */fish)
-            _fish_config="$HOME/.config/fish/config.fish"
-            mkdir -p "$(dirname "$_fish_config")"
-            _fish_line="fish_add_path $BIN_DIR"
-            if [ -f "$_fish_config" ] && grep -qF "$BIN_DIR" "$_fish_config"; then
-                echo "   $BIN_DIR already in $_fish_config"
-            else
-                printf '\n# KISS Agent Framework\n%s\n' "$_fish_line" >> "$_fish_config"
-                echo "   Added $BIN_DIR to $_fish_config"
-            fi
-            ;;
-        *)      _add_path_to_rc "$HOME/.zshrc"
-                _add_path_to_rc "$HOME/.bashrc" ;;
-    esac
-    echo ""
-
-    # --- Tell the user where to find the remote URL ----------------------------
-    _NTFY_TOPIC=""
-    if [ -f "$HOME/.kiss/ntfy_topic" ]; then
-        _NTFY_TOPIC="$(cat "$HOME/.kiss/ntfy_topic")"
-    fi
-    if [ -z "$_NTFY_TOPIC" ]; then
-        _NTFY_TOPIC="$(uv run python -c "
-import hashlib, platform, uuid
-identity = f'{platform.node()}:{uuid.getnode()}'
-topic = 'kiss-' + hashlib.sha256(identity.encode()).hexdigest()[:32]
-print(topic)
-" 2>/dev/null || true)"
-        if [ -n "$_NTFY_TOPIC" ]; then
-            mkdir -p "$HOME/.kiss"
-            printf '%s\n' "$_NTFY_TOPIC" > "$HOME/.kiss/ntfy_topic"
-        fi
-    fi
-    echo ""
-    echo "----------------------------------------------------------------------"
-    echo "  REMOTE ACCESS URL"
-    echo "----------------------------------------------------------------------"
-    echo "  Your KISS Sorcar remote URL will be available shortly."
-    echo ""
-    echo "  Find it in any of these places:"
-    echo "    • File:  ~/.kiss/remote-url.json"
-    if [ -n "$_NTFY_TOPIC" ]; then
-        echo "    • Web:   https://ntfy.sh/$_NTFY_TOPIC"
-        echo "    • CLI:   curl -s https://ntfy.sh/$_NTFY_TOPIC/json?poll=1 | tail -1 | python3 -m json.tool"
-    fi
-    echo ""
-    echo "  The URL is automatically posted to the ntfy.sh topic above"
-    echo "  whenever it changes (e.g. after a tunnel restart)."
-    echo "----------------------------------------------------------------------"
-    echo ""
-
-    echo "=== Installation Complete ==="
-    echo "Date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-    echo "Project: $PROJECT_DIR"
-} 2>&1 | tee "$LOG_FILE"
-
-echo ""
-echo "Log saved to $LOG_FILE"
-echo "Open a new terminal for PATH changes to take effect."
-
-# --- Relaunch VS Code -------------------------------------------------------
-# The just-installed PATH/dependency updates only take effect in VS Code
-# windows started after this script finished, so we (re)launch VS Code here.
-# We try several strategies in order of reliability so that VS Code is
-# launched even when the `code` shell command is not on PATH (a common
-# situation on a brand-new macOS install where the user has never run
-# "Shell Command: Install 'code' command in PATH" from the command palette,
-# or on Linux where VS Code was installed via snap/flatpak with a non-PATH
-# binary).  Every step is non-fatal — the install itself is already complete.
 launch_vscode() {
     case "$OS" in
         Darwin)
-            # macOS: `open -a` uses LaunchServices to find and activate the
-            # app bundle.  This works even when the `code` CLI is not on
-            # PATH and reliably foregrounds an existing window or opens a
-            # new one.
             if open -a "Visual Studio Code" >/dev/null 2>&1; then
                 echo "Launched VS Code via 'open -a'."
                 return 0
             fi
-            # Fallback 1: open the .app bundle directly by path.
-            if [ -d "/Applications/Visual Studio Code.app" ]; then
-                if open "/Applications/Visual Studio Code.app" >/dev/null 2>&1; then
-                    echo "Launched VS Code from /Applications."
-                    return 0
-                fi
+            if [ -d "/Applications/Visual Studio Code.app" ] && open "/Applications/Visual Studio Code.app" >/dev/null 2>&1; then
+                echo "Launched VS Code from /Applications."
+                return 0
             fi
             ;;
         Linux)
-            # Linux: try the `code` CLI on PATH, then known install paths,
-            # then snap and flatpak.
             for candidate in \
                 "$(command -v code 2>/dev/null || true)" \
                 "$BIN_DIR/code" \
@@ -754,45 +234,107 @@ launch_vscode() {
                 "/snap/bin/code" \
                 "/usr/share/code/code"; do
                 if [ -n "$candidate" ] && [ -x "$candidate" ]; then
-                    (nohup "$candidate" >/dev/null 2>&1 &)
+                    (nohup "$candidate" "$PROJECT_DIR" >/dev/null 2>&1 &)
                     echo "Launched VS Code from $candidate."
                     return 0
                 fi
             done
-            if command -v flatpak &>/dev/null \
-               && flatpak info com.visualstudio.code &>/dev/null; then
-                (nohup flatpak run com.visualstudio.code >/dev/null 2>&1 &)
-                echo "Launched VS Code via flatpak."
-                return 0
-            fi
             ;;
     esac
 
-    # Last-resort fallback (works on both OSes if `code` is on PATH):
-    # detach so the script exits cleanly even if `code` backgrounds itself
-    # slowly.
-    if command -v code &>/dev/null; then
-        (nohup code >/dev/null 2>&1 &)
-        echo "Launched VS Code via 'code' on PATH."
+    if find_code_cli && [ -n "$CODE_CLI" ]; then
+        (nohup "$CODE_CLI" "$PROJECT_DIR" >/dev/null 2>&1 &)
+        echo "Launched VS Code from $CODE_CLI."
         return 0
     fi
 
+    echo "Could not launch VS Code automatically. Open VS Code manually to finish setup."
     return 1
 }
 
-if launch_vscode; then
-    :
-else
+{
+    echo "=== KISS Sorcar Source Install ==="
+    echo "Date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    echo "Directory: $PROJECT_DIR"
+    echo "OS: $OS ($ARCH)"
     echo ""
-    echo "WARNING: Could not launch VS Code automatically."
-    case "$OS" in
-        Darwin)
-            echo "  - Install VS Code from https://code.visualstudio.com/ and"
-            echo "    re-run this script, OR open it manually from /Applications."
-            ;;
-        Linux)
-            echo "  - Install VS Code from https://code.visualstudio.com/ (deb/rpm/snap/flatpak)"
-            echo "    and re-run this script, OR launch it manually."
-            ;;
-    esac
-fi
+
+    if [ "$OS" = "Darwin" ]; then
+        echo ">>> Checking Xcode Command Line Tools..."
+        ensure_xcode_clt
+        echo ""
+    fi
+
+    echo ">>> [1/6] Checking git..."
+    if ! command -v git &>/dev/null; then
+        install_git
+    fi
+    echo "   $(git --version) ready"
+    echo ""
+
+    echo ">>> [2/6] Checking Node.js..."
+    if ! command -v node &>/dev/null || ! command -v npm &>/dev/null || ! command -v npx &>/dev/null; then
+        install_node || true
+    fi
+    if command -v node &>/dev/null && command -v npm &>/dev/null && command -v npx &>/dev/null; then
+        echo "   node $(node --version) ready"
+        echo "   npm $(npm --version) ready"
+    else
+        echo "   ERROR: Node.js, npm, and npx are required to build the extension."
+        echo "   Install Node.js from https://nodejs.org and re-run this script."
+        exit 1
+    fi
+    echo ""
+
+    echo ">>> [3/6] Checking VS Code CLI..."
+    if ! find_code_cli; then
+        install_code_cli || true
+        find_code_cli || true
+    fi
+    if [ -n "$CODE_CLI" ]; then
+        echo "   code CLI ready: $CODE_CLI"
+    else
+        echo "   ERROR: VS Code CLI not found — cannot install the extension."
+        echo "   Install VS Code from https://code.visualstudio.com and re-run this script."
+        exit 1
+    fi
+    echo ""
+
+    echo ">>> [4/6] Downloading official Claude Code skills..."
+    bash "$PROJECT_DIR/scripts/fetch-claude-skills.sh"
+    echo ""
+
+    echo ">>> [5/6] Building VS Code extension..."
+    VSCODE_EXT_DIR="$PROJECT_DIR/src/kiss/agents/vscode"
+    VSIX="$VSCODE_EXT_DIR/kiss-sorcar.vsix"
+    cd "$VSCODE_EXT_DIR"
+    npm ci
+    npm run package
+    cd "$PROJECT_DIR"
+    if [ ! -f "$VSIX" ]; then
+        echo "   ERROR: Failed to build VSIX"
+        exit 1
+    fi
+    echo "   Built $VSIX"
+    echo ""
+
+    echo ">>> [6/6] Installing VS Code extension..."
+    "$CODE_CLI" --install-extension "$VSIX" --force 2>&1
+    echo "   Extension installed into VS Code"
+    date -u +%Y-%m-%dT%H:%M:%SZ > "$HOME/.kiss/.extension-updated"
+    printf '%s\n' "$PROJECT_DIR" > "$HOME/.kiss/install_dir"
+    echo ""
+
+    echo "=== Source bootstrap complete ==="
+    echo "Date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    echo "Project: $PROJECT_DIR"
+    echo ""
+    echo "KISS Sorcar runtime setup will finish inside VS Code."
+    echo "The extension will install/check uv, Python dependencies, Playwright,"
+    echo "cloudflared, shell PATH entries, API keys, remote access auth, and kiss-web."
+} 2>&1 | tee "$LOG_FILE"
+
+echo ""
+echo "Log saved to $LOG_FILE"
+echo "Launching VS Code to finish setup..."
+launch_vscode || true

@@ -331,14 +331,15 @@ export function getDefaultModel(): string {
 
 /**
  * Run the post-install finalization steps: install the ``sorcar`` CLI
- * wrapper, restart the kiss-web daemon, persist PATH entries to the
- * user's shell rc file, and prompt for any missing API keys.  Returns
+ * wrapper, record the project directory, install cloudflared, restart the
+ * kiss-web daemon, persist PATH entries to the user's shell rc file, and
+ * prompt for any missing API keys.  Returns
  * whether at least one API key (or the Claude CLI) is available.
  *
  * When called with a non-null ``progress`` reporter this function
  * publishes brief sub-step messages so the surrounding "KISS Sorcar:
  * Setting up" notification stays visible continuously from the first
- * install step until the restart prompt is shown.  Passing ``null``
+ * install step until the completion message is shown.  Passing ``null``
  * skips the progress reports (used on the fast path, which has no
  * progress notification to annotate).
  */
@@ -351,6 +352,12 @@ async function runFinalization(
     if (progress) progress.report({message: 'Installing CLI wrapper...'});
     installCliScript(kissProjectPath, uvPath);
   }
+
+  if (progress) progress.report({message: 'Recording install location...'});
+  writeInstallDirMarker(kissProjectPath);
+
+  if (progress) progress.report({message: 'Checking cloudflared...'});
+  await installCloudflaredIfNeeded();
 
   if (progress) progress.report({message: 'Restarting kiss-web daemon...'});
   restartKissWebDaemon(kissProjectPath);
@@ -650,9 +657,9 @@ async function ensureDependenciesImpl(): Promise<void> {
         // Finalization runs INSIDE the withProgress callback so the
         // "KISS Sorcar: Setting up" notification stays visible
         // continuously from the first install step until the
-        // "Restart VS Code" prompt is shown.  Previously these steps
-        // ran after the callback returned, leaving a visible gap
-        // between "Installing dependencies..." and "Restart VS Code"
+        // completion message is shown.  Previously these steps ran
+        // after the callback returned, leaving a visible gap between
+        // "Installing dependencies..." and the final notification
         // (often several seconds — much longer when ensureApiKeys
         // had to prompt the user for an API key).
         progress.report({message: 'Finalizing setup...'});
@@ -1017,6 +1024,24 @@ function computeKissWebFingerprint(
       `computeKissWebFingerprint failed: ${err instanceof Error ? err.message : err}`,
     );
     return '';
+  }
+}
+
+/**
+ * Record the project directory selected by the installer.  Source installs
+ * write the checkout path; direct VSIX installs write the bundled
+ * ``kiss_project`` path.  ``findKissProject`` can then prefer the source tree
+ * for clone-based installs while VSIX users keep using the embedded bundle.
+ */
+function writeInstallDirMarker(kissProjectPath: string): void {
+  if (!HOME_DIR) return;
+  try {
+    fs.mkdirSync(LOG_DIR, {recursive: true});
+    fs.writeFileSync(path.join(LOG_DIR, 'install_dir'), kissProjectPath + '\n');
+  } catch (err) {
+    log(
+      `Failed to write install_dir marker: ${err instanceof Error ? err.message : err}`,
+    );
   }
 }
 
@@ -1449,6 +1474,69 @@ async function installMinGitWindows(): Promise<boolean> {
     );
   }
   return false;
+}
+
+/**
+ * Install cloudflared from the official release asset when it is missing.
+ * This is best-effort: the local web UI still works without a tunnel, so
+ * failures are logged instead of blocking extension setup.
+ */
+async function installCloudflaredIfNeeded(): Promise<boolean> {
+  if (process.platform === 'win32') return false;
+  if (commandExists('cloudflared')) return true;
+
+  const archMap: Record<string, string> = {arm64: 'arm64', x64: 'amd64'};
+  const arch = archMap[process.arch];
+  if (!arch) {
+    log(`Unsupported architecture for cloudflared: ${process.arch}`);
+    return false;
+  }
+
+  const binDir = path.join(HOME_DIR, '.local', 'bin');
+  fs.mkdirSync(binDir, {recursive: true});
+
+  try {
+    if (process.platform === 'darwin') {
+      if (commandExists('brew')) {
+        try {
+          await execPromise('brew install cloudflared');
+          if (commandExists('cloudflared')) return true;
+        } catch (err) {
+          log(
+            `Homebrew cloudflared install failed: ${err instanceof Error ? err.message : err}`,
+          );
+        }
+      }
+
+      const url = `https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-${arch}.tgz`;
+      const tarPath = path.join(binDir, `cloudflared-darwin-${arch}.tgz`);
+      await downloadFile(url, tarPath);
+      await spawnPromise('tar', ['xzf', tarPath, '-C', binDir]);
+      try {
+        fs.unlinkSync(tarPath);
+      } catch {
+        /* ignore */
+      }
+    } else if (process.platform === 'linux') {
+      const url = `https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${arch}`;
+      const dst = path.join(binDir, 'cloudflared');
+      await downloadFile(url, dst);
+    } else {
+      return false;
+    }
+
+    const cloudflaredPath = path.join(binDir, 'cloudflared');
+    if (fs.existsSync(cloudflaredPath)) {
+      fs.chmodSync(cloudflaredPath, 0o755);
+    }
+    log('cloudflared installed successfully');
+    return commandExists('cloudflared') || fs.existsSync(cloudflaredPath);
+  } catch (err) {
+    log(
+      `cloudflared installation failed: ${err instanceof Error ? err.message : err}`,
+    );
+    return false;
+  }
 }
 
 /**

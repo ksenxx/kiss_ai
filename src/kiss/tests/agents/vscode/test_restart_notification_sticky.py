@@ -33,8 +33,6 @@ def _read(name: str) -> str:
     return (VSCODE_TS_DIR / name).read_text()
 
 
-class TestRestartNotificationSticky(unittest.TestCase):
-    """The post-install restart notification must be sticky."""
 def _strip_comments(src: str) -> str:
     """Strip line and block comments — needed because the source
     contains long explanatory comments that reference the historical
@@ -46,7 +44,7 @@ def _strip_comments(src: str) -> str:
 
 
 class TestNoRestartPromptInDependencyInstaller(unittest.TestCase):
-    post-install flow."""
+    """The dependency installer must not show a restart prompt in the post-install flow."""
 
     src: str = ""
     src_no_comments: str = ""
