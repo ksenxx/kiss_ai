@@ -622,7 +622,7 @@ class VSCodeServer(
             *new_tab_id* is now subscribed to its event stream;
             ``False`` when no live agent exists.
         """
-        if not chat_id or not new_tab_id or chat_id == new_tab_id:
+        if not chat_id or not new_tab_id:
             return False
         with self._state_lock:
             t = self._tab_states.get(chat_id)
@@ -631,7 +631,23 @@ class VSCodeServer(
             alive = t.task_thread is not None and t.task_thread.is_alive()
             if not (alive or t.is_task_active):
                 return False
-        self.printer.subscribe_tab(chat_id, new_tab_id)
+        # When ``chat_id == new_tab_id`` (the typical case after a
+        # frontend reload or a history-click on a still-running task —
+        # the tab id IS the chat id per the ``tab_id == chat_id``
+        # invariant) the new tab IS the source.  No subscription is
+        # needed because the live agent is already broadcasting under
+        # that very tab id; but we still must return ``True`` so the
+        # caller emits a ``status running=true`` event BEFORE the
+        # ``task_events`` replay.  Without that status event the
+        # webview's ``isRunning`` flag stays false during
+        # ``replayTaskEvents``, ``applyChevronState`` falls into the
+        # collapsed branch, and every replayed panel — plus every
+        # subsequent live event from the still-running agent — is
+        # marked ``.chv-hidden`` (display:none).  The user sees an
+        # empty output and a collapsed chevron despite events still
+        # streaming live.
+        if chat_id != new_tab_id:
+            self.printer.subscribe_tab(chat_id, new_tab_id)
         return True
 
 
