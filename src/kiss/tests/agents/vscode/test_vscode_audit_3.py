@@ -117,23 +117,23 @@ class TestAwaitUserResponseNoLock(unittest.TestCase):
 
         tab_get_idx = None
         for i, line in enumerate(lines):
-            if "_running_agent_states.get" in line:
+            if "running_agent_states.get" in line:
                 tab_get_idx = i
                 break
         assert tab_get_idx is not None, (
-            "N2: could not find _running_agent_states.get in _await_user_response"
+            "N2: could not find running_agent_states.get in _await_user_response"
         )
 
         preceding = "\n".join(lines[max(0, tab_get_idx - 5):tab_get_idx])
         assert "_state_lock" in preceding, (
-            "N2 fix: _running_agent_states.get should be protected by _state_lock"
+            "N2 fix: running_agent_states.get should be protected by _state_lock"
         )
 
     def test_close_tab_mutates_running_agent_states_under_lock(self) -> None:
-        """Contrast: ``_close_tab`` mutates ``_running_agent_states`` under lock."""
+        """Contrast: ``_close_tab`` mutates ``running_agent_states`` under lock."""
         src = inspect.getsource(VSCodeServer._close_tab)
         lock_pattern = re.compile(
-            r"with self\._state_lock:.*?_running_agent_states\.pop",
+            r"with self\._state_lock:.*?running_agent_states\.pop",
             re.DOTALL,
         )
         assert lock_pattern.search(src), (

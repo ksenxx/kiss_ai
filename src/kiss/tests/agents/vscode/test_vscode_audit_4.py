@@ -355,7 +355,7 @@ class TestCmdRunSingleLockFixed(unittest.TestCase):
         src = inspect.getsource(_CommandsMixin._cmd_run)
         pattern = re.compile(
             r"with self\._state_lock:.*?"
-            r"_running_agent_states\.get\(tab_id\).*?"
+            r"running_agent_states\.get\(tab_id\).*?"
             r"task_thread.*?is_alive",
             re.DOTALL,
         )
@@ -373,7 +373,7 @@ class TestCmdRunSingleLockFixed(unittest.TestCase):
         with server._state_lock:
             tab = server._running_agent_states.get(tab_id)
             if tab is None:
-                from kiss.agents.vscode.running_agent_state import _RunningAgentState
+                from kiss.agents.sorcar.running_agent_state import _RunningAgentState
                 tab = _RunningAgentState(tab_id, server._default_model)
                 server._running_agent_states[tab_id] = tab
 
