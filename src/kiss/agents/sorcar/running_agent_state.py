@@ -76,8 +76,21 @@ class _RunningAgentState:
         "frontend_closed",
     )
 
-    def __init__(self, tab_id: str, default_model: str) -> None:
-        self.agent = WorktreeSorcarAgent("Sorcar VS Code")
+    def __init__(
+        self,
+        tab_id: str,
+        default_model: str,
+        *,
+        agent: WorktreeSorcarAgent | None = None,
+    ) -> None:
+        # When *agent* is omitted (the VS Code server flow), a fresh
+        # ``WorktreeSorcarAgent`` is created so the per-tab agent state
+        # (``chat_id``, ``_last_task_id``, worktree handle, …) is
+        # isolated from every other tab.  When *agent* is supplied
+        # (the standalone :meth:`ChatSorcarAgent.run` flow) the caller
+        # is registering ITSELF as the running agent under its own
+        # ``chat_id`` — no second agent instance is allocated.
+        self.agent = agent if agent is not None else WorktreeSorcarAgent("Sorcar VS Code")
         self.use_worktree: bool = False
         self.use_parallel: bool = False
         self.task_history_id: int | None = None

@@ -20,21 +20,26 @@ def clip_autocomplete_suggestion(query: str, suggestion: str) -> str:
     Removes the query prefix if the LLM echoed it, strips surrounding
     whitespace, and stops at newlines.
 
-    Also strips *leading* whitespace from the suggestion when the user's
-    query is empty or already ends in whitespace.  In those cases the
-    user's cursor (or empty input) already provides the gap between the
-    typed text and the ghost-text overlay; any leading whitespace on the
-    suggestion would render as visible *extra* spaces between the cursor
-    and the start of the ghost text.  This happens in practice when the
-    prefix-matched history task contains consecutive spaces (e.g. the
-    user types ``"fix "`` and the history holds ``"fix  the bug"`` with
-    two spaces) — the raw suffix carries the extra space which the
-    overlay then renders verbatim under ``white-space: pre-wrap``.
+    Normalises the cursor-to-ghost gap so the overlay (which uses
+    ``white-space: pre-wrap``) never renders visible extra spaces
+    between the user's cursor and the start of the ghost text:
 
-    Conversely, when the query ends with a non-whitespace character a
-    leading space on the suggestion is the legitimate cursor-to-ghost
-    separator (e.g. query ``"fix"`` + suggestion ``" the bug"`` reads as
-    ``"fix the bug"``) and is preserved.
+    - When the user's query is empty or already ends in whitespace, the
+      user's cursor (or empty input) already provides the gap, so any
+      leading whitespace on the suggestion would render as visible
+      *extra* spaces.  All leading whitespace is stripped.
+
+    - When the query ends in a non-whitespace character, exactly one
+      space is allowed as the legitimate cursor-to-ghost separator
+      (e.g. query ``"fix"`` + suggestion ``" the bug"`` reads as
+      ``"fix the bug"``).  Any *additional* leading whitespace is the
+      same visible-padding bug — it happens when the prefix-matched
+      history task contains consecutive spaces (e.g. user types
+      ``"parse"`` and history holds ``"parse  arguments"`` with two
+      spaces) — and is collapsed away, leaving exactly one separator
+      space.  A suggestion that starts with non-whitespace gets no
+      separator prepended (e.g. identifier completion ``"os.pa"`` →
+      ``"th"``).
     """
     s = clean_llm_output(suggestion)
     if not s:
@@ -44,6 +49,10 @@ def clip_autocomplete_suggestion(query: str, suggestion: str) -> str:
     s = s.split("\n")[0]
     if not query or (query[-1:].isspace()):
         s = s.lstrip()
+    else:
+        stripped = s.lstrip()
+        if len(stripped) != len(s):
+            s = " " + stripped
     return s
 
 
