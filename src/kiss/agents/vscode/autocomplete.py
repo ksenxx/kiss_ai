@@ -18,14 +18,14 @@ from kiss.agents.vscode.helpers import (
 )
 
 if TYPE_CHECKING:
-    from kiss.agents.vscode.printer import VSCodePrinter
+    from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 
 
 class _AutocompleteMixin:
     """Ghost-text + file-path autocomplete methods."""
 
     if TYPE_CHECKING:
-        printer: VSCodePrinter
+        printer: BaseBrowserPrinter
         work_dir: str
         _state_lock: threading.Lock
         _complete_queue: queue.Queue[tuple[str, int, str, str]] | None

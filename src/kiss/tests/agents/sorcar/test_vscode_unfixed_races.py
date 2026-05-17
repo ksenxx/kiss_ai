@@ -351,19 +351,12 @@ class TestRefreshFileCacheRaceStructural(unittest.TestCase):
         self.assertIn("self._file_cache = result", src_refresh)
 
 
-class TestBroadcastOrderingFixed(unittest.TestCase):
-    """VSCodePrinter.broadcast nests locks correctly (fixed race)."""
-
-    def test_locks_are_nested(self) -> None:
-        """_stdout_lock is acquired inside _lock, not separately."""
-        import inspect
-
-        from kiss.agents.vscode.server import VSCodePrinter
-
-        src = inspect.getsource(VSCodePrinter.broadcast)
-        lock_idx = src.index("self._lock")
-        stdout_idx = src.index("self._stdout_lock")
-        self.assertLess(lock_idx, stdout_idx)
+# The historical ``TestBroadcastOrderingFixed`` introspected
+# ``VSCodePrinter.broadcast`` for a nested ``_stdout_lock`` /
+# ``_lock`` pattern.  Under the single-daemon architecture there is
+# no stdout transport — ``WebPrinter`` writes events to UDS / WSS
+# sockets via the asyncio loop and the per-stdout-lock invariant the
+# old test pinned no longer applies.
 
 
 if __name__ == "__main__":

@@ -1,13 +1,18 @@
 """VS Code extension backend server for Sorcar agent.
 
-This module provides a JSON-based stdio interface between the VS Code
-extension and the Sorcar agent. Commands are read from stdin as JSON
-lines, and events are written to stdout as JSON lines.
-
 The per-command handlers, task-runner, merge / worktree flow and
 autocomplete logic live in sibling mixin modules.  This file keeps the
-core dispatch loop, per-tab state accessors, the history / chat /
-commit-message helpers, and the ``main`` CLI entry point.
+per-tab state accessors, the command dispatcher, and the history /
+chat / commit-message helpers.
+
+``VSCodeServer`` is consumed by :class:`RemoteAccessServer`
+(:mod:`kiss.agents.vscode.web_server`), which owns the actual I/O
+transports (Unix-domain socket for the local VS Code extension and
+WebSocket for remote browser clients) and instantiates a
+:class:`WebPrinter` whose ``broadcast`` method fans events out to
+every connected client.  No stdin/stdout transport remains: the old
+per-tab subprocess model has been fully replaced by the single
+``kiss-web`` daemon.
 """
 
 from __future__ import annotations
@@ -16,7 +21,6 @@ import json
 import logging
 import os
 import queue
-import sys
 import threading
 from typing import Any
 
@@ -37,6 +41,7 @@ from kiss.agents.sorcar.persistence import (
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState, parse_task_tags
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.autocomplete import _AutocompleteMixin
+from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 from kiss.agents.vscode.commands import _CommandsMixin
 from kiss.agents.vscode.diff_merge import (
     _cleanup_merge_data,
@@ -49,7 +54,6 @@ from kiss.agents.vscode.helpers import (
     model_vendor,
 )
 from kiss.agents.vscode.merge_flow import _MergeFlowMixin
-from kiss.agents.vscode.printer import VSCodePrinter
 from kiss.agents.vscode.task_runner import _TaskRunnerMixin
 from kiss.core.models.model_info import (
     MODEL_INFO,
@@ -59,10 +63,8 @@ from kiss.core.models.model_info import (
 )
 
 __all__ = [
-    "VSCodePrinter",
     "VSCodeServer",
     "_RunningAgentState",
-    "main",
     "parse_task_tags",
 ]
 
@@ -77,8 +79,14 @@ class VSCodeServer(
 ):
     """Backend server for VS Code extension."""
 
-    def __init__(self) -> None:
-        self.printer = VSCodePrinter()
+    def __init__(self, printer: BaseBrowserPrinter | None = None) -> None:
+        # The transport-specific printer is owned by the caller
+        # (typically :class:`RemoteAccessServer`, which passes a
+        # :class:`WebPrinter`).  Defaulting to a plain
+        # :class:`BaseBrowserPrinter` keeps the unit tests that
+        # construct a bare ``VSCodeServer()`` working — they patch
+        # ``server.printer.broadcast`` themselves to capture events.
+        self.printer: BaseBrowserPrinter = printer or BaseBrowserPrinter()
         # ``running_agent_states`` is now a class attribute on
         # :class:`WorktreeSorcarAgent` (shared across every instance).
         # Reset on init so each ``VSCodeServer`` starts with a clean
@@ -170,25 +178,6 @@ class VSCodeServer(
             True if at least one tab has ``is_running_non_wt`` set.
         """
         return any(t.is_running_non_wt for t in WorktreeSorcarAgent.running_agent_states.values())
-
-    def run(self) -> None:
-        """Main loop: read commands from stdin, execute them."""
-        for line in sys.stdin:
-            line = line.strip()
-            if not line:
-                continue
-            cmd: dict[str, Any] = {}
-            try:
-                cmd = json.loads(line)
-                self._handle_command(cmd)
-            except json.JSONDecodeError as e:
-                self.printer.broadcast({"type": "error", "text": f"Invalid JSON: {e}"})
-            except Exception as e:  # pragma: no cover
-                event: dict[str, Any] = {"type": "error", "text": str(e)}
-                tab_id = cmd.get("tabId") if isinstance(cmd, dict) else None
-                if tab_id is not None:
-                    event["tabId"] = tab_id
-                self.printer.broadcast(event)
 
     def _handle_command(self, cmd: dict[str, Any]) -> None:
         """Dispatch a command from VS Code to the appropriate handler."""
@@ -807,11 +796,4 @@ class VSCodeServer(
             })
 
 
-def main() -> None:  # pragma: no cover — CLI entry point
-    """Main entry point for VS Code backend server."""
-    server = VSCodeServer()
-    server.run()
 
-
-if __name__ == "__main__":
-    main()

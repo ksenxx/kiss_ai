@@ -110,7 +110,7 @@ class _StubAgent(ChatSorcarAgent):
 
 class _RecordingPrinter(BaseBrowserPrinter):
     """BaseBrowserPrinter whose ``broadcast`` runs the SAME side effects
-    as the real VSCodePrinter (inject tabId, record, persist) so the
+    as a real browser printer (inject tabId, record, persist) so the
     ``_persist_event`` plumbing is exercised end-to-end.
     """
 

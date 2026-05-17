@@ -3,7 +3,7 @@
 Covers the following violations from the earlier audit that the user
 asked to fix:
 
-- A7: ``VSCodePrinter`` usage offsets must be per-tab, not shared.
+- A7: Printer usage offsets must be per-tab, not shared.
 - B4: ``adjacent_task_events`` must always carry a ``tabId`` so a
   missing frontend tab_id cannot reach every tab.
 - B5: ``commitMessage`` events generated in the background thread must
@@ -125,8 +125,10 @@ class TestB5CommitMessageCarriesTabId(unittest.TestCase):
     """B5: commitMessage events must carry tabId so only the requester sees them."""
 
     def test_cmd_generate_commit_message_tags_events_with_tab_id(self) -> None:
-        server = VSCodeServer()
-        events: list[dict] = []
+        from kiss.tests.agents.vscode._memory_printer import MemoryPrinter
+
+        printer = MemoryPrinter()
+        server = VSCodeServer(printer=printer)
         done = threading.Event()
         captured_tab_ids: list[object] = []
 
@@ -137,25 +139,14 @@ class TestB5CommitMessageCarriesTabId(unittest.TestCase):
             server.printer.broadcast({"type": "commitMessage", "message": "x"})
             done.set()
 
-        import io
-        import sys as _sys
-        buf = io.StringIO()
-        real_stdout = _sys.stdout
-        _sys.stdout = buf
-        try:
-            server._generate_commit_message = stub  # type: ignore[assignment]
-            server._cmd_generate_commit_message({
-                "type": "generateCommitMessage", "tabId": "TAB-1",
-            })
-            assert done.wait(timeout=5)
-        finally:
-            _sys.stdout = real_stdout
-        import json as _json
-        for line in buf.getvalue().splitlines():
-            if line.strip():
-                events.append(_json.loads(line))
+        server._generate_commit_message = stub  # type: ignore[assignment]
+        server._cmd_generate_commit_message({
+            "type": "generateCommitMessage", "tabId": "TAB-1",
+        })
+        assert done.wait(timeout=5)
+
         assert captured_tab_ids == ["TAB-1"]
-        cm = [e for e in events if e.get("type") == "commitMessage"]
+        cm = [e for e in printer.emitted if e.get("type") == "commitMessage"]
         assert len(cm) == 1
         assert cm[0].get("tabId") == "TAB-1"
 
