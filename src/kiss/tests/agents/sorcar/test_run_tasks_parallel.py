@@ -24,12 +24,12 @@ class TestRunTasksParallel:
             pass
 
     def test_accepts_model_and_work_dir(self) -> None:
-        """Verify model and work_dir parameters are accepted."""
+        """Verify model_name and work_dir parameters are accepted."""
         try:
             run_tasks_parallel(
                 ["task"],
                 max_workers=0,
-                model="gpt-4o",
+                model_name="gpt-4o",
                 work_dir="/tmp",
             )
         except ValueError:
