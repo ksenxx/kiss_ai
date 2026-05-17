@@ -41,6 +41,7 @@ import threading
 from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
+from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 from kiss.agents.vscode.server import VSCodeServer
 
@@ -106,6 +107,7 @@ def _start_fake_running_task(
         ``(started_event, release_event, thread)``
     """
     tab = server._get_tab(tab_id)
+    tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
     tab.agent._chat_id = chat_id
     tab.is_task_active = True
     tab.stop_event = threading.Event()

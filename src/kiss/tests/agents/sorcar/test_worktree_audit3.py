@@ -15,6 +15,7 @@ import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.git_worktree import _git
 from kiss.agents.sorcar.persistence import _append_chat_event
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 
 def _redirect_db(tmpdir: str) -> tuple:
@@ -113,6 +114,7 @@ class TestBug8Fix:
 
         server, events = _make_server(self.repo)
         tab = server._get_tab("0")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.use_worktree = True
 
         tab.agent.run(prompt_template="task1", work_dir=str(self.repo))
@@ -149,6 +151,7 @@ class TestBug8Fix:
 
         server, events = _make_server(self.repo)
         tab = server._get_tab("0")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.use_worktree = True
 
         tab.agent.run(prompt_template="task1", work_dir=str(self.repo))
@@ -184,6 +187,7 @@ class TestBug9Fix:
 
         server, events = _make_server(self.repo)
         tab = server._get_tab("0")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.use_worktree = True
 
         tab.agent.run(prompt_template="task1", work_dir=str(self.repo))
@@ -219,6 +223,7 @@ class TestBug9Fix:
 
         server, events = _make_server(self.repo)
         tab = server._get_tab("0")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.use_worktree = True
 
         tab.agent.run(prompt_template="task1", work_dir=str(self.repo))
@@ -247,6 +252,7 @@ class TestBug9Fix:
 
         server, events = _make_server(self.repo)
         tab = server._get_tab("0")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.use_worktree = True
 
         tab.agent.run(prompt_template="task1", work_dir=str(self.repo))
@@ -275,6 +281,7 @@ class TestBug9Fix:
 
         server, events = _make_server(self.repo)
         tab = server._get_tab("0")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.use_worktree = True
 
         tab.agent.run(prompt_template="task1", work_dir=str(self.repo))
@@ -322,6 +329,7 @@ class TestBug10Fix:
 
         server1, events1 = _make_server(self.repo)
         tab1 = server1._get_tab("0")
+        tab1.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab1.use_worktree = True
         tab1.agent.run(prompt_template="task1", work_dir=str(self.repo))
         assert tab1.agent._wt_pending
@@ -347,6 +355,7 @@ class TestBug10Fix:
         server2._replay_session(chat_id, "0")
 
         tab2 = server2._get_tab("0")
+        tab2.agent = WorktreeSorcarAgent("Sorcar VS Code")
         assert tab2.use_worktree is True, (
             "BUG-10 FIX: use_worktree should be restored from persisted data"
         )
@@ -367,6 +376,7 @@ class TestBug10Fix:
 
         server1, events1 = _make_server(self.repo)
         tab1 = server1._get_tab("0")
+        tab1.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab1.agent.run(prompt_template="task1", work_dir=str(self.repo))
         chat_id = tab1.agent.chat_id
         task_id = tab1.agent._last_task_id
@@ -385,6 +395,7 @@ class TestBug10Fix:
         server2._replay_session(chat_id, "0")
 
         tab2 = server2._get_tab("0")
+        tab2.agent = WorktreeSorcarAgent("Sorcar VS Code")
         assert tab2.use_worktree is False
 
 
@@ -411,6 +422,7 @@ class TestBug11Fix:
 
         server1, events1 = _make_server(self.repo)
         tab1 = server1._get_tab("0")
+        tab1.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab1.use_worktree = True
         tab1.agent.run(prompt_template="task1", work_dir=str(self.repo))
         chat_id = tab1.agent.chat_id

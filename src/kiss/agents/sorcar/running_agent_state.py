@@ -44,26 +44,35 @@ ctypes.pythonapi.PyThreadState_SetAsyncExc.argtypes = [
 
 
 class _RunningAgentState:
-    """Per-tab state holding the agent, runtime state, and settings.
+    """Per-tab state holding settings, runtime state, and the live agent (if any).
 
-    Each chat tab owns a single ``WorktreeSorcarAgent`` so concurrent
-    tabs never share mutable agent state (chat_id, last_task_id,
-    worktree branch, etc.).  The ``use_worktree`` flag is passed to
-    ``agent.run()`` per task — when ``False`` the agent short-circuits
-    to the plain stateful code path, so no separate non-worktree agent
-    instance is needed.  Runtime state (stop event, task thread,
-    answer queue, merge flag) also lives here so the server needs
-    only a single ``running_agent_states`` dict (the process-global
-    map is the
-    :attr:`kiss.agents.sorcar.worktree_sorcar_agent.WorktreeSorcarAgent.running_agent_states`
-    class attribute).
+    The ``agent`` field is **transient** — populated only while a task
+    is actively running (or its post-task worktree-merge UI is still
+    in flight) and reset back to ``None`` once the task lifecycle
+    completes.  A fresh :class:`WorktreeSorcarAgent` is created at
+    :meth:`_CommandsMixin._cmd_run` before the worker thread starts
+    and disposed in :meth:`_TaskRunnerMixin._run_task`'s outer
+    ``finally``.  Operations that need agent / worktree state outside
+    of an active task (worktree merge / discard / release, conflict
+    check, changed-files listing, autocommit) build a short-lived
+    ephemeral agent and restore worktree state from git via
+    :meth:`WorktreeSorcarAgent._restore_from_git`.
+
+    Long-lived per-tab state — the canonical ``chat_id``, the most
+    recently completed ``last_task_id``, sticky UI flags
+    (``use_worktree``, ``use_parallel``, ``selected_model``,
+    ``skip_merge``), and lifecycle bookkeeping — lives directly on
+    this state so it survives across task boundaries without
+    requiring an agent instance.
     """
 
     __slots__ = (
         "agent",
+        "chat_id",
+        "last_task_id",
+        "task_history_id",
         "use_worktree",
         "use_parallel",
-        "task_history_id",
         "selected_model",
         "stop_event",
         "task_thread",
@@ -83,17 +92,33 @@ class _RunningAgentState:
         *,
         agent: WorktreeSorcarAgent | None = None,
     ) -> None:
-        # When *agent* is omitted (the VS Code server flow), a fresh
-        # ``WorktreeSorcarAgent`` is created so the per-tab agent state
-        # (``chat_id``, ``_last_task_id``, worktree handle, …) is
-        # isolated from every other tab.  When *agent* is supplied
-        # (the standalone :meth:`WorktreeSorcarAgent.run` flow) the caller
-        # is registering ITSELF as the running agent under its own
-        # ``chat_id`` — no second agent instance is allocated.
-        self.agent = agent if agent is not None else WorktreeSorcarAgent("Sorcar VS Code")
+        # ``agent`` is transient — the VS Code server flow leaves it
+        # ``None`` until :meth:`_CommandsMixin._cmd_run` constructs a
+        # fresh agent immediately before the worker thread starts.
+        # The standalone :meth:`WorktreeSorcarAgent.run` flow passes
+        # ``agent=self`` so its own per-run registration entry points
+        # back at the running agent.
+        self.agent: WorktreeSorcarAgent | None = agent
+        # Canonical chat id for this tab.  Empty for brand-new tabs
+        # that have not yet been associated with a chat (the
+        # ``tab_id == chat_id`` invariant is established in
+        # :meth:`_CommandsMixin._cmd_run` once a task starts; a
+        # history-row click populates this directly in
+        # :meth:`VSCodeServer._replay_session`).
+        self.chat_id: str = ""
+        # Primary-key id of the most recently *completed* task in this
+        # tab's chat session — used by post-task hooks
+        # (:meth:`_MergeFlowMixin._handle_autocommit_action`) that may
+        # run after the agent has already been disposed.
+        self.last_task_id: int | None = None
+        # In-flight task id within the current ``_run_task_inner``
+        # iteration — used as the persistence target for the
+        # ``task_done`` / ``task_stopped`` / ``task_error`` event,
+        # the result row, and the extra-payload row.  Reset to
+        # ``None`` once the post-task finally block has cleaned up.
+        self.task_history_id: int | None = None
         self.use_worktree: bool = False
         self.use_parallel: bool = False
-        self.task_history_id: int | None = None
         self.selected_model: str = default_model
         self.stop_event: threading.Event | None = None
         self.task_thread: threading.Thread | None = None

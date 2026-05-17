@@ -19,6 +19,8 @@ import unittest
 from typing import Any
 from unittest import TestCase
 
+from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+
 
 def _make_server() -> Any:
     os.environ.setdefault("KISS_WORKDIR", "/tmp")
@@ -49,6 +51,7 @@ class TestStoppedTaskEmitsResultEvent(TestCase):
 
         tab_id = "stop-test-1"
         tab = server._get_tab(tab_id)
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
 
         def fake_run(**kwargs: Any) -> None:
             tab.agent.total_tokens_used = 1234
@@ -118,6 +121,7 @@ class TestStoppedTaskEmitsResultEvent(TestCase):
 
         tab_id = "error-test-1"
         tab = server._get_tab(tab_id)
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
 
         def fake_run(**kwargs: Any) -> None:
             tab.agent.total_tokens_used = 500
@@ -176,6 +180,7 @@ class TestStoppedTaskEmitsResultEvent(TestCase):
 
         tab_id = "success-test-1"
         tab = server._get_tab(tab_id)
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
 
         def fake_run(**kwargs: Any) -> None:
             printer = kwargs.get("printer", server.printer)
@@ -242,6 +247,7 @@ class TestBudgetExceededResultPanel(TestCase):
 
         tab_id = "budget-test-1"
         tab = server._get_tab(tab_id)
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
 
         def fake_run(**kwargs: Any) -> None:
             tab.agent.total_tokens_used = 50000

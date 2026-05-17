@@ -95,6 +95,17 @@ class _TaskRunnerMixin:
                     tab.user_answer_queue = None
                     tab.is_task_active = False
                     tab.is_running_non_wt = False
+                    # Dispose the transient agent — a fresh one is
+                    # built per task in ``_CommandsMixin._cmd_run``.
+                    # Worktree post-task operations (merge / discard,
+                    # conflict check, changed-files, release) build
+                    # ephemeral agents on demand and restore state
+                    # from git via ``_restore_from_git``.
+                    if tab.agent is not None:
+                        tab.last_task_id = (
+                            tab.agent._last_task_id or tab.last_task_id
+                        )
+                        tab.agent = None
                 self.printer.broadcast(
                     {"type": "status", "running": False, "tabId": tab_id},
                 )
@@ -164,6 +175,22 @@ class _TaskRunnerMixin:
         tab_id = cmd.get("tabId", "")
         tab = self._get_tab(tab_id)
         model = cmd.get("model") or tab.selected_model
+
+        # Build the per-task agent now (the previous agent was
+        # disposed at the end of the prior ``_run_task`` so there is
+        # no long-lived per-tab agent across distinct task
+        # executions).  Tests that need to inject a stub agent (e.g.
+        # patch ``tab.agent.run``) can pre-populate ``tab.agent``
+        # before calling ``_run_task`` — we honour any agent the
+        # caller has already attached.
+        if tab.agent is None:
+            agent = WorktreeSorcarAgent("Sorcar VS Code")
+            if tab.chat_id:
+                agent._chat_id = tab.chat_id
+            elif tab_id:
+                agent._chat_id = tab_id
+            tab.agent = agent
+            tab.chat_id = agent.chat_id or tab.chat_id or tab_id
 
         available = get_available_models()
         if not available or (model and model not in available):

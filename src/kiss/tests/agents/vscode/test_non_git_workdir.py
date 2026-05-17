@@ -24,6 +24,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
+from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.server import VSCodeServer
 
 
@@ -214,6 +215,7 @@ class TestNonGitWorktreeActions(_NonGitHarness):
 
     def test_worktree_action_unknown(self) -> None:
         tab = self.server._get_tab("t-wt3")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.use_worktree = True
         self.server._handle_command(
             {"type": "worktreeAction", "action": "frobnicate", "tabId": "t-wt3"},
@@ -227,6 +229,7 @@ class TestNonGitAutocommit(_NonGitHarness):
 
     def test_finish_merge_no_autocommit_prompt(self) -> None:
         tab = self.server._get_tab("t1")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.use_worktree = False
         tab.is_merging = True
         Path(self.tmpdir, "loose.txt").write_text("x\n")
@@ -284,11 +287,13 @@ class TestNonGitRunTask(_NonGitHarness):
         agent invocation creating a single new file."""
         called: dict[str, Any] = {"called": False, "kwargs": None}
         tab = self.server._get_tab(tab_id)
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
 
         def fake_run(**kwargs: Any) -> str:
             called["called"] = True
             called["kwargs"] = kwargs
             Path(self.tmpdir, "agent_output.txt").write_text("hi\n")
+            assert tab.agent is not None
             tab.agent.total_tokens_used = 10
             tab.agent.budget_used = 0.001
             tab.agent.step_count = 1
@@ -367,8 +372,12 @@ class TestNonGitRunTask(_NonGitHarness):
             errors = self._events_of("error")
             assert not errors, f"unexpected error events: {errors}"
             assert "merge_started" not in self._types()
-            assert tab.agent._wt_branch is None
-            assert tab.agent._wt_pending is False
+            # The per-task agent is disposed in ``_run_task``'s outer
+            # ``finally``; a fresh agent is auto-allocated by
+            # ``_get_tab`` and (since this is a non-git work_dir) has
+            # no pending worktree state.
+            assert tab.agent is None or tab.agent._wt_branch is None
+            assert tab.agent is None or tab.agent._wt_pending is False
         finally:
             keys.ANTHROPIC_API_KEY = saved
 

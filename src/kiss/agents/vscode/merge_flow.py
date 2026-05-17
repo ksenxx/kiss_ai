@@ -62,6 +62,53 @@ class _MergeFlowMixin:
         def _any_non_wt_running(self) -> bool: ...
         def _dispose_if_closed(self, tab_id: str) -> None: ...
 
+    def _ensure_wt_agent(
+        self, tab: _RunningAgentState,
+    ) -> WorktreeSorcarAgent | None:
+        """Return a worktree-aware agent for *tab*.
+
+        Returns ``tab.agent`` directly when a task / merge is still
+        in flight (its worktree state is already populated by
+        :meth:`WorktreeSorcarAgent.run`).  Otherwise builds a
+        short-lived **ephemeral** agent and restores worktree state
+        from git via :meth:`WorktreeSorcarAgent._restore_from_git`,
+        so worktree post-task operations (merge / discard, conflict
+        check, changed-files listing, release on tab close) keep
+        working after the transient task agent has been disposed.
+
+        The ephemeral agent is NOT cached back onto ``tab.agent`` —
+        the user wanted no long-lived agent across task boundaries,
+        and persisting one here would defeat that.  Callers should
+        treat the returned agent as a local-scope value and not
+        share it across distinct UI operations.
+
+        Returns:
+            The agent, or ``None`` if no git repo is available.
+        """
+        agent = tab.agent
+        if agent is not None and (
+            tab.is_task_active or tab.is_merging
+            or agent._wt_pending or agent._wt_branch
+        ):
+            # Active task / merge owns its worktree state, OR an
+            # already-restored agent — return as-is.
+            return agent
+        repo = GitWorktreeOps.discover_repo(Path(self.work_dir))
+        if repo is None:
+            return agent  # may be None
+        if agent is None:
+            agent = WorktreeSorcarAgent("Sorcar VS Code")
+        if tab.chat_id:
+            # Sync chat id onto the agent so ``_restore_from_git``
+            # can find the ``kiss/wt-{chat_id}-*`` branch.  The agent
+            # may have been lazily auto-allocated by ``_get_tab``
+            # before the tab's chat id was populated (e.g. when
+            # ``_replay_session`` calls ``_get_tab`` before setting
+            # ``tab.chat_id`` from the persisted history row).
+            agent._chat_id = tab.chat_id
+        agent._restore_from_git(repo)
+        return agent
+
     def _start_merge_session(
         self, merge_json_path: str, tab_id: str = "",
     ) -> bool:
@@ -338,11 +385,19 @@ class _MergeFlowMixin:
                 if tab_id:
                     with self._state_lock:
                         tab = WorktreeSorcarAgent.running_agent_states.get(tab_id)
-                    task_id = (
-                        tab.agent._last_task_id
-                        if tab is not None
-                        else None
-                    )
+                    task_id: int | None = None
+                    if tab is not None:
+                        task_id = tab.last_task_id
+                        if task_id is None and tab.agent is not None:
+                            # Fallback for legacy callers that wire
+                            # the task id onto the agent (e.g. tests
+                            # that pre-seed ``tab.agent._last_task_id``
+                            # without populating the new
+                            # :class:`_RunningAgentState.last_task_id`
+                            # field).  Production sets both in
+                            # :meth:`_TaskRunnerMixin._run_task`'s
+                            # outer ``finally``.
+                            task_id = tab.agent._last_task_id
                     if task_id is not None:
                         _append_chat_event(done_event, task_id=task_id)
             else:
@@ -403,13 +458,16 @@ class _MergeFlowMixin:
                 merge review has already been completed.
         """
         tab = self._get_tab(tab_id)
-        if not tab.use_worktree or not tab.agent._wt_pending:
+        if not tab.use_worktree:
+            return
+        wt_agent = self._ensure_wt_agent(tab)
+        if wt_agent is None or not wt_agent._wt_pending:
             return
         changed = self._get_worktree_changed_files(tab_id)
         if changed and try_merge_review:
-            wt_dir = tab.agent._wt_dir
+            wt_dir = wt_agent._wt_dir
             if wt_dir is not None and wt_dir.exists():
-                base_ref = tab.agent._baseline_commit or "HEAD"
+                base_ref = wt_agent._baseline_commit or "HEAD"
                 try:
                     if self._prepare_and_start_merge(
                         str(wt_dir), base_ref=base_ref, tab_id=tab_id,
@@ -421,14 +479,13 @@ class _MergeFlowMixin:
             with self._state_lock:
                 non_wt_busy = self._any_non_wt_running()
             if not non_wt_busy:
-                tab.agent.discard()
+                wt_agent.discard()
                 return
-        wt = tab.agent
         event: dict[str, Any] = {
             "type": "worktree_done",
-            "branch": wt._wt_branch,
-            "worktreeDir": str(wt._wt_dir),
-            "originalBranch": wt._original_branch,
+            "branch": wt_agent._wt_branch,
+            "worktreeDir": str(wt_agent._wt_dir),
+            "originalBranch": wt_agent._original_branch,
             "changedFiles": changed,
             "hasConflict": self._check_merge_conflict(tab_id) if changed else False,
             "tabId": tab_id,
@@ -449,13 +506,20 @@ class _MergeFlowMixin:
         tab = self._get_tab(tab_id)
         if not tab.use_worktree:
             return
-        wt = tab.agent
-        repo_root = wt._repo_root
-        if repo_root is None:
-            repo_root = GitWorktreeOps.discover_repo(Path(self.work_dir))
+        wt_agent = self._ensure_wt_agent(tab)
+        if wt_agent is None:
+            return
+        # ``_ensure_wt_agent`` already calls ``_restore_from_git`` when
+        # it builds an ephemeral agent.  Only call it again when the
+        # tab's existing agent is in use (e.g. an in-flight task whose
+        # worktree state hasn't been populated yet).
+        if tab.agent is wt_agent:
+            repo_root = wt_agent._repo_root
             if repo_root is None:
-                return
-        wt._restore_from_git(repo_root)
+                repo_root = GitWorktreeOps.discover_repo(Path(self.work_dir))
+                if repo_root is None:
+                    return
+            wt_agent._restore_from_git(repo_root)
 
 
     def _check_merge_conflict(self, tab_id: str = "") -> bool:
@@ -482,7 +546,10 @@ class _MergeFlowMixin:
         tab = self._get_tab(tab_id)
         if not tab.use_worktree:
             return False
-        wt = tab.agent._wt
+        wt_agent = self._ensure_wt_agent(tab)
+        if wt_agent is None:
+            return False
+        wt = wt_agent._wt
         if wt is None or wt.original_branch is None:
             return False
         wt_dir = wt.wt_dir
@@ -581,13 +648,16 @@ class _MergeFlowMixin:
         tab = self._get_tab(tab_id)
         if not tab.use_worktree:
             return []
-        wt = tab.agent
-        if not wt._original_branch:
+        wt_agent = self._ensure_wt_agent(tab)
+        if wt_agent is None or not wt_agent._original_branch:
             return []
+        wt = wt_agent
+        original_branch = wt._original_branch
+        assert original_branch is not None  # narrowed by the check above
         wt_dir = wt._wt_dir
         if wt_dir and wt_dir.exists():
             base_ref = self._resolve_base_ref(
-                str(wt_dir), wt._baseline_commit, wt._original_branch,
+                str(wt_dir), wt._baseline_commit, original_branch,
             )
             tracked = _git(str(wt_dir), "diff", "--name-only", base_ref)
             if tracked.returncode == 0:
@@ -605,7 +675,7 @@ class _MergeFlowMixin:
             return []
         repo_root = str(wt._repo_root) if wt._repo_root else self.work_dir
         base_ref = self._resolve_base_ref(
-            repo_root, wt._baseline_commit, wt._original_branch,
+            repo_root, wt._baseline_commit, original_branch,
             tip=wt._wt_branch,
         )
         result = _git(repo_root, "diff", "--name-only",
@@ -661,9 +731,13 @@ class _MergeFlowMixin:
         tab = self._get_tab(tab_id)
         if not tab.use_worktree:
             return {"success": False, "message": "Worktree mode is not enabled"}
-        wt = tab.agent
-        if not wt._wt_pending:
+        wt_agent = self._ensure_wt_agent(tab)
+        if wt_agent is None:
+            return {"success": False, "message": "Not a git repository"}
+        if not wt_agent._wt_pending:
             self._ensure_worktree_state(tab_id)
+            wt_agent = self._ensure_wt_agent(tab) or wt_agent
+        wt = wt_agent
         if action == "merge":
             busy = self._check_worktree_busy(tab, "merging")
             if busy:

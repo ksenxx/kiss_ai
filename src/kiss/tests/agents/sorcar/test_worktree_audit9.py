@@ -237,6 +237,7 @@ class TestBug41Red6Fix:
         even if thread-local tab_id is None (replay path)."""
         server = VSCodeServer()
         tab = server._get_tab("replay-tab")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         assert not tab.is_merging
 
         merge_dir = tmp_path / "merge"
@@ -270,7 +271,7 @@ class TestBug42Inc5Fix:
         to it, so the guard must be present in the helper.
         """
         helper_src = inspect.getsource(VSCodeServer._present_pending_worktree)
-        discard_pos = helper_src.find("tab.agent.discard()")
+        discard_pos = helper_src.find("wt_agent.discard()")
         assert discard_pos > 0
         context = helper_src[max(0, discard_pos - 500):discard_pos]
         assert "_any_non_wt_running" in context, (
@@ -291,7 +292,7 @@ class TestBug42Inc5Fix:
         )
         helper_src = inspect.getsource(VSCodeServer._present_pending_worktree)
         guard_pos = helper_src.find("_any_non_wt_running")
-        discard_pos = helper_src.find("tab.agent.discard()")
+        discard_pos = helper_src.find("wt_agent.discard()")
         assert guard_pos > 0 and discard_pos > 0
         assert guard_pos < discard_pos, (
             "Guard must precede discard call in the shared helper"
@@ -470,6 +471,7 @@ class TestInc6Fix:
         server = VSCodeServer()
         server.work_dir = str(repo)
         tab = server._get_tab("inc6-tab")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.use_worktree = True
         tab.agent._wt = GitWorktree(
             repo_root=repo,

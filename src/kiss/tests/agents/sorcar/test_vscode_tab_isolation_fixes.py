@@ -28,6 +28,7 @@ import threading
 import time
 import unittest
 
+from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.server import VSCodeServer
 
 
@@ -194,6 +195,7 @@ class TestC1AdjacentTaskNoGlobalFallback(unittest.TestCase):
 
         server._get_adjacent_task = stub  # type: ignore[assignment]
         tab = server._get_tab("T")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         assert tab.agent.chat_id == ""
         server._cmd_get_adjacent_task({
             "type": "getAdjacentTask", "tabId": "T",

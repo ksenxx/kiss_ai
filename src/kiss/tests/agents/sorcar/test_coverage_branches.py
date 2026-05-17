@@ -26,6 +26,7 @@ from kiss.agents.sorcar.useful_tools import (
 from kiss.agents.sorcar.web_use_tool import (
     WebUseTool,
 )
+from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.browser_ui import (
     BaseBrowserPrinter,
     _coalesce_events,
@@ -260,6 +261,7 @@ class TestVSCodeServerBranches:
         """_emit_pending_worktree emits worktree_done when branch exists."""
         server, events = self._make_server()
         tab = server._get_tab("0")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.use_worktree = True
         repo = tmp_path / "repo"
         repo.mkdir()

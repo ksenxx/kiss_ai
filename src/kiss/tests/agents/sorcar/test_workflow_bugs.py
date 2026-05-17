@@ -168,10 +168,12 @@ class TestBug1IsTaskActiveLeaks:
         server = _server(self.repo)
 
         tab_a = server._get_tab("tab-a")
+        tab_a.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab_a.use_worktree = True
         tab_a.is_merging = True
 
         tab_b = server._get_tab("tab-b")
+        tab_b.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab_b.stop_event = threading.Event()
         tab_b.user_answer_queue = queue.Queue(maxsize=1)
         tab_b.task_thread = threading.Thread(target=lambda: None)
@@ -304,6 +306,7 @@ class TestBug4CloseTabOrphansWorktree:
         server = _server(self.repo)
         tab_id = "tab-close-test"
         tab = server._get_tab(tab_id)
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.use_worktree = True
 
         branch = "kiss/wt-close-test"
@@ -326,6 +329,7 @@ class TestBug4CloseTabOrphansWorktree:
         server = _server(self.repo)
         tab_id = "tab-close-empty"
         tab = server._get_tab(tab_id)
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.use_worktree = True
 
         branch = "kiss/wt-close-empty"
@@ -352,6 +356,7 @@ class TestBug4CloseTabOrphansWorktree:
         server = _server(self.repo)
         tab_id = "tab-active"
         tab = server._get_tab(tab_id)
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.use_worktree = True
         tab.is_task_active = True
 

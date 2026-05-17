@@ -28,6 +28,7 @@ from kiss.agents.sorcar.persistence import (
     _get_db,
     _load_latest_chat_events_by_chat_id,
 )
+from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.browser_ui import _DISPLAY_EVENT_TYPES
 from kiss.agents.vscode.server import VSCodeServer
 
@@ -79,6 +80,7 @@ class TestAutocommitPersistence(unittest.TestCase):
         """Create a task history entry and wire it to the tab's agent."""
         task_id, chat_id = _add_task("test task", "")
         tab = self.server._get_tab(tab_id)
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.agent._last_task_id = task_id
         tab.agent._chat_id = chat_id
         return task_id, chat_id
@@ -97,6 +99,7 @@ class TestAutocommitPersistence(unittest.TestCase):
         autocommit_done event must be persisted to the task history
         so it appears when the session is replayed."""
         tab = self.server._get_tab("t1")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.use_worktree = False
         task_id, chat_id = self._create_task_for_tab("t1")
 
@@ -125,6 +128,7 @@ class TestAutocommitPersistence(unittest.TestCase):
         """Skipping autocommit (no commit made) should NOT persist
         an autocommit_done event since no commit was created."""
         tab = self.server._get_tab("t2")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.use_worktree = False
         task_id, chat_id = self._create_task_for_tab("t2")
 
@@ -143,6 +147,7 @@ class TestAutocommitPersistence(unittest.TestCase):
         """When the session is replayed via _load_latest_chat_events_by_chat_id,
         the autocommit_done event must be included in the returned events."""
         tab = self.server._get_tab("t3")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.use_worktree = False
         task_id, chat_id = self._create_task_for_tab("t3")
 
@@ -164,6 +169,7 @@ class TestAutocommitPersistence(unittest.TestCase):
         """If there's no task_id on the agent (edge case), autocommit
         should still work but just not persist."""
         tab = self.server._get_tab("t4")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.use_worktree = False
         tab.agent._last_task_id = None
 

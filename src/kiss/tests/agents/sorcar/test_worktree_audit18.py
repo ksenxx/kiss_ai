@@ -168,12 +168,14 @@ class TestRaceMergeGuardTOCTOU:
         server = _server(repo)
 
         tab_a = server._get_tab("a")
+        tab_a.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab_a.use_worktree = True
         tab_a.is_task_active = False
         agent_a = cast(WorktreeSorcarAgent, tab_a.agent)
         wt = _make_wt_with_commit(repo, "kiss/wt-race1-1", agent_a)
 
         tab_b = server._get_tab("b")
+        tab_b.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab_b.use_worktree = False
         tab_b.is_running_non_wt = False
 
@@ -267,6 +269,7 @@ class TestRacePostTaskVsUserAction:
         server = _server(repo)
 
         tab = server._get_tab("a")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.use_worktree = True
         tab.is_task_active = False
         agent = cast(WorktreeSorcarAgent, tab.agent)

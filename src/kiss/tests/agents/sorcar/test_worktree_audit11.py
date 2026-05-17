@@ -37,6 +37,7 @@ import subprocess
 from pathlib import Path
 
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
+from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.diff_merge import (
     _capture_untracked,
     _parse_diff_hunks,
@@ -200,6 +201,7 @@ class TestBug56ConflictCheckBaselineValidation:
         server = VSCodeServer()
         server.work_dir = str(repo)
         tab = server._get_tab("bug56a-tab")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.use_worktree = True
         tab.agent._wt = GitWorktree(
             repo_root=repo,
@@ -241,6 +243,7 @@ class TestBug56ConflictCheckBaselineValidation:
         server = VSCodeServer()
         server.work_dir = str(repo)
         tab = server._get_tab("bug56b-tab")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.use_worktree = True
         tab.agent._wt = GitWorktree(
             repo_root=repo,
@@ -268,6 +271,7 @@ class TestBug56ConflictCheckBaselineValidation:
         server = VSCodeServer()
         server.work_dir = str(repo)
         tab = server._get_tab("bug56c-tab")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.use_worktree = True
         tab.agent._wt = GitWorktree(
             repo_root=repo,

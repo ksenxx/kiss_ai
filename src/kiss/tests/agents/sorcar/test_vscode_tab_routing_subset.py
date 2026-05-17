@@ -21,6 +21,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
+from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.server import VSCodeServer
 
 
@@ -151,6 +152,7 @@ class TestWorktreeProgressRouted(unittest.TestCase):
     def test_worktree_progress_carries_tab_id(self) -> None:
         server, events = _make_server()
         tab = server._get_tab("t-13")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.use_worktree = True
         tab.agent._wt = object()  # type: ignore[assignment]
 
