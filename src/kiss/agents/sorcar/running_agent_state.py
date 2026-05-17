@@ -1,7 +1,10 @@
 """Per-tab state and small text helpers for the VS Code server.
 
-Split out of ``server.py`` for organisation.  Imported and
-re-exported from ``server`` for backwards compatibility.
+Originally split out of ``server.py`` for organisation; moved into
+the ``sorcar`` package so the per-tab state class lives alongside
+its owning :class:`kiss.agents.sorcar.chat_sorcar_agent.ChatSorcarAgent`
+(whose :attr:`~ChatSorcarAgent.running_agent_states` class attribute
+holds the process-global map keyed by tab id).
 """
 
 from __future__ import annotations
@@ -50,8 +53,10 @@ class _RunningAgentState:
     to the plain stateful code path, so no separate non-worktree agent
     instance is needed.  Runtime state (stop event, task thread,
     answer queue, merge flag) also lives here so the server needs
-    only a single ``_running_agent_states`` dict (the process-global
-    map lives in :mod:`kiss.agents.sorcar.chat_sorcar_agent`).
+    only a single ``running_agent_states`` dict (the process-global
+    map is the
+    :attr:`kiss.agents.sorcar.chat_sorcar_agent.ChatSorcarAgent.running_agent_states`
+    class attribute).
     """
 
     __slots__ = (

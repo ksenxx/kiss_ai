@@ -20,7 +20,7 @@ import sys
 import threading
 from typing import Any
 
-from kiss.agents.sorcar.chat_sorcar_agent import _running_agent_states
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import (
     _append_chat_event,
     _chat_has_tasks,
@@ -35,6 +35,7 @@ from kiss.agents.sorcar.persistence import (
     _load_model_usage,
     _search_history,
 )
+from kiss.agents.sorcar.running_agent_state import _RunningAgentState, parse_task_tags
 from kiss.agents.vscode.autocomplete import _AutocompleteMixin
 from kiss.agents.vscode.commands import _CommandsMixin
 from kiss.agents.vscode.diff_merge import (
@@ -49,7 +50,6 @@ from kiss.agents.vscode.helpers import (
 )
 from kiss.agents.vscode.merge_flow import _MergeFlowMixin
 from kiss.agents.vscode.printer import VSCodePrinter
-from kiss.agents.vscode.running_agent_state import _RunningAgentState, parse_task_tags
 from kiss.agents.vscode.task_runner import _TaskRunnerMixin
 from kiss.core.models.model_info import (
     MODEL_INFO,
@@ -79,17 +79,17 @@ class VSCodeServer(
 
     def __init__(self) -> None:
         self.printer = VSCodePrinter()
-        # ``_running_agent_states`` is now a process-global dict living
-        # in ``kiss.agents.sorcar.chat_sorcar_agent`` and imported at
-        # module scope.  Reset on init so each ``VSCodeServer`` starts
-        # with a clean slate (production only ever spawns one server
-        # per Python process; test fixtures that instantiate the
-        # server fresh need isolation from prior tests' tab state).
-        # The server still owns ``_state_lock`` to coordinate
-        # multi-step access (read-then-modify, scan-then-modify) and
-        # the lifecycle transitions that span both the dict and
-        # individual ``_RunningAgentState`` fields.
-        _running_agent_states.clear()
+        # ``running_agent_states`` is now a class attribute on
+        # :class:`ChatSorcarAgent` (shared across every instance).
+        # Reset on init so each ``VSCodeServer`` starts with a clean
+        # slate (production only ever spawns one server per Python
+        # process; test fixtures that instantiate the server fresh
+        # need isolation from prior tests' tab state).  The server
+        # still owns ``_state_lock`` to coordinate multi-step access
+        # (read-then-modify, scan-then-modify) and the lifecycle
+        # transitions that span both the dict and individual
+        # ``_RunningAgentState`` fields.
+        ChatSorcarAgent.running_agent_states.clear()
         self.work_dir = os.environ.get("KISS_WORKDIR", os.getcwd())
         persisted = _load_last_model()
         self._default_model = (
@@ -112,11 +112,12 @@ class VSCodeServer(
 
         Backward-compat accessor for existing test fixtures and audit
         tests that read ``server._running_agent_states``.  The
-        canonical home is the module global
-        :data:`kiss.agents.sorcar.chat_sorcar_agent._running_agent_states`;
-        production code inside this package imports it directly.
+        canonical home is the class attribute
+        :attr:`kiss.agents.sorcar.chat_sorcar_agent.ChatSorcarAgent.running_agent_states`;
+        production code inside this package accesses it directly via
+        :class:`ChatSorcarAgent`.
         """
-        return _running_agent_states
+        return ChatSorcarAgent.running_agent_states
 
     def _get_tab(self, tab_id: str) -> _RunningAgentState:
         """Get or create per-tab state for the given tab.
@@ -140,10 +141,10 @@ class VSCodeServer(
             The per-tab state object.
         """
         with self._state_lock:
-            tab = _running_agent_states.get(tab_id)
+            tab = ChatSorcarAgent.running_agent_states.get(tab_id)
             if tab is None:
                 tab = _RunningAgentState(tab_id, self._default_model)
-                _running_agent_states[tab_id] = tab
+                ChatSorcarAgent.running_agent_states[tab_id] = tab
             return tab
 
     def _any_non_wt_running(self) -> bool:
@@ -154,7 +155,7 @@ class VSCodeServer(
         Returns:
             True if at least one tab has ``is_running_non_wt`` set.
         """
-        return any(t.is_running_non_wt for t in _running_agent_states.values())
+        return any(t.is_running_non_wt for t in ChatSorcarAgent.running_agent_states.values())
 
     def run(self) -> None:
         """Main loop: read commands from stdin, execute them."""
@@ -374,7 +375,7 @@ class VSCodeServer(
             tab_id: The frontend tab identifier to close.
         """
         with self._state_lock:
-            tab = _running_agent_states.get(tab_id)
+            tab = ChatSorcarAgent.running_agent_states.get(tab_id)
             if tab is not None and (
                 tab.is_task_active
                 or tab.is_merging
@@ -382,7 +383,7 @@ class VSCodeServer(
             ):
                 tab.frontend_closed = True
                 return
-            _running_agent_states.pop(tab_id, None)
+            ChatSorcarAgent.running_agent_states.pop(tab_id, None)
         self._teardown_tab_resources(tab_id, tab)
 
     def _dispose_if_closed(self, tab_id: str) -> None:
@@ -400,7 +401,7 @@ class VSCodeServer(
         if not tab_id:
             return
         with self._state_lock:
-            tab = _running_agent_states.get(tab_id)
+            tab = ChatSorcarAgent.running_agent_states.get(tab_id)
             if tab is None or not tab.frontend_closed:
                 return
             if (
@@ -409,7 +410,7 @@ class VSCodeServer(
                 or (tab.task_thread is not None and tab.task_thread.is_alive())
             ):
                 return
-            _running_agent_states.pop(tab_id, None)
+            ChatSorcarAgent.running_agent_states.pop(tab_id, None)
         self._teardown_tab_resources(tab_id, tab)
 
     def _teardown_tab_resources(
@@ -648,7 +649,7 @@ class VSCodeServer(
         if not chat_id or not new_tab_id:
             return False
         with self._state_lock:
-            t = _running_agent_states.get(chat_id)
+            t = ChatSorcarAgent.running_agent_states.get(chat_id)
             if t is None:
                 return False
             alive = t.task_thread is not None and t.task_thread.is_alive()

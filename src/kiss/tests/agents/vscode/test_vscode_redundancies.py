@@ -65,7 +65,7 @@ class TestCmdRunUsesGetTab:
         from kiss.agents.vscode.commands import _CommandsMixin
 
         src = inspect.getsource(_CommandsMixin._cmd_run)
-        assert "from kiss.agents.vscode.running_agent_state import _RunningAgentState" not in src, (
+        assert "from kiss.agents.sorcar.running_agent_state import _RunningAgentState" not in src, (
             "_cmd_run must not redundantly re-import _RunningAgentState; the "
             "module-level import in commands.py is sufficient."
         )

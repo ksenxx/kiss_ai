@@ -52,8 +52,8 @@ class TestAwaitUserResponseLockingFix(unittest.TestCase):
         ``with self._state_lock`` block.
         """
         src = inspect.getsource(_TaskRunnerMixin._await_user_response)
-        assert "_running_agent_states.get(" in src, (
-            "_await_user_response should access _running_agent_states"
+        assert "running_agent_states.get(" in src, (
+            "_await_user_response should access running_agent_states"
         )
         assert "with self._state_lock" in src, (
             "B1 FIX: _await_user_response now reads _running_agent_states "
@@ -117,13 +117,13 @@ class TestAutocommitActionLockingFix(unittest.TestCase):
         ``with self._state_lock`` block.
         """
         src = inspect.getsource(_MergeFlowMixin._handle_autocommit_action)
-        assert "_running_agent_states.get(tab_id)" in src.replace("self.", ""), (
-            "_handle_autocommit_action should access _running_agent_states"
+        assert "running_agent_states.get(tab_id)" in src.replace("self.", ""), (
+            "_handle_autocommit_action should access running_agent_states"
         )
         lock_blocks = list(re.finditer(r"with self\._state_lock", src))
-        tab_accesses = list(re.finditer(r"_running_agent_states\.get", src))
+        tab_accesses = list(re.finditer(r"running_agent_states\.get", src))
         assert len(lock_blocks) >= len(tab_accesses), (
-            f"B2 FIX: {len(tab_accesses)} _running_agent_states.get() calls "
+            f"B2 FIX: {len(tab_accesses)} running_agent_states.get() calls "
             f"guarded by {len(lock_blocks)} _state_lock blocks"
         )
 
