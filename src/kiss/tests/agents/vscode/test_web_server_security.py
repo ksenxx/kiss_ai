@@ -24,6 +24,7 @@ Coverage:
 """
 
 from __future__ import annotations
+import pytest
 
 import asyncio
 import inspect
@@ -116,14 +117,17 @@ class TestH1NoTunnelWithoutPassword(IsolatedAsyncioTestCase):
         await self.server.stop_async()
         self._snap.__exit__()
 
+    @pytest.mark.slow
     async def test_tunnel_proc_is_none_when_no_password(self) -> None:
         """No cloudflared subprocess is spawned when remote_password=''."""
         self.assertIsNone(self.server._tunnel_proc)
 
+    @pytest.mark.slow
     async def test_active_url_is_local_only(self) -> None:
         """Without a password the active URL is the local URL, not a tunnel URL."""
         self.assertEqual(self.server._active_url, self.server._local_url)
 
+    @pytest.mark.slow
     async def test_watchdog_does_not_start_tunnel_without_password(self) -> None:
         """The watchdog tick must also refuse to spawn the tunnel."""
         self.server._tunnel_proc = None
@@ -674,6 +678,7 @@ class TestH6StderrReaderCleanup(unittest.TestCase):
         finally:
             proc.wait(timeout=2)
 
+    @pytest.mark.slow
     def test_reader_keeps_draining_stderr_after_url_found(self) -> None:
         """The reader thread must keep draining stderr after finding URL.
 

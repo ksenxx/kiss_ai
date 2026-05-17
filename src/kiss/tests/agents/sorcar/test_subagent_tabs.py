@@ -62,6 +62,7 @@ class _CapturePrinter(BaseBrowserPrinter):
 class TestSubagentTabEvents:
     """Verify that run_parallel broadcasts subagent tab events."""
 
+    @pytest.mark.slow
     def test_parallel_creates_subagent_tab_events(self) -> None:
         """Running a task with run_parallel creates openSubagentTab events."""
         from kiss.agents.sorcar.sorcar_agent import SorcarAgent
@@ -119,6 +120,7 @@ class TestSubagentTabEvents:
             "Expected streaming events from sub-agents with sub-tab IDs"
         )
 
+    @pytest.mark.slow
     def test_parallel_subagent_events_have_correct_types(self) -> None:
         """Sub-agent events include standard streaming types."""
         from kiss.agents.sorcar.sorcar_agent import SorcarAgent

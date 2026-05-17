@@ -23,6 +23,7 @@ These tests verify that pathway end-to-end:
 """
 
 from __future__ import annotations
+import pytest
 
 import json
 import os
@@ -107,6 +108,7 @@ class TestStartNamedTunnelUsesConfiguredUrl(unittest.TestCase):
         finally:
             srv._stop_tunnel()
 
+    @pytest.mark.slow
     def test_returns_none_when_subprocess_exits_without_registration(
         self,
     ) -> None:
