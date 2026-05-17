@@ -683,6 +683,10 @@ def run_tasks_parallel(
                 "isSubagentTab": True,
             })
 
+    # Local import: ``chat_sorcar_agent`` imports from this module, so a
+    # top-level import would be circular.
+    from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+
     def _run_single(args: tuple[int, str]) -> str:
         idx, task = args
         sub_tab_id = sub_tab_ids[idx]
