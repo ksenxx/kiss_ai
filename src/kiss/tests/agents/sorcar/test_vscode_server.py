@@ -7,12 +7,13 @@ in main.js.
 No mocks — uses real functions from the server module.
 """
 
-import pytest
 import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+
+import pytest
 
 from kiss.agents.sorcar.git_worktree import GitWorktree
 from kiss.agents.vscode.helpers import model_vendor

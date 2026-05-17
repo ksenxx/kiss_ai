@@ -24,7 +24,6 @@ Coverage:
 """
 
 from __future__ import annotations
-import pytest
 
 import asyncio
 import inspect
@@ -41,6 +40,7 @@ import unittest
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 
+import pytest
 from websockets.asyncio.client import connect
 
 from kiss.agents.vscode import web_server as ws_mod

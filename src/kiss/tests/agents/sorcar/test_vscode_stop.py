@@ -10,13 +10,14 @@ thread that is blocked in I/O and never reaches a cooperative
 ``_check_stop()`` call.
 """
 
-import pytest
 import json
 import os
 import subprocess
 import threading
 import time
 import unittest
+
+import pytest
 
 
 class TestVSCodeServerStop(unittest.TestCase):

@@ -31,7 +31,6 @@ All tests use real subprocesses (``/bin/bash`` scripts) and the real
 """
 
 from __future__ import annotations
-import pytest
 
 import asyncio
 import inspect
@@ -41,6 +40,8 @@ import tempfile
 import time
 import unittest
 from unittest import IsolatedAsyncioTestCase
+
+import pytest
 
 from kiss.agents.vscode import web_server as ws_mod
 from kiss.agents.vscode.vscode_config import CONFIG_PATH, save_config
