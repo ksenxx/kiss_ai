@@ -139,16 +139,16 @@ class _CommandsMixin:
                 tab.skip_merge = bool(cmd["skipMerge"])
             tab.stop_event = threading.Event()
             tab.user_answer_queue = queue.Queue(maxsize=1)
-            # Tab id IS the chat id from run-start.  For a brand-new
-            # chat tab the frontend allocates a random uuid as the
-            # tab id; for a tab opened by clicking a history row the
-            # frontend sets the tab id equal to the resumed chat id.
-            # Adopting the tab id as the agent's chat id here makes
-            # tab_id == chat_id an invariant throughout the lifecycle
-            # — no chat_id ↔ tab_id translation is required anywhere.
+            # Tab id IS the chat id from run-start (the
+            # ``tab_id == chat_id`` invariant): a brand-new chat tab
+            # allocates a random uuid as the tab id, while a tab
+            # opened by clicking a history row uses the resumed chat
+            # id as the tab id.  Record the canonical chat id on the
+            # tab now so :meth:`_TaskRunnerMixin._run_task` can use
+            # it when it constructs the per-task agent.
             if tab_id:
-                tab.agent._chat_id = tab_id
-            chat_id = tab.agent.chat_id
+                tab.chat_id = tab_id
+            chat_id = tab.chat_id
             thread = threading.Thread(
                 target=self._run_task, args=(cmd,), daemon=True
             )
@@ -296,7 +296,7 @@ class _CommandsMixin:
         """
         tab_id = cmd.get("tabId", "")
         adj_tab = self._get_tab(tab_id)
-        chat_id = adj_tab.agent.chat_id
+        chat_id = adj_tab.chat_id
         self._get_adjacent_task(
             chat_id,
             cmd.get("task", ""),

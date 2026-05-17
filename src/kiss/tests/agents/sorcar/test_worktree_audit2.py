@@ -123,6 +123,7 @@ class TestBug5UseWorktreeNotRestored:
         server = VSCodeServer()
 
         tab = server._get_tab("test-tab")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
 
         assert tab.use_worktree is False
 

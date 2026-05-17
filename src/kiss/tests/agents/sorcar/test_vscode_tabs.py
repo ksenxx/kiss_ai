@@ -578,23 +578,23 @@ if __name__ == "__main__":
 class TestPerTabAgentIsolation(unittest.TestCase):
     """Each tab gets its own agent instances — no cross-tab state leakage."""
 
-    def test_different_tabs_have_independent_agents(self) -> None:
-        """Tab agents are distinct objects (chat_id assigned on first task)."""
+    def test_different_tabs_have_independent_chat_ids(self) -> None:
+        """Tabs hold their own chat_id (no shared per-tab agent)."""
         server, _ = _make_server()
         tab1 = server._get_tab("1")
         tab2 = server._get_tab("2")
-        assert tab1.agent is not tab2.agent
-        assert tab1.agent.chat_id == ""
-        assert tab2.agent.chat_id == ""
+        assert tab1 is not tab2
+        assert tab1.chat_id == ""
+        assert tab2.chat_id == ""
 
     def test_new_chat_on_one_tab_does_not_affect_other(self) -> None:
-        """Calling new_chat on tab 1 does not change tab 2's chat_id."""
+        """Resetting tab 1's chat_id does not change tab 2's chat_id."""
         server, _ = _make_server()
         tab1 = server._get_tab("1")
         tab2 = server._get_tab("2")
-        tab2.agent._chat_id = "42"
-        tab1.agent.new_chat()
-        assert tab2.agent.chat_id == "42"
+        tab2.chat_id = "42"
+        tab1.chat_id = ""
+        assert tab2.chat_id == "42"
 
     def test_use_worktree_is_per_tab(self) -> None:
         """Setting use_worktree on one tab does not affect others."""
@@ -628,16 +628,24 @@ class TestPerTabAgentIsolation(unittest.TestCase):
         assert "99" in server._running_agent_states
         assert tab is server._get_tab("99")
 
-    def test_agent_is_always_worktree_sorcar_agent(self) -> None:
-        """_RunningAgentState.agent is a single WorktreeSorcarAgent regardless of toggle."""
-        from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-
+    def test_agent_is_transient_per_task(self) -> None:
+        """tab.agent is replaced fresh per task — no state persists across tasks."""
         server, _ = _make_server()
         tab = server._get_tab("1")
-        original = tab.agent
-        assert isinstance(original, WorktreeSorcarAgent)
-        tab.use_worktree = True
-        assert tab.agent is original
+        # ``_get_tab`` lazily allocates a slot agent so tests and
+        # out-of-task callers (worktree merge / discard, conflict
+        # check, history click) can read agent state directly.  The
+        # slot is wiped to ``None`` at the end of every ``_run_task``
+        # so no agent state survives a task boundary; a fresh agent
+        # is built in ``_cmd_run`` immediately before each worker
+        # thread starts.
+        first = tab.agent
+        assert first is not None
+        tab.agent = None
+        again = tab  # same _RunningAgentState
+        again = server._get_tab("1")  # _get_tab repopulates the slot
+        assert again.agent is not None
+        assert again.agent is not first  # fresh per allocation
 
 
 class TestSelectedModelIsolation(unittest.TestCase):

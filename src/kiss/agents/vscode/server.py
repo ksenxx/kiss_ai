@@ -145,6 +145,20 @@ class VSCodeServer(
             if tab is None:
                 tab = _RunningAgentState(tab_id, self._default_model)
                 WorktreeSorcarAgent.running_agent_states[tab_id] = tab
+            # Lazily ensure an agent slot for tests / out-of-task
+            # callers that read ``tab.agent`` directly (e.g. merge
+            # / discard, worktree state inspection).  The agent is
+            # transient — :meth:`_TaskRunnerMixin._run_task`'s outer
+            # ``finally`` sets ``tab.agent = None`` once each task
+            # completes, and :meth:`_CommandsMixin._cmd_run` allocates
+            # a fresh agent before the worker thread starts.  So no
+            # agent state ever survives a task boundary; the slot
+            # populated here is a fresh, empty agent.
+            if tab.agent is None:
+                agent = WorktreeSorcarAgent("Sorcar VS Code")
+                if tab.chat_id:
+                    agent._chat_id = tab.chat_id
+                tab.agent = agent
             return tab
 
     def _any_non_wt_running(self) -> bool:
@@ -427,9 +441,16 @@ class VSCodeServer(
             tab: The popped tab state, or ``None`` when the tab was
                 never created (e.g. ``closeTab`` for an unknown id).
         """
-        if tab is not None and tab.agent._wt_pending:
+        if tab is not None:
+            # Build an ephemeral worktree-aware agent to release any
+            # still-pending worktree branch.  When the tab's task
+            # agent was already disposed (the common case at tab
+            # close after the task ended), ``_ensure_wt_agent``
+            # restores worktree state from git.
             try:
-                tab.agent._release_worktree()
+                wt_agent = self._ensure_wt_agent(tab)
+                if wt_agent is not None and wt_agent._wt_pending:
+                    wt_agent._release_worktree()
             except Exception:
                 logger.debug("Worktree release on tab close failed", exc_info=True)
         self.printer.cleanup_tab(tab_id)
@@ -459,7 +480,13 @@ class VSCodeServer(
         tab = self._get_tab(tab_id)
         with self._state_lock:
             tab.selected_model = self._default_model
-        tab.agent.new_chat()
+            # Clear the long-lived chat identity for this tab; the
+            # next ``_cmd_run`` will mint a fresh chat id when it
+            # builds the per-task agent.  No agent is owned by the
+            # tab outside of an active task, so there is nothing
+            # else to reset here.
+            tab.chat_id = ""
+            tab.last_task_id = None
         self.printer.broadcast({
             "type": "showWelcome",
             "tabId": tab_id,
@@ -511,13 +538,12 @@ class VSCodeServer(
         # original ``sub_tab_id`` reach the newly opened tab.
         extra_str = str(result.get("extra", "") or "")
         subagent_info: dict[str, object] | None = None
-        is_worktree = False
+        extra_raw: object = None
         if extra_str:
             try:
-                extra = json.loads(extra_str)
-                if isinstance(extra, dict):
-                    is_worktree = bool(extra.get("is_worktree"))
-                    sub = extra.get("subagent")
+                extra_raw = json.loads(extra_str)
+                if isinstance(extra_raw, dict):
+                    sub = extra_raw.get("subagent")
                     if isinstance(sub, dict):
                         subagent_info = sub
             except (json.JSONDecodeError, TypeError):
@@ -532,14 +558,18 @@ class VSCodeServer(
             rebound_running = self._reattach_running_chat(chat_id, tab_id)
 
         tab = self._get_tab(tab_id)
-        # Always attach the new tab's own agent to the resumed chat
-        # so a follow-up prompt typed in this tab continues the same
-        # chat session.  With multi-viewer subscribe semantics the
-        # source tab (running the live task) keeps its own _RunningAgentState,
-        # so the new tab needs its own agent linked to the chat too.
-        tab.agent.resume_chat_by_id(chat_id)
+        # Associate the resumed chat id with this tab so a follow-up
+        # prompt typed here will be carried into the agent built by
+        # the next ``_cmd_run``.  With multi-viewer subscribe
+        # semantics the source tab (running the live task) keeps
+        # its own ``_RunningAgentState``; the new tab just needs to
+        # remember which chat session it belongs to.
         with self._state_lock:
-            tab.use_worktree = is_worktree
+            tab.chat_id = chat_id
+            tab.use_worktree = bool(
+                extra_raw.get("is_worktree")
+                if isinstance(extra_raw, dict) else False,
+            )
             # If a prior ``closeTab`` for this tab id had flipped the
             # deferred-disposal flag (e.g. the web server's grace
             # timer fired during a slow reload while a task was still

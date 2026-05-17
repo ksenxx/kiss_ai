@@ -115,6 +115,7 @@ class TestNewChatSimpleBroadcast:
 
         tab_id = "tab-bug71-ok"
         tab = server._get_tab(tab_id)
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.use_worktree = True
         tab.is_task_active = False
 
@@ -145,6 +146,7 @@ class TestBug72WorktreeActionDuringRunningTask:
 
         tab_id = "tab-bug72-merge"
         tab = server._get_tab(tab_id)
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.use_worktree = True
 
         agent = cast(WorktreeSorcarAgent, tab.agent)
@@ -185,6 +187,7 @@ class TestBug72WorktreeActionDuringRunningTask:
 
         tab_id = "tab-bug72-discard"
         tab = server._get_tab(tab_id)
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.use_worktree = True
 
         agent = cast(WorktreeSorcarAgent, tab.agent)
@@ -224,6 +227,7 @@ class TestIsTaskActiveFlagExists:
         server = VSCodeServer()
         server.work_dir = str(tmp_path)
         tab = server._get_tab("tab-new")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         assert hasattr(tab, "is_task_active"), (
             "_RunningAgentState must expose ``is_task_active`` (required by "
             "the BUG-71 / BUG-72 fix)."

@@ -27,6 +27,7 @@ import re
 import threading
 import unittest
 
+from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.diff_merge import _diff_files, _hunk_to_dict
 from kiss.agents.vscode.server import VSCodeServer
 
@@ -56,6 +57,7 @@ class TestCmdRunSpuriousStatusFalse(unittest.TestCase):
 
     def test_duplicate_run_broadcasts_running_true_while_task_is_alive(self) -> None:
         tab = self.server._get_tab("t1")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         blocker = threading.Event()
         thread = threading.Thread(target=blocker.wait, daemon=True)
         thread.start()
@@ -89,6 +91,7 @@ class TestCloseTabRaceWithTaskStartup(unittest.TestCase):
 
     def test_close_tab_refuses_when_task_thread_alive(self) -> None:
         tab = self.server._get_tab("t1")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         blocker = threading.Event()
         thread = threading.Thread(target=blocker.wait, daemon=True)
         thread.start()
@@ -176,6 +179,7 @@ class TestFinishMergeRedundantLookup(unittest.TestCase):
         first lookup, so removing the tab mid-flow doesn't lose it."""
         server, events = _make_server()
         tab = server._get_tab("t1")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.is_merging = True
         tab.use_worktree = False
 
@@ -241,6 +245,7 @@ class TestCmdRunAlreadyRunningErrorContent(unittest.TestCase):
 
     def test_error_and_status_both_carry_tab_id(self) -> None:
         tab = self.server._get_tab("t1")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         blocker = threading.Event()
         thread = threading.Thread(target=blocker.wait, daemon=True)
         thread.start()

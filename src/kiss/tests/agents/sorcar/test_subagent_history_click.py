@@ -42,6 +42,7 @@ import threading
 from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
+from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 from kiss.agents.vscode.server import VSCodeServer
 
@@ -263,6 +264,7 @@ class TestReplaySessionOpensSubagentTab:
 
         # Simulate the parent agent still running under its own tab.
         parent_tab = server._get_tab("tab-parent")
+        parent_tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         parent_tab.agent._chat_id = chat_id
         parent_tab.is_task_active = True
         parent_thread = threading.Thread(

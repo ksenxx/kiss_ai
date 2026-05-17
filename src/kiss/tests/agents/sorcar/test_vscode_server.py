@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar.git_worktree import GitWorktree
+from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.helpers import model_vendor
 from kiss.agents.vscode.server import VSCodeServer
 
@@ -850,13 +851,16 @@ class TestWorktreeServerIntegration(unittest.TestCase):
         self._git("checkout", "main")
 
         tab = self.server._get_tab("0")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.use_worktree = True
         _set_agent_wt(tab.agent, self.repo, "kiss/merge-test", "main")
 
         result = self.server._handle_worktree_action("merge", "0")
         assert result["success"] is True
         assert "Successfully merged" in result["message"]
-        assert self.server._get_tab("0").agent._wt_branch is None
+        after_agent = self.server._get_tab("0").agent
+        assert after_agent is not None
+        assert after_agent._wt_branch is None
 
     def test_handle_worktree_action_discard(self) -> None:
         """Discard action removes worktree branch."""
@@ -864,13 +868,16 @@ class TestWorktreeServerIntegration(unittest.TestCase):
         self._git("checkout", "main")
 
         tab = self.server._get_tab("0")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.use_worktree = True
         _set_agent_wt(tab.agent, self.repo, "kiss/discard-test", "main")
 
         result = self.server._handle_worktree_action("discard", "0")
         assert result["success"] is True
         assert "Discarded" in result["message"]
-        assert self.server._get_tab("0").agent._wt_branch is None
+        after_agent = self.server._get_tab("0").agent
+        assert after_agent is not None
+        assert after_agent._wt_branch is None
 
     def test_worktree_action_command_routing(self) -> None:
         """worktreeAction command is routed to _handle_worktree_action."""
@@ -898,6 +905,7 @@ class TestWorktreeServerIntegration(unittest.TestCase):
         self._git("checkout", "main")
 
         tab = self.server._get_tab("0")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.use_worktree = True
         _set_agent_wt(tab.agent, self.repo, "kiss/progress-test", "main")
 
@@ -915,6 +923,7 @@ class TestWorktreeServerIntegration(unittest.TestCase):
         self._git("checkout", "main")
 
         tab = self.server._get_tab("0")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.use_worktree = True
         _set_agent_wt(tab.agent, self.repo, "kiss/no-progress-test", "main")
 
@@ -955,6 +964,7 @@ class TestAgentToggle(unittest.TestCase):
 
         server = VSCodeServer()
         tab = server._get_tab("0")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         assert tab.use_worktree is False
         assert isinstance(tab.agent, WorktreeSorcarAgent)
         assert isinstance(tab.agent, ChatSorcarAgent)

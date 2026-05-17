@@ -35,7 +35,7 @@ from kiss.agents.sorcar.cli_helpers import (
     _print_recent_chats,
 )
 from kiss.agents.sorcar.git_worktree import GitWorktree
-from kiss.agents.sorcar.worktree_sorcar_agent import _generate_commit_message
+from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent, _generate_commit_message
 from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 from kiss.agents.vscode.server import VSCodeServer
 
@@ -204,6 +204,7 @@ class TestVSCodeServerUncoveredBranches:
         """_check_merge_conflict returns False when no wt_branch (line 733)."""
         server = VSCodeServer()
         tab = server._get_tab("0")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.use_worktree = True
         tab.agent._wt = None  # type: ignore[attr-defined]
         assert server._check_merge_conflict() is False
@@ -212,6 +213,7 @@ class TestVSCodeServerUncoveredBranches:
         """_get_worktree_changed_files returns [] when no branches."""
         server = VSCodeServer()
         tab = server._get_tab("0")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.use_worktree = True
         tab.agent._wt = None  # type: ignore[attr-defined]
         assert server._get_worktree_changed_files() == []
@@ -253,6 +255,7 @@ class TestVSCodeServerUncoveredBranches:
 
             server = VSCodeServer()
             tab = server._get_tab("0")
+            tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
             tab.use_worktree = True
             tab.agent._wt = GitWorktree(
                 repo_root=repo, branch="test-wt",
