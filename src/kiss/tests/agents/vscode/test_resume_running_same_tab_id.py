@@ -1,8 +1,8 @@
 """Regression: loading a still-running task into a tab whose id equals
 the chat_id (the common case under the ``tab_id == chat_id``
 invariant — e.g. after a VS Code reload, or when a user clicks the
-history row for a chat whose live ``_TabState`` is still alive under
-``_tab_states[chat_id]``) must broadcast ``status running=true``
+history row for a chat whose live ``_RunningAgentState`` is still alive under
+``_running_agent_states[chat_id]``) must broadcast ``status running=true``
 BEFORE ``task_events``.
 
 Without this:
@@ -63,8 +63,8 @@ class _StubPrinter:
         pass
 
 
-class _StubTabState:
-    """Stand-in for a still-running ``_TabState``."""
+class _StubRunningAgentState:
+    """Stand-in for a still-running ``_RunningAgentState``."""
 
     def __init__(self) -> None:
         self.task_thread = type(
@@ -106,7 +106,7 @@ def _make_server() -> tuple[VSCodeServer, _StubPrinter]:
     srv = object.__new__(VSCodeServer)
     printer = _StubPrinter()
     srv.printer = printer  # type: ignore[assignment]
-    srv._tab_states = {}  # type: ignore[attr-defined]
+    srv._running_agent_states = {}  # type: ignore[attr-defined]
     srv._state_lock = threading.RLock()  # type: ignore[attr-defined,assignment]
     srv._default_model = "test"  # type: ignore[attr-defined]
     return srv, printer
@@ -120,7 +120,7 @@ class TestReattachRunningChatSameTabId:
     def test_returns_true_when_running_state_exists_same_id(self) -> None:
         srv, printer = _make_server()
         chat_id = "chat-and-tab-same-id"
-        srv._tab_states[chat_id] = _StubTabState()  # type: ignore[assignment]
+        srv._running_agent_states[chat_id] = _StubRunningAgentState()  # type: ignore[assignment]
 
         result = srv._reattach_running_chat(chat_id, chat_id)
 
@@ -139,14 +139,14 @@ class TestReattachRunningChatSameTabId:
 
     def test_returns_false_when_no_running_state(self) -> None:
         srv, _ = _make_server()
-        # No _tab_states entry → nothing to reattach to.
+        # No _running_agent_states entry → nothing to reattach to.
         assert srv._reattach_running_chat("chat-x", "chat-x") is False
 
     def test_subscribe_called_when_ids_differ(self) -> None:
         srv, printer = _make_server()
         chat_id = "chat-1"
         new_tab_id = "tab-2"
-        srv._tab_states[chat_id] = _StubTabState()  # type: ignore[assignment]
+        srv._running_agent_states[chat_id] = _StubRunningAgentState()  # type: ignore[assignment]
 
         result = srv._reattach_running_chat(chat_id, new_tab_id)
 
@@ -167,9 +167,9 @@ class TestReplaySessionSameTabIdEmitsStatusFirst:
     ) -> None:
         srv, printer = _make_server()
         chat_id = "chat-same-as-tab"
-        # The running _TabState lives under chat_id, which IS the
+        # The running _RunningAgentState lives under chat_id, which IS the
         # frontend's new tab id (tab_id==chat_id invariant).
-        srv._tab_states[chat_id] = _StubTabState()  # type: ignore[assignment]
+        srv._running_agent_states[chat_id] = _StubRunningAgentState()  # type: ignore[assignment]
 
         events_blob = json.dumps([
             {"type": "text_delta", "text": "hi"},
@@ -193,7 +193,7 @@ class TestReplaySessionSameTabIdEmitsStatusFirst:
 
         with patch.object(
             VSCodeServer, "_get_tab",
-            return_value=srv._tab_states[chat_id],
+            return_value=srv._running_agent_states[chat_id],
         ), patch.object(
             VSCodeServer, "_emit_pending_worktree",
         ), patch(

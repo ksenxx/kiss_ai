@@ -5,10 +5,10 @@ get-or-create tab pattern.  Naively delegating ``_cmd_run`` to
 ``_get_tab`` introduced a TOCTOU bug (see audit round 4, A6): the
 lock would be released between get-or-create and the alive-check /
 thread-start, allowing a concurrent ``_close_tab`` to drop the tab
-from ``_tab_states``.  The correct shape inlines the get-or-create
+from ``_running_agent_states``.  The correct shape inlines the get-or-create
 inside the same ``_state_lock`` block that performs the alive check
 and starts the thread, so no other helper that would re-acquire the
-lock is called.  ``_TabState`` import is shared at module top, not
+lock is called.  ``_RunningAgentState`` import is shared at module top, not
 duplicated locally.
 
 Redundancy 2 — The autocommit-prompt broadcast pattern
@@ -37,7 +37,7 @@ class TestCmdRunUsesGetTab:
         Calling ``_get_tab`` would acquire and release ``_state_lock``
         once, then ``_cmd_run`` re-acquires it for the alive check and
         thread start — opening a TOCTOU window where ``_close_tab`` can
-        drop the tab from ``_tab_states`` between the two lock blocks.
+        drop the tab from ``_running_agent_states`` between the two lock blocks.
         The audit-round-4 A6 fix mandates a single lock block.
         """
         from kiss.agents.vscode.commands import _CommandsMixin
@@ -60,35 +60,35 @@ class TestCmdRunUsesGetTab:
         )
 
     def test_cmd_run_uses_module_level_tab_state_import(self) -> None:
-        """_cmd_run must use the module-level _TabState import, not a
+        """_cmd_run must use the module-level _RunningAgentState import, not a
         local re-import inside the function body."""
         from kiss.agents.vscode.commands import _CommandsMixin
 
         src = inspect.getsource(_CommandsMixin._cmd_run)
-        assert "from kiss.agents.vscode.tab_state import _TabState" not in src, (
-            "_cmd_run must not redundantly re-import _TabState; the "
+        assert "from kiss.agents.vscode.running_agent_state import _RunningAgentState" not in src, (
+            "_cmd_run must not redundantly re-import _RunningAgentState; the "
             "module-level import in commands.py is sufficient."
         )
 
     def test_get_tab_creates_tab_for_new_id(self) -> None:
-        """_get_tab must create a new _TabState when tab_id is unknown."""
+        """_get_tab must create a new _RunningAgentState when tab_id is unknown."""
         from kiss.agents.vscode.server import VSCodeServer
 
         server = VSCodeServer.__new__(VSCodeServer)
-        server._tab_states = {}
+        server._running_agent_states = {}
         server._default_model = "test-model"
         server._state_lock = threading.Lock()
         tab = server._get_tab("new-tab")
         assert tab is not None
         assert tab.selected_model == "test-model"
-        assert "new-tab" in server._tab_states
+        assert "new-tab" in server._running_agent_states
 
     def test_get_tab_returns_existing_tab(self) -> None:
         """_get_tab must return the same object for repeated calls."""
         from kiss.agents.vscode.server import VSCodeServer
 
         server = VSCodeServer.__new__(VSCodeServer)
-        server._tab_states = {}
+        server._running_agent_states = {}
         server._default_model = "test-model"
         server._state_lock = threading.Lock()
         tab1 = server._get_tab("t1")

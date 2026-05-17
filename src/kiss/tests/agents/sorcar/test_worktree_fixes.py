@@ -25,7 +25,7 @@ from kiss.agents.vscode.diff_merge import (
     _prepare_merge_view,
     _save_untracked_base,
 )
-from kiss.agents.vscode.server import VSCodeServer, _TabState
+from kiss.agents.vscode.server import VSCodeServer, _RunningAgentState
 
 
 def _redirect_db(tmpdir: str) -> tuple:
@@ -249,8 +249,8 @@ class TestFix3MainTreeBusyGuard:
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_tab_state_has_is_running_non_wt(self) -> None:
-        """_TabState should have is_running_non_wt attribute."""
-        tab = _TabState("t1", "gpt-4")
+        """_RunningAgentState should have is_running_non_wt attribute."""
+        tab = _RunningAgentState("t1", "gpt-4")
         assert hasattr(tab, "is_running_non_wt")
         assert tab.is_running_non_wt is False
 
@@ -373,7 +373,7 @@ class TestFix4SymmetricGuard:
         with server._state_lock:
             would_block = any(
                 t.is_merging and t.use_worktree
-                for t in server._tab_states.values()
+                for t in server._running_agent_states.values()
             )
         assert would_block, (
             "Fix 4: non-wt task must be blocked when wt merge is active"
@@ -389,7 +389,7 @@ class TestFix4SymmetricGuard:
         with server._state_lock:
             would_block = any(
                 t.is_merging and t.use_worktree
-                for t in server._tab_states.values()
+                for t in server._running_agent_states.values()
             )
         assert not would_block, (
             "Fix 4: non-wt merge should not block another non-wt task"

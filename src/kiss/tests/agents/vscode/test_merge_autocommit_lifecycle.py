@@ -429,19 +429,19 @@ class TestAutocommitPromptNotShownForCleanWorkTree(_LifecycleHarness):
 
 class TestFinishMergeTabMissing(_LifecycleHarness):
     """BUG REPRODUCTION: when _finish_merge is called on a process that
-    doesn't have the tab in _tab_states (e.g., merge-action was routed
+    doesn't have the tab in _running_agent_states (e.g., merge-action was routed
     to the service process after the task process was disposed), the
     autocommit_prompt must still be emitted for dirty non-worktree tabs.
 
     This reproduces the bug where merge buttons and autocommit were not
-    shown because the tab was missing from _tab_states.
+    shown because the tab was missing from _running_agent_states.
     """
 
     def test_autocommit_prompt_when_tab_not_in_states(self) -> None:
         """_finish_merge must send autocommit_prompt even when the tab
-        is not pre-existing in _tab_states."""
+        is not pre-existing in _running_agent_states."""
         tab_id = "missing-tab-id"
-        assert tab_id not in self.server._tab_states
+        assert tab_id not in self.server._running_agent_states
 
         Path(self.tmpdir, "README.md").write_text("# Modified\n")
 
@@ -451,13 +451,13 @@ class TestFinishMergeTabMissing(_LifecycleHarness):
         assert "merge_ended" in types, f"merge_ended not found: {types}"
         assert "autocommit_prompt" in types, (
             "autocommit_prompt should be sent even when the tab is missing "
-            f"from _tab_states. Got: {types}"
+            f"from _running_agent_states. Got: {types}"
         )
 
     def test_merge_ended_still_sent_when_tab_missing(self) -> None:
         """merge_ended must always be broadcast, even when tab is missing."""
         tab_id = "missing-tab-2"
-        assert tab_id not in self.server._tab_states
+        assert tab_id not in self.server._running_agent_states
 
         self.server._finish_merge(tab_id)
 

@@ -24,7 +24,7 @@ BUG-72: ``VSCodeServer._handle_worktree_action("merge"/"discard")``
 
 Both bugs have a common root cause: there is no per-tab "a task is
 actively executing ``agent.run()``" flag.  The fix adds
-``_TabState.is_task_active`` (set True immediately before the
+``_RunningAgentState.is_task_active`` (set True immediately before the
 ``agent.run()`` loop and cleared in the post-task ``finally`` block
 BEFORE ``worktree_done`` is broadcast), and wires it into the
 ``_new_chat`` and ``_handle_worktree_action`` guards.
@@ -214,7 +214,7 @@ class TestBug72WorktreeActionDuringRunningTask:
 
 
 class TestIsTaskActiveFlagExists:
-    """The fix relies on a new ``_TabState.is_task_active`` flag that
+    """The fix relies on a new ``_RunningAgentState.is_task_active`` flag that
     is cleared on construction and set True while a task is active.
     """
 
@@ -225,7 +225,7 @@ class TestIsTaskActiveFlagExists:
         server.work_dir = str(tmp_path)
         tab = server._get_tab("tab-new")
         assert hasattr(tab, "is_task_active"), (
-            "_TabState must expose ``is_task_active`` (required by "
+            "_RunningAgentState must expose ``is_task_active`` (required by "
             "the BUG-71 / BUG-72 fix)."
         )
         assert tab.is_task_active is False, (

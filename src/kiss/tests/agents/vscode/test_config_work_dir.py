@@ -146,7 +146,7 @@ class TestCmdSaveConfigUpdatesServerWorkDir(TestCase):
                 self.printer = FakePrinter()  # type: ignore[assignment]
                 self.work_dir = "/old/dir"
                 self._state_lock = __import__("threading").Lock()
-                self._tab_states: dict[str, Any] = {}
+                self._running_agent_states: dict[str, Any] = {}
                 self._default_model = ""
 
             def _get_models(self) -> None:
@@ -175,7 +175,7 @@ class TestCmdSaveConfigUpdatesServerWorkDir(TestCase):
                 self.printer = FakePrinter()  # type: ignore[assignment]
                 self.work_dir = "/old/dir"
                 self._state_lock = __import__("threading").Lock()
-                self._tab_states: dict[str, Any] = {}
+                self._running_agent_states: dict[str, Any] = {}
                 self._default_model = ""
 
             def _get_models(self) -> None:
@@ -203,7 +203,7 @@ class TestCmdSaveConfigUpdatesServerWorkDir(TestCase):
                 self.printer = FakePrinter()  # type: ignore[assignment]
                 self.work_dir = "/old/dir"
                 self._state_lock = __import__("threading").Lock()
-                self._tab_states: dict[str, Any] = {}
+                self._running_agent_states: dict[str, Any] = {}
                 self._default_model = ""
 
             def _get_models(self) -> None:

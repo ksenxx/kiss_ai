@@ -152,7 +152,7 @@ _MAX_PROMPT_BYTES = 1_000_000
 # re-claims a tab id (current ``tabId`` or any entry in
 # ``restoredTabs``) cancels the pending close before it fires.  10s
 # is long enough to cover typical reloads on a slow link without
-# letting an orphaned ``_TabState`` linger meaningfully.
+# letting an orphaned ``_RunningAgentState`` linger meaningfully.
 _TAB_CLOSE_GRACE = 10.0
 
 # Path to the localhost Unix-domain socket exposed by
@@ -2162,7 +2162,7 @@ class RemoteAccessServer:
         # over many short-lived sessions.
         self._ws_tabs: dict[ServerConnection, set[str]] = {}
         # Deferred-disposal state for tabs whose WebSocket connection
-        # has dropped but whose backend ``_TabState`` should survive a
+        # has dropped but whose backend ``_RunningAgentState`` should survive a
         # short grace window so a reload / transient reconnect can
         # re-claim it.  See :meth:`_schedule_tab_close`.
         self._pending_tab_closes: dict[str, asyncio.TimerHandle] = {}
@@ -2387,7 +2387,7 @@ class RemoteAccessServer:
         Pops the merge state (if any) for *tab_id* and dispatches the
         ``closeTab`` command through :meth:`_run_cmd`, which routes
         through :class:`VSCodeServer._close_tab`.  When the tab is
-        idle, ``_close_tab`` disposes the ``_TabState`` immediately;
+        idle, ``_close_tab`` disposes the ``_RunningAgentState`` immediately;
         when a task or merge review is still in flight, it flips
         ``frontend_closed=True`` and lets the existing deferred-
         disposal hook (:meth:`VSCodeServer._dispose_if_closed`) tear

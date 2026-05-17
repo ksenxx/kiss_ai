@@ -2832,7 +2832,7 @@ class TestSorcarSidebarViewPublicAPI(unittest.TestCase):
 
     def test_dispose_closes_agent_client(self) -> None:
         """Phase 3+: dispose closes the single AgentClient (UDS).  Per-tab
-        AgentProcess subprocesses no longer exist; the daemon's _TabStates
+        AgentProcess subprocesses no longer exist; the daemon's _RunningAgentStates
         survive the deferred-close grace window and re-attach on the next
         activation via ``ready`` / ``resumeSession``."""
         idx = self._ts.index("public dispose()")
@@ -2978,7 +2978,7 @@ class TestSorcarSidebarViewDisposeHandler(unittest.TestCase):
     def test_public_dispose_closes_client_and_emitter(self) -> None:
         """Phase 3+: dispose closes the AgentClient (UDS to kiss-web
         daemon) and disposes the commit-message emitter.  The daemon
-        keeps its _TabStates alive through the deferred-close grace
+        keeps its _RunningAgentStates alive through the deferred-close grace
         window so an extension reload does NOT interrupt running tasks."""
         idx = self._ts.index("public dispose()")
         end = self._ts.index("\n  }", idx) + 4

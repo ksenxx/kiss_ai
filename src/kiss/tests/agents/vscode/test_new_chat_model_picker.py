@@ -127,7 +127,7 @@ class TestNewChatModelPicker:
             "tabId": "tab-new",
         })
 
-        tab = server._tab_states.get("tab-new")
+        tab = server._running_agent_states.get("tab-new")
         assert tab is not None
         assert tab.selected_model == "fresh-model", (
             f"New tab should use DB model 'fresh-model', "
@@ -162,7 +162,7 @@ class TestNewChatModelPicker:
         assert len(welcome_events) == 1
         assert welcome_events[0].get("model") == "model-B"
 
-        tab = server._tab_states.get("tab-new")
+        tab = server._running_agent_states.get("tab-new")
         assert tab is not None
         assert tab.selected_model == "model-B"
 

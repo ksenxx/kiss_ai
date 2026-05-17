@@ -27,7 +27,7 @@ from kiss.agents.vscode.diff_merge import (
     _prepare_merge_view,
 )
 from kiss.agents.vscode.helpers import generate_commit_message_from_diff
-from kiss.agents.vscode.tab_state import _TabState
+from kiss.agents.vscode.running_agent_state import _RunningAgentState
 
 if TYPE_CHECKING:
     from kiss.agents.vscode.printer import VSCodePrinter
@@ -56,9 +56,9 @@ class _MergeFlowMixin:
         printer: VSCodePrinter
         work_dir: str
         _state_lock: threading.Lock
-        _tab_states: dict[str, _TabState]
+        _running_agent_states: dict[str, _RunningAgentState]
 
-        def _get_tab(self, tab_id: str) -> _TabState: ...
+        def _get_tab(self, tab_id: str) -> _RunningAgentState: ...
         def _any_non_wt_running(self) -> bool: ...
         def _dispose_if_closed(self, tab_id: str) -> None: ...
 
@@ -87,10 +87,10 @@ class _MergeFlowMixin:
             resolved_tab_id = tab_id or getattr(
                 self.printer._thread_local, "tab_id", None,
             )
-            resolved_tab: _TabState | None = None
+            resolved_tab: _RunningAgentState | None = None
             with self._state_lock:
                 if resolved_tab_id is not None:
-                    resolved_tab = self._tab_states.get(resolved_tab_id)
+                    resolved_tab = self._running_agent_states.get(resolved_tab_id)
                     if resolved_tab is not None:
                         resolved_tab.is_merging = True
             try:
@@ -190,7 +190,7 @@ class _MergeFlowMixin:
         if not tab.use_worktree:
             self._broadcast_autocommit_prompt(tab_id)
         # If the user closed the tab while the merge view was open,
-        # dispose the now-idle _TabState.  No-op otherwise.
+        # dispose the now-idle _RunningAgentState.  No-op otherwise.
         self._dispose_if_closed(tab_id)
 
     def _main_dirty_files(self) -> list[str]:
@@ -337,7 +337,7 @@ class _MergeFlowMixin:
                 )
                 if tab_id:
                     with self._state_lock:
-                        tab = self._tab_states.get(tab_id)
+                        tab = self._running_agent_states.get(tab_id)
                     task_id = (
                         tab.agent._last_task_id
                         if tab is not None
@@ -613,7 +613,7 @@ class _MergeFlowMixin:
                       wt._wt_branch)
         return result.stdout.strip().splitlines() if result.returncode == 0 else []
 
-    def _check_worktree_busy(self, tab: _TabState, verb: str) -> dict[str, Any] | None:
+    def _check_worktree_busy(self, tab: _RunningAgentState, verb: str) -> dict[str, Any] | None:
         """Return an error dict if a worktree action should be refused, else None.
 
         Checks both the tab's own task and any non-worktree task running

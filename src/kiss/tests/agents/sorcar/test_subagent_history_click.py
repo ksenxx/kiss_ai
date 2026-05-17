@@ -29,7 +29,7 @@ Spec
 
    c. Does NOT invoke ``_reattach_running_chat`` — sub-agents share
       the parent's chat_id but run as threads inside the parent's
-      executor; rebinding the parent's ``_TabState`` would steal it.
+      executor; rebinding the parent's ``_RunningAgentState`` would steal it.
 
    d. Still broadcasts ``task_events`` so persisted history shows.
 """
@@ -246,7 +246,7 @@ class TestReplaySessionOpensSubagentTab:
     def test_replay_subagent_does_not_invoke_reattach_running_chat(
         self,
     ) -> None:
-        """A sub-agent row must NOT rebind the parent's ``_TabState``.
+        """A sub-agent row must NOT rebind the parent's ``_RunningAgentState``.
 
         The parent's tab state holds the running thread; rebinding it
         to the sub-agent's new tab would steal the parent's tab.
@@ -280,11 +280,11 @@ class TestReplaySessionOpensSubagentTab:
 
         # Parent tab MUST remain keyed under "tab-parent" — not
         # rebound to "tab-history-click".
-        assert "tab-parent" in server._tab_states
-        assert server._tab_states["tab-parent"] is parent_tab
+        assert "tab-parent" in server._running_agent_states
+        assert server._running_agent_states["tab-parent"] is parent_tab
         # The new tab has its own (separate) state.
-        assert "tab-history-click" in server._tab_states
+        assert "tab-history-click" in server._running_agent_states
         assert (
-            server._tab_states["tab-history-click"] is not parent_tab
+            server._running_agent_states["tab-history-click"] is not parent_tab
         )
         parent_thread.join(timeout=1)

@@ -271,18 +271,18 @@ class TestUserAnswerQueueStaleReference(unittest.TestCase):
 
         src = inspect.getsource(VSCodeServer._cmd_user_answer)
         self.assertIn("ans_state.user_answer_queue", src)
-        self.assertIn("self._tab_states.get(ans_tab)", src)
+        self.assertIn("self._running_agent_states.get(ans_tab)", src)
         lines = src.split("\n")
         found_lock = False
         for line in lines:
             if "_state_lock" in line:
                 found_lock = True
                 break
-            if "_tab_states.get" in line:
+            if "_running_agent_states.get" in line:
                 break
         self.assertTrue(
             found_lock,
-            "userAnswer should read _tab_states under _state_lock — race fixed",
+            "userAnswer should read _running_agent_states under _state_lock — race fixed",
         )
 
 
