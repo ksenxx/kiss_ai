@@ -75,7 +75,7 @@ class TestCmdRunUsesGetTab:
         from kiss.agents.vscode.server import VSCodeServer
 
         server = VSCodeServer.__new__(VSCodeServer)
-        server._running_agent_states = {}
+        server._running_agent_states.clear()
         server._default_model = "test-model"
         server._state_lock = threading.Lock()
         tab = server._get_tab("new-tab")
@@ -88,7 +88,7 @@ class TestCmdRunUsesGetTab:
         from kiss.agents.vscode.server import VSCodeServer
 
         server = VSCodeServer.__new__(VSCodeServer)
-        server._running_agent_states = {}
+        server._running_agent_states.clear()
         server._default_model = "test-model"
         server._state_lock = threading.Lock()
         tab1 = server._get_tab("t1")

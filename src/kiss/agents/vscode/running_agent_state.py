@@ -50,7 +50,8 @@ class _RunningAgentState:
     to the plain stateful code path, so no separate non-worktree agent
     instance is needed.  Runtime state (stop event, task thread,
     answer queue, merge flag) also lives here so the server needs
-    only a single ``_running_agent_states`` dict.
+    only a single ``_running_agent_states`` dict (the process-global
+    map lives in :mod:`kiss.agents.sorcar.chat_sorcar_agent`).
     """
 
     __slots__ = (

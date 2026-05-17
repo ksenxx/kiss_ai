@@ -271,7 +271,7 @@ class TestUserAnswerQueueStaleReference(unittest.TestCase):
 
         src = inspect.getsource(VSCodeServer._cmd_user_answer)
         self.assertIn("ans_state.user_answer_queue", src)
-        self.assertIn("self._running_agent_states.get(ans_tab)", src)
+        self.assertIn("_running_agent_states.get(ans_tab)", src)
         lines = src.split("\n")
         found_lock = False
         for line in lines:

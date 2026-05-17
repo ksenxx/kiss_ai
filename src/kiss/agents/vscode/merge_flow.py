@@ -17,6 +17,7 @@ import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from kiss.agents.sorcar.chat_sorcar_agent import _running_agent_states
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps, repo_lock
 from kiss.agents.sorcar.persistence import _append_chat_event
 from kiss.agents.vscode.diff_merge import (
@@ -56,7 +57,6 @@ class _MergeFlowMixin:
         printer: VSCodePrinter
         work_dir: str
         _state_lock: threading.Lock
-        _running_agent_states: dict[str, _RunningAgentState]
 
         def _get_tab(self, tab_id: str) -> _RunningAgentState: ...
         def _any_non_wt_running(self) -> bool: ...
@@ -90,7 +90,7 @@ class _MergeFlowMixin:
             resolved_tab: _RunningAgentState | None = None
             with self._state_lock:
                 if resolved_tab_id is not None:
-                    resolved_tab = self._running_agent_states.get(resolved_tab_id)
+                    resolved_tab = _running_agent_states.get(resolved_tab_id)
                     if resolved_tab is not None:
                         resolved_tab.is_merging = True
             try:
@@ -337,7 +337,7 @@ class _MergeFlowMixin:
                 )
                 if tab_id:
                     with self._state_lock:
-                        tab = self._running_agent_states.get(tab_id)
+                        tab = _running_agent_states.get(tab_id)
                     task_id = (
                         tab.agent._last_task_id
                         if tab is not None
