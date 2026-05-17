@@ -84,7 +84,7 @@ class SorcarAgent(RelentlessAgent):
         return run_tasks_parallel(
             tasks,
             max_workers=max_workers,
-            model=getattr(self, "model_name", None),
+            model_name=getattr(self, "model_name", None),
             work_dir=getattr(self, "work_dir", None),
             printer=self.printer,
         )
@@ -175,7 +175,7 @@ class SorcarAgent(RelentlessAgent):
         def update_settings(
             is_parallel: bool | None = None,
             is_worktree: bool | None = None,
-            model: str | None = None,
+            model_name: str | None = None,
             max_budget: float | None = None,
             working_directory: str | None = None,
             use_web_browser: bool | None = None,
@@ -201,7 +201,7 @@ class SorcarAgent(RelentlessAgent):
             Args:
                 is_parallel: Enable/disable parallel sub-agent spawning.
                 is_worktree: Enable/disable git worktree isolation.
-                model: Switch the LLM model for subsequent sub-sessions.
+                model_name: Switch the LLM model for subsequent sub-sessions.
                 max_budget: Set the maximum budget in USD.
                 working_directory: Change the agent working directory.
                 use_web_browser: Enable/disable browser/web tools.
@@ -248,9 +248,9 @@ class SorcarAgent(RelentlessAgent):
                         "value": bool(is_worktree),
                     })
 
-            if model is not None:
-                self.model_name = model
-                updated.append(f"model={model}")
+            if model_name is not None:
+                self.model_name = model_name
+                updated.append(f"model={model_name}")
                 if broadcast:
                     broadcast({
                         "type": "updateSetting",
@@ -612,7 +612,7 @@ def _coerce_tasks(tasks: Any) -> list[str]:
 def run_tasks_parallel(
     tasks: list[str],
     max_workers: int | None = None,
-    model: str | None = None,
+    model_name: str | None = None,
     work_dir: str | None = None,
     printer: Printer | None = None,
 ) -> list[str]:
@@ -641,7 +641,7 @@ def run_tasks_parallel(
         max_workers: Maximum number of threads.  ``None`` lets
             :class:`~concurrent.futures.ThreadPoolExecutor` pick a default
             (typically ``min(32, cpu_count + 4)``).
-        model: LLM model name for all parallel agents.  ``None`` uses the
+        model_name: LLM model name for all parallel agents.  ``None`` uses the
             default from persistence (same as :meth:`SorcarAgent.run`).
         work_dir: Working directory for all parallel agents.  ``None`` uses
             the default (``artifact_dir/kiss_workdir``).
@@ -689,12 +689,12 @@ def run_tasks_parallel(
         tl = getattr(printer, "_thread_local", None) if printer else None
         if tl is not None:
             tl.tab_id = sub_tab_id
-        agent = SorcarAgent(f"Parallel-{task[:40]}")
+        agent = ChatSorcarAgent(f"Parallel-{task[:40]}")
         success = True
         try:
             result: str = agent.run(
                 prompt_template=task,
-                model_name=model,
+                model_name=model_name,
                 work_dir=work_dir,
                 printer=printer,
             )
