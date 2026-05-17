@@ -58,7 +58,6 @@ class KISSAgent(Base):
 
     def __init__(self, name: str) -> None:
         super().__init__(name)
-        self.step_offset = 0
 
     def _reset(
         self,
