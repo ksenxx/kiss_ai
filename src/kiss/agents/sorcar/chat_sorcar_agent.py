@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import yaml
 
@@ -25,6 +25,7 @@ from kiss.agents.sorcar.sorcar_agent import SorcarAgent, _coerce_tasks
 
 if TYPE_CHECKING:
     from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+    from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 MAX_TASKS = 10
 
@@ -270,6 +271,33 @@ class ChatSorcarAgent(SorcarAgent):
         # translation in the extension layer.
         if self._chat_id == "":
             self._chat_id = uuid.uuid4().hex
+
+        # Publish this agent in the process-global running-state map
+        # so any code in the ``sorcar`` package (e.g. a status helper,
+        # a stop button, a UI fan-out subscriber) can discover the
+        # live agent by its ``chat_id``.  Skip the registration when
+        # an entry is already present: the VS Code server creates
+        # the ``_RunningAgentState`` ahead of run-start under the
+        # ``tab_id == chat_id`` invariant — re-registering here would
+        # clobber the server's task-lifecycle flags.  Sub-agents
+        # launched by :meth:`_run_tasks_parallel` share the parent
+        # agent's ``chat_id``, so they too see an existing entry and
+        # skip; they are tracked separately via the printer's
+        # ``_persist_agents`` map keyed by ``sub_tab_id``.
+        registered_here = False
+        if self._chat_id not in ChatSorcarAgent.running_agent_states:
+            from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+
+            state = _RunningAgentState(
+                self._chat_id,
+                getattr(self, "model_name", "") or "",
+                agent=cast("WorktreeSorcarAgent", self),
+            )
+            state.selected_model = getattr(self, "model_name", "") or state.selected_model
+            state.is_task_active = True
+            ChatSorcarAgent.running_agent_states[self._chat_id] = state
+            registered_here = True
+
         agent_prompt = self.build_chat_prompt(prompt_template)
         task_id, self._chat_id = _add_task(prompt_template, chat_id=self._chat_id)
         self._last_task_id = task_id
@@ -305,5 +333,14 @@ class ChatSorcarAgent(SorcarAgent):
                 if self._subagent_info is not None:
                     extra_payload["subagent"] = self._subagent_info
                 _save_task_extra(extra_payload, task_id=task_id)
+            if registered_here:
+                current = ChatSorcarAgent.running_agent_states.get(self._chat_id)
+                # Only remove the entry we ourselves added.  A
+                # different code path (e.g. the VS Code server) may
+                # have replaced it mid-run; in that case the new
+                # owner is responsible for its own cleanup.
+                if current is not None and current.agent is self:
+                    current.is_task_active = False
+                    ChatSorcarAgent.running_agent_states.pop(self._chat_id, None)
 
 
