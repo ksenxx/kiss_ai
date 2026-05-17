@@ -352,13 +352,17 @@ class TestBrowserUIBranches:
         assert len(output_events) == 1
 
     def test_print_tool_result_non_core_tool(self) -> None:
-        """Non-core tool result is hidden unless is_error (line 273->281)."""
+        """Non-core tool result is now rendered (policy: render every tool's
+        return value EXCEPT ``finish``). Verify the event reaches the
+        recording for a custom (non-core) tool.
+        """
         p = BaseBrowserPrinter()
         p.start_recording()
         p.print("some result", type="tool_result", tool_name="custom_tool", is_error=False)
         events = p.stop_recording()
         tool_results = [e for e in events if e.get("type") == "tool_result"]
-        assert len(tool_results) == 0
+        assert len(tool_results) == 1
+        assert tool_results[0]["content"] == "some result"
 
 
 class TestWebUseToolBranches:
