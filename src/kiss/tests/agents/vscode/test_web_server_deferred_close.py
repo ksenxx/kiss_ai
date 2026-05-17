@@ -22,6 +22,7 @@ timers are exercised through the public-on-the-class helpers
 """
 
 from __future__ import annotations
+import pytest
 
 import asyncio
 import shutil
@@ -205,6 +206,7 @@ class TestDeferredWebTabClose(IsolatedAsyncioTestCase):
             release.set()
             thr.join(timeout=5)
 
+    @pytest.mark.slow
     async def test_reconnect_via_handle_ready_cancels_close(self) -> None:
         """A ``ready`` reconnect cancels the pending close for both the
         current ``tabId`` and every entry in ``restoredTabs``.

@@ -50,6 +50,7 @@ def _parse_yaml_result(result: str) -> dict:
 class TestRunTasksParallelReal:
     """Real LLM calls through run_tasks_parallel()."""
 
+    @pytest.mark.slow
     def test_single_task(self) -> None:
         """A single-element list completes and returns a one-element list."""
         results = run_tasks_parallel(
@@ -61,6 +62,7 @@ class TestRunTasksParallelReal:
         parsed = _parse_yaml_result(results[0])
         assert "summary" in parsed
 
+    @pytest.mark.slow
     def test_two_independent_tasks(self) -> None:
         """Two independent tasks run concurrently and both succeed."""
         results = run_tasks_parallel(
@@ -76,6 +78,7 @@ class TestRunTasksParallelReal:
             parsed = _parse_yaml_result(r)
             assert "summary" in parsed
 
+    @pytest.mark.slow
     def test_three_tasks_order_preserved(self) -> None:
         """Results are returned in the same order as input tasks."""
         tasks = [
@@ -91,6 +94,7 @@ class TestRunTasksParallelReal:
         assert "BETA" in summaries[1], f"Expected BETA in: {summaries[1]}"
         assert "GAMMA" in summaries[2], f"Expected GAMMA in: {summaries[2]}"
 
+    @pytest.mark.slow
     def test_with_work_dir(self, tmp_path: Path) -> None:
         """Tasks can use a custom work_dir."""
         # Create a file in tmp_path for the agent to read
@@ -112,6 +116,7 @@ class TestRunTasksParallelReal:
             f"Expected file content in summary: {parsed}"
         )
 
+    @pytest.mark.slow
     def test_file_tasks_parallel(self, tmp_path: Path) -> None:
         """Multiple file-reading tasks run in parallel."""
         # Create two files
@@ -144,6 +149,7 @@ class TestRunTasksParallelReal:
 class TestRunParallelEdgeCases:
     """Edge cases and boundary conditions for parallel execution."""
 
+    @pytest.mark.slow
     def test_single_task_parallel(self) -> None:
         """Parallel with just one task works correctly."""
         results = run_tasks_parallel(
@@ -154,6 +160,7 @@ class TestRunParallelEdgeCases:
         assert len(results) == 1
         assert "SOLO" in _parse_yaml_result(results[0]).get("summary", "")
 
+    @pytest.mark.slow
     def test_max_workers_one(self) -> None:
         """max_workers=1 forces sequential execution (still returns correct results)."""
         results = run_tasks_parallel(
@@ -210,6 +217,7 @@ class TestRunParallelEdgeCases:
 class TestParallelFileIO:
     """Verify parallel agents writing to separate files don't collide."""
 
+    @pytest.mark.slow
     def test_parallel_write_different_files(self, tmp_path: Path) -> None:
         """Multiple agents writing different files concurrently succeed."""
         tasks = [
@@ -232,6 +240,7 @@ class TestParallelFileIO:
             parsed = _parse_yaml_result(r)
             assert "summary" in parsed
 
+    @pytest.mark.slow
     def test_parallel_read_same_file(self, tmp_path: Path) -> None:
         """Multiple agents reading the same file concurrently succeed."""
         shared = tmp_path / "shared.txt"
@@ -280,6 +289,7 @@ class _CapturePrinter(BaseBrowserPrinter):
 class TestSubagentTabEventsE2E:
     """E2E tests verifying subagent tab events with real LLM calls."""
 
+    @pytest.mark.slow
     def test_subagent_tab_events_broadcast(self) -> None:
         """run_tasks_parallel with a printer broadcasts open/done tab events."""
         printer = _CapturePrinter()
@@ -319,6 +329,7 @@ class TestSubagentTabEventsE2E:
             "parent-e2e__sub_0", "parent-e2e__sub_1",
         }
 
+    @pytest.mark.slow
     def test_subagent_streaming_events_have_tab_ids(self) -> None:
         """Streaming events from sub-agents carry the correct tabId."""
         printer = _CapturePrinter()
@@ -354,6 +365,7 @@ class TestSubagentTabEventsE2E:
             "trimOldestTabs must exclude subagent tabs"
         )
 
+    @pytest.mark.slow
     def test_description_field_in_open_event(self) -> None:
         """openSubagentTab event carries 'description' field for JS frontend."""
         printer = _CapturePrinter()

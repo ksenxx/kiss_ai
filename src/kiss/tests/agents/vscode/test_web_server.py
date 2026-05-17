@@ -5,6 +5,7 @@ command dispatch, and event broadcasting through the web server.
 """
 
 from __future__ import annotations
+import pytest
 
 import asyncio
 import json
@@ -949,6 +950,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                 f"Got Unknown command errors: {unknown_errors}",
             )
 
+    @pytest.mark.slow
     async def test_ws_submit_emits_task_text_and_status(self) -> None:
         """The 'submit' command emits setTaskText and status running=True."""
         async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
@@ -3132,6 +3134,7 @@ class TestNamedTunnel(IsolatedAsyncioTestCase):
             proc.terminate()
             proc.wait()
 
+    @pytest.mark.slow
     async def test_start_tunnel_file_not_found(self) -> None:
         """_start_tunnel returns None when cloudflared is not found."""
         server = RemoteAccessServer(
@@ -3573,6 +3576,7 @@ class TestStartNamedTunnel(IsolatedAsyncioTestCase):
         finally:
             server._stop_tunnel()
 
+    @pytest.mark.slow
     async def test_named_tunnel_process_dies_returns_none(self) -> None:
         """_start_named_tunnel returns None when process exits without URL."""
         self._install_fake_cloudflared(
@@ -3605,6 +3609,7 @@ class TestStartQuickTunnelFallback(IsolatedAsyncioTestCase):
         elif CONFIG_PATH.exists():
             CONFIG_PATH.unlink()
 
+    @pytest.mark.slow
     async def test_quick_tunnel_no_url_from_stderr(self) -> None:
         """When stderr doesn't contain URL, falls back to metrics API."""
         import sys
@@ -3635,6 +3640,7 @@ class TestStartQuickTunnelFallback(IsolatedAsyncioTestCase):
             proc.terminate()
             proc.wait()
 
+    @pytest.mark.slow
     async def test_quick_tunnel_process_dies_during_fallback(self) -> None:
         """When cloudflared dies during metrics fallback, returns None."""
         import sys
@@ -4339,6 +4345,7 @@ class TestStopTunnelKillPath(IsolatedAsyncioTestCase):
         else:
             _URL_FILE.unlink(missing_ok=True)
 
+    @pytest.mark.slow
     async def test_kill_stubborn_process_with_ready_signal(self) -> None:
         """_stop_tunnel kills a process that ignores SIGTERM."""
         script = (
@@ -5011,6 +5018,7 @@ class TestStartTunnelGenericException(IsolatedAsyncioTestCase):
         import shutil
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
+    @pytest.mark.slow
     async def test_generic_exception_returns_none(self) -> None:
         """Non-FileNotFoundError exception → returns None (line 1474-1475)."""
         cf = os.path.join(self._tmpdir, "cloudflared")
@@ -5059,6 +5067,7 @@ class TestQuickTunnelUrlFromStderr(IsolatedAsyncioTestCase):
         result = self.server._start_quick_tunnel()
         self.assertEqual(result, "https://test-abc.trycloudflare.com")
 
+    @pytest.mark.slow
     async def test_process_dies_during_reader(self) -> None:
         """Process dies without URL → falls through (lines 1519-1522)."""
         cf = os.path.join(self._tmpdir, "cloudflared")
@@ -5098,6 +5107,7 @@ class TestNamedTunnelProcessDies(IsolatedAsyncioTestCase):
         import shutil
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
+    @pytest.mark.slow
     async def test_named_tunnel_process_dies_returns_none(self) -> None:
         """Named tunnel process exits without registering → None (1580-1581)."""
         cf = os.path.join(self._tmpdir, "cloudflared")
@@ -5325,6 +5335,7 @@ class TestSendWelcomeInfoDiscoverUrl(IsolatedAsyncioTestCase):
 class TestStartWithTunnel(unittest.TestCase):
     """Test start() with tunnel enabled using fake cloudflared."""
 
+    @pytest.mark.slow
     def test_start_with_tunnel_success(self) -> None:
         """start() with tunnel prints tunnel URL (lines 1715, 1730)."""
         tmpdir = tempfile.mkdtemp()
@@ -5380,6 +5391,7 @@ class TestStartWithTunnel(unittest.TestCase):
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    @pytest.mark.slow
     def test_start_with_tunnel_failure(self) -> None:
         """start() with tunnel failure prints warning (line 1732)."""
         tmpdir = tempfile.mkdtemp()
@@ -5505,6 +5517,7 @@ class TestQuickTunnelFallbackMetricsHit(IsolatedAsyncioTestCase):
         import shutil
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
+    @pytest.mark.slow
     async def test_fallback_finds_url_from_metrics(self) -> None:
         """When stderr has no URL, fallback poll finds it (1536-1539)."""
         cf = os.path.join(self._tmpdir, "cloudflared")
@@ -5573,6 +5586,7 @@ class TestQuickTunnelProcessPoll(IsolatedAsyncioTestCase):
         import shutil
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
+    @pytest.mark.slow
     async def test_process_exits_during_stderr_read(self) -> None:
         """Process exits after non-URL output → poll() check (line 1522)."""
         cf = os.path.join(self._tmpdir, "cloudflared")
@@ -5832,6 +5846,7 @@ class TestWatchdogEdgeDeregistration(IsolatedAsyncioTestCase):
                 f"Subprocess should still be alive at tick {tick}",
             )
 
+    @pytest.mark.slow
     async def test_unhealthy_at_limit_force_restarts(self) -> None:
         """At the threshold the watchdog terminates and restarts the tunnel.
 

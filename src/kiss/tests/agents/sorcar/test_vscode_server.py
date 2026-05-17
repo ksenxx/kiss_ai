@@ -7,6 +7,7 @@ in main.js.
 No mocks — uses real functions from the server module.
 """
 
+import pytest
 import shutil
 import subprocess
 import tempfile
@@ -1301,6 +1302,7 @@ class TestMergeSession(unittest.TestCase):
         errors = [e for e in self.events if e["type"] == "error"]
         assert any("merge review" in e["text"] for e in errors)
 
+    @pytest.mark.slow
     def test_merging_does_not_block_other_tabs(self) -> None:
         """A merge on one tab does not block tasks on other tabs."""
         self.server._get_tab("5").is_merging = True

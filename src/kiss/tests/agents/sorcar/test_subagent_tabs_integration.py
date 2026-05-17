@@ -156,6 +156,7 @@ class TestSubagentTabsIntegration:
             "Not all events have correct sub_tab_id"
         assert len(tab_id_events) >= 3
 
+    @pytest.mark.slow
     def test_no_printer_does_not_crash(self) -> None:
         """Verify _run_tasks_parallel works gracefully when printer is None."""
         # Setup

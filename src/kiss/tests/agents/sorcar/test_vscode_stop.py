@@ -10,6 +10,7 @@ thread that is blocked in I/O and never reaches a cooperative
 ``_check_stop()`` call.
 """
 
+import pytest
 import json
 import os
 import subprocess
@@ -21,6 +22,7 @@ import unittest
 class TestVSCodeServerStop(unittest.TestCase):
     """Integration test: stop command interrupts a running task."""
 
+    @pytest.mark.slow
     def test_stop_command_interrupts_running_task(self) -> None:
         """Send a run command, then a stop command, and verify the task stops."""
         home = os.path.expanduser("~")

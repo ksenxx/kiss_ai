@@ -23,6 +23,7 @@ Violations confirmed by database analysis of 91 tasks from 2026-05-14:
 """
 
 from __future__ import annotations
+import pytest
 
 import os
 import tempfile
@@ -153,6 +154,7 @@ def _get_tool_input(call: dict[str, Any]) -> dict[str, Any]:
 # DB evidence: 90% of tasks violated this (54/60)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.slow
 def test_user_prefs_read_is_first_tool_call() -> None:
     """Agent must call Read(USER_PREFS.md) as its very first tool call."""
     work_dir = tempfile.mkdtemp()
@@ -186,6 +188,7 @@ def test_user_prefs_read_is_first_tool_call() -> None:
 # DB evidence: 92% of tasks never read SORCAR.md at all (55/60)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.slow
 def test_sorcar_md_read_as_second_call() -> None:
     """Agent must call Read(SORCAR.md) as its second tool call."""
     work_dir = tempfile.mkdtemp()
@@ -219,6 +222,7 @@ def test_sorcar_md_read_as_second_call() -> None:
 # DB evidence: 11 tasks used cat/head for USER_PREFS, 6 for SORCAR
 # ---------------------------------------------------------------------------
 
+@pytest.mark.slow
 def test_no_bash_cat_for_mandatory_files() -> None:
     """Agent must not use Bash(cat/head) to read USER_PREFS.md or SORCAR.md."""
     work_dir = tempfile.mkdtemp()
@@ -252,6 +256,7 @@ def test_no_bash_cat_for_mandatory_files() -> None:
 # DB evidence: 7/60 tasks edited without prior Read (12%)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.slow
 def test_read_before_edit() -> None:
     """Agent must Read a file before calling Edit on it."""
     work_dir = tempfile.mkdtemp()
@@ -293,6 +298,7 @@ def test_read_before_edit() -> None:
 # DB evidence: 70% of code tasks skip lint (7/10)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.slow
 def test_lint_check_before_finish() -> None:
     """Agent must run `uv run check` before finishing when code was modified."""
     work_dir = tempfile.mkdtemp()
@@ -335,6 +341,7 @@ def test_lint_check_before_finish() -> None:
 # SYSTEM.md: "Compose the full detailed answer directly inside the summary"
 # ---------------------------------------------------------------------------
 
+@pytest.mark.slow
 def test_visibility_constraint_full_answer() -> None:
     """For informational questions, the finish summary must contain the full answer."""
     work_dir = tempfile.mkdtemp()
@@ -369,6 +376,7 @@ def test_visibility_constraint_full_answer() -> None:
 # DB evidence: Task 1179 used curl to evade, task 1222 only visited 5 URLs
 # ---------------------------------------------------------------------------
 
+@pytest.mark.slow
 def test_web_research_creates_information_file() -> None:
     """Web research task must create an information-*.md file with proper header."""
     work_dir = tempfile.mkdtemp()
@@ -415,6 +423,7 @@ def test_web_research_creates_information_file() -> None:
 # DB evidence: 0/91 tasks proactively updated USER_PREFS.md
 # ---------------------------------------------------------------------------
 
+@pytest.mark.slow
 def test_user_prefs_updated_after_learning() -> None:
     """Agent must update USER_PREFS.md when it discovers new project info."""
     work_dir = tempfile.mkdtemp()
@@ -457,6 +466,7 @@ def test_user_prefs_updated_after_learning() -> None:
 # DB evidence: Tasks 1177, 1205 said "Greeted the user" in summary
 # ---------------------------------------------------------------------------
 
+@pytest.mark.slow
 def test_visibility_no_meta_description_for_greeting() -> None:
     """For a greeting, the summary must be the actual greeting, not a narration."""
     work_dir = tempfile.mkdtemp()
@@ -497,6 +507,7 @@ def test_visibility_no_meta_description_for_greeting() -> None:
 # DB evidence: Task 1231 (weather) had 0 tool calls, task 1234 wrong year
 # ---------------------------------------------------------------------------
 
+@pytest.mark.slow
 def test_realtime_question_uses_tools() -> None:
     """Agent must use tools (go_to_url or Bash) for weather/current-events questions."""
     work_dir = tempfile.mkdtemp()
@@ -545,6 +556,7 @@ def test_realtime_question_uses_tools() -> None:
 # DB evidence: Task 1180 claimed "30+ sources" with only 4 URLs
 # ---------------------------------------------------------------------------
 
+@pytest.mark.slow
 def test_no_fabricated_source_count() -> None:
     """Agent must not claim more sources than it actually visited."""
     work_dir = tempfile.mkdtemp()
@@ -585,6 +597,7 @@ def test_no_fabricated_source_count() -> None:
 # DB evidence: 0/4 research tasks created information-*.md
 # ---------------------------------------------------------------------------
 
+@pytest.mark.slow
 def test_web_research_info_file_mandatory() -> None:
     """Research task must create PWD/tmp/information-*.md with counter tracking."""
     work_dir = tempfile.mkdtemp()

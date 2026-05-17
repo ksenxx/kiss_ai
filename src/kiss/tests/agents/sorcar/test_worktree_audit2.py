@@ -5,6 +5,7 @@ BUG-5 through BUG-7 plus INC-2.
 """
 
 from __future__ import annotations
+import pytest
 
 import json
 import shutil
@@ -151,6 +152,7 @@ class TestBug6FinalizeIgnoresCommitFailure:
         _restore_db(self.db_saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
+    @pytest.mark.slow
     def test_finalize_removes_worktree_despite_commit_failure(self) -> None:
         """BUG-6 FIX: _finalize_worktree returns False and preserves
         the worktree directory when auto-commit is rejected by a
