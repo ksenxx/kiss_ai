@@ -268,7 +268,9 @@ class TestPersistenceTypoFixed:
 
 class TestRecordFileUsageAtomic:
     def test_entire_operation_under_db_lock(self) -> None:
-        """INSERT, SELECT COUNT, DELETE, and commit are all inside _db_lock."""
+        """INSERT, SELECT COUNT, DELETE, and commit are all inside the
+        process-wide write lock (``_rw_lock.write_lock()`` per Phase 6).
+        """
         from kiss.agents.sorcar import persistence
 
         source = inspect.getsource(persistence._record_file_usage)
@@ -277,11 +279,14 @@ class TestRecordFileUsageAtomic:
         lock_line = None
         lock_indent = 0
         for i, line in enumerate(lines):
-            if "with _db_lock:" in line:
+            if "_rw_lock.write_lock()" in line:
                 lock_line = i
                 lock_indent = len(line) - len(line.lstrip())
                 break
-        assert lock_line is not None
+        assert lock_line is not None, (
+            "_record_file_usage must hold _rw_lock.write_lock() for the "
+            "INSERT/SELECT/DELETE/commit block"
+        )
 
         for i, line in enumerate(lines):
             if i <= lock_line:
@@ -302,11 +307,13 @@ class TestRecordFileUsageAtomic:
 
 class TestPersistenceTOCTOUFixed:
     def test_save_task_result_uses_lock(self) -> None:
-        """_save_task_result() wraps everything under _db_lock."""
+        """_save_task_result() wraps everything under the process-wide write
+        lock (``_rw_lock.write_lock()`` per Phase 6).
+        """
         from kiss.agents.sorcar import persistence
 
         source = inspect.getsource(persistence._save_task_result)
-        assert "with _db_lock:" in source
+        assert "_rw_lock.write_lock()" in source
 
     def test_save_task_result_accepts_task_id(self) -> None:
         """_save_task_result() has a task_id parameter."""

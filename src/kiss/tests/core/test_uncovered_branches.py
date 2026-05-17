@@ -94,6 +94,7 @@ class TestAnthropicStopValNotStrOrList(TestCase):
             api_key="test-key",
             model_config={"stop": 42},
         )
+        m.conversation = [{"role": "user", "content": "hello"}]
         kwargs = m._build_create_kwargs()
         assert "stop_sequences" not in kwargs
         assert "stop" not in kwargs
@@ -343,6 +344,7 @@ class TestAnthropicBuildKwargs:
 
         m = AnthropicModel("claude-sonnet-4-test", api_key="test")
         m.model_config = {"max_tokens": 999}
+        m.conversation = [{"role": "user", "content": "hello"}]
         kwargs = m._build_create_kwargs()
         assert kwargs["max_tokens"] == 999
         assert "thinking" in kwargs
@@ -352,6 +354,7 @@ class TestAnthropicBuildKwargs:
 
         m = AnthropicModel("claude-sonnet-4-test", api_key="test")
         m.model_config = {"thinking": {"type": "disabled"}}
+        m.conversation = [{"role": "user", "content": "hello"}]
         kwargs = m._build_create_kwargs()
         assert kwargs["thinking"] == {"type": "disabled"}
 
