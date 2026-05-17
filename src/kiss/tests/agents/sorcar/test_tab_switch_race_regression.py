@@ -746,8 +746,8 @@ class TestCreateNewTabDuringRunningTask(unittest.TestCase):
         """createNewTab creates a fresh tab (isRunning=false by default
         from makeTab) and delegates DOM reset to restoreTab without
         touching runningTabId."""
-        idx = self.js.index("function createNewTab()")
-        block = self.js[idx : idx + 1000]
+        idx = self.js.index("function createNewTab(")
+        block = self.js[idx : idx + 2000]
         assert "makeTab(" in block
         assert "restoreTab(tab)" in block
         assert "runningTabId" not in block
@@ -1026,7 +1026,7 @@ class TestPerTabAttachments(unittest.TestCase):
         """createNewTab builds a fresh tab (with default attachments=[])
         then calls restoreTab, which loads that empty list into the
         shared ``attachments`` variable and re-renders the chip row."""
-        idx = self.js.index("function createNewTab()")
+        idx = self.js.index("function createNewTab(")
         end = self.js.index("\n  function ", idx + 1)
         body = self.js[idx:end]
         assert "makeTab(" in body
@@ -1064,7 +1064,7 @@ class TestPerTabInputValue(unittest.TestCase):
         """Typed but unsent text carries over: createNewTab captures it
         into ``tab.inputValue`` so the subsequent restoreTab installs it
         back into the shared input box."""
-        idx = self.js.index("function createNewTab()")
+        idx = self.js.index("function createNewTab(")
         end = self.js.index("\n  function ", idx + 1)
         body = self.js[idx:end]
         assert "const pendingText = inp.value" in body
@@ -1165,7 +1165,7 @@ class TestPerTabIsMerging(unittest.TestCase):
         """A freshly-built tab has ``isMerging: false`` by default, and
         restoreTab both copies that into the shared ``isMerging`` flag
         and removes any existing merge toolbar from the DOM."""
-        idx = self.js.index("function createNewTab()")
+        idx = self.js.index("function createNewTab(")
         end = self.js.index("\n  function ", idx + 1)
         body = self.js[idx:end]
         assert "makeTab(" in body

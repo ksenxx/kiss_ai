@@ -32,7 +32,7 @@ _MAIN_JS = (
 
 def _extract_fn_body(src: str, header: str) -> str:
     """Return the source of a top-level ``function name() { ... }`` block
-    whose header matches ``header`` (e.g. ``function createNewTab()``).
+    whose header matches ``header`` (e.g. ``function createNewTab(``).
     Braces are matched by counting; string/comment handling is minimal
     and sufficient for main.js."""
     start = src.index(header)
@@ -75,7 +75,7 @@ class TestCreateNewTabDoesNotBlockInput(unittest.TestCase):
     def test_new_tab_does_not_disable_input_when_prior_tab_running(
         self,
     ) -> None:
-        create_new_tab_src = _extract_fn_body(self.js, "function createNewTab()")
+        create_new_tab_src = _extract_fn_body(self.js, "function createNewTab(")
         assert "saveCurrentTab()" in create_new_tab_src
         assert "makeTab(" in create_new_tab_src
         assert "restoreTab(tab)" in create_new_tab_src
@@ -224,7 +224,7 @@ class TestCreateNewTabStructural(unittest.TestCase):
         cls.js = _MAIN_JS.read_text()
 
     def test_create_new_tab_syncs_running_state(self) -> None:
-        body = _extract_fn_body(self.js, "function createNewTab()")
+        body = _extract_fn_body(self.js, "function createNewTab(")
         assert re.search(r"setRunningState\(\s*(false|tab\.isRunning)\s*\)", body), (
             "createNewTab() must call setRunningState(false) or "
             "setRunningState(tab.isRunning) after restoreTab(tab); otherwise "

@@ -2338,8 +2338,10 @@ class TestSorcarSidebarViewTS(unittest.TestCase):
     def test_calls_build_chat_html(self) -> None:
         assert "buildChatHtml(" in self._ts
 
-    def test_has_agent_process(self) -> None:
-        assert "AgentProcess" in self._ts
+    def test_has_agent_client(self) -> None:
+        """Phase 3: extension talks to the daemon over a single AgentClient
+        (UDS) instead of spawning per-tab AgentProcess subprocesses."""
+        assert "AgentClient" in self._ts
 
     def test_has_handle_message(self) -> None:
         assert "_handleMessage(" in self._ts
@@ -2828,13 +2830,16 @@ class TestSorcarSidebarViewPublicAPI(unittest.TestCase):
     def test_has_dispose(self) -> None:
         assert "public dispose()" in self._ts
 
-    def test_dispose_kills_agent_processes(self) -> None:
+    def test_dispose_closes_agent_client(self) -> None:
+        """Phase 3+: dispose closes the single AgentClient (UDS).  Per-tab
+        AgentProcess subprocesses no longer exist; the daemon's _TabStates
+        survive the deferred-close grace window and re-attach on the next
+        activation via ``ready`` / ``resumeSession``."""
         idx = self._ts.index("public dispose()")
         end = self._ts.index("\n  }", idx) + 4
         body = self._ts[idx:end]
-        assert "proc.dispose()" in body
-        assert "_taskProcesses.clear()" in body
-        assert "_serviceProcess" in body
+        assert "this._client.dispose()" in body
+        assert "this._client = null" in body
 
     def test_has_visible_getter(self) -> None:
         assert "get visible()" in self._ts
@@ -2850,8 +2855,8 @@ class TestSorcarSidebarViewAgentEventHandling(unittest.TestCase):
         cls._ts = (base / "src" / "SorcarSidebarView.ts").read_text()
 
     def _get_message_handler_body(self) -> str:
-        """Get the _setupProcessListeners message handler body."""
-        idx = self._ts.index("private _setupProcessListeners(")
+        """Get the _installClientListener message handler body."""
+        idx = self._ts.index("private _installClientListener(")
         end = self._ts.index("\n  }", idx) + 4
         return self._ts[idx:end]
 
@@ -2970,13 +2975,15 @@ class TestSorcarSidebarViewDisposeHandler(unittest.TestCase):
         block = self._ts[idx : idx + 300]
         assert "_resolveAllWorktreeActions" in block
 
-    def test_public_dispose_kills_agent(self) -> None:
+    def test_public_dispose_closes_client_and_emitter(self) -> None:
+        """Phase 3+: dispose closes the AgentClient (UDS to kiss-web
+        daemon) and disposes the commit-message emitter.  The daemon
+        keeps its _TabStates alive through the deferred-close grace
+        window so an extension reload does NOT interrupt running tasks."""
         idx = self._ts.index("public dispose()")
         end = self._ts.index("\n  }", idx) + 4
         body = self._ts[idx:end]
-        assert "proc.dispose()" in body
-        assert "_taskProcesses.clear()" in body
-        assert "_serviceProcess" in body
+        assert "this._client.dispose()" in body
         assert "this._onCommitMessage.dispose()" in body
 
     def test_send_to_webview_guards_disposed(self) -> None:
@@ -3140,28 +3147,28 @@ class TestWebviewTabBarJS(unittest.TestCase):
 
 
     def test_create_new_tab_function_exists(self) -> None:
-        assert "function createNewTab()" in self._js
+        assert "function createNewTab(" in self._js
 
     def test_create_new_tab_saves_current_tab(self) -> None:
-        idx = self._js.index("function createNewTab()")
+        idx = self._js.index("function createNewTab(")
         end = self._js.index("\n  function ", idx + 1)
         body = self._js[idx:end]
         assert "saveCurrentTab()" in body
 
     def test_create_new_tab_creates_tab_via_make_tab(self) -> None:
-        idx = self._js.index("function createNewTab()")
+        idx = self._js.index("function createNewTab(")
         end = self._js.index("\n  function ", idx + 1)
         body = self._js[idx:end]
         assert "makeTab(" in body
 
     def test_create_new_tab_pushes_to_tabs_array(self) -> None:
-        idx = self._js.index("function createNewTab()")
+        idx = self._js.index("function createNewTab(")
         end = self._js.index("\n  function ", idx + 1)
         body = self._js[idx:end]
         assert "tabs.push(" in body
 
     def test_create_new_tab_sets_active_tab(self) -> None:
-        idx = self._js.index("function createNewTab()")
+        idx = self._js.index("function createNewTab(")
         end = self._js.index("\n  function ", idx + 1)
         body = self._js[idx:end]
         assert "activeTabId = tab.id" in body
@@ -3174,7 +3181,7 @@ class TestWebviewTabBarJS(unittest.TestCase):
         isMerging, so without this the previous tab's running flag
         would persist and leave the new tab's input / sendBtn disabled.
         """
-        idx = self._js.index("function createNewTab()")
+        idx = self._js.index("function createNewTab(")
         end = self._js.index("\n  function ", idx + 1)
         body = self._js[idx:end]
         assert "restoreTab(tab)" in body
@@ -3187,19 +3194,19 @@ class TestWebviewTabBarJS(unittest.TestCase):
         )
 
     def test_create_new_tab_renders_tab_bar(self) -> None:
-        idx = self._js.index("function createNewTab()")
+        idx = self._js.index("function createNewTab(")
         end = self._js.index("\n  function ", idx + 1)
         body = self._js[idx:end]
         assert "renderTabBar()" in body
 
     def test_create_new_tab_persists_state(self) -> None:
-        idx = self._js.index("function createNewTab()")
+        idx = self._js.index("function createNewTab(")
         end = self._js.index("\n  function ", idx + 1)
         body = self._js[idx:end]
         assert "persistTabState()" in body
 
     def test_create_new_tab_shows_welcome(self) -> None:
-        idx = self._js.index("function createNewTab()")
+        idx = self._js.index("function createNewTab(")
         end = self._js.index("\n  function ", idx + 1)
         body = self._js[idx:end]
         assert "welcome" in body

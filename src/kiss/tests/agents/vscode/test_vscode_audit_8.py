@@ -136,11 +136,18 @@ class TestTimerFlushNoClosure:
                 f"Timer function should be functools.partial, got {type(timer_func)}"
             )
             assert timer_func.func == printer._timer_flush_for_tab
-        # Wait for timer to fire
-        time.sleep(0.2)
+        # Wait for the 0.1s timer to fire.  Under coverage instrumentation
+        # the timer thread is delayed noticeably, so poll up to 2 s with a
+        # short backoff instead of relying on a single sleep.
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            flush_events = [e for e in events if e.get("type") == "system_output"]
+            if any("chunk2" in e["text"] for e in flush_events):
+                break
+            time.sleep(0.05)
         flush_events = [e for e in events if e.get("type") == "system_output"]
-        # Both chunks should have been flushed (chunk1 immediately, chunk2 via timer)
         all_text = "".join(e["text"] for e in flush_events)
+        # chunk1 flushes immediately; chunk2 flushes via the timer.
         assert "chunk1" in all_text
         assert "chunk2" in all_text
 
