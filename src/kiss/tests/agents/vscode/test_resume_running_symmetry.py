@@ -138,7 +138,7 @@ class TestReplaySessionStatusBeforeTaskEvents:
         # minimal instance via object.__new__ and inject what we need.
         srv = object.__new__(VSCodeServer)
         srv.printer = printer  # type: ignore[assignment]
-        srv._running_agent_states = {}  # type: ignore[attr-defined]
+        srv._running_agent_states.clear()
         srv._state_lock = __import__("threading").RLock()  # type: ignore
         srv._default_model = "test"  # type: ignore[attr-defined]
         return srv, printer

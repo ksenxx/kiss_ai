@@ -106,7 +106,7 @@ def _make_server() -> tuple[VSCodeServer, _StubPrinter]:
     srv = object.__new__(VSCodeServer)
     printer = _StubPrinter()
     srv.printer = printer  # type: ignore[assignment]
-    srv._running_agent_states = {}  # type: ignore[attr-defined]
+    srv._running_agent_states.clear()
     srv._state_lock = threading.RLock()  # type: ignore[attr-defined,assignment]
     srv._default_model = "test"  # type: ignore[attr-defined]
     return srv, printer

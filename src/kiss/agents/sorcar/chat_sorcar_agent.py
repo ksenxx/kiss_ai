@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
@@ -23,7 +23,25 @@ from kiss.agents.sorcar.persistence import (
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent, _coerce_tasks
 
+if TYPE_CHECKING:
+    from kiss.agents.vscode.running_agent_state import _RunningAgentState
+
 MAX_TASKS = 10
+
+# Process-global map of frontend tab id → live per-tab agent runtime
+# state.  Owned conceptually by the VS Code server (which mutates it
+# under its own ``_state_lock`` to coordinate task lifecycle, merge,
+# autocommit and worktree transitions), but lives here as a module
+# global so that any helper inside the ``sorcar`` package can inspect
+# or attach to a running agent without holding a reference to the
+# server instance.  Defined here — rather than inside
+# ``kiss.agents.vscode.running_agent_state`` — to avoid an import
+# cycle: ``running_agent_state`` already imports
+# ``WorktreeSorcarAgent`` (which imports ``ChatSorcarAgent``), so the
+# annotation has to live behind a ``TYPE_CHECKING`` guard.  Producers
+# / consumers MUST hold ``VSCodeServer._state_lock`` for any
+# multi-step access (read-then-modify, scan-then-modify).
+_running_agent_states: dict[str, _RunningAgentState] = {}
 
 class ChatSorcarAgent(SorcarAgent):
     """SorcarAgent with chat-session state management.

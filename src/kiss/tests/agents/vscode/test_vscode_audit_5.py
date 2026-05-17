@@ -121,7 +121,7 @@ class TestAutocommitActionLockingFix(unittest.TestCase):
             "_handle_autocommit_action should access _running_agent_states"
         )
         lock_blocks = list(re.finditer(r"with self\._state_lock", src))
-        tab_accesses = list(re.finditer(r"self\._running_agent_states\.get", src))
+        tab_accesses = list(re.finditer(r"_running_agent_states\.get", src))
         assert len(lock_blocks) >= len(tab_accesses), (
             f"B2 FIX: {len(tab_accesses)} _running_agent_states.get() calls "
             f"guarded by {len(lock_blocks)} _state_lock blocks"

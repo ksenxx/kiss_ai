@@ -20,6 +20,7 @@ import sys
 import threading
 from typing import Any
 
+from kiss.agents.sorcar.chat_sorcar_agent import _running_agent_states
 from kiss.agents.sorcar.persistence import (
     _append_chat_event,
     _chat_has_tasks,
@@ -78,7 +79,17 @@ class VSCodeServer(
 
     def __init__(self) -> None:
         self.printer = VSCodePrinter()
-        self._running_agent_states: dict[str, _RunningAgentState] = {}
+        # ``_running_agent_states`` is now a process-global dict living
+        # in ``kiss.agents.sorcar.chat_sorcar_agent`` and imported at
+        # module scope.  Reset on init so each ``VSCodeServer`` starts
+        # with a clean slate (production only ever spawns one server
+        # per Python process; test fixtures that instantiate the
+        # server fresh need isolation from prior tests' tab state).
+        # The server still owns ``_state_lock`` to coordinate
+        # multi-step access (read-then-modify, scan-then-modify) and
+        # the lifecycle transitions that span both the dict and
+        # individual ``_RunningAgentState`` fields.
+        _running_agent_states.clear()
         self.work_dir = os.environ.get("KISS_WORKDIR", os.getcwd())
         persisted = _load_last_model()
         self._default_model = (
@@ -94,6 +105,18 @@ class VSCodeServer(
         self._file_cache: list[str] | None = None
         self._last_active_file: str = ""
         self._last_active_content: str = ""
+
+    @property
+    def _running_agent_states(self) -> dict[str, _RunningAgentState]:
+        """Process-global running-agent-state dict.
+
+        Backward-compat accessor for existing test fixtures and audit
+        tests that read ``server._running_agent_states``.  The
+        canonical home is the module global
+        :data:`kiss.agents.sorcar.chat_sorcar_agent._running_agent_states`;
+        production code inside this package imports it directly.
+        """
+        return _running_agent_states
 
     def _get_tab(self, tab_id: str) -> _RunningAgentState:
         """Get or create per-tab state for the given tab.
@@ -117,10 +140,10 @@ class VSCodeServer(
             The per-tab state object.
         """
         with self._state_lock:
-            tab = self._running_agent_states.get(tab_id)
+            tab = _running_agent_states.get(tab_id)
             if tab is None:
                 tab = _RunningAgentState(tab_id, self._default_model)
-                self._running_agent_states[tab_id] = tab
+                _running_agent_states[tab_id] = tab
             return tab
 
     def _any_non_wt_running(self) -> bool:
@@ -131,7 +154,7 @@ class VSCodeServer(
         Returns:
             True if at least one tab has ``is_running_non_wt`` set.
         """
-        return any(t.is_running_non_wt for t in self._running_agent_states.values())
+        return any(t.is_running_non_wt for t in _running_agent_states.values())
 
     def run(self) -> None:
         """Main loop: read commands from stdin, execute them."""
@@ -351,7 +374,7 @@ class VSCodeServer(
             tab_id: The frontend tab identifier to close.
         """
         with self._state_lock:
-            tab = self._running_agent_states.get(tab_id)
+            tab = _running_agent_states.get(tab_id)
             if tab is not None and (
                 tab.is_task_active
                 or tab.is_merging
@@ -359,7 +382,7 @@ class VSCodeServer(
             ):
                 tab.frontend_closed = True
                 return
-            self._running_agent_states.pop(tab_id, None)
+            _running_agent_states.pop(tab_id, None)
         self._teardown_tab_resources(tab_id, tab)
 
     def _dispose_if_closed(self, tab_id: str) -> None:
@@ -377,7 +400,7 @@ class VSCodeServer(
         if not tab_id:
             return
         with self._state_lock:
-            tab = self._running_agent_states.get(tab_id)
+            tab = _running_agent_states.get(tab_id)
             if tab is None or not tab.frontend_closed:
                 return
             if (
@@ -386,7 +409,7 @@ class VSCodeServer(
                 or (tab.task_thread is not None and tab.task_thread.is_alive())
             ):
                 return
-            self._running_agent_states.pop(tab_id, None)
+            _running_agent_states.pop(tab_id, None)
         self._teardown_tab_resources(tab_id, tab)
 
     def _teardown_tab_resources(
@@ -625,7 +648,7 @@ class VSCodeServer(
         if not chat_id or not new_tab_id:
             return False
         with self._state_lock:
-            t = self._running_agent_states.get(chat_id)
+            t = _running_agent_states.get(chat_id)
             if t is None:
                 return False
             alive = t.task_thread is not None and t.task_thread.is_alive()

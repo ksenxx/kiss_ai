@@ -21,6 +21,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 # ---------------------------------------------------------------------------
@@ -337,7 +338,7 @@ class TestM4AwaitUserResponseEmptyQueue(unittest.TestCase):
                 self.printer._thread_local.stop_event = threading.Event()
                 self.printer._thread_local.tab_id = "ghost-tab"
                 self._state_lock = threading.Lock()
-                self._running_agent_states = {}  # no entry for "ghost-tab"
+                self._running_agent_states: dict[str, Any] = {}  # no entry for "ghost-tab"
 
         srv = FakeServer()
         t0 = time.time()
