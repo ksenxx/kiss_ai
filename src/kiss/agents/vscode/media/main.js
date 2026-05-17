@@ -2329,16 +2329,23 @@
   }).observe(O, {childList: true, subtree: true, characterData: true});
 
   // --- Timer ---
+  function _renderTimerTick() {
+    const s = Math.floor((Date.now() - t0) / 1000);
+    const m = Math.floor(s / 60);
+    statusText.textContent =
+      'Running ' + (m > 0 ? m + 'm ' : '') + (s % 60) + 's';
+  }
   function startTimer() {
     if (!t0) t0 = Date.now();
     if (timerIv) clearInterval(timerIv);
     statusText.style.color = 'var(--red)';
-    timerIv = setInterval(() => {
-      const s = Math.floor((Date.now() - t0) / 1000);
-      const m = Math.floor(s / 60);
-      statusText.textContent =
-        'Running ' + (m > 0 ? m + 'm ' : '') + (s % 60) + 's';
-    }, 1000);
+    // Render the first tick immediately so the "Running …" label
+    // appears the instant the running state turns on (e.g. when a
+    // running task is loaded into a new tab from history).  Without
+    // this the statusText stays at "Ready" / blank for up to 1s
+    // until the first ``setInterval`` callback fires.
+    _renderTimerTick();
+    timerIv = setInterval(_renderTimerTick, 1000);
   }
   function stopTimer() {
     if (timerIv) {
