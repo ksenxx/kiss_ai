@@ -16,12 +16,12 @@ import sys
 import threading
 from typing import TYPE_CHECKING, Any
 
-from kiss.agents.sorcar.chat_sorcar_agent import _running_agent_states
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import (
     _record_file_usage,
     _record_model_usage,
 )
-from kiss.agents.vscode.running_agent_state import _RunningAgentState
+from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 
 if TYPE_CHECKING:
     from kiss.agents.vscode.printer import VSCodePrinter
@@ -123,10 +123,10 @@ class _CommandsMixin:
         """
         tab_id = cmd.get("tabId", "")
         with self._state_lock:
-            tab = _running_agent_states.get(tab_id)
+            tab = ChatSorcarAgent.running_agent_states.get(tab_id)
             if tab is None:
                 tab = _RunningAgentState(tab_id, self._default_model)
-                _running_agent_states[tab_id] = tab
+                ChatSorcarAgent.running_agent_states[tab_id] = tab
             if tab.task_thread is not None and tab.task_thread.is_alive():
                 self.printer.broadcast({
                     "type": "error",
@@ -216,7 +216,7 @@ class _CommandsMixin:
         """Route a user answer to the correct tab's queue."""
         ans_tab = cmd.get("tabId", "")
         with self._state_lock:
-            ans_state = _running_agent_states.get(ans_tab)
+            ans_state = ChatSorcarAgent.running_agent_states.get(ans_tab)
             q = ans_state.user_answer_queue if ans_state is not None else None
         if q is None:
             logger.debug("userAnswer dropped: no queue for tabId=%s", ans_tab)

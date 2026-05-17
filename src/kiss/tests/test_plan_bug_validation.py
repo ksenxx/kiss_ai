@@ -328,7 +328,7 @@ class TestAddTaskReturnsRowId:
 class TestForceStopThreadArgtypes:
     def test_argtypes_set_at_module_level(self) -> None:
         """PyThreadState_SetAsyncExc.argtypes is set at module level."""
-        import kiss.agents.vscode.running_agent_state as tab_state_mod
+        import kiss.agents.sorcar.running_agent_state as tab_state_mod
 
         source = inspect.getsource(tab_state_mod)
         assert "PyThreadState_SetAsyncExc.argtypes" in source
