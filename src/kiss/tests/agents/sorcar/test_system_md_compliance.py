@@ -23,12 +23,12 @@ Violations confirmed by database analysis of 91 tasks from 2026-05-14:
 """
 
 from __future__ import annotations
-import pytest
 
 import os
 import tempfile
 from typing import Any
 
+import pytest
 import yaml
 
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent

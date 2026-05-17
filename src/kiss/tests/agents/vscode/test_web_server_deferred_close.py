@@ -22,7 +22,6 @@ timers are exercised through the public-on-the-class helpers
 """
 
 from __future__ import annotations
-import pytest
 
 import asyncio
 import shutil
@@ -30,6 +29,8 @@ import tempfile
 import threading
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
+
+import pytest
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.vscode.web_server import (

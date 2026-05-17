@@ -5,7 +5,6 @@ command dispatch, and event broadcasting through the web server.
 """
 
 from __future__ import annotations
-import pytest
 
 import asyncio
 import json
@@ -23,6 +22,7 @@ from pathlib import Path
 from typing import Any
 from unittest import IsolatedAsyncioTestCase
 
+import pytest
 from websockets.asyncio.client import connect
 
 from kiss.agents.vscode.vscode_config import CONFIG_PATH, save_config

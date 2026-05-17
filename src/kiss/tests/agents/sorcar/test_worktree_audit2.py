@@ -5,7 +5,6 @@ BUG-5 through BUG-7 plus INC-2.
 """
 
 from __future__ import annotations
-import pytest
 
 import json
 import shutil
@@ -13,6 +12,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any, cast
+
+import pytest
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.git_worktree import (

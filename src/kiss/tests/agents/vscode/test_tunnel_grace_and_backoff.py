@@ -22,7 +22,6 @@ These tests verify the fixes:
 """
 
 from __future__ import annotations
-import pytest
 
 import asyncio
 import json
@@ -33,6 +32,8 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+
+import pytest
 
 from kiss.agents.vscode.vscode_config import CONFIG_PATH, save_config
 from kiss.agents.vscode.web_server import (

@@ -23,7 +23,6 @@ These tests verify that pathway end-to-end:
 """
 
 from __future__ import annotations
-import pytest
 
 import json
 import os
@@ -31,6 +30,8 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
+
+import pytest
 
 from kiss.agents.vscode import web_server as ws
 from kiss.agents.vscode.web_server import (
