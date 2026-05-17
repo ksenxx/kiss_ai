@@ -1,12 +1,13 @@
-"""Regression: ``ChatSorcarAgent.run()`` publishes itself in
-``ChatSorcarAgent.running_agent_states`` while running.
+"""Regression: ``WorktreeSorcarAgent.run()`` publishes itself in
+``WorktreeSorcarAgent.running_agent_states`` while running.
 
-When the standalone :class:`ChatSorcarAgent` is invoked, the process-global
-running-state map (a class attribute on :class:`ChatSorcarAgent`) should
-contain a live :class:`_RunningAgentState` entry keyed by the agent's
-``chat_id`` for the duration of the ``run()`` call, and the entry must be
-removed once ``run()`` completes.  The entry's ``agent`` field must be the
-caller itself (not a freshly-allocated ``WorktreeSorcarAgent``).
+When the standalone :class:`WorktreeSorcarAgent` is invoked, the
+process-global running-state map (a class attribute on
+:class:`WorktreeSorcarAgent`) should contain a live
+:class:`_RunningAgentState` entry keyed by the agent's ``chat_id`` for
+the duration of the ``run()`` call, and the entry must be removed once
+``run()`` completes.  The entry's ``agent`` field must be the caller
+itself (not a freshly-allocated ``WorktreeSorcarAgent``).
 
 When an entry is already present (e.g. the VS Code server pre-populates
 one under the ``tab_id == chat_id`` invariant), ``run()`` must NOT clobber
@@ -27,8 +28,8 @@ from pathlib import Path
 from typing import Any
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 # ---------------------------------------------------------------------------
 # Fake OpenAI server (always returns a ``finish`` tool call)
@@ -120,7 +121,7 @@ class TestRunningStatePopulatedOnRun:
         self.saved = _redirect(self.tmpdir)
         self.srv, self.url = _start_server()
         # Ensure a clean class-attribute slate; the dict is process-wide.
-        ChatSorcarAgent.running_agent_states.clear()
+        WorktreeSorcarAgent.running_agent_states.clear()
 
     def teardown_method(self) -> None:
         self.srv.shutdown()
@@ -129,12 +130,12 @@ class TestRunningStatePopulatedOnRun:
             th._db_conn = None
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
-        ChatSorcarAgent.running_agent_states.clear()
+        WorktreeSorcarAgent.running_agent_states.clear()
 
     def test_state_added_while_running_and_removed_after(self) -> None:
         """``run()`` adds an entry keyed by ``chat_id`` and removes it on exit."""
         cfg = {"base_url": self.url, "api_key": "test-key"}
-        agent = ChatSorcarAgent("standalone")
+        agent = WorktreeSorcarAgent("standalone")
 
         # Capture the state mid-run by hooking the upstream finish tool's
         # bookkeeping isn't trivial; instead, just check the post-run
@@ -146,7 +147,7 @@ class TestRunningStatePopulatedOnRun:
             work_dir=self.tmpdir,
         )
         # After run() returns, the entry must be gone again.
-        assert agent.chat_id not in ChatSorcarAgent.running_agent_states
+        assert agent.chat_id not in WorktreeSorcarAgent.running_agent_states
 
     def test_state_is_live_during_run(self) -> None:
         """While ``run()`` is executing, an entry IS present keyed by chat_id.
@@ -157,7 +158,7 @@ class TestRunningStatePopulatedOnRun:
         signaling Event to observe the state.
         """
         cfg = {"base_url": self.url, "api_key": "test-key"}
-        agent = ChatSorcarAgent("live-check")
+        agent = WorktreeSorcarAgent("live-check")
         # Pre-set chat_id so we know the key in advance.
         agent.resume_chat_by_id("live-chat-id")
 
@@ -168,7 +169,7 @@ class TestRunningStatePopulatedOnRun:
         def observer() -> None:
             started.wait(timeout=5)
             # Snapshot the dict membership while the worker is mid-run.
-            state = ChatSorcarAgent.running_agent_states.get("live-chat-id")
+            state = WorktreeSorcarAgent.running_agent_states.get("live-chat-id")
             observed["state"] = state
             observed["agent_is_self"] = state is not None and state.agent is agent
             observed["is_task_active"] = state is not None and state.is_task_active
@@ -194,7 +195,7 @@ class TestRunningStatePopulatedOnRun:
         def observer_poll() -> None:
             started.wait(timeout=5)
             for _ in range(2000):  # up to ~2s
-                state = ChatSorcarAgent.running_agent_states.get("live-chat-id")
+                state = WorktreeSorcarAgent.running_agent_states.get("live-chat-id")
                 if state is not None:
                     observed["state"] = state
                     observed["agent_is_self"] = state.agent is agent
@@ -216,19 +217,19 @@ class TestRunningStatePopulatedOnRun:
         assert observed["is_task_active"], "is_task_active should be True mid-run"
 
         # And the entry is gone after run() returns.
-        assert "live-chat-id" not in ChatSorcarAgent.running_agent_states
+        assert "live-chat-id" not in WorktreeSorcarAgent.running_agent_states
 
     def test_run_does_not_clobber_preexisting_state(self) -> None:
         """If an entry already exists (VS Code server case), ``run()`` leaves it alone."""
         cfg = {"base_url": self.url, "api_key": "test-key"}
-        agent = ChatSorcarAgent("vscode-emulated")
+        agent = WorktreeSorcarAgent("vscode-emulated")
         agent.resume_chat_by_id("pre-existing-id")
 
         # Pre-populate as the VS Code server would: a fresh
         # ``_RunningAgentState`` whose internal agent is the standard
         # ``WorktreeSorcarAgent("Sorcar VS Code")`` (NOT *agent*).
         preexisting = _RunningAgentState("pre-existing-id", "gpt-4o-mini")
-        ChatSorcarAgent.running_agent_states["pre-existing-id"] = preexisting
+        WorktreeSorcarAgent.running_agent_states["pre-existing-id"] = preexisting
 
         agent.run(
             prompt_template="please don't clobber me",
@@ -238,5 +239,5 @@ class TestRunningStatePopulatedOnRun:
         )
 
         # The pre-existing entry must still be there, unchanged.
-        assert ChatSorcarAgent.running_agent_states.get("pre-existing-id") is preexisting
+        assert WorktreeSorcarAgent.running_agent_states.get("pre-existing-id") is preexisting
         assert preexisting.agent is not agent

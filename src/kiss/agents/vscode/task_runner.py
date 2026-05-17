@@ -22,7 +22,6 @@ if TYPE_CHECKING:
     from kiss.agents.sorcar.running_agent_state import _RunningAgentState
     from kiss.agents.vscode.printer import VSCodePrinter
 
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps, repo_lock
 from kiss.agents.sorcar.persistence import (
     _append_chat_event,
@@ -30,6 +29,7 @@ from kiss.agents.sorcar.persistence import (
     _save_task_result,
 )
 from kiss.agents.sorcar.running_agent_state import parse_task_tags
+from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.diff_merge import (
     _capture_untracked,
     _parse_diff_hunks,
@@ -88,7 +88,7 @@ class _TaskRunnerMixin:
             self._run_task_inner(cmd)
         finally:
             with self._state_lock:
-                tab = ChatSorcarAgent.running_agent_states.get(tab_id)
+                tab = WorktreeSorcarAgent.running_agent_states.get(tab_id)
                 if tab is not None:
                     tab.task_thread = None
                     tab.stop_event = None
@@ -208,7 +208,7 @@ class _TaskRunnerMixin:
             with self._state_lock:
                 if any(
                     t.is_merging and t.use_worktree
-                    for t in ChatSorcarAgent.running_agent_states.values()
+                    for t in WorktreeSorcarAgent.running_agent_states.values()
                 ):
                     tab.is_task_active = False
                     self.printer.broadcast({
@@ -415,7 +415,7 @@ class _TaskRunnerMixin:
             logger.debug("_stop_task called without tab_id; ignoring")
             return
         with self._state_lock:
-            tab = ChatSorcarAgent.running_agent_states.get(tab_id)
+            tab = WorktreeSorcarAgent.running_agent_states.get(tab_id)
             pairs = [(tab.stop_event, tab.task_thread)] if tab is not None else []
         for stop_event, task_thread in pairs:
             if stop_event:
@@ -468,7 +468,11 @@ class _TaskRunnerMixin:
             raise KeyboardInterrupt("No stop event set")
         tab_id = getattr(self.printer._thread_local, "tab_id", None)
         with self._state_lock:
-            tab = ChatSorcarAgent.running_agent_states.get(tab_id) if tab_id is not None else None
+            tab = (
+                WorktreeSorcarAgent.running_agent_states.get(tab_id)
+                if tab_id is not None
+                else None
+            )
             q = tab.user_answer_queue if tab is not None else None
         # M4 — when the tab has no answer queue (e.g. the tab was closed
         # mid-question) there is no path that can ever return a response.

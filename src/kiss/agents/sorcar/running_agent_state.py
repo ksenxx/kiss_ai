@@ -2,8 +2,8 @@
 
 Originally split out of ``server.py`` for organisation; moved into
 the ``sorcar`` package so the per-tab state class lives alongside
-its owning :class:`kiss.agents.sorcar.chat_sorcar_agent.ChatSorcarAgent`
-(whose :attr:`~ChatSorcarAgent.running_agent_states` class attribute
+its owning :class:`kiss.agents.sorcar.worktree_sorcar_agent.WorktreeSorcarAgent`
+(whose :attr:`~WorktreeSorcarAgent.running_agent_states` class attribute
 holds the process-global map keyed by tab id).
 """
 
@@ -55,7 +55,7 @@ class _RunningAgentState:
     answer queue, merge flag) also lives here so the server needs
     only a single ``running_agent_states`` dict (the process-global
     map is the
-    :attr:`kiss.agents.sorcar.chat_sorcar_agent.ChatSorcarAgent.running_agent_states`
+    :attr:`kiss.agents.sorcar.worktree_sorcar_agent.WorktreeSorcarAgent.running_agent_states`
     class attribute).
     """
 
@@ -87,7 +87,7 @@ class _RunningAgentState:
         # ``WorktreeSorcarAgent`` is created so the per-tab agent state
         # (``chat_id``, ``_last_task_id``, worktree handle, …) is
         # isolated from every other tab.  When *agent* is supplied
-        # (the standalone :meth:`ChatSorcarAgent.run` flow) the caller
+        # (the standalone :meth:`WorktreeSorcarAgent.run` flow) the caller
         # is registering ITSELF as the running agent under its own
         # ``chat_id`` — no second agent instance is allocated.
         self.agent = agent if agent is not None else WorktreeSorcarAgent("Sorcar VS Code")
