@@ -47,7 +47,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
    * every chat tab over one UDS socket.  Lazy-initialised on first use
    * via ``_getClient()``.  Reload survives running tasks: closing this
    * client only ends the socket; the daemon keeps every in-flight
-   * ``_TabState`` alive for the deferred-close grace window so the next
+   * ``_RunningAgentState`` alive for the deferred-close grace window so the next
    * activation can reconnect and re-subscribe.
    */
   private _client: AgentClient | null = null;
@@ -638,7 +638,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         client.sendCommand({type: 'getInputHistory'});
         this._sendToWebview({type: 'focusInput'} as ToWebviewMessage);
         // Auto-reload events for restored tabs that had active sessions.
-        // The daemon's _TabState retains state across reloads, so resumeSession
+        // The daemon's _RunningAgentState retains state across reloads, so resumeSession
         // either replays persisted events or re-subscribes to a still-running
         // task via the printer's subscriber map.
         const restoredTabs = message.restoredTabs;
@@ -840,7 +840,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         const resumeTabId = message.tabId;
         // The daemon's _replay_session re-subscribes a still-running
         // chat via the printer's subscriber map when chatId belongs to
-        // a live _TabState, otherwise replays persisted events.  No
+        // a live _RunningAgentState, otherwise replays persisted events.  No
         // process-level reattachment is required on the extension
         // side anymore.
         this._getClient().sendCommand({
@@ -1252,7 +1252,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
    * Cleanup: dispose listeners and close the daemon connection.
    *
    * Closing the UDS socket only ends this client's connection — the
-   * daemon's ``_TabState`` lives on through the deferred-close grace
+   * daemon's ``_RunningAgentState`` lives on through the deferred-close grace
    * window so in-flight agent tasks survive an extension reload.  A
    * fresh activation re-connects and re-subscribes via ``ready`` /
    * ``resumeSession`` exactly as a browser refresh does.

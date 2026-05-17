@@ -1,4 +1,4 @@
-"""Integration tests for deferred ``_TabState`` disposal.
+"""Integration tests for deferred ``_RunningAgentState`` disposal.
 
 When the frontend issues ``closeTab`` for a tab whose backend agent
 is still running a task (or whose merge view is open), the tab state
@@ -11,7 +11,7 @@ second ``closeTab``.
 This contract is exercised by the tests below:
 
 1. ``closeTab`` during a running task marks the tab
-   ``frontend_closed=True`` but does NOT pop ``_tab_states``.
+   ``frontend_closed=True`` but does NOT pop ``_running_agent_states``.
 2. When the task ends (``_run_task`` finally), ``_dispose_if_closed``
    pops the tab AND ``printer.cleanup_tab`` is called (so per-tab
    printer state is torn down too).
@@ -53,7 +53,7 @@ def _silent_server() -> VSCodeServer:
     """``VSCodeServer`` whose printer.broadcast is a no-op (for tests).
 
     Avoids polluting test stdout with JSON event lines while still
-    exercising the real ``_tab_states`` / ``_subscribers`` /
+    exercising the real ``_running_agent_states`` / ``_subscribers`` /
     ``cleanup_tab`` machinery.
     """
     server = VSCodeServer()
@@ -98,13 +98,13 @@ class TestDeferredDisposal:
         server._close_tab(tab_id)
 
         # Deferred: state is still present and flagged.
-        assert tab_id in server._tab_states
+        assert tab_id in server._running_agent_states
         assert tab.frontend_closed is True
         assert tab_id in server.printer._persist_agents
 
         # Disposal MUST NOT happen while the task is still active.
         server._dispose_if_closed(tab_id)
-        assert tab_id in server._tab_states
+        assert tab_id in server._running_agent_states
 
         # Task ends — mirror _run_task's finally block exactly.
         release.set()
@@ -115,7 +115,7 @@ class TestDeferredDisposal:
         server._dispose_if_closed(tab_id)
 
         # Now the state must be gone, and per-tab printer state too.
-        assert tab_id not in server._tab_states
+        assert tab_id not in server._running_agent_states
         assert tab_id not in server.printer._persist_agents
 
     def test_close_tab_during_merge_defers(self) -> None:
@@ -126,14 +126,14 @@ class TestDeferredDisposal:
 
         server._close_tab(tab_id)
         # Deferred — tab is still here, just flagged.
-        assert tab_id in server._tab_states
+        assert tab_id in server._running_agent_states
         assert tab.frontend_closed is True
 
         # Merge ends.
         with server._state_lock:
             tab.is_merging = False
         server._dispose_if_closed(tab_id)
-        assert tab_id not in server._tab_states
+        assert tab_id not in server._running_agent_states
 
     def test_close_tab_idle_disposes_immediately(self) -> None:
         server = _silent_server()
@@ -141,7 +141,7 @@ class TestDeferredDisposal:
         server._get_tab(tab_id)
         # No lifecycle flags raised.
         server._close_tab(tab_id)
-        assert tab_id not in server._tab_states
+        assert tab_id not in server._running_agent_states
 
     def test_dispose_if_closed_noop_when_not_flagged(self) -> None:
         server = _silent_server()
@@ -152,7 +152,7 @@ class TestDeferredDisposal:
         # Frontend never closed the tab — disposal must NOT happen
         # even though every lifecycle flag is clear.
         server._dispose_if_closed(tab_id)
-        assert tab_id in server._tab_states
+        assert tab_id in server._running_agent_states
 
     def test_dispose_if_closed_idempotent_and_unknown_tab_safe(self) -> None:
         server = _silent_server()
@@ -164,9 +164,9 @@ class TestDeferredDisposal:
         tab_id = "tab-X"
         server._get_tab(tab_id)
         server._close_tab(tab_id)
-        assert tab_id not in server._tab_states
+        assert tab_id not in server._running_agent_states
         server._dispose_if_closed(tab_id)
-        assert tab_id not in server._tab_states
+        assert tab_id not in server._running_agent_states
 
     def test_subscribers_pruned_on_deferred_disposal(self) -> None:
         """When a viewer subscribed to a closed-then-finished source,
@@ -181,12 +181,12 @@ class TestDeferredDisposal:
 
         src_tab.is_task_active = True
         server._close_tab(source)
-        assert source in server._tab_states  # deferred
+        assert source in server._running_agent_states  # deferred
 
         with server._state_lock:
             src_tab.is_task_active = False
         server._dispose_if_closed(source)
 
-        assert source not in server._tab_states
+        assert source not in server._running_agent_states
         # cleanup_tab dropped source from the subscriber map.
         assert source not in server.printer._subscribers

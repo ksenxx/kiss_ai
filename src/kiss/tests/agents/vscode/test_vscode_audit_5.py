@@ -2,10 +2,10 @@
 ``kiss.agents.vscode`` — audit round 5.
 
 B1 fix: ``_await_user_response`` now acquires ``_state_lock`` before
-    reading ``_tab_states``, consistent with the locking discipline.
+    reading ``_running_agent_states``, consistent with the locking discipline.
 
 B2 fix: ``_handle_autocommit_action`` now acquires ``_state_lock``
-    before reading ``_tab_states`` when persisting the autocommit event.
+    before reading ``_running_agent_states`` when persisting the autocommit event.
 
 I1 fix: ``_cmd_user_answer`` now uses ``cmd.get("tabId", "")`` (empty
     string default), consistent with every other command handler.
@@ -43,20 +43,20 @@ def _make_server() -> tuple[VSCodeServer, list[dict]]:
 
 class TestAwaitUserResponseLockingFix(unittest.TestCase):
     """B1 FIX: ``_await_user_response`` now acquires ``_state_lock``
-    before reading ``_tab_states``, consistent with the locking
+    before reading ``_running_agent_states``, consistent with the locking
     discipline used everywhere else.
     """
 
-    def test_source_reads_tab_states_under_lock(self) -> None:
-        """Structural: the source accesses ``_tab_states`` inside a
+    def test_source_reads_running_agent_states_under_lock(self) -> None:
+        """Structural: the source accesses ``_running_agent_states`` inside a
         ``with self._state_lock`` block.
         """
         src = inspect.getsource(_TaskRunnerMixin._await_user_response)
-        assert "_tab_states.get(" in src, (
-            "_await_user_response should access _tab_states"
+        assert "_running_agent_states.get(" in src, (
+            "_await_user_response should access _running_agent_states"
         )
         assert "with self._state_lock" in src, (
-            "B1 FIX: _await_user_response now reads _tab_states "
+            "B1 FIX: _await_user_response now reads _running_agent_states "
             "under _state_lock"
         )
 
@@ -109,21 +109,21 @@ class TestAwaitUserResponseLockingFix(unittest.TestCase):
 
 class TestAutocommitActionLockingFix(unittest.TestCase):
     """B2 FIX: ``_handle_autocommit_action`` now acquires ``_state_lock``
-    before reading ``_tab_states`` when persisting the autocommit event.
+    before reading ``_running_agent_states`` when persisting the autocommit event.
     """
 
-    def test_source_reads_tab_states_under_lock(self) -> None:
-        """Structural: every ``_tab_states.get`` call is guarded by a
+    def test_source_reads_running_agent_states_under_lock(self) -> None:
+        """Structural: every ``_running_agent_states.get`` call is guarded by a
         ``with self._state_lock`` block.
         """
         src = inspect.getsource(_MergeFlowMixin._handle_autocommit_action)
-        assert "_tab_states.get(tab_id)" in src.replace("self.", ""), (
-            "_handle_autocommit_action should access _tab_states"
+        assert "_running_agent_states.get(tab_id)" in src.replace("self.", ""), (
+            "_handle_autocommit_action should access _running_agent_states"
         )
         lock_blocks = list(re.finditer(r"with self\._state_lock", src))
-        tab_accesses = list(re.finditer(r"self\._tab_states\.get", src))
+        tab_accesses = list(re.finditer(r"self\._running_agent_states\.get", src))
         assert len(lock_blocks) >= len(tab_accesses), (
-            f"B2 FIX: {len(tab_accesses)} _tab_states.get() calls "
+            f"B2 FIX: {len(tab_accesses)} _running_agent_states.get() calls "
             f"guarded by {len(lock_blocks)} _state_lock blocks"
         )
 

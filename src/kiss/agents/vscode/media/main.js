@@ -143,7 +143,7 @@
   // Hard cap on the number of open chat tabs.  When createNewTab pushes
   // the count beyond this, trimOldestTabs() drops the oldest entries
   // (front of the array) and notifies the backend so server-side
-  // _TabState is also released.
+  // _RunningAgentState is also released.
   const MAX_TABS = 5;
 
   /** Drop the oldest tabs from the front of `tabs` until the count

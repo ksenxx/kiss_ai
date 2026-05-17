@@ -22,7 +22,7 @@ Spec
       agent's event stream via
       :meth:`BaseBrowserPrinter.subscribe_tab` so every subsequent
       broadcast is duplicated with ``tabId=new_id``.  The source
-      ``_TabState`` is NOT moved — both the original tab id and the
+      ``_RunningAgentState`` is NOT moved — both the original tab id and the
       new tab id receive the stream, supporting multiple concurrent
       viewers of the same running task.
 
@@ -166,8 +166,8 @@ class TestCloseTabDoesNotStopRunningTask:
         # Simulate the frontend closing the tab while the task runs.
         server._handle_command({"type": "closeTab", "tabId": tab_id_a})
 
-        # Backend MUST keep the _TabState so the task can finish.
-        assert tab_id_a in server._tab_states
+        # Backend MUST keep the _RunningAgentState so the task can finish.
+        assert tab_id_a in server._running_agent_states
         assert thread.is_alive(), (
             "Agent thread must continue to run after closeTab"
         )
@@ -223,9 +223,9 @@ class TestResumeRunningTaskReattachesLiveEvents:
             server, tab_id_a, chat_id,
         )
 
-        # Close tab A; backend retains _TabState because task active.
+        # Close tab A; backend retains _RunningAgentState because task active.
         server._handle_command({"type": "closeTab", "tabId": tab_id_a})
-        assert tab_id_a in server._tab_states
+        assert tab_id_a in server._running_agent_states
 
         # User clicks the running task in history → frontend allocates
         # a new tab id and sends resumeSession.
@@ -239,11 +239,11 @@ class TestResumeRunningTaskReattachesLiveEvents:
         # Both tab states exist: the source (still owns the running
         # thread) AND the new viewer tab.  Multi-viewer fan-out keeps
         # both alive instead of moving the stream.
-        assert tab_id_a in server._tab_states
-        assert tab_id_b in server._tab_states
-        assert server._tab_states[tab_id_a].task_thread is thread
+        assert tab_id_a in server._running_agent_states
+        assert tab_id_b in server._running_agent_states
+        assert server._running_agent_states[tab_id_a].task_thread is thread
         # The new viewer tab does not own a task thread.
-        assert server._tab_states[tab_id_b].task_thread is None
+        assert server._running_agent_states[tab_id_b].task_thread is None
 
         # Replay broadcast went to the new tab id.
         replays = [e for e in events if e.get("type") == "task_events"]

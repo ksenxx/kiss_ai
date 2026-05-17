@@ -9,7 +9,7 @@ Bugs
 ----
 N1: ``_timer_flush`` inner closure uses type annotation ``tid: int | None``
     but tab_id values are always ``str | None``.
-N2: ``_await_user_response`` reads ``self._tab_states`` without holding
+N2: ``_await_user_response`` reads ``self._running_agent_states`` without holding
     ``_state_lock``, racing with ``_close_tab`` which mutates the dict
     under the lock.
 N3: ``_scan_files`` depth check ``len(rel_root.parts) - 1 > 3`` was
@@ -102,13 +102,13 @@ class TestTimerFlushTypeAnnotation(unittest.TestCase):
 
 
 class TestAwaitUserResponseNoLock(unittest.TestCase):
-    """N2: ``_await_user_response`` reads ``self._tab_states.get(tab_id)``
+    """N2: ``_await_user_response`` reads ``self._running_agent_states.get(tab_id)``
     without holding ``_state_lock``, creating a data race with
     ``_close_tab`` which pops the entry under the lock.
     """
 
-    def test_source_has_lock_around_tab_states_get(self) -> None:
-        """Structural: ``_tab_states.get`` IS inside a
+    def test_source_has_lock_around_running_agent_states_get(self) -> None:
+        """Structural: ``_running_agent_states.get`` IS inside a
         ``with self._state_lock`` block in ``_await_user_response``
         (confirming the N2 data race fix).
         """
@@ -117,34 +117,34 @@ class TestAwaitUserResponseNoLock(unittest.TestCase):
 
         tab_get_idx = None
         for i, line in enumerate(lines):
-            if "_tab_states.get" in line:
+            if "_running_agent_states.get" in line:
                 tab_get_idx = i
                 break
         assert tab_get_idx is not None, (
-            "N2: could not find _tab_states.get in _await_user_response"
+            "N2: could not find _running_agent_states.get in _await_user_response"
         )
 
         preceding = "\n".join(lines[max(0, tab_get_idx - 5):tab_get_idx])
         assert "_state_lock" in preceding, (
-            "N2 fix: _tab_states.get should be protected by _state_lock"
+            "N2 fix: _running_agent_states.get should be protected by _state_lock"
         )
 
-    def test_close_tab_mutates_tab_states_under_lock(self) -> None:
-        """Contrast: ``_close_tab`` mutates ``_tab_states`` under lock."""
+    def test_close_tab_mutates_running_agent_states_under_lock(self) -> None:
+        """Contrast: ``_close_tab`` mutates ``_running_agent_states`` under lock."""
         src = inspect.getsource(VSCodeServer._close_tab)
         lock_pattern = re.compile(
-            r"with self\._state_lock:.*?_tab_states\.pop",
+            r"with self\._state_lock:.*?_running_agent_states\.pop",
             re.DOTALL,
         )
         assert lock_pattern.search(src), (
-            "N2 contrast: _close_tab pops _tab_states under _state_lock"
+            "N2 contrast: _close_tab pops _running_agent_states under _state_lock"
         )
 
     def test_behavioral_race_scenario(self) -> None:
         """Behavioral: demonstrate the race window.
 
         Thread A (task): calls ``_await_user_response`` and reads
-        ``_tab_states.get("t1")``.
+        ``_running_agent_states.get("t1")``.
 
         Thread B (main): calls ``_close_tab("t1")`` which pops the
         entry under the lock.
@@ -161,13 +161,13 @@ class TestAwaitUserResponseNoLock(unittest.TestCase):
 
         server.printer._thread_local.stop_event = tab.stop_event
         server.printer._thread_local.tab_id = "t1"
-        pre_close_tab = server._tab_states.get("t1")
+        pre_close_tab = server._running_agent_states.get("t1")
         assert pre_close_tab is not None, "Tab exists before close"
 
         with server._state_lock:
-            server._tab_states.pop("t1", None)
+            server._running_agent_states.pop("t1", None)
 
-        post_close_tab = server._tab_states.get("t1")
+        post_close_tab = server._running_agent_states.get("t1")
         assert post_close_tab is None, (
             "N2: after close, unlocked read returns None — answer is lost"
         )

@@ -355,7 +355,7 @@ class TestCmdRunSingleLockFixed(unittest.TestCase):
         src = inspect.getsource(_CommandsMixin._cmd_run)
         pattern = re.compile(
             r"with self\._state_lock:.*?"
-            r"_tab_states\.get\(tab_id\).*?"
+            r"_running_agent_states\.get\(tab_id\).*?"
             r"task_thread.*?is_alive",
             re.DOTALL,
         )
@@ -371,19 +371,19 @@ class TestCmdRunSingleLockFixed(unittest.TestCase):
         tab_id = "tab-a6"
 
         with server._state_lock:
-            tab = server._tab_states.get(tab_id)
+            tab = server._running_agent_states.get(tab_id)
             if tab is None:
-                from kiss.agents.vscode.tab_state import _TabState
-                tab = _TabState(tab_id, server._default_model)
-                server._tab_states[tab_id] = tab
+                from kiss.agents.vscode.running_agent_state import _RunningAgentState
+                tab = _RunningAgentState(tab_id, server._default_model)
+                server._running_agent_states[tab_id] = tab
 
-            assert tab_id in server._tab_states, (
+            assert tab_id in server._running_agent_states, (
                 "Tab is tracked throughout the single lock block"
             )
             tab.stop_event = threading.Event()
             tab.task_thread = threading.Thread(target=lambda: None, daemon=True)
 
-        assert tab_id in server._tab_states
+        assert tab_id in server._running_agent_states
         assert tab.task_thread is not None
 
 

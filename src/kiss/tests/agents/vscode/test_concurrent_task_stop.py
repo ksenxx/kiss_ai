@@ -808,7 +808,7 @@ class TestCleanupTab(unittest.TestCase):
 
 
 class TestCloseTabServer(unittest.TestCase):
-    """_close_tab on VSCodeServer cleans up _tab_states, printer state,
+    """_close_tab on VSCodeServer cleans up _running_agent_states, printer state,
     and _persist_agents."""
 
     @staticmethod
@@ -820,12 +820,12 @@ class TestCloseTabServer(unittest.TestCase):
         return VSCodeServer()
 
     def test_close_tab_removes_tab_state(self) -> None:
-        """_close_tab removes the tab from _tab_states."""
+        """_close_tab removes the tab from _running_agent_states."""
         server = self._make_server()
         server._get_tab("tab1")
-        assert "tab1" in server._tab_states
+        assert "tab1" in server._running_agent_states
         server._close_tab("tab1")
-        assert "tab1" not in server._tab_states
+        assert "tab1" not in server._running_agent_states
 
     def test_close_tab_cleans_printer_bash_states(self) -> None:
         """_close_tab removes the tab's bash state from the printer."""
@@ -862,7 +862,7 @@ class TestCloseTabServer(unittest.TestCase):
         tab = server._get_tab("tab1")
         tab.is_task_active = True
         server._close_tab("tab1")
-        assert "tab1" in server._tab_states
+        assert "tab1" in server._running_agent_states
 
     def test_close_tab_skips_merging_tab(self) -> None:
         """_close_tab does not remove a tab that is in a merge review."""
@@ -870,7 +870,7 @@ class TestCloseTabServer(unittest.TestCase):
         tab = server._get_tab("tab1")
         tab.is_merging = True
         server._close_tab("tab1")
-        assert "tab1" in server._tab_states
+        assert "tab1" in server._running_agent_states
 
     def test_close_tab_nonexistent_is_noop(self) -> None:
         """_close_tab for an unknown tab_id does not raise."""
@@ -881,9 +881,9 @@ class TestCloseTabServer(unittest.TestCase):
         """The closeTab command dispatches to _close_tab."""
         server = self._make_server()
         server._get_tab("tab1")
-        assert "tab1" in server._tab_states
+        assert "tab1" in server._running_agent_states
         server._handle_command({"type": "closeTab", "tabId": "tab1"})
-        assert "tab1" not in server._tab_states
+        assert "tab1" not in server._running_agent_states
 
 
 if __name__ == "__main__":

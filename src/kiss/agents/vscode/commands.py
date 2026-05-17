@@ -20,7 +20,7 @@ from kiss.agents.sorcar.persistence import (
     _record_file_usage,
     _record_model_usage,
 )
-from kiss.agents.vscode.tab_state import _TabState
+from kiss.agents.vscode.running_agent_state import _RunningAgentState
 
 if TYPE_CHECKING:
     from kiss.agents.vscode.printer import VSCodePrinter
@@ -67,7 +67,7 @@ class _CommandsMixin:
         printer: VSCodePrinter
         work_dir: str
         _state_lock: threading.Lock
-        _tab_states: dict[str, _TabState]
+        _running_agent_states: dict[str, _RunningAgentState]
         _default_model: str
         _complete_seq: int
         _complete_seq_latest: int
@@ -75,7 +75,7 @@ class _CommandsMixin:
         _last_active_file: str
         _last_active_content: str
 
-        def _get_tab(self, tab_id: str) -> _TabState: ...
+        def _get_tab(self, tab_id: str) -> _RunningAgentState: ...
         def _run_task(self, cmd: dict[str, Any]) -> None: ...
         def _stop_task(self, tab_id: str = "") -> None: ...
         def _get_models(self) -> None: ...
@@ -123,10 +123,10 @@ class _CommandsMixin:
         """
         tab_id = cmd.get("tabId", "")
         with self._state_lock:
-            tab = self._tab_states.get(tab_id)
+            tab = self._running_agent_states.get(tab_id)
             if tab is None:
-                tab = _TabState(tab_id, self._default_model)
-                self._tab_states[tab_id] = tab
+                tab = _RunningAgentState(tab_id, self._default_model)
+                self._running_agent_states[tab_id] = tab
             if tab.task_thread is not None and tab.task_thread.is_alive():
                 self.printer.broadcast({
                     "type": "error",
@@ -216,7 +216,7 @@ class _CommandsMixin:
         """Route a user answer to the correct tab's queue."""
         ans_tab = cmd.get("tabId", "")
         with self._state_lock:
-            ans_state = self._tab_states.get(ans_tab)
+            ans_state = self._running_agent_states.get(ans_tab)
             q = ans_state.user_answer_queue if ans_state is not None else None
         if q is None:
             logger.debug("userAnswer dropped: no queue for tabId=%s", ans_tab)

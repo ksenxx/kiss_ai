@@ -231,13 +231,13 @@ class TestC2C3ReplayRequiresTabId(unittest.TestCase):
     def test_empty_tab_id_does_not_create_tab_keyed_by_chat_id(self) -> None:
         server, _ = _make_server()
         server._replay_session("some-chat-id", tab_id="")
-        assert "some-chat-id" not in server._tab_states
+        assert "some-chat-id" not in server._running_agent_states
 
     def test_empty_tab_id_does_not_flip_use_worktree_on_any_tab(self) -> None:
         server, _ = _make_server()
         server._get_tab("real-tab").use_worktree = False
         server._replay_session("some-chat-id", tab_id="")
-        for tab in server._tab_states.values():
+        for tab in server._running_agent_states.values():
             assert tab.use_worktree is False
 
 

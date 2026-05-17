@@ -48,7 +48,7 @@ from kiss.agents.vscode.helpers import (
 )
 from kiss.agents.vscode.merge_flow import _MergeFlowMixin
 from kiss.agents.vscode.printer import VSCodePrinter
-from kiss.agents.vscode.tab_state import _TabState, parse_task_tags
+from kiss.agents.vscode.running_agent_state import _RunningAgentState, parse_task_tags
 from kiss.agents.vscode.task_runner import _TaskRunnerMixin
 from kiss.core.models.model_info import (
     MODEL_INFO,
@@ -60,7 +60,7 @@ from kiss.core.models.model_info import (
 __all__ = [
     "VSCodePrinter",
     "VSCodeServer",
-    "_TabState",
+    "_RunningAgentState",
     "main",
     "parse_task_tags",
 ]
@@ -78,7 +78,7 @@ class VSCodeServer(
 
     def __init__(self) -> None:
         self.printer = VSCodePrinter()
-        self._tab_states: dict[str, _TabState] = {}
+        self._running_agent_states: dict[str, _RunningAgentState] = {}
         self.work_dir = os.environ.get("KISS_WORKDIR", os.getcwd())
         persisted = _load_last_model()
         self._default_model = (
@@ -95,7 +95,7 @@ class VSCodeServer(
         self._last_active_file: str = ""
         self._last_active_content: str = ""
 
-    def _get_tab(self, tab_id: str) -> _TabState:
+    def _get_tab(self, tab_id: str) -> _RunningAgentState:
         """Get or create per-tab state for the given tab.
 
         Each tab gets its own agent instances so concurrent tabs never
@@ -117,10 +117,10 @@ class VSCodeServer(
             The per-tab state object.
         """
         with self._state_lock:
-            tab = self._tab_states.get(tab_id)
+            tab = self._running_agent_states.get(tab_id)
             if tab is None:
-                tab = _TabState(tab_id, self._default_model)
-                self._tab_states[tab_id] = tab
+                tab = _RunningAgentState(tab_id, self._default_model)
+                self._running_agent_states[tab_id] = tab
             return tab
 
     def _any_non_wt_running(self) -> bool:
@@ -131,7 +131,7 @@ class VSCodeServer(
         Returns:
             True if at least one tab has ``is_running_non_wt`` set.
         """
-        return any(t.is_running_non_wt for t in self._tab_states.values())
+        return any(t.is_running_non_wt for t in self._running_agent_states.values())
 
     def run(self) -> None:
         """Main loop: read commands from stdin, execute them."""
@@ -330,7 +330,7 @@ class VSCodeServer(
     def _close_tab(self, tab_id: str) -> None:
         """Clean up all backend state for a closed tab.
 
-        Removes the tab from ``_tab_states``, cleans up per-tab printer
+        Removes the tab from ``_running_agent_states``, cleans up per-tab printer
         state (bash buffers, recordings), and drops the persist-agent
         reference.
 
@@ -351,7 +351,7 @@ class VSCodeServer(
             tab_id: The frontend tab identifier to close.
         """
         with self._state_lock:
-            tab = self._tab_states.get(tab_id)
+            tab = self._running_agent_states.get(tab_id)
             if tab is not None and (
                 tab.is_task_active
                 or tab.is_merging
@@ -359,7 +359,7 @@ class VSCodeServer(
             ):
                 tab.frontend_closed = True
                 return
-            self._tab_states.pop(tab_id, None)
+            self._running_agent_states.pop(tab_id, None)
         self._teardown_tab_resources(tab_id, tab)
 
     def _dispose_if_closed(self, tab_id: str) -> None:
@@ -377,7 +377,7 @@ class VSCodeServer(
         if not tab_id:
             return
         with self._state_lock:
-            tab = self._tab_states.get(tab_id)
+            tab = self._running_agent_states.get(tab_id)
             if tab is None or not tab.frontend_closed:
                 return
             if (
@@ -386,17 +386,17 @@ class VSCodeServer(
                 or (tab.task_thread is not None and tab.task_thread.is_alive())
             ):
                 return
-            self._tab_states.pop(tab_id, None)
+            self._running_agent_states.pop(tab_id, None)
         self._teardown_tab_resources(tab_id, tab)
 
     def _teardown_tab_resources(
-        self, tab_id: str, tab: _TabState | None,
+        self, tab_id: str, tab: _RunningAgentState | None,
     ) -> None:
         """Release worktree, per-tab printer state and merge data dir.
 
         Shared cleanup tail used by both the immediate (:meth:`_close_tab`)
         and the deferred (:meth:`_dispose_if_closed`) disposal paths.
-        Caller must have already popped *tab* from ``_tab_states``.
+        Caller must have already popped *tab* from ``_running_agent_states``.
 
         Args:
             tab_id: The frontend tab identifier being disposed.
@@ -418,7 +418,7 @@ class VSCodeServer(
         The ``newChat`` command is only issued by the frontend's
         ``createNewTab`` flow, which always allocates a fresh tab id
         that the backend has never seen before.  ``_get_tab`` creates a
-        clean ``_TabState``, so there is no prior run state (no active
+        clean ``_RunningAgentState``, so there is no prior run state (no active
         task, no in-progress merge, no pending worktree, no carried-over
         warnings) to guard against here.
 
@@ -448,7 +448,7 @@ class VSCodeServer(
         """Replay recorded chat events for a previous chat session.
 
         Sets the tab's agent chat_id to match the resumed session.
-        The tab_id (frontend key in ``_tab_states``) does not change.
+        The tab_id (frontend key in ``_running_agent_states``) does not change.
 
         When ``tab_id`` is empty the call is a no-op — the previous
         behavior of synthesizing a phantom tab keyed by ``chat_id`` and
@@ -480,7 +480,7 @@ class VSCodeServer(
         # Inspect ``extra`` BEFORE re-attaching so we can detect a
         # sub-agent row and skip ``_reattach_running_chat`` for it.
         # Sub-agents share their parent's chat_id but run as threads
-        # inside the parent's executor — the parent's ``_TabState``
+        # inside the parent's executor — the parent's ``_RunningAgentState``
         # owns the live thread, so rebinding it here would steal the
         # parent's tab.  We only need to rebind the printer's per-tab
         # alias so live events still tagged with the sub-agent's
@@ -511,7 +511,7 @@ class VSCodeServer(
         # Always attach the new tab's own agent to the resumed chat
         # so a follow-up prompt typed in this tab continues the same
         # chat session.  With multi-viewer subscribe semantics the
-        # source tab (running the live task) keeps its own _TabState,
+        # source tab (running the live task) keeps its own _RunningAgentState,
         # so the new tab needs its own agent linked to the chat too.
         tab.agent.resume_chat_by_id(chat_id)
         with self._state_lock:
@@ -594,16 +594,16 @@ class VSCodeServer(
         self._emit_pending_worktree(tab_id)
 
     def _reattach_running_chat(self, chat_id: str, new_tab_id: str) -> bool:
-        """Subscribe *new_tab_id* to a still-running ``_TabState`` for
+        """Subscribe *new_tab_id* to a still-running ``_RunningAgentState`` for
         *chat_id* so its live agent's events ALSO flow to the newly
         opened tab — without stealing the stream from the original
         client.
 
         With the ``tab_id == chat_id`` invariant established at
         run-start in :meth:`_CommandsMixin._cmd_run`, the source
-        ``_TabState`` is keyed by *chat_id* directly — no scan
+        ``_RunningAgentState`` is keyed by *chat_id* directly — no scan
         required.  Multi-viewer fan-out is implemented in the
-        printer: the original ``_TabState`` keeps owning the running
+        printer: the original ``_RunningAgentState`` keeps owning the running
         task and the agent thread keeps tagging events with the
         original (source) tab id, while
         :meth:`BaseBrowserPrinter.subscribe_tab` registers
@@ -625,7 +625,7 @@ class VSCodeServer(
         if not chat_id or not new_tab_id:
             return False
         with self._state_lock:
-            t = self._tab_states.get(chat_id)
+            t = self._running_agent_states.get(chat_id)
             if t is None:
                 return False
             alive = t.task_thread is not None and t.task_thread.is_alive()

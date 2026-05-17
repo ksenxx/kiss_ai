@@ -97,7 +97,7 @@ class TestCloseTabRaceWithTaskStartup(unittest.TestCase):
 
         self.server._close_tab("t1")
 
-        assert "t1" in self.server._tab_states, (
+        assert "t1" in self.server._running_agent_states, (
             "B2 fix: tab should NOT be removed while task_thread is alive"
         )
 
@@ -183,7 +183,7 @@ class TestFinishMergeRedundantLookup(unittest.TestCase):
 
         def intercept_present(tid: str, **kw: object) -> None:
             with server._state_lock:
-                server._tab_states.pop(tid, None)
+                server._running_agent_states.pop(tid, None)
             removed.set()
 
         server._present_pending_worktree = intercept_present  # type: ignore[assignment,method-assign]

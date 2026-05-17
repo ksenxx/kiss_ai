@@ -360,7 +360,7 @@ class TestBug4CloseTabOrphansWorktree:
 
         server._close_tab(tab_id)
 
-        assert tab_id in server._tab_states
+        assert tab_id in server._running_agent_states
         assert GitWorktreeOps.branch_exists(self.repo, branch)
 
         tab.is_task_active = False

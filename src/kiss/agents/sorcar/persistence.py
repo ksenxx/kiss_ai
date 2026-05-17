@@ -802,15 +802,6 @@ def _append_chat_event(
         resolved = _resolve_task_id(db, task_id, task)
         if resolved is None:
             return
-        row = db.execute(
-            "SELECT COALESCE(MAX(seq), -1) + 1 AS next_seq FROM events WHERE task_id = ?",
-            (resolved,),
-        ).fetchone()
-        next_seq = row["next_seq"] if row else 0
-        db.execute(
-            "INSERT INTO events (task_id, seq, event_json, timestamp) VALUES (?, ?, ?, ?)",
-            (resolved, next_seq, json.dumps(event), time.time()),
-        )
         cached = _next_seq_cache.get(resolved)
         if cached is None:
             row = db.execute(
@@ -820,8 +811,6 @@ def _append_chat_event(
             ).fetchone()
             cached = row["next_seq"] if row else 0
         db.execute(
-            "UPDATE task_history SET has_events = 1 WHERE id = ?",
-            (resolved,),
             "INSERT INTO events (task_id, seq, event_json, timestamp) "
             "VALUES (?, ?, ?, ?)",
             (resolved, cached, json.dumps(event), time.time()),

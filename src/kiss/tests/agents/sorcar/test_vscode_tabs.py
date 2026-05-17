@@ -257,7 +257,7 @@ class TestConcurrentTabs(unittest.TestCase):
 
         time.sleep(2)
         threads = [
-            t.task_thread for t in self.server._tab_states.values()
+            t.task_thread for t in self.server._running_agent_states.values()
             if t.task_thread is not None
         ]
         for t in threads:
@@ -621,15 +621,15 @@ class TestPerTabAgentIsolation(unittest.TestCase):
         assert tab2.task_history_id is None
 
     def test_get_tab_creates_on_demand(self) -> None:
-        """_get_tab creates a new _TabState if one doesn't exist."""
+        """_get_tab creates a new _RunningAgentState if one doesn't exist."""
         server, _ = _make_server()
-        assert "99" not in server._tab_states
+        assert "99" not in server._running_agent_states
         tab = server._get_tab("99")
-        assert "99" in server._tab_states
+        assert "99" in server._running_agent_states
         assert tab is server._get_tab("99")
 
     def test_agent_is_always_worktree_sorcar_agent(self) -> None:
-        """_TabState.agent is a single WorktreeSorcarAgent regardless of toggle."""
+        """_RunningAgentState.agent is a single WorktreeSorcarAgent regardless of toggle."""
         from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
         server, _ = _make_server()

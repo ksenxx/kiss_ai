@@ -5,8 +5,7 @@ import time
 from functools import partial
 from typing import Any
 
-from kiss.agents.sorcar.persistence import _append_chat_event
-from kiss.agents.sorcar.persistence import _queue_chat_event
+from kiss.agents.sorcar.persistence import _append_chat_event, _queue_chat_event
 from kiss.core.printer import (
     Printer,
     extract_extras,
