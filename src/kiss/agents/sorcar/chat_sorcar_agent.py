@@ -35,6 +35,23 @@ class ChatSorcarAgent(SorcarAgent):
     from the VS Code extension as a standalone reusable agent.
     """
 
+    # Process-global map of ``task_history.id`` (the database primary
+    # key minted by :func:`_add_task`) → the :class:`ChatSorcarAgent`
+    # instance currently executing that task.  Every ``run()`` call —
+    # top-level chat tasks as well as parallel sub-agent tasks
+    # spawned by :meth:`_run_tasks_parallel` — inserts itself here
+    # immediately after the task row is written to ``sorcar.db`` and
+    # removes itself in the ``finally`` block once ``run()`` returns
+    # (or raises).  External observers can use this map to ask
+    # "which agent (if any) is currently driving task X?" without
+    # having to scan :attr:`WorktreeSorcarAgent.running_agent_states`
+    # (which is keyed by frontend tab id and tracks per-tab UI
+    # state, not per-task agents).  Insertions and removals on
+    # distinct ``task_id`` keys never collide so no lock is required
+    # — CPython dict ``__setitem__`` / ``pop`` are atomic under the
+    # GIL.
+    running_agents: dict[int, ChatSorcarAgent] = {}
+
     def __init__(self, name: str) -> None:
         super().__init__(name)
         self._chat_id: str = ""
@@ -253,6 +270,12 @@ class ChatSorcarAgent(SorcarAgent):
         agent_prompt = self.build_chat_prompt(prompt_template)
         task_id, self._chat_id = _add_task(prompt_template, chat_id=self._chat_id)
         self._last_task_id = task_id
+        # Publish ``self`` as the agent currently driving ``task_id``.
+        # The entry is added the moment the row exists in
+        # ``task_history`` and removed in the matching ``finally``
+        # block below so the lifetime mirrors exactly "task is in
+        # flight inside this ``run()`` call".
+        ChatSorcarAgent.running_agents[task_id] = self
         _record_frequent_task(prompt_template)
 
         result_summary = ""
@@ -269,6 +292,7 @@ class ChatSorcarAgent(SorcarAgent):
             result_summary = "Task failed"
             raise
         finally:
+            ChatSorcarAgent.running_agents.pop(task_id, None)
             if not skip_persistence:
                 _save_task_result(task_id=task_id, result=result_summary)
                 from kiss._version import __version__
