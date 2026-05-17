@@ -170,13 +170,6 @@ class TestIsWorktree:
 class TestModel:
     """model_name sets agent.model_name and broadcasts."""
 
-    @pytest.mark.xfail(
-        reason=(
-            "production sorcar_agent.py update_settings has a NameError when broadcasting "
-            "the 'model' key (refers to undefined 'model' instead of 'model_name')"
-        ),
-        strict=False,
-    )
     def test_change_model(self) -> None:
         agent, printer, tools = _make_agent_and_printer()
         update = _find_tool(tools, "update_settings")
@@ -350,13 +343,6 @@ class TestAutoCommit:
 class TestMultipleSettings:
     """Multiple settings changed in one call."""
 
-    @pytest.mark.xfail(
-        reason=(
-            "production sorcar_agent.py update_settings has a NameError when broadcasting "
-            "the 'model' key (refers to undefined 'model' instead of 'model_name')"
-        ),
-        strict=False,
-    )
     def test_two_settings(self) -> None:
         agent, printer, tools = _make_agent_and_printer()
         update = _find_tool(tools, "update_settings")
@@ -372,13 +358,6 @@ class TestMultipleSettings:
         keys = {e["key"] for e in evts}
         assert keys == {"is_parallel", "model"}
 
-    @pytest.mark.xfail(
-        reason=(
-            "production sorcar_agent.py update_settings has a NameError when broadcasting "
-            "the 'model' key (refers to undefined 'model' instead of 'model_name')"
-        ),
-        strict=False,
-    )
     def test_all_settings_at_once(self, tmp_path: Path) -> None:
         agent, printer, tools = _make_agent_and_printer()
         update = _find_tool(tools, "update_settings")
@@ -734,13 +713,6 @@ class TestWebPrinterBroadcast:
     retrievable through ``stop_recording``.
     """
 
-    @pytest.mark.xfail(
-        reason=(
-            "production sorcar_agent.py update_settings has a NameError when broadcasting "
-            "the 'model' key (refers to undefined 'model' instead of 'model_name')"
-        ),
-        strict=False,
-    )
     def test_events_recorded(self) -> None:
         """updateSetting events are captured in WebPrinter's recording."""
         from kiss.agents.vscode.web_server import WebPrinter
@@ -770,13 +742,6 @@ class TestWebPrinterBroadcast:
         keys = {e["key"] for e in setting_evts}
         assert keys == {"is_parallel", "model"}
 
-    @pytest.mark.xfail(
-        reason=(
-            "production sorcar_agent.py update_settings has a NameError when broadcasting "
-            "the 'model' key (refers to undefined 'model' instead of 'model_name')"
-        ),
-        strict=False,
-    )
     def test_all_settings_recorded(self, tmp_path: Path) -> None:
         """All 12 setting types are recorded by WebPrinter."""
         from kiss.agents.vscode.web_server import WebPrinter

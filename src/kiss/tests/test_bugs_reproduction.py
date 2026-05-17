@@ -7,8 +7,6 @@ or test doubles are used.
 
 import inspect
 
-import pytest
-
 
 class TestC4ThoughtSignaturesNotCleared:
     def test_reset_conversation_clears_thought_signatures(self) -> None:
@@ -160,14 +158,6 @@ class TestI4ModelUsageNotRecordedOnFailure:
 
 
 class TestI5OffByOneStepCount:
-    @pytest.mark.xfail(
-        reason=(
-            "production KISSAgent._run_agentic_loop currently increments "
-            "step_count before _check_limits and _check_limits uses >=; "
-            "fixing requires production code changes"
-        ),
-        strict=False,
-    )
     def test_agent_executes_max_steps_not_max_steps_minus_one(self) -> None:
         """With max_steps=N, the agent should execute N steps, not N-1.
 
