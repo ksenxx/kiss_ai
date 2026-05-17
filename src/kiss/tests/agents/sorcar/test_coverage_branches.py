@@ -6,7 +6,6 @@ and real function calls.
 
 from __future__ import annotations
 
-import json
 import os
 import queue
 import subprocess
@@ -232,30 +231,6 @@ class TestVSCodeServerBranches:
         assert result == "my answer"
         ask_events = [e for e in events if e["type"] == "askUser"]
         assert len(ask_events) == 1
-
-    def test_run_with_stdin(self):
-        """Test run() reads from stdin and dispatches."""
-        server = VSCodeServer()
-        events: list[dict] = []
-        def capture(event):
-            events.append(event)
-        server.printer.broadcast = capture  # type: ignore[assignment]
-
-        import io
-        cmds = [
-            json.dumps({"type": "getModels"}) + "\n",
-            json.dumps({"type": "selectModel", "model": "claude-opus-4-6"}) + "\n",
-            "",
-        ]
-        old_stdin = os.sys.stdin  # type: ignore[attr-defined]
-        os.sys.stdin = io.StringIO("".join(cmds))  # type: ignore[attr-defined]
-        try:
-            server.run()
-        finally:
-            os.sys.stdin = old_stdin  # type: ignore[attr-defined]
-
-        model_events = [e for e in events if e["type"] == "models"]
-        assert len(model_events) == 1
 
     def test_emit_pending_worktree_with_branch(self, tmp_path):
         """_emit_pending_worktree emits worktree_done when branch exists."""

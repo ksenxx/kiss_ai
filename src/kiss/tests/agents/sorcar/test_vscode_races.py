@@ -13,110 +13,18 @@ they can surface races reliably.
 
 from __future__ import annotations
 
-import io
-import json
-import sys
 import threading
-import time
 import unittest
 
-from kiss.agents.vscode.server import VSCodePrinter, VSCodeServer
+from kiss.agents.vscode.server import VSCodeServer
 
-
-class TestBroadcastOrderingRace(unittest.TestCase):
-    """``VSCodePrinter.broadcast`` must keep recording order == stdout order.
-
-    The original implementation acquired ``_lock`` (for recording) and
-    ``_stdout_lock`` (for stdout) in two separate critical sections,
-    so two concurrent broadcasts could interleave and produce a
-    recording order that differed from the stdout order.
-
-    This test forces the race deterministically by wrapping
-    ``printer._stdout_lock`` so the first thread to reach the lock is
-    suspended BEFORE it actually acquires it — letting the second
-    thread complete its full broadcast first and thereby get its
-    stdout write out before the first thread's.
-    """
-
-    def test_recording_matches_stdout_order_under_concurrency(self) -> None:
-        printer = VSCodePrinter()
-        printer.start_recording()
-
-        inner_lock = printer._stdout_lock
-
-        class _OrderingLock:
-            """Context-manager wrapper that delays the first thread.
-
-            The first thread to call ``__enter__`` is held before
-            actually acquiring ``inner_lock`` until ``allow_first``
-            is signalled — any later thread proceeds immediately.
-            """
-
-            def __init__(self) -> None:
-                self.first_ident: int | None = None
-                self.first_blocked = threading.Event()
-                self.allow_first = threading.Event()
-
-            def __enter__(self) -> None:
-                tid = threading.get_ident()
-                if self.first_ident is None:
-                    self.first_ident = tid
-                    self.first_blocked.set()
-                    self.allow_first.wait(timeout=5)
-                inner_lock.acquire()
-
-            def __exit__(self, *_a: object) -> None:
-                inner_lock.release()
-
-        ordering = _OrderingLock()
-        printer._stdout_lock = ordering  # type: ignore[assignment]
-
-        captured: list[dict] = []
-        capture_lock = threading.Lock()
-
-        class _CapturingStdout(io.StringIO):
-            def write(self, s: str) -> int:  # type: ignore[override]
-                for line in s.splitlines():
-                    if not line:
-                        continue
-                    with capture_lock:
-                        captured.append(json.loads(line))
-                return len(s)
-
-            def flush(self) -> None:  # type: ignore[override]
-                pass
-
-        orig_stdout = sys.stdout
-        sys.stdout = _CapturingStdout()
-        try:
-            def t1_run() -> None:
-                printer.broadcast({"type": "system_prompt", "text": "first"})
-
-            def t2_run() -> None:
-                ordering.first_blocked.wait(timeout=5)
-                printer.broadcast({"type": "system_prompt", "text": "second"})
-
-            t1 = threading.Thread(target=t1_run)
-            t2 = threading.Thread(target=t2_run)
-            t1.start()
-            t2.start()
-            ordering.first_blocked.wait(timeout=5)
-            time.sleep(0.1)
-            ordering.allow_first.set()
-            t1.join(timeout=5)
-            t2.join(timeout=5)
-        finally:
-            sys.stdout = orig_stdout
-            printer._stdout_lock = inner_lock
-
-        recorded = printer.stop_recording()
-        self.assertEqual(len(recorded), 2)
-        self.assertEqual(len(captured), 2)
-        self.assertEqual(
-            [e["text"] for e in recorded],
-            [e["text"] for e in captured],
-            "recording order must equal stdout write order",
-        )
+# The historical ``TestBroadcastOrderingRace`` exercised the
+# ``_stdout_lock`` ordering guarantee inside the now-deleted
+# ``VSCodePrinter``.  Under the single-daemon architecture the
+# extension talks to ``kiss-web`` over a Unix-domain socket and there
+# is no stdout transport — ``WebPrinter._send_to_ws_clients`` performs
+# the socket-level writes through a dedicated asyncio loop, so the
+# stdout-order invariant the old test pinned no longer exists.
 
 
 class TestFileCacheOverwriteRace(unittest.TestCase):

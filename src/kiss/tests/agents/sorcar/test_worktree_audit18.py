@@ -129,8 +129,8 @@ class _RecordingPrinter:
     """Real printer that records every broadcast call.
 
     Not a mock — a concrete object fulfilling the exact ``broadcast``
-    contract.  Used instead of the stdout-writing ``VSCodePrinter`` so
-    the tests can assert on emitted events.
+    contract.  Used instead of the real :class:`WebPrinter` so the
+    tests can assert on emitted events without standing up sockets.
     """
 
     def __init__(self) -> None:

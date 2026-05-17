@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-    from kiss.agents.vscode.printer import VSCodePrinter
+    from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps, repo_lock
 from kiss.agents.sorcar.persistence import (
@@ -46,7 +46,7 @@ class _TaskRunnerMixin:
     """Task-lifecycle methods (run, stop, user-question callback)."""
 
     if TYPE_CHECKING:
-        printer: VSCodePrinter
+        printer: BaseBrowserPrinter
         work_dir: str
         _state_lock: threading.Lock
 

@@ -2105,12 +2105,11 @@ class RemoteAccessServer:
         # config provides one.
         self.work_dir: str = work_dir or ""
 
-        self._vscode_server = VSCodeServer()
-        if self.work_dir:
-            self._vscode_server.work_dir = self.work_dir
         self._printer = WebPrinter()
         self._printer.work_dir = self.work_dir
-        self._vscode_server.printer = self._printer  # type: ignore[assignment]
+        self._vscode_server = VSCodeServer(printer=self._printer)
+        if self.work_dir:
+            self._vscode_server.work_dir = self.work_dir
 
         self._html_bytes = _build_html().encode("utf-8")
         self._tunnel_proc: subprocess.Popen[str] | None = None

@@ -56,49 +56,6 @@ class TestUnknownCommandErrorRouted(unittest.TestCase):
         assert "tabId" not in err[0]
 
 
-class TestRunGenericErrorRouted(unittest.TestCase):
-    def test_generic_exception_carries_tab_id_from_cmd(self) -> None:
-        """run() catches a handler exception and includes cmd.tabId on error."""
-        server, events = _make_server()
-
-        def boom(self: VSCodeServer, cmd: dict[str, Any]) -> None:
-            raise RuntimeError("boom-x")
-
-        server._HANDLERS = {**VSCodeServer._HANDLERS, "kaboom": boom}  # type: ignore[assignment]
-
-        import io
-        import sys
-        orig_stdin = sys.stdin
-        sys.stdin = io.StringIO(json.dumps({"type": "kaboom", "tabId": "t-42"}) + "\n")
-        try:
-            server.run()
-        finally:
-            sys.stdin = orig_stdin
-
-        err = [e for e in events if e.get("type") == "error"]
-        assert len(err) == 1
-        assert err[0].get("tabId") == "t-42"
-        assert err[0]["text"] == "boom-x"
-
-    def test_invalid_json_error_has_no_tab_id(self) -> None:
-        """Invalid JSON path cannot parse tabId; field must be absent."""
-        server, events = _make_server()
-
-        import io
-        import sys
-        orig_stdin = sys.stdin
-        sys.stdin = io.StringIO("{not json\n")
-        try:
-            server.run()
-        finally:
-            sys.stdin = orig_stdin
-
-        err = [e for e in events if e.get("type") == "error"]
-        assert len(err) == 1
-        assert "tabId" not in err[0]
-        assert "Invalid JSON" in err[0]["text"]
-
-
 class TestStartMergeSessionRouted(unittest.TestCase):
     def _write_merge_json(self, path: Path) -> None:
         payload = {

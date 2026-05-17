@@ -31,7 +31,7 @@ from kiss.agents.vscode.diff_merge import (
 from kiss.agents.vscode.helpers import generate_commit_message_from_diff
 
 if TYPE_CHECKING:
-    from kiss.agents.vscode.printer import VSCodePrinter
+    from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +54,7 @@ class _MergeFlowMixin:
     """Merge-view, worktree-action, and autocommit methods."""
 
     if TYPE_CHECKING:
-        printer: VSCodePrinter
+        printer: BaseBrowserPrinter
         work_dir: str
         _state_lock: threading.Lock
 

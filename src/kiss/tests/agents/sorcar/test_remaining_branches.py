@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -133,30 +132,6 @@ class TestVSCodeServerBranches:
         (th._DB_PATH, th._db_conn, th._KISS_DIR) = self._saved
         import shutil
         shutil.rmtree(self._tmpdir, ignore_errors=True)
-
-    def test_run_loop_empty_lines_and_invalid_json(self) -> None:
-        """server.run() skips empty lines, handles invalid JSON (line 119)."""
-        import io
-
-        server = VSCodeServer()
-        events: list[dict] = []
-        orig_broadcast = server.printer.broadcast
-        def capture(ev: dict) -> None:
-            events.append(ev)
-            orig_broadcast(ev)
-        server.printer.broadcast = capture  # type: ignore[assignment]
-
-        fake_stdin = io.StringIO("\n\nnot-json\n")
-        old_stdin = sys.stdin
-        sys.stdin = fake_stdin
-        try:
-            server.run()
-        finally:
-            sys.stdin = old_stdin
-
-        error_events = [e for e in events if e.get("type") == "error"]
-        assert len(error_events) == 1
-        assert "Invalid JSON" in error_events[0]["text"]
 
     def test_handle_command_unknown(self) -> None:
         """Unknown command type broadcasts error."""

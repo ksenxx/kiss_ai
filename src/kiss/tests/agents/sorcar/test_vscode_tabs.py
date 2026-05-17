@@ -133,48 +133,28 @@ class TestTabIdInjection(unittest.TestCase):
 
     def test_broadcast_injects_tabid_from_thread_local(self) -> None:
         """When thread-local tab_id is set, broadcast adds tabId to events."""
-        import io
-        import json
-        import sys
+        from kiss.tests.agents.vscode._memory_printer import MemoryPrinter
 
-        from kiss.agents.vscode.server import VSCodePrinter
-
-        printer = VSCodePrinter()
+        printer = MemoryPrinter()
         printer._thread_local.tab_id = "7"
 
-        buf = io.StringIO()
-        old_stdout = sys.stdout
-        sys.stdout = buf
-        try:
-            printer.broadcast({"type": "askUser", "question": "What?"})
-        finally:
-            sys.stdout = old_stdout
+        printer.broadcast({"type": "askUser", "question": "What?"})
 
-        event = json.loads(buf.getvalue().strip())
-        assert event["tabId"] == "7"
-        assert event["type"] == "askUser"
+        assert len(printer.emitted) == 1
+        assert printer.emitted[0]["tabId"] == "7"
+        assert printer.emitted[0]["type"] == "askUser"
 
     def test_broadcast_does_not_overwrite_explicit_tabid(self) -> None:
         """If event already has tabId, broadcast does not overwrite it."""
-        import io
-        import json
-        import sys
+        from kiss.tests.agents.vscode._memory_printer import MemoryPrinter
 
-        from kiss.agents.vscode.server import VSCodePrinter
-
-        printer = VSCodePrinter()
+        printer = MemoryPrinter()
         printer._thread_local.tab_id = "7"
 
-        buf = io.StringIO()
-        old_stdout = sys.stdout
-        sys.stdout = buf
-        try:
-            printer.broadcast({"type": "error", "text": "oops", "tabId": "3"})
-        finally:
-            sys.stdout = old_stdout
+        printer.broadcast({"type": "error", "text": "oops", "tabId": "3"})
 
-        event = json.loads(buf.getvalue().strip())
-        assert event["tabId"] == "3"
+        assert len(printer.emitted) == 1
+        assert printer.emitted[0]["tabId"] == "3"
 
 
 class TestStopRouting(unittest.TestCase):
@@ -457,34 +437,15 @@ class TestFollowupAsyncTabId(unittest.TestCase):
         """The background thread created by _generate_followup_async
         sets the printer's thread-local tab_id so that broadcasts get
         the correct tabId."""
-        import io
-        import sys
+        from kiss.tests.agents.vscode._memory_printer import MemoryPrinter
 
-        from kiss.agents.vscode.server import VSCodePrinter
-
-        printer = VSCodePrinter()
-        captured_tab_ids: list[int | None] = []
-        original_broadcast = printer.broadcast
-
-        def capture_broadcast(event: dict) -> None:  # type: ignore[type-arg]
-            captured_tab_ids.append(event.get("tabId"))
-            original_broadcast(event)
-
-        printer.broadcast = capture_broadcast  # type: ignore[assignment]
-
-        server = VSCodeServer()
-        server.printer = printer
+        printer = MemoryPrinter()
+        server = VSCodeServer(printer=printer)
 
         printer._thread_local.tab_id = "42"
 
-        buf = io.StringIO()
-        old_stdout = sys.stdout
-        sys.stdout = buf
-        try:
-            server._generate_followup_async("task", "result", None)
-            time.sleep(2)
-        finally:
-            sys.stdout = old_stdout
+        server._generate_followup_async("task", "result", None)
+        time.sleep(2)
 
         import inspect
         src = inspect.getsource(server._generate_followup_async)
@@ -497,35 +458,21 @@ class TestBashFlushTimerTabId(unittest.TestCase):
 
     def test_timer_flush_injects_tab_id(self) -> None:
         """Bash output flushed by the timer includes the correct tabId."""
-        import io
-        import json
-        import sys
+        from kiss.tests.agents.vscode._memory_printer import MemoryPrinter
 
-        from kiss.agents.vscode.server import VSCodePrinter
-
-        printer = VSCodePrinter()
+        printer = MemoryPrinter()
         printer._thread_local.tab_id = "99"
 
-        buf = io.StringIO()
-        old_stdout = sys.stdout
-        sys.stdout = buf
-        try:
-            with printer._bash_lock:
-                printer._bash_state.last_flush = time.monotonic()
-            printer.print("line1\n", type="bash_stream")
-            time.sleep(0.5)
-        finally:
-            sys.stdout = old_stdout
+        with printer._bash_lock:
+            printer._bash_state.last_flush = time.monotonic()
+        printer.print("line1\n", type="bash_stream")
+        time.sleep(0.5)
 
-        output = buf.getvalue().strip()
-        if output:
-            lines = output.split("\n")
-            for line in lines:
-                event = json.loads(line)
-                if event.get("type") == "system_output":
-                    assert event.get("tabId") == "99", (
-                        f"Expected tabId='99', got {event.get('tabId')}"
-                    )
+        for event in printer.emitted:
+            if event.get("type") == "system_output":
+                assert event.get("tabId") == "99", (
+                    f"Expected tabId='99', got {event.get('tabId')}"
+                )
 
 
 class TestRecordingIsolation(unittest.TestCase):
@@ -534,25 +481,16 @@ class TestRecordingIsolation(unittest.TestCase):
 
     def test_recording_captures_own_tab_events(self) -> None:
         """Recording captures events for the current tab (per-tab isolation)."""
-        import io
-        import sys
+        from kiss.tests.agents.vscode._memory_printer import MemoryPrinter
 
-        from kiss.agents.vscode.server import VSCodePrinter
-
-        printer = VSCodePrinter()
+        printer = MemoryPrinter()
         printer._thread_local.tab_id = "1"
 
         printer.start_recording()
 
-        buf = io.StringIO()
-        old_stdout = sys.stdout
-        sys.stdout = buf
-        try:
-            printer.broadcast({"type": "tool_call", "name": "Read"})
-            printer.broadcast({"type": "tool_result", "content": "ok"})
-            printer.broadcast({"type": "prompt", "text": "global event"})
-        finally:
-            sys.stdout = old_stdout
+        printer.broadcast({"type": "tool_call", "name": "Read"})
+        printer.broadcast({"type": "tool_result", "content": "ok"})
+        printer.broadcast({"type": "prompt", "text": "global event"})
 
         events = printer.stop_recording()
 

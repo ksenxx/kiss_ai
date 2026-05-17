@@ -528,7 +528,7 @@ class BaseBrowserPrinter(Printer):
         """Append event to the active recording for the event's tab.
 
         Looks up the recording list by ``tabId`` from the event (set by
-        ``VSCodePrinter.broadcast``), falling back to the thread-local
+        ``WebPrinter.broadcast``), falling back to the thread-local
         ``tab_id``.  This ensures timer-thread broadcasts (bash flush)
         are routed to the correct tab's recording.
 
@@ -545,13 +545,21 @@ class BaseBrowserPrinter(Printer):
             rec.append(event)
 
     def broadcast(self, event: dict[str, Any]) -> None:
-        """Broadcast an event and record it.
+        """Inject the thread-local tabId, record, and persist the event.
+
+        Subclasses that own a transport (WSS / UDS sockets, etc.) add
+        their own emission logic AFTER calling the recording / persistence
+        path — see :class:`WebPrinter` in ``web_server.py``.  The default
+        implementation here is sufficient for tests that only need the
+        recording and persistence side effects.
 
         Args:
             event: The event dictionary to broadcast.
         """
+        event = self._inject_tab_id(event)
         with self._lock:
             self._record_event(event)
+        self._persist_event(event)
 
     def _broadcast_result(
         self,
