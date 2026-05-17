@@ -1,29 +1,17 @@
-"""Integration tests: thinking/text after non-core tools must go into Thoughts panels.
+"""Integration tests: thinking/text after a tool_call must go into Thoughts panels.
 
-Bug: When the model calls a non-core tool (screenshot, go_to_url, scroll,
-click, etc.), the printer does NOT broadcast a ``tool_result`` event because
-``tool_name not in core_tools`` (core_tools = {Bash, Read, Edit, Write}).
-The frontend ``processOutputEvent`` only sets ``pendingPanel = true`` on
-``tool_result``, and sets ``pendingPanel = false`` on ``tool_call``.  So
-after a non-core tool_call whose tool_result is suppressed, ``pendingPanel``
-stays ``false`` and ``stepCount > 0``, causing the next ``thinking_start``
-or ``text_delta`` to bypass Thoughts-panel creation and render directly
-in the main output area.
+Originally a non-core ``tool_result`` (screenshot, go_to_url, scroll,
+click, …) was suppressed by ``BaseBrowserPrinter`` and the frontend's
+``pendingPanel`` flag stayed ``false`` after such a tool_call — the next
+thinking/text block then bypassed Thoughts-panel creation.
 
-Real-world example (from task 1022 — "the dependency lines are not showing
-up?"):
-
-    [7]  tool_call(Read)       → pendingPanel = false
-    [8]  tool_result(Read)     → pendingPanel = true   (Read is core)
-    [9]  text_end              → no-op
-    [10] tool_call(screenshot) → pendingPanel = false   ← BUG
-    --- tool_result for screenshot NOT broadcast (not core) ---
-    [11] thinking_start        → pendingPanel=false, stepCount>0 → NO PANEL ❌
-
-Fix: Set ``pendingPanel = true`` (not false) on ``tool_call`` events so
-that after every tool call — regardless of whether the tool_result is
-broadcast — the next thinking/text block gets its own Thoughts panel.
-This change must be applied in:
+The backend now broadcasts ``tool_result`` for every tool *except*
+``finish`` (commit a8d394a7), so the suppression branch is gone.  The
+frontend fix — set ``pendingPanel = true`` on ``tool_call`` itself — is
+still required as a defensive invariant: it guarantees a Thoughts
+panel for the next thinking/text block regardless of how the printer
+decides to render the tool's return value.  These tests pin that
+invariant in:
   1. ``processOutputEvent``
   2. ``processOutputEventForBgTab``
   3. ``replayEventsInto``
@@ -141,36 +129,34 @@ def test_replay_events_into_tool_call_sets_pending_true() -> None:
     )
 
 
-# ── Backend test: non-core tool_result is suppressed ──────────────────────
+# ── Backend test: tool_result is broadcast for every non-finish tool ──────
 
 
-def test_noncore_tool_result_is_suppressed() -> None:
-    """Verify that tool_result for non-core tools is NOT broadcast.
+def test_noncore_tool_result_is_broadcast() -> None:
+    """Verify that tool_result for non-core tools IS broadcast.
 
-    This is the root cause: the printer suppresses tool_result for
-    tools not in core_tools (Bash, Read, Edit, Write), so the frontend
-    never sees tool_result and pendingPanel stays false.
+    Earlier the printer suppressed ``tool_result`` for tools outside
+    the {Bash, Read, Edit, Write} whitelist.  Commit a8d394a7 removed
+    that whitelist — every tool's return value is now rendered except
+    ``finish`` (the agentic loop renders ``finish`` as a dedicated
+    ``result`` panel).  This test pins the new behaviour so any future
+    "suppress non-core tools" regression fails loudly.
     """
     from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 
     printer = BaseBrowserPrinter()
     printer.start_recording()
 
-    # Simulate a non-core tool call + result
     printer.print("screenshot", type="tool_call", tool_input={})
     printer.print("image data...", type="tool_result", tool_name="screenshot")
 
     events = printer.stop_recording()
     types = [e["type"] for e in events]
 
-    # tool_call should produce text_end + tool_call
     assert "tool_call" in types, "tool_call event must be broadcast"
-
-    # tool_result should NOT be broadcast for non-core tools
-    assert "tool_result" not in types, (
-        "tool_result for non-core tool 'screenshot' should be suppressed. "
-        "This is by design (reduces UI noise), but means the frontend "
-        "must handle panel creation without relying on tool_result."
+    assert "tool_result" in types, (
+        "tool_result for non-core tool 'screenshot' must be broadcast "
+        "(the core_tools whitelist was removed in commit a8d394a7)."
     )
 
 
@@ -196,13 +182,14 @@ def test_core_tool_result_is_broadcast() -> None:
 
 
 def test_thinking_after_noncore_tool_gets_panel_events() -> None:
-    """Simulate the real event sequence and verify panel-creation events.
+    """Simulate a non-core tool turn and verify the post-a8d394a7 event order.
 
-    Replays the event sequence from task 1022 through the printer to
-    confirm that the backend emits the events in the order that the
-    frontend must handle.  The test verifies:
-    1. Non-core tool_result is suppressed
-    2. The event stream matches the pattern that causes the bug
+    After commit a8d394a7 the printer broadcasts ``tool_result`` for
+    every non-``finish`` tool, so the screenshot tool_call is followed
+    by its tool_result *before* the next thinking_start.  The frontend
+    still creates a Thoughts panel for the thinking_start because
+    ``pendingPanel`` is set ``true`` on the tool_call itself (the
+    invariant pinned by the tests above).
     """
     from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 
@@ -229,9 +216,6 @@ def test_thinking_after_noncore_tool_gets_panel_events() -> None:
     events = printer.stop_recording()
     types = [e["type"] for e in events]
 
-    # The critical pattern: after tool_call(screenshot), no tool_result,
-    # then thinking_start.  Without the fix, the frontend wouldn't create
-    # a Thoughts panel for this thinking_start.
     screenshot_idx = None
     for i, e in enumerate(events):
         if e["type"] == "tool_call" and e.get("name") == "screenshot":
@@ -239,13 +223,14 @@ def test_thinking_after_noncore_tool_gets_panel_events() -> None:
             break
     assert screenshot_idx is not None
 
-    # Verify no tool_result between screenshot tool_call and next thinking_start
+    # tool_result(screenshot) is now broadcast and appears between the
+    # screenshot tool_call and the next thinking_start.
     post_screenshot = types[screenshot_idx + 1 :]
     thinking_start_offset = post_screenshot.index("thinking_start")
     between = post_screenshot[:thinking_start_offset]
-    assert "tool_result" not in between, (
-        f"Expected no tool_result between screenshot tool_call and thinking_start, "
-        f"got: {between}"
+    assert "tool_result" in between, (
+        "tool_result for the screenshot tool must be broadcast between "
+        f"its tool_call and the next thinking_start, got: {between}"
     )
 
 

@@ -30,7 +30,7 @@ _JS_PATH = (
 
 
 class TestAskUserSidebarReveal:
-    """Structural test: _setupProcessListeners reveals the sidebar on askUser."""
+    """Structural test: _installClientListener reveals the sidebar on askUser."""
 
     def test_setup_process_listeners_reveals_sidebar_on_askuser(self) -> None:
         """The TS source must call view.show before sendToWebview for askUser."""
@@ -38,7 +38,7 @@ class TestAskUserSidebarReveal:
             pytest.skip("TS source not available")
         source = _TS_PATH.read_text()
 
-        start = source.index("_setupProcessListeners(proc:")
+        start = source.index("private _installClientListener(")
         end = source.find("\n  private ", start + 1)
         if end == -1:
             end = start + 10000
