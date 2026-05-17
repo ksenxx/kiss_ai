@@ -12,7 +12,7 @@ import shutil
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
@@ -32,6 +32,9 @@ from kiss.agents.sorcar.git_worktree import (
 )
 from kiss.agents.sorcar.persistence import _allocate_chat_id
 from kiss.core.kiss_error import KISSError
+
+if TYPE_CHECKING:
+    from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +86,22 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
     Attributes:
         _wt: The current/pending worktree state, or ``None`` when idle.
     """
+
+    # Process-global map of frontend tab id → live per-tab agent
+    # runtime state.  Class attribute (shared across every
+    # :class:`WorktreeSorcarAgent` instance) so any helper inside the
+    # ``sorcar`` package can inspect or attach to a running agent
+    # without holding a reference to either the agent or the VS Code
+    # server.  Owned conceptually by the VS Code server, which mutates
+    # it under its own ``_state_lock`` to coordinate task lifecycle,
+    # merge, autocommit and worktree transitions.  Defined here —
+    # rather than inside :mod:`kiss.agents.sorcar.running_agent_state`
+    # — to avoid an import cycle: ``running_agent_state`` already
+    # imports :class:`WorktreeSorcarAgent`, so the annotation lives
+    # behind a ``TYPE_CHECKING`` guard.  Producers / consumers MUST
+    # hold ``VSCodeServer._state_lock`` for any multi-step access
+    # (read-then-modify, scan-then-modify).
+    running_agent_states: dict[str, _RunningAgentState] = {}
 
     def __init__(self, name: str) -> None:
         super().__init__(name)
@@ -529,6 +548,51 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             self._merge_conflict_warning = None
 
 
+    def _register_running_state(self) -> bool:
+        """Publish ``self`` in :attr:`running_agent_states` for this chat.
+
+        Skips registration when an entry is already present: the VS
+        Code server pre-populates a ``_RunningAgentState`` ahead of
+        run-start under the ``tab_id == chat_id`` invariant — re-
+        registering here would clobber the server's task-lifecycle
+        flags.  Sub-agents launched by
+        :meth:`ChatSorcarAgent._run_tasks_parallel` are plain
+        :class:`ChatSorcarAgent` instances and never call this method,
+        so they are tracked separately via the printer's
+        ``_persist_agents`` map keyed by ``sub_tab_id``.
+
+        Returns:
+            ``True`` when a fresh entry was added (and the caller must
+            remove it in its own ``finally``); ``False`` when an entry
+            was already present (the existing owner is responsible
+            for cleanup).
+        """
+        if self._chat_id in WorktreeSorcarAgent.running_agent_states:
+            return False
+        from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+
+        state = _RunningAgentState(
+            self._chat_id,
+            getattr(self, "model_name", "") or "",
+            agent=self,
+        )
+        state.selected_model = getattr(self, "model_name", "") or state.selected_model
+        state.is_task_active = True
+        WorktreeSorcarAgent.running_agent_states[self._chat_id] = state
+        return True
+
+    def _unregister_running_state(self) -> None:
+        """Remove ``self``'s entry from :attr:`running_agent_states`.
+
+        Only removes the entry we ourselves added.  A different code
+        path (e.g. the VS Code server) may have replaced it mid-run;
+        in that case the new owner is responsible for its own cleanup.
+        """
+        current = WorktreeSorcarAgent.running_agent_states.get(self._chat_id)
+        if current is not None and current.agent is self:
+            current.is_task_active = False
+            WorktreeSorcarAgent.running_agent_states.pop(self._chat_id, None)
+
     def run(  # type: ignore[override]
         self,
         prompt_template: str = "",
@@ -560,55 +624,64 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         Returns:
             YAML string with 'success' and 'summary' keys.
         """
-        if not kwargs.pop("use_worktree", True):
-            self._flush_warnings(kwargs.get("printer"))
-            return super().run(prompt_template=prompt_template, **kwargs)
-
-        work_dir_str = kwargs.get("work_dir")
-        discovery_dir = Path(work_dir_str) if work_dir_str else Path.cwd()
-
-        repo = GitWorktreeOps.discover_repo(discovery_dir)
-        if repo is None:
-            logger.warning("Not a git repo, running task directly")
-            self._flush_warnings(kwargs.get("printer"))
-            return super().run(prompt_template=prompt_template, **kwargs)
-
+        # Establish ``chat_id`` BEFORE registering so the entry is
+        # keyed by the canonical session identifier.  Identical to
+        # the standalone :meth:`ChatSorcarAgent.run` minting (both
+        # use a fresh UUID hex via :func:`_allocate_chat_id`).
         if self._chat_id == "":
             self._chat_id = _allocate_chat_id()
-
-        self._restore_from_git(repo)
-
-        wt_work_dir = self._try_setup_worktree(repo, work_dir_str)
-        if wt_work_dir is None:
-            self._flush_warnings(kwargs.get("printer"))
-            return super().run(prompt_template=prompt_template, **kwargs)
-
-        printer = kwargs.get("printer")
-        self._flush_warnings(printer)
-        if printer and hasattr(printer, "broadcast"):
-            printer.broadcast(
-                {
-                    "type": "worktree_created",
-                    "worktreeDir": str(self._wt_dir),
-                    "branch": self._wt_branch,
-                }
-            )
-
-        kwargs["work_dir"] = str(wt_work_dir)
+        registered_here = self._register_running_state()
 
         try:
-            return super().run(prompt_template=prompt_template, **kwargs)
-        except KISSError:
-            raise
-        except Exception as exc:
-            return str(
-                yaml.dump(
+            if not kwargs.pop("use_worktree", True):
+                self._flush_warnings(kwargs.get("printer"))
+                return super().run(prompt_template=prompt_template, **kwargs)
+
+            work_dir_str = kwargs.get("work_dir")
+            discovery_dir = Path(work_dir_str) if work_dir_str else Path.cwd()
+
+            repo = GitWorktreeOps.discover_repo(discovery_dir)
+            if repo is None:
+                logger.warning("Not a git repo, running task directly")
+                self._flush_warnings(kwargs.get("printer"))
+                return super().run(prompt_template=prompt_template, **kwargs)
+
+            self._restore_from_git(repo)
+
+            wt_work_dir = self._try_setup_worktree(repo, work_dir_str)
+            if wt_work_dir is None:
+                self._flush_warnings(kwargs.get("printer"))
+                return super().run(prompt_template=prompt_template, **kwargs)
+
+            printer = kwargs.get("printer")
+            self._flush_warnings(printer)
+            if printer and hasattr(printer, "broadcast"):
+                printer.broadcast(
                     {
-                        "success": False,
-                        "summary": f"Task failed with error: {exc}",
+                        "type": "worktree_created",
+                        "worktreeDir": str(self._wt_dir),
+                        "branch": self._wt_branch,
                     }
                 )
-            )
+
+            kwargs["work_dir"] = str(wt_work_dir)
+
+            try:
+                return super().run(prompt_template=prompt_template, **kwargs)
+            except KISSError:
+                raise
+            except Exception as exc:
+                return str(
+                    yaml.dump(
+                        {
+                            "success": False,
+                            "summary": f"Task failed with error: {exc}",
+                        }
+                    )
+                )
+        finally:
+            if registered_here:
+                self._unregister_running_state()
 
 
     def merge(self) -> str:
