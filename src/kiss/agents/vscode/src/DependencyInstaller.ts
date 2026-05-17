@@ -712,6 +712,73 @@ async function ensureDependenciesImpl(): Promise<void> {
 }
 
 /**
+ * Reliably kill every process listening on ``port``.
+ *
+ * Sends SIGTERM first, polls up to 3 s for graceful exit, then SIGKILLs
+ * any stragglers.  Returns silently when nothing is listening.
+ *
+ * Used in place of ``pkill -x kiss-web``: kiss-web is a Python shebang
+ * script, so the kernel's ``comm`` field is the truncated interpreter
+ * path rather than the literal ``kiss-web``, making name-based pkill
+ * unreliable on macOS.  Killing by listening port works on both macOS
+ * and Linux without relying on process-name heuristics.
+ *
+ * @param port - TCP port whose listening processes should be killed.
+ */
+function killProcessOnPort(port: number): void {
+  let pids: string[] = [];
+  try {
+    pids = execFileSync('lsof', ['-ti', `:${port}`], {
+      encoding: 'utf-8',
+      timeout: 3000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+      .trim()
+      .split('\n')
+      .filter(Boolean);
+  } catch {
+    return; // Nothing listening — ok.
+  }
+  for (const pid of pids) {
+    try {
+      process.kill(parseInt(pid, 10), 'SIGTERM');
+    } catch {
+      /* already gone */
+    }
+  }
+  // Wait up to ~3 s for the port to free up.
+  for (let i = 0; i < 6; i++) {
+    try {
+      execSync(`lsof -i :${port} -t`, {stdio: 'ignore', timeout: 2000});
+      execSync('sleep 0.5', {timeout: 2000});
+    } catch {
+      return; // Port is free.
+    }
+  }
+  // Force-kill any survivors.
+  let stragglers: string[] = [];
+  try {
+    stragglers = execFileSync('lsof', ['-ti', `:${port}`], {
+      encoding: 'utf-8',
+      timeout: 3000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+      .trim()
+      .split('\n')
+      .filter(Boolean);
+  } catch {
+    return;
+  }
+  for (const pid of stragglers) {
+    try {
+      process.kill(parseInt(pid, 10), 'SIGKILL');
+    } catch {
+      /* already gone */
+    }
+  }
+}
+
+/**
  * Restart the kiss-web remote access daemon.
  *
  * Always restarts the daemon so that code changes from an editable install
@@ -777,12 +844,12 @@ function restartKissWebDaemon(kissProjectPath: string): void {
       `${currentFp.slice(0, 8) || '<none>'}, daemonAlive=${daemonAlive}`,
   );
 
-  // Kill the existing kiss-web process before restarting.  Use
-  // ``pkill -x`` (exact comm match) and pass the name as a separate
-  // argv element via ``execFileSync`` so the shell never interpolates
-  // the value.  We deliberately avoid the substring-match flag, which
-  // would otherwise kill unrelated processes (e.g. a user editing
-  // kiss-web.py in another VS Code window).
+  // Kill the existing kiss-web process before restarting.  ``kiss-web``
+  // is a Python shebang script, so the kernel's ``comm`` field is the
+  // (15-char-truncated) interpreter path — NOT the literal string
+  // ``kiss-web``.  ``pkill -x kiss-web`` is therefore a silent no-op
+  // on macOS; killing by listening port is the only reliable approach
+  // that works across both macOS and Linux.
   //
   // ``cloudflared`` is intentionally NOT killed here: the Python
   // ``web_server`` adopts the existing cloudflared on startup
@@ -791,26 +858,7 @@ function restartKissWebDaemon(kissProjectPath: string): void {
   // restarts.  When the kiss-web binary genuinely changed we still
   // restart kiss-web; the surviving cloudflared keeps forwarding to
   // ``https://localhost:8787``, which the new kiss-web re-binds.
-  try {
-    execFileSync('pkill', ['-x', 'kiss-web'], {
-      stdio: 'ignore',
-      timeout: 5000,
-    });
-  } catch {
-    /* no matching process — ok */
-  }
-
-  // Wait for port 8787 to be free (up to 5 seconds)
-  for (let i = 0; i < 10; i++) {
-    try {
-      execSync('lsof -i :8787 -t', {stdio: 'ignore', timeout: 2000});
-      // Port still in use — wait
-      execSync('sleep 0.5', {timeout: 2000});
-    } catch {
-      // Port is free
-      break;
-    }
-  }
+  killProcessOnPort(8787);
 
   if (process.platform === 'darwin') {
     const plistLabel = 'com.kiss.web-server';
