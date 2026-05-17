@@ -255,7 +255,7 @@ class SorcarAgent(RelentlessAgent):
                     broadcast({
                         "type": "updateSetting",
                         "key": "model",
-                        "value": model,
+                        "value": model_name,
                     })
 
             if max_budget is not None:
