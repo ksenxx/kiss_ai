@@ -29,6 +29,22 @@ from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
 
 
+def _capture_broadcasts(server: object, sink: io.StringIO) -> None:
+    """Redirect the server's printer broadcasts to ``sink`` as JSON lines.
+
+    The default ``BaseBrowserPrinter`` no longer writes to stdout; this
+    helper restores the legacy stdout-driven event capture that several
+    tests depend on by wrapping the printer's ``broadcast`` method.
+    """
+    orig = server.printer.broadcast  # type: ignore[attr-defined]
+
+    def wrapper(event: dict) -> None:
+        sink.write(json.dumps(event) + "\n")
+        orig(event)
+
+    server.printer.broadcast = wrapper  # type: ignore[attr-defined]
+
+
 def _finish_response(model: str = "gpt-4o-mini") -> dict:
     """OpenAI chat-completion that calls ``finish`` with result='done'."""
     return {
@@ -243,6 +259,7 @@ class TestCustomEndpointRealHTTP:
             captured = io.StringIO()
             monkeypatch.setattr(sys, "stdout", captured)
             server = VSCodeServer()
+            _capture_broadcasts(server, captured)
             server._get_models()
 
             events = [
@@ -400,6 +417,7 @@ class TestApiKeySetupAndDeletion:
         captured = io.StringIO()
         monkeypatch.setattr(sys, "stdout", captured)
         server = VSCodeServer()
+        _capture_broadcasts(server, captured)
 
         server._handle_command({
             "type": "saveConfig",
