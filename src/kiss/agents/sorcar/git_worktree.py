@@ -394,12 +394,43 @@ class GitWorktreeOps:
         return result.returncode == 0
 
     @staticmethod
+    def _merge_commit_message(repo: Path, branch: str) -> str:
+        """Return the commit message to use for a squash-merge commit.
+
+        When the agent has made at least one commit on *branch* (the
+        common case — the agent auto-commits its changes before
+        merging), this returns the full message (subject + body) of
+        the branch's HEAD commit, so the merge into the original
+        branch carries the meaningful per-task description rather
+        than git's generic ``"Squashed commit of the following:"`` or
+        a synthetic ``"kiss: merged from <branch>"`` placeholder.
+
+        Falls back to ``"kiss: merged from <branch>"`` only when the
+        branch's HEAD message cannot be read (corrupt branch, git
+        error).  Never returns an empty string, because ``git commit``
+        rejects empty messages.
+
+        Args:
+            repo: Git repo root path (the working directory that will
+                run ``git log``).
+            branch: The worktree branch whose HEAD message to read.
+
+        Returns:
+            A non-empty commit message string.
+        """
+        result = _git("log", "-1", "--format=%B", branch, cwd=repo)
+        msg = result.stdout.rstrip()
+        if result.returncode != 0 or not msg:
+            return f"kiss: merged from {branch}"
+        return msg
+
+    @staticmethod
     def squash_merge_branch(repo: Path, branch: str) -> MergeResult:
         """Squash-merge a branch and commit the result.
 
         Uses ``git merge --squash`` to apply all changes from *branch*,
-        then commits them.  The commit message is taken from git's
-        auto-generated ``SQUASH_MSG``.
+        then commits the staged result using the HEAD commit message
+        of *branch* (see :meth:`_merge_commit_message`).
 
         On conflict, resets to a clean state with ``git reset --hard``.
 
@@ -420,7 +451,8 @@ class GitWorktreeOps:
             return MergeResult.CONFLICT
         diff = _git("diff", "--cached", "--quiet", cwd=repo)
         if diff.returncode != 0:
-            commit_result = _git("commit", "--no-edit", cwd=repo)
+            msg = GitWorktreeOps._merge_commit_message(repo, branch)
+            commit_result = _git("commit", "-m", msg, cwd=repo)
             if commit_result.returncode != 0:
                 logger.warning(
                     "squash merge commit failed: %s",
@@ -771,16 +803,7 @@ class GitWorktreeOps:
 
         diff_check = _git("diff", "--cached", "--quiet", cwd=repo)
         if diff_check.returncode != 0:
-            log_msgs = _git(
-                "log",
-                "--oneline",
-                f"{baseline}..{branch}",
-                cwd=repo,
-            )
-            body = log_msgs.stdout.strip()
-            msg = f"kiss: merged from {branch}"
-            if body:
-                msg += f"\n\n{body}"
+            msg = GitWorktreeOps._merge_commit_message(repo, branch)
             commit_result = _git("commit", "-m", msg, cwd=repo)
             if commit_result.returncode != 0:
                 logger.warning(
