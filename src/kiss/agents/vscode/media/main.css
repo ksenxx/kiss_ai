@@ -811,6 +811,15 @@ body.remote-chat #welcome > #input-area {
 #menu-btn:hover:not(:disabled) { color: color-mix(in srgb, var(--fg) 66%, transparent); }
 #menu-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 
+#autocommit-btn {
+  background: none; border: none;
+  color: color-mix(in srgb, var(--fg) 50%, transparent); cursor: pointer;
+  padding: 4px; transition: color 0.15s, opacity 0.15s;
+  display: flex; align-items: center; position: relative;
+}
+#autocommit-btn:hover:not(:disabled) { color: color-mix(in srgb, var(--fg) 66%, transparent); }
+#autocommit-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
 /* Menu dropdown */
 #menu-dropdown {
   position: absolute; bottom: 100%; left: 0;

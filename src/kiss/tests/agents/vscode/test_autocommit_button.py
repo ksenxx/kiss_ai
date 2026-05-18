@@ -2,8 +2,9 @@
 
 Validates:
 - The button element exists in the HTML template (SorcarTab.ts).
-- The button is placed between parallel-toggle-btn and demo-toggle-btn in #model-picker.
-- The button uses the shared dropdown menu-item CSS.
+- The button is placed immediately to the right of the menu button in
+  #model-picker (outside the dropdown).
+- The button has its own #autocommit-btn CSS, styled like #menu-btn.
 - The JS click handler sends the correct ``autocommitAction`` message.
 - The button is disabled when a task is running (setRunningState).
 - The backend ``autocommitAction`` command dispatches to ``_handle_autocommit_action``.
@@ -56,14 +57,20 @@ class TestAutocommitButtonInTemplate(unittest.TestCase):
         btn_html = html[btn_start:btn_end]
         assert "Auto commit" in btn_html
 
-    def test_button_between_parallel_and_demo(self) -> None:
-        """The autocommit button is between parallel-toggle-btn and demo-toggle-btn."""
+    def test_button_right_of_menu_btn(self) -> None:
+        """The autocommit button sits to the right of the menu button.
+
+        It must be immediately after ``#menu-btn`` and before the
+        ``#menu-dropdown`` container, i.e. it is no longer inside the
+        dropdown.
+        """
         html = _read("src/SorcarTab.ts")
-        parallel_pos = html.index('id="parallel-toggle-btn"')
+        menu_pos = html.index('id="menu-btn"')
         btn_pos = html.index('id="autocommit-btn"')
-        demo_pos = html.index('id="demo-toggle-btn"')
-        assert parallel_pos < btn_pos < demo_pos, (
-            "autocommit-btn should be between parallel-toggle-btn and demo-toggle-btn"
+        dropdown_pos = html.index('id="menu-dropdown"')
+        assert menu_pos < btn_pos < dropdown_pos, (
+            "autocommit-btn should be to the right of #menu-btn and "
+            "outside #menu-dropdown"
         )
 
     def test_button_inside_model_picker(self) -> None:
@@ -85,20 +92,19 @@ class TestAutocommitButtonInTemplate(unittest.TestCase):
 
 
 class TestAutocommitButtonCSS(unittest.TestCase):
-    """The autocommit button uses shared menu-item CSS."""
+    """The autocommit button has its own icon-button CSS."""
 
     def test_base_styles_exist(self) -> None:
         css = _read("media/main.css")
-        assert ".menu-item" in css
-        assert "#autocommit-btn" not in css
+        assert "#autocommit-btn {" in css
 
     def test_hover_style_exists(self) -> None:
         css = _read("media/main.css")
-        assert ".menu-item:hover:not(:disabled)" in css
+        assert "#autocommit-btn:hover:not(:disabled)" in css
 
     def test_disabled_style_exists(self) -> None:
         css = _read("media/main.css")
-        assert ".menu-item:disabled" in css
+        assert "#autocommit-btn:disabled" in css
 
 
 class TestAutocommitButtonJS(unittest.TestCase):
