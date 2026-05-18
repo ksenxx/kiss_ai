@@ -885,6 +885,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         this._getClient().sendCommand({
           type: 'complete',
           query: message.query,
+          tabId: this._activeTabId || undefined,
           activeFile: editorFile || undefined,
           activeFileContent: completeDoc?.getText(),
         });

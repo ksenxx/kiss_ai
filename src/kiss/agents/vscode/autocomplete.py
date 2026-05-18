@@ -11,7 +11,11 @@ import re
 import threading
 from typing import TYPE_CHECKING
 
-from kiss.agents.sorcar.persistence import _load_file_usage, _prefix_match_task
+from kiss.agents.sorcar.persistence import (
+    _load_chat_context,
+    _load_file_usage,
+    _prefix_match_task,
+)
 from kiss.agents.vscode.helpers import (
     clip_autocomplete_suggestion,
     rank_file_suggestions,
@@ -28,26 +32,37 @@ class _AutocompleteMixin:
         printer: BaseBrowserPrinter
         work_dir: str
         _state_lock: threading.Lock
-        _complete_queue: queue.Queue[tuple[str, int, str, str]] | None
+        _complete_queue: queue.Queue[tuple[str, int, str, str, str]] | None
         _complete_worker: threading.Thread | None
         _complete_seq_latest: int
         _file_cache: list[str] | None
 
     def _complete_from_active_file(
-        self, query: str, snapshot_file: str = "", snapshot_content: str = ""
+        self,
+        query: str,
+        snapshot_file: str = "",
+        snapshot_content: str = "",
+        chat_id: str = "",
     ) -> str:
         """Complete the trailing token of *query* using identifiers from the active file.
 
         Extracts single-word identifiers and dot-chained identifiers
         (e.g. ``self.method``, ``os.path.join``) from the active editor
-        buffer (or falls back to reading from disk). Matches the trailing
-        token of the query — which may contain dots — against all
-        candidates via case-sensitive prefix matching.
+        buffer (or falls back to reading from disk).  When *chat_id* is
+        provided, also harvests identifiers from the ``task`` and
+        ``result`` text of every prior task in that chat session, so
+        completions can suggest words the user has already used earlier
+        in the same conversation.  Matches the trailing token of the
+        query — which may contain dots — against all candidates via
+        case-sensitive prefix matching.
 
         Args:
             query: The full query string from the chat input.
             snapshot_file: Atomically-captured active file path.
             snapshot_content: Atomically-captured active file content.
+            chat_id: Current chat session id; when non-empty, identifiers
+                from previous tasks in this chat are added to the
+                candidate pool.
 
         Returns:
             The remaining suffix to append, or empty string if no match.
@@ -55,13 +70,12 @@ class _AutocompleteMixin:
         content = snapshot_content
         if not content:
             active_path = snapshot_file
-            if not active_path:
-                return ""
-            try:
-                with open(active_path) as f:
-                    content = f.read(50000)
-            except OSError:
-                return ""
+            if active_path:
+                try:
+                    with open(active_path) as f:
+                        content = f.read(50000)
+                except OSError:
+                    content = ""
 
         if query and not (query[-1].isalnum() or query[-1] == "_" or query[-1] == "."):
             return ""
@@ -71,8 +85,25 @@ class _AutocompleteMixin:
         partial = m.group(1)
         if len(partial) < 2:
             return ""
-        words = set(re.findall(r"\b[A-Za-z_]\w{2,}\b", content))
-        chains = set(re.findall(r"\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+\b", content))
+
+        chat_text = ""
+        if chat_id:
+            parts: list[str] = []
+            for entry in _load_chat_context(chat_id):
+                task = entry.get("task")
+                result = entry.get("result")
+                if isinstance(task, str):
+                    parts.append(task)
+                if isinstance(result, str):
+                    parts.append(result)
+            chat_text = "\n".join(parts)
+
+        if not content and not chat_text:
+            return ""
+
+        combined = content + ("\n" + chat_text if chat_text else "")
+        words = set(re.findall(r"\b[A-Za-z_]\w{2,}\b", combined))
+        chains = set(re.findall(r"\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+\b", combined))
         candidates = words | chains
 
         best = ""
@@ -94,8 +125,8 @@ class _AutocompleteMixin:
                     item = q.get_nowait()
                 except queue.Empty:  # pragma: no cover — race guard
                     break
-            query, seq, snapshot_file, snapshot_content = item
-            self._complete(query, seq, snapshot_file, snapshot_content)
+            query, seq, snapshot_file, snapshot_content, chat_id = item
+            self._complete(query, seq, snapshot_file, snapshot_content, chat_id)
 
     def _complete(
         self,
@@ -103,6 +134,7 @@ class _AutocompleteMixin:
         seq: int = -1,
         snapshot_file: str = "",
         snapshot_content: str = "",
+        chat_id: str = "",
     ) -> None:
         """Ghost text autocomplete via fast local prefix matching.
 
@@ -113,6 +145,9 @@ class _AutocompleteMixin:
                 call exits early to avoid broadcasting stale results.
             snapshot_file: Atomically-captured active file path.
             snapshot_content: Atomically-captured active file content.
+            chat_id: Current chat session id; passed through to the
+                active-file completion so previous tasks in the same
+                chat contribute identifier candidates.
         """
         if seq >= 0:
             with self._state_lock:
@@ -126,7 +161,9 @@ class _AutocompleteMixin:
         if match:
             fast = match[len(query):]
         else:
-            fast = self._complete_from_active_file(query, snapshot_file, snapshot_content)
+            fast = self._complete_from_active_file(
+                query, snapshot_file, snapshot_content, chat_id,
+            )
         fast = clip_autocomplete_suggestion(query, fast)
         self.printer.broadcast({"type": "ghost", "suggestion": fast, "query": query})
 

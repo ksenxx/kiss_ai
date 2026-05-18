@@ -196,6 +196,38 @@ class TestVSCodeServerBranches:
         result = server._complete_from_active_file("test", "/nonexistent/file.py", "")
         assert result == ""
 
+    def test_complete_from_active_file_uses_chat_history(self) -> None:
+        """_complete_from_active_file harvests identifiers from prior chat tasks."""
+        task_id, chat_id = th._add_task("first task with calculate_total_amount usage")
+        th._save_task_result(
+            "the result mentions parse_xml_payload again", task_id=task_id,
+        )
+        server = VSCodeServer()
+        # No file content at all — must still find a candidate from chat history.
+        assert server._complete_from_active_file(
+            "calc", "", "", chat_id,
+        ) == "ulate_total_amount"
+        assert server._complete_from_active_file(
+            "parse_xml", "", "", chat_id,
+        ) == "_payload"
+        # Without chat_id, the same call returns nothing because there is
+        # no active-file content to harvest identifiers from.
+        assert server._complete_from_active_file("calc", "", "") == ""
+
+    def test_complete_from_active_file_combines_file_and_chat(self) -> None:
+        """File content and chat history both contribute candidates."""
+        _task_id, chat_id = th._add_task("chat had wonderful_widget_factory in it")
+        server = VSCodeServer()
+        file_content = "class HelperUtil:\n    pass\n"
+        # Match from file content.
+        assert server._complete_from_active_file(
+            "Help", "", file_content, chat_id,
+        ) == "erUtil"
+        # Match from chat history when the partial doesn't appear in file.
+        assert server._complete_from_active_file(
+            "wonderful", "", file_content, chat_id,
+        ) == "_widget_factory"
+
     def test_fast_complete_history_match(self) -> None:
         """_complete returns history match via broadcast."""
         server = VSCodeServer()

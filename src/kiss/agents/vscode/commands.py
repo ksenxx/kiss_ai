@@ -71,7 +71,7 @@ class _CommandsMixin:
         _default_model: str
         _complete_seq: int
         _complete_seq_latest: int
-        _complete_queue: queue.Queue[tuple[str, int, str, str]] | None
+        _complete_queue: queue.Queue[tuple[str, int, str, str, str]] | None
         _last_active_file: str
         _last_active_content: str
         _file_cache: list[str] | None
@@ -273,6 +273,12 @@ class _CommandsMixin:
         query = cmd.get("query", "")
         active_file = cmd.get("activeFile")
         active_content = cmd.get("activeFileContent")
+        tab_id = cmd.get("tabId", "")
+        chat_id = ""
+        if tab_id:
+            tab = _RunningAgentState.running_agent_states.get(tab_id)
+            if tab is not None:
+                chat_id = tab.chat_id
         with self._state_lock:
             if active_file:
                 self._last_active_file = active_file
@@ -285,7 +291,9 @@ class _CommandsMixin:
             self._complete_seq_latest = seq
         if query:
             self._ensure_complete_worker()
-            self._complete_queue.put((query, seq, snapshot_file, snapshot_content))  # type: ignore[union-attr]
+            self._complete_queue.put(  # type: ignore[union-attr]
+                (query, seq, snapshot_file, snapshot_content, chat_id),
+            )
 
     def _cmd_get_input_history(self, cmd: dict[str, Any]) -> None:
         """Send deduplicated task texts for arrow-key cycling."""

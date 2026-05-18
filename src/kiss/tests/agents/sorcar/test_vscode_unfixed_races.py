@@ -59,9 +59,12 @@ class TestCompleteSeqCounterRace(unittest.TestCase):
             seq: int = -1,
             snapshot_file: str = "",
             snapshot_content: str = "",
+            chat_id: str = "",
         ) -> None:
             observed_latest.append(server._complete_seq_latest)
-            original_complete(query, seq, snapshot_file, snapshot_content)
+            original_complete(
+                query, seq, snapshot_file, snapshot_content, chat_id,
+            )
 
         server._complete = slow_complete  # type: ignore[method-assign]
 

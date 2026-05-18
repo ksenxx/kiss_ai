@@ -54,7 +54,7 @@ export type FromWebviewMessage =
     }
   | {type: 'resumeSession'; id: string; taskId?: number; tabId?: string}
   | {type: 'getWelcomeSuggestions'}
-  | {type: 'complete'; query: string}
+  | {type: 'complete'; query: string; tabId?: string}
   | {type: 'mergeAction'; action: string; tabId?: string}
   | {type: 'newChat'; tabId?: string}
   | {type: 'generateCommitMessage'}
