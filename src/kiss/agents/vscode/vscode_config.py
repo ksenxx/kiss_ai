@@ -33,7 +33,6 @@ DEFAULTS: dict[str, Any] = {
     "custom_headers": "",
     "use_web_browser": True,
     "remote_password": "",
-    "work_dir": "",
 }
 
 API_KEY_ENV_VARS: frozenset[str] = frozenset({
@@ -240,9 +239,7 @@ def _refresh_config() -> None:
 def apply_config_to_env(cfg: dict[str, Any]) -> None:
     """Apply loaded config values to the running process.
 
-    Sets ``max_budget`` on the default config and updates
-    ``KISS_WORKDIR`` in ``os.environ`` when ``work_dir`` is non-empty
-    so that the running server picks up work-dir changes immediately.
+    Sets ``max_budget`` on the default config.
 
     Args:
         cfg: The configuration dict (from :func:`load_config`).
@@ -251,10 +248,6 @@ def apply_config_to_env(cfg: dict[str, Any]) -> None:
 
     budget = cfg.get("max_budget", DEFAULTS["max_budget"])
     config_module.DEFAULT_CONFIG.max_budget = float(budget)
-
-    work_dir = cfg.get("work_dir", "")
-    if work_dir:
-        os.environ["KISS_WORKDIR"] = work_dir
 
 
 def get_custom_model_entry(cfg: dict[str, Any]) -> dict[str, Any] | None:
