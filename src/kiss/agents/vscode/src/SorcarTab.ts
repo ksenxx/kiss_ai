@@ -226,12 +226,6 @@ export function buildChatHtml(
           <label class="config-label">Remote password
             <input type="text" id="cfg-remote-password" placeholder="Remote access password">
           </label>
-          <label class="config-label">Working directory
-            <div style="display:flex;gap:4px;align-items:center;">
-              <input type="text" id="cfg-work-dir" placeholder="Default: current workspace folder" style="flex:1;">
-              <button type="button" id="cfg-work-dir-browse" title="Browse for folder" style="padding:4px 8px;cursor:pointer;">Browse</button>
-            </div>
-          </label>
           <div class="config-divider"></div>
           <div class="sidebar-hdr" style="margin-top:8px;">API Keys</div>
           <label class="config-label">Gemini API Key
