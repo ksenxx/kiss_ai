@@ -167,6 +167,21 @@ class ChatSorcarAgent(SorcarAgent):
         broadcast = getattr(printer, "broadcast", None) if printer else None
         thread_local = getattr(printer, "_thread_local", None) if printer else None
         parent_tab_id = getattr(thread_local, "tab_id", None) if thread_local else None
+        # Cooperative-stop event of the parent task thread.  Captured
+        # here so each ``ThreadPoolExecutor`` worker can copy it onto
+        # its own ``printer._thread_local.stop_event`` slot before
+        # invoking the sub-agent.  Without this propagation a Stop
+        # click on the parent tab sets only the parent thread's
+        # event; the sub-agent worker's ``printer._check_stop()``
+        # reads a fresh (empty) thread-local and becomes a silent
+        # no-op, so sub-agents — and any nested sub-sub-agents
+        # spawned by them — keep running until completion.  Storing
+        # the same ``Event`` instance on the sub-agent's
+        # :class:`_RunningAgentState` (below) lets a direct Stop on
+        # the sub-agent's tab terminate the same task tree, too.
+        parent_stop_event = (
+            getattr(thread_local, "stop_event", None) if thread_local else None
+        )
         sub_tab_ids: list[str] = []
         for i, task in enumerate(tasks):
             if parent_tab_id:
@@ -194,6 +209,16 @@ class ChatSorcarAgent(SorcarAgent):
             tl = getattr(printer, "_thread_local", None) if printer else None
             if tl is not None:
                 tl.tab_id = sub_tab_id
+                # Propagate the parent task thread's cooperative
+                # stop_event into this worker thread so
+                # ``printer._check_stop()`` and
+                # ``SorcarAgent.run``'s ``self._stop_event``
+                # snapshot (used to kill child subprocesses) both
+                # honour a Stop click on the parent tab.  Nested
+                # ``_run_tasks_parallel`` calls re-read this same
+                # slot, so the propagation is transitive across
+                # every level of nesting.
+                tl.stop_event = parent_stop_event
             agent = ChatSorcarAgent(f"Parallel-{task[:40]}")
             if chat_id:
                 agent.resume_chat_by_id(chat_id)
@@ -239,6 +264,13 @@ class ChatSorcarAgent(SorcarAgent):
                 parent_task_id if isinstance(parent_task_id, int) else None
             )
             sub_state.task_thread = threading.current_thread()
+            # Share the parent's cooperative-stop ``Event`` with the
+            # sub-agent state so a Stop click that targets the
+            # sub-agent's tab directly (resolved by
+            # :meth:`_TaskRunnerMixin._stop_task`) sets the same
+            # event the parent is watching — terminating the whole
+            # task tree, not just one sub-agent.
+            sub_state.stop_event = parent_stop_event
             _RunningAgentState.running_agent_states[sub_tab_id] = sub_state
             success = True
             try:
