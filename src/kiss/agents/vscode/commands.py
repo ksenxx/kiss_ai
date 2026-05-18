@@ -207,10 +207,6 @@ class _CommandsMixin:
         """Send file list for autocomplete."""
         self._get_files(cmd.get("prefix", ""))
 
-    def _cmd_refresh_files(self, cmd: dict[str, Any]) -> None:
-        """Refresh the file cache."""
-        self._refresh_file_cache()
-
     def _cmd_record_file_usage(self, cmd: dict[str, Any]) -> None:
         """Record a file access for usage-based sorting."""
         path = cmd.get("path", "")
@@ -447,7 +443,6 @@ class _CommandsMixin:
         "getFrequentTasks": _cmd_get_frequent_tasks,
         "deleteTask": _cmd_delete_task,
         "getFiles": _cmd_get_files,
-        "refreshFiles": _cmd_refresh_files,
         "recordFileUsage": _cmd_record_file_usage,
         "userAnswer": _cmd_user_answer,
         "resumeSession": _cmd_resume_session,

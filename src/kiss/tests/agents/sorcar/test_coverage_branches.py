@@ -538,13 +538,6 @@ class TestVSCodeServerMoreBranches:
         file_events = [e for e in events if e["type"] == "files"]
         assert len(file_events) == 1
 
-    def test_handle_command_refresh_files(self):
-        server, events = self._make_server()
-        server._handle_command({"type": "refreshFiles"})
-        time.sleep(0.5)
-        assert server._file_cache is None or isinstance(server._file_cache, list)
-
-
     def test_run_task_with_attachments(self):
         """Test _run_task processes attachments."""
         import base64

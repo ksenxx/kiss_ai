@@ -242,7 +242,6 @@ export interface AgentCommand {
     | 'resumeSession'
     | 'complete'
     | 'mergeAction'
-    | 'refreshFiles'
     | 'newChat'
     | 'closeTab'
     | 'generateCommitMessage'
