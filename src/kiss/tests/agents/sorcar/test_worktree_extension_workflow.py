@@ -707,12 +707,16 @@ class TestServerWorktreeWorkflow:
         _agent(server).discard()
 
 
-    def test_worktree_no_changes_auto_discarded_on_failure(self) -> None:
-        """Worktree is auto-discarded when agent fails with no file changes.
+    def test_worktree_no_changes_preserved_on_failure(self) -> None:
+        """Worktree branch is preserved when agent fails with no file changes.
 
-        When the exception happens before any file changes, the
-        worktree is discarded automatically and no worktree_done event
-        is emitted (nothing for the user to merge).
+        The user explicitly enabled the worktree workflow (and left
+        auto-commit off), so the branch must remain in git for manual
+        inspection / merge / discard even when the task failed before
+        making any file changes.  Previously this path auto-discarded
+        the branch, which surfaced as the "worktree branch is not
+        getting created" symptom in the
+        ``use_worktree=True`` + ``autoCommit=False`` mode.
         """
         _unpatch_super_run(self.original_run)
         self.original_run = _patch_super_run(raise_exc=RuntimeError("boom"))
@@ -727,13 +731,16 @@ class TestServerWorktreeWorkflow:
         })
 
         wt_events = [e for e in events if e["type"] == "worktree_done"]
-        assert len(wt_events) == 0
+        assert len(wt_events) == 1
+        # ``WorktreeSorcarAgent.run`` swallows non-KISSError exceptions
+        # from the parent class and returns a YAML failure summary, so
+        # the task wrapper still emits ``task_done`` (not ``task_error``).
         done_events = [e for e in events if e["type"] == "task_done"]
         assert len(done_events) == 1
-        assert not _agent(server)._wt_pending
+        assert _agent(server)._wt_pending
 
-    def test_worktree_no_changes_auto_discarded_on_stop(self) -> None:
-        """Worktree is auto-discarded when user stops with no file changes."""
+    def test_worktree_no_changes_preserved_on_stop(self) -> None:
+        """Worktree branch is preserved when user stops with no file changes."""
         _unpatch_super_run(self.original_run)
         self.original_run = _patch_super_run(raise_exc=KeyboardInterrupt("stopped"))
 
@@ -748,7 +755,9 @@ class TestServerWorktreeWorkflow:
 
         stopped_events = [e for e in events if e["type"] == "task_stopped"]
         assert len(stopped_events) == 1
-        assert not _agent(server)._wt_pending
+        assert _agent(server)._wt_pending
+        wt_events = [e for e in events if e["type"] == "worktree_done"]
+        assert len(wt_events) == 1
 
     def test_worktree_merge_review_shown_on_failure_with_changes(self) -> None:
         """Merge/diff review UI is shown when agent fails after making changes.

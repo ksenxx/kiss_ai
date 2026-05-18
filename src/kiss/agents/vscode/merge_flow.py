@@ -442,6 +442,7 @@ class _MergeFlowMixin:
 
     def _present_pending_worktree(
         self, tab_id: str, *, try_merge_review: bool,
+        discard_if_empty: bool = True,
     ) -> None:
         """Auto-discard, start merge review, or emit ``worktree_done``.
 
@@ -455,19 +456,28 @@ class _MergeFlowMixin:
           ``worktree_done``.
         - Worktree has changed files and *try_merge_review* is False
           (merge review already finished): broadcast ``worktree_done``.
-        - Worktree has no changes and no non-wt task is running:
-          auto-discard.
-        - Worktree has no changes but a non-wt task is running:
-          broadcast ``worktree_done`` so the user is aware of the
-          pending branch and can take manual action later
-          (BUG-68 fix — previously silent for the post-task and
-          post-merge-review paths).
+        - Worktree has no changes and *discard_if_empty* is True
+          and no non-wt task is running: auto-discard the empty
+          branch (BUG-66 — clean up stale resumed sessions and
+          finished merge reviews).
+        - Worktree has no changes and *discard_if_empty* is False:
+          preserve the branch and broadcast ``worktree_done``.
+          The post-task path passes ``discard_if_empty=False``
+          when the user opted into the worktree workflow but has
+          not explicitly chosen to merge or discard yet — so the
+          branch must remain visible in ``git branch`` for manual
+          inspection / merge / discard (fixes the user-reported
+          "worktree branch is not getting created" symptom in
+          ``use_worktree=True`` + ``autoCommit=False`` mode).
 
         Args:
             tab_id: The tab with a pending worktree.
             try_merge_review: Whether to attempt starting a merge
                 review before falling back.  Pass False after a
                 merge review has already been completed.
+            discard_if_empty: When True (default), auto-discard the
+                branch if no files changed.  Post-task callers should
+                pass False to preserve the branch for manual action.
         """
         tab = self._get_tab(tab_id)
         if not tab.use_worktree:
@@ -487,7 +497,7 @@ class _MergeFlowMixin:
                         return
                 except BaseException:
                     logger.debug("Worktree merge review error", exc_info=True)
-        if not changed:
+        if not changed and discard_if_empty:
             with self._state_lock:
                 non_wt_busy = self._any_non_wt_running()
             if not non_wt_busy:

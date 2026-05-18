@@ -72,6 +72,7 @@ class _TaskRunnerMixin:
         ) -> dict[str, Any]: ...
         def _present_pending_worktree(
             self, tab_id: str, *, try_merge_review: bool,
+            discard_if_empty: bool = True,
         ) -> None: ...
         def _extract_result_summary(self) -> str: ...
         def _generate_followup_async(
@@ -456,8 +457,19 @@ class _TaskRunnerMixin:
                                 **result,
                             })
                         else:
+                            # ``discard_if_empty=False``: the user
+                            # opted into the worktree workflow with
+                            # auto-commit OFF and has not yet chosen
+                            # to merge or discard.  Preserve the
+                            # branch in git even when no file changes
+                            # were made so it is visible in
+                            # ``git branch`` for manual action
+                            # (fixes the "worktree branch is not
+                            # getting created" bug).
                             self._present_pending_worktree(
-                                tab_id, try_merge_review=True,
+                                tab_id,
+                                try_merge_review=True,
+                                discard_if_empty=False,
                             )
                     except BaseException:
                         logger.debug("Worktree merge review error", exc_info=True)
