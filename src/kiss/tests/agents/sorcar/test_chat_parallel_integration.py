@@ -19,9 +19,9 @@ import sqlite3
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -38,7 +38,8 @@ from kiss.agents.sorcar.persistence import (
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 
-def _retry_on_busy[_T](op: Callable[[], _T], attempts: int = 8) -> _T:
+
+def _retry_on_busy[T](op: Callable[[], T], attempts: int = 8) -> T:
     """Retry ``op`` on transient SQLite "database is locked" errors.
 
     The persistence layer uses WAL + a 5s ``busy_timeout``, but under
