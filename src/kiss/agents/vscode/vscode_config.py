@@ -33,6 +33,15 @@ DEFAULTS: dict[str, Any] = {
     "custom_headers": "",
     "use_web_browser": True,
     "remote_password": "",
+    # ``auto_commit_mode`` is the persistent "Auto commit" toggle in
+    # the menu dropdown.  When True, post-task processing skips the
+    # interactive merge/diff workflow and auto-commits the agent's
+    # changes.  In worktree mode the worktree is additionally
+    # auto-merged into the original branch.  Mirrored via
+    # ``update_settings(auto_commit_mode=...)`` (distinct from the
+    # one-shot ``auto_commit=True`` trigger used by the legacy icon
+    # button).
+    "auto_commit_mode": False,
 }
 
 API_KEY_ENV_VARS: frozenset[str] = frozenset({

@@ -608,6 +608,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     tabId?: string,
     workDir?: string,
     skipMerge?: boolean,
+    autoCommit?: boolean,
   ): void {
     const effectiveWorkDir = workDir || this._getWorkDir();
     this._sendToWebview({type: 'setTaskText', text: prompt, tabId});
@@ -621,6 +622,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       attachments,
       useWorktree,
       useParallel,
+      autoCommit,
       tabId,
       skipMerge,
     });
@@ -695,6 +697,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           tabId,
           effectiveWorkDir,
           message.skipMerge,
+          message.autoCommit,
         );
         break;
       }
