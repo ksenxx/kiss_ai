@@ -139,14 +139,22 @@ class _CommandsMixin:
                 tab.skip_merge = bool(cmd["skipMerge"])
             tab.stop_event = threading.Event()
             tab.user_answer_queue = queue.Queue(maxsize=1)
-            # Tab id IS the chat id from run-start (the
-            # ``tab_id == chat_id`` invariant): a brand-new chat tab
-            # allocates a random uuid as the tab id, while a tab
-            # opened by clicking a history row uses the resumed chat
-            # id as the tab id.  Record the canonical chat id on the
-            # tab now so :meth:`_TaskRunnerMixin._run_task` can use
-            # it when it constructs the per-task agent.
-            if tab_id:
+            # Establish the canonical chat id for this run.  When
+            # :meth:`_replay_session` has already populated ``tab.chat_id``
+            # with the chat id of a resumed history row, preserve it —
+            # otherwise the follow-up task would be cut off from the
+            # prior chat context (``ChatSorcarAgent.build_chat_prompt``
+            # would query history for the tab id, find nothing, and
+            # send the LLM an empty preamble).  This matters whenever
+            # the frontend's resumed-history tab id differs from the
+            # resumed chat id (a viewer tab that allocated a fresh
+            # uuid, an older client, or a chat id already taken by
+            # another open tab).  When ``tab.chat_id`` is still empty
+            # (brand-new chat tab that did not resume any session),
+            # fall back to seeding it with ``tab_id`` so the
+            # ``tab_id == chat_id`` invariant holds for the source
+            # tab that originally launched the task.
+            if not tab.chat_id and tab_id:
                 tab.chat_id = tab_id
             chat_id = tab.chat_id
             thread = threading.Thread(
