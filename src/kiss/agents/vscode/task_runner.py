@@ -185,12 +185,25 @@ class _TaskRunnerMixin:
         # caller has already attached.
         if tab.agent is None:
             agent = WorktreeSorcarAgent("Sorcar VS Code")
-            if tab.chat_id:
-                agent._chat_id = tab.chat_id
-            elif tab_id:
-                agent._chat_id = tab_id
             tab.agent = agent
-            tab.chat_id = agent.chat_id or tab.chat_id or tab_id
+        # Sync the agent's chat id to the tab's chat id BEFORE the run
+        # starts.  ``_RunningAgentState._get_tab`` eagerly populates
+        # ``tab.agent`` (for merge / discard / worktree state callers
+        # that read it out-of-task) — at the moment of that eager
+        # creation the tab may have had an empty ``chat_id``, e.g.
+        # because ``_replay_session`` hasn't yet associated the
+        # resumed history row.  Without this sync the agent's stale
+        # ``_chat_id == ""`` would survive into
+        # :meth:`ChatSorcarAgent.run`, which would mint a fresh uuid
+        # and ``build_chat_prompt`` would query history for that
+        # never-seen uuid — finding nothing and sending the LLM no
+        # prior context.  Falling back to ``tab_id`` preserves the
+        # ``tab_id == chat_id`` invariant for brand-new chat tabs.
+        if tab.chat_id:
+            tab.agent._chat_id = tab.chat_id
+        elif tab_id:
+            tab.agent._chat_id = tab_id
+        tab.chat_id = tab.agent.chat_id or tab.chat_id or tab_id
 
         available = get_available_models()
         if not available or (model and model not in available):
