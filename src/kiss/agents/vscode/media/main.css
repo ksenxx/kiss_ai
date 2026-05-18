@@ -224,9 +224,29 @@ body {
   min-width: 28px;
   max-width: 28px;
   padding: 4px 0;
-  margin-right: 8px;
   flex-shrink: 0;
 }
+
+.tab-bar-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 26px;
+  padding: 0;
+  margin: 0;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--dim);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.tab-bar-action-btn:hover {
+  color: var(--fg);
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+}
+.tab-bar-action-btn:last-child { margin-right: 4px; }
 
 /* ── Subagent Tabs ───────────────────────────────────── */
 .chat-tab.subagent-tab {
