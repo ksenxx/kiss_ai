@@ -374,7 +374,6 @@ class TestMultipleSettings:
             demo_mode=True,
             auto_commit=True,
             custom_endpoint="http://localhost:8080/v1",
-            custom_api_key="sk-custom",
             custom_headers="X-Custom:val",
         )
 
@@ -388,12 +387,11 @@ class TestMultipleSettings:
         assert "demo_mode=True" in result
         assert "auto_commit=triggered" in result
         assert "custom_endpoint=http://localhost:8080/v1" in result
-        assert "custom_api_key=<updated>" in result
         assert "custom_headers=<updated>" in result
 
-        # 12 settings → 12 broadcast events
+        # 11 settings → 11 broadcast events
         evts = _setting_events(printer)
-        assert len(evts) == 12
+        assert len(evts) == 11
 
 
 class TestCustomEndpoint:
@@ -428,34 +426,25 @@ class TestCustomEndpoint:
         assert cfg["custom_endpoint"] == ""
 
 
-class TestCustomApiKey:
-    """custom_api_key persists to config; broadcast value is True (secret)."""
+class TestApiKeysRejected:
+    """API key parameters are no longer accepted by update_settings."""
 
-    def test_set_key(self) -> None:
-        _agent, printer, tools = _make_agent_and_printer()
-        update = _find_tool(tools, "update_settings")
-
-        result = update(custom_api_key="sk-test-12345")
-        assert "custom_api_key=<updated>" in result
-
-        cfg = json.loads(vscode_config.CONFIG_PATH.read_text())
-        assert cfg["custom_api_key"] == "sk-test-12345"
-
-        evts = _setting_events(printer)
-        assert len(evts) == 1
-        assert evts[0]["key"] == "custom_api_key"
-        assert evts[0]["value"] is True
-
-    def test_clear_key(self) -> None:
+    @pytest.mark.parametrize("param", [
+        "custom_api_key",
+        "gemini_api_key",
+        "openai_api_key",
+        "anthropic_api_key",
+        "together_api_key",
+        "openrouter_api_key",
+        "minimax_api_key",
+    ])
+    def test_api_key_param_raises_type_error(self, param: str) -> None:
+        """Passing any API key parameter raises TypeError (unexpected kwarg)."""
         _agent, _printer, tools = _make_agent_and_printer()
         update = _find_tool(tools, "update_settings")
 
-        update(custom_api_key="sk-test")
-        result = update(custom_api_key="")
-        assert "custom_api_key=<updated>" in result
-
-        cfg = json.loads(vscode_config.CONFIG_PATH.read_text())
-        assert cfg["custom_api_key"] == ""
+        with pytest.raises(TypeError):
+            update(**{param: "sk-test-12345"})
 
 
 class TestCustomHeaders:
@@ -475,65 +464,6 @@ class TestCustomHeaders:
         assert len(evts) == 1
         assert evts[0]["key"] == "custom_headers"
         assert evts[0]["value"] is True
-
-
-class TestApiKeys:
-    """API key settings persist via save_api_key_to_shell and broadcast True."""
-
-    @pytest.fixture(autouse=True)
-    def _isolate_shell_rc(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Point HOME to tmp_path so shell RC writes go to a temp dir."""
-        monkeypatch.setenv("HOME", str(tmp_path))
-        monkeypatch.setenv("SHELL", "/bin/zsh")
-
-    @pytest.mark.parametrize("param,env_var", [
-        ("gemini_api_key", "GEMINI_API_KEY"),
-        ("openai_api_key", "OPENAI_API_KEY"),
-        ("anthropic_api_key", "ANTHROPIC_API_KEY"),
-        ("together_api_key", "TOGETHER_API_KEY"),
-        ("openrouter_api_key", "OPENROUTER_API_KEY"),
-        ("minimax_api_key", "MINIMAX_API_KEY"),
-    ])
-    def test_set_api_key(
-        self,
-        param: str,
-        env_var: str,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        # Remove existing env var if present
-        monkeypatch.delenv(env_var, raising=False)
-        _agent, printer, tools = _make_agent_and_printer()
-        update = _find_tool(tools, "update_settings")
-
-        result = update(**{param: "test-key-value-123"})
-        assert f"{param}=<updated>" in result
-
-        # Env var should be set
-        import os
-        assert os.environ.get(env_var) == "test-key-value-123"
-
-        # Broadcast uses True, not the actual key
-        evts = _setting_events(printer)
-        assert len(evts) == 1
-        assert evts[0]["key"] == param
-        assert evts[0]["value"] is True
-
-    def test_multiple_api_keys_at_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-        _agent, printer, tools = _make_agent_and_printer()
-        update = _find_tool(tools, "update_settings")
-
-        result = update(gemini_api_key="gem-123", openai_api_key="oai-456")
-        assert "gemini_api_key=<updated>" in result
-        assert "openai_api_key=<updated>" in result
-
-        import os
-        assert os.environ.get("GEMINI_API_KEY") == "gem-123"
-        assert os.environ.get("OPENAI_API_KEY") == "oai-456"
-
-        evts = _setting_events(printer)
-        assert len(evts) == 2
 
 
 class TestNoPrinterBroadcast:
@@ -618,7 +548,6 @@ class TestWorktreeSorcarAgentNoPrinter:
             working_directory=str(wd),
             use_web_browser=False,
             custom_endpoint="http://localhost:11434/v1",
-            custom_api_key="sk-slack-test",
             custom_headers="X-Slack:true",
         )
 
@@ -636,7 +565,6 @@ class TestWorktreeSorcarAgentNoPrinter:
         assert "max_budget=5.0" in result
         assert "use_web_browser=False" in result
         assert "custom_endpoint=http://localhost:11434/v1" in result
-        assert "custom_api_key=<updated>" in result
         assert "custom_headers=<updated>" in result
 
         # Config file should contain persisted values (only DEFAULTS keys)
@@ -646,22 +574,11 @@ class TestWorktreeSorcarAgentNoPrinter:
         assert cfg["work_dir"] == str(wd.resolve())
         assert cfg["use_web_browser"] is False
         assert cfg["custom_endpoint"] == "http://localhost:11434/v1"
-        assert cfg["custom_api_key"] == "sk-slack-test"
         assert cfg["custom_headers"] == "X-Slack:true"
 
-    def test_api_key_persists_without_printer(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """API keys set via shell RC persist even without a printer."""
-        import os
-
+    def test_api_key_param_rejected_without_printer(self) -> None:
+        """API key parameters raise TypeError (no longer accepted)."""
         from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-
-        monkeypatch.setenv("HOME", str(tmp_path))
-        monkeypatch.setenv("SHELL", "/bin/zsh")
-        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
         agent = WorktreeSorcarAgent("test-slack-apikey")
         agent.printer = None
@@ -669,9 +586,8 @@ class TestWorktreeSorcarAgentNoPrinter:
         tools = agent._get_tools()
         update = _find_tool(tools, "update_settings")
 
-        result = update(gemini_api_key="slack-gem-key")
-        assert "gemini_api_key=<updated>" in result
-        assert os.environ.get("GEMINI_API_KEY") == "slack-gem-key"
+        with pytest.raises(TypeError):
+            update(gemini_api_key="slack-gem-key")
 
     def test_remote_password_and_demo_mode(self) -> None:
         """remote_password and demo_mode work without a printer."""
@@ -743,7 +659,7 @@ class TestWebPrinterBroadcast:
         assert keys == {"is_parallel", "model"}
 
     def test_all_settings_recorded(self, tmp_path: Path) -> None:
-        """All 12 setting types are recorded by WebPrinter."""
+        """All 11 setting types are recorded by WebPrinter."""
         from kiss.agents.vscode.web_server import WebPrinter
 
         agent = SorcarAgent("test-web-all")
@@ -767,7 +683,6 @@ class TestWebPrinterBroadcast:
             demo_mode=True,
             auto_commit=True,
             custom_endpoint="http://localhost:8080/v1",
-            custom_api_key="sk-web",
             custom_headers="X-Web:true",
         )
 
@@ -776,13 +691,13 @@ class TestWebPrinterBroadcast:
             raw = list(printer._recordings.get(key, []))
 
         setting_evts = [e for e in raw if e.get("type") == "updateSetting"]
-        assert len(setting_evts) == 12
+        assert len(setting_evts) == 11
 
         expected_keys = {
             "is_parallel", "is_worktree", "model", "max_budget",
             "working_directory", "use_web_browser", "remote_password",
             "demo_mode", "auto_commit", "custom_endpoint",
-            "custom_api_key", "custom_headers",
+            "custom_headers",
         }
         actual_keys = {e["key"] for e in setting_evts}
         assert actual_keys == expected_keys
@@ -802,7 +717,6 @@ class TestWebPrinterBroadcast:
 
         update(
             remote_password="top-secret",
-            custom_api_key="sk-secret",
             custom_headers="Authorization:Bearer xyz",
         )
 
@@ -817,7 +731,6 @@ class TestWebPrinterBroadcast:
             )
             # The actual secret value must NOT appear in the event
             assert "top-secret" not in json.dumps(evt)
-            assert "sk-secret" not in json.dumps(evt)
             assert "Bearer xyz" not in json.dumps(evt)
 
     def test_config_persists_with_web_printer(self) -> None:
@@ -838,6 +751,59 @@ class TestWebPrinterBroadcast:
         assert cfg["max_budget"] == 25.0
         assert cfg["custom_endpoint"] == "http://local:1234/v1"
         assert agent.max_budget == 25.0
+
+
+class TestApiKeysCannotBeUpdated:
+    """API keys cannot be updated through the update_settings tool.
+
+    For security reasons, the tool rejects all API key parameters with a
+    TypeError (Python's "unexpected keyword argument" error).  Users must
+    set API keys through the settings UI or environment variables.
+    """
+
+    @pytest.mark.parametrize("api_key_param", [
+        "custom_api_key",
+        "gemini_api_key",
+        "openai_api_key",
+        "anthropic_api_key",
+        "together_api_key",
+        "openrouter_api_key",
+        "minimax_api_key",
+    ])
+    def test_api_key_param_not_in_signature(self, api_key_param: str) -> None:
+        """The API key parameter is not part of update_settings' signature."""
+        import inspect
+
+        _agent, _printer, tools = _make_agent_and_printer()
+        update = _find_tool(tools, "update_settings")
+        sig = inspect.signature(update)
+        assert api_key_param not in sig.parameters
+
+    def test_api_key_not_advertised_in_docstring(self) -> None:
+        """API keys should not appear in the docstring's Args list."""
+        _agent, _printer, tools = _make_agent_and_printer()
+        update = _find_tool(tools, "update_settings")
+        doc = update.__doc__ or ""
+        # The docstring may mention API keys to explain they're disallowed,
+        # but they must not be listed under "Args:".
+        args_section_marker = "Args:"
+        if args_section_marker in doc:
+            args_section = doc.split(args_section_marker, 1)[1]
+            # Split out the "Returns:" trailer so we only inspect the args.
+            args_section = args_section.split("Returns:", 1)[0]
+            for forbidden in (
+                "custom_api_key:",
+                "gemini_api_key:",
+                "openai_api_key:",
+                "anthropic_api_key:",
+                "together_api_key:",
+                "openrouter_api_key:",
+                "minimax_api_key:",
+            ):
+                assert forbidden not in args_section, (
+                    f"API key '{forbidden}' should not be documented as a"
+                    " supported update_settings parameter."
+                )
 
 
 class TestConfigPersistenceIsolation:
