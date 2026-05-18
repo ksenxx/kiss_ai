@@ -2126,8 +2126,15 @@
     // tabs MUST NOT show siblings from the same chat_id — they
     // render exactly one task, the sub-agent's own row.
     const _activeTabForAdj = tabs.find(t => t.id === activeTabId);
-    const _isSubagentActive = !!(_activeTabForAdj && _activeTabForAdj.isSubagentTab);
-    if (!adjacentLoading && activeTabId && currentTaskName && !_isSubagentActive) {
+    const _isSubagentActive = !!(
+      _activeTabForAdj && _activeTabForAdj.isSubagentTab
+    );
+    if (
+      !adjacentLoading &&
+      activeTabId &&
+      currentTaskName &&
+      !_isSubagentActive
+    ) {
       const atTop = O.scrollTop <= 0;
       const atBottom = O.scrollTop + O.clientHeight >= O.scrollHeight - 2;
 
