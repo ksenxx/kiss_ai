@@ -120,7 +120,7 @@ class _PromptCapture:
         # task summary that subsequent ``build_chat_prompt`` calls
         # surface as "### Result N".
         if printer is not None and hasattr(printer, "broadcast"):
-            printer.broadcast({
+            cast(Any, printer).broadcast({
                 "type": "result",
                 "text": summary,
                 "success": True,
