@@ -108,7 +108,7 @@ class VSCodeServer(
         self._state_lock = threading.Lock()
         self._complete_seq: int = 0
         self._complete_seq_latest: int = -1
-        self._complete_queue: queue.Queue[tuple[str, int, str, str]] | None = None
+        self._complete_queue: queue.Queue[tuple[str, int, str, str, str]] | None = None
         self._complete_worker: threading.Thread | None = None
         self._file_cache: list[str] | None = None
         self._last_active_file: str = ""
