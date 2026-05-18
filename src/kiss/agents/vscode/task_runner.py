@@ -64,6 +64,12 @@ class _TaskRunnerMixin:
         ) -> bool: ...
         def _main_dirty_files(self) -> list[str]: ...
         def _broadcast_autocommit_prompt(self, tab_id: str) -> None: ...
+        def _handle_autocommit_action(
+            self, action: str, tab_id: str = "",
+        ) -> None: ...
+        def _handle_worktree_action(
+            self, action: str, tab_id: str = "",
+        ) -> dict[str, Any]: ...
         def _present_pending_worktree(
             self, tab_id: str, *, try_merge_review: bool,
         ) -> None: ...
@@ -232,6 +238,11 @@ class _TaskRunnerMixin:
                 return
             tab.use_worktree = bool(cmd.get("useWorktree", False))
             tab.use_parallel = bool(cmd.get("useParallel", False))
+            # Mirror the "Auto commit" menu toggle for this submit.
+            # When ON the post-task block skips the interactive
+            # merge/diff workflow and auto-commits agent changes
+            # (and auto-merges the worktree in worktree mode).
+            tab.auto_commit_mode = bool(cmd.get("autoCommit", False))
             tab.is_task_active = True
             stop_event = tab.stop_event
             use_worktree = tab.use_worktree
@@ -367,6 +378,16 @@ class _TaskRunnerMixin:
                                     pre_untracked,
                                     pre_file_hashes,
                                 )
+                        elif tab.auto_commit_mode:
+                            # "Auto commit" toggle is ON — skip the
+                            # interactive merge/diff workflow entirely
+                            # and commit the agent's pending changes
+                            # directly.  Mirrors the user clicking
+                            # "Auto commit" on the autocommit prompt
+                            # without ever opening the merge view.
+                            with self._state_lock:
+                                tab.deferred_snapshot = None
+                            self._handle_autocommit_action("commit", tab_id)
                         else:
                             with self._state_lock:
                                 tab.deferred_snapshot = None
@@ -404,6 +425,7 @@ class _TaskRunnerMixin:
                         "cost": round(tab.agent.budget_used, 6),
                         "is_parallel": tab.use_parallel,
                         "is_worktree": use_worktree,
+                        "auto_commit_mode": tab.auto_commit_mode,
                     },
                     task_id=tab.task_history_id,
                 )
@@ -411,9 +433,27 @@ class _TaskRunnerMixin:
                 self.printer.reset()
                 if use_worktree and tab.agent._wt_pending and not tab.skip_merge:
                     try:
-                        self._present_pending_worktree(
-                            tab_id, try_merge_review=True,
-                        )
+                        if tab.auto_commit_mode:
+                            # "Auto commit" toggle is ON in worktree
+                            # mode — skip the worktree merge review
+                            # entirely and auto-commit + auto-merge
+                            # the worktree branch into the original
+                            # branch.  ``_handle_worktree_action`` runs
+                            # the same generate-message → commit →
+                            # squash-merge → cleanup sequence as the
+                            # interactive "Merge" button.
+                            result = self._handle_worktree_action(
+                                "merge", tab_id,
+                            )
+                            self.printer.broadcast({
+                                "type": "worktree_result",
+                                "tabId": tab_id,
+                                **result,
+                            })
+                        else:
+                            self._present_pending_worktree(
+                                tab_id, try_merge_review=True,
+                            )
                     except BaseException:
                         logger.debug("Worktree merge review error", exc_info=True)
                 if task_end_event:  # pragma: no branch — always set
