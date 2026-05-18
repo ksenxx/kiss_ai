@@ -2452,11 +2452,6 @@
       case 'configData':
         populateConfigForm(ev.config || {}, ev.apiKeys || {});
         break;
-      case 'folderPicked':
-        if (ev.path) {
-          document.getElementById('cfg-work-dir').value = ev.path;
-        }
-        break;
       case 'history':
         renderHistory(ev.sessions || [], ev.offset || 0, ev.generation || 0);
         break;
@@ -4175,14 +4170,6 @@
     }
     configSidebarClose.addEventListener('click', closeConfigSidebar);
     configSidebarOverlay.addEventListener('click', closeConfigSidebar);
-    const browseBtn = document.getElementById('cfg-work-dir-browse');
-    if (browseBtn) {
-      browseBtn.addEventListener('click', () => {
-        const workDirInput = document.getElementById('cfg-work-dir');
-        const currentPath = workDirInput ? workDirInput.value.trim() : '';
-        vscode.postMessage({type: 'pickFolder', currentPath});
-      });
-    }
     historySearch.addEventListener('input', () => {
       resetHistoryPagination();
       vscode.postMessage({
@@ -4926,7 +4913,6 @@
     el('cfg-custom-headers').value = cfg.custom_headers || '';
     el('cfg-use-web-browser').checked = cfg.use_web_browser !== false;
     el('cfg-remote-password').value = cfg.remote_password || '';
-    el('cfg-work-dir').value = cfg.work_dir || '';
     configFormPopulated = true;
     // Populate API key fields from current environment values
     const keyIds = [
@@ -4950,7 +4936,6 @@
       custom_headers: el('cfg-custom-headers').value.trim(),
       use_web_browser: el('cfg-use-web-browser').checked,
       remote_password: el('cfg-remote-password').value.trim(),
-      work_dir: el('cfg-work-dir').value.trim(),
     };
     const apiKeys = {};
     const keyIds = [
