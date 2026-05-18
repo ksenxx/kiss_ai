@@ -10,6 +10,14 @@
 # Log saved to ~/.kiss/install.log
 set -e
 
+# Capture the user's working directory *before* any `cd` so that VS Code can
+# later be launched with this directory as the workspace root.  The agents
+# spawned inside VS Code default their PWD to the workspace root (see
+# ``kiss.agents.vscode.server`` — ``os.getcwd()`` is the fallback when
+# ``KISS_WORKDIR`` is unset), so opening the workspace here makes the
+# agents' PWD match the user's original shell PWD.
+USER_PWD="$PWD"
+
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 BIN_DIR="$HOME/.local/bin"
@@ -214,14 +222,17 @@ find_code_cli() {
 }
 
 launch_vscode() {
+    # ``$USER_PWD`` is captured at the top of this script before any ``cd``.
+    # Passing it to VS Code makes it the workspace root so that agents
+    # spawned inside the editor inherit it as their PWD.
     case "$OS" in
         Darwin)
-            if open -a "Visual Studio Code" >/dev/null 2>&1; then
-                echo "Launched VS Code via 'open -a'."
+            if open -a "Visual Studio Code" "$USER_PWD" >/dev/null 2>&1; then
+                echo "Launched VS Code via 'open -a' with workspace $USER_PWD."
                 return 0
             fi
-            if [ -d "/Applications/Visual Studio Code.app" ] && open "/Applications/Visual Studio Code.app" >/dev/null 2>&1; then
-                echo "Launched VS Code from /Applications."
+            if [ -d "/Applications/Visual Studio Code.app" ] && open -a "/Applications/Visual Studio Code.app" "$USER_PWD" >/dev/null 2>&1; then
+                echo "Launched VS Code from /Applications with workspace $USER_PWD."
                 return 0
             fi
             ;;
@@ -234,8 +245,8 @@ launch_vscode() {
                 "/snap/bin/code" \
                 "/usr/share/code/code"; do
                 if [ -n "$candidate" ] && [ -x "$candidate" ]; then
-                    (nohup "$candidate" "$PROJECT_DIR" >/dev/null 2>&1 &)
-                    echo "Launched VS Code from $candidate."
+                    (nohup "$candidate" "$USER_PWD" >/dev/null 2>&1 &)
+                    echo "Launched VS Code from $candidate with workspace $USER_PWD."
                     return 0
                 fi
             done
@@ -243,8 +254,8 @@ launch_vscode() {
     esac
 
     if find_code_cli && [ -n "$CODE_CLI" ]; then
-        (nohup "$CODE_CLI" "$PROJECT_DIR" >/dev/null 2>&1 &)
-        echo "Launched VS Code from $CODE_CLI."
+        (nohup "$CODE_CLI" "$USER_PWD" >/dev/null 2>&1 &)
+        echo "Launched VS Code from $CODE_CLI with workspace $USER_PWD."
         return 0
     fi
 
