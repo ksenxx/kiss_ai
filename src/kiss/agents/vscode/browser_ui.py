@@ -237,30 +237,6 @@ class BaseBrowserPrinter(Printer):
                 self._subscribers[canonical] = viewers
             viewers.add(viewer_tab_id)
 
-    def unsubscribe_tab(self, source_tab_id: str, viewer_tab_id: str) -> None:
-        """Remove *viewer_tab_id* from the subscriber set of
-        *source_tab_id*.
-
-        Idempotent: silently does nothing when the subscription does
-        not exist.  Cleans up empty subscriber sets so
-        ``_subscribers`` does not grow without bound.
-
-        Args:
-            source_tab_id: The original tab id whose subscriber set is
-                being modified.  Alias-resolved.
-            viewer_tab_id: The viewer tab id to remove.
-        """
-        if not source_tab_id or not viewer_tab_id:
-            return
-        with self._lock:
-            canonical = self._resolve_tab_id(source_tab_id)
-            viewers = self._subscribers.get(canonical)
-            if viewers is None:
-                return
-            viewers.discard(viewer_tab_id)
-            if not viewers:
-                self._subscribers.pop(canonical, None)
-
     def _fanout_targets(self, tab_id: str | None) -> list[str]:
         """Return a snapshot of viewer tab ids subscribed to *tab_id*.
 
