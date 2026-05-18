@@ -2454,6 +2454,7 @@
           }
         }
         renderTabBar();
+        refreshHistory();
         break;
       }
       case 'models':
@@ -4710,7 +4711,13 @@
       div.style.backgroundColor = chatIdBgColor(String(s.id));
       div.style.color = '#1a1a1a';
 
-      if (s.failed) {
+      if (s.is_running) {
+        const runningDot = document.createElement('span');
+        runningDot.className = 'sidebar-item-running';
+        runningDot.dataset.tooltip = 'Task running';
+        runningDot.setAttribute('aria-label', 'Task running');
+        div.appendChild(runningDot);
+      } else if (s.failed) {
         const failedDot = document.createElement('span');
         failedDot.className = 'sidebar-item-failed';
         failedDot.dataset.tooltip = 'Task failed';
