@@ -74,6 +74,7 @@ class _CommandsMixin:
         _complete_queue: queue.Queue[tuple[str, int, str, str]] | None
         _last_active_file: str
         _last_active_content: str
+        _file_cache: list[str] | None
 
         def _get_tab(self, tab_id: str) -> _RunningAgentState: ...
         def _run_task(self, cmd: dict[str, Any]) -> None: ...
@@ -390,6 +391,32 @@ class _CommandsMixin:
         if cfg.get("remote_password", ""):
             _restart_kiss_web_daemon()
 
+    def _cmd_set_work_dir(self, cmd: dict[str, Any]) -> None:
+        """Update the server's working directory.
+
+        Sent by the VS Code extension whenever
+        ``vscode.workspace.workspaceFolders`` changes (i.e. the user
+        opens a different folder) and once at activation so a
+        freshly-attached extension synchronises the daemon even when
+        the daemon was started with a different ``KISS_WORKDIR``.
+
+        Invalidates the autocomplete file cache and clears the
+        ``_last_active_file`` snapshot — both refer to files from the
+        previous workspace and must not leak across folders.
+        """
+        new_dir = cmd.get("workDir", "")
+        if not new_dir:
+            return
+        with self._state_lock:
+            if self.work_dir == new_dir:
+                return
+            self.work_dir = new_dir
+            # Stale cache from the previous folder must not bleed
+            # into the new folder's autocomplete results.
+            self._file_cache = None
+            self._last_active_file = ""
+            self._last_active_content = ""
+
     def _cmd_set_skip_merge(self, cmd: dict[str, Any]) -> None:
         """Set the skip_merge flag on a tab.
 
@@ -426,6 +453,7 @@ class _CommandsMixin:
         "worktreeAction": _cmd_worktree_action,
         "autocommitAction": _cmd_autocommit_action,
         "setSkipMerge": _cmd_set_skip_merge,
+        "setWorkDir": _cmd_set_work_dir,
         "getConfig": _cmd_get_config,
         "saveConfig": _cmd_save_config,
     }
