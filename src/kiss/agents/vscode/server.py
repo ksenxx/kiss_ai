@@ -224,6 +224,28 @@ class VSCodeServer(
             "selected": self._default_model,
         })
 
+    def _get_running_task_ids(self) -> set[int]:
+        """Return the set of task_history row ids with alive worker threads.
+
+        Scans all per-tab ``_RunningAgentState`` entries and collects the
+        ``task_history_id`` of those whose ``task_thread`` is still alive.
+        Must be called WITHOUT holding ``_state_lock`` — acquires it internally.
+
+        Returns:
+            Set of ``task_history.id`` values that are currently running.
+        """
+        running: set[int] = set()
+        with self._state_lock:
+            for tab in _RunningAgentState.running_agent_states.values():
+                tid = tab.task_history_id
+                if (
+                    tid is not None
+                    and tab.task_thread is not None
+                    and tab.task_thread.is_alive()
+                ):
+                    running.add(tid)
+        return running
+
     def _get_history(self, query: str | None, offset: int = 0, generation: int = 0) -> None:
         """Send conversation history with pagination support."""
         if query:
@@ -231,15 +253,18 @@ class VSCodeServer(
         else:
             entries = _load_history(limit=50, offset=offset)
 
+        running_task_ids = self._get_running_task_ids()
+
         sessions = []
         for entry in entries:
             task = str(entry.get("task", ""))
             has_events = bool(entry.get("has_events", False))
             chat_id = str(entry.get("chat_id", "") or "")
             result = str(entry.get("result", "") or "")
+            entry_id = entry.get("id")
             session: dict[str, Any] = {
                 "id": chat_id,
-                "task_id": entry.get("id"),
+                "task_id": entry_id,
                 "title": task[:50] + "..." if len(task) > 50 else task,
                 "timestamp": entry.get("timestamp", 0),
                 "preview": task,
@@ -247,6 +272,10 @@ class VSCodeServer(
                 "failed": (
                     result.startswith("Task failed")
                     or result == "Agent Failed Abruptly"
+                ),
+                "is_running": (
+                    isinstance(entry_id, int)
+                    and entry_id in running_task_ids
                 ),
             }
             # Mark sub-agent rows so the history sidebar treats them
