@@ -828,9 +828,7 @@
   const worktreeToggleBtn = document.getElementById('worktree-toggle-btn');
   const parallelToggleBtn = document.getElementById('parallel-toggle-btn');
   const demoToggleBtn = document.getElementById('demo-toggle-btn');
-  const autocommitToggleBtn = document.getElementById(
-    'autocommit-toggle-btn',
-  );
+  const autocommitToggleBtn = document.getElementById('autocommit-toggle-btn');
   const taskPanel = document.getElementById('task-panel');
   const taskPanelText = document.getElementById('task-panel-text');
   const taskPanelChevron = document.getElementById('task-panel-chevron');
@@ -4354,8 +4352,8 @@
             parallelToggleBtn && parallelToggleBtn.classList.contains('active')
           ),
           autoCommit: !!(
-            autocommitToggleBtn
-            && autocommitToggleBtn.classList.contains('active')
+            autocommitToggleBtn &&
+            autocommitToggleBtn.classList.contains('active')
           ),
           workDir: curTab.workDir || '',
         });
@@ -4393,8 +4391,7 @@
         parallelToggleBtn && parallelToggleBtn.classList.contains('active')
       ),
       autoCommit: !!(
-        autocommitToggleBtn
-        && autocommitToggleBtn.classList.contains('active')
+        autocommitToggleBtn && autocommitToggleBtn.classList.contains('active')
       ),
     };
     if (curTab && curTab.workDir) msg.workDir = curTab.workDir;
