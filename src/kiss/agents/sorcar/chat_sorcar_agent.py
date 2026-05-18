@@ -56,12 +56,13 @@ class ChatSorcarAgent(SorcarAgent):
         super().__init__(name)
         self._chat_id: str = ""
         self._last_task_id: int | None = None
-        # Populated by ``_run_tasks_parallel`` on each sub-agent before
-        # it runs so the sub-agent's task_history row records its
-        # original frontend sub-tab id, parent tab id, task index, and
-        # truncated description.  The history sidebar reads these to
-        # reopen the row as a sub-agent tab rather than a regular chat
-        # tab.  ``None`` on the top-level agent.
+        # Populated by ``_run_tasks_parallel`` on each sub-agent
+        # before it runs.  The single ``parent_task_id`` field links
+        # the sub-agent's ``task_history`` row back to the row of
+        # the parent task that spawned it.  The presence of this
+        # field on a row's ``extra.subagent`` payload is itself the
+        # signal that the row is a sub-agent task; no separate
+        # boolean is stored.  ``None`` on the top-level agent.
         self._subagent_info: dict[str, object] | None = None
 
     @property
@@ -147,6 +148,13 @@ class ChatSorcarAgent(SorcarAgent):
         model = getattr(self, "model_name", None)
         work_dir = getattr(self, "work_dir", None)
         chat_id = self._chat_id
+        # The parent's ``task_history.id`` is the only piece of
+        # provenance that a sub-agent row persists; it is set when
+        # the parent's ``run()`` calls ``_add_task`` and we are
+        # inside the LLM agent loop now, so ``_last_task_id`` is
+        # available.  Captured into a local so each sub-agent thread
+        # sees the parent id at spawn time.
+        parent_task_id = self._last_task_id
         printer = self.printer
         broadcast = getattr(printer, "broadcast", None) if printer else None
         thread_local = getattr(printer, "_thread_local", None) if printer else None
@@ -181,16 +189,14 @@ class ChatSorcarAgent(SorcarAgent):
             agent = ChatSorcarAgent(f"Parallel-{task[:40]}")
             if chat_id:
                 agent.resume_chat_by_id(chat_id)
-            # Persist the sub-agent's frontend identity into its own
-            # task_history row so the history sidebar can later reopen
-            # it as a sub-agent tab (⚡N indicator, no input bar)
-            # rather than reclassifying it as a regular chat tab.
-            agent._subagent_info = {
-                "tab_id": sub_tab_id,
-                "parent_tab_id": parent_tab_id or "",
-                "task_index": idx,
-                "description": task[:200],
-            }
+            # Persist the parent's ``task_history.id`` on the
+            # sub-agent's row so the history sidebar can identify
+            # the row as a sub-agent task (presence of the
+            # ``subagent`` key implies the row is a sub-agent).  All
+            # other display details (description, color, icon) are
+            # derivable from the row's own ``task`` column and a
+            # per-tab ``isSubagentTab`` flag on the frontend.
+            agent._subagent_info = {"parent_task_id": parent_task_id}
             # Register the sub-agent in the printer's ``_persist_agents``
             # map keyed by ``sub_tab_id`` so events broadcast by this
             # sub-agent thread (each tagged with ``sub_tab_id`` via the
