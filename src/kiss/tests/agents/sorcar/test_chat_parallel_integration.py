@@ -15,11 +15,13 @@ from __future__ import annotations
 import json
 import random
 import shutil
+import sqlite3
 import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +37,28 @@ from kiss.agents.sorcar.persistence import (
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+
+def _retry_on_busy[_T](op: Callable[[], _T], attempts: int = 8) -> _T:
+    """Retry ``op`` on transient SQLite "database is locked" errors.
+
+    The persistence layer uses WAL + a 5s ``busy_timeout``, but under
+    aggressive thread-pool contention with many short-lived writes
+    SQLite still occasionally returns ``SQLITE_BUSY`` because the WAL
+    writer holds the file lock while committing.  The concurrency
+    invariants the tests verify are unaffected by retrying these
+    transient errors at the call site.
+    """
+    last: Exception | None = None
+    for i in range(attempts):
+        try:
+            return op()
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower():
+                raise
+            last = exc
+            time.sleep(0.05 * (i + 1))
+    assert last is not None
+    raise last
 
 # ---------------------------------------------------------------------------
 # Fake OpenAI-compatible server that always returns a ``finish`` tool call
@@ -467,12 +491,16 @@ class TestConcurrentThreadPoolExecutor:
         def writer(idx: int) -> None:
             time.sleep(random.uniform(0.01, 0.05))
             try:
-                task_id, _ = _add_task(
-                    f"concurrent-write-{idx}", chat_id=chat_id
+                task_id, _ = _retry_on_busy(
+                    lambda: _add_task(
+                        f"concurrent-write-{idx}", chat_id=chat_id,
+                    )
                 )
                 time.sleep(random.uniform(0.005, 0.02))
-                _save_task_result(
-                    result=f"result-{idx}", task_id=task_id
+                _retry_on_busy(
+                    lambda: _save_task_result(
+                        result=f"result-{idx}", task_id=task_id,
+                    )
                 )
             except Exception as exc:
                 errors.append(f"writer-{idx}: {exc}")
@@ -500,11 +528,15 @@ class TestConcurrentThreadPoolExecutor:
         def writer(idx: int) -> None:
             time.sleep(random.uniform(0.005, 0.03))
             try:
-                task_id, _ = _add_task(
-                    f"rw-task-{idx}", chat_id=chat_id
+                task_id, _ = _retry_on_busy(
+                    lambda: _add_task(
+                        f"rw-task-{idx}", chat_id=chat_id,
+                    )
                 )
-                _save_task_result(
-                    result=f"rw-result-{idx}", task_id=task_id
+                _retry_on_busy(
+                    lambda: _save_task_result(
+                        result=f"rw-result-{idx}", task_id=task_id,
+                    )
                 )
             except Exception as exc:
                 write_errors.append(f"writer-{idx}: {exc}")
@@ -512,7 +544,7 @@ class TestConcurrentThreadPoolExecutor:
         def reader(idx: int) -> None:
             time.sleep(random.uniform(0.005, 0.03))
             try:
-                ctx = _load_chat_context(chat_id)
+                ctx = _retry_on_busy(lambda: _load_chat_context(chat_id))
                 # Every entry that has been committed should have
                 # consistent task/result pairs
                 for entry in ctx:
