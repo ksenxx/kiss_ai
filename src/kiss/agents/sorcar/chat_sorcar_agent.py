@@ -314,7 +314,31 @@ class ChatSorcarAgent(SorcarAgent):
         self._last_user_prompt = prompt_template
 
         agent_prompt = self.build_chat_prompt(prompt_template)
-        task_id, self._chat_id = _add_task(prompt_template, chat_id=self._chat_id)
+
+        # Build an initial ``extra`` payload with values known at task
+        # creation time so the history sidebar can display them
+        # immediately — even while the task is still running.  Post-
+        # completion values (tokens, cost) are merged by the final
+        # ``_save_task_extra`` call in the ``finally`` block below (or
+        # by ``task_runner.py`` for the VS Code path).
+        from kiss._version import __version__
+
+        early_extra: dict[str, object] = {
+            "model": kwargs.get("model_name", "") or "",
+            "work_dir": kwargs.get("work_dir", "") or "",
+            "version": __version__,
+            "is_parallel": bool(kwargs.get("is_parallel", False)),
+            "is_worktree": (
+                bool(kwargs.get("use_worktree", False))
+                or type(self).__name__ == "WorktreeSorcarAgent"
+            ),
+        }
+        if self._subagent_info is not None:
+            early_extra["subagent"] = self._subagent_info
+
+        task_id, self._chat_id = _add_task(
+            prompt_template, chat_id=self._chat_id, extra=early_extra,
+        )
         self._last_task_id = task_id
         # Publish ``self`` as the agent currently driving ``task_id``.
         # The entry is added the moment the row exists in
