@@ -311,6 +311,22 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
     """Test WebSocket communication without authentication."""
 
     async def asyncSetUp(self) -> None:
+        # Other tests in the suite (e.g. ones that monkeypatch ``HOME``
+        # or temporarily redirect ``persistence._KISS_DIR``) can leave
+        # the SQLite path pointing at a now-deleted ``tmp_path``.  Pin
+        # persistence to a fresh test-owned directory so these tests
+        # remain independent regardless of run order.
+        import kiss.agents.sorcar.persistence as _persistence
+        self._saved_persistence = (
+            _persistence._DB_PATH,
+            _persistence._db_conn,
+            _persistence._KISS_DIR,
+        )
+        self._persistence_dir = Path(tempfile.mkdtemp(prefix="kiss_ws_test_"))
+        _persistence._KISS_DIR = self._persistence_dir
+        _persistence._DB_PATH = self._persistence_dir / "sorcar.db"
+        _persistence._db_conn = None
+
         self.port = _find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
@@ -330,6 +346,19 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
             CONFIG_PATH.write_text(self._orig_config)
         elif CONFIG_PATH.exists():
             CONFIG_PATH.unlink()
+
+        import kiss.agents.sorcar.persistence as _persistence
+        if _persistence._db_conn is not None:
+            try:
+                _persistence._db_conn.close()
+            except Exception:
+                pass
+            _persistence._db_conn = None
+        (
+            _persistence._DB_PATH,
+            _persistence._db_conn,
+            _persistence._KISS_DIR,
+        ) = self._saved_persistence
 
     async def test_ws_auth_no_password(self) -> None:
         """WebSocket connection with empty password succeeds immediately."""

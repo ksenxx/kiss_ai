@@ -229,8 +229,11 @@ class TestWorkingDirectory:
         assert agent.work_dir == resolved
         assert target.exists()
 
+        # ``work_dir`` is not in ``DEFAULTS``, so ``save_config`` drops it
+        # from the persisted file.  Only the in-memory agent state and
+        # broadcast event are observable.
         cfg = json.loads(vscode_config.CONFIG_PATH.read_text())
-        assert cfg["work_dir"] == resolved
+        assert "work_dir" not in cfg
 
         evts = _setting_events(printer)
         assert len(evts) == 1
@@ -568,10 +571,11 @@ class TestWorktreeSorcarAgentNoPrinter:
         assert "custom_headers=<updated>" in result
 
         # Config file should contain persisted values (only DEFAULTS keys)
-        # is_worktree is NOT in DEFAULTS, so save_config drops it.
+        # ``is_worktree`` and ``work_dir`` are NOT in DEFAULTS, so
+        # ``save_config`` drops them.
         cfg = json.loads(vscode_config.CONFIG_PATH.read_text())
         assert cfg["max_budget"] == 5.0
-        assert cfg["work_dir"] == str(wd.resolve())
+        assert "work_dir" not in cfg
         assert cfg["use_web_browser"] is False
         assert cfg["custom_endpoint"] == "http://localhost:11434/v1"
         assert cfg["custom_headers"] == "X-Slack:true"
