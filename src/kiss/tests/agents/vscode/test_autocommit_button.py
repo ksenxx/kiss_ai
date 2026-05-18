@@ -50,12 +50,13 @@ class TestAutocommitButtonInTemplate(unittest.TestCase):
             "autocommit-btn button not found in SorcarTab.ts"
         )
 
-    def test_button_has_menu_label(self) -> None:
+    def test_button_has_tooltip(self) -> None:
+        """The button advertises its purpose via a ``data-tooltip``."""
         html = _read("src/SorcarTab.ts")
         btn_start = html.index('id="autocommit-btn"')
         btn_end = html.index("</button>", btn_start)
         btn_html = html[btn_start:btn_end]
-        assert "Auto commit" in btn_html
+        assert "data-tooltip=" in btn_html
 
     def test_button_right_of_menu_btn(self) -> None:
         """The autocommit button sits to the right of the menu button.
