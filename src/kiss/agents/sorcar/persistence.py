@@ -311,18 +311,30 @@ def _most_recent_task_id(db: sqlite3.Connection, task: str | None) -> int | None
     return row["id"] if row else None
 
 
-def _add_task(task: str, chat_id: str = "") -> tuple[int, str]:
+def _add_task(
+    task: str,
+    chat_id: str = "",
+    extra: dict[str, object] | None = None,
+) -> tuple[int, str]:
     """Append a task to the history and return ``(task_id, chat_id)``.
 
     When *chat_id* is ``""`` (new session), a new UUID-style string
     is generated as the chat session identifier.
     Otherwise the given *chat_id* is stored directly (continuation task).
 
+    When *extra* is provided, the JSON-encoded dict is written into the
+    ``extra`` column in the same INSERT so that values known at task
+    creation time (model, work_dir, version, toggles) are immediately
+    visible in the history sidebar — even before the task completes.
+    Callers that need to add post-completion values (tokens, cost) can
+    later call :func:`_save_task_extra` which overwrites the column.
+
     Thread-safe: all writes are protected by ``_rw_lock.write_lock()``.
 
     Args:
         task: The task description string.
         chat_id: Chat session identifier.  ``""`` starts a new session.
+        extra: Optional dict of metadata to store immediately.
 
     Returns:
         ``(task_id, chat_id)`` — the inserted row id and the
@@ -330,12 +342,14 @@ def _add_task(task: str, chat_id: str = "") -> tuple[int, str]:
     """
     import uuid
     db = _get_db()
+    extra_str = json.dumps(extra) if extra else ""
     with _rw_lock.write_lock():
         if chat_id == "":
             chat_id = uuid.uuid4().hex
         cursor = db.execute(
-            "INSERT INTO task_history (timestamp, task, chat_id, result) VALUES (?, ?, ?, ?)",
-            (time.time(), task, chat_id, "Agent Failed Abruptly"),
+            "INSERT INTO task_history (timestamp, task, chat_id, result, extra) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (time.time(), task, chat_id, "Agent Failed Abruptly", extra_str),
         )
         row_id = cursor.lastrowid
         if row_id is None:  # pragma: no cover
