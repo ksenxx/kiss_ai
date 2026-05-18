@@ -88,6 +88,8 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _sizeReportResolver:
     | ((s: {inner: number; screen: number}) => void)
     | undefined;
+  /** Subscription to workspace-folder changes; disposes on dispose(). */
+  private _workspaceFoldersSub: vscode.Disposable | undefined;
 
   /**
    * Show a notification-progress dialog with a timeout-based auto-resolve.
@@ -197,6 +199,22 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     this._client = client;
     this._installClientListener(client);
     client.connect();
+    // Sync the daemon's work_dir with the current workspace folder.
+    // The daemon caches ``self.work_dir`` once at process start from
+    // ``KISS_WORKDIR``/``getcwd()``; without this push, every backend
+    // path that does not receive an explicit ``workDir`` per command
+    // (autocomplete file-list, commit-message, worktree actions)
+    // keeps using the stale init value after the user opens a
+    // different folder in VS Code.
+    client.sendCommand({type: 'setWorkDir', workDir: this._getWorkDir()});
+    // Keep the daemon in sync whenever the workspace folder set
+    // changes (e.g. user opens a different folder in this window).
+    this._workspaceFoldersSub = vscode.workspace.onDidChangeWorkspaceFolders(
+      () => {
+        const wd = this._getWorkDir();
+        this._getClient().sendCommand({type: 'setWorkDir', workDir: wd});
+      },
+    );
     return client;
   }
 
@@ -1253,6 +1271,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       this._urlFileWatchTimer = undefined;
     }
     this._resolveAllWorktreeActions();
+    if (this._workspaceFoldersSub) {
+      this._workspaceFoldersSub.dispose();
+      this._workspaceFoldersSub = undefined;
+    }
     for (const mgr of this._mergeManagers.values()) mgr.dispose();
     this._mergeManagers.clear();
     if (this._client) {

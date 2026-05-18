@@ -251,6 +251,7 @@ export interface AgentCommand {
     | 'autocommitAction'
     | 'getAdjacentTask'
     | 'setSkipMerge'
+    | 'setWorkDir'
     | 'getConfig'
     | 'saveConfig';
   prompt?: string;
