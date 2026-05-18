@@ -68,6 +68,7 @@ class _RunningAgentState:
 
     __slots__ = (
         "agent",
+        "tab_id",
         "chat_id",
         "last_task_id",
         "task_history_id",
@@ -99,12 +100,17 @@ class _RunningAgentState:
         # ``agent=self`` so its own per-run registration entry points
         # back at the running agent.
         self.agent: WorktreeSorcarAgent | None = agent
+        # Frontend routing key for this tab.  Stored on the state so
+        # consumers (e.g. multi-viewer subscribe in
+        # :meth:`VSCodeServer._reattach_running_chat`) can recover the
+        # source tab id without depending on the dict key.
+        self.tab_id: str = tab_id
         # Canonical chat id for this tab.  Empty for brand-new tabs
-        # that have not yet been associated with a chat (the
-        # ``tab_id == chat_id`` invariant is established in
-        # :meth:`_CommandsMixin._cmd_run` once a task starts; a
-        # history-row click populates this directly in
-        # :meth:`VSCodeServer._replay_session`).
+        # that have not yet been associated with a chat; populated by
+        # :meth:`_CommandsMixin._cmd_run` (fresh uuid) or by
+        # :meth:`VSCodeServer._replay_session` (resumed history row).
+        # Orthogonal to :attr:`tab_id` (frontend routing key): the
+        # same chat may be live-viewed from multiple tabs.
         self.chat_id: str = ""
         # Primary-key id of the most recently *completed* task in this
         # tab's chat session — used by post-task hooks

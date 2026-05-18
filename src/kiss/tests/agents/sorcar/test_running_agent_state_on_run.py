@@ -9,9 +9,9 @@ the duration of the ``run()`` call, and the entry must be removed once
 ``run()`` completes.  The entry's ``agent`` field must be the caller
 itself (not a freshly-allocated ``WorktreeSorcarAgent``).
 
-When an entry is already present (e.g. the VS Code server pre-populates
-one under the ``tab_id == chat_id`` invariant), ``run()`` must NOT clobber
-or pop it.
+When an entry with a matching ``chat_id`` is already present (e.g. the
+VS Code server pre-populates one keyed by the frontend tab id ahead of
+run-start), ``run()`` must NOT clobber or pop it.
 
 Uses a real local HTTP server that always returns a ``finish`` tool call —
 no mocks / no patches.  Persistence is redirected to a temp directory.
@@ -227,8 +227,12 @@ class TestRunningStatePopulatedOnRun:
 
         # Pre-populate as the VS Code server would: a fresh
         # ``_RunningAgentState`` whose internal agent is the standard
-        # ``WorktreeSorcarAgent("Sorcar VS Code")`` (NOT *agent*).
+        # ``WorktreeSorcarAgent("Sorcar VS Code")`` (NOT *agent*) and
+        # whose ``chat_id`` matches the agent's chat id so the
+        # standalone agent's ``_register_running_state`` detects the
+        # pre-existing entry and skips re-registration.
         preexisting = _RunningAgentState("pre-existing-id", "gpt-4o-mini")
+        preexisting.chat_id = "pre-existing-id"
         WorktreeSorcarAgent.running_agent_states["pre-existing-id"] = preexisting
 
         agent.run(

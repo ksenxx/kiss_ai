@@ -259,11 +259,10 @@ class ChatSorcarAgent(SorcarAgent):
         # Mint a fresh chat id at run-start when one is not already
         # set (e.g. a brand-new chat tab that has never resumed a
         # history entry).  Establishing the chat id BEFORE _add_task
-        # makes it the canonical identifier the frontend tab is
-        # keyed by: callers (commands.py _cmd_run) assign the tab
-        # id to this chat id so tab_id == chat_id throughout the
-        # lifecycle, removing the need for any chat_id ↔ tab_id
-        # translation in the extension layer.
+        # ensures every persisted event is tagged with the same
+        # canonical chat id.  ``tab_id`` (frontend routing key) and
+        # ``chat_id`` (persistence key) are orthogonal; the extension
+        # layer maintains its own chat_id ↔ tab_id index for routing.
         if self._chat_id == "":
             self._chat_id = uuid.uuid4().hex
 

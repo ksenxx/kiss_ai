@@ -109,6 +109,7 @@ def _start_fake_running_task(
     tab = server._get_tab(tab_id)
     tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
     tab.agent._chat_id = chat_id
+    tab.chat_id = chat_id
     tab.is_task_active = True
     tab.stop_event = threading.Event()
 
@@ -155,10 +156,10 @@ class TestCloseTabDoesNotStopRunningTask:
 
     def test_close_tab_keeps_thread_alive_and_finishes_task(self) -> None:
         server, _events = _make_server()
-        # With the ``tab_id == chat_id`` invariant, the running tab's
-        # id IS the chat id.
+        # ``tab_id`` and ``chat_id`` are orthogonal — the tab's
+        # routing key need not match the chat persistence key.
         chat_id = "chat-running-1"
-        tab_id_a = chat_id
+        tab_id_a = "tab-A"
         started, release, thread = _start_fake_running_task(
             server, tab_id_a, chat_id,
         )
@@ -214,11 +215,11 @@ class TestResumeRunningTaskReattachesLiveEvents:
         )
 
         server, events = _make_server()
-        # With the ``tab_id == chat_id`` invariant, the running tab's
-        # id IS the chat id; the viewer that joins from history uses
-        # a different tab id (the user opens a new chat tab keyed by
-        # ``s.id`` from the history row — same value as chat_id).
-        tab_id_a = chat_id
+        # ``tab_id`` and ``chat_id`` are orthogonal — the source tab
+        # carries its own routing key, and the viewer that joins from
+        # history allocates a fresh tab id; the chat lookup is routed
+        # by the persisted chat id.
+        tab_id_a = "tab-A"
         tab_id_b = "tab-B"
 
         started, release, thread = _start_fake_running_task(

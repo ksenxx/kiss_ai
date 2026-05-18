@@ -551,11 +551,15 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
     def _register_running_state(self) -> bool:
         """Publish ``self`` in :attr:`running_agent_states` for this chat.
 
-        Skips registration when an entry is already present: the VS
-        Code server pre-populates a ``_RunningAgentState`` ahead of
-        run-start under the ``tab_id == chat_id`` invariant — re-
-        registering here would clobber the server's task-lifecycle
-        flags.  Sub-agents launched by
+        Skips registration when an entry whose ``chat_id`` matches
+        ``self._chat_id`` is already present: the VS Code server
+        pre-populates a ``_RunningAgentState`` keyed by the frontend
+        tab id ahead of run-start, with ``chat_id`` set on the state;
+        re-registering here would clobber the server's task-lifecycle
+        flags.  In standalone / CLI runs no such pre-population
+        happens, and the entry is added here keyed by ``self._chat_id``
+        (the only routing key available — there is no separate tab).
+        Sub-agents launched by
         :meth:`ChatSorcarAgent._run_tasks_parallel` are plain
         :class:`ChatSorcarAgent` instances and never call this method,
         so they are tracked separately via the printer's
@@ -567,8 +571,9 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             was already present (the existing owner is responsible
             for cleanup).
         """
-        if self._chat_id in WorktreeSorcarAgent.running_agent_states:
-            return False
+        for state in WorktreeSorcarAgent.running_agent_states.values():
+            if state.chat_id == self._chat_id:
+                return False
         from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 
         state = _RunningAgentState(
@@ -576,6 +581,10 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             getattr(self, "model_name", "") or "",
             agent=self,
         )
+        # Tag the state with the canonical chat id so subsequent
+        # lookups (e.g. multi-viewer subscribe, ``_unregister_running_state``)
+        # can route by chat id without depending on the dict key.
+        state.chat_id = self._chat_id
         state.selected_model = getattr(self, "model_name", "") or state.selected_model
         state.is_task_active = True
         WorktreeSorcarAgent.running_agent_states[self._chat_id] = state
@@ -588,10 +597,15 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         path (e.g. the VS Code server) may have replaced it mid-run;
         in that case the new owner is responsible for its own cleanup.
         """
-        current = WorktreeSorcarAgent.running_agent_states.get(self._chat_id)
-        if current is not None and current.agent is self:
+        target_key: str | None = None
+        for key, state in WorktreeSorcarAgent.running_agent_states.items():
+            if state.agent is self and state.chat_id == self._chat_id:
+                target_key = key
+                break
+        if target_key is not None:
+            current = WorktreeSorcarAgent.running_agent_states[target_key]
             current.is_task_active = False
-            WorktreeSorcarAgent.running_agent_states.pop(self._chat_id, None)
+            WorktreeSorcarAgent.running_agent_states.pop(target_key, None)
 
     def run(  # type: ignore[override]
         self,

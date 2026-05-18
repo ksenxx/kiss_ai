@@ -115,16 +115,22 @@ class TestHistoryClickHandlerSkipsRedundantReplay:
     def test_regular_row_guards_resume_on_create_return_value(self) -> None:
         js = _read_main_js()
         # Locate the regular (non-subagent) branch.  We pin it by the
-        # comment that introduces it and the exact ``createNewTab(s.id)``
+        # comment that introduces it and the exact ``createNewTab()``
         # call site (sub-agent branch uses ``s.subagent_tab_id``).
+        # ``tab_id`` and ``chat_id`` are orthogonal — the regular branch
+        # allocates a fresh tab id and routes the chat lookup by
+        # ``chatId`` in the ``resumeSession`` payload.
         tail = _extract_block(
             js,
-            r"// When the clicked history row has a known chat_id \(s\.id\) and",
+            r"// When the clicked history row has a known chat_id \(s\.id\)",
         )
         # The branch must capture createNewTab's return value and gate
         # both setTaskText and the resumeSession postMessage on it.
+        # (Defensive: ``createNewTab()`` with no preset id always
+        # creates, but the guard keeps the regular and sub-agent
+        # branches symmetric and protects against future refactors.)
         m = re.search(
-            r"const created = createNewTab\(s\.id\);\s*"
+            r"const created = createNewTab\(\);\s*"
             r"if \(created\) \{\s*"
             r"setTaskText\(s\.preview \|\| s\.title \|\| ''\);\s*"
             r"vscode\.postMessage\(\{\s*"
@@ -134,9 +140,9 @@ class TestHistoryClickHandlerSkipsRedundantReplay:
         assert m is not None, (
             "the regular has_events branch must wrap setTaskText + "
             "resumeSession in `if (created) { ... }` where "
-            "`created = createNewTab(s.id)` — otherwise re-opening a "
-            "history row for an already-open live tab clobbers its "
-            "panel text and triggers a redundant replay"
+            "`created = createNewTab()` — keeps the regular and "
+            "sub-agent branches symmetric and guards the resume against "
+            "an unexpected short-circuit"
         )
 
 
