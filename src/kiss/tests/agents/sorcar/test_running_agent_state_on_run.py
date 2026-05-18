@@ -1,9 +1,9 @@
 """Regression: ``WorktreeSorcarAgent.run()`` publishes itself in
-``WorktreeSorcarAgent.running_agent_states`` while running.
+``_RunningAgentState.running_agent_states`` while running.
 
 When the standalone :class:`WorktreeSorcarAgent` is invoked, the
 process-global running-state map (a class attribute on
-:class:`WorktreeSorcarAgent`) should contain a live
+:class:`_RunningAgentState`) should contain a live
 :class:`_RunningAgentState` entry keyed by the agent's ``chat_id`` for
 the duration of the ``run()`` call, and the entry must be removed once
 ``run()`` completes.  The entry's ``agent`` field must be the caller
@@ -121,7 +121,7 @@ class TestRunningStatePopulatedOnRun:
         self.saved = _redirect(self.tmpdir)
         self.srv, self.url = _start_server()
         # Ensure a clean class-attribute slate; the dict is process-wide.
-        WorktreeSorcarAgent.running_agent_states.clear()
+        _RunningAgentState.running_agent_states.clear()
 
     def teardown_method(self) -> None:
         self.srv.shutdown()
@@ -130,7 +130,7 @@ class TestRunningStatePopulatedOnRun:
             th._db_conn = None
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
-        WorktreeSorcarAgent.running_agent_states.clear()
+        _RunningAgentState.running_agent_states.clear()
 
     def test_state_added_while_running_and_removed_after(self) -> None:
         """``run()`` adds an entry keyed by ``chat_id`` and removes it on exit."""
@@ -147,7 +147,7 @@ class TestRunningStatePopulatedOnRun:
             work_dir=self.tmpdir,
         )
         # After run() returns, the entry must be gone again.
-        assert agent.chat_id not in WorktreeSorcarAgent.running_agent_states
+        assert agent.chat_id not in _RunningAgentState.running_agent_states
 
     def test_state_is_live_during_run(self) -> None:
         """While ``run()`` is executing, an entry IS present keyed by chat_id.
@@ -169,7 +169,7 @@ class TestRunningStatePopulatedOnRun:
         def observer() -> None:
             started.wait(timeout=5)
             # Snapshot the dict membership while the worker is mid-run.
-            state = WorktreeSorcarAgent.running_agent_states.get("live-chat-id")
+            state = _RunningAgentState.running_agent_states.get("live-chat-id")
             observed["state"] = state
             observed["agent_is_self"] = state is not None and state.agent is agent
             observed["is_task_active"] = state is not None and state.is_task_active
@@ -195,7 +195,7 @@ class TestRunningStatePopulatedOnRun:
         def observer_poll() -> None:
             started.wait(timeout=5)
             for _ in range(2000):  # up to ~2s
-                state = WorktreeSorcarAgent.running_agent_states.get("live-chat-id")
+                state = _RunningAgentState.running_agent_states.get("live-chat-id")
                 if state is not None:
                     observed["state"] = state
                     observed["agent_is_self"] = state.agent is agent
@@ -217,7 +217,7 @@ class TestRunningStatePopulatedOnRun:
         assert observed["is_task_active"], "is_task_active should be True mid-run"
 
         # And the entry is gone after run() returns.
-        assert "live-chat-id" not in WorktreeSorcarAgent.running_agent_states
+        assert "live-chat-id" not in _RunningAgentState.running_agent_states
 
     def test_run_does_not_clobber_preexisting_state(self) -> None:
         """If an entry already exists (VS Code server case), ``run()`` leaves it alone."""
@@ -233,7 +233,7 @@ class TestRunningStatePopulatedOnRun:
         # pre-existing entry and skips re-registration.
         preexisting = _RunningAgentState("pre-existing-id", "gpt-4o-mini")
         preexisting.chat_id = "pre-existing-id"
-        WorktreeSorcarAgent.running_agent_states["pre-existing-id"] = preexisting
+        _RunningAgentState.running_agent_states["pre-existing-id"] = preexisting
 
         agent.run(
             prompt_template="please don't clobber me",
@@ -243,5 +243,5 @@ class TestRunningStatePopulatedOnRun:
         )
 
         # The pre-existing entry must still be there, unchanged.
-        assert WorktreeSorcarAgent.running_agent_states.get("pre-existing-id") is preexisting
+        assert _RunningAgentState.running_agent_states.get("pre-existing-id") is preexisting
         assert preexisting.agent is not agent

@@ -2,9 +2,12 @@
 
 Originally split out of ``server.py`` for organisation; moved into
 the ``sorcar`` package so the per-tab state class lives alongside
-its owning :class:`kiss.agents.sorcar.worktree_sorcar_agent.WorktreeSorcarAgent`
-(whose :attr:`~WorktreeSorcarAgent.running_agent_states` class attribute
-holds the process-global map keyed by tab id).
+its consumer :class:`kiss.agents.sorcar.worktree_sorcar_agent.WorktreeSorcarAgent`.
+
+The process-global registry mapping frontend tab id →
+:class:`_RunningAgentState` lives directly on this class as
+:attr:`_RunningAgentState.running_agent_states` — a registry of its
+own instances.
 """
 
 from __future__ import annotations
@@ -13,8 +16,10 @@ import ctypes
 import queue
 import re
 import threading
+from typing import TYPE_CHECKING
 
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+if TYPE_CHECKING:
+    from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 
 def parse_task_tags(text: str) -> list[str]:
@@ -65,6 +70,21 @@ class _RunningAgentState:
     this state so it survives across task boundaries without
     requiring an agent instance.
     """
+
+    # Process-global map of frontend tab id → live per-tab agent
+    # runtime state.  Class attribute (shared across every
+    # :class:`_RunningAgentState` instance) so any helper inside the
+    # ``kiss.agents`` package can inspect or attach to a running
+    # agent without holding a reference to either the agent or the
+    # VS Code server.  Owned conceptually by the VS Code server,
+    # which mutates it under its own ``_state_lock`` to coordinate
+    # task lifecycle, merge, autocommit and worktree transitions.
+    # Living on the state class itself avoids the prior import cycle
+    # with :mod:`kiss.agents.sorcar.worktree_sorcar_agent` and makes
+    # the registry self-typed (a dict of this very class).
+    # Producers / consumers MUST hold ``VSCodeServer._state_lock``
+    # for any multi-step access (read-then-modify, scan-then-modify).
+    running_agent_states: dict[str, _RunningAgentState] = {}
 
     __slots__ = (
         "agent",

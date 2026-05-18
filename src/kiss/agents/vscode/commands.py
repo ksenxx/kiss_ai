@@ -22,7 +22,6 @@ from kiss.agents.sorcar.persistence import (
     _record_model_usage,
 )
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
 if TYPE_CHECKING:
     from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
@@ -124,10 +123,10 @@ class _CommandsMixin:
         """
         tab_id = cmd.get("tabId", "")
         with self._state_lock:
-            tab = WorktreeSorcarAgent.running_agent_states.get(tab_id)
+            tab = _RunningAgentState.running_agent_states.get(tab_id)
             if tab is None:
                 tab = _RunningAgentState(tab_id, self._default_model)
-                WorktreeSorcarAgent.running_agent_states[tab_id] = tab
+                _RunningAgentState.running_agent_states[tab_id] = tab
             if tab.task_thread is not None and tab.task_thread.is_alive():
                 self.printer.broadcast({
                     "type": "error",
@@ -221,7 +220,7 @@ class _CommandsMixin:
         """Route a user answer to the correct tab's queue."""
         ans_tab = cmd.get("tabId", "")
         with self._state_lock:
-            ans_state = WorktreeSorcarAgent.running_agent_states.get(ans_tab)
+            ans_state = _RunningAgentState.running_agent_states.get(ans_tab)
             q = ans_state.user_answer_queue if ans_state is not None else None
         if q is None:
             logger.debug("userAnswer dropped: no queue for tabId=%s", ans_tab)
