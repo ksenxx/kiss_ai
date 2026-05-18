@@ -304,11 +304,18 @@
       tab.outputFragment = null;
     }
     if (taskPanel && taskPanelText) {
-      taskPanelText.textContent = tab.taskPanelHTML;
+      // Trim trailing/leading whitespace so the user-visible task text
+      // — which is also what gets selected and copied to the clipboard
+      // — never carries stray newlines.  Regression: setTaskText() trims
+      // its input, but tab.taskPanelHTML can also be written by
+      // background-tab handlers ('taskExecuted', 'setTaskText',
+      // 'openSubagentTab') from raw event fields, so this restore path
+      // must defensively trim too.  See test_task_panel_no_trailing_newlines.py.
+      taskPanelText.textContent = (tab.taskPanelHTML || '').trim();
       if (tab.taskPanelVisible) taskPanel.classList.add('visible');
       else taskPanel.classList.remove('visible');
     }
-    currentTaskName = tab.taskPanelHTML || '';
+    currentTaskName = (tab.taskPanelHTML || '').trim();
     updateChevronIcon(!!tab.panelsExpandedMap[currentTaskName]);
     if (statusText) {
       statusText.textContent = tab.statusTextContent || 'Ready';
@@ -3073,7 +3080,10 @@
         break;
       }
       case 'openSubagentTab': {
-        const subDesc = ev.description || 'Sub-agent';
+        // Trim so trailing newlines from the backend description don't
+        // bleed into taskPanelHTML and resurface in the user's clipboard
+        // when they copy-select the task panel.
+        const subDesc = (ev.description || 'Sub-agent').trim();
         // Include the 1-based task index in the title so tabs whose
         // descriptions share a long common prefix (e.g. "Research and
         // summarize: ...") are visually distinct in the truncated tab
