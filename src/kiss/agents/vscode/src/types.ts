@@ -30,6 +30,7 @@ export type FromWebviewMessage =
       attachments: Attachment[];
       useWorktree?: boolean;
       useParallel?: boolean;
+      autoCommit?: boolean;
       tabId?: string;
       workDir?: string;
       skipMerge?: boolean;
@@ -270,6 +271,7 @@ export interface AgentCommand {
   action?: 'merge' | 'discard' | 'all-done' | 'commit' | 'skip';
   useWorktree?: boolean;
   useParallel?: boolean;
+  autoCommit?: boolean;
   task?: string;
   direction?: 'prev' | 'next';
   tabId?: string;
