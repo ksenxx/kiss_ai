@@ -94,6 +94,33 @@ You are a judge assessing whether the task was fully completed.
   - summary: concise explanation of what is missing or why it passes
 """
 
+def _user_visible_work_dir(work_dir: str) -> str:
+    """Return the user-facing work directory.
+
+    When ``work_dir`` is inside a ``.kiss-worktrees/<slug>/`` subtree
+    (created by :class:`WorktreeSorcarAgent`), strip the worktree
+    segment so the path points to the user's actual repo location.
+    This makes the PWD reported in :data:`IMPORTANT_INSTRUCTIONS`
+    consistent between worktree and non-worktree modes — the internal
+    worktree directory is an implementation detail the agent should
+    not surface when the user asks ``what is PWD?``.
+
+    Args:
+        work_dir: Absolute work directory path (may be inside a worktree).
+
+    Returns:
+        The user-facing path: the ``.kiss-worktrees/<slug>`` segment
+        removed if present, otherwise ``work_dir`` unchanged.
+    """
+    parts = Path(work_dir).parts
+    if ".kiss-worktrees" not in parts:
+        return work_dir
+    idx = parts.index(".kiss-worktrees")
+    if idx + 1 >= len(parts):
+        return work_dir
+    return str(Path(*parts[:idx], *parts[idx + 2 :]))
+
+
 def _str_to_bool(value: str | bool) -> bool:
     """Coerce a string or bool to a Python bool.
 
@@ -195,7 +222,7 @@ class RelentlessAgent(Base):
         current_pid = str(os.getpid())
         important_instructions = IMPORTANT_INSTRUCTIONS.format(
             step_threshold=str(self.max_steps - 2),
-            work_dir=self.work_dir,
+            work_dir=_user_visible_work_dir(self.work_dir),
             current_pid=current_pid,
         )
         system_prompt = self.system_prompt + important_instructions
