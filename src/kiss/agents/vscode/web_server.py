@@ -1583,7 +1583,7 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
                 <line x1="3" y1="18" x2="21" y2="18"/>
               </svg>
             </button>
-            <button id="autocommit-btn" data-tooltip="Auto commit">
+            <button id="autocommit-btn" data-tooltip="git commit">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
                stroke="currentColor" stroke-width="2" stroke-linecap="round"
                stroke-linejoin="round">
