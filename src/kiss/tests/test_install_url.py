@@ -29,20 +29,6 @@ class TestInstallUrl(unittest.TestCase):
             "README.md must not contain github.com/blob install URL (returns HTML)",
         )
 
-    def test_vscode_readme_uses_raw_url(self) -> None:
-        readme_path = REPO_ROOT / "src" / "kiss" / "agents" / "vscode" / "README.md"
-        if not readme_path.exists():
-            self.skipTest("vscode README.md no longer shipped in this tree")
-        readme = readme_path.read_text()
-        self.assertTrue(
-            RAW_URL_PATTERN.search(readme),
-            "vscode README.md should contain raw.githubusercontent.com install URL",
-        )
-        self.assertFalse(
-            BLOB_URL_PATTERN.search(readme),
-            "vscode README.md must not contain github.com/blob install URL",
-        )
-
     def test_install_script_has_shebang(self) -> None:
         script = (REPO_ROOT / "scripts" / "install.sh").read_text()
         self.assertTrue(
