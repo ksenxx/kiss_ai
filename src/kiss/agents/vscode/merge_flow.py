@@ -137,7 +137,7 @@ class _MergeFlowMixin:
             resolved_tab: _RunningAgentState | None = None
             with self._state_lock:
                 if resolved_tab_id is not None:
-                    resolved_tab = WorktreeSorcarAgent.running_agent_states.get(resolved_tab_id)
+                    resolved_tab = _RunningAgentState.running_agent_states.get(resolved_tab_id)
                     if resolved_tab is not None:
                         resolved_tab.is_merging = True
             try:
@@ -384,7 +384,7 @@ class _MergeFlowMixin:
                 )
                 if tab_id:
                     with self._state_lock:
-                        tab = WorktreeSorcarAgent.running_agent_states.get(tab_id)
+                        tab = _RunningAgentState.running_agent_states.get(tab_id)
                     task_id: int | None = None
                     if tab is not None:
                         task_id = tab.last_task_id

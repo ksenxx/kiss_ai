@@ -44,7 +44,7 @@ class ChatSorcarAgent(SorcarAgent):
     # removes itself in the ``finally`` block once ``run()`` returns
     # (or raises).  External observers can use this map to ask
     # "which agent (if any) is currently driving task X?" without
-    # having to scan :attr:`WorktreeSorcarAgent.running_agent_states`
+    # having to scan :attr:`_RunningAgentState.running_agent_states`
     # (which is keyed by frontend tab id and tracks per-tab UI
     # state, not per-task agents).  Insertions and removals on
     # distinct ``task_id`` keys never collide so no lock is required
