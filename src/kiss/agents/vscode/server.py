@@ -507,14 +507,15 @@ class VSCodeServer(
         if not result or not result.get("events"):
             return
 
-        # Inspect ``extra`` BEFORE re-attaching so we can detect a
-        # sub-agent row and skip ``_reattach_running_chat`` for it.
-        # Sub-agents share their parent's chat_id but run as threads
-        # inside the parent's executor — the parent's ``_RunningAgentState``
-        # owns the live thread, so rebinding it here would steal the
-        # parent's tab.  We only need to rebind the printer's per-tab
-        # alias so live events still tagged with the sub-agent's
-        # original ``sub_tab_id`` reach the newly opened tab.
+        # Inspect ``extra`` BEFORE re-attaching so we know whether to
+        # flip the freshly-allocated tab into sub-agent styling.  The
+        # sub-agent's own :class:`_RunningAgentState` is registered by
+        # :meth:`ChatSorcarAgent._run_tasks_parallel` under the
+        # sub-agent's ``sub_tab_id`` and carries
+        # ``task_history_id`` mirrored from its own ``task_history``
+        # row, so :meth:`_reattach_running_chat` can disambiguate it
+        # from the parent (which shares ``chat_id``) by matching on
+        # the row's task id.
         extra_str = str(result.get("extra", "") or "")
         subagent_info: dict[str, object] | None = None
         extra_raw: object = None
@@ -528,13 +529,24 @@ class VSCodeServer(
             except (json.JSONDecodeError, TypeError):
                 pass
 
-        rebound_running = False
-        if subagent_info is None:
-            # Subscribe the new tab to a still-running agent's event
-            # stream (under some other tab id) so its live events ALSO
-            # flow here — without stealing the stream from the original
-            # client.  See :meth:`_reattach_running_chat`.
-            rebound_running = self._reattach_running_chat(chat_id, tab_id)
+        # Subscribe the new tab to a still-running agent's event
+        # stream (under some other tab id) so its live events ALSO
+        # flow here — without stealing the stream from the original
+        # client.  See :meth:`_reattach_running_chat`.  The ``task_id``
+        # kwarg disambiguates by ``task_history_id`` so the parent
+        # (whose ``_RunningAgentState`` shares the sub-agent's
+        # ``chat_id``) is never matched when the user clicks a
+        # sub-agent row.  When ``task_id`` is ``None`` (no specific
+        # row, just a chat) the regular chat-id-based scan applies.
+        rebound_task_id = result.get("task_id") if result else None
+        if not isinstance(rebound_task_id, int):
+            rebound_task_id = None
+        rebound_running = self._reattach_running_chat(
+            chat_id,
+            tab_id,
+            task_id=rebound_task_id,
+            is_subagent=subagent_info is not None,
+        )
 
         tab = self._get_tab(tab_id)
         # Associate the resumed chat id with this tab so a follow-up
@@ -616,19 +628,42 @@ class VSCodeServer(
         })
         self._emit_pending_worktree(tab_id)
 
-    def _reattach_running_chat(self, chat_id: str, new_tab_id: str) -> bool:
-        """Subscribe *new_tab_id* to a still-running ``_RunningAgentState`` for
-        *chat_id* so its live agent's events ALSO flow to the newly
-        opened tab — without stealing the stream from the original
-        client.
+    def _reattach_running_chat(
+        self,
+        chat_id: str,
+        new_tab_id: str,
+        *,
+        task_id: int | None = None,
+        is_subagent: bool = False,
+    ) -> bool:
+        """Subscribe *new_tab_id* to a still-running ``_RunningAgentState``
+        so its live agent's events ALSO flow to the newly opened tab —
+        without stealing the stream from the original client.
 
         ``tab_id`` (frontend routing key) and ``chat_id`` (persistence
         key) are orthogonal: the source ``_RunningAgentState`` is
         keyed by its own tab id (whatever the frontend allocated when
         the task was launched), and the chat id is stored on the
-        state.  This method scans :attr:`running_agent_states` for an
-        entry whose ``chat_id`` matches and whose task thread is
-        still alive (or whose ``is_task_active`` flag is set).
+        state.
+
+        Matching strategy (two passes when *task_id* is given):
+
+        1. Exact pass — when *task_id* is provided, the scan first
+           tries to find a live state whose ``task_history_id``
+           equals it.  This is what makes multi-view of running
+           **sub-agents** work — sub-agents share their parent's
+           ``chat_id`` but each carries a distinct
+           ``task_history_id`` mirrored from its own ``task_history``
+           row by :meth:`ChatSorcarAgent.run`.
+
+        2. Fallback pass — if no exact task-id match is found (or
+           *task_id* is ``None``), the scan matches any live state
+           whose ``chat_id`` equals *chat_id* **and** which is not
+           itself a sub-agent state (``is_subagent=False``).
+           Excluding sub-agents from this pass guarantees that
+           clicking the parent (or any regular task in the chat)
+           never lands the viewer inside a sub-agent's stream by
+           accident.
 
         Multi-viewer fan-out is implemented in the printer: the
         original ``_RunningAgentState`` keeps owning the running task
@@ -644,23 +679,56 @@ class VSCodeServer(
             chat_id: The chat id of the task the user clicked in
                 history.
             new_tab_id: The freshly allocated frontend tab id.
+            task_id: When provided, only states whose
+                ``task_history_id`` equals this id are eligible.
+                Used by sub-agent multi-view to disambiguate from
+                the parent (which shares ``chat_id``).
 
         Returns:
-            ``True`` when a live agent for *chat_id* exists and
+            ``True`` when a matching live agent exists and
             *new_tab_id* is now subscribed to its event stream;
-            ``False`` when no live agent exists.
+            ``False`` when no matching live agent exists.
         """
-        if not chat_id or not new_tab_id:
+        if not new_tab_id:
+            return False
+        if task_id is None and not chat_id:
             return False
         with self._state_lock:
             source: _RunningAgentState | None = None
-            for t in _RunningAgentState.running_agent_states.values():
-                if t.chat_id != chat_id:
-                    continue
-                alive = t.task_thread is not None and t.task_thread.is_alive()
-                if alive or t.is_task_active:
-                    source = t
-                    break
+            # Pass 1 — exact ``task_history_id`` match (only when
+            # caller knows the row id).  Used by sub-agent multi-view
+            # so the parent's state (which shares ``chat_id``) is
+            # never reached.
+            if task_id is not None:
+                for t in _RunningAgentState.running_agent_states.values():
+                    if t.task_history_id != task_id:
+                        continue
+                    alive = (
+                        t.task_thread is not None and t.task_thread.is_alive()
+                    )
+                    if alive or t.is_task_active:
+                        source = t
+                        break
+            # Pass 2 — chat-id fallback, excluding sub-agent states.
+            # Excluding sub-agents here means the fallback can never
+            # subscribe a regular-task viewer to a sub-agent's stream
+            # (which would be the wrong row entirely).  When the row
+            # the user clicked is itself a sub-agent
+            # (``is_subagent=True``) the fallback is skipped
+            # altogether: a sub-agent row whose thread has already
+            # ended must NEVER be attached to its parent's stream.
+            if source is None and chat_id and not is_subagent:
+                for t in _RunningAgentState.running_agent_states.values():
+                    if t.chat_id != chat_id:
+                        continue
+                    if t.is_subagent:
+                        continue
+                    alive = (
+                        t.task_thread is not None and t.task_thread.is_alive()
+                    )
+                    if alive or t.is_task_active:
+                        source = t
+                        break
             if source is None:
                 return False
             source_tab_id = source.tab_id
