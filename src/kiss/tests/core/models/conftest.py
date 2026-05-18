@@ -16,12 +16,15 @@ the module attribute, so they continue to exercise the real lookup logic.
 
 from __future__ import annotations
 
+from types import ModuleType
+
 import pytest
 
 
 @pytest.fixture(autouse=True)
 def _stub_cli_locators(monkeypatch: pytest.MonkeyPatch) -> None:
     """Stub Claude Code / Codex binary lookups for offline test runs."""
+    cc_mod: ModuleType | None
     try:
         import kiss.core.models.claude_code_model as cc_mod
     except ImportError:
@@ -31,6 +34,7 @@ def _stub_cli_locators(monkeypatch: pytest.MonkeyPatch) -> None:
             cc_mod, "_find_claude_cli", lambda: "/usr/bin/claude", raising=False,
         )
 
+    cx_mod: ModuleType | None
     try:
         import kiss.core.models.codex_model as cx_mod
     except ImportError:
