@@ -489,6 +489,12 @@ class _TaskRunnerMixin:
         or other I/O and never reaches a cooperative ``_check_stop()``
         call.
 
+        When *tab_id* is a subscriber (multi-viewer) tab that has no
+        ``stop_event`` of its own, the method resolves through the
+        printer's subscriber mapping to locate the source tab that owns
+        the running task and stops that instead.  This lets a second
+        browser client viewing a running task via history-click stop it.
+
         Args:
             tab_id: The tab to stop.  When falsy (empty string), the
                 call is a no-op — a missing ``tabId`` at this layer
@@ -500,16 +506,51 @@ class _TaskRunnerMixin:
             return
         with self._state_lock:
             tab = _RunningAgentState.running_agent_states.get(tab_id)
-            pairs = [(tab.stop_event, tab.task_thread)] if tab is not None else []
-        for stop_event, task_thread in pairs:
-            if stop_event:
-                stop_event.set()
-            if task_thread is not None and task_thread.is_alive():
-                threading.Thread(
-                    target=self._force_stop_thread,
-                    args=(task_thread,),
-                    daemon=True,
-                ).start()
+            stop_event = tab.stop_event if tab is not None else None
+            task_thread = tab.task_thread if tab is not None else None
+
+        # When the tab has no stop_event (e.g. a subscriber/viewer tab
+        # created by _replay_session → subscribe_tab), look up which
+        # source tab this viewer is subscribed to and stop that instead.
+        if stop_event is None:
+            source_tab_id = self._find_source_tab_for_viewer(tab_id)
+            if source_tab_id:
+                with self._state_lock:
+                    source = _RunningAgentState.running_agent_states.get(
+                        source_tab_id,
+                    )
+                    if source is not None:
+                        stop_event = source.stop_event
+                        task_thread = source.task_thread
+
+        if stop_event:
+            stop_event.set()
+        if task_thread is not None and task_thread.is_alive():
+            threading.Thread(
+                target=self._force_stop_thread,
+                args=(task_thread,),
+                daemon=True,
+            ).start()
+
+    def _find_source_tab_for_viewer(self, viewer_tab_id: str) -> str | None:
+        """Find the source tab id that *viewer_tab_id* is subscribed to.
+
+        Scans the printer's ``_subscribers`` mapping (source → {viewers})
+        to find the source tab whose event stream *viewer_tab_id* is
+        receiving copies of.  Returns ``None`` when no subscription
+        exists for *viewer_tab_id*.
+
+        Args:
+            viewer_tab_id: The subscriber/viewer tab id to look up.
+
+        Returns:
+            The source tab id, or ``None`` if not found.
+        """
+        with self.printer._lock:
+            for source, viewers in self.printer._subscribers.items():
+                if viewer_tab_id in viewers:
+                    return source
+        return None
 
     @staticmethod
     def _force_stop_thread(task_thread: threading.Thread) -> None:
