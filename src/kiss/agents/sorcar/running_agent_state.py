@@ -105,6 +105,8 @@ class _RunningAgentState:
         "skip_merge",
         "deferred_snapshot",
         "frontend_closed",
+        "is_subagent",
+        "parent_task_id",
     )
 
     def __init__(
@@ -177,3 +179,14 @@ class _RunningAgentState:
         # last lifecycle flag (``is_task_active`` / ``is_merging`` /
         # ``task_thread.is_alive()``) drops to false.
         self.frontend_closed: bool = False
+        # Set by :meth:`ChatSorcarAgent._run_tasks_parallel` for the
+        # per-thread state of each parallel sub-agent.  When True,
+        # this state represents a sub-agent's live run (sharing the
+        # parent's :attr:`chat_id`) and ``parent_task_id`` carries the
+        # ``task_history.id`` of the parent task that spawned it.
+        # These two fields let
+        # :meth:`VSCodeServer._reattach_running_chat` disambiguate
+        # which live state to subscribe a freshly-opened history-tab
+        # to when several states share the same ``chat_id``.
+        self.is_subagent: bool = False
+        self.parent_task_id: int | None = None
