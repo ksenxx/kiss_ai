@@ -1156,29 +1156,53 @@ body.remote-chat #welcome > #input-area {
 }
 .sidebar-empty { font-size: var(--fs-base); color: color-mix(in srgb, var(--fg) 50%, transparent); padding: 8px 0; }
 
-/* ── Ask User Modal ─────────────────────────────────── */
+/* ── Ask User Modal ───────────────────────────────────
+   The modal must fit within the chat webview even when the agent's
+   question is very long.  Layout: modal-content is a flex column with
+   max-height: 85vh; the question area inside #ask-user-slot is the only
+   shrinkable child (min-height: 0; overflow-y: auto) so the reply
+   textarea and Submit button always stay visible. */
 #ask-user-modal {
   position: fixed; inset: 0; background: rgb(0 0 0 / 70%);
   display: flex; align-items: center; justify-content: center; z-index: 300;
+  padding: 16px; box-sizing: border-box;
 }
 
 .modal-content {
   background: var(--bg2); border: 1px solid var(--border);
   border-radius: 12px; padding: 20px; width: 90%; max-width: 400px;
+  max-height: 85vh; box-sizing: border-box;
+  display: flex; flex-direction: column; min-height: 0;
 }
-.modal-title { font-size: var(--fs-xl); font-weight: 600; color: var(--fg); margin-bottom: 12px; }
-.ask-user-question { font-size: var(--fs-lg); color: color-mix(in srgb, var(--fg) 83%, transparent); margin-bottom: 12px; line-height: 1.5; }
+.modal-title { font-size: var(--fs-xl); font-weight: 600; color: var(--fg); margin-bottom: 12px; flex: 0 0 auto; }
+
+#ask-user-slot {
+  display: flex; flex-direction: column; min-height: 0; flex: 1 1 auto;
+}
+
+.ask-user-question {
+  font-size: var(--fs-lg); color: color-mix(in srgb, var(--fg) 83%, transparent);
+  margin-bottom: 12px; line-height: 1.5;
+  flex: 0 1 auto; min-height: 0; overflow-y: auto;
+  /* room for the scrollbar so text never sits under it */
+  padding-right: 4px;
+  /* break long unbreakable strings (URLs, identifiers) so they don't force
+     horizontal overflow inside the narrow modal */
+  overflow-wrap: anywhere; word-break: break-word;
+}
 
 .ask-user-input {
   width: 100%; background: color-mix(in srgb, var(--fg) 5%, transparent); border: 1px solid var(--border);
   border-radius: 6px; color: var(--fg); font-size: var(--fs-lg); padding: 10px;
   resize: none; outline: none; min-height: 80px; margin-bottom: 12px;
+  box-sizing: border-box; flex: 0 0 auto;
 }
 .ask-user-input:focus { border-color: var(--accent); }
 
 .ask-user-submit {
   background: var(--accent); border: none; border-radius: 6px; color: var(--vscode-button-foreground);
   font-size: var(--fs-lg); font-weight: 500; padding: 8px 16px; cursor: pointer; transition: opacity 0.15s;
+  flex: 0 0 auto; align-self: flex-start;
 }
 .ask-user-submit:hover { opacity: 0.9; }
 
