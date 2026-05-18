@@ -250,13 +250,26 @@ body {
 .tab-bar-action-btn:last-child { margin-right: 10px; }
 
 /* ── Subagent Tabs ───────────────────────────────────── */
+/* Sub-agent tabs MUST be visually distinct from regular chat
+ * tabs: the user clicks a sub-agent row in history and the
+ * resulting tab is the only one that does not load sibling
+ * tasks from the same chat_id.  Use the purple accent for the
+ * border, background tint, and label colour so it is obvious
+ * at a glance — both when inactive and when active. */
 .chat-tab.subagent-tab {
-  border-bottom-color: color-mix(in srgb, var(--purple) 40%, transparent);
+  border-bottom-color: color-mix(in srgb, var(--purple) 55%, transparent);
+  background: color-mix(in srgb, var(--purple) 8%, transparent);
+  color: color-mix(in srgb, var(--purple) 75%, var(--fg));
   max-width: 160px;
+}
+
+.chat-tab.subagent-tab:hover {
+  background: color-mix(in srgb, var(--purple) 14%, transparent);
 }
 
 .chat-tab.subagent-tab.active {
   border-bottom-color: var(--purple);
+  background: color-mix(in srgb, var(--purple) 16%, transparent);
   color: var(--purple);
 }
 

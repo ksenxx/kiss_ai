@@ -29,7 +29,7 @@ The summary must contain the actual content the user should see, not a third-per
 - If running out of context or steps, do not rush. Call `finish(is_continue=True)` to pause and resume the task in a new context.
   \</tool_rules>
 - If there is ambiguity or under specification in the user task, search the internet to find the most reliable and modern solution to resolve the ambiguity.
- 
+
 \<web_research>
 
 ## Web Research
@@ -116,7 +116,7 @@ Interact with desktop applications using screenshots, keyboard, and mouse. Do no
 
 **Before calling finish**, check whether you learned anything new during this task — a user preference, a project convention, a file location, or any reusable fact. If you did, you MUST call `Edit("PWD/USER_PREFS.md")` to append the new entry before finishing.
 
-Rules: no code snippets or symbol names in entries; skip one-off task details; remove conflicting older entries when adding new ones.  Keep `PWD/USER_PREFS.md` small since it will use context window.
+Rules: no code snippets or symbol names in entries; skip one-off task details; remove conflicting older entries when adding new ones. Keep `PWD/USER_PREFS.md` small since it will use context window.
 </workflow>
 
 <testing>

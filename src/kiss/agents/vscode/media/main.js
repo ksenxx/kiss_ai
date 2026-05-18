@@ -2122,8 +2122,12 @@
   O.addEventListener('wheel', e => {
     if (isRunning && e.deltaY < 0) _scrollLock = true;
 
-    // Adjacent task loading via overscroll detection
-    if (!adjacentLoading && activeTabId && currentTaskName) {
+    // Adjacent task loading via overscroll detection.  Sub-agent
+    // tabs MUST NOT show siblings from the same chat_id — they
+    // render exactly one task, the sub-agent's own row.
+    const _activeTabForAdj = tabs.find(t => t.id === activeTabId);
+    const _isSubagentActive = !!(_activeTabForAdj && _activeTabForAdj.isSubagentTab);
+    if (!adjacentLoading && activeTabId && currentTaskName && !_isSubagentActive) {
       const atTop = O.scrollTop <= 0;
       const atBottom = O.scrollTop + O.clientHeight >= O.scrollHeight - 2;
 
@@ -2209,6 +2213,10 @@
       _touchOutputLastY = currentY;
 
       if (adjacentLoading || !activeTabId || !currentTaskName) return;
+      // Sub-agent tabs MUST NOT load sibling tasks from the same
+      // chat_id — they render exactly the sub-agent's own row.
+      const _activeTabT = tabs.find(t => t.id === activeTabId);
+      if (_activeTabT && _activeTabT.isSubagentTab) return;
 
       const atTop = O.scrollTop <= 0;
       const atBottom = O.scrollTop + O.clientHeight >= O.scrollHeight - 2;
@@ -3084,12 +3092,14 @@
         // bleed into taskPanelHTML and resurface in the user's clipboard
         // when they copy-select the task panel.
         const subDesc = (ev.description || 'Sub-agent').trim();
-        // Include the 1-based task index in the title so tabs whose
-        // descriptions share a long common prefix (e.g. "Research and
-        // summarize: ...") are visually distinct in the truncated tab
-        // bar — otherwise users see 3 tabs that look identical and
-        // count them as one (root cause of the "only 2 tabs got
-        // created" report).
+        // Include the 1-based task index in the title for live
+        // spawns so tabs whose descriptions share a long common
+        // prefix (e.g. "Research and summarize: ...") stay visually
+        // distinct in the truncated tab bar.  History-reopened
+        // sub-agent rows have no ``taskIndex`` (the persisted
+        // payload is just ``{parent_task_id}``); they fall back to
+        // a bare ⚡ flame, which the purple .subagent-tab accent
+        // already makes unambiguously a sub-agent tab.
         const subIdx =
           typeof ev.taskIndex === 'number' ? ev.taskIndex + 1 : null;
         const titlePrefix = subIdx !== null ? '⚡' + subIdx + ' ' : '⚡ ';
@@ -4765,42 +4775,14 @@
           window._startDemoReplay(allHistSessions);
           return;
         }
-        // Sub-agent history rows must reopen as sub-agent tabs (⚡N
-        // indicator, no input bar) rather than regular chat tabs.  If
-        // a tab keyed by the persisted sub-agent tab id is already
-        // open (because the sub-agent is currently running and the
-        // backend created the tab via ``openSubagentTab``), just
-        // focus it — its events are already streaming live.
-        // Otherwise allocate a new tab and ``resumeSession``; the
-        // call ``printer.rebind_tab`` to route live events here (when
-        // ``orig_sub_tab_id == new tab_id`` the rebind is a no-op).
-        if (s.is_subagent && s.subagent_tab_id) {
-          const existing = tabs.find(t => t.id === s.subagent_tab_id);
-          if (existing) {
-            switchToTab(s.subagent_tab_id);
-            closeSidebar();
-            return;
-          }
-          if (s.has_events && s.id) {
-            const created = createNewTab(s.subagent_tab_id);
-            if (created) {
-              setTaskText(s.preview || s.title || '');
-              vscode.postMessage({
-                type: 'resumeSession',
-                id: s.id,
-                taskId: s.task_id,
-                tabId: activeTabId,
-              });
-            }
-          } else {
-            createNewTab();
-            inp.value = s.preview || s.title || '';
-            syncClearBtn();
-            inp.focus();
-          }
-          closeSidebar();
-          return;
-        }
+        // Sub-agent history rows reopen as a regular chat tab that
+        // the backend (``_replay_session``) will then flip into a
+        // sub-agent tab via ``openSubagentTab`` (purple accent,
+        // ⚡ icon, no input bar, no adjacent-task loading).  We do
+        // not look up "is the original sub-agent tab still open?" —
+        // sub-agent rows are persisted with just their parent
+        // task_history.id, so the simplest UX is a fresh tab whose
+        // events are replayed from the row's own events table.
         // When the clicked history row has a known chat_id (s.id)
         // and persisted events, allocate a fresh tab id and let the
         // backend route the chat lookup by chat_id (passed in the
