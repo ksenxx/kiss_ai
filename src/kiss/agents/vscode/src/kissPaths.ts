@@ -98,9 +98,3 @@ export function findUvPath(): string | null {
   }
 }
 
-/**
- * Find the uv binary path, with 'uv' fallback for spawning.
- */
-export function findUvBinary(): string {
-  return findUvPath() ?? 'uv';
-}

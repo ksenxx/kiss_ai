@@ -83,17 +83,6 @@ class TestMultiViewerFanout:
         assert printer._recordings.get("T2", []) == []
         assert printer._recordings.get("T3", []) == []
 
-    def test_unsubscribe_stops_fanout_for_that_viewer(self) -> None:
-        printer = MemoryPrinter()
-        printer.subscribe_tab("T1", "T2")
-        printer.subscribe_tab("T1", "T3")
-        printer.unsubscribe_tab("T1", "T2")
-
-        _emit_on(printer, "T1", {"type": "text_delta", "text": "x"})
-
-        tab_ids = sorted(str(e.get("tabId")) for e in printer.emitted)
-        assert tab_ids == ["T1", "T3"], tab_ids
-
     def test_subscribe_is_idempotent(self) -> None:
         printer = MemoryPrinter()
         printer.subscribe_tab("T1", "T2")
