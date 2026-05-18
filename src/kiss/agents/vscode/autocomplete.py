@@ -12,7 +12,7 @@ import threading
 from typing import TYPE_CHECKING
 
 from kiss.agents.sorcar.persistence import (
-    _load_chat_context,
+    _load_chat_context_text,
     _load_file_usage,
     _prefix_match_task,
 )
@@ -86,17 +86,7 @@ class _AutocompleteMixin:
         if len(partial) < 2:
             return ""
 
-        chat_text = ""
-        if chat_id:
-            parts: list[str] = []
-            for entry in _load_chat_context(chat_id):
-                task = entry.get("task")
-                result = entry.get("result")
-                if isinstance(task, str):
-                    parts.append(task)
-                if isinstance(result, str):
-                    parts.append(result)
-            chat_text = "\n".join(parts)
+        chat_text = _load_chat_context_text(chat_id)
 
         if not content and not chat_text:
             return ""
