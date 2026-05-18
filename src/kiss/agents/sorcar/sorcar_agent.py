@@ -183,20 +183,18 @@ class SorcarAgent(RelentlessAgent):
             demo_mode: bool | None = None,
             auto_commit: bool | None = None,
             custom_endpoint: str | None = None,
-            custom_api_key: str | None = None,
             custom_headers: str | None = None,
-            gemini_api_key: str | None = None,
-            openai_api_key: str | None = None,
-            anthropic_api_key: str | None = None,
-            together_api_key: str | None = None,
-            openrouter_api_key: str | None = None,
-            minimax_api_key: str | None = None,
         ) -> str:
             """Update task configuration settings during execution.
 
             Modifies runtime agent settings, persists config-level changes,
             and broadcasts UI updates to the frontend. Only provided
             (non-None) keys are updated; omitted keys are left unchanged.
+
+            API keys (e.g. ``custom_api_key``, ``openai_api_key``,
+            ``anthropic_api_key``) cannot be updated through this tool for
+            security reasons.  Users must set them through the settings UI
+            or environment variables.
 
             Args:
                 is_parallel: Enable/disable parallel sub-agent spawning.
@@ -209,14 +207,7 @@ class SorcarAgent(RelentlessAgent):
                 demo_mode: Enable/disable demo replay mode in the UI.
                 auto_commit: When True, trigger auto-commit of pending changes.
                 custom_endpoint: Set a custom LLM endpoint URL (e.g. local model).
-                custom_api_key: Set the API key for the custom endpoint.
                 custom_headers: Set custom HTTP headers (Key:Value, one per line).
-                gemini_api_key: Set the Gemini API key.
-                openai_api_key: Set the OpenAI API key.
-                anthropic_api_key: Set the Anthropic API key.
-                together_api_key: Set the Together API key.
-                openrouter_api_key: Set the OpenRouter API key.
-                minimax_api_key: Set the MiniMax API key.
 
             Returns:
                 A summary of which settings were updated.
@@ -354,16 +345,6 @@ class SorcarAgent(RelentlessAgent):
                         "value": custom_endpoint,
                     })
 
-            if custom_api_key is not None:
-                updated.append("custom_api_key=<updated>")
-                _save_setting_to_config("custom_api_key", custom_api_key)
-                if broadcast:
-                    broadcast({
-                        "type": "updateSetting",
-                        "key": "custom_api_key",
-                        "value": True,
-                    })
-
             if custom_headers is not None:
                 updated.append("custom_headers=<updated>")
                 _save_setting_to_config("custom_headers", custom_headers)
@@ -373,32 +354,6 @@ class SorcarAgent(RelentlessAgent):
                         "key": "custom_headers",
                         "value": True,
                     })
-
-            api_key_params = {
-                "gemini_api_key": ("GEMINI_API_KEY", gemini_api_key),
-                "openai_api_key": ("OPENAI_API_KEY", openai_api_key),
-                "anthropic_api_key": ("ANTHROPIC_API_KEY", anthropic_api_key),
-                "together_api_key": ("TOGETHER_API_KEY", together_api_key),
-                "openrouter_api_key": ("OPENROUTER_API_KEY", openrouter_api_key),
-                "minimax_api_key": ("MINIMAX_API_KEY", minimax_api_key),
-            }
-            for param_name, (env_var, key_value) in api_key_params.items():
-                if key_value is not None:
-                    try:
-                        from kiss.agents.vscode.vscode_config import (
-                            save_api_key_to_shell,
-                        )
-                        save_api_key_to_shell(env_var, key_value)
-                    except Exception:
-                        import os
-                        os.environ[env_var] = key_value
-                    updated.append(f"{param_name}=<updated>")
-                    if broadcast:
-                        broadcast({
-                            "type": "updateSetting",
-                            "key": param_name,
-                            "value": True,
-                        })
 
             if not updated:
                 return "No settings were changed (all arguments were None)."
