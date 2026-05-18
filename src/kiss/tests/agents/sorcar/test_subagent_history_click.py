@@ -1,37 +1,35 @@
-"""Integration tests: clicking a sub-agent task in the history sidebar
-reopens it as a sub-agent tab (⚡N indicator, no input bar) instead of
-reclassifying it as a regular chat tab, loads its persisted events,
-and routes any in-flight events still tagged with the sub-agent's
-original ``sub_tab_id`` to the newly opened tab.
+"""Integration tests: a sub-agent ``task_history`` row reopened from
+the history sidebar is treated like a regular task except that the
+resulting tab is styled as a sub-agent tab (``isSubagentTab=True``,
+purple accent, ⚡ icon) and the frontend suppresses adjacent-task
+loading on it.
 
 Spec
 ----
-1. ``ChatSorcarAgent`` sub-agents persist their frontend identity —
-   original ``sub_tab_id``, ``parent_tab_id``, ``task_index``,
-   ``description`` — into ``task_history.extra`` under the
-   ``"subagent"`` key, so the row can be reopened as a sub-agent tab.
+1. ``ChatSorcarAgent`` sub-agents persist a minimal payload —
+   ``extra.subagent = {"parent_task_id": <parent's task_history.id>}``
+   — into their own ``task_history`` row.  Presence of the
+   ``subagent`` key implies the row is a sub-agent.
 
-2. ``VSCodeServer._get_history`` surfaces ``is_subagent``,
-   ``subagent_tab_id``, ``task_index``, ``parent_tab_id``, and
-   ``description`` on the session dict it returns to the webview.
+2. ``VSCodeServer._get_history`` surfaces ``is_subagent: True`` and
+   ``parent_task_id: <int>`` on the session dict returned to the
+   webview.  No other sub-agent metadata is forwarded.
 
-3. ``VSCodeServer._replay_session``, when the loaded row carries a
-   sub-agent ``extra``:
+3. ``VSCodeServer._replay_session``, when the loaded row carries an
+   ``extra.subagent`` blob:
 
    a. Broadcasts ``openSubagentTab`` for the freshly allocated tab
-      so the frontend handler (idempotent on ``tab_id``) flips it
-      from a regular chat tab into a sub-agent tab in place.
+      with ``description`` derived from the row's own ``task``
+      column and ``isDone`` derived from
+      :attr:`ChatSorcarAgent.running_agents` membership of the
+      sub-agent's own task id.
 
-   b. Calls ``printer.rebind_tab(original_sub_tab_id, new_tab_id)``
-      so any future events still tagged with the original
-      ``sub_tab_id`` (because the parent agent's executor still
-      thinks the sub-agent is on the old id) reach the new tab.
-
-   c. Does NOT invoke ``_reattach_running_chat`` — sub-agents share
+   b. Does NOT invoke ``_reattach_running_chat`` — sub-agents share
       the parent's chat_id but run as threads inside the parent's
-      executor; rebinding the parent's ``_RunningAgentState`` would steal it.
+      executor; rebinding the parent's ``_RunningAgentState`` would
+      steal it.
 
-   d. Still broadcasts ``task_events`` so persisted history shows.
+   c. Still broadcasts ``task_events`` so persisted history shows.
 """
 
 from __future__ import annotations
@@ -84,9 +82,7 @@ def _make_server() -> tuple[VSCodeServer, list[dict]]:
 
 def _seed_subagent_row(
     *,
-    parent_tab_id: str,
-    sub_tab_id: str,
-    task_index: int,
+    parent_task_id: int,
     chat_id: str,
     description: str,
 ) -> int:
@@ -108,12 +104,7 @@ def _seed_subagent_row(
             "cost": 0.0,
             "is_parallel": False,
             "is_worktree": False,
-            "subagent": {
-                "tab_id": sub_tab_id,
-                "parent_tab_id": parent_tab_id,
-                "task_index": task_index,
-                "description": description[:200],
-            },
+            "subagent": {"parent_task_id": parent_task_id},
         },
         task_id=task_id,
     )
@@ -121,7 +112,7 @@ def _seed_subagent_row(
 
 
 class TestHistorySurfacesSubagentMetadata:
-    """``_get_history`` must expose sub-agent fields on each session."""
+    """``_get_history`` must expose the minimal sub-agent marker."""
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
@@ -134,12 +125,11 @@ class TestHistorySurfacesSubagentMetadata:
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_subagent_row_returns_is_subagent_and_metadata(self) -> None:
+    def test_subagent_row_returns_is_subagent_and_parent_task_id(self) -> None:
         chat_id = "chat-parent-1"
+        parent_id, _ = th._add_task("parent task", chat_id=chat_id)
         task_id = _seed_subagent_row(
-            parent_tab_id="tab-parent",
-            sub_tab_id="tab-parent__sub_2",
-            task_index=2,
+            parent_task_id=parent_id,
             chat_id=chat_id,
             description="Sub-task 3: research X",
         )
@@ -152,10 +142,12 @@ class TestHistorySurfacesSubagentMetadata:
         assert len(match) == 1
         s = match[0]
         assert s["is_subagent"] is True
-        assert s["subagent_tab_id"] == "tab-parent__sub_2"
-        assert s["parent_tab_id"] == "tab-parent"
-        assert s["task_index"] == 2
-        assert s["description"] == "Sub-task 3: research X"
+        assert s["parent_task_id"] == parent_id
+        # No legacy frontend identity is leaked.
+        assert "subagent_tab_id" not in s
+        assert "parent_tab_id" not in s
+        assert "task_index" not in s
+        assert "description" not in s
 
     def test_regular_row_has_no_subagent_flag(self) -> None:
         task_id, _ = th._add_task("regular task", chat_id="chat-reg-1")
@@ -171,11 +163,12 @@ class TestHistorySurfacesSubagentMetadata:
         ]
         assert len(match) == 1
         assert "is_subagent" not in match[0]
+        assert "parent_task_id" not in match[0]
 
 
 class TestReplaySessionOpensSubagentTab:
     """``_replay_session`` on a sub-agent row converts the new tab
-    into a sub-agent tab and rebinds the printer alias."""
+    into a sub-agent tab."""
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
@@ -192,11 +185,9 @@ class TestReplaySessionOpensSubagentTab:
         self,
     ) -> None:
         chat_id = "chat-parent-2"
-        original_sub_tab_id = "tab-parent__sub_0"
+        parent_id, _ = th._add_task("parent task", chat_id=chat_id)
         task_id = _seed_subagent_row(
-            parent_tab_id="tab-parent",
-            sub_tab_id=original_sub_tab_id,
-            task_index=0,
+            parent_task_id=parent_id,
             chat_id=chat_id,
             description="Sub-task A",
         )
@@ -212,10 +203,11 @@ class TestReplaySessionOpensSubagentTab:
         assert len(opens) == 1, f"events={events}"
         op = opens[0]
         assert op["tab_id"] == new_tab_id
-        assert op["taskIndex"] == 0
         assert op["isSubagentTab"] is True
+        # Description is taken from the row's own ``task`` column.
         assert op["description"] == "Sub-task A"
-        assert op["parent_tab_id"] == "tab-parent"
+        # Sub-agent has completed (not in running_agents) so isDone=True.
+        assert op["isDone"] is True
 
         # 2. ``task_events`` was broadcast after, routed to new tab.
         replays = [e for e in events if e.get("type") == "task_events"]
@@ -236,27 +228,18 @@ class TestReplaySessionOpensSubagentTab:
         replay_idx = events.index(replays[0])
         assert open_idx < replay_idx
 
-        # 4. Printer alias rebinds the original sub_tab_id to the new
-        # tab id so any in-flight live events still tagged with the
-        # old id reach the new tab.
-        assert (
-            server.printer._tab_id_alias.get(original_sub_tab_id)
-            == new_tab_id
-        )
-
     def test_replay_subagent_does_not_invoke_reattach_running_chat(
         self,
     ) -> None:
-        """A sub-agent row must NOT rebind the parent's ``_RunningAgentState``.
-
-        The parent's tab state holds the running thread; rebinding it
-        to the sub-agent's new tab would steal the parent's tab.
+        """A sub-agent row must NOT rebind the parent's
+        ``_RunningAgentState``.  The parent's tab state holds the
+        running thread; rebinding it to the sub-agent's new tab
+        would steal the parent's tab.
         """
         chat_id = "chat-parent-3"
+        parent_id, _ = th._add_task("parent task", chat_id=chat_id)
         task_id = _seed_subagent_row(
-            parent_tab_id="tab-parent",
-            sub_tab_id="tab-parent__sub_0",
-            task_index=0,
+            parent_task_id=parent_id,
             chat_id=chat_id,
             description="Sub-task B",
         )

@@ -249,11 +249,13 @@ class VSCodeServer(
                     or result == "Agent Failed Abruptly"
                 ),
             }
-            # Surface sub-agent metadata so the history sidebar can
-            # reopen the row as a sub-agent tab (⚡N indicator, no
-            # input bar) instead of reclassifying it as a regular
-            # chat tab.  Stored in ``extra`` under the ``subagent``
-            # key by ``ChatSorcarAgent.run`` for sub-agent rows.
+            # Mark sub-agent rows so the history sidebar treats them
+            # as a regular task with one rendering difference: the
+            # reopened tab is styled as a sub-agent tab (purple
+            # accent, ⚡ icon) and suppresses adjacent-task loading
+            # for siblings in the same chat.  Persisted as just
+            # ``{"parent_task_id": <int>}`` under ``extra.subagent``;
+            # presence of the key implies the row is a sub-agent.
             extra_raw = str(entry.get("extra", "") or "")
             if extra_raw:
                 try:
@@ -264,19 +266,9 @@ class VSCodeServer(
                     sub = extra_obj.get("subagent")
                     if isinstance(sub, dict):
                         session["is_subagent"] = True
-                        session["subagent_tab_id"] = str(
-                            sub.get("tab_id", "") or ""
-                        )
-                        session["parent_tab_id"] = str(
-                            sub.get("parent_tab_id", "") or ""
-                        )
-                        ti = sub.get("task_index")
-                        session["task_index"] = (
-                            int(ti) if isinstance(ti, int) else 0
-                        )
-                        session["description"] = str(
-                            sub.get("description", task) or task
-                        )
+                        pid = sub.get("parent_task_id")
+                        if isinstance(pid, int):
+                            session["parent_task_id"] = pid
             sessions.append(session)
         self.printer.broadcast({
             "type": "history", "sessions": sessions,
@@ -570,43 +562,33 @@ class VSCodeServer(
             # Convert the freshly created regular tab into a sub-agent
             # tab on the frontend.  The ``openSubagentTab`` handler is
             # idempotent on ``tab_id`` (see main.js case
-            # ``openSubagentTab``) and will simply flip the existing
-            # tab's ``isSubagentTab`` / title in place.
-            ti = subagent_info.get("task_index")
-            orig_sub_tab_id = str(subagent_info.get("tab_id", "") or "")
-            # The handler defaults to ``isRunning=true / isDone=false``
-            # so the tab pulses ◉ purple — but for sub-agents whose
-            # execution already finished there will be no later
-            # ``subagentDone`` event to flip it to ✓ green, so the
-            # tab would forever look like it's running.  Detect "done
-            # at history-load time" by checking the printer's
-            # ``_persist_agents`` map: an entry under the original
-            # sub_tab_id means the sub-agent thread is still running
-            # (registered just before ``agent.run()``, popped in the
-            # ``finally``).  If absent, the sub-agent has finished
-            # (success or failure) and the history-loaded tab should
-            # render with the same ✓ green indicator the originally
-            # spawned tab ended on.
-            persist_agents = getattr(self.printer, "_persist_agents", {})
+            # ``openSubagentTab``) and will flip the existing tab's
+            # ``isSubagentTab`` / title in place.  Sub-agent rows
+            # persist only the parent ``task_history.id`` — the
+            # description shown in the tab header is derived from the
+            # row's own ``task`` column.
+            #
+            # ``isDone`` is decided from the task-id-keyed
+            # ``ChatSorcarAgent.running_agents`` map: presence under
+            # the sub-agent's own task id means its thread is still
+            # running, absence means it finished.  This lets the
+            # reopened tab render with the same ✓ green indicator the
+            # original tab ended on (instead of pulsing ◉ purple
+            # forever because no later ``subagentDone`` arrives).
+            from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+
+            sub_task_id = result.get("task_id")
             is_done = not (
-                orig_sub_tab_id and orig_sub_tab_id in persist_agents
+                isinstance(sub_task_id, int)
+                and sub_task_id in ChatSorcarAgent.running_agents
             )
             self.printer.broadcast({
                 "type": "openSubagentTab",
                 "tab_id": tab_id,
-                "parent_tab_id": subagent_info.get("parent_tab_id", "") or "",
-                "description": subagent_info.get(
-                    "description", result.get("task", "")
-                ),
-                "taskIndex": int(ti) if isinstance(ti, int) else 0,
+                "description": str(result.get("task", "") or ""),
                 "isSubagentTab": True,
                 "isDone": is_done,
             })
-            # Route any future events tagged with the sub-agent's
-            # original sub_tab_id (the parent's running executor may
-            # still be emitting them via thread-local) to the new tab.
-            if orig_sub_tab_id and orig_sub_tab_id != tab_id:
-                self.printer.rebind_tab(orig_sub_tab_id, tab_id)
 
         if rebound_running:
             # Make the resumed tab show the running spinner since the
