@@ -1184,8 +1184,10 @@ body.remote-chat #welcome > #input-area {
   font-size: var(--fs-lg); color: color-mix(in srgb, var(--fg) 83%, transparent);
   margin-bottom: 12px; line-height: 1.5;
   flex: 0 1 auto; min-height: 0; overflow-y: auto;
+
   /* room for the scrollbar so text never sits under it */
   padding-right: 4px;
+
   /* break long unbreakable strings (URLs, identifiers) so they don't force
      horizontal overflow inside the narrow modal */
   overflow-wrap: anywhere; word-break: break-word;

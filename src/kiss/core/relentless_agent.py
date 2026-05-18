@@ -95,30 +95,21 @@ You are a judge assessing whether the task was fully completed.
 """
 
 def _user_visible_work_dir(work_dir: str) -> str:
-    """Return the user-facing work directory.
+    """Return the work directory exactly as the agent will see it on disk.
 
-    When ``work_dir`` is inside a ``.kiss-worktrees/<slug>/`` subtree
-    (created by :class:`WorktreeSorcarAgent`), strip the worktree
-    segment so the path points to the user's actual repo location.
-    This makes the PWD reported in :data:`IMPORTANT_INSTRUCTIONS`
-    consistent between worktree and non-worktree modes — the internal
-    worktree directory is an implementation detail the agent should
-    not surface when the user asks ``what is PWD?``.
+    When the agent runs in worktree mode, its real working directory is
+    inside ``<repo>/.kiss-worktrees/<slug>/``.  That is where ``pwd``,
+    ``os.getcwd()``, and ``Bash`` commands actually execute, so the
+    system prompt must report that exact path — anything else would
+    mislead the agent about its real location.
 
     Args:
-        work_dir: Absolute work directory path (may be inside a worktree).
+        work_dir: Absolute work directory path.
 
     Returns:
-        The user-facing path: the ``.kiss-worktrees/<slug>`` segment
-        removed if present, otherwise ``work_dir`` unchanged.
+        ``work_dir`` unchanged.
     """
-    parts = Path(work_dir).parts
-    if ".kiss-worktrees" not in parts:
-        return work_dir
-    idx = parts.index(".kiss-worktrees")
-    if idx + 1 >= len(parts):
-        return work_dir
-    return str(Path(*parts[:idx], *parts[idx + 2 :]))
+    return work_dir
 
 
 def _str_to_bool(value: str | bool) -> bool:

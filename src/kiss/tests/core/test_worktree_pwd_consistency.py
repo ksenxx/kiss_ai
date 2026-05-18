@@ -1,9 +1,9 @@
-"""Integration test: PWD reported by the agent must be consistent across modes.
+"""Integration test: PWD reported by the agent must be the real working dir.
 
-Repro for the bug where, with worktree mode enabled, the agent answers
-``PWD`` with the internal ``.kiss-worktrees/<slug>`` directory path
-instead of the user-facing repo root.  Without worktree mode the agent
-correctly reports the repo root.
+In worktree mode the agent's real ``cwd`` is
+``<repo>/.kiss-worktrees/<slug>/...``.  The system prompt must report
+that exact path so that asking ``what is your PWD?`` gives the truthful
+answer, matching what ``pwd`` / ``os.getcwd()`` actually return.
 """
 
 from __future__ import annotations
@@ -99,44 +99,37 @@ class _CapturingServer:
 
 
 class TestUserVisibleWorkDir(unittest.TestCase):
-    """Unit tests for the path-stripping helper."""
+    """Unit tests: the helper now returns the real path unchanged."""
 
     def test_non_worktree_path_unchanged(self) -> None:
         """Paths outside .kiss-worktrees are returned unchanged."""
         self.assertEqual(_user_visible_work_dir("/Users/x/repo"), "/Users/x/repo")
 
-    def test_worktree_root_stripped(self) -> None:
-        """``<repo>/.kiss-worktrees/<slug>`` becomes ``<repo>``."""
+    def test_worktree_root_preserved(self) -> None:
+        """``<repo>/.kiss-worktrees/<slug>`` is returned unchanged."""
         wt = "/Users/x/repo/.kiss-worktrees/kiss_wt-abc-123"
-        self.assertEqual(_user_visible_work_dir(wt), "/Users/x/repo")
+        self.assertEqual(_user_visible_work_dir(wt), wt)
 
-    def test_worktree_subdir_stripped(self) -> None:
-        """``<repo>/.kiss-worktrees/<slug>/<sub>`` becomes ``<repo>/<sub>``."""
+    def test_worktree_subdir_preserved(self) -> None:
+        """A subdirectory inside a worktree is returned unchanged."""
         wt = "/Users/x/repo/.kiss-worktrees/kiss_wt-abc-123/src/pkg"
-        self.assertEqual(_user_visible_work_dir(wt), "/Users/x/repo/src/pkg")
-
-    def test_dangling_worktrees_marker(self) -> None:
-        """A path ending in ``.kiss-worktrees`` with no slug is returned unchanged."""
-        self.assertEqual(
-            _user_visible_work_dir("/Users/x/repo/.kiss-worktrees"),
-            "/Users/x/repo/.kiss-worktrees",
-        )
+        self.assertEqual(_user_visible_work_dir(wt), wt)
 
 
 class TestImportantInstructionsRendering(unittest.TestCase):
     """Direct rendering of IMPORTANT_INSTRUCTIONS via the helper."""
 
-    def test_worktree_dir_not_leaked(self) -> None:
-        """The worktree segment must not appear in IMPORTANT_INSTRUCTIONS."""
+    def test_worktree_dir_is_exposed(self) -> None:
+        """The real worktree path must appear in IMPORTANT_INSTRUCTIONS."""
         wt = "/Users/x/repo/.kiss-worktrees/kiss_wt-abc-123"
         rendered = IMPORTANT_INSTRUCTIONS.format(
             step_threshold="98",
             work_dir=_user_visible_work_dir(wt),
             current_pid="1",
         )
-        self.assertIn("/Users/x/repo", rendered)
-        self.assertNotIn(".kiss-worktrees", rendered)
-        self.assertNotIn("kiss_wt-abc-123", rendered)
+        self.assertIn(wt, rendered)
+        self.assertIn(".kiss-worktrees", rendered)
+        self.assertIn("kiss_wt-abc-123", rendered)
 
 
 class TestPwdConsistencyEndToEnd(unittest.TestCase):
@@ -172,24 +165,24 @@ class TestPwdConsistencyEndToEnd(unittest.TestCase):
         self.assertIn(str(repo.resolve()), sp)
         self.assertNotIn(".kiss-worktrees", sp)
 
-    def test_pwd_with_worktree_mode_reports_repo_root(self) -> None:
-        """Bug repro / fix: worktree-mode run must NOT leak the worktree path.
+    def test_pwd_with_worktree_mode_reports_worktree_dir(self) -> None:
+        """Worktree-mode run MUST report the actual worktree path.
 
         When the work_dir is inside ``<repo>/.kiss-worktrees/<slug>/``, the
-        agent's system prompt must report the repo root (``<repo>``) as
-        the Work dir — matching the non-worktree behavior — so that asking
-        ``what is PWD?`` gives the same answer in both modes.
+        agent's system prompt must report that exact directory as the
+        Work dir, because that is where the agent's ``cwd`` and ``Bash``
+        tool actually operate.  Reporting anything else would mislead the
+        agent about its real location on disk.
         """
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td) / "myrepo"
             wt_dir = repo / ".kiss-worktrees" / "kiss_wt-abc123-1234567890"
             wt_dir.mkdir(parents=True)
             sp = self._run_with_work_dir(str(wt_dir))
-        # User-visible repo root must appear in the prompt.
-        self.assertIn(str(repo.resolve()), sp)
-        # Internal worktree segment must NOT appear.
-        self.assertNotIn(".kiss-worktrees", sp)
-        self.assertNotIn("kiss_wt-abc123-1234567890", sp)
+        # The real worktree path must appear in the prompt.
+        self.assertIn(str(wt_dir.resolve()), sp)
+        self.assertIn(".kiss-worktrees", sp)
+        self.assertIn("kiss_wt-abc123-1234567890", sp)
 
 
 if __name__ == "__main__":
