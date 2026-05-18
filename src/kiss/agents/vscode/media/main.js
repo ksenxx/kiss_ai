@@ -456,7 +456,8 @@
       tabList.appendChild(el);
     });
 
-    // Add "+" button as a direct child of tab-bar (between tab-list and history-btn)
+    // Add "+" button as a direct child of tab-bar, positioned between
+    // #tab-list and the action buttons (frequent / history / settings).
     const existingAdd = tabBar.querySelector('.chat-tab-add');
     if (!existingAdd) {
       const addBtn = document.createElement('div');
@@ -466,7 +467,9 @@
       addBtn.addEventListener('click', () => {
         createNewTab();
       });
-      tabBar.appendChild(addBtn);
+      const firstActionBtn = tabBar.querySelector('.tab-bar-action-btn');
+      if (firstActionBtn) tabBar.insertBefore(addBtn, firstActionBtn);
+      else tabBar.appendChild(addBtn);
     }
 
     // Scroll the active tab into view
