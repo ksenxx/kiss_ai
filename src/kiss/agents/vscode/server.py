@@ -132,12 +132,10 @@ class VSCodeServer(
 
         Each tab gets its own agent instances so concurrent tabs never
         share mutable agent state (chat_id, task_id, worktree, etc.).
-        With the ``tab_id == chat_id`` invariant established at
-        run-start in :meth:`_CommandsMixin._cmd_run`, the tab id IS
-        the agent's chat id once a task has started; before that
-        the tab id is whatever the frontend allocated (a random
-        uuid for a brand-new chat, or the chat id when a history
-        row is clicked).
+        ``tab_id`` is purely a frontend routing key (whatever uuid the
+        frontend allocated for this tab); ``chat_id`` is purely the
+        persistence key stored on :class:`_RunningAgentState` once a
+        run starts.
 
         Thread-safe: acquires ``_state_lock`` to protect the
         get-or-create pattern against concurrent callers.
@@ -642,13 +640,18 @@ class VSCodeServer(
         opened tab — without stealing the stream from the original
         client.
 
-        With the ``tab_id == chat_id`` invariant established at
-        run-start in :meth:`_CommandsMixin._cmd_run`, the source
-        ``_RunningAgentState`` is keyed by *chat_id* directly — no scan
-        required.  Multi-viewer fan-out is implemented in the
-        printer: the original ``_RunningAgentState`` keeps owning the running
-        task and the agent thread keeps tagging events with the
-        original (source) tab id, while
+        ``tab_id`` (frontend routing key) and ``chat_id`` (persistence
+        key) are orthogonal: the source ``_RunningAgentState`` is
+        keyed by its own tab id (whatever the frontend allocated when
+        the task was launched), and the chat id is stored on the
+        state.  This method scans :attr:`running_agent_states` for an
+        entry whose ``chat_id`` matches and whose task thread is
+        still alive (or whose ``is_task_active`` flag is set).
+
+        Multi-viewer fan-out is implemented in the printer: the
+        original ``_RunningAgentState`` keeps owning the running task
+        and the agent thread keeps tagging events with the original
+        (source) tab id, while
         :meth:`BaseBrowserPrinter.subscribe_tab` registers
         *new_tab_id* as an additional viewer so every broadcast is
         duplicated with ``tabId=new_tab_id``.  This means BOTH the
@@ -668,29 +671,27 @@ class VSCodeServer(
         if not chat_id or not new_tab_id:
             return False
         with self._state_lock:
-            t = WorktreeSorcarAgent.running_agent_states.get(chat_id)
-            if t is None:
+            source: _RunningAgentState | None = None
+            for t in WorktreeSorcarAgent.running_agent_states.values():
+                if t.chat_id != chat_id:
+                    continue
+                alive = t.task_thread is not None and t.task_thread.is_alive()
+                if alive or t.is_task_active:
+                    source = t
+                    break
+            if source is None:
                 return False
-            alive = t.task_thread is not None and t.task_thread.is_alive()
-            if not (alive or t.is_task_active):
-                return False
-        # When ``chat_id == new_tab_id`` (the typical case after a
-        # frontend reload or a history-click on a still-running task —
-        # the tab id IS the chat id per the ``tab_id == chat_id``
-        # invariant) the new tab IS the source.  No subscription is
-        # needed because the live agent is already broadcasting under
-        # that very tab id; but we still must return ``True`` so the
-        # caller emits a ``status running=true`` event BEFORE the
-        # ``task_events`` replay.  Without that status event the
-        # webview's ``isRunning`` flag stays false during
-        # ``replayTaskEvents``, ``applyChevronState`` falls into the
-        # collapsed branch, and every replayed panel — plus every
-        # subsequent live event from the still-running agent — is
-        # marked ``.chv-hidden`` (display:none).  The user sees an
-        # empty output and a collapsed chevron despite events still
-        # streaming live.
-        if chat_id != new_tab_id:
-            self.printer.subscribe_tab(chat_id, new_tab_id)
+            source_tab_id = source.tab_id
+        # Subscribe the new viewer to the source tab's broadcast
+        # stream (skipping the degenerate self-subscribe when the
+        # source happens to share its tab id — e.g. when a reloaded
+        # client reuses the same uuid).  The caller still emits a
+        # ``status running=true`` event before the ``task_events``
+        # replay so the webview's ``isRunning`` flag is set before
+        # ``replayTaskEvents`` runs; otherwise ``applyChevronState``
+        # would mark every replayed panel ``.chv-hidden``.
+        if source_tab_id != new_tab_id:
+            self.printer.subscribe_tab(source_tab_id, new_tab_id)
         return True
 
 

@@ -647,10 +647,9 @@
   function createNewTab(presetId) {
     // Preserve any typed text so it carries over to the new tab
     const pendingText = inp.value || '';
-    // If a presetId is supplied (e.g. when a history row with a known
-    // chat_id is clicked) and a tab keyed by that id is already open,
-    // just focus it.  This keeps the invariant ``tab.id == chat_id``
-    // without duplicating tabs for the same chat.
+    // If a presetId is supplied (e.g. the sub-agent reopen path
+    // routes by the persisted sub-agent tab id) and a tab keyed by
+    // that id is already open, just focus it — do not duplicate.
     if (presetId) {
       const existingTab = tabs.find(t => t.id === presetId);
       if (existingTab) {
@@ -661,9 +660,8 @@
     saveCurrentTab();
     const tab = makeTab('new chat');
     // When ``presetId`` is supplied, force the new tab's id to it so
-    // that the tab id IS the chat id throughout the lifecycle (the
-    // backend treats ``tabId`` as the chat id in ``_cmd_run``).  When
-    // omitted, ``makeTab`` already minted a random uuid via
+    // the existing routing key (e.g. the sub-agent tab id) is reused.
+    // When omitted, ``makeTab`` already minted a random uuid via
     // ``genTabId``.
     if (presetId) {
       tab.id = presetId;
@@ -4778,18 +4776,14 @@
           closeSidebar();
           return;
         }
-        // When the clicked history row has a known chat_id (s.id) and
-        // persisted events, create the new tab WITH that chat_id as
-        // its tab id so the ``tab_id == chat_id`` invariant holds end
-        // to end (no chat_id ↔ tab_id translation is needed anywhere).
-        // If a tab with that id is already open, ``createNewTab``
-        // short-circuits to ``switchToTab`` and returns false — in
-        // that case skip ``setTaskText`` and ``resumeSession`` so we
-        // do not clobber the panel text or trigger a redundant
-        // backend replay on a tab that is already live-streaming the
-        // same chat.
+        // When the clicked history row has a known chat_id (s.id)
+        // and persisted events, allocate a fresh tab id and let the
+        // backend route the chat lookup by chat_id (passed in the
+        // ``resumeSession`` payload).  ``tab_id`` and ``chat_id``
+        // are orthogonal — the same chat may be live-viewed from
+        // multiple tabs, each with its own routing key.
         if (s.has_events && s.id) {
-          const created = createNewTab(s.id);
+          const created = createNewTab();
           if (created) {
             setTaskText(s.preview || s.title || '');
             vscode.postMessage({

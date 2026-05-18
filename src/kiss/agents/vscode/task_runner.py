@@ -197,13 +197,12 @@ class _TaskRunnerMixin:
         # :meth:`ChatSorcarAgent.run`, which would mint a fresh uuid
         # and ``build_chat_prompt`` would query history for that
         # never-seen uuid — finding nothing and sending the LLM no
-        # prior context.  Falling back to ``tab_id`` preserves the
-        # ``tab_id == chat_id`` invariant for brand-new chat tabs.
+        # prior context.  ``_cmd_run`` guarantees ``tab.chat_id`` is
+        # populated (either preserved from ``_replay_session`` or
+        # freshly minted) before this thread runs.
         if tab.chat_id:
             tab.agent._chat_id = tab.chat_id
-        elif tab_id:
-            tab.agent._chat_id = tab_id
-        tab.chat_id = tab.agent.chat_id or tab.chat_id or tab_id
+        tab.chat_id = tab.agent.chat_id or tab.chat_id
 
         available = get_available_models()
         if not available or (model and model not in available):

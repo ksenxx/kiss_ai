@@ -7,12 +7,14 @@ Spec
 1. A previous task (T1) with result R1 is persisted in ``sorcar.db``
    under chat id X.
 2. The user clicks the history row for T1.  The frontend's
-   ``createNewTab(s.id)`` allocates a tab with id == X and sends:
+   ``createNewTab()`` allocates a fresh tab with a new uuid Y and sends:
 
-       ``newChat`` (tabId=X)  →  ``resumeSession`` (chatId=X, taskId=t1,
-       tabId=X)
+       ``newChat`` (tabId=Y)  →  ``resumeSession`` (chatId=X, taskId=t1,
+       tabId=Y)
 
-   so the ``tab_id == chat_id`` invariant holds.
+   ``tab_id`` (Y) and ``chat_id`` (X) are orthogonal — the backend
+   routes the chat lookup by chat_id while the tab id stays the
+   frontend's own routing key.
 3. The user types a new task (T2) and presses Run.  The backend's
    ``_run_task_inner`` builds a fresh agent that ultimately calls
    :meth:`SorcarAgent.run` with the augmented prompt produced by
@@ -193,11 +195,11 @@ class TestHistoryContinuationContext(unittest.TestCase):
         assert chat_id, "expected non-empty chat_id"
 
         # Step 2: simulate the user clicking the history row for that
-        # task.  The frontend's ``createNewTab(chat_id)`` sends
-        # ``newChat`` first, then ``resumeSession``.  The tab id in
-        # both messages is the chat id (the tab_id == chat_id
-        # invariant the backend relies on).
-        history_tab = chat_id
+        # task.  The frontend's ``createNewTab()`` sends ``newChat``
+        # first, then ``resumeSession``.  The tab id allocated is a
+        # fresh uuid orthogonal to the chat id; the backend routes
+        # the chat lookup by chat_id from the ``resumeSession`` payload.
+        history_tab = "tab_" + chat_id
         self.server._handle_command(
             {"type": "newChat", "tabId": history_tab}
         )

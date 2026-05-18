@@ -14,6 +14,7 @@ import queue
 import subprocess
 import sys
 import threading
+import uuid
 from typing import TYPE_CHECKING, Any
 
 from kiss.agents.sorcar.persistence import (
@@ -145,17 +146,13 @@ class _CommandsMixin:
             # otherwise the follow-up task would be cut off from the
             # prior chat context (``ChatSorcarAgent.build_chat_prompt``
             # would query history for the tab id, find nothing, and
-            # send the LLM an empty preamble).  This matters whenever
-            # the frontend's resumed-history tab id differs from the
-            # resumed chat id (a viewer tab that allocated a fresh
-            # uuid, an older client, or a chat id already taken by
-            # another open tab).  When ``tab.chat_id`` is still empty
-            # (brand-new chat tab that did not resume any session),
-            # fall back to seeding it with ``tab_id`` so the
-            # ``tab_id == chat_id`` invariant holds for the source
-            # tab that originally launched the task.
-            if not tab.chat_id and tab_id:
-                tab.chat_id = tab_id
+            # send the LLM an empty preamble).  Otherwise allocate a
+            # fresh chat id.  ``tab_id`` (the frontend routing key)
+            # and ``chat_id`` (the persistence key) are kept
+            # orthogonal: every run gets its own chat id, regardless
+            # of which tab launched it.
+            if not tab.chat_id:
+                tab.chat_id = uuid.uuid4().hex
             chat_id = tab.chat_id
             thread = threading.Thread(
                 target=self._run_task, args=(cmd,), daemon=True
