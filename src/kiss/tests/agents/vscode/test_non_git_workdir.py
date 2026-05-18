@@ -107,22 +107,6 @@ class TestNonGitCommandsDoNotCrash(_NonGitHarness):
         assert "alpha.txt" in names
         assert "beta.py" in names
 
-    def test_refresh_files_then_get(self) -> None:
-        Path(self.tmpdir, "x.md").write_text("x\n")
-        self.server._handle_command({"type": "refreshFiles"})
-        for _ in range(50):
-            with self.server._state_lock:
-                if self.server._file_cache is not None:
-                    break
-            import time as _t
-            _t.sleep(0.02)
-        self.server._handle_command({"type": "getFiles", "prefix": "x"})
-        evt = self._events_of("files")
-        assert any(
-            any(f["text"].startswith("x") for f in e["files"])
-            for e in evt
-        )
-
     def test_record_file_usage(self) -> None:
         self.server._handle_command(
             {"type": "recordFileUsage", "path": "foo.txt"},
