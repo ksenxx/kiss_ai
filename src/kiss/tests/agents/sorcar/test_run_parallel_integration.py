@@ -56,7 +56,7 @@ class TestRunTasksParallelReal:
         results = run_tasks_parallel(
             ["What is 2 + 2? Reply with just the number."],
             max_workers=1,
-            model=FAST_MODEL,
+            model_name=FAST_MODEL,
         )
         assert len(results) == 1
         parsed = _parse_yaml_result(results[0])
@@ -71,7 +71,7 @@ class TestRunTasksParallelReal:
                 "What is the capital of Japan? Reply with just the city name.",
             ],
             max_workers=2,
-            model=FAST_MODEL,
+            model_name=FAST_MODEL,
         )
         assert len(results) == 2
         for r in results:
@@ -86,7 +86,7 @@ class TestRunTasksParallelReal:
             "Reply with exactly the word 'BETA' and nothing else.",
             "Reply with exactly the word 'GAMMA' and nothing else.",
         ]
-        results = run_tasks_parallel(tasks, max_workers=3, model=FAST_MODEL)
+        results = run_tasks_parallel(tasks, max_workers=3, model_name=FAST_MODEL)
         assert len(results) == 3
         # Each result should contain its respective keyword
         summaries = [_parse_yaml_result(r).get("summary", "") for r in results]
@@ -107,7 +107,7 @@ class TestRunTasksParallelReal:
                 "Include the exact content in your summary.",
             ],
             max_workers=1,
-            model=FAST_MODEL,
+            model_name=FAST_MODEL,
             work_dir=str(tmp_path),
         )
         assert len(results) == 1
@@ -129,7 +129,7 @@ class TestRunTasksParallelReal:
                 f"Read {tmp_path / 'b.txt'} and reply with its contents.",
             ],
             max_workers=2,
-            model=FAST_MODEL,
+            model_name=FAST_MODEL,
             work_dir=str(tmp_path),
         )
         assert len(results) == 2
@@ -155,7 +155,7 @@ class TestRunParallelEdgeCases:
         results = run_tasks_parallel(
             ["Reply with the word 'SOLO'."],
             max_workers=1,
-            model=FAST_MODEL,
+            model_name=FAST_MODEL,
         )
         assert len(results) == 1
         assert "SOLO" in _parse_yaml_result(results[0]).get("summary", "")
@@ -169,7 +169,7 @@ class TestRunParallelEdgeCases:
                 "Reply with the word 'SECOND'.",
             ],
             max_workers=1,
-            model=FAST_MODEL,
+            model_name=FAST_MODEL,
         )
         assert len(results) == 2
         assert "FIRST" in _parse_yaml_result(results[0]).get("summary", "")
@@ -231,7 +231,7 @@ class TestParallelFileIO:
         results = run_tasks_parallel(
             tasks,
             max_workers=3,
-            model=FAST_MODEL,
+            model_name=FAST_MODEL,
             work_dir=str(tmp_path),
         )
         assert len(results) == 3
@@ -253,7 +253,7 @@ class TestParallelFileIO:
         results = run_tasks_parallel(
             tasks,
             max_workers=2,
-            model=FAST_MODEL,
+            model_name=FAST_MODEL,
             work_dir=str(tmp_path),
         )
         assert len(results) == 2
@@ -301,7 +301,7 @@ class TestSubagentTabEventsE2E:
                 "Reply with just the word 'BETA'.",
             ],
             max_workers=2,
-            model=FAST_MODEL,
+            model_name=FAST_MODEL,
             printer=printer,
         )
         assert len(results) == 2
@@ -338,7 +338,7 @@ class TestSubagentTabEventsE2E:
         run_tasks_parallel(
             ["Reply with just 'hello'."],
             max_workers=1,
-            model=FAST_MODEL,
+            model_name=FAST_MODEL,
             printer=printer,
         )
 
@@ -374,7 +374,7 @@ class TestSubagentTabEventsE2E:
         run_tasks_parallel(
             ["Reply with the word DELTA."],
             max_workers=1,
-            model=FAST_MODEL,
+            model_name=FAST_MODEL,
             printer=printer,
         )
 

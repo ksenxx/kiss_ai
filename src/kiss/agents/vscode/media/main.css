@@ -242,6 +242,7 @@ body {
   cursor: pointer;
   flex-shrink: 0;
 }
+
 .tab-bar-action-btn:hover {
   color: var(--fg);
   background: color-mix(in srgb, var(--fg) 6%, transparent);

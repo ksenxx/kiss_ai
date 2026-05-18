@@ -107,7 +107,7 @@ Skip this planning step for simple single-file modifications.
 
 ## File Browsing
 
-When exploring unfamiliar code, collect information and code snippets in PWD/tmp/file-information-{unique_id}.md as you go without deep thinking, 
+When exploring unfamiliar code, collect information and code snippets in PWD/tmp/file-information-{unique_id}.md as you go without deep thinking,
 then review the collected material and think deeply before acting.
 
 ## Desktop Apps
