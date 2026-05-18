@@ -7,6 +7,7 @@ management — the same workflow that the VS Code extension performs in
 
 from __future__ import annotations
 
+import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -21,6 +22,7 @@ from kiss.agents.sorcar.persistence import (
     _save_task_extra,
     _save_task_result,
 )
+from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent, _coerce_tasks
 
 MAX_TASKS = 10
@@ -208,6 +210,30 @@ class ChatSorcarAgent(SorcarAgent):
             # chat tab, which looks like "the sub-task didn't open".
             if persist_agents is not None:
                 persist_agents[sub_tab_id] = agent
+            # Also register a real :class:`_RunningAgentState` for the
+            # sub-agent, keyed by its own ``sub_tab_id``.  Treating
+            # the sub-agent as a regular task in the registry is what
+            # makes multi-view work: when a user clicks the sub-agent
+            # row in the history sidebar,
+            # :meth:`VSCodeServer._replay_session` →
+            # :meth:`VSCodeServer._reattach_running_chat` finds this
+            # state (disambiguated by ``task_history_id``, which the
+            # sub-agent's :meth:`ChatSorcarAgent.run` mirrors here
+            # once :func:`_add_task` mints the id) and subscribes the
+            # freshly-opened tab to the printer's per-tab broadcast
+            # stream so the live events ALSO flow to the new tab.
+            # ``is_subagent`` + ``parent_task_id`` are the two flag
+            # fields the frontend needs to render the sub-agent
+            # styling correctly on history reopen.
+            sub_state = _RunningAgentState(sub_tab_id, model or "")
+            sub_state.chat_id = chat_id
+            sub_state.is_task_active = True
+            sub_state.is_subagent = True
+            sub_state.parent_task_id = (
+                parent_task_id if isinstance(parent_task_id, int) else None
+            )
+            sub_state.task_thread = threading.current_thread()
+            _RunningAgentState.running_agent_states[sub_tab_id] = sub_state
             success = True
             try:
                 result: str = agent.run(
@@ -227,6 +253,7 @@ class ChatSorcarAgent(SorcarAgent):
             finally:
                 if persist_agents is not None:
                     persist_agents.pop(sub_tab_id, None)
+                _RunningAgentState.running_agent_states.pop(sub_tab_id, None)
                 if tl is not None:
                     tl.tab_id = None
                 if broadcast:
@@ -281,6 +308,27 @@ class ChatSorcarAgent(SorcarAgent):
         # block below so the lifetime mirrors exactly "task is in
         # flight inside this ``run()`` call".
         ChatSorcarAgent.running_agents[task_id] = self
+        # Mirror ``task_id`` onto the per-thread :class:`_RunningAgentState`
+        # (when one exists for the thread-local tab id).  This makes
+        # ``task_history_id`` available DURING the run — not just
+        # after — so that
+        # :meth:`VSCodeServer._reattach_running_chat` can disambiguate
+        # by task id when multiple live states share the same
+        # ``chat_id`` (parent + parallel sub-agents).  No-op for
+        # callers that lack a thread-local tab binding (e.g. unit
+        # tests that exercise :class:`ChatSorcarAgent` directly).
+        # ``self.printer`` is not yet assigned at this point (the
+        # base ``KissAgent.run`` sets it from the ``printer`` kwarg);
+        # so consult the kwarg directly with a fall-back to
+        # ``self.printer`` for callers that pre-assign it.
+        printer_for_mirror = kwargs.get("printer") or getattr(self, "printer", None)
+        tl = getattr(printer_for_mirror, "_thread_local", None)
+        tl_tab_id = getattr(tl, "tab_id", None) if tl is not None else None
+        mirrored_state: _RunningAgentState | None = None
+        if isinstance(tl_tab_id, str) and tl_tab_id:
+            mirrored_state = _RunningAgentState.running_agent_states.get(tl_tab_id)
+            if mirrored_state is not None:
+                mirrored_state.task_history_id = task_id
         _record_frequent_task(prompt_template)
 
         result_summary = ""
@@ -298,6 +346,8 @@ class ChatSorcarAgent(SorcarAgent):
             raise
         finally:
             ChatSorcarAgent.running_agents.pop(task_id, None)
+            if mirrored_state is not None and mirrored_state.task_history_id == task_id:
+                mirrored_state.task_history_id = None
             if not skip_persistence:
                 _save_task_result(task_id=task_id, result=result_summary)
                 from kiss._version import __version__
