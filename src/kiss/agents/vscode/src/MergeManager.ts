@@ -26,6 +26,8 @@ interface ProcessedHunk {
 interface MergeFileState {
   basePath: string;
   hunks: ProcessedHunk[];
+  /** True when the file did not exist before the agent created it. */
+  isNewFile: boolean;
 }
 
 export interface MergeFileData {
@@ -277,7 +279,13 @@ export class MergeManager extends EventEmitter {
     } else {
       s.hunks.splice(idx, 1);
     }
-    if (!s.hunks.length) delete this._ms[fp];
+    if (!s.hunks.length) {
+      const wasNew = s.isNewFile;
+      delete this._ms[fp];
+      if (wasNew && countProp === 'nc') {
+        await this._deleteNewFile(fp);
+      }
+    }
     this.emit('hunkProcessed');
     this._afterHunkAction(fp);
   }
@@ -413,12 +421,36 @@ export class MergeManager extends EventEmitter {
     }
   }
 
+  /**
+   * Delete a newly-created file from disk and close its editor tab.
+   *
+   * Called when the user rejects all changes to a file that the agent
+   * created (did not exist before the task).  Uses WorkspaceEdit.deleteFile
+   * so VS Code closes the corresponding editor tab automatically.
+   */
+  private async _deleteNewFile(fp: string): Promise<void> {
+    try {
+      const edit = new vscode.WorkspaceEdit();
+      edit.deleteFile(vscode.Uri.file(fp), {ignoreIfNotExists: true});
+      await vscode.workspace.applyEdit(edit);
+    } catch {
+      // Best-effort: fall back to direct unlink
+      try {
+        fs.unlinkSync(fp);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
   private async _resolveAll(
     countProp: 'oc' | 'nc',
     startProp: 'os' | 'ns',
     label: string,
   ): Promise<void> {
     const fps = Object.keys(this._ms);
+    const newFilesToDelete =
+      countProp === 'nc' ? fps.filter(fp => this._ms[fp]?.isNewFile) : [];
     try {
       for (const fp of fps) {
         await this._deleteFileHunks(fp, countProp, startProp);
@@ -428,6 +460,9 @@ export class MergeManager extends EventEmitter {
       this._curHunk = null;
       for (const fp of fps) {
         this._refreshDeco(fp);
+      }
+      for (const fp of newFilesToDelete) {
+        await this._deleteNewFile(fp);
       }
       await vscode.workspace.saveAll(false);
       vscode.window.showInformationMessage(label);
@@ -440,8 +475,12 @@ export class MergeManager extends EventEmitter {
     countProp: 'oc' | 'nc',
     startProp: 'os' | 'ns',
   ): Promise<void> {
+    const wasNew = this._ms[fp]?.isNewFile ?? false;
     await this._deleteFileHunks(fp, countProp, startProp);
     delete this._ms[fp];
+    if (wasNew && countProp === 'nc') {
+      await this._deleteNewFile(fp);
+    }
     this._curHunk = null;
     this._afterHunkAction(fp);
   }
@@ -600,7 +639,9 @@ export class MergeManager extends EventEmitter {
         }
       }
 
-      this._ms[f.current] = {basePath: f.base, hunks: processed};
+      const isNewFile =
+        processed.length > 0 && processed.every(h => h.oc === 0);
+      this._ms[f.current] = {basePath: f.base, hunks: processed, isNewFile};
     }
 
     // Show only the first changed file in the editor (viewColumn: One
