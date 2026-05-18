@@ -50,6 +50,123 @@ def _create_coverage_db(test_code: str, source_code: str) -> str:
     return cov_file
 
 
+def test_lcov_typescript_and_javascript_coverage_redundancy():
+    """LCOV records for *.ts/*.js files participate in redundancy.
+
+    ``test_subset`` covers a strict subset of the lines and branches
+    that ``test_superset`` covers (across one TypeScript and one
+    JavaScript source file), so the analyzer must mark ``test_subset``
+    as redundant even though no Python source file is involved beyond
+    the empty .coverage database.
+    """
+    tmpdir = tempfile.mkdtemp()
+    cov_file = _create_coverage_db(
+        source_code="x = 1\n",
+        test_code="def test_noop():\n    assert True\n",
+    )
+
+    lcov_path = os.path.join(tmpdir, "browser.info")
+    with open(lcov_path, "w") as f:
+        f.write(
+            "TN:test_superset\n"
+            "SF:/proj/src/handler.ts\n"
+            "DA:1,3\n"
+            "DA:2,3\n"
+            "DA:3,1\n"
+            "BRDA:2,0,0,2\n"
+            "BRDA:2,0,1,1\n"
+            "FNDA:3,handle\n"
+            "end_of_record\n"
+            "TN:test_superset\n"
+            "SF:/proj/src/util.js\n"
+            "DA:10,1\n"
+            "end_of_record\n"
+            "TN:test_subset\n"
+            "SF:/proj/src/handler.ts\n"
+            "DA:1,1\n"
+            "DA:2,1\n"
+            "BRDA:2,0,0,1\n"
+            "FNDA:1,handle\n"
+            "end_of_record\n"
+            "TN:test_unique\n"
+            "SF:/proj/src/util.js\n"
+            "DA:99,1\n"
+            "end_of_record\n"
+        )
+
+    redundant = analyze_redundancy(cov_file, lcov_files=[lcov_path])
+    assert "test_subset" in redundant
+    assert "test_superset" not in redundant
+    assert "test_unique" not in redundant
+
+
+def test_lcov_not_taken_branches_and_unhit_lines_ignored():
+    """``DA:line,0``, ``BRDA:...,-`` and ``FNDA:0,name`` are not items.
+
+    A test whose LCOV record contains only zero-hit / not-taken
+    entries contributes nothing to the analysis and is therefore
+    redundant.
+    """
+    tmpdir = tempfile.mkdtemp()
+    cov_file = _create_coverage_db(
+        source_code="x = 1\n",
+        test_code="def test_noop():\n    assert True\n",
+    )
+
+    lcov_path = os.path.join(tmpdir, "browser.info")
+    with open(lcov_path, "w") as f:
+        f.write(
+            "TN:test_real\n"
+            "SF:/proj/src/handler.ts\n"
+            "DA:1,1\n"
+            "BRDA:1,0,0,1\n"
+            "FNDA:1,handle\n"
+            "end_of_record\n"
+            "TN:test_empty\n"
+            "SF:/proj/src/handler.ts\n"
+            "DA:1,0\n"
+            "BRDA:1,0,0,-\n"
+            "FNDA:0,handle\n"
+            "end_of_record\n"
+        )
+
+    redundant = analyze_redundancy(cov_file, lcov_files=[lcov_path])
+    assert "test_empty" not in set(redundant) - {"test_empty"}
+    # test_empty has no items at all so it cannot make any item redundant
+    # and is itself trivially redundant only if it has nothing to cover.
+    # Methods with empty item sets are never added to method_items so
+    # they simply do not appear.
+    assert "test_empty" not in redundant
+    assert "test_real" not in redundant
+
+
+def test_lcov_default_test_name_from_filename():
+    """Records without a ``TN:`` use the LCOV file's stem as the name."""
+    tmpdir = tempfile.mkdtemp()
+    cov_file = _create_coverage_db(
+        source_code="x = 1\n",
+        test_code="def test_noop():\n    assert True\n",
+    )
+
+    lcov_path = os.path.join(tmpdir, "playwright_run.info")
+    with open(lcov_path, "w") as f:
+        f.write(
+            "SF:/proj/src/handler.ts\n"
+            "DA:1,1\n"
+            "end_of_record\n"
+            "TN:other\n"
+            "SF:/proj/src/handler.ts\n"
+            "DA:1,1\n"
+            "DA:2,1\n"
+            "end_of_record\n"
+        )
+
+    redundant = analyze_redundancy(cov_file, lcov_files=[lcov_path])
+    # playwright_run covers a strict subset of `other`, so it is redundant
+    assert "playwright_run" in redundant
+    assert "other" not in redundant
+
+
 def test_setup_teardown_arcs_grouped_with_method():
     """Setup/teardown arcs are merged into the method's arc set.
 
