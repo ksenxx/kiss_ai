@@ -78,14 +78,24 @@ def model_vendor(name: str) -> tuple[str, int]:
     return "Together AI", 5
 
 
-def generate_commit_message_from_diff(diff_text: str) -> str:
+def generate_commit_message_from_diff(
+    diff_text: str, user_prompt: str | None = None,
+) -> str:
     """Generate a git commit message from a diff via LLM.
 
     Uses a fast/cheap model to produce a conventional-commit-style
-    message.  Returns a fallback string on any failure.
+    message.  When *user_prompt* is provided, the user's original
+    task prompt is included in the LLM context so the generated
+    subject/body reflect the *intent* of the change (not just the
+    mechanical diff) and the full prompt is appended at the end of
+    the commit message body for traceability.  Returns a fallback
+    string on any failure.
 
     Args:
         diff_text: Output of ``git diff --cached`` or similar.
+        user_prompt: The user's task prompt that produced the diff,
+            or ``None`` when not available (e.g. user-invoked manual
+            commit-message generation from the UI).
 
     Returns:
         The cleaned commit-message string, or ``"kiss: auto-commit agent work"``
@@ -95,28 +105,73 @@ def generate_commit_message_from_diff(diff_text: str) -> str:
 
     fallback = "kiss: auto-commit agent work"
     if not diff_text:
+        if user_prompt:
+            return _append_user_prompt(fallback, user_prompt)
         return fallback
     try:
         agent = KISSAgent("Commit Message Generator")
-        raw = agent.run(
-            model_name=get_fast_model(),
-            prompt_template=(
+        if user_prompt:
+            context = (
+                f"User task prompt:\n{user_prompt}\n\nDiff:\n{diff_text}"
+            )
+            template = (
+                "Generate a concise git commit message for these "
+                "changes. The user's task prompt is provided for "
+                "context — use it to phrase the subject line in "
+                "terms of the user's INTENT, not just the mechanical "
+                "diff. Use conventional commit format with a clear "
+                "subject line (type: description) and optionally a "
+                "body with bullet points for multiple changes. Do "
+                "NOT quote or repeat the user prompt — it will be "
+                "appended separately. Return ONLY the commit message "
+                "text, no quotes or markdown fences.\n\n{context}"
+            )
+        else:
+            context = f"Diff:\n{diff_text}"
+            template = (
                 "Generate a concise git commit message for these "
                 "changes. Use conventional commit format with a "
                 "clear subject line (type: description) and "
                 "optionally a body with bullet points for multiple "
                 "changes. Return ONLY the commit message text, no "
                 "quotes or markdown fences.\n\n{context}"
-            ),
-            arguments={"context": f"Diff:\n{diff_text}"},
+            )
+        raw = agent.run(
+            model_name=get_fast_model(),
+            prompt_template=template,
+            arguments={"context": context},
             is_agentic=False,
             verbose=False,
         )
-        msg = clean_llm_output(raw)
-        return msg if msg else fallback
+        msg = clean_llm_output(raw) or fallback
+        if user_prompt:
+            msg = _append_user_prompt(msg, user_prompt)
+        return msg
     except Exception:
         logger.debug("Commit message generation failed", exc_info=True)
+        if user_prompt:
+            return _append_user_prompt(fallback, user_prompt)
         return fallback
+
+
+def _append_user_prompt(message: str, user_prompt: str) -> str:
+    """Append the user's task prompt to a commit message body.
+
+    Trims whitespace from *user_prompt* and appends it under a
+    ``User prompt:`` heading separated by a blank line.  If the
+    prompt is empty after trimming, *message* is returned unchanged.
+
+    Args:
+        message: The base commit message (subject + optional body).
+        user_prompt: The user's original task prompt string.
+
+    Returns:
+        The combined commit message with the user prompt appended.
+    """
+    trimmed = user_prompt.strip()
+    if not trimmed:
+        return message
+    return f"{message.rstrip()}\n\nUser prompt:\n{trimmed}"
 
 
 def generate_followup_text(task: str, result: str, model: str) -> str:

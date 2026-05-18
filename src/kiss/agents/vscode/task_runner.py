@@ -323,6 +323,11 @@ class _TaskRunnerMixin:
             _model_config = build_model_config(_vcfg)
 
             for task_prompt in subtasks:
+                # Record the raw user prompt so the post-task
+                # auto-commit hooks can incorporate the user's intent
+                # in the generated commit message (see
+                # :meth:`_MergeFlowMixin._handle_autocommit_action`).
+                tab.last_user_prompt = task_prompt
                 try:
                     tab.agent.run(
                         prompt_template=task_prompt,

@@ -58,6 +58,12 @@ class ChatSorcarAgent(SorcarAgent):
         super().__init__(name)
         self._chat_id: str = ""
         self._last_task_id: int | None = None
+        # The most recent user task prompt seen by ``run()``.  Used
+        # by auto-commit code paths to include the user's intent in
+        # the generated commit message (see
+        # :func:`~kiss.agents.vscode.helpers.generate_commit_message_from_diff`).
+        # Empty string when the agent has not yet run any task.
+        self._last_user_prompt: str = ""
         # Populated by ``_run_tasks_parallel`` on each sub-agent
         # before it runs.  The single ``parent_task_id`` field links
         # the sub-agent's ``task_history`` row back to the row of
@@ -298,6 +304,14 @@ class ChatSorcarAgent(SorcarAgent):
         # layer maintains its own chat_id ↔ tab_id index for routing.
         if self._chat_id == "":
             self._chat_id = uuid.uuid4().hex
+
+        # Stash the raw user prompt BEFORE any chat-context
+        # augmentation so auto-commit (worktree finalize, the
+        # ``update_settings(auto_commit=True)`` tool, etc.) can include
+        # the user's own words — not the synthetic
+        # ``## Previous tasks...`` augmented prompt — in the generated
+        # commit message.
+        self._last_user_prompt = prompt_template
 
         agent_prompt = self.build_chat_prompt(prompt_template)
         task_id, self._chat_id = _add_task(prompt_template, chat_id=self._chat_id)
