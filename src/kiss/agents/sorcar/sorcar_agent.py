@@ -316,15 +316,26 @@ class SorcarAgent(RelentlessAgent):
                     if repo:
                         commit_dir = wd if wd != repo else repo
                         GitWorktreeOps.stage_all(commit_dir)
+                        user_prompt = (
+                            getattr(self, "_last_user_prompt", "") or None
+                        )
                         try:
                             from kiss.agents.vscode.helpers import (
                                 generate_commit_message_from_diff,
                             )
 
                             diff = GitWorktreeOps.staged_diff(commit_dir)
-                            msg = generate_commit_message_from_diff(diff)
+                            msg = generate_commit_message_from_diff(
+                                diff, user_prompt=user_prompt,
+                            )
                         except Exception:
                             msg = "kiss: auto-commit agent changes"
+                            if user_prompt:
+                                from kiss.agents.vscode.helpers import (
+                                    _append_user_prompt,
+                                )
+
+                                msg = _append_user_prompt(msg, user_prompt)
                         GitWorktreeOps.commit_staged(commit_dir, msg)
                 except Exception:
                     pass

@@ -368,7 +368,19 @@ class _MergeFlowMixin:
                     "message": "Generating commit message…",
                     "tabId": tab_id,
                 })
-                msg = generate_commit_message_from_diff(diff.stdout) or "Auto-commit"
+                with self._state_lock:
+                    prompt_tab = _RunningAgentState.running_agent_states.get(
+                        tab_id,
+                    )
+                user_prompt = (
+                    prompt_tab.last_user_prompt if prompt_tab else ""
+                ) or None
+                msg = (
+                    generate_commit_message_from_diff(
+                        diff.stdout, user_prompt=user_prompt,
+                    )
+                    or "Auto-commit"
+                )
                 self.printer.broadcast({
                     "type": "autocommit_progress",
                     "message": "Committing…",

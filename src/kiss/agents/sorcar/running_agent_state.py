@@ -91,6 +91,7 @@ class _RunningAgentState:
         "tab_id",
         "chat_id",
         "last_task_id",
+        "last_user_prompt",
         "task_history_id",
         "use_worktree",
         "use_parallel",
@@ -140,6 +141,13 @@ class _RunningAgentState:
         # (:meth:`_MergeFlowMixin._handle_autocommit_action`) that may
         # run after the agent has already been disposed.
         self.last_task_id: int | None = None
+        # Most recent user task prompt submitted on this tab.
+        # Populated by :meth:`_TaskRunnerMixin._run_task_inner` before
+        # each agent run and read by post-task auto-commit hooks
+        # (:meth:`_MergeFlowMixin._handle_autocommit_action`) so the
+        # generated commit message can include the user's intent.
+        # Empty string before the first task has run.
+        self.last_user_prompt: str = ""
         # In-flight task id within the current ``_run_task_inner``
         # iteration — used as the persistence target for the
         # ``task_done`` / ``task_stopped`` / ``task_error`` event,

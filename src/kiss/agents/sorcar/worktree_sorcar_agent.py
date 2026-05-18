@@ -37,14 +37,20 @@ from kiss.core.kiss_error import KISSError
 logger = logging.getLogger(__name__)
 
 
-def _generate_commit_message(wt_dir: Path) -> str:
+def _generate_commit_message(
+    wt_dir: Path, user_prompt: str | None = None,
+) -> str:
     """Generate a commit message for worktree changes using an LLM.
 
     Gets the staged diff and delegates to
     :func:`~kiss.agents.vscode.helpers.generate_commit_message_from_diff`.
+    When *user_prompt* is provided, it is forwarded so the user's
+    task prompt is incorporated into the commit message.
 
     Args:
         wt_dir: The worktree directory containing staged changes.
+        user_prompt: The user's task prompt that produced these
+            staged changes, or ``None`` when not available.
 
     Returns:
         A commit message string.
@@ -52,7 +58,7 @@ def _generate_commit_message(wt_dir: Path) -> str:
     from kiss.agents.vscode.helpers import generate_commit_message_from_diff
 
     diff_text = GitWorktreeOps.staged_diff(wt_dir)
-    return generate_commit_message_from_diff(diff_text)
+    return generate_commit_message_from_diff(diff_text, user_prompt=user_prompt)
 
 
 def _manual_merge_cmd(wt: GitWorktree) -> str:
@@ -172,11 +178,18 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         if self._wt is None or not self._wt.wt_dir.exists():
             return False
         GitWorktreeOps.stage_all(self._wt.wt_dir)
+        user_prompt = self._last_user_prompt or None
         try:
-            msg = _generate_commit_message(self._wt.wt_dir)
+            msg = _generate_commit_message(
+                self._wt.wt_dir, user_prompt=user_prompt,
+            )
         except Exception:
             logger.debug("LLM commit message generation failed; using fallback", exc_info=True)
             msg = "kiss: auto-commit agent changes"
+            if user_prompt:
+                from kiss.agents.vscode.helpers import _append_user_prompt
+
+                msg = _append_user_prompt(msg, user_prompt)
         return GitWorktreeOps.commit_staged(self._wt.wt_dir, msg)
 
 

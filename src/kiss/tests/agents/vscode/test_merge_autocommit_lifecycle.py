@@ -78,7 +78,7 @@ class _LifecycleHarness(unittest.TestCase):
         self.server, self.events = _make_server(self.tmpdir)
         self._orig_gen = _merge_flow_module.generate_commit_message_from_diff
 
-        def fake_gen(diff_text: str) -> str:
+        def fake_gen(diff_text: str, user_prompt: str | None = None) -> str:
             return "chore: auto-commit test"
 
         _merge_flow_module.generate_commit_message_from_diff = fake_gen  # type: ignore[assignment]
