@@ -88,7 +88,7 @@ class VSCodeServer(
         # ``server.printer.broadcast`` themselves to capture events.
         self.printer: BaseBrowserPrinter = printer or BaseBrowserPrinter()
         # ``running_agent_states`` is now a class attribute on
-        # :class:`WorktreeSorcarAgent` (shared across every instance).
+        # :class:`_RunningAgentState` (shared across every instance).
         # Reset on init so each ``VSCodeServer`` starts with a clean
         # slate (production only ever spawns one server per Python
         # process; test fixtures that instantiate the server fresh
@@ -97,7 +97,7 @@ class VSCodeServer(
         # (read-then-modify, scan-then-modify) and the lifecycle
         # transitions that span both the dict and individual
         # ``_RunningAgentState`` fields.
-        WorktreeSorcarAgent.running_agent_states.clear()
+        _RunningAgentState.running_agent_states.clear()
         self.work_dir = os.environ.get("KISS_WORKDIR", os.getcwd())
         persisted = _load_last_model()
         self._default_model = (
@@ -121,11 +121,11 @@ class VSCodeServer(
         Backward-compat accessor for existing test fixtures and audit
         tests that read ``server._running_agent_states``.  The
         canonical home is the class attribute
-        :attr:`kiss.agents.sorcar.worktree_sorcar_agent.WorktreeSorcarAgent.running_agent_states`;
+        :attr:`kiss.agents.sorcar.running_agent_state._RunningAgentState.running_agent_states`;
         production code inside this package accesses it directly via
-        :class:`WorktreeSorcarAgent`.
+        :class:`_RunningAgentState`.
         """
-        return WorktreeSorcarAgent.running_agent_states
+        return _RunningAgentState.running_agent_states
 
     def _get_tab(self, tab_id: str) -> _RunningAgentState:
         """Get or create per-tab state for the given tab.
@@ -147,10 +147,10 @@ class VSCodeServer(
             The per-tab state object.
         """
         with self._state_lock:
-            tab = WorktreeSorcarAgent.running_agent_states.get(tab_id)
+            tab = _RunningAgentState.running_agent_states.get(tab_id)
             if tab is None:
                 tab = _RunningAgentState(tab_id, self._default_model)
-                WorktreeSorcarAgent.running_agent_states[tab_id] = tab
+                _RunningAgentState.running_agent_states[tab_id] = tab
             # Lazily ensure an agent slot for tests / out-of-task
             # callers that read ``tab.agent`` directly (e.g. merge
             # / discard, worktree state inspection).  The agent is
@@ -175,7 +175,7 @@ class VSCodeServer(
         Returns:
             True if at least one tab has ``is_running_non_wt`` set.
         """
-        return any(t.is_running_non_wt for t in WorktreeSorcarAgent.running_agent_states.values())
+        return any(t.is_running_non_wt for t in _RunningAgentState.running_agent_states.values())
 
     def _handle_command(self, cmd: dict[str, Any]) -> None:
         """Dispatch a command from VS Code to the appropriate handler."""
@@ -376,7 +376,7 @@ class VSCodeServer(
             tab_id: The frontend tab identifier to close.
         """
         with self._state_lock:
-            tab = WorktreeSorcarAgent.running_agent_states.get(tab_id)
+            tab = _RunningAgentState.running_agent_states.get(tab_id)
             if tab is not None and (
                 tab.is_task_active
                 or tab.is_merging
@@ -384,7 +384,7 @@ class VSCodeServer(
             ):
                 tab.frontend_closed = True
                 return
-            WorktreeSorcarAgent.running_agent_states.pop(tab_id, None)
+            _RunningAgentState.running_agent_states.pop(tab_id, None)
         self._teardown_tab_resources(tab_id, tab)
 
     def _dispose_if_closed(self, tab_id: str) -> None:
@@ -402,7 +402,7 @@ class VSCodeServer(
         if not tab_id:
             return
         with self._state_lock:
-            tab = WorktreeSorcarAgent.running_agent_states.get(tab_id)
+            tab = _RunningAgentState.running_agent_states.get(tab_id)
             if tab is None or not tab.frontend_closed:
                 return
             if (
@@ -411,7 +411,7 @@ class VSCodeServer(
                 or (tab.task_thread is not None and tab.task_thread.is_alive())
             ):
                 return
-            WorktreeSorcarAgent.running_agent_states.pop(tab_id, None)
+            _RunningAgentState.running_agent_states.pop(tab_id, None)
         self._teardown_tab_resources(tab_id, tab)
 
     def _teardown_tab_resources(
@@ -672,7 +672,7 @@ class VSCodeServer(
             return False
         with self._state_lock:
             source: _RunningAgentState | None = None
-            for t in WorktreeSorcarAgent.running_agent_states.values():
+            for t in _RunningAgentState.running_agent_states.values():
                 if t.chat_id != chat_id:
                     continue
                 alive = t.task_thread is not None and t.task_thread.is_alive()

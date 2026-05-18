@@ -28,7 +28,7 @@ from kiss.agents.sorcar.persistence import (
     _save_task_extra,
     _save_task_result,
 )
-from kiss.agents.sorcar.running_agent_state import parse_task_tags
+from kiss.agents.sorcar.running_agent_state import _RunningAgentState, parse_task_tags
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.diff_merge import (
     _capture_untracked,
@@ -88,7 +88,7 @@ class _TaskRunnerMixin:
             self._run_task_inner(cmd)
         finally:
             with self._state_lock:
-                tab = WorktreeSorcarAgent.running_agent_states.get(tab_id)
+                tab = _RunningAgentState.running_agent_states.get(tab_id)
                 if tab is not None:
                     tab.task_thread = None
                     tab.stop_event = None
@@ -247,7 +247,7 @@ class _TaskRunnerMixin:
             with self._state_lock:
                 if any(
                     t.is_merging and t.use_worktree
-                    for t in WorktreeSorcarAgent.running_agent_states.values()
+                    for t in _RunningAgentState.running_agent_states.values()
                 ):
                     tab.is_task_active = False
                     self.printer.broadcast({
@@ -454,7 +454,7 @@ class _TaskRunnerMixin:
             logger.debug("_stop_task called without tab_id; ignoring")
             return
         with self._state_lock:
-            tab = WorktreeSorcarAgent.running_agent_states.get(tab_id)
+            tab = _RunningAgentState.running_agent_states.get(tab_id)
             pairs = [(tab.stop_event, tab.task_thread)] if tab is not None else []
         for stop_event, task_thread in pairs:
             if stop_event:
@@ -508,7 +508,7 @@ class _TaskRunnerMixin:
         tab_id = getattr(self.printer._thread_local, "tab_id", None)
         with self._state_lock:
             tab = (
-                WorktreeSorcarAgent.running_agent_states.get(tab_id)
+                _RunningAgentState.running_agent_states.get(tab_id)
                 if tab_id is not None
                 else None
             )

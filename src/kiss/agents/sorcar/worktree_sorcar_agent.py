@@ -12,7 +12,7 @@ import shutil
 import sys
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import yaml
 
@@ -31,10 +31,8 @@ from kiss.agents.sorcar.git_worktree import (
     repo_lock,
 )
 from kiss.agents.sorcar.persistence import _allocate_chat_id
+from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.core.kiss_error import KISSError
-
-if TYPE_CHECKING:
-    from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 
 logger = logging.getLogger(__name__)
 
@@ -86,22 +84,6 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
     Attributes:
         _wt: The current/pending worktree state, or ``None`` when idle.
     """
-
-    # Process-global map of frontend tab id → live per-tab agent
-    # runtime state.  Class attribute (shared across every
-    # :class:`WorktreeSorcarAgent` instance) so any helper inside the
-    # ``sorcar`` package can inspect or attach to a running agent
-    # without holding a reference to either the agent or the VS Code
-    # server.  Owned conceptually by the VS Code server, which mutates
-    # it under its own ``_state_lock`` to coordinate task lifecycle,
-    # merge, autocommit and worktree transitions.  Defined here —
-    # rather than inside :mod:`kiss.agents.sorcar.running_agent_state`
-    # — to avoid an import cycle: ``running_agent_state`` already
-    # imports :class:`WorktreeSorcarAgent`, so the annotation lives
-    # behind a ``TYPE_CHECKING`` guard.  Producers / consumers MUST
-    # hold ``VSCodeServer._state_lock`` for any multi-step access
-    # (read-then-modify, scan-then-modify).
-    running_agent_states: dict[str, _RunningAgentState] = {}
 
     def __init__(self, name: str) -> None:
         super().__init__(name)
@@ -549,7 +531,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
 
 
     def _register_running_state(self) -> bool:
-        """Publish ``self`` in :attr:`running_agent_states` for this chat.
+        """Publish ``self`` in :attr:`_RunningAgentState.running_agent_states` for this chat.
 
         Skips registration when an entry whose ``chat_id`` matches
         ``self._chat_id`` is already present: the VS Code server
@@ -571,11 +553,9 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             was already present (the existing owner is responsible
             for cleanup).
         """
-        for state in WorktreeSorcarAgent.running_agent_states.values():
+        for state in _RunningAgentState.running_agent_states.values():
             if state.chat_id == self._chat_id:
                 return False
-        from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-
         state = _RunningAgentState(
             self._chat_id,
             getattr(self, "model_name", "") or "",
@@ -587,25 +567,25 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         state.chat_id = self._chat_id
         state.selected_model = getattr(self, "model_name", "") or state.selected_model
         state.is_task_active = True
-        WorktreeSorcarAgent.running_agent_states[self._chat_id] = state
+        _RunningAgentState.running_agent_states[self._chat_id] = state
         return True
 
     def _unregister_running_state(self) -> None:
-        """Remove ``self``'s entry from :attr:`running_agent_states`.
+        """Remove ``self``'s entry from :attr:`_RunningAgentState.running_agent_states`.
 
         Only removes the entry we ourselves added.  A different code
         path (e.g. the VS Code server) may have replaced it mid-run;
         in that case the new owner is responsible for its own cleanup.
         """
         target_key: str | None = None
-        for key, state in WorktreeSorcarAgent.running_agent_states.items():
+        for key, state in _RunningAgentState.running_agent_states.items():
             if state.agent is self and state.chat_id == self._chat_id:
                 target_key = key
                 break
         if target_key is not None:
-            current = WorktreeSorcarAgent.running_agent_states[target_key]
+            current = _RunningAgentState.running_agent_states[target_key]
             current.is_task_active = False
-            WorktreeSorcarAgent.running_agent_states.pop(target_key, None)
+            _RunningAgentState.running_agent_states.pop(target_key, None)
 
     def run(  # type: ignore[override]
         self,
