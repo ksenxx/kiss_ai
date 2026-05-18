@@ -239,7 +239,7 @@ ______________________________________________________________________
   - `repo`: Git repo root path.
   - **Returns:** True if the pop succeeded, False on conflict or error.
 
-- **squash_merge_branch** — Squash-merge a branch and commit the result. Uses `git merge --squash` to apply all changes from *branch*, then commits them. The commit message is taken from git's auto-generated `SQUASH_MSG`. On conflict, resets to a clean state with `git reset --hard`.<br/>`squash_merge_branch(repo: Path, branch: str) -> MergeResult`
+- **squash_merge_branch** — Squash-merge a branch and commit the result. Uses `git merge --squash` to apply all changes from *branch*, then commits the staged result using the HEAD commit message of *branch* (see :meth:`_merge_commit_message`). On conflict, resets to a clean state with `git reset --hard`.<br/>`squash_merge_branch(repo: Path, branch: str) -> MergeResult`
 
   - `repo`: Git repo root path.
   - `branch`: Branch to squash-merge.
