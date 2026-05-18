@@ -84,6 +84,37 @@ _rw_lock = _RWLock()
 
 
 # ---------------------------------------------------------------------------
+# Chat-context text cache
+# ---------------------------------------------------------------------------
+#
+# Autocomplete (`_complete_from_active_file`) calls ``_load_chat_context`` on
+# every keystroke when ``chat_id`` is supplied — that runs a SELECT against
+# ``task_history`` and re-joins every prior task/result text in the session.
+# The chat context only changes when a task is added or a task result is
+# saved, so we cache the joined text per ``chat_id`` and invalidate on both
+# write paths.  The cache lives at module scope (not on the server instance)
+# so any caller — VS Code autocomplete, parallel sub-agents reusing the same
+# chat — benefits transparently, and tests that swap the database connection
+# don't accumulate stale invalidator callbacks.
+
+_chat_context_text_cache: dict[str, str] = {}
+_chat_context_cache_lock = threading.Lock()
+
+
+def _invalidate_chat_context_cache(chat_id: str = "") -> None:
+    """Drop the cached chat-context text for *chat_id*.
+
+    When *chat_id* is empty, the entire cache is cleared (used by test
+    fixtures that swap the underlying database file).
+    """
+    with _chat_context_cache_lock:
+        if chat_id:
+            _chat_context_text_cache.pop(chat_id, None)
+        else:
+            _chat_context_text_cache.clear()
+
+
+# ---------------------------------------------------------------------------
 # Paths and constants
 # ---------------------------------------------------------------------------
 
@@ -310,7 +341,12 @@ def _add_task(task: str, chat_id: str = "") -> tuple[int, str]:
         if row_id is None:  # pragma: no cover
             raise RuntimeError("sqlite did not return lastrowid")
         db.commit()
-        return row_id, chat_id
+    # Invalidate the autocomplete chat-context cache so the new task's
+    # text becomes visible to ghost-text suggestions on the next
+    # keystroke.  Done outside the write lock to keep the critical
+    # section short.
+    _invalidate_chat_context_cache(chat_id)
+    return row_id, chat_id
 
 
 def _allocate_chat_id() -> str:
@@ -527,6 +563,7 @@ def _save_task_result(
     # event stream alongside the new ``result`` value.
     _flush_chat_events()
     db = _get_db()
+    affected_chat_id = ""
     with _rw_lock.write_lock():
         resolved = _resolve_task_id(db, task_id, task)
         if resolved is None:
@@ -535,7 +572,17 @@ def _save_task_result(
             "UPDATE task_history SET result = ? WHERE id = ?",
             (result, resolved),
         )
+        row = db.execute(
+            "SELECT chat_id FROM task_history WHERE id = ?", (resolved,),
+        ).fetchone()
+        if row is not None:
+            affected_chat_id = row["chat_id"] or ""
         db.commit()
+    # Invalidate the autocomplete chat-context cache so the updated
+    # result text becomes visible to ghost-text suggestions on the next
+    # keystroke.  Done outside the write lock to keep the critical
+    # section short.
+    _invalidate_chat_context_cache(affected_chat_id)
 
 
 def _save_task_extra(
@@ -1087,6 +1134,46 @@ def _load_chat_context(chat_id: str) -> list[_HistoryEntry]:
             (chat_id,),
         ).fetchall()
         return [{"task": r["task"], "result": r["result"]} for r in rows]
+
+
+def _load_chat_context_text(chat_id: str) -> str:
+    """Return the joined task+result text for *chat_id* with caching.
+
+    Concatenates the ``task`` and ``result`` strings of every entry
+    returned by :func:`_load_chat_context` with newline separators.
+    The joined string is cached in ``_chat_context_text_cache`` and
+    automatically invalidated by :func:`_add_task` and
+    :func:`_save_task_result` so callers (notably the ghost-text
+    autocomplete, which calls this on every keystroke) never re-run
+    the SQL or rejoin the text while the chat context is unchanged.
+
+    Args:
+        chat_id: The string chat session identifier.  Empty string
+            short-circuits to ``""``.
+
+    Returns:
+        Newline-joined concatenation of every prior task and result
+        in the session, or ``""`` when *chat_id* is empty or no prior
+        rows exist.
+    """
+    if not chat_id:
+        return ""
+    with _chat_context_cache_lock:
+        cached = _chat_context_text_cache.get(chat_id)
+    if cached is not None:
+        return cached
+    parts: list[str] = []
+    for entry in _load_chat_context(chat_id):
+        task = entry.get("task")
+        result = entry.get("result")
+        if isinstance(task, str):
+            parts.append(task)
+        if isinstance(result, str):
+            parts.append(result)
+    text = "\n".join(parts)
+    with _chat_context_cache_lock:
+        _chat_context_text_cache[chat_id] = text
+    return text
 
 
 def _load_model_usage() -> dict[str, int]:
