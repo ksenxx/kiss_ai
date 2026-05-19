@@ -3105,11 +3105,11 @@
         // distinct in the truncated tab bar.  History-reopened
         // sub-agent rows have no ``taskIndex`` (the persisted
         // payload is just ``{parent_task_id}``); they fall back to
-        // a bare ⚡ flame, which the purple .subagent-tab accent
-        // already makes unambiguously a sub-agent tab.
+        // the bare description — the purple .subagent-tab accent
+        // already makes them unambiguously a sub-agent tab.
         const subIdx =
           typeof ev.taskIndex === 'number' ? ev.taskIndex + 1 : null;
-        const titlePrefix = subIdx !== null ? '⚡' + subIdx + ' ' : '⚡ ';
+        const titlePrefix = subIdx !== null ? subIdx + '. ' : '';
         const title = titlePrefix + subDesc.substring(0, 40);
         // Idempotent: if a tab with the same id already exists, update
         // it in place rather than pushing a duplicate.  Defends against
@@ -4747,7 +4747,7 @@
         // Sub-agent history rows reopen as a regular chat tab that
         // the backend (``_replay_session``) will then flip into a
         // sub-agent tab via ``openSubagentTab`` (purple accent,
-        // ⚡ icon, no input bar, no adjacent-task loading).  We do
+        // no input bar, no adjacent-task loading).  We do
         // not look up "is the original sub-agent tab still open?" —
         // sub-agent rows are persisted with just their parent
         // task_history.id, so the simplest UX is a fresh tab whose
