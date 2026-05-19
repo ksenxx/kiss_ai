@@ -82,6 +82,15 @@ class _RWLock:
 
 _rw_lock = _RWLock()
 
+# Dedicated mutex for first-time DDL (``_init_tables``).  We intentionally
+# do NOT reuse ``_rw_lock`` because most query helpers acquire the read
+# lock *before* calling ``_get_db()`` — if ``_get_db()`` then tried to
+# upgrade to ``_rw_lock.write_lock()`` for ``_init_tables`` it would
+# self-deadlock against its own read lock.  Concurrent CREATE TABLE
+# IF NOT EXISTS statements across threads are serialized through this
+# small lock instead, which is independent of the reader/writer queue.
+_init_tables_lock = threading.Lock()
+
 
 # ---------------------------------------------------------------------------
 # Chat-context text cache
@@ -284,10 +293,17 @@ def _get_db() -> sqlite3.Connection:
         isolation_level=None,  # true autocommit — no implicit BEGIN
     )
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.row_factory = sqlite3.Row
-    _init_tables(conn)
+    # Serialize first-time DDL across concurrent threads so CREATE TABLE
+    # statements (run by every fresh thread-local connection) don't race
+    # and trigger "database is locked" errors under heavy parallelism.
+    # NOTE: must use a dedicated lock (not ``_rw_lock``) — many callers
+    # already hold ``_rw_lock.read_lock()`` when invoking ``_get_db()``,
+    # so reusing the RW lock for DDL would self-deadlock.
+    with _init_tables_lock:
+        _init_tables(conn)
 
     tl.conn = conn
     tl.gen = _db_generation

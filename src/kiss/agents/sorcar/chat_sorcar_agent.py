@@ -203,6 +203,13 @@ class ChatSorcarAgent(SorcarAgent):
             getattr(printer, "_persist_agents", None) if printer else None
         )
 
+        # Per-sub-agent usage captured in the worker's ``finally`` block
+        # so the parent can aggregate cost / tokens / steps back into
+        # its own running totals after the pool drains.  Indexed by
+        # task position so order matches *tasks*.  Each tuple is
+        # ``(budget_used, total_tokens_used, total_steps)``.
+        sub_usage: list[tuple[float, int, int]] = [(0.0, 0, 0)] * len(tasks)
+
         def _run_single(args: tuple[int, str]) -> str:
             idx, task = args
             sub_tab_id = sub_tab_ids[idx]
@@ -274,11 +281,19 @@ class ChatSorcarAgent(SorcarAgent):
             _RunningAgentState.running_agent_states[sub_tab_id] = sub_state
             success = True
             try:
+                # ``is_parallel=True`` propagates the parallel capability
+                # so sub-agents get the ``run_parallel`` tool and can
+                # themselves invoke nested parallel execution.  Budget
+                # aggregation chains correctly because each level's
+                # sub-agent ``budget_used`` already includes its own
+                # nested sub-agents' costs (captured below via
+                # ``sub_usage`` in their own pool).
                 result: str = agent.run(
                     prompt_template=task,
                     model_name=model,
                     work_dir=work_dir,
                     printer=printer,
+                    is_parallel=True,
                 )
                 return result
             except Exception as exc:
@@ -289,6 +304,13 @@ class ChatSorcarAgent(SorcarAgent):
                 )
                 return error_result
             finally:
+                # Capture this sub-agent's running totals before its
+                # state is torn down so the parent can roll them up.
+                sub_usage[idx] = (
+                    float(getattr(agent, "budget_used", 0.0) or 0.0),
+                    int(getattr(agent, "total_tokens_used", 0) or 0),
+                    int(getattr(agent, "total_steps", 0) or 0),
+                )
                 if persist_agents is not None:
                     persist_agents.pop(sub_tab_id, None)
                 _RunningAgentState.running_agent_states.pop(sub_tab_id, None)
@@ -302,7 +324,37 @@ class ChatSorcarAgent(SorcarAgent):
                     })
 
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            return list(pool.map(_run_single, enumerate(tasks)))
+            results = list(pool.map(_run_single, enumerate(tasks)))
+
+        # Roll the sub-agents' cost / tokens / steps into this (parent)
+        # agent's running totals so the global accounting and UI reflect
+        # the full work done.  Without this aggregation, nested parallel
+        # sub-agent budgets stay invisible to the parent.  Matches the
+        # behaviour of ``SorcarAgent._run_tasks_parallel``.  Use
+        # ``getattr`` with float/int defaults because tests that drive
+        # ``_run_tasks_parallel`` directly (without going through
+        # :meth:`run`) may not have initialised the running-totals
+        # attributes on the parent.
+        self.budget_used = (
+            float(getattr(self, "budget_used", 0.0) or 0.0)
+            + sum(u[0] for u in sub_usage)
+        )
+        self.total_tokens_used = (
+            int(getattr(self, "total_tokens_used", 0) or 0)
+            + sum(u[1] for u in sub_usage)
+        )
+        self.total_steps = (
+            int(getattr(self, "total_steps", 0) or 0)
+            + sum(u[2] for u in sub_usage)
+        )
+        if self.printer is not None:
+            try:
+                self.printer.budget_offset = self.budget_used  # type: ignore[attr-defined]
+                self.printer.tokens_offset = self.total_tokens_used  # type: ignore[attr-defined]
+                self.printer.steps_offset = self.total_steps  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        return results
 
     def run(  # type: ignore[override]
         self,
