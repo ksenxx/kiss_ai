@@ -1147,23 +1147,69 @@ def _get_adjacent_task_by_chat_id(
 def _load_chat_context(chat_id: str) -> list[_HistoryEntry]:
     """Load all tasks and results for a chat session in chronological order.
 
+    Sub-agent rows (those whose ``extra`` column carries a
+    ``subagent`` key — set by :class:`ChatSorcarAgent._run_tasks_parallel`
+    on every worker thread's task row) are filtered out.  Sub-agent
+    tasks/results are an internal implementation detail of the
+    parent's ``run_parallel`` tool call; surfacing them in the chat
+    context would (a) pollute the LLM's "Previous tasks and results"
+    augmentation built by
+    :meth:`ChatSorcarAgent.build_chat_prompt` with N copies of every
+    fan-out task, and (b) cause the parent tab's history panel to
+    list the sub-agent rows alongside the parent task that already
+    summarises them.
+
     Args:
         chat_id: The string chat session identifier.
 
     Returns:
         List of dicts with ``task`` and ``result`` keys, ordered by
-        timestamp ascending (oldest first).
+        timestamp ascending (oldest first), excluding sub-agent rows.
     """
     if not chat_id:
         return []
     with _rw_lock.read_lock():
         db = _get_db()
         rows = db.execute(
-            "SELECT task, result FROM task_history "
+            "SELECT task, result, extra FROM task_history "
             "WHERE chat_id = ? ORDER BY timestamp ASC",
             (chat_id,),
         ).fetchall()
-        return [{"task": r["task"], "result": r["result"]} for r in rows]
+        entries: list[_HistoryEntry] = []
+        for r in rows:
+            if _is_subagent_row(r["extra"]):
+                continue
+            entries.append({"task": r["task"], "result": r["result"]})
+        return entries
+
+
+def _is_subagent_row(extra: object) -> bool:
+    """Return ``True`` when *extra* JSON encodes a sub-agent task row.
+
+    A sub-agent row is identified by the presence of a ``subagent``
+    key in the JSON object stored in ``task_history.extra`` — this
+    key is written by
+    :meth:`ChatSorcarAgent._run_tasks_parallel`'s worker thread for
+    every fan-out task.  Empty / missing / malformed ``extra``
+    values yield ``False`` so legacy rows that pre-date the
+    ``subagent`` marker continue to be treated as regular parent
+    tasks.
+
+    Args:
+        extra: The raw ``extra`` column value (``None``, ``""``, or a
+            JSON-encoded string).
+
+    Returns:
+        ``True`` if *extra* parses as a dict containing a ``subagent``
+        key, ``False`` otherwise.
+    """
+    if not extra or not isinstance(extra, str):
+        return False
+    try:
+        parsed = json.loads(extra)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    return isinstance(parsed, dict) and "subagent" in parsed
 
 
 def _load_chat_context_text(chat_id: str) -> str:
