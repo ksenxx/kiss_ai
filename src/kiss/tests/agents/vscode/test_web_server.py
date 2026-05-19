@@ -2459,6 +2459,61 @@ class TestAugmentMergeData(unittest.TestCase):
         self.assertEqual(result["data"]["files"][0]["base_text"], "")
         self.assertEqual(result["data"]["files"][0]["current_text"], "")
 
+    def test_binary_file_does_not_raise(self) -> None:
+        """Binary files (e.g. generated PDFs) must not crash augmentation.
+
+        Regression: ``Path.read_text()`` raises ``UnicodeDecodeError``
+        on binary content, which is a ``ValueError`` — NOT an
+        ``OSError`` — so the previous ``except (OSError, KeyError)``
+        let the exception bubble up through the broadcast path and
+        the merge UI never opened for binary-only changes.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            base_path = os.path.join(td, "old.pdf")
+            cur_path = os.path.join(td, "new.pdf")
+            # Bytes that fail UTF-8 decoding (typical PDF header + 0xff).
+            Path(base_path).write_bytes(b"%PDF-1.4\n\x00\x01\xff\xfe")
+            Path(cur_path).write_bytes(b"%PDF-1.7\n\x00\x02\xff\xfe")
+            event = {
+                "type": "merge_data",
+                "data": {
+                    "files": [
+                        {
+                            "base": base_path,
+                            "current": cur_path,
+                            "binary": True,
+                        }
+                    ]
+                },
+            }
+            # Must not raise, and must still yield string text fields
+            # so downstream JSON serialization is safe.
+            result = _augment_merge_data(event)
+            f = result["data"]["files"][0]
+            self.assertEqual(f["base_text"], "")
+            self.assertEqual(f["current_text"], "")
+            # JSON-serializable.
+            json.dumps(result)
+
+    def test_binary_file_without_flag_does_not_raise(self) -> None:
+        """Even without an explicit binary flag, undecodable bytes
+        must not break the broadcast path."""
+        with tempfile.TemporaryDirectory() as td:
+            base_path = os.path.join(td, "a.bin")
+            cur_path = os.path.join(td, "b.bin")
+            Path(base_path).write_bytes(b"\x00\xff\xfe\x80")
+            Path(cur_path).write_bytes(b"\x00\xff\xfe\x81")
+            event = {
+                "type": "merge_data",
+                "data": {
+                    "files": [{"base": base_path, "current": cur_path}]
+                },
+            }
+            result = _augment_merge_data(event)
+            f = result["data"]["files"][0]
+            self.assertEqual(f["base_text"], "")
+            self.assertEqual(f["current_text"], "")
+
 
 class TestReadVersion(unittest.TestCase):
     """Test _read_version helper."""
