@@ -418,10 +418,10 @@
         // Subagent tab indicator — only render the pulsing ◉ while the
         // sub-agent is actively running.  Once it's done (either fresh
         // completion or a non-running sub-agent loaded from history),
-        // suppress the green ✓ / red ✗ status icon: the purple
+        // suppress the green / red status circle: the purple
         // .subagent-tab accent is enough to identify the tab as a
-        // sub-agent, and an idle ✓ on a long-finished history tab adds
-        // noise without conveying new information.
+        // sub-agent, and an idle indicator on a long-finished history
+        // tab adds noise without conveying new information.
         if (!tab.isDone) {
           const subIndicator = document.createElement('span');
           subIndicator.className = 'subagent-indicator';
@@ -439,7 +439,10 @@
           icon.className = tab.lastTaskFailed
             ? 'chat-tab-status chat-tab-fail'
             : 'chat-tab-status chat-tab-ok';
-          icon.textContent = tab.lastTaskFailed ? '\u2717' : '\u2713';
+          // Show a filled circle (●) coloured green for success or red
+          // for failure via the .chat-tab-ok / .chat-tab-fail classes,
+          // replacing the previous ✓ / ✗ glyphs.
+          icon.textContent = '\u25CF';
           el.appendChild(icon);
         }
       }

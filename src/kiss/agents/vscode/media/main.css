@@ -175,7 +175,7 @@ body {
 }
 
 .chat-tab-status {
-  font-size: 10px; font-weight: 700; flex-shrink: 0; line-height: 1;
+  font-size: 12px; font-weight: 700; flex-shrink: 0; line-height: 1;
 }
 .chat-tab-ok { color: var(--green); }
 .chat-tab-fail { color: var(--red); }
