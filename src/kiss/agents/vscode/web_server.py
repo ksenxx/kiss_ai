@@ -1515,14 +1515,7 @@ width=device-width,initial-scale=1,maximum-scale=1">
 </head>
 <body class="remote-chat">
   <div id="app">
-    <div id="tab-bar"><div id="tab-list"></div><button
-     id="frequent-btn" class="tab-bar-action-btn"
-     data-tooltip="Frequent tasks" type="button">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-       stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <polyline points="20 12 18 7 14 17 10 5 6 14 4 12"/>
-      </svg>
-    </button><button id="history-btn" class="tab-bar-action-btn"
+    <div id="tab-bar"><div id="tab-list"></div><button id="history-btn" class="tab-bar-action-btn"
      data-tooltip="History" type="button">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
        stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1697,8 +1690,13 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
 
     <div id="sidebar">
       <button id="sidebar-close">&times;</button>
-      <div class="sidebar-section">
-        <div class="sidebar-hdr">Recent Conversations</div>
+      <div class="sidebar-tabs">
+        <button id="sidebar-tab-history" class="sidebar-tab active"
+         type="button">History</button>
+        <button id="sidebar-tab-frequent" class="sidebar-tab"
+         type="button">Frequent</button>
+      </div>
+      <div id="sidebar-tab-history-panel" class="sidebar-section sidebar-tab-panel">
         <div class="search-wrap">
           <input type="text" id="history-search" placeholder="Search history...">
           <button class="search-clear-btn" id="history-search-clear"
@@ -1708,19 +1706,14 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
           <div class="sidebar-empty">No conversations yet</div>
         </div>
       </div>
-    </div>
-    <div id="sidebar-overlay"></div>
-
-    <div id="frequent-sidebar">
-      <button id="frequent-sidebar-close">&times;</button>
-      <div class="sidebar-section">
-        <div class="sidebar-hdr">Frequent Tasks</div>
+      <div id="sidebar-tab-frequent-panel"
+       class="sidebar-section sidebar-tab-panel" style="display:none;">
         <div id="frequent-list">
           <div class="sidebar-empty">No tasks yet</div>
         </div>
       </div>
     </div>
-    <div id="frequent-sidebar-overlay"></div>
+    <div id="sidebar-overlay"></div>
 
     <div id="config-sidebar">
       <button id="config-sidebar-close">&times;</button>
