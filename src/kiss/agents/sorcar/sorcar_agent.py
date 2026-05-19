@@ -152,35 +152,39 @@ class SorcarAgent(RelentlessAgent):
         if self._use_web_tools and self.web_use_tool is None:
             self.web_use_tool = WebUseTool()
             tools.extend(self.web_use_tool.get_tools())
-        def run_parallel(tasks: list[str], max_workers: int | None = None) -> str:
+        def run_parallel(tasks: str, max_workers: str = "") -> str:
             """Run multiple independent tasks concurrently using parallel agents.
 
-            Spawns a separate SorcarAgent for each task string and executes
-            them in parallel threads.  Use this tool when you have two or
-            more **independent** sub-tasks that do not depend on each
-            other's results (e.g. summarising several files, researching
-            separate topics, running independent code changes, searching
-            multiple solutions).
+            Spawns a separate ChatSorcarAgent for each task string and executes
+            them in parallel threads.
 
-            Each parallel agent inherits the current model and working
-            directory.  Results are returned in the same order as the
-            input tasks.
+            **When to call run_parallel:**
+            - Multi-source / multi-topic research ("research these 5
+              companies", "summarize each of these N PDFs").
+            - Codebase exploration across unrelated modules ("look at the
+              frontend, backend, db layer, and auth in parallel").
+            - Multi-perspective review of one artifact (correctness
+              reviewer + security reviewer + style reviewer +
+              architecture reviewer, each looking at the same diff with
+              a different lens).
+            - Generating N alternative candidates for the same problem
+              so the orchestrator can pick the best.
+            - Independent test suites or validations on disjoint targets.
+            - Bulk file generation when each file is independent and the
+              API contract between them is already pinned down in a
+              spec.
 
-            **When NOT to use**: Do not use this for tasks that must run
-            sequentially or that depend on each other's output.
 
             Args:
-                tasks: List of task description strings.  Each string is a
-                    complete, self-contained instruction that a fresh
-                    SorcarAgent can execute on its own.  Example::
+                tasks: A JSON-encoded list of task description strings.
+                    Example::
 
-                        [
-                            "Read src/foo.py and summarize its purpose",
-                            "Read src/bar.py and summarize its purpose",
-                            "Find the current weather in San Francisco",
-                        ]
-                max_workers: Maximum number of concurrent threads.
-                    ``None`` (default) lets Python choose automatically.
+                        '["Read src/foo.py and summarize its purpose", '
+                        '"Read src/bar.py and summarize its purpose", '
+                        '"Find the current weather in San Francisco"]'
+                max_workers: Maximum number of concurrent threads, as a
+                    string containing an integer (e.g. ``"4"``).  An empty
+                    string (default) lets Python choose automatically.
                     Set to a lower number to limit concurrency.
 
             Returns:
@@ -188,7 +192,9 @@ class SorcarAgent(RelentlessAgent):
                 objects, one per task, in the same order as the input.
                 Each result object has ``success`` and ``summary`` keys.
             """
-            results = self._run_tasks_parallel(tasks, max_workers=max_workers)
+            task_list = _coerce_tasks(tasks)
+            workers: int | None = int(max_workers) if max_workers else None
+            results = self._run_tasks_parallel(task_list, max_workers=workers)
             result_str: str = yaml.dump(results, sort_keys=False)
             return result_str
 
