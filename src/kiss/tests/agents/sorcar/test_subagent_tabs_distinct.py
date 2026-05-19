@@ -62,7 +62,7 @@ class _MockPrinter:
 class TestBackendBroadcastsDistinctSubagentTabs:
     def test_module_level_run_tasks_parallel_includes_task_index(self) -> None:
         printer = _MockPrinter()
-        printer._thread_local.tab_id = "parent-1"
+        printer._thread_local.task_id = "parent-1"
 
         with patch(
             "kiss.agents.sorcar.sorcar_agent.SorcarAgent.run",
@@ -89,7 +89,7 @@ class TestBackendBroadcastsDistinctSubagentTabs:
         agent = ChatSorcarAgent("test")
         printer = _MockPrinter()
         agent.printer = cast(Printer | None, printer)
-        printer._thread_local.tab_id = "parent-2"
+        printer._thread_local.task_id = "parent-2"
 
         with patch.object(
             agent,

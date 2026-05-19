@@ -280,7 +280,7 @@ class TestCCOpusTextStreamingInToolMode:
             subprocess.Popen = original_popen  # type: ignore[assignment,misc]
 
         # Read raw recording before coalescing to count individual broadcasts
-        key = printer._tab_key()
+        key = printer._task_key()
         with printer._lock:
             raw = list(printer._recordings.get(key, []))
         raw_text_deltas = [e for e in raw if e.get("type") == "text_delta"]
@@ -322,7 +322,7 @@ class TestCCOpusTextStreamingInToolMode:
             subprocess.Popen = original_popen  # type: ignore[assignment,misc]
 
         # Read raw recording before coalescing
-        key = printer._tab_key()
+        key = printer._task_key()
         with printer._lock:
             raw = list(printer._recordings.get(key, []))
         raw_types = [e.get("type") for e in raw]
@@ -378,7 +378,7 @@ class TestCCOpusTextStreamingInToolMode:
             subprocess.Popen = original_popen  # type: ignore[assignment,misc]
 
         # Read raw recording before coalescing
-        key = printer._tab_key()
+        key = printer._task_key()
         with printer._lock:
             raw = list(printer._recordings.get(key, []))
         raw_text_deltas = [e for e in raw if e.get("type") == "text_delta"]

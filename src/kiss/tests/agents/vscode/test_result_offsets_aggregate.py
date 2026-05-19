@@ -28,7 +28,7 @@ class _CapturePrinter(BaseBrowserPrinter):
         self._ev_lock = threading.Lock()
 
     def broadcast(self, event: dict) -> None:
-        event = self._inject_tab_id(event)
+        event = self._inject_task_id(event)
         with self._ev_lock:
             self.events.append(event)
 
@@ -46,7 +46,7 @@ def test_result_panel_adds_budget_offset_from_subagents() -> None:
     0.1058 should yield a displayed total of $0.3030.
     """
     printer = _CapturePrinter()
-    printer._thread_local.tab_id = "parent-tab"
+    printer._thread_local.task_id = "parent-tab"
     # Simulate run_parallel having accumulated three sub-agents'
     # cost / tokens / steps into the printer offsets.
     printer.budget_offset = 0.0615 + 0.0721 + 0.0636  # = 0.1972
@@ -84,7 +84,7 @@ def test_result_panel_with_no_offsets_unchanged() -> None:
     Guards the fix against double-counting when no sub-agents ran.
     """
     printer = _CapturePrinter()
-    printer._thread_local.tab_id = "solo-tab"
+    printer._thread_local.task_id = "solo-tab"
 
     printer.print(
         "summary: ok\nsuccess: true\n",
@@ -105,7 +105,7 @@ def test_result_panel_with_no_offsets_unchanged() -> None:
 def test_result_panel_handles_na_cost() -> None:
     """``cost="N/A"`` must be left alone even when offsets are set."""
     printer = _CapturePrinter()
-    printer._thread_local.tab_id = "na-tab"
+    printer._thread_local.task_id = "na-tab"
     printer.budget_offset = 0.20
     printer.tokens_offset = 100
     printer.steps_offset = 4

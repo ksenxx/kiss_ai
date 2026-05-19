@@ -77,7 +77,7 @@ class TestSubagentTabsIntegration:
         agent = ChatSorcarAgent("test-agent")
         mock_printer = MockPrinter()
         agent.printer = cast(Printer | None, mock_printer)
-        mock_printer._thread_local.tab_id = "parent-tab-1"
+        mock_printer._thread_local.task_id = "parent-tab-1"
 
         # Mock run() to avoid actual API calls
         with patch.object(agent, "run", return_value='{"result": "done"}'):
@@ -111,7 +111,7 @@ class TestSubagentTabsIntegration:
         agent = ChatSorcarAgent("test-agent")
         mock_printer = MockPrinter()
         agent.printer = cast(Printer | None, mock_printer)
-        mock_printer._thread_local.tab_id = "parent-tab-2"
+        mock_printer._thread_local.task_id = "parent-tab-2"
 
         # Mock run() to avoid actual API calls
         with patch.object(agent, "run", return_value='{"result": "success"}'):
@@ -139,11 +139,11 @@ class TestSubagentTabsIntegration:
         agent = ChatSorcarAgent("test-agent")
         printer = MockPrinter()
         agent.printer = cast(Printer | None, printer)
-        printer._thread_local.tab_id = "parent-tab-3"
+        printer._thread_local.task_id = "parent-tab-3"
 
         # Manually simulate what happens in _run_single
         sub_tab_id = "parent-tab-3__sub_0"
-        printer._thread_local.tab_id = sub_tab_id
+        printer._thread_local.task_id = sub_tab_id
 
         # Simulate events from sub-agent
         printer.text_delta("Hello ")
