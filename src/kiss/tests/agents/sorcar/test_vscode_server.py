@@ -356,7 +356,7 @@ class TestLastActiveFile(unittest.TestCase):
 
 
 class TestMainJsFrequentTasksLimit(unittest.TestCase):
-    """Test that openFrequentSidebar requests 50 frequent tasks, not fewer."""
+    """The Frequent sub-tab requests 50 frequent tasks, not fewer."""
 
     js: str
 
@@ -366,7 +366,7 @@ class TestMainJsFrequentTasksLimit(unittest.TestCase):
         cls.js = (base / "vscode" / "media" / "main.js").read_text()
 
     def test_frequent_sidebar_requests_limit_50(self) -> None:
-        """openFrequentSidebar sends getFrequentTasks with limit: 50."""
+        """Frequent-tasks sub-tab sends ``getFrequentTasks`` with limit: 50."""
         assert "getFrequentTasks" in self.js
         assert "limit: 50" in self.js
         assert "limit: 20" not in self.js
@@ -494,12 +494,41 @@ class TestHistoryPanelSearchOnOpen(unittest.TestCase):
         end = self._js.index("sidebarClose.addEventListener(", idx)
         return self._js[idx:end]
 
+    def _get_switch_sidebar_tab_body(self) -> str:
+        """Extract the switchSidebarTab function body."""
+        import re
+
+        m = re.search(
+            r"function switchSidebarTab\([^)]*\)\s*\{", self._js
+        )
+        assert m, "switchSidebarTab function not found"
+        start = m.start()
+        brace = 0
+        for i in range(m.end() - 1, len(self._js)):
+            ch = self._js[i]
+            if ch == "{":
+                brace += 1
+            elif ch == "}":
+                brace -= 1
+                if brace == 0:
+                    return self._js[start : i + 1]
+        raise AssertionError("Could not extract switchSidebarTab body")
+
     def test_history_btn_click_sends_query(self) -> None:
-        """historyBtn click handler includes query: historySearch.value."""
+        """Opening the sidebar from history-btn sends query: historySearch.value.
+
+        The history-btn click handler delegates to ``switchSidebarTab('history')``,
+        which is responsible for sending ``getHistory`` with the current search
+        query so existing search text filters the results on panel open.
+        """
         body = self._get_history_btn_click_body()
-        assert "query: historySearch.value" in body, (
-            "historyBtn click handler must send query: historySearch.value "
-            "so existing search text filters the results on panel open"
+        assert "switchSidebarTab('history')" in body, (
+            "history-btn click handler must call switchSidebarTab('history')"
+        )
+        switch_body = self._get_switch_sidebar_tab_body()
+        assert "query: historySearch" in switch_body, (
+            "switchSidebarTab must send query: historySearch.value so "
+            "existing search text filters the results on panel open"
         )
 
     def test_all_get_history_calls_include_query(self) -> None:

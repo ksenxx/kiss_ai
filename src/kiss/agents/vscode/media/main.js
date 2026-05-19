@@ -817,14 +817,16 @@
   );
   const configSidebarClose = document.getElementById('config-sidebar-close');
 
-  // Frequent-tasks sidebar elements
-  const frequentBtn = document.getElementById('frequent-btn');
-  const frequentSidebar = document.getElementById('frequent-sidebar');
-  const frequentSidebarOverlay = document.getElementById(
-    'frequent-sidebar-overlay',
+  // Sidebar tab elements (History / Frequent tasks live inside #sidebar).
+  const sidebarTabHistoryBtn = document.getElementById('sidebar-tab-history');
+  const sidebarTabFrequentBtn = document.getElementById(
+    'sidebar-tab-frequent',
   );
-  const frequentSidebarClose = document.getElementById(
-    'frequent-sidebar-close',
+  const sidebarTabHistoryPanel = document.getElementById(
+    'sidebar-tab-history-panel',
+  );
+  const sidebarTabFrequentPanel = document.getElementById(
+    'sidebar-tab-frequent-panel',
   );
   const frequentList = document.getElementById('frequent-list');
   const autocommitBtn = document.getElementById('autocommit-btn');
@@ -3901,14 +3903,6 @@
         e.preventDefault();
         closeSidebar();
       }
-      if (
-        e.key === 'Escape' &&
-        frequentSidebar &&
-        frequentSidebar.classList.contains('open')
-      ) {
-        e.preventDefault();
-        closeFrequentSidebar();
-      }
     });
     inp.addEventListener('keydown', e => {
       // Autocomplete navigation
@@ -4156,20 +4150,17 @@
       }
     });
     historyBtn.addEventListener('click', () => {
-      if (sidebar.classList.contains('open')) {
+      if (
+        sidebar.classList.contains('open') &&
+        sidebarTabHistoryBtn.classList.contains('active')
+      ) {
         closeSidebar();
       } else {
         closeConfigSidebar();
-        closeFrequentSidebar();
-        resetHistoryPagination();
         sidebar.classList.add('open');
         sidebarOverlay.classList.add('open');
         historyBtn.classList.add('active');
-        vscode.postMessage({
-          type: 'getHistory',
-          query: historySearch.value,
-          generation: historyGeneration,
-        });
+        switchSidebarTab('history');
       }
     });
     sidebarClose.addEventListener('click', closeSidebar);
@@ -4181,20 +4172,15 @@
         openConfigSidebar();
       }
     });
-    if (frequentBtn) {
-      frequentBtn.addEventListener('click', () => {
-        if (frequentSidebar.classList.contains('open')) {
-          closeFrequentSidebar();
-        } else {
-          openFrequentSidebar();
-        }
+    if (sidebarTabHistoryBtn) {
+      sidebarTabHistoryBtn.addEventListener('click', () => {
+        switchSidebarTab('history');
       });
     }
-    if (frequentSidebarClose) {
-      frequentSidebarClose.addEventListener('click', closeFrequentSidebar);
-    }
-    if (frequentSidebarOverlay) {
-      frequentSidebarOverlay.addEventListener('click', closeFrequentSidebar);
+    if (sidebarTabFrequentBtn) {
+      sidebarTabFrequentBtn.addEventListener('click', () => {
+        switchSidebarTab('frequent');
+      });
     }
     configSidebarClose.addEventListener('click', closeConfigSidebar);
     configSidebarOverlay.addEventListener('click', closeConfigSidebar);
@@ -4840,7 +4826,6 @@
   function openConfigSidebar() {
     closeConfigSidebar();
     closeSidebar();
-    closeFrequentSidebar();
     configFormPopulated = false;
     vscode.postMessage({type: 'getConfig'});
     configSidebar.classList.add('open');
@@ -4857,20 +4842,35 @@
     configBtn.classList.remove('active');
   }
 
-  function openFrequentSidebar() {
-    if (!frequentSidebar) return;
-    closeSidebar();
-    closeConfigSidebar();
-    vscode.postMessage({type: 'getFrequentTasks', limit: 50});
-    frequentSidebar.classList.add('open');
-    if (frequentSidebarOverlay) frequentSidebarOverlay.classList.add('open');
-    if (frequentBtn) frequentBtn.classList.add('active');
-  }
-  function closeFrequentSidebar() {
-    if (!frequentSidebar) return;
-    frequentSidebar.classList.remove('open');
-    if (frequentSidebarOverlay) frequentSidebarOverlay.classList.remove('open');
-    if (frequentBtn) frequentBtn.classList.remove('active');
+  /**
+   * Show one of the in-panel sidebar tabs ("history" or "frequent") and
+   * trigger the matching backend fetch.  Toggles the ``.active`` class on
+   * the tab buttons and the ``display`` of the panels.
+   */
+  function switchSidebarTab(tab) {
+    const showFrequent = tab === 'frequent';
+    if (sidebarTabHistoryBtn) {
+      sidebarTabHistoryBtn.classList.toggle('active', !showFrequent);
+    }
+    if (sidebarTabFrequentBtn) {
+      sidebarTabFrequentBtn.classList.toggle('active', showFrequent);
+    }
+    if (sidebarTabHistoryPanel) {
+      sidebarTabHistoryPanel.style.display = showFrequent ? 'none' : '';
+    }
+    if (sidebarTabFrequentPanel) {
+      sidebarTabFrequentPanel.style.display = showFrequent ? '' : 'none';
+    }
+    if (showFrequent) {
+      vscode.postMessage({type: 'getFrequentTasks', limit: 50});
+    } else {
+      resetHistoryPagination();
+      vscode.postMessage({
+        type: 'getHistory',
+        query: historySearch ? historySearch.value : '',
+        generation: historyGeneration,
+      });
+    }
   }
 
   function renderFrequentTasks(tasks) {
@@ -4904,7 +4904,7 @@
         inp.style.height = 'auto';
         inp.style.height = inp.scrollHeight + 'px';
         inp.focus();
-        closeFrequentSidebar();
+        closeSidebar();
       });
       frequentList.appendChild(div);
     });
