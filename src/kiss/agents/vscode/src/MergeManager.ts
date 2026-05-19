@@ -28,6 +28,8 @@ interface MergeFileState {
   hunks: ProcessedHunk[];
   /** True when the file did not exist before the agent created it. */
   isNewFile: boolean;
+  /** True for binary files that cannot be diffed at the line level. */
+  isBinary: boolean;
 }
 
 export interface MergeFileData {
@@ -35,6 +37,8 @@ export interface MergeFileData {
   base: string;
   current: string;
   hunks: Array<{bs: number; bc: number; cs: number; cc: number}>;
+  /** Set to true for binary files with no text hunks. */
+  binary?: boolean;
 }
 
 export interface MergeData {
@@ -102,7 +106,7 @@ export class MergeManager extends EventEmitter {
   private _onWillSave(e: vscode.TextDocumentWillSaveEvent): void {
     const fp = e.document.uri.fsPath;
     const s = this._ms[fp];
-    if (!s || s.hunks.length === 0) return;
+    if (!s || s.hunks.length === 0 || s.isBinary) return;
     this._reinsertingFiles.add(fp);
     e.waitUntil(
       (async () => {
@@ -261,6 +265,26 @@ export class MergeManager extends EventEmitter {
     const s = this._ms[fp];
     if (!s) return;
     const h = s.hunks[idx];
+    // Binary files: no text editing — just accept or reject the whole file
+    if (s.isBinary) {
+      const wasNew = s.isNewFile;
+      const basePath = s.basePath;
+      s.hunks.splice(idx, 1);
+      if (!s.hunks.length) {
+        delete this._ms[fp];
+        if (countProp === 'nc') {
+          // Rejecting: restore base or delete new file
+          if (wasNew) {
+            await this._deleteNewFile(fp);
+          } else {
+            this._restoreBinaryBase(fp, basePath);
+          }
+        }
+      }
+      this.emit('hunkProcessed');
+      this._afterHunkAction(fp);
+      return;
+    }
     if (h[countProp] > 0) {
       const ed = await this._getOrOpenEditor(fp);
       const ok = await this._delLinesWithRetry(ed, h[startProp], h[countProp]);
@@ -380,6 +404,16 @@ export class MergeManager extends EventEmitter {
       idx: this._ms[found.fp].hunks.indexOf(found.h),
     };
 
+    // Binary files: open with vscode.open which handles non-text files
+    if (this._ms[found.fp]?.isBinary) {
+      await vscode.commands.executeCommand(
+        'vscode.open',
+        vscode.Uri.file(found.fp),
+        {viewColumn: vscode.ViewColumn.One, preview: false},
+      );
+      return;
+    }
+
     const doc = await vscode.workspace.openTextDocument(
       vscode.Uri.file(found.fp),
     );
@@ -422,6 +456,20 @@ export class MergeManager extends EventEmitter {
   }
 
   /**
+   * Restore the pre-task base content of a binary file on reject.
+   *
+   * Copies the saved base file back to the current path so the
+   * agent's binary changes are reverted.
+   */
+  private _restoreBinaryBase(fp: string, basePath: string): void {
+    try {
+      fs.copyFileSync(basePath, fp);
+    } catch {
+      console.error(`[MergeManager] failed to restore binary base for ${fp}`);
+    }
+  }
+
+  /**
    * Delete a newly-created file from disk and close its editor tab.
    *
    * Called when the user rejects all changes to a file that the agent
@@ -451,9 +499,18 @@ export class MergeManager extends EventEmitter {
     const fps = Object.keys(this._ms);
     const newFilesToDelete =
       countProp === 'nc' ? fps.filter(fp => this._ms[fp]?.isNewFile) : [];
+    // Collect binary files that need base restoration on reject
+    const binaryToRestore =
+      countProp === 'nc'
+        ? fps
+            .filter(fp => this._ms[fp]?.isBinary && !this._ms[fp]?.isNewFile)
+            .map(fp => ({fp, basePath: this._ms[fp].basePath}))
+        : [];
     try {
       for (const fp of fps) {
-        await this._deleteFileHunks(fp, countProp, startProp);
+        if (!this._ms[fp]?.isBinary) {
+          await this._deleteFileHunks(fp, countProp, startProp);
+        }
       }
     } finally {
       this._ms = {};
@@ -463,6 +520,9 @@ export class MergeManager extends EventEmitter {
       }
       for (const fp of newFilesToDelete) {
         await this._deleteNewFile(fp);
+      }
+      for (const {fp, basePath} of binaryToRestore) {
+        this._restoreBinaryBase(fp, basePath);
       }
       await vscode.workspace.saveAll(false);
       vscode.window.showInformationMessage(label);
@@ -475,11 +535,21 @@ export class MergeManager extends EventEmitter {
     countProp: 'oc' | 'nc',
     startProp: 'os' | 'ns',
   ): Promise<void> {
-    const wasNew = this._ms[fp]?.isNewFile ?? false;
-    await this._deleteFileHunks(fp, countProp, startProp);
+    const s = this._ms[fp];
+    const wasNew = s?.isNewFile ?? false;
+    const wasBinary = s?.isBinary ?? false;
+    const basePath = s?.basePath ?? '';
+    if (!wasBinary) {
+      await this._deleteFileHunks(fp, countProp, startProp);
+    }
     delete this._ms[fp];
-    if (wasNew && countProp === 'nc') {
-      await this._deleteNewFile(fp);
+    if (countProp === 'nc') {
+      // Rejecting
+      if (wasNew) {
+        await this._deleteNewFile(fp);
+      } else if (wasBinary) {
+        this._restoreBinaryBase(fp, basePath);
+      }
     }
     this._curHunk = null;
     this._afterHunkAction(fp);
@@ -568,6 +638,35 @@ export class MergeManager extends EventEmitter {
     let firstFileFp: string | null = null;
 
     for (const f of data.files || []) {
+      if (!firstFileFp) {
+        firstFileFp = f.current;
+      }
+
+      // Binary files: skip text editing, add a dummy hunk for navigation
+      if (f.binary) {
+        const dummyHunk: ProcessedHunk = {
+          os: 0,
+          oc: 0,
+          ns: 0,
+          nc: 0,
+          baseLines: [],
+        };
+        const hasBase = (() => {
+          try {
+            return fs.statSync(f.base).size > 0;
+          } catch {
+            return false;
+          }
+        })();
+        this._ms[f.current] = {
+          basePath: f.base,
+          hunks: [dummyHunk],
+          isNewFile: !hasBase,
+          isBinary: true,
+        };
+        continue;
+      }
+
       const currentUri = vscode.Uri.file(f.current);
       const doc = await vscode.workspace.openTextDocument(currentUri);
 
@@ -592,10 +691,6 @@ export class MergeManager extends EventEmitter {
         } catch {
           /* ignore */
         }
-      }
-
-      if (!firstFileFp) {
-        firstFileFp = f.current;
       }
 
       let baseLines: string[] = [];
@@ -641,7 +736,12 @@ export class MergeManager extends EventEmitter {
 
       const isNewFile =
         processed.length > 0 && processed.every(h => h.oc === 0);
-      this._ms[f.current] = {basePath: f.base, hunks: processed, isNewFile};
+      this._ms[f.current] = {
+        basePath: f.base,
+        hunks: processed,
+        isNewFile,
+        isBinary: false,
+      };
     }
 
     // Show only the first changed file in the editor (viewColumn: One
@@ -649,21 +749,30 @@ export class MergeManager extends EventEmitter {
     // and navigate to its first hunk.
     if (firstFileFp && this._ms[firstFileFp]?.hunks.length) {
       this._curHunk = {fp: firstFileFp, idx: 0};
-      const firstDoc = await vscode.workspace.openTextDocument(
-        vscode.Uri.file(firstFileFp),
-      );
-      const firstEd = await vscode.window.showTextDocument(firstDoc, {
-        preview: false,
-        viewColumn: vscode.ViewColumn.One,
-      });
-      const fh = this._ms[firstFileFp].hunks[0];
-      const fl = fh.nc > 0 ? fh.ns : fh.os;
-      firstEd.revealRange(
-        new vscode.Range(fl, 0, fl, 0),
-        vscode.TextEditorRevealType.InCenter,
-      );
-      firstEd.selection = new vscode.Selection(fl, 0, fl, 0);
-      this._refreshDeco(firstFileFp);
+      if (this._ms[firstFileFp].isBinary) {
+        // Binary file: use vscode.open which handles non-text files
+        await vscode.commands.executeCommand(
+          'vscode.open',
+          vscode.Uri.file(firstFileFp),
+          {viewColumn: vscode.ViewColumn.One, preview: false},
+        );
+      } else {
+        const firstDoc = await vscode.workspace.openTextDocument(
+          vscode.Uri.file(firstFileFp),
+        );
+        const firstEd = await vscode.window.showTextDocument(firstDoc, {
+          preview: false,
+          viewColumn: vscode.ViewColumn.One,
+        });
+        const fh = this._ms[firstFileFp].hunks[0];
+        const fl = fh.nc > 0 ? fh.ns : fh.os;
+        firstEd.revealRange(
+          new vscode.Range(fl, 0, fl, 0),
+          vscode.TextEditorRevealType.InCenter,
+        );
+        firstEd.selection = new vscode.Selection(fl, 0, fl, 0);
+        this._refreshDeco(firstFileFp);
+      }
     } else {
       this._curHunk = null;
     }
