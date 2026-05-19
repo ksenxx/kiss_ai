@@ -328,7 +328,7 @@ The prompt opens with two XML-tagged sections that establish who the agent is an
 You are KISS Sorcar, an AI General Assistant and IDE
 developed by Koushik Sen (ksen@berkeley.edu).
 Repo: https://github.com/ksenxx/kiss_ai
-Version: 2026.5.23
+Version: 2026.5.32
 
 Your sole goal is completing the user's task accurately
 and thoroughly.  Be rigorous, check facts, and produce
@@ -344,6 +344,15 @@ directly inside the summary string of finish(). When
 answering informational questions, include the complete
 answer in the summary, not a meta-description of what
 was done.
+
+**Bad** (meta-description): "Greeted the user and asked
+what they'd like to work on. Awaiting a specific task."
+**Good** (actual content): "Hi! I'm KISS Sorcar, ready
+to help. What would you like to work on?"
+
+The summary must contain the actual content the user
+should see, not a third-person narration of what
+happened.
 </visibility_constraint>
 \end{prompt}
 
@@ -353,7 +362,7 @@ was done.
 
 \textbf{Task focus.}  ``Your sole goal is completing the user's task accurately and thoroughly'' anchors the model on the task at hand and discourages meta-commentary, tangential exploration, and unsolicited clarification questions that consume tokens without making progress.  It also instructs the model to treat errors as obstacles to overcome rather than reasons to stop.
 
-\textbf{Visibility constraint as a separate section.}  The \texttt{<visibility\_constraint>} block is separated from tool rules because it governs a different concern: not \emph{how} to use tools, but \emph{what the user can see}.  Without this instruction, the model may ``tell'' the user something in an intermediate message and then assume the user has seen it, leading to confusion when the user asks for information the model believes it already provided.  The clause ``not a meta-description of what was done'' prevents the model from returning vague summaries like ``Fixed the bug in Y'' instead of showing the actual fix; it forces the model to include concrete details, results, and outputs in the summary.  A second audit found that 3~out of 91~production tasks still produced meta-descriptions (e.g., ``Greeted the user and asked what they'd like to work on'' instead of the actual greeting).  The current version now includes explicit good/bad examples directly in the prompt to make the distinction concrete and unambiguous.
+\textbf{Visibility constraint as a separate section.}  The \texttt{<visibility\_constraint>} block is separated from tool rules because it governs a different concern: not \emph{how} to use tools, but \emph{what the user can see}.  Without this instruction, the model may ``tell'' the user something in an intermediate message and then assume the user has seen it, leading to confusion when the user asks for information the model believes it already provided.  The clause ``not a meta-description of what was done'' prevents the model from returning vague summaries like ``Fixed the bug in Y'' instead of showing the actual fix; it forces the model to include concrete details, results, and outputs in the summary.  A second audit found that 3~out of 91~production tasks still produced meta-descriptions (e.g., ``Greeted the user and asked what they'd like to work on'' instead of the actual greeting).  The current version now includes explicit \textbf{Bad}/\textbf{Good} examples directly in the prompt---contrasting a third-person meta-description against the actual greeting the user should see---to make the distinction concrete and unambiguous, and closes with the directive that ``the summary must contain the actual content the user should see, not a third-person narration of what happened.''
 
 %......................................................................
 \subsection{Tool Rules}
@@ -365,15 +374,24 @@ Tool usage rules are explicit and mechanical:
 <tool_rules>
 ## Tool Usage
 
-- PWD = current working directory. Use Write() for new
-  files; Edit() for small changes.
+- PWD denotes current working directory and DOES NOT
+  REFER to a directory named PWD.
+- Use Write() for new files; Edit() for small changes.
 - Run Bash synchronously with timeout_seconds (default
-  300s). On timeout, retry with a higher value.  For
+  120s). On timeout, retry with a higher value.  For
   commands exceeding 10 minutes, run in background,
   redirect output to a file, and poll periodically.
 - Use go_to_url() for browser navigation.
-- Read large files in chunks. Store temp files in
-  PWD/tmp; clean up after.
+- Read large files in chunks.
+- **Temporary files -- CRITICAL**: ALL temporary,
+  scratch, and intermediate files MUST be created
+  inside PWD/tmp/, never directly in PWD/. This
+  includes research notes, file-information dumps,
+  downloaded artifacts, build outputs, and any other
+  transient file. Create PWD/tmp/ if it doesn't exist.
+  Before calling finish(), delete every temporary file
+  you created in PWD/tmp/ (but not the directory
+  itself if it was pre-existing).
 - When multiple independent tool calls are needed, make
   them all in the same turn to maximize parallelism.
   When calls depend on prior results, sequence them
@@ -385,19 +403,27 @@ Tool usage rules are explicit and mechanical:
   finish(is_continue=True) to pause and resume the task
   in a new context.
 </tool_rules>
+
+- If there is ambiguity or under specification in the
+  user task, search the internet to find the most
+  reliable and modern solution to resolve the ambiguity.
 \end{prompt}
 
 Each tool rule addresses a specific failure mode:
 
-\textbf{``PWD = current working directory.''}  The acronym ``PWD'' appears throughout the prompt and in user task descriptions (e.g., ``edit PWD/src/main.py'').  Without this definition, the model might interpret PWD as the Unix environment variable \texttt{\$PWD} and attempt to expand it, or misinterpret it as a literal directory name.  The explicit definition ensures consistent interpretation.
+\textbf{``PWD denotes current working directory and DOES NOT REFER to a directory named PWD.''}  The acronym ``PWD'' appears throughout the prompt and in user task descriptions (e.g., ``edit PWD/src/main.py'').  Without this definition, the model might interpret PWD as the Unix environment variable \texttt{\$PWD} and attempt to expand it, or---more commonly---misinterpret it as a literal directory named \texttt{PWD/} inside the workspace and create files at that path.  The explicit negative clause (``DOES NOT REFER to a directory named PWD'') was added after we observed the model creating an actual \texttt{PWD/} subdirectory in real tasks; the negative framing eliminates the literal-directory misinterpretation directly.
 
 \textbf{``Use Write() for new files; Edit() for small changes.''}  Without this distinction, the model may use \texttt{Write()} to overwrite an existing file with a slightly modified version, losing content it forgot to include.  By reserving \texttt{Write()} for new files and requiring \texttt{Edit()} for modifications, the instruction ensures that changes are surgical and that unchanged portions of a file are never at risk.
 
-\textbf{Bash timeout guidance.}  LLMs frequently launch shell commands without considering their runtime.  A compilation or test suite that takes five minutes will time out at the default 30-second shell timeout in most agent frameworks, causing spurious failures.  The instruction to use 300~seconds as the default, retry with higher timeouts on timeouts, and run long-running commands in the background with output redirected to a file provides a mechanical protocol that handles common cases without requiring the model to estimate runtime from first principles.
+\textbf{Bash timeout guidance.}  LLMs frequently launch shell commands without considering their runtime.  A compilation or test suite that takes five minutes will time out at the default 30-second shell timeout in most agent frameworks, causing spurious failures.  The instruction to use 120~seconds as the default, retry with higher timeouts on timeouts, and run long-running commands in the background with output redirected to a file provides a mechanical protocol that handles common cases without requiring the model to estimate runtime from first principles.
 
 \textbf{``Use go\_to\_url() for browser navigation.''}  The agent has access to multiple tools that could plausibly interact with the web (shell-based \texttt{curl}, a Python program, the browser tool, etc.).  This clause eliminates ambiguity by specifying which tool to use for browser-based interactions.
 
-\textbf{``Read large files in chunks.\ Store temp files in PWD/tmp; clean up after.''}  Reading a 10,000-line file in a single tool call consumes a large fraction of the context window.  By instructing the model to read files in chunks, the prompt prevents context window exhaustion caused by a single-file read, preserving capacity for the rest of the task.  Without the temporary-file directive, the model creates temporary files in unpredictable locations (the system \texttt{/tmp}, the home directory, or scattered throughout the project).  Centralizing temporary files in a known directory makes cleanup predictable, and the explicit cleanup directive prevents the project tree from being polluted with stale artifacts after the task completes.
+\textbf{``Read large files in chunks.''}  Reading a 10,000-line file in a single tool call consumes a large fraction of the context window.  By instructing the model to read files in chunks, the prompt prevents context window exhaustion caused by a single-file read, preserving capacity for the rest of the task.
+
+\textbf{Temporary files (CRITICAL).}  A separate, emphatically marked clause requires that \emph{all} temporary, scratch, and intermediate files---research notes, file-information dumps, downloaded artifacts, build outputs---live inside \texttt{PWD/tmp/} and never directly in \texttt{PWD/}.  Without this directive, the model creates temporary files in unpredictable locations (the system \texttt{/tmp}, the home directory, or scattered throughout the project) or sometimes directly in the project root, polluting the working tree with artifacts that are difficult to distinguish from legitimate project files.  Centralizing temporary files in a known directory makes cleanup mechanical and predictable.  The companion clause requires the agent to create \texttt{PWD/tmp/} if it does not exist and to delete every temporary file it created before calling \texttt{finish}, while preserving the \texttt{PWD/tmp/} directory itself if it was pre-existing---a deliberately narrow cleanup contract that prevents the agent from accidentally deleting unrelated files that happened to be in the same directory.
+
+\textbf{Ambiguity protocol.}  A trailing instruction outside the \texttt{<tool\_rules>} block---``If there is ambiguity or under specification in the user task, search the internet to find the most reliable and modern solution to resolve the ambiguity''---channels the model's natural tendency to confabulate when underspecified into the structured web-research workflow described below.  Rather than letting the model guess (the default behavior) or stop and ask the user (which interrupts the workflow), this directive turns ambiguity into a research task that produces an auditable artifact.
 
 \textbf{Parallel tool calls.}  The instruction to ``make them all in the same turn'' when tool calls are independent reduces latency by allowing the framework to execute multiple tool calls concurrently.  Without this instruction, the model tends to issue one tool call per turn even when the calls are independent, wasting round trips.
 
@@ -412,21 +438,10 @@ We begin every task with mandatory reads, then enforce a read-before-modify disc
 \begin{prompt}
 ## Mandatory First Actions -- CRITICAL
 
-Your VERY FIRST tool call in every task MUST be
-Read("PWD/USER_PREFS.md").
-Your SECOND tool call MUST be Read("PWD/SORCAR.md").
-
-These two reads MUST happen before ANY other tool
-call -- no Bash, no Write, no screenshot, nothing.
-
-Prohibited shortcuts: Do NOT use Bash("cat
-USER_PREFS.md ...") or Bash("head ...") or any
-Bash command to read these files. You MUST use the
-Read() tool.
-
-Do NOT combine these reads with other work. Two
-separate Read() calls, in order: USER_PREFS.md
-first, then SORCAR.md.
+**Your VERY FIRST tool call** in every task MUST be
+Read("PWD/SORCAR.md") and follow the instructions
+in SORCAR.md with highest priority.
+**Your SECOND tool call** is Read("PWD/USER_DEFS.md").
 
 ## Pre-flight Checks
 
@@ -446,7 +461,9 @@ integration test that reproduces the problem first, then
 fix the code, then verify the test passes.
 \end{prompt}
 
-\noindent The ``Mandatory First Actions'' section ensures that cross-session preferences and project-specific overrides are loaded before any work begins.  This section has undergone two rounds of empirical refinement.  In the initial version (which merely listed the reads in a ``Self-Improvement Loop'' section), the agent read \texttt{USER\_PREFS.md} as its first tool call only 33\% of the time and read \texttt{SORCAR.md} only 46\% of the time.  After promoting these reads to a dedicated section with imperative language, compliance improved in integration tests but regressed in production: analysis of 91~real tasks showed that 90\% still violated the \texttt{USER\_PREFS.md}-first rule and 92\% never read \texttt{SORCAR.md}.  Two evasion patterns emerged: (1)~the agent used \texttt{Bash("cat USER\_PREFS.md")} instead of the \texttt{Read()} tool (11~tasks), and (2)~the agent combined the file read with other commands in a single \texttt{Bash} call (5~tasks).  The current version addresses these evasions with explicit prohibitions (``Do NOT use Bash to cat/head these files'') and ordinal position mandates (``Your VERY FIRST tool call'', ``Your SECOND tool call'').  After these changes, compliance reached 100\% in integration tests.
+\noindent The ``Mandatory First Actions'' section ensures that project-specific overrides and user-defined facts are loaded before any work begins.  This section has undergone several rounds of empirical refinement.  In the initial version (which merely listed the reads in a ``Self-Improvement Loop'' section), the agent read \texttt{USER\_PREFS.md} as its first tool call only 33\% of the time and read \texttt{SORCAR.md} only 46\% of the time.  After promoting these reads to a dedicated section with imperative language, compliance improved in integration tests but regressed in production: analysis of 91~real tasks showed that 90\% still violated the first-read rule and 92\% never read \texttt{SORCAR.md}.  Two evasion patterns emerged: (1)~the agent used \texttt{Bash("cat ...")} instead of the \texttt{Read()} tool, and (2)~the agent combined the file read with other commands in a single \texttt{Bash} call.  Earlier revisions addressed these with explicit prohibitions and ordinal position mandates, raising compliance to 100\% in integration tests.
+
+The current version then reorders the reads---placing \texttt{SORCAR.md} first (with the rider ``follow the instructions in SORCAR.md with highest priority'') and \texttt{USER\_DEFS.md} second.  This change reflects two observations from production usage.  First, \texttt{SORCAR.md} contains project-specific instructions that can override or extend the general system prompt, so loading it first lets the rest of the task be interpreted under the active project's rules.  Second, the file that the agent treats as a source of \emph{user definitions and facts} (formerly named \texttt{USER\_PREFS.md}) has been renamed to \texttt{USER\_DEFS.md} to better reflect its role---it stores reusable user definitions and project invariants discovered across sessions, distinct from the agent's own learned preferences captured in \texttt{USER\_PREFS.md} via the Self-Improvement Loop.  The prohibitions against \texttt{Bash}-based reading remain enforced by the general ``Read before modify'' discipline in the Pre-flight Checks section.
 
 Each pre-flight check targets a specific category of avoidable error:
 
@@ -609,23 +626,24 @@ The agent maintains a preferences file that captures user invariants discovered 
 
 Before calling finish, check whether you learned
 anything new during this task -- a user preference,
-a project convention, a file location, an API
-pattern, a tool behavior, or any reusable fact. If
-you did, you MUST call Edit("PWD/USER_PREFS.md") to
-append the new entry before finishing.
+a project convention, a file location, or any
+reusable fact. If you did, you MUST call
+Edit("PWD/USER_PREFS.md") to append the new entry
+before finishing.
 
-Rules: no code snippets or symbol names; skip
-one-off task details; remove conflicting older
-entries when adding new ones.
+Rules: no code snippets or symbol names in entries;
+skip one-off task details; remove conflicting older
+entries when adding new ones. Keep PWD/USER_PREFS.md
+small since it will use context window.
 \end{prompt}
 
 \noindent Each clause in this compact instruction serves the goal of cross-session learning:
 
-\textbf{Reading USER\_PREFS.md at task start.}  The preferences file contains invariants learned from previous tasks---coding conventions, project-specific rules, architectural decisions.  The ``Mandatory First Actions'' section now enforces this read as the very first tool call, ensuring that the agent's behavior is consistent across sessions, even though each session starts with a fresh context window.
+\textbf{Persistent preferences across sessions.}  The preferences file contains invariants learned from previous tasks---coding conventions, project-specific rules, architectural decisions---and is consulted as part of the agent's startup context.  In the current revision the file is paired with a separate user-definitions file (\texttt{USER\_DEFS.md}) whose read is mandated in the ``Mandatory First Actions'' section, ensuring that the agent's behavior is consistent across sessions even though each session starts with a fresh context window.
 
 \textbf{``Update with user preferences/invariants.''}  After completing a task, the agent may have learned new information about the user's preferences: a preferred naming convention, a disliked pattern, a project-specific invariant.  Writing these to the preferences file makes them available to future sessions.  This mechanism allows the agent to accumulate project knowledge over time without requiring the user to repeat themselves.
 
-\textbf{``No code snippets/symbols; skip one-off tasks.''}  Code snippets in the preferences file are fragile: they become stale as the codebase evolves, and they consume tokens that would be better spent on natural-language descriptions of invariants.  The companion rule about one-off tasks prevents preference drift in the opposite direction: without it, the agent would record an entry every time it completed any task, gradually polluting the file with idiosyncratic details (a particular file path, a single throwaway experiment) that have no bearing on future work.  Together, the two clauses keep the file compact, robust to code changes, and focused on durable invariants.
+\textbf{``No code snippets/symbols; skip one-off tasks.''}  Code snippets in the preferences file are fragile: they become stale as the codebase evolves, and they consume tokens that would be better spent on natural-language descriptions of invariants.  The companion rule about one-off tasks prevents preference drift in the opposite direction: without it, the agent would record an entry every time it completed any task, gradually polluting the file with idiosyncratic details (a particular file path, a single throwaway experiment) that have no bearing on future work.  A third clause---``Keep \texttt{PWD/USER\_PREFS.md} small since it will use context window''---reinforces the same goal from the cost side: every byte stored in the preferences file is loaded into every subsequent task's context, so unconstrained growth degrades both prompt-quality and latency across all future sessions.  Together, the three clauses keep the file compact, robust to code changes, and focused on durable invariants.
 
 \textbf{``Remove conflicting old entries carefully and thoroughly.''}  Over time, preferences may become contradictory---for example, an early preference might say ``use camelCase for test methods'' while a later correction says ``use snake\_case.'' Without explicit conflict resolution, the file would accumulate contradictions, confusing the agent.  This instruction mandates that the agent actively resolve conflicts when updating the file to maintain internal consistency.  \emph{Note that we do not keep learnings in a database or in various folders because it makes the information stale when lots of code changes are happening.  It is impossible for an agent to eliminate stale information across databases and multiple folders.}
 
@@ -647,11 +665,17 @@ Before calling finish(success=True):
    .tsx, or .jsx file in this session: you MUST run
    uv run check --full and fix all errors. This is not
    optional. Do NOT call finish without running this
-   command first.
+   command first. If the project doesn't use uv, run
+   the equivalent lint/typecheck command.
 3. Check each user requirement against what was
    delivered.
-4. If any check fails, keep working.
-5. After 3 failed retries of the same fix approach,
+4. Clean up temporary files: Delete all temporary
+   files you created in PWD/tmp/ during this session
+   (research notes, file-information dumps, scratch
+   files, etc.). Do NOT delete files you did not
+   create.
+5. If any check fails, keep working.
+6. After 3 failed retries of the same fix approach,
    step back and rethink from scratch.
 \end{prompt}
 
@@ -659,9 +683,11 @@ Before calling finish(success=True):
 
 \textbf{``Re-read and verify every modified file.''}  This is the analog of a code review performed by the agent on its own work.  The model may have introduced a typo, forgotten to close a bracket, or made an edit that looked correct in the diff but was wrong in the full-file context.  Re-reading the file after all edits are complete catches these errors.
 
-\textbf{``If you created or modified ANY code file: you MUST run uv run check.''}  The original instruction (``Run required checks; fix failures'') was too vague: analysis of 91~real tasks showed that 70\% of code-modification tasks (7/10) skipped lint/typecheck entirely.  The revised version enumerates the exact file extensions that trigger the obligation and names the exact command to run, converting a soft guideline into an unambiguous, verifiable mandate.
+\textbf{``If you created or modified ANY code file: you MUST run uv run check.''}  The original instruction (``Run required checks; fix failures'') was too vague: analysis of 91~real tasks showed that 70\% of code-modification tasks (7/10) skipped lint/typecheck entirely.  The revised version enumerates the exact file extensions that trigger the obligation and names the exact command to run, converting a soft guideline into an unambiguous, verifiable mandate.  A trailing fallback clause---``If the project doesn't use uv, run the equivalent lint/typecheck command''---generalizes the rule to projects with different toolchains while keeping \texttt{uv run check -{}-full} as the canonical instruction.
 
 \textbf{``Check each user requirement against delivery.''}  The model may have completed a task that it \emph{thinks} satisfies the user's request, but actually misses a requirement.  This instruction forces a systematic comparison between the original task description and the delivered result, catching gaps and misinterpretations.
+
+\textbf{``Clean up temporary files.''}  The temporary-files directive in the Tool Usage section requires the agent to write scratch files into \texttt{PWD/tmp/}, but without an explicit cleanup step at the end of the task, those artifacts persist and pollute the project's working tree over time.  This step mandates deletion of every temporary file the agent created during the session.  The companion clause ``Do NOT delete files you did not create'' is essential: the \texttt{tmp/} directory may contain artifacts from other sessions or from the developer's own scratch work, and an indiscriminate \texttt{rm -rf tmp/*} would destroy unrelated content.  Together, the two clauses form a narrow, audit-friendly cleanup contract.
 
 \textbf{``If any check fails, keep working.''}  Without this instruction, the model may call \texttt{finish(success=True)} even when it knows a check has failed, rationalizing that the failure is ``minor'' or ``unrelated.''  The instruction makes the rule absolute: no finishing until all checks pass.
 
@@ -680,27 +706,28 @@ When a task requires searching the internet, researching
 a topic, or answering questions that benefit from current
 information:
 
-- Visit at least 30 distinct websites per research
+- Visit at least 10 distinct websites per research
   session. Do not stop early or rationalize visiting
-  fewer.
+  fewer. **This is a hard requirement -- you MUST
+  visit 10 sites, not 5 or 10.**
 - You MUST use go_to_url() to visit each site. Do NOT
   use Bash("curl ...") or Bash("wget ...") as a
   substitute for visiting websites. Using curl/wget to
-  fetch pages does not count toward the 30-site
+  fetch pages does not count toward the 10-site
   requirement.
 - Procedure:
   1. Create PWD/tmp/information-{unique_id}.md with
-     header: # Web Research -- Websites visited: 0/30
+     header: # Web Research -- Websites visited: 0/10
   2. Per site visited: (a) use go_to_url() to visit the
      site, (b) extract information, (c) use Edit() to
-     append ## [N/30] URL + extracted information to the
+     append ## [N/10] URL + extracted information to the
      file, (d) use Edit() to update the header counter.
   3. Do not proceed to synthesis until the counter
-     reaches 30.
+     reaches 10.
   4. If results dry up, try different queries, synonyms,
      official docs, GitHub repos/issues, Stack Overflow,
      blogs, Reddit, papers, and API references.
-  5. After reaching 30, review all findings and
+  5. After reaching 10, review all findings and
      synthesize.
 - Ask the user for login help when a page requires
   authentication.
@@ -711,15 +738,15 @@ fixes, or file modifications where you already have
 sufficient context, proceed directly.
 \end{prompt}
 
-\noindent The rationale is a two-phase separation between \emph{collection} and \emph{synthesis}.  LLMs tend to anchor on the first few results they encounter, which biases their solutions toward a narrow slice of the design space.  By forcing the agent to accumulate a broad set of information into a file \emph{before} reasoning about it, the protocol counteracts anchoring bias and encourages the model to consider diverse approaches.  The ``visit $\geq$30 websites'' threshold is deliberately aggressive: it ensures the agent does not shortcut the research phase after two or three hits, and the resulting information file serves as an auditable artifact of what the agent considered.  The structured procedure with a counter header (\texttt{\# Web Research --- Websites visited: 0/30}) and per-site entries (\texttt{\#\# [N/30] URL}) addresses an empirically observed failure mode in which the model claims to have ``visited many sites'' after only a handful of fetches; a concrete counter forces the model to verify the actual number visited before declaring the collection phase complete.  The instruction to try ``different queries, synonyms, official docs'' when results dry up prevents the agent from giving up prematurely on a narrow set of search terms.
+\noindent The rationale is a two-phase separation between \emph{collection} and \emph{synthesis}.  LLMs tend to anchor on the first few results they encounter, which biases their solutions toward a narrow slice of the design space.  By forcing the agent to accumulate a broad set of information into a file \emph{before} reasoning about it, the protocol counteracts anchoring bias and encourages the model to consider diverse approaches.  An earlier version of this prompt required visiting at least 30 websites, but the threshold was lowered to 10 after we observed that the 30-site requirement frequently inflated token cost and wall-clock time without proportionally improving answer quality on routine research tasks; 10 sites remain enough to span official documentation, primary sources, secondary commentary, and a few divergent perspectives.  The resulting information file serves as an auditable artifact of what the agent considered.  The structured procedure with a counter header (\texttt{\# Web Research --- Websites visited: 0/10}) and per-site entries (\texttt{\#\# [N/10] URL}) addresses an empirically observed failure mode in which the model claims to have ``visited many sites'' after only a handful of fetches; a concrete counter forces the model to verify the actual number visited before declaring the collection phase complete.  An additional emphatic clause---``This is a hard requirement -- you MUST visit 10 sites, not 5 or 10''---was added after we observed the model rationalizing partial compliance (``I visited 7 sites, which is close enough'').  The instruction to try ``different queries, synonyms, official docs'' when results dry up prevents the agent from giving up prematurely on a narrow set of search terms.
 
-An additional evasion pattern observed in production was the agent using \texttt{Bash("curl ...")} to fetch web pages instead of \texttt{go\_to\_url()}, thereby bypassing the browser-based visit counter while still gathering information.  Analysis of 91~real tasks found 4~research tasks that visited fewer than 30~sites (ranging from 1--5~URLs), with one task (1179) using \texttt{curl} to fetch content from 15+~sites without triggering \texttt{go\_to\_url}.  The explicit prohibition of \texttt{curl}/\texttt{wget} for research closes this loophole.
+An additional evasion pattern observed in production was the agent using \texttt{Bash("curl ...")} to fetch web pages instead of \texttt{go\_to\_url()}, thereby bypassing the browser-based visit counter while still gathering information.  Analysis of 91~real tasks found 4~research tasks that visited fewer than the required minimum number of sites (ranging from 1--5~URLs), with one task (1179) using \texttt{curl} to fetch content from 15+~sites without triggering \texttt{go\_to\_url}.  The explicit prohibition of \texttt{curl}/\texttt{wget} for research closes this loophole.
 
 A second audit uncovered two additional failure modes.  First, the mandatory information file (\texttt{tmp/information-\{id\}.md}) was created in 0~out of 4~research tasks---the agent skipped file creation entirely and answered from memory or from a handful of sites.  The current version adds explicit mandatory language: ``The file is your proof of work---if it doesn't exist when you call finish, you violated this rule.''  Second, one task claimed ``a synthesis of 30+~sources'' in its result summary while having visited only 4~URLs---a fabricated source count.  A new ``Real-Time Data'' section addresses both hallucination (answering current weather, news, or stock questions from stale training data---one task reported news from the wrong year) and source fabrication (``Do NOT fabricate or exaggerate source counts'').
 
 The login instruction addresses a practical obstacle in web research: many websites require authentication before revealing their content.  Rather than silently skipping gated pages or hallucinating their contents, we instruct the agent to ask the user for help with login.
 
-\textbf{Scoped applicability.}  The final paragraph---``This requirement applies to research and information-gathering tasks.  For pure code edits, bug fixes, or file modifications where you already have sufficient context, proceed directly''---is an important addition.  Without this exemption, the agent would perform 30 website visits even for simple one-line code fixes where the necessary context is already in the file being edited, wasting tokens and tool-call budget.  The exemption allows the agent to skip research when the task is purely mechanical, while still enforcing thorough research for tasks that benefit from external information.
+\textbf{Scoped applicability.}  The final paragraph---``This requirement applies to research and information-gathering tasks.  For pure code edits, bug fixes, or file modifications where you already have sufficient context, proceed directly''---is an important addition.  Without this exemption, the agent would perform 10 website visits even for simple one-line code fixes where the necessary context is already in the file being edited, wasting tokens and tool-call budget.  The exemption allows the agent to skip research when the task is purely mechanical, while still enforcing thorough research for tasks that benefit from external information.
 
 %......................................................................
 \subsection{File Browsing Protocol}
@@ -769,19 +796,21 @@ A final section provides project-specific instructions that are injected when th
   `uv run pytest -v` (timeout 900s).
 - Do not install the KISS Sorcar extension from inside
   Sorcar.
+- You SYSTEM.md (the system prompt) is located at
+  ~/.vscode/extensions/ksenxx.kiss-sorcar-2026.5.32/
+    kiss_project/src/kiss
 - KISS Sorcar paper:
   https://github.com/ksenxx/kiss_ai/blob/main/
     papers/kisssorcar/kiss_sorcar.tex
 - Third-party agents: kiss/agents/third_party_agents
-- Official Claude SKILLS: kiss/agents/claude_skills
+- Claude SKILLS: kiss/agents/claude_skills. You can
+  use them as necessary.
 - Authenticate unauthenticated third-party agents; ask
   the user only when a page requires human
   authentication.
-- Read PWD/SORCAR.md for overriding project-specific
-  instructions.
 \end{prompt}
 
-These overrides serve six purposes.  First, they specify the exact toolchain commands for the KISS project itself (\texttt{uv run check -{}-full}, \texttt{uv run pytest}), eliminating guesswork about which linter, formatter, or test runner to use.  Second, they prevent dangerous self-modification: just as a surgeon should not operate on themselves, the agent must not install or reinstall the VS~Code extension it is running inside, since doing so would terminate its own process.  Third, the agent is given a URL to its own paper's source as a source of self-knowledge: when a user asks the agent about its own capabilities, design, or identity, it can retrieve and read the paper rather than hallucinating an answer.  This creates a self-referential loop in which the documentation describing the agent is also consumed by the agent.  Fourth, the instructions expose a third-party agent integration layer: the agent is told where third-party agents live (\texttt{kiss/agents/third\_party\_agents}).  When a third-party agent requires authentication, the agent handles it autonomously and only prompts the user when a page genuinely requires human credentials---reducing unnecessary interruptions while maintaining security.  Fifth, official Claude SKILLS~\citep{claudecode2025} are bundled in \texttt{kiss/agents/claude\_skills}, giving the agent access to Anthropic's skill library for common software engineering patterns; by indicating where these skills reside, the agent can reference and apply them when relevant tasks arise.  Sixth, the \texttt{SORCAR.md} override mechanism allows per-repository instructions to further customize the agent's behavior, forming a hierarchy: general system prompt $\rightarrow$ Sorcar-specific instructions $\rightarrow$ repository-specific \texttt{SORCAR.md}.  This approach also enables us to not hardcode \texttt{SORCAR.md} in the KISS Sorcar code, removing one more dependency.  In the \texttt{SORCAR.md}, one can include more markdown files for further instructions.
+These overrides serve six purposes.  First, they specify the exact toolchain commands for the KISS project itself (\texttt{uv run check -{}-full}, \texttt{uv run pytest}), eliminating guesswork about which linter, formatter, or test runner to use.  Second, they prevent dangerous self-modification: just as a surgeon should not operate on themselves, the agent must not install or reinstall the VS~Code extension it is running inside, since doing so would terminate its own process.  Third, the agent is told the on-disk location of its own \texttt{SYSTEM.md} (under \texttt{\textasciitilde/.vscode/extensions/ksenxx.kiss-sorcar-\$VERSION/kiss\_project/src/kiss}) so that questions about its own prompt or behavior can be answered by reading the canonical file rather than from memory.  This pointer is paired with a URL to the paper's \LaTeX{} source, giving the agent two complementary self-references: the system prompt for operational rules and the paper for design rationale.  Fourth, the instructions expose a third-party agent integration layer: the agent is told where third-party agents live (\texttt{kiss/agents/third\_party\_agents}).  When a third-party agent requires authentication, the agent handles it autonomously and only prompts the user when a page genuinely requires human credentials---reducing unnecessary interruptions while maintaining security.  Fifth, Claude SKILLS~\citep{claudecode2025} are bundled in \texttt{kiss/agents/claude\_skills} with the note ``You can use them as necessary,'' giving the agent access to Anthropic's skill library for common software engineering patterns; the permissive framing (rather than a mandate) lets the agent select skills opportunistically when a task matches one.  Sixth, the \texttt{SORCAR.md} override mechanism---now enforced by the Mandatory First Actions section---allows per-repository instructions to further customize the agent's behavior, forming a hierarchy: general system prompt $\rightarrow$ Sorcar-specific instructions $\rightarrow$ repository-specific \texttt{SORCAR.md}.  This approach also enables us to not hardcode \texttt{SORCAR.md} in the KISS Sorcar code, removing one more dependency.  In the \texttt{SORCAR.md}, one can include more markdown files for further instructions.
 
 %----------------------------------------------------------------------
 \section{VS Code Extension Features}
