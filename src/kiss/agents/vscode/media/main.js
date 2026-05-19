@@ -798,6 +798,7 @@
 
   const statusText = document.getElementById('status-text');
   const historyBtn = document.getElementById('history-btn');
+  const menuBtn = document.getElementById('menu-btn');
   const sidebar = document.getElementById('sidebar');
   const sidebarOverlay = document.getElementById('sidebar-overlay');
   const sidebarClose = document.getElementById('sidebar-close');
@@ -4121,7 +4122,7 @@
         hideAC();
       }
     });
-    historyBtn.addEventListener('click', () => {
+    function toggleHistorySidebar() {
       if (
         sidebar.classList.contains('open') &&
         sidebarTabHistoryBtn.classList.contains('active')
@@ -4133,7 +4134,11 @@
         historyBtn.classList.add('active');
         switchSidebarTab('history');
       }
-    });
+    }
+    historyBtn.addEventListener('click', toggleHistorySidebar);
+    if (menuBtn) {
+      menuBtn.addEventListener('click', toggleHistorySidebar);
+    }
     sidebarClose.addEventListener('click', closeSidebar);
     sidebarOverlay.addEventListener('click', closeSidebar);
     if (sidebarTabHistoryBtn) {
