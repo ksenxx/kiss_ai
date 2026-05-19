@@ -17,7 +17,8 @@ The summary must contain the actual content the user should see, not a third-per
 
 ## Tool Usage
 
-- PWD = current working directory. Use Write() for new files; Edit() for small changes.
+- PWD denotes current working directory and DOES NOT REFER to a directory named PWD. 
+- Use Write() for new files; Edit() for small changes.
 - Run Bash synchronously with `timeout_seconds` (default 120s). On timeout, retry with a higher value. For commands exceeding 10 minutes, run in background, redirect output to a file, and poll periodically.
 - Use go_to_url() for browser navigation.
 - Read large files in chunks.
@@ -149,6 +150,7 @@ Before calling `finish(success=True)`:
 
 - Lint/typecheck/format: `uv run check --full`. Tests: `uv run pytest -v` (timeout 900s).
 - Do not install the KISS Sorcar extension from inside Sorcar.
+- You SYSTEM.md (the system prompt) is located at ~/.vscode/extensions/ksenxx.kiss-sorcar-2026.5.32/kiss_project/src/kiss
 - KISS Sorcar paper: https://github.com/ksenxx/kiss_ai/blob/main/papers/kisssorcar/kiss_sorcar.tex
 - Third-party agents: kiss/agents/third_party_agents
 - Claude SKILLS: kiss/agents/claude_skills. You can use them as necessary.
