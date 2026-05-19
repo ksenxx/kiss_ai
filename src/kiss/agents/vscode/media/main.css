@@ -814,34 +814,17 @@ body.remote-chat #welcome > #input-area {
 #autocommit-btn:hover:not(:disabled) { color: color-mix(in srgb, var(--fg) 66%, transparent); }
 #autocommit-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 
-/* Menu dropdown */
-#menu-dropdown {
-  position: absolute; bottom: 100%; left: 0;
-  min-width: 200px;
-  background: var(--bg2); border: 1px solid var(--border); border-radius: 8px;
-  display: none; flex-direction: column; padding: 4px 0;
-  z-index: 100; box-shadow: 0 -4px 20px rgb(0 0 0 / 40%); margin-bottom: 6px;
-}
-#menu-dropdown.open { display: flex; }
-
-.menu-item {
+/* Inline toggle buttons (worktree / parallel / auto-commit) */
+.toggle-btn {
   background: none; border: none;
-  color: color-mix(in srgb, var(--fg) 70%, transparent);
-  cursor: pointer; padding: 7px 12px;
-  display: flex; align-items: center; gap: 8px;
-  font-size: var(--fs-base); font-family: inherit;
-  transition: background 0.12s, color 0.12s;
-  white-space: nowrap; text-align: left;
+  color: color-mix(in srgb, var(--fg) 50%, transparent); cursor: pointer;
+  padding: 4px; transition: color 0.15s, opacity 0.15s;
+  display: flex; align-items: center; position: relative;
 }
-.menu-item:hover:not(:disabled) { background: color-mix(in srgb, var(--fg) 8%, transparent); color: var(--fg); }
-.menu-item:disabled { opacity: 0.35; cursor: not-allowed; }
-.menu-item svg { flex-shrink: 0; opacity: 0.6; }
-
-.menu-item.active {
-  color: var(--accent);
-}
-.menu-item.active svg { opacity: 1; }
-.menu-item.active:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.toggle-btn:hover:not(:disabled) { color: color-mix(in srgb, var(--fg) 66%, transparent); }
+.toggle-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+.toggle-btn.active { color: var(--accent); }
+.toggle-btn.active:hover:not(:disabled) { color: color-mix(in srgb, var(--accent) 80%, transparent); }
 
 .menu-divider {
   height: 1px;

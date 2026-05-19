@@ -3213,8 +3213,6 @@
     sendBtn.style.display = 'flex';
     stopBtn.style.display = running ? 'flex' : 'none';
 
-    const md = document.getElementById('menu-dropdown');
-    if (running && md) md.classList.remove('open');
     updateInputDisabled();
     updateQueueIndicator();
     if (running) {
@@ -4009,26 +4007,6 @@
       input.onchange = handleFileSelect;
       input.click();
     });
-    const menuBtn = document.getElementById('menu-btn');
-    const menuDropdown = document.getElementById('menu-dropdown');
-    if (menuBtn && menuDropdown) {
-      menuBtn.addEventListener('click', e => {
-        e.stopPropagation();
-        closeModelDD();
-        menuDropdown.classList.toggle('open');
-      });
-      document.addEventListener('click', e => {
-        if (!menuDropdown.contains(e.target) && e.target !== menuBtn) {
-          menuDropdown.classList.remove('open');
-        }
-      });
-      menuDropdown.addEventListener('click', e => {
-        if (e.target.closest('.menu-item')) {
-          menuDropdown.classList.remove('open');
-        }
-      });
-    }
-
     if (worktreeToggleBtn) {
       worktreeToggleBtn.addEventListener('click', () => {
         worktreeToggleBtn.classList.toggle('active');
@@ -4086,7 +4064,6 @@
     }
     modelBtn.addEventListener('click', e => {
       e.stopPropagation();
-      if (menuDropdown) menuDropdown.classList.remove('open');
       if (modelDropdown.classList.contains('open')) {
         closeModelDD();
         return;

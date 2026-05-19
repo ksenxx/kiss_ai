@@ -61,17 +61,26 @@ class TestAutocommitButtonInTemplate(unittest.TestCase):
     def test_button_right_of_menu_btn(self) -> None:
         """The autocommit button sits to the right of the menu button.
 
-        It must be immediately after ``#menu-btn`` and before the
-        ``#menu-dropdown`` container, i.e. it is no longer inside the
-        dropdown.
+        It must come after ``#menu-btn`` and after the three inline
+        toggle buttons (``#worktree-toggle-btn``, ``#parallel-toggle-btn``,
+        ``#autocommit-toggle-btn``) which now live between ``#menu-btn``
+        and ``#autocommit-btn``.
         """
         html = _read("src/SorcarTab.ts")
         menu_pos = html.index('id="menu-btn"')
+        worktree_pos = html.index('id="worktree-toggle-btn"')
+        parallel_pos = html.index('id="parallel-toggle-btn"')
+        autocommit_toggle_pos = html.index('id="autocommit-toggle-btn"')
         btn_pos = html.index('id="autocommit-btn"')
-        dropdown_pos = html.index('id="menu-dropdown"')
-        assert menu_pos < btn_pos < dropdown_pos, (
-            "autocommit-btn should be to the right of #menu-btn and "
-            "outside #menu-dropdown"
+        assert (
+            menu_pos
+            < worktree_pos
+            < parallel_pos
+            < autocommit_toggle_pos
+            < btn_pos
+        ), (
+            "autocommit-btn should be the last button in the input "
+            "footer, after the three inline toggle buttons"
         )
 
     def test_button_inside_model_picker(self) -> None:
