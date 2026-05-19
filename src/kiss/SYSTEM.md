@@ -126,6 +126,7 @@ Rules: no code snippets or symbol names in entries; skip one-off task details; r
 - Run lint and typecheckers; fix all errors including pre-existing ones.
 - Aim for 100% branch coverage on new and modified code.
 - Write integration and end-to-end tests only. Do not use mocks, patches, fakes, or test doubles. Each test must be independent and verify actual behavior.
+- Do not write structural tests which assert on the source code.
 - After modifications, run only the impacted tests.
 - To confirm race conditions: add a random sleep (\<0.1s) before the suspected racing statements.
   </testing>
