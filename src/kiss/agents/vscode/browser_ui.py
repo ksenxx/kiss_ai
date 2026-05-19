@@ -540,6 +540,19 @@ class BaseBrowserPrinter(Printer):
         cost: str = "N/A",
         step_count: int = 0,
     ) -> None:
+        # Apply per-tab offsets so sub-agent cost / tokens / steps that
+        # were accumulated into the printer (e.g. by ``run_parallel``)
+        # are included in the final result panel.  Otherwise the parent
+        # agent's displayed cost would be smaller than the sum of its
+        # sub-agents' costs.  Matches the offset arithmetic in the
+        # ``usage_info`` branch of :meth:`WebPrinter.print`.
+        if isinstance(cost, str) and cost.startswith("$"):
+            try:
+                cost = f"${float(cost[1:]) + self.budget_offset:.4f}"
+            except ValueError:
+                pass
+        total_tokens = total_tokens + self.tokens_offset
+        step_count = step_count + self.steps_offset
         event: dict[str, Any] = {
             "type": "result",
             "text": text or "(no result)",
