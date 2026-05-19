@@ -1,7 +1,7 @@
 """Integration tests: a sub-agent ``task_history`` row reopened from
 the history sidebar is treated like a regular task except that the
 resulting tab is styled as a sub-agent tab (``isSubagentTab=True``,
-purple accent, ⚡ icon) and the frontend suppresses adjacent-task
+purple accent) and the frontend suppresses adjacent-task
 loading on it.
 
 Spec
