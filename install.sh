@@ -97,6 +97,56 @@ ensure_xcode_clt() {
     fi
 }
 
+ensure_homebrew() {
+    [ "$OS" = "Darwin" ] || return 0
+
+    if command -v brew &>/dev/null; then
+        echo "   Homebrew already installed at $(command -v brew)"
+        return 0
+    fi
+
+    echo ""
+    echo "   Homebrew (https://brew.sh) is not installed."
+    echo "   Installing it will enable KISS Sorcar to install necessary tools on demand"
+    echo "   (e.g. git, cloudflared, and other runtime dependencies)."
+    echo ""
+
+    local REPLY_BREW=""
+    if [ -r /dev/tty ]; then
+        read -r -p "   Install the latest Homebrew now? [Y/n] " REPLY_BREW </dev/tty
+    else
+        read -r -p "   Install the latest Homebrew now? [Y/n] " REPLY_BREW
+    fi
+
+    case "$REPLY_BREW" in
+        ""|y|Y|yes|YES|Yes)
+            echo "   Installing Homebrew..."
+            if [ -r /dev/tty ]; then
+                NONINTERACTIVE=1 /bin/bash -c \
+                    "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" </dev/tty
+            else
+                NONINTERACTIVE=1 /bin/bash -c \
+                    "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+            fi
+            # Make brew available in the current shell session.
+            if [ -x /opt/homebrew/bin/brew ]; then
+                eval "$(/opt/homebrew/bin/brew shellenv)"
+            elif [ -x /usr/local/bin/brew ]; then
+                eval "$(/usr/local/bin/brew shellenv)"
+            fi
+            if command -v brew &>/dev/null; then
+                echo "   Homebrew installed at $(command -v brew)"
+            else
+                echo "   WARNING: Homebrew install did not complete; continuing without it."
+            fi
+            ;;
+        *)
+            echo "   Skipping Homebrew install. KISS Sorcar may not be able to install"
+            echo "   some tools on demand without it."
+            ;;
+    esac
+}
+
 install_git() {
     case "$OS" in
         Darwin)
@@ -273,6 +323,10 @@ launch_vscode() {
     if [ "$OS" = "Darwin" ]; then
         echo ">>> Checking Xcode Command Line Tools..."
         ensure_xcode_clt
+        echo ""
+
+        echo ">>> Checking Homebrew..."
+        ensure_homebrew
         echo ""
     fi
 
