@@ -815,14 +815,14 @@ class TestMainCssWorktreeToggle(unittest.TestCase):
         cls.css = (base / "vscode" / "media" / "main.css").read_text()
 
     def test_has_worktree_toggle_btn_base_style(self) -> None:
-        assert ".menu-item" in self.css
+        assert ".toggle-btn" in self.css
         assert "#worktree-toggle-btn" not in self.css
 
     def test_has_worktree_toggle_btn_active_style(self) -> None:
-        assert ".menu-item.active" in self.css
+        assert ".toggle-btn.active" in self.css
 
     def test_active_uses_accent_color(self) -> None:
-        idx = self.css.index(".menu-item.active")
+        idx = self.css.index(".toggle-btn.active")
         block = self.css[idx : idx + 200]
         assert "accent" in block
 
@@ -1146,14 +1146,14 @@ class TestMainCssParallelToggle(unittest.TestCase):
         cls.css = (base / "vscode" / "media" / "main.css").read_text()
 
     def test_has_parallel_toggle_btn_base_style(self) -> None:
-        assert ".menu-item" in self.css
+        assert ".toggle-btn" in self.css
         assert "#parallel-toggle-btn" not in self.css
 
     def test_has_parallel_toggle_btn_active_style(self) -> None:
-        assert ".menu-item.active" in self.css
+        assert ".toggle-btn.active" in self.css
 
     def test_active_uses_accent_color(self) -> None:
-        idx = self.css.index(".menu-item.active")
+        idx = self.css.index(".toggle-btn.active")
         block = self.css[idx : idx + 200]
         assert "accent" in block
 
@@ -2289,11 +2289,11 @@ class TestRunningStateDisablesButtons(unittest.TestCase):
         assert "#upload-btn:disabled" in self.css
 
     def test_css_worktree_btn_disabled_style(self) -> None:
-        assert ".menu-item:disabled" in self.css
+        assert ".toggle-btn:disabled" in self.css
         assert "#worktree-toggle-btn:disabled" not in self.css
 
     def test_css_parallel_btn_disabled_style(self) -> None:
-        assert ".menu-item:disabled" in self.css
+        assert ".toggle-btn:disabled" in self.css
         assert "#parallel-toggle-btn:disabled" not in self.css
 
     def test_css_no_history_btn_disabled_style(self) -> None:
