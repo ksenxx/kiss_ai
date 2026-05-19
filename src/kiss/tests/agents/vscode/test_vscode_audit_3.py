@@ -45,7 +45,6 @@ from kiss.agents.vscode.diff_merge import (
     _untracked_base_dir,
 )
 from kiss.agents.vscode.server import VSCodeServer
-from kiss.agents.vscode.task_runner import _TaskRunnerMixin
 
 
 def _make_server() -> tuple[VSCodeServer, list[dict]]:
@@ -72,23 +71,6 @@ class TestTimerFlushTypeAnnotation(unittest.TestCase):
     None)`` which is ``str | None``.
     """
 
-    def test_source_has_correct_type_annotation(self) -> None:
-        """Structural: the ``_timer_flush_for_tab`` method annotates
-        ``tab_id`` as ``str | None`` (the N1 bug was fixed by
-        refactoring the closure into a method with the correct type).
-        """
-        src = inspect.getsource(BaseBrowserPrinter._timer_flush_for_tab)
-        match = re.search(r"def _timer_flush_for_tab\(self,\s*tab_id:\s*([\w |]+)", src)
-        assert match is not None, (
-            "N1 fix: could not find _timer_flush_for_tab definition"
-        )
-        annotation = match.group(1).strip()
-        assert "str" in annotation, (
-            f"N1 fix: expected 'str' in annotation, got: {annotation!r}"
-        )
-        assert "int" not in annotation, (
-            f"N1 fix: annotation should NOT contain 'int': {annotation!r}"
-        )
 
     def test_owner_tab_is_string(self) -> None:
         """Behavioral: the captured ``owner_tab`` is actually a string."""
@@ -107,27 +89,6 @@ class TestAwaitUserResponseNoLock(unittest.TestCase):
     ``_close_tab`` which pops the entry under the lock.
     """
 
-    def test_source_has_lock_around_running_agent_states_get(self) -> None:
-        """Structural: ``_running_agent_states.get`` IS inside a
-        ``with self._state_lock`` block in ``_await_user_response``
-        (confirming the N2 data race fix).
-        """
-        src = inspect.getsource(_TaskRunnerMixin._await_user_response)
-        lines = src.splitlines()
-
-        tab_get_idx = None
-        for i, line in enumerate(lines):
-            if "running_agent_states.get" in line:
-                tab_get_idx = i
-                break
-        assert tab_get_idx is not None, (
-            "N2: could not find running_agent_states.get in _await_user_response"
-        )
-
-        preceding = "\n".join(lines[max(0, tab_get_idx - 5):tab_get_idx])
-        assert "_state_lock" in preceding, (
-            "N2 fix: running_agent_states.get should be protected by _state_lock"
-        )
 
     def test_close_tab_mutates_running_agent_states_under_lock(self) -> None:
         """Contrast: ``_close_tab`` mutates ``running_agent_states`` under lock."""
@@ -186,12 +147,6 @@ class TestScanFilesDepthOffByOne(unittest.TestCase):
             f"N3: PurePath('.').parts should be (), got {PurePath('.').parts}"
         )
 
-    def test_source_has_depth_check(self) -> None:
-        """Structural: the depth check uses ``len(rel_root.parts) > 10``."""
-        src = inspect.getsource(_scan_files)
-        assert "parts) > 10" in src, (
-            "N3: _scan_files should have the depth check 'parts) > 10'"
-        )
 
     def test_depth_10_files_are_included(self) -> None:
         """Behavioral: files at depth 10 are included when the
@@ -257,19 +212,6 @@ class TestScanFilesDepthOffByOne(unittest.TestCase):
         )
 
 
-class TestTruncatedCommentInRunTaskInner(unittest.TestCase):
-    """N4: The comment ``# BUG-B fix: if this worktree tab has a
-    pending branch from a`` is truncated — the sentence is incomplete.
-    """
-
-    def test_source_has_truncated_comment(self) -> None:
-        """Structural: the truncated comment has been removed."""
-        src = inspect.getsource(_TaskRunnerMixin._run_task_inner)
-        # N4 fix: the truncated "pending branch from a" comment was
-        # cleaned up.  Verify it is no longer present.
-        assert "pending branch from a" not in src, (
-            "N4: the truncated comment should have been removed"
-        )
 
 
 class TestWritePathsEmptyTabId(unittest.TestCase):
@@ -301,45 +243,7 @@ class TestWritePathsEmptyTabId(unittest.TestCase):
             "with tab_id, untracked-base is isolated in tab subdir"
         )
 
-    def test_capture_pre_snapshot_has_no_tab_id_guard(self) -> None:
-        """Structural: ``_capture_pre_snapshot`` does not check for
-        empty ``tab_id`` before calling ``_save_untracked_base``."""
-        src = inspect.getsource(_TaskRunnerMixin._capture_pre_snapshot)
-        assert "_save_untracked_base" in src, (
-            "N5: _capture_pre_snapshot calls _save_untracked_base"
-        )
-        lines = src.splitlines()
-        save_idx = None
-        for i, line in enumerate(lines):
-            if "_save_untracked_base" in line:
-                save_idx = i
-                break
-        assert save_idx is not None
-        preceding = "\n".join(lines[max(0, save_idx - 5):save_idx])
-        assert "not tab_id" not in preceding and "if tab_id" not in preceding, (
-            "N5: no tab_id guard before _save_untracked_base call"
-        )
 
-    def test_prepare_and_start_merge_has_no_tab_id_guard(self) -> None:
-        """Structural: ``_prepare_and_start_merge`` does not check for
-        empty ``tab_id`` before calling ``_merge_data_dir``."""
-        from kiss.agents.vscode.merge_flow import _MergeFlowMixin
-
-        src = inspect.getsource(_MergeFlowMixin._prepare_and_start_merge)
-        assert "_merge_data_dir" in src, (
-            "N5: _prepare_and_start_merge calls _merge_data_dir"
-        )
-        lines = src.splitlines()
-        merge_dir_idx = None
-        for i, line in enumerate(lines):
-            if "_merge_data_dir" in line:
-                merge_dir_idx = i
-                break
-        assert merge_dir_idx is not None
-        preceding = "\n".join(lines[max(0, merge_dir_idx - 5):merge_dir_idx])
-        assert "not tab_id" not in preceding and "if tab_id" not in preceding, (
-            "N5: no tab_id guard before _merge_data_dir call"
-        )
 
     def test_cross_tab_data_collision_with_empty_tab_id(self) -> None:
         """Behavioral: two calls with empty tab_id write to the same

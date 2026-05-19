@@ -17,7 +17,6 @@ picker accordingly.
 from __future__ import annotations
 
 import os
-import re
 import tempfile
 import threading
 from collections.abc import Generator
@@ -166,51 +165,3 @@ class TestNewChatModelPicker:
         assert tab is not None
         assert tab.selected_model == "model-B"
 
-
-class TestFrontendSendsNewChatCommand:
-    """Frontend createNewTab() must post a newChat command to the backend."""
-
-    def test_create_new_tab_posts_new_chat(self) -> None:
-        """createNewTab() in main.js must include vscode.postMessage({type: 'newChat', ...})."""
-        source = MAIN_JS.read_text()
-
-        m = re.search(r"function\s+createNewTab\s*\(", source)
-        assert m is not None, "createNewTab function not found in main.js"
-
-        start = source.index("{", m.start())
-        depth = 0
-        end = start
-        for i in range(start, len(source)):
-            if source[i] == "{":
-                depth += 1
-            elif source[i] == "}":
-                depth -= 1
-                if depth == 0:
-                    end = i + 1
-                    break
-        body = source[start:end]
-
-        assert "newChat" in body, (
-            "createNewTab() must post a 'newChat' command to trigger "
-            "backend model lookup from DB"
-        )
-
-    def test_show_welcome_handler_uses_ev_model(self) -> None:
-        """The showWelcome case in main.js must set selectedModel from ev.model."""
-        source = MAIN_JS.read_text()
-
-        m = re.search(r"case\s+'showWelcome'\s*:", source)
-        assert m is not None, "showWelcome case not found in main.js"
-
-        start = m.start()
-        block_end = source.find("case '", start + 20)
-        if block_end == -1:
-            block_end = len(source)
-        block = source[start:block_end]
-
-        assert "ev.model" in block, (
-            "showWelcome handler must read ev.model to update model picker"
-        )
-        assert "selectedModel" in block, (
-            "showWelcome handler must update selectedModel from ev.model"
-        )

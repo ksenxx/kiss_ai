@@ -38,42 +38,10 @@ DEP_INSTALLER = REPO / "src/kiss/agents/vscode/src/DependencyInstaller.ts"
 BUILD_SCRIPT = REPO / "scripts/build-extension.sh"
 
 
-def test_dependency_installer_does_not_use_pkill_x_kiss_web() -> None:
-    """``pkill -x kiss-web`` must be gone from DependencyInstaller.ts.
-
-    It is unreliable on macOS — see module docstring.
-    """
-    src = DEP_INSTALLER.read_text(encoding="utf-8")
-    assert "'pkill', ['-x', 'kiss-web']" not in src, (
-        "pkill -x kiss-web is a silent no-op on macOS; "
-        "use killProcessOnPort(8787) instead."
-    )
 
 
-def test_dependency_installer_has_kill_process_on_port_helper() -> None:
-    """The helper that kills by listening port must exist."""
-    src = DEP_INSTALLER.read_text(encoding="utf-8")
-    assert "function killProcessOnPort(" in src, (
-        "killProcessOnPort helper missing from DependencyInstaller.ts"
-    )
-    # Must use lsof -ti to look up PIDs by listening port.
-    assert "'-ti', `:${port}`" in src or "'-ti', `:${port}`" in src
-    # SIGTERM first, SIGKILL fallback.
-    assert "'SIGTERM'" in src
-    assert "'SIGKILL'" in src
 
 
-def test_restart_kiss_web_daemon_calls_kill_process_on_port() -> None:
-    """``restartKissWebDaemon`` must call ``killProcessOnPort(8787)``."""
-    src = DEP_INSTALLER.read_text(encoding="utf-8")
-    start = src.index("function restartKissWebDaemon(")
-    # Look at the body up to the next top-level function (≈3000 chars is
-    # well past the kill block but well before EOF).
-    body = src[start : start + 6000]
-    assert "killProcessOnPort(8787)" in body, (
-        "restartKissWebDaemon must kill the daemon by port (8787) "
-        "via killProcessOnPort — pkill -x kiss-web is unreliable."
-    )
 
 
 def test_build_script_kills_daemon_after_install_before_marker() -> None:

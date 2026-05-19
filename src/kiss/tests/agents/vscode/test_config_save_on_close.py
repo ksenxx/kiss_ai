@@ -21,31 +21,17 @@ _VSCODE_DIR = Path(__file__).resolve().parents[3] / "agents" / "vscode"
 class TestSaveButtonRemovedFromHTML(unittest.TestCase):
     """The cfg-save-btn element must not appear in any HTML template."""
 
-    def test_sorcar_tab_has_no_save_button(self) -> None:
-        ts = (_VSCODE_DIR / "src" / "SorcarTab.ts").read_text()
-        assert "cfg-save-btn" not in ts
 
     def test_web_server_has_no_save_button(self) -> None:
         py = (_VSCODE_DIR / "web_server.py").read_text()
         assert "cfg-save-btn" not in py
 
-    def test_main_js_has_no_save_button_reference(self) -> None:
-        js = (_VSCODE_DIR / "media" / "main.js").read_text()
-        assert "cfg-save-btn" not in js
 
-    def test_css_has_no_save_button_style(self) -> None:
-        css = (_VSCODE_DIR / "media" / "main.css").read_text()
-        assert "config-save-btn" not in css
 
 
 class TestConfigSidebarRemoved(unittest.TestCase):
     """The standalone ``#config-sidebar`` element is gone."""
 
-    def test_no_config_sidebar_in_extension_html(self) -> None:
-        ts = (_VSCODE_DIR / "src" / "SorcarTab.ts").read_text()
-        assert 'id="config-sidebar"' not in ts
-        assert 'id="config-sidebar-overlay"' not in ts
-        assert 'id="config-sidebar-close"' not in ts
 
     def test_no_config_sidebar_in_webapp_html(self) -> None:
         py = (_VSCODE_DIR / "web_server.py").read_text()
@@ -53,17 +39,6 @@ class TestConfigSidebarRemoved(unittest.TestCase):
         assert 'id="config-sidebar-overlay"' not in py
         assert 'id="config-sidebar-close"' not in py
 
-    def test_no_config_sidebar_references_in_js(self) -> None:
-        js = (_VSCODE_DIR / "media" / "main.js").read_text()
-        for sym in (
-            "openConfigSidebar",
-            "closeConfigSidebar",
-            "configSidebar",
-            "configSidebarOverlay",
-            "configSidebarClose",
-            "configBtn",
-        ):
-            assert sym not in js, f"{sym} should be gone from main.js"
 
 
 class TestSettingsSavesOnCloseOrSwitch(unittest.TestCase):

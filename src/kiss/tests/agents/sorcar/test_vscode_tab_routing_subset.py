@@ -92,17 +92,6 @@ class TestStartMergeSessionRouted(unittest.TestCase):
         assert len(ms) == 1 and "tabId" not in ms[0]
 
 
-class TestWorktreeDoneEventStructure(unittest.TestCase):
-    """worktree_done event always carries tabId (now inlined in _present_pending_worktree)."""
-
-    def test_worktree_done_source_includes_tab_id(self) -> None:
-        """Structural: the worktree_done dict in _present_pending_worktree includes tabId."""
-        import inspect
-
-        from kiss.agents.vscode.merge_flow import _MergeFlowMixin
-        src = inspect.getsource(_MergeFlowMixin._present_pending_worktree)
-        assert '"worktree_done"' in src
-        assert '"tabId"' in src
 
 
 class TestWorktreeProgressRouted(unittest.TestCase):

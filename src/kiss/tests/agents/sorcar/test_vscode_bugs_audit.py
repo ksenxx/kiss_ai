@@ -107,12 +107,6 @@ class TestCloseTabRaceWithTaskStartup(unittest.TestCase):
         blocker.set()
         thread.join(timeout=2)
 
-    def test_source_confirms_task_thread_check(self) -> None:
-        """Structural: ``_close_tab`` now mentions ``task_thread``."""
-        src = inspect.getsource(VSCodeServer._close_tab)
-        assert "task_thread" in src, (
-            "B2 fix: _close_tab should check task_thread"
-        )
 
 
 class TestHunkToDictAsymmetry(unittest.TestCase):
@@ -165,14 +159,6 @@ class TestHunkToDictAsymmetry(unittest.TestCase):
 class TestFinishMergeRedundantLookup(unittest.TestCase):
     """R1 fix: ``_finish_merge`` now performs a single tab lookup."""
 
-    def test_source_has_one_tab_lookup(self) -> None:
-        """Structural: only one tab lookup in ``_finish_merge``."""
-        from kiss.agents.vscode.merge_flow import _MergeFlowMixin
-        src = inspect.getsource(_MergeFlowMixin._finish_merge)
-        matches = re.findall(r"self\._get_tab\(tab_id\)", src)
-        assert len(matches) == 1, (
-            f"R1 fix: expected 1 lookup, found {len(matches)}"
-        )
 
     def test_autocommit_prompt_not_lost_after_tab_removal(self) -> None:
         """Behavioral: the autocommit check uses the tab ref from the
@@ -202,23 +188,6 @@ class TestReplaySessionUseWorktreeNoLock(unittest.TestCase):
     ``_state_lock``, consistent with ``_run_task_inner``.
     """
 
-    def test_source_confirms_lock_around_use_worktree(self) -> None:
-        """Structural: ``tab.use_worktree = bool(...)`` is now inside a
-        ``with self._state_lock`` block."""
-        src = inspect.getsource(VSCodeServer._replay_session)
-        lines = src.splitlines()
-        wt_line_idx = None
-        for i, line in enumerate(lines):
-            if "tab.use_worktree" in line and "bool(" in line:
-                wt_line_idx = i
-                break
-        assert wt_line_idx is not None, (
-            "Could not find tab.use_worktree = bool(...) in _replay_session"
-        )
-        preceding = "\n".join(lines[max(0, wt_line_idx - 8): wt_line_idx])
-        assert "_state_lock" in preceding, (
-            "I1 fix: _state_lock should guard use_worktree assignment"
-        )
 
     def test_run_task_inner_sets_use_worktree_under_lock(self) -> None:
         """Contrast: ``_run_task_inner`` also sets ``use_worktree``

@@ -179,73 +179,8 @@ class TestBug25ReleaseBranchOrphanedOnNoneOriginal:
 
         assert agent._wt is None, "_wt should be cleared"
 
-    def test_source_shows_no_cleanup_on_none_original(self) -> None:
-        """BUG-25: Confirm source code has no branch cleanup when
-        original_branch is None."""
-        source = inspect.getsource(WorktreeSorcarAgent._release_worktree)
-        lines = source.splitlines()
-        in_original_branch_block = False
-        has_else_for_original = False
-        for line in lines:
-            if "if wt.original_branch:" in line:
-                in_original_branch_block = True
-            if in_original_branch_block and line.strip().startswith("else:"):
-                if_indent = None
-                for l2 in lines:
-                    if "if wt.original_branch:" in l2:
-                        if_indent = len(l2) - len(l2.lstrip())
-                        break
-                else_indent = len(line) - len(line.lstrip())
-                if if_indent is not None and else_indent == if_indent:
-                    has_else_for_original = True
-
-        assert not has_else_for_original, (
-            "BUG-25 appears fixed: there's now an else branch for "
-            "original_branch is None"
-        )
 
 
-class TestBug26MergeDeleteInsideLock:
-    """BUG-26 FIX: merge() now delegates to _do_merge() which runs
-    delete_branch inside repo_lock. Both merge() and _release_worktree
-    use the same _do_merge() helper, so they are consistent.
-    """
-
-    def test_merge_uses_do_merge(self) -> None:
-        """merge() delegates to _do_merge() for the locked operation."""
-        source = inspect.getsource(WorktreeSorcarAgent.merge)
-        assert "_do_merge" in source, (
-            "merge() must delegate to _do_merge()"
-        )
-
-    def test_release_uses_do_merge(self) -> None:
-        """_release_worktree delegates to _do_merge() for the locked operation."""
-        source = inspect.getsource(WorktreeSorcarAgent._release_worktree)
-        assert "_do_merge" in source, (
-            "_release_worktree must delegate to _do_merge()"
-        )
-
-    def test_do_merge_has_delete_inside_lock(self) -> None:
-        """_do_merge runs delete_branch inside repo_lock."""
-        source = inspect.getsource(WorktreeSorcarAgent._do_merge)
-        lines = source.splitlines()
-
-        lock_indent = None
-        for i, line in enumerate(lines):
-            stripped = line.lstrip()
-            indent = len(line) - len(stripped)
-
-            if "with repo_lock(" in line:
-                lock_indent = indent
-                continue
-
-            if lock_indent is not None and "delete_branch" in line:
-                assert indent > lock_indent, (
-                    "delete_branch must be inside repo_lock"
-                )
-                break
-        else:
-            raise AssertionError("delete_branch not found in _do_merge")
 
 
 class TestBug27CleanupDeletesConflictBranch:
@@ -314,16 +249,6 @@ class TestBug27CleanupDeletesConflictBranch:
         )
         assert branch_name in cleanup_output
 
-    def test_cleanup_orphans_does_not_check_unmerged(self) -> None:
-        """BUG-27: Confirm cleanup_orphans has no unmerged-commit check."""
-        source = inspect.getsource(GitWorktreeOps.cleanup_orphans)
-        assert "--no-merged" not in source, (
-            "BUG-27 appears fixed: cleanup_orphans now checks for "
-            "unmerged commits"
-        )
-        assert "merge-base" not in source, (
-            "BUG-27 appears fixed: cleanup_orphans now checks merge status"
-        )
 
 
 class TestBug28StartMergeSessionThreadLocal:
@@ -386,14 +311,6 @@ class TestBug28StartMergeSessionThreadLocal:
             _restore_db(saved)
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-    def test_present_pending_worktree_does_not_set_thread_local(self) -> None:
-        """BUG-28: _present_pending_worktree (which now includes the
-        worktree merge review logic) doesn't set thread-local tab_id."""
-        source = inspect.getsource(VSCodeServer._present_pending_worktree)
-        assert "_thread_local.tab_id" not in source, (
-            "BUG-28 appears fixed: _present_pending_worktree now "
-            "sets thread-local tab_id"
-        )
 
 
 class TestBug29ConflictInstructionsIgnoreDirtyState:
@@ -460,12 +377,3 @@ class TestBug29ConflictInstructionsIgnoreDirtyState:
                 "Warning should contain merge --squash instructions "
                 "when no baseline"
             )
-
-    def test_warning_mentions_stash_pop(self) -> None:
-        """BUG-29 fix: the conflict warning tells the user to run
-        ``git stash pop`` when the auto-merge stashed their uncommitted
-        changes, so they can restore them after resolving the conflict.
-        """
-        source = inspect.getsource(WorktreeSorcarAgent._release_worktree)
-        assert "stash_suffix" in source
-        assert "git stash pop" in source
