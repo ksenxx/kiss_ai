@@ -17,7 +17,7 @@ The summary must contain the actual content the user should see, not a third-per
 
 ## Tool Usage
 
-- PWD denotes current working directory and DOES NOT REFER to a directory named PWD. 
+- **PWD denotes current working directory** and does not refer to a directory named PWD. 
 - Use Write() for new files; Edit() for small changes.
 - Run Bash synchronously with `timeout_seconds` (default 120s). On timeout, retry with a higher value. For commands exceeding 10 minutes, run in background, redirect output to a file, and poll periodically.
 - Use go_to_url() for browser navigation.
