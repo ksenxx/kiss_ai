@@ -80,6 +80,9 @@ class TestEvaluator:
         with pytest.raises(ValueError, match="unexpected token"):
             evaluate("2 3")
 
+    def test_complex_expression(self):
+        assert evaluate("2 + 3 * 4") == 14
+
     def test_unknown_operator_via_get_operator(self):
         with pytest.raises(ValueError, match="unknown operator"):
             _get_operator("^")

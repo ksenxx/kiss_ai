@@ -1,9 +1,10 @@
-"""Integration tests for the "Auto commit" toggle in the menu dropdown.
+"""Integration tests for the inline "Auto commit" toggle button.
 
 Validates:
 - The toggle exists in both ``SorcarTab.ts`` (extension webview) and
   the standalone remote-access ``web_server.py`` HTML template,
-  inside ``#menu-dropdown`` alongside ``worktree-toggle-btn`` etc.
+  rendered inline between ``#menu-btn`` and ``#autocommit-btn``
+  alongside ``worktree-toggle-btn`` and ``parallel-toggle-btn``.
 - ``main.js`` references the toggle and forwards its state as
   ``autoCommit`` on submit/run messages.
 - ``_RunningAgentState`` carries an ``auto_commit_mode`` field that
@@ -69,28 +70,33 @@ def _make_server(work_dir: str) -> tuple[VSCodeServer, list[dict]]:
 
 
 class TestAutocommitToggleInTemplate(unittest.TestCase):
-    """The new toggle button exists in the menu dropdown HTML."""
+    """The toggle button exists inline in the input-footer HTML."""
 
     def test_sorcar_tab_template(self) -> None:
         html = _read("src/SorcarTab.ts")
         assert 'id="autocommit-toggle-btn"' in html
-        # The toggle lives inside the menu dropdown, alongside the
-        # sibling toggles (Use worktree / Use parallelism).
-        dropdown_start = html.index('id="menu-dropdown"')
-        dropdown_end = html.index("</div>", dropdown_start)
-        snippet = html[dropdown_start:dropdown_end]
-        assert 'id="autocommit-toggle-btn"' in snippet
-        assert "Auto commit" in snippet
-        assert 'class="menu-item"' in snippet
+        # The toggle is an inline icon-only button with class
+        # ``toggle-btn`` and an "Auto commit" tooltip.
+        btn_start = html.index('id="autocommit-toggle-btn"')
+        btn_end = html.index("</button>", btn_start)
+        btn_html = html[btn_start:btn_end]
+        assert 'class="toggle-btn"' in btn_html
+        assert 'data-tooltip="Auto commit"' in btn_html
+        # And it sits between ``#menu-btn`` and ``#autocommit-btn``.
+        menu_pos = html.index('id="menu-btn"')
+        toggle_pos = html.index('id="autocommit-toggle-btn"')
+        commit_pos = html.index('id="autocommit-btn"')
+        assert menu_pos < toggle_pos < commit_pos
 
     def test_web_server_template(self) -> None:
         html = _read("web_server.py")
         assert 'id="autocommit-toggle-btn"' in html
-        # The remote-access HTML places the toggle inside the same
-        # ``#menu-dropdown`` container as the other toggles.
-        dropdown_idx = html.index('id="menu-dropdown"')
-        toggle_idx = html.index('id="autocommit-toggle-btn"')
-        assert toggle_idx > dropdown_idx
+        # The remote-access HTML positions the toggle between
+        # ``#menu-btn`` and ``#autocommit-btn``.
+        menu_pos = html.index('id="menu-btn"')
+        toggle_pos = html.index('id="autocommit-toggle-btn"')
+        commit_pos = html.index('id="autocommit-btn"')
+        assert menu_pos < toggle_pos < commit_pos
 
 
 class TestAutocommitToggleJS(unittest.TestCase):

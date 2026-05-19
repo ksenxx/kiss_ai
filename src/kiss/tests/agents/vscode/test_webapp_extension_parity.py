@@ -76,31 +76,36 @@ def test_webapp_tab_bar_contains_action_buttons() -> None:
         assert f'id="{btn}"' in web_bar, f"webapp tab-bar missing {btn}"
 
 
-def test_webapp_menu_dropdown_omits_tab_bar_actions() -> None:
-    """Tab-bar actions are not duplicated inside the menu dropdown."""
-    ext_menu = _section(_ext_html(), "menu-dropdown")
-    web_menu = _section(_build_html(), "menu-dropdown")
-    assert ext_menu and web_menu
+def test_webapp_input_footer_omits_tab_bar_actions() -> None:
+    """Tab-bar actions are not duplicated inside the input footer."""
+    ext_footer = _section(_ext_html(), "input-footer")
+    web_footer = _section(_build_html(), "input-footer")
+    assert ext_footer and web_footer
     for btn in _TAB_BAR_ACTIONS:
         assert (
-            f'id="{btn}"' not in ext_menu
-        ), f"sanity: extension menu-dropdown still has {btn}"
+            f'id="{btn}"' not in ext_footer
+        ), f"sanity: extension input-footer still has {btn}"
         assert (
-            f'id="{btn}"' not in web_menu
-        ), f"webapp menu-dropdown still has {btn}"
+            f'id="{btn}"' not in web_footer
+        ), f"webapp input-footer still has {btn}"
 
 
-def test_webapp_menu_dropdown_toggle_order_matches_extension() -> None:
-    """Menu toggle buttons appear in the same order in both webviews."""
+def test_webapp_inline_toggle_order_matches_extension() -> None:
+    """Inline toggle buttons appear in the same order in both webviews.
+
+    The three toggles (use worktree / use parallelism / auto commit)
+    render inline between ``#menu-btn`` and ``#autocommit-btn`` in the
+    input-footer's ``#model-picker`` container.
+    """
     ids = (
         "worktree-toggle-btn",
         "parallel-toggle-btn",
         "autocommit-toggle-btn",
     )
-    ext_menu = _section(_ext_html(), "menu-dropdown")
-    web_menu = _section(_build_html(), "menu-dropdown")
-    ext_positions = [(ext_menu.find(f'id="{i}"'), i) for i in ids]
-    web_positions = [(web_menu.find(f'id="{i}"'), i) for i in ids]
+    ext_picker = _section(_ext_html(), "model-picker")
+    web_picker = _section(_build_html(), "model-picker")
+    ext_positions = [(ext_picker.find(f'id="{i}"'), i) for i in ids]
+    web_positions = [(web_picker.find(f'id="{i}"'), i) for i in ids]
     assert all(p >= 0 for p, _ in ext_positions), ext_positions
     assert all(p >= 0 for p, _ in web_positions), web_positions
     assert [i for _, i in sorted(ext_positions)] == list(ids)
@@ -117,14 +122,21 @@ def test_webapp_omits_work_dir_config_field() -> None:
     ), "webapp still ships the removed cfg-work-dir field"
 
 
-def test_webapp_autocommit_button_outside_menu_dropdown() -> None:
-    """``#autocommit-btn`` is a top-level input-footer button, not a menu item."""
+def test_webapp_autocommit_button_after_inline_toggles() -> None:
+    """``#autocommit-btn`` follows the three inline toggle buttons.
+
+    The toggles now render inline between ``#menu-btn`` and
+    ``#autocommit-btn``, so the commit button must appear last in
+    the ``#model-picker`` button row.
+    """
     web = _build_html()
-    web_menu = _section(web, "menu-dropdown")
-    assert 'id="autocommit-btn"' in web
+    web_picker = _section(web, "model-picker")
+    assert 'id="autocommit-btn"' in web_picker
+    autocommit_toggle_pos = web_picker.index('id="autocommit-toggle-btn"')
+    commit_pos = web_picker.index('id="autocommit-btn"')
     assert (
-        'id="autocommit-btn"' not in web_menu
-    ), "autocommit-btn should live outside the dropdown"
+        autocommit_toggle_pos < commit_pos
+    ), "autocommit-btn must follow the inline toggle buttons"
 
 
 def test_webapp_delete_task_button_has_no_tooltip_attribute() -> None:
