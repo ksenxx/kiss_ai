@@ -97,35 +97,8 @@ body {
 
 
 
-/* ── Config Sidebar ─────────────────────────────────── */
-#config-sidebar {
-  position: fixed;
-  right: 0; top: 0; bottom: 0;
-  width: min(420px, 75vw);
-  background: var(--bg2);
-  border-left: 1px solid var(--border);
-  transform: translateX(100%);
-  transition: transform 0.2s ease;
-  z-index: 200;
-  padding: 16px;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-}
-#config-sidebar.open { transform: translateX(0); }
-#config-sidebar .sidebar-section { overflow: visible; flex: none; }
-
-#config-sidebar-overlay {
-  position: fixed; inset: 0; background: rgb(0 0 0 / 50%);
-  z-index: 199; opacity: 0; pointer-events: none; transition: opacity 0.2s ease;
-}
-#config-sidebar-overlay.open { opacity: 1; pointer-events: auto; }
-
-#config-sidebar-close {
-  position: absolute; top: 12px; right: 12px; background: none; border: none;
-  color: color-mix(in srgb, var(--fg) 50%, transparent); font-size: var(--fs-2xl); cursor: pointer; padding: 4px 8px; border-radius: 4px;
-}
-#config-sidebar-close:hover { color: color-mix(in srgb, var(--fg) 83%, transparent); background: color-mix(in srgb, var(--fg) 8%, transparent); }
+/* ── Settings sub-tab panel ─────────────────────────── */
+#sidebar-tab-settings-panel { overflow-y: auto; }
 
 .config-label {
   display: block;
