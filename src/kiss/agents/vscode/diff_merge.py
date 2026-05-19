@@ -594,8 +594,14 @@ def _prepare_merge_view(
         shutil.rmtree(merge_dir)
     manifest_files: list[dict[str, Any]] = []
     for fname, fh in file_hunks.items():
-        current_path = Path(work_dir) / fname
+        target_path = Path(work_dir) / fname
+        current_path = target_path
         if not current_path.is_file():
+            # The agent deleted a tracked file.  The merge view needs a
+            # readable "current" stand-in so VS Code / the web client
+            # can render the diff, but rejecting all hunks must restore
+            # the file at the real workspace location (``target_path``),
+            # not at the placeholder.
             deleted_dir = merge_dir / ".deleted"
             deleted_placeholder = deleted_dir / fname
             deleted_placeholder.parent.mkdir(parents=True, exist_ok=True)
@@ -616,6 +622,7 @@ def _prepare_merge_view(
                 "name": fname,
                 "base": str(base_path),
                 "current": str(current_path),
+                "target": str(target_path),
                 "hunks": fh,
             },
         )
@@ -640,6 +647,7 @@ def _prepare_merge_view(
                 "name": fname,
                 "base": str(base_path),
                 "current": str(current_path),
+                "target": str(current_path),
                 "hunks": [{"bs": 0, "bc": 0, "cs": 0, "cc": 0}],
                 "binary": True,
             },
