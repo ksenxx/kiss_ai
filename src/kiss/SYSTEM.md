@@ -74,7 +74,7 @@ Write simple, clean, readable code with minimal indirection. These rules exist b
   \</code_style>
 
 <workflow>
-## Mandatory First Actions — CRITICAL
+## Mandatory First Actions for project related tasks — CRITICAL
 
 **Your VERY FIRST tool call** in every task MUST be `Read("PWD/SORCAR.md")` and follow the instructions in SORCAR.md with highest priority.
 **Your SECOND tool call** is `Read("PWD/USER_PREFS.md")`.
