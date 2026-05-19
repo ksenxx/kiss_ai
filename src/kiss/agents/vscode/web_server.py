@@ -1567,6 +1567,15 @@ width=device-width,initial-scale=1,maximum-scale=1">
         </div>
         <div id="input-footer">
           <div id="model-picker">
+            <button id="menu-btn" data-tooltip="Advanced options">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round"
+               stroke-linejoin="round">
+                <line x1="3" y1="6" x2="21" y2="6"/>
+                <line x1="3" y1="12" x2="21" y2="12"/>
+                <line x1="3" y1="18" x2="21" y2="18"/>
+              </svg>
+            </button>
             <button id="model-btn" data-tooltip="Select model">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
                stroke="currentColor" stroke-width="2">
@@ -1580,15 +1589,6 @@ width=device-width,initial-scale=1,maximum-scale=1">
                stroke-linejoin="round">
                 <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19\
 a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
-              </svg>
-            </button>
-            <button id="menu-btn" data-tooltip="Advanced options">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
-               stroke="currentColor" stroke-width="2" stroke-linecap="round"
-               stroke-linejoin="round">
-                <line x1="3" y1="6" x2="21" y2="6"/>
-                <line x1="3" y1="12" x2="21" y2="12"/>
-                <line x1="3" y1="18" x2="21" y2="18"/>
               </svg>
             </button>
             <button id="worktree-toggle-btn" class="toggle-btn"
