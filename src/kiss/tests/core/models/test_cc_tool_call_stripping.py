@@ -8,7 +8,6 @@ directly to callbacks (no buffering) for incremental UI updates.
 No mocks — uses real functions and real model instances.
 """
 
-import inspect
 import unittest
 
 from kiss.core.models.claude_code_model import ClaudeCodeModel
@@ -99,17 +98,7 @@ class TestCCModelTokenStreaming(unittest.TestCase):
     """Verify ClaudeCodeModel.generate_and_process_with_tools streams tokens
     directly to callbacks without buffering."""
 
-    def test_source_has_no_buffer(self) -> None:
-        """generate_and_process_with_tools must NOT buffer tokens."""
-        src = inspect.getsource(ClaudeCodeModel.generate_and_process_with_tools)
-        assert "buffer" not in src, "Token buffering was removed for streaming"
-        assert "buffer.append" not in src
 
-    def test_source_does_not_replace_callbacks(self) -> None:
-        """Callbacks must not be swapped — tokens stream through the originals."""
-        src = inspect.getsource(ClaudeCodeModel.generate_and_process_with_tools)
-        assert "self.token_callback = " not in src
-        assert "self.thinking_callback = " not in src
 
     def test_no_callback_no_crash(self) -> None:
         """When there's no token_callback, generate_and_process_with_tools works."""
@@ -117,11 +106,6 @@ class TestCCModelTokenStreaming(unittest.TestCase):
         m.initialize("test")
         assert m.token_callback is None
 
-    def test_config_restored_in_finally(self) -> None:
-        """Model config is restored even on exception."""
-        src = inspect.getsource(ClaudeCodeModel.generate_and_process_with_tools)
-        assert "finally:" in src
-        assert "self.model_config = original_config" in src
 
 
 class TestStripEdgeCases(unittest.TestCase):

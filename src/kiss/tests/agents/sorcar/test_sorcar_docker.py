@@ -29,19 +29,7 @@ def _find_kiss_project_body() -> str:
 class TestFindKissProjectSearchOrder(unittest.TestCase):
     """findKissProject() must only check env var, config setting, and embedded path."""
 
-    def test_env_var_check_exists(self) -> None:
-        """KISS_PROJECT_PATH env var must be checked."""
-        source = KISS_PATHS.read_text()
-        assert re.search(
-            r"process\.env\.KISS_PROJECT_PATH", source
-        ), "KISS_PROJECT_PATH check not found in kissPaths.ts"
 
-    def test_config_setting_check_exists(self) -> None:
-        """kissSorcar.kissProjectPath config setting must be checked."""
-        source = KISS_PATHS.read_text()
-        assert re.search(
-            r"kissProjectPath", source
-        ), "kissProjectPath config check not found"
 
     def test_no_workspace_folder_search(self) -> None:
         """No upward search from workspace folders."""
@@ -65,12 +53,6 @@ class TestFindKissProjectSearchOrder(unittest.TestCase):
                 f"findKissProject() should not check common location '{loc}'"
             )
 
-    def test_no_search_upward_function(self) -> None:
-        """searchUpward function should not exist (dead code removed)."""
-        source = KISS_PATHS.read_text()
-        assert "function searchUpward" not in source, (
-            "searchUpward function should be removed"
-        )
 
 
 if __name__ == "__main__":

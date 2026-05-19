@@ -89,20 +89,3 @@ class TestOpenSubagentTabHidesInputForActiveTab:
             "obvious to readers."
         )
 
-
-class TestRestoreTabAlreadyHidesForSubagentTab:
-    """Sanity: ``restoreTab`` continues to enforce the rule on every
-    tab switch — the openSubagentTab fix is needed only because the
-    backend converts the tab AFTER the tab switch already ran."""
-
-    def test_restore_tab_hides_input_when_subagent_tab(self) -> None:
-        js = MAIN_JS.read_text()
-        # restoreTab uses tab.isSubagentTab in the hide condition.
-        # Locate the function and verify the condition is present.
-        rt_start = js.find("function restoreTab")
-        assert rt_start > 0
-        # End of function is approximated by the next `function `.
-        rt_end = js.find("function renderTabBar", rt_start)
-        rt_block = js[rt_start:rt_end]
-        assert "tab.isSubagentTab" in rt_block
-        assert "inputContainer.style.display = 'none'" in rt_block

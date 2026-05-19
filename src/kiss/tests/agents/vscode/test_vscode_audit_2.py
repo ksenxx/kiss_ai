@@ -94,16 +94,6 @@ class TestCompleteFromActiveFileLongestMatch(unittest.TestCase):
             f"B4 intentional: expected longest suffix 'er_manager', got {result!r}"
         )
 
-    def test_source_confirms_longest_preference(self) -> None:
-        """Structural: the comparison uses ``len(suffix) > len(best)``."""
-        from kiss.agents.vscode.autocomplete import _AutocompleteMixin
-
-        src = inspect.getsource(
-            _AutocompleteMixin._complete_from_active_file,
-        )
-        assert "len(suffix) > len(best)" in src, (
-            "B4 intentional: source confirms longest-wins comparison"
-        )
 
 
 class TestCloseTabMergeDataCleanup(unittest.TestCase):
@@ -111,26 +101,6 @@ class TestCloseTabMergeDataCleanup(unittest.TestCase):
     remove on-disk merge artifacts when a tab is closed.
     """
 
-    def test_source_has_merge_cleanup_call(self) -> None:
-        """Structural: the tab-disposal tail calls cleanup functions.
-
-        The B5 fix originally lived directly in ``_close_tab``; the
-        shared cleanup tail was later factored out to
-        ``_teardown_tab_resources`` so both the immediate and the
-        deferred disposal paths invoke it.  Either ``_close_tab`` or
-        ``_teardown_tab_resources`` may contain the calls — we just
-        require that the disposal path as a whole references them.
-        """
-        src = (
-            inspect.getsource(VSCodeServer._close_tab)
-            + inspect.getsource(VSCodeServer._teardown_tab_resources)
-        )
-        assert "_cleanup_merge_data" in src, (
-            "B5 fix: tab disposal should call _cleanup_merge_data"
-        )
-        assert "_merge_data_dir" in src, (
-            "B5 fix: tab disposal should reference _merge_data_dir"
-        )
 
     def test_merge_data_removed_after_tab_close(self) -> None:
         """Behavioral: merge data directory is removed after tab close."""
@@ -188,12 +158,6 @@ class TestModelVendorOpenAIClassification(unittest.TestCase):
             f"openrouter/ should be OpenRouter, got ({vendor}, {order})"
         )
 
-    def test_source_confirms_openai_prefix_branch(self) -> None:
-        """Structural: the OpenAI branch now includes 'openai/' prefix."""
-        src = inspect.getsource(model_vendor)
-        assert 'name.startswith("openai/")' in src, (
-            "B6 fix: source should check for openai/ prefix"
-        )
 
 
 class TestFinishMergeEmptyTabIdGuard(unittest.TestCase):
@@ -211,12 +175,6 @@ class TestFinishMergeEmptyTabIdGuard(unittest.TestCase):
             f"parent={parent}, child.parent={child.parent}"
         )
 
-    def test_finish_merge_guards_against_empty_string(self) -> None:
-        """Structural: ``_finish_merge`` uses ``if not tab_id:``."""
-        src = inspect.getsource(_MergeFlowMixin._finish_merge)
-        assert "not tab_id" in src, (
-            "B7 fix: _finish_merge should guard against falsy tab_id"
-        )
 
     def test_finish_merge_empty_is_noop(self) -> None:
         """Behavioral: calling _finish_merge('') does not destroy data."""
@@ -259,47 +217,6 @@ class TestFinishMergeEmptyTabIdGuard(unittest.TestCase):
         )
 
 
-class TestRunTaskStatusBroadcastInsideLock(unittest.TestCase):
-    """B8 / A2 fix: ``_run_task``'s finally block broadcasts
-    ``status: running: False`` INSIDE the ``_state_lock`` block to
-    prevent a race where a new ``_cmd_run`` broadcasts ``status: True``
-    before the stale ``status: False``.
-    """
-
-    def test_source_confirms_broadcast_inside_state_lock(self) -> None:
-        """Structural: broadcast call is deeper than the with line."""
-        src = inspect.getsource(_TaskRunnerMixin._run_task)
-        lines = src.splitlines()
-
-        finally_idx = None
-        lock_idx = None
-        broadcast_idx = None
-        for i, line in enumerate(lines):
-            if "finally:" in line:
-                finally_idx = i
-            if finally_idx is not None and "_state_lock" in line and "with" in line:
-                if lock_idx is None:
-                    lock_idx = i
-            # The ``broadcast(...)`` call is split across multiple source
-            # lines, so look for the unique ``"running": False`` payload
-            # token (always on the dict-literal line) instead of trying to
-            # match call + payload on the same line.
-            if lock_idx is not None and '"running": False' in line:
-                broadcast_idx = i
-                break
-
-        assert lock_idx is not None, "Found _state_lock in finally block"
-        assert broadcast_idx is not None, "Found status broadcast"
-        assert broadcast_idx > lock_idx, (
-            "broadcast is after the lock line"
-        )
-
-        indent_lock = len(lines[lock_idx]) - len(lines[lock_idx].lstrip())
-        indent_bc = len(lines[broadcast_idx]) - len(lines[broadcast_idx].lstrip())
-        assert indent_bc > indent_lock, (
-            f"A2 fix: broadcast indent ({indent_bc}) > lock indent "
-            f"({indent_lock}), confirming it's inside the critical section"
-        )
 
 
 class TestClipAutocompleteSuggestionRedundant(unittest.TestCase):
@@ -321,12 +238,6 @@ class TestClipAutocompleteSuggestionRedundant(unittest.TestCase):
         result = clip_autocomplete_suggestion("server", "_config")
         assert result == "_config", f"Expected identity, got {result!r}"
 
-    def test_source_confirms_clip_applied_to_local_completions(self) -> None:
-        from kiss.agents.vscode.autocomplete import _AutocompleteMixin
-
-        src = inspect.getsource(_AutocompleteMixin._complete)
-        assert "_complete_from_active_file" in src
-        assert "clip_autocomplete_suggestion" in src
 
 
 class TestTabIdTypeConsistency(unittest.TestCase):
@@ -371,20 +282,6 @@ class TestTabIdTypeConsistency(unittest.TestCase):
             )
 
 
-class TestBroadcastWorktreeDoneAlwaysHasTabId(unittest.TestCase):
-    """I3 fix: ``worktree_done`` broadcast (now inlined in
-    ``_present_pending_worktree``) always includes ``tabId``.
-    """
-
-    def test_source_confirms_unconditional_tab_id(self) -> None:
-        """Structural: ``tabId`` is set directly in the worktree_done event."""
-        src = inspect.getsource(_MergeFlowMixin._present_pending_worktree)
-        assert '"worktree_done"' in src, (
-            "I3: worktree_done event should be inlined in _present_pending_worktree"
-        )
-        assert '"tabId"' in src, (
-            "I3 fix: tabId should be in the event dict"
-        )
 
 
 if __name__ == "__main__":

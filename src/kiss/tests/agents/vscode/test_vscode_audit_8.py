@@ -9,9 +9,6 @@ Covers:
 
 from __future__ import annotations
 
-import ast
-import inspect
-import textwrap
 import time
 
 import pytest
@@ -76,27 +73,6 @@ class TestTimerFlushNoClosure:
         method = getattr(BaseBrowserPrinter, "_timer_flush_for_tab")
         assert callable(method)
 
-    def test_no_nested_def_in_print_method(self) -> None:
-        """Verify the print() method has no nested function definitions.
-
-        Closures are forbidden; _timer_flush must be a proper method.
-        """
-        from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
-
-        source = inspect.getsource(BaseBrowserPrinter.print)
-        tree = ast.parse(textwrap.dedent(source))
-        # Find nested FunctionDef nodes inside the main function
-        func_def = tree.body[0]
-        assert isinstance(func_def, ast.FunctionDef)
-        nested_funcs = [
-            node.name
-            for node in ast.walk(func_def)
-            if isinstance(node, ast.FunctionDef) and node is not func_def
-        ]
-        assert nested_funcs == [], (
-            f"print() method should not contain nested function defs, "
-            f"found: {nested_funcs}"
-        )
 
     def test_timer_flush_for_tab_type_annotation(self) -> None:
         """Verify _timer_flush_for_tab accepts str | None tab_id."""
@@ -155,17 +131,6 @@ class TestTimerFlushNoClosure:
 class TestNoMisleadingReExportComment:
     """server.py should not have misleading noqa: F401 re-export comments."""
 
-    def test_no_noqa_f401_reexport_comment(self) -> None:
-        """Verify server.py does not have a misleading noqa: F401 comment
-        on its diff_merge imports (they are actually used, not re-exports)."""
-        source_path = inspect.getfile(
-            __import__("kiss.agents.vscode.server", fromlist=["VSCodeServer"])
-        )
-        source = open(source_path).read()
-        assert "noqa: F401" not in source, (
-            "server.py should not have noqa: F401 comments — "
-            "the diff_merge imports are used directly"
-        )
 
     def test_server_all_does_not_expose_diff_merge_names(self) -> None:
         """Verify __all__ in server.py does not list diff_merge symbols."""

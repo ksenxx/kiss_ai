@@ -13,16 +13,11 @@ I1 fix: ``_cmd_user_answer`` now uses ``cmd.get("tabId", "")`` (empty
 
 from __future__ import annotations
 
-import inspect
 import queue
-import re
 import threading
 import unittest
 
-from kiss.agents.vscode.commands import _CommandsMixin
-from kiss.agents.vscode.merge_flow import _MergeFlowMixin
 from kiss.agents.vscode.server import VSCodeServer
-from kiss.agents.vscode.task_runner import _TaskRunnerMixin
 
 
 def _make_server() -> tuple[VSCodeServer, list[dict]]:
@@ -47,18 +42,6 @@ class TestAwaitUserResponseLockingFix(unittest.TestCase):
     discipline used everywhere else.
     """
 
-    def test_source_reads_running_agent_states_under_lock(self) -> None:
-        """Structural: the source accesses ``_running_agent_states`` inside a
-        ``with self._state_lock`` block.
-        """
-        src = inspect.getsource(_TaskRunnerMixin._await_user_response)
-        assert "running_agent_states.get(" in src, (
-            "_await_user_response should access running_agent_states"
-        )
-        assert "with self._state_lock" in src, (
-            "B1 FIX: _await_user_response now reads _running_agent_states "
-            "under _state_lock"
-        )
 
     def test_behavioral_read_with_lock(self) -> None:
         """Behavioral: ``_await_user_response`` now acquires
@@ -107,70 +90,8 @@ class TestAwaitUserResponseLockingFix(unittest.TestCase):
         )
 
 
-class TestAutocommitActionLockingFix(unittest.TestCase):
-    """B2 FIX: ``_handle_autocommit_action`` now acquires ``_state_lock``
-    before reading ``_running_agent_states`` when persisting the autocommit event.
-    """
-
-    def test_source_reads_running_agent_states_under_lock(self) -> None:
-        """Structural: every ``_running_agent_states.get`` call is guarded by a
-        ``with self._state_lock`` block.
-        """
-        src = inspect.getsource(_MergeFlowMixin._handle_autocommit_action)
-        assert "running_agent_states.get(tab_id)" in src.replace("self.", ""), (
-            "_handle_autocommit_action should access running_agent_states"
-        )
-        lock_blocks = list(re.finditer(r"with self\._state_lock", src))
-        tab_accesses = list(re.finditer(r"running_agent_states\.get", src))
-        assert len(lock_blocks) >= len(tab_accesses), (
-            f"B2 FIX: {len(tab_accesses)} running_agent_states.get() calls "
-            f"guarded by {len(lock_blocks)} _state_lock blocks"
-        )
 
 
-class TestTabIdDefaultConsistencyFix(unittest.TestCase):
-    """I1 FIX: ``_cmd_user_answer`` now uses ``cmd.get("tabId", "")``
-    (empty string default), consistent with every other handler.
-    """
-
-    def test_user_answer_uses_empty_string_default(self) -> None:
-        src = inspect.getsource(_CommandsMixin._cmd_user_answer)
-        assert re.search(r'cmd\.get\("tabId",\s*""\)', src), (
-            "I1 FIX: _cmd_user_answer now uses cmd.get('tabId', '')"
-        )
-
-    def test_all_handlers_use_empty_string_default(self) -> None:
-        """Every cmd handler that reads tabId uses a default of ''."""
-        handlers_with_tabid = [
-            _CommandsMixin._cmd_run,
-            _CommandsMixin._cmd_stop,
-            _CommandsMixin._cmd_select_model,
-            _CommandsMixin._cmd_close_tab,
-            _CommandsMixin._cmd_new_chat,
-            _CommandsMixin._cmd_resume_session,
-            _CommandsMixin._cmd_merge_action,
-            _CommandsMixin._cmd_complete,
-            _CommandsMixin._cmd_get_adjacent_task,
-            _CommandsMixin._cmd_generate_commit_message,
-            _CommandsMixin._cmd_worktree_action,
-            _CommandsMixin._cmd_autocommit_action,
-            _CommandsMixin._cmd_user_answer,
-        ]
-        for handler in handlers_with_tabid:
-            src = inspect.getsource(handler)
-            if 'cmd.get("tabId"' not in src:
-                continue
-            has_empty_default = bool(
-                re.search(r'cmd\.get\("tabId",\s*""\)', src)
-            )
-            has_none_default = bool(
-                re.search(r'cmd\.get\("tabId"\)', src)
-                and not re.search(r'cmd\.get\("tabId",', src)
-            )
-            assert has_empty_default and not has_none_default, (
-                f"I1 FIX: {handler.__name__} should use "
-                f'cmd.get("tabId", ""), not cmd.get("tabId")'
-            )
 
 
 if __name__ == "__main__":

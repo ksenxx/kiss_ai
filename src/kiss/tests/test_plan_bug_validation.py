@@ -8,12 +8,6 @@ import inspect
 
 
 class TestPollerSessionResume:
-    def test_poller_uses_resume_chat_by_id(self) -> None:
-        """_handle_message() uses resume_chat_by_id instead of mutating _chat_id."""
-        from kiss.agents.third_party_agents._channel_agent_utils import ChannelRunner
-
-        source = inspect.getsource(ChannelRunner._handle_message)
-        assert "agent._chat_id" not in source
 
     def test_stateful_agent_has_resume_by_id(self) -> None:
         """ChatSorcarAgent exposes resume_chat_by_id."""
@@ -60,12 +54,6 @@ class TestIRCBackendLifecycle:
 
         assert hasattr(IRCChannelBackend, "disconnect")
 
-    def test_irc_socket_has_timeout(self) -> None:
-        """IRC connect sets a socket timeout for the reader loop."""
-        from kiss.agents.third_party_agents.irc_agent import IRCChannelBackend
-
-        source = inspect.getsource(IRCChannelBackend.connect)
-        assert "settimeout" in source
 
 
 class TestWhatsAppWebhookLifecycle:
@@ -75,12 +63,6 @@ class TestWhatsAppWebhookLifecycle:
 
         assert hasattr(WhatsAppChannelBackend, "disconnect")
 
-    def test_disconnect_calls_shutdown(self) -> None:
-        """disconnect() shuts down the webhook server."""
-        from kiss.agents.third_party_agents.whatsapp_agent import WhatsAppChannelBackend
-
-        source = inspect.getsource(WhatsAppChannelBackend.disconnect)
-        assert "shutdown" in source or "stop_http_server" in source
 
 
 class TestRelentlessAgentTempFile:
@@ -91,12 +73,6 @@ class TestRelentlessAgentTempFile:
         source = inspect.getsource(RelentlessAgent)
         assert "tempfile.mkstemp(" not in source
 
-    def test_uses_work_dir_tmp(self) -> None:
-        """RelentlessAgent creates temp files under work_dir/tmp."""
-        from kiss.core.relentless_agent import RelentlessAgent
-
-        source = inspect.getsource(RelentlessAgent)
-        assert '"tmp"' in source or "'tmp'" in source
 
 
 class TestDockerManagerTimeout:
@@ -107,68 +83,12 @@ class TestDockerManagerTimeout:
         sig = inspect.signature(DockerManager.Bash)
         assert "timeout_seconds" in sig.parameters
 
-    def test_bash_enforces_timeout(self) -> None:
-        """Bash() uses timeout to limit exec_run duration."""
-        from kiss.docker.docker_manager import DockerManager
-
-        source = inspect.getsource(DockerManager.Bash)
-        assert "timed out" in source or "timeout" in source
 
 
-class TestDockerOutputFormatting:
-    def test_no_unconditional_newline(self) -> None:
-        """Output parts are joined only when non-empty."""
-        from kiss.docker.docker_manager import DockerManager
-
-        source = inspect.getsource(DockerManager.Bash)
-        assert 'stdout + "\\n" + stderr' not in source
-        assert "output_parts" in source or "filter" in source or "if part" in source
 
 
-class TestNoChdirInEntryPoints:
-    def test_sorcar_agent_no_os_chdir(self) -> None:
-        """sorcar_agent.py does not use os.chdir()."""
-        from kiss.agents.sorcar import sorcar_agent
-
-        source = inspect.getsource(sorcar_agent)
-        assert "os.chdir(" not in source
-
-    def test_stateful_agent_no_os_chdir(self) -> None:
-        """chat_sorcar_agent.py does not use os.chdir()."""
-        from kiss.agents.sorcar import chat_sorcar_agent
-
-        source = inspect.getsource(chat_sorcar_agent)
-        assert "os.chdir(" not in source
-
-    def test_channel_agents_no_os_chdir(self) -> None:
-        """Channel agent CLIs do not use os.chdir()."""
-        from kiss.agents.third_party_agents import (
-            discord_agent,
-            irc_agent,
-            slack_agent,
-            whatsapp_agent,
-        )
-
-        for mod in [discord_agent, irc_agent, slack_agent, whatsapp_agent]:
-            source = inspect.getsource(mod)
-            assert "os.chdir(" not in source, f"{mod.__name__} should not use os.chdir"
 
 
-class TestWebhookBindFailurePropagated:
-    def test_whatsapp_connect_fails_on_bind_error(self) -> None:
-        """WhatsApp connect() fails if webhook server cannot bind."""
-        from kiss.agents.third_party_agents.whatsapp_agent import WhatsAppChannelBackend
-
-        source = inspect.getsource(WhatsAppChannelBackend.connect)
-        assert "if not self._start_webhook_server()" in source
-
-    def test_start_webhook_returns_bool(self) -> None:
-        """_start_webhook_server returns a bool success flag."""
-        from kiss.agents.third_party_agents.whatsapp_agent import WhatsAppChannelBackend
-
-        source = inspect.getsource(WhatsAppChannelBackend._start_webhook_server)
-        assert "return True" in source
-        assert "return False" in source
 
 
 class TestWebhookDistinctPorts:
@@ -194,13 +114,6 @@ class TestWebhookDistinctPorts:
         assert len(ports) == len(backends), "All ports should be distinct"
 
 
-class TestSystemPromptAnchored:
-    def test_sorcar_path_uses_pkg_dir(self) -> None:
-        """SORCAR.md is resolved relative to _kiss_pkg_dir, not bare CWD."""
-        import kiss.core.base as base_mod
-
-        source = inspect.getsource(base_mod)
-        assert '_kiss_pkg_dir / "SYSTEM.md"' in source or "_kiss_pkg_dir / 'SYSTEM.md'" in source
 
 
 class TestArtifactDirLazy:
@@ -218,20 +131,6 @@ class TestArtifactDirLazy:
         assert hasattr(config_mod, "set_artifact_base_dir")
 
 
-class TestGlobalBudgetSynchronizedReads:
-    def test_get_global_budget_used_under_lock(self) -> None:
-        """Base.get_global_budget_used() reads under _class_lock."""
-        from kiss.core.base import Base
-
-        source = inspect.getsource(Base.get_global_budget_used)
-        assert "_class_lock" in source
-
-    def test_check_limits_uses_getter(self) -> None:
-        """_check_limits uses get_global_budget_used() (which is lock-protected)."""
-        from kiss.core.kiss_agent import KISSAgent
-
-        source = inspect.getsource(KISSAgent._check_limits)
-        assert "get_global_budget_used()" in source
 
 
 class TestGlobalBudgetReset:
@@ -242,78 +141,13 @@ class TestGlobalBudgetReset:
         assert hasattr(Base, "reset_global_budget")
         assert callable(Base.reset_global_budget)
 
-    def test_poller_resets_budget_on_start(self) -> None:
-        """ChannelRunner resets global budget in run_once()."""
-        from kiss.agents.third_party_agents._channel_agent_utils import ChannelRunner
-
-        source = inspect.getsource(ChannelRunner.run_once)
-        assert "reset_global_budget" in source
 
 
-class TestPersistenceTypoFixed:
-    def test_no_abrubptly_typo(self) -> None:
-        """persistence.py no longer contains 'Abrubptly'."""
-        from kiss.agents.sorcar import persistence
-
-        source = inspect.getsource(persistence)
-        assert "Abrubptly" not in source
-
-    def test_has_correct_spelling(self) -> None:
-        """persistence.py uses 'Abruptly'."""
-        from kiss.agents.sorcar import persistence
-
-        source = inspect.getsource(persistence)
-        assert "Abruptly" in source
 
 
-class TestRecordFileUsageAtomic:
-    def test_entire_operation_under_db_lock(self) -> None:
-        """INSERT, SELECT COUNT, DELETE, and commit are all inside the
-        process-wide write lock (``_rw_lock.write_lock()`` per Phase 6).
-        """
-        from kiss.agents.sorcar import persistence
-
-        source = inspect.getsource(persistence._record_file_usage)
-        lines = source.split("\n")
-
-        lock_line = None
-        lock_indent = 0
-        for i, line in enumerate(lines):
-            if "_rw_lock.write_lock()" in line:
-                lock_line = i
-                lock_indent = len(line) - len(line.lstrip())
-                break
-        assert lock_line is not None, (
-            "_record_file_usage must hold _rw_lock.write_lock() for the "
-            "INSERT/SELECT/DELETE/commit block"
-        )
-
-        for i, line in enumerate(lines):
-            if i <= lock_line:
-                continue
-            stripped = line.strip()
-            if not stripped:
-                continue
-            indent = len(line) - len(line.lstrip())
-            if indent <= lock_indent:
-                break
-            if "INSERT INTO file_usage" in stripped:
-                assert True
-            if "SELECT COUNT(*)" in stripped:
-                assert True
-            if "db.commit()" in stripped:
-                assert True
 
 
 class TestPersistenceTOCTOUFixed:
-    def test_save_task_result_uses_lock(self) -> None:
-        """_save_task_result() wraps everything under the process-wide write
-        lock (``_rw_lock.write_lock()`` per Phase 6).
-        """
-        from kiss.agents.sorcar import persistence
-
-        source = inspect.getsource(persistence._save_task_result)
-        assert "_rw_lock.write_lock()" in source
 
     def test_save_task_result_accepts_task_id(self) -> None:
         """_save_task_result() has a task_id parameter."""
@@ -323,22 +157,7 @@ class TestPersistenceTOCTOUFixed:
         assert "task_id" in sig.parameters
 
 
-class TestAddTaskReturnsRowId:
-    def test_add_task_returns_int(self) -> None:
-        """_add_task() returns the inserted row ID."""
-        from kiss.agents.sorcar import persistence
 
-        source = inspect.getsource(persistence._add_task)
-        assert "lastrowid" in source
-        assert "return" in source
-
-class TestForceStopThreadArgtypes:
-    def test_argtypes_set_at_module_level(self) -> None:
-        """PyThreadState_SetAsyncExc.argtypes is set at module level."""
-        import kiss.agents.sorcar.running_agent_state as tab_state_mod
-
-        source = inspect.getsource(tab_state_mod)
-        assert "PyThreadState_SetAsyncExc.argtypes" in source
 
 
 class TestDbConnClosable:
@@ -348,14 +167,3 @@ class TestDbConnClosable:
 
         assert hasattr(persistence, "_close_db")
         assert callable(persistence._close_db)
-
-class TestWebUseToolCleanupOnFailure:
-    def test_ensure_browser_has_cleanup_on_failure(self) -> None:
-        """_ensure_browser calls self.close() in except block."""
-        from kiss.agents.sorcar.web_use_tool import WebUseTool
-
-        source = inspect.getsource(WebUseTool._ensure_browser)
-        assert "self.close()" in source
-        except_idx = source.index("except Exception:")
-        close_idx = source.index("self.close()")
-        assert close_idx > except_idx

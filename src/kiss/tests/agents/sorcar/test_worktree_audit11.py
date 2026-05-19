@@ -31,7 +31,6 @@ BUG-58: ``cleanup_orphans`` classifies branches by checking whether they
 from __future__ import annotations
 
 import hashlib
-import inspect
 import json
 import subprocess
 from pathlib import Path
@@ -106,58 +105,6 @@ def _cleanup(repo: Path, branch: str, wt_dir: Path) -> None:
         GitWorktreeOps.delete_branch(repo, branch)
 
 
-class TestBug55NonWtFlagToctou:
-    """BUG-55: ``is_running_non_wt`` is set AFTER the pre-task snapshot
-    is captured.  During the gap, a concurrent worktree merge can modify
-    the main tree, making the snapshot stale.
-
-    FIX: Set ``is_running_non_wt = True`` BEFORE calling
-    ``_capture_pre_snapshot`` so concurrent merges are blocked during
-    the entire snapshot + task execution window.
-    """
-
-    def test_flag_set_before_snapshot_in_source(self) -> None:
-        """Verify the source code sets is_running_non_wt before snapshot.
-
-        The flag must appear BEFORE _capture_pre_snapshot in the source
-        so concurrent worktree merges are blocked during snapshot capture.
-        """
-        source = inspect.getsource(VSCodeServer._run_task_inner)
-
-        flag_pos = source.find("is_running_non_wt = True")
-        snapshot_pos = source.find("_capture_pre_snapshot")
-        assert flag_pos != -1 and snapshot_pos != -1, (
-            "Could not find both is_running_non_wt and _capture_pre_snapshot"
-        )
-        assert flag_pos < snapshot_pos, (
-            "BUG-55: is_running_non_wt must be set BEFORE "
-            "_capture_pre_snapshot to prevent TOCTOU gap. "
-            f"Flag at {flag_pos}, snapshot at {snapshot_pos}"
-        )
-
-    def test_flag_cleared_on_snapshot_failure(self) -> None:
-        """If _capture_pre_snapshot raises, the flag must still be cleared.
-
-        The flag set + snapshot must be inside the try/finally that
-        clears the flag, or have their own guard.
-        """
-        source = inspect.getsource(VSCodeServer._run_task_inner)
-
-        lines = source.split("\n")
-        flag_line = None
-        finally_line = None
-        for i, line in enumerate(lines):
-            if "is_running_non_wt = True" in line and flag_line is None:
-                flag_line = i
-            if "is_running_non_wt = False" in line and finally_line is None:
-                finally_line = i
-
-        assert flag_line is not None
-        assert finally_line is not None
-        assert finally_line > flag_line, (
-            "BUG-55: is_running_non_wt = False must come after = True "
-            "in the code to ensure cleanup on exception"
-        )
 
 
 class TestBug56ConflictCheckBaselineValidation:

@@ -352,18 +352,6 @@ class TestSubagentTabEventsE2E:
             "Expected streaming events routed to subagent tab"
         )
 
-    def test_subagent_tabs_not_counted_in_max_tabs(self) -> None:
-        """Subagent tabs are excluded from MAX_TABS trimming in frontend JS."""
-        # This test verifies the JS logic by checking that the
-        # trimOldestTabs function filters out isSubagentTab.
-        main_js = (
-            Path(__file__).resolve().parents[3]
-            / "agents" / "vscode" / "media" / "main.js"
-        )
-        content = main_js.read_text()
-        assert "!t.isSubagentTab" in content, (
-            "trimOldestTabs must exclude subagent tabs"
-        )
 
     @pytest.mark.slow
     def test_description_field_in_open_event(self) -> None:

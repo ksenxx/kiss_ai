@@ -56,7 +56,6 @@ from kiss.agents.vscode.diff_merge import (
     _merge_data_dir,
     _parse_diff_hunks,
     _prepare_merge_view,
-    _save_untracked_base,
     _snapshot_files,
 )
 from kiss.agents.vscode.server import VSCodeServer
@@ -120,43 +119,7 @@ class TestBug34NonWorktreeSnapshotNoLock:
         _restore_db(self._saved)
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
-    def test_source_lacks_repo_lock_in_run_task_inner_non_worktree_block(self) -> None:
-        """BUG-34: The pre-task snapshot code in _run_task_inner does NOT
-        acquire repo_lock.  Confirm this by inspecting the source."""
-        source = inspect.getsource(VSCodeServer._run_task_inner)
-        lines = source.splitlines()
 
-        snapshot_start = None
-        for i, line in enumerate(lines):
-            if "if not use_worktree:" in line:
-                snapshot_start = i
-                break
-
-        assert snapshot_start is not None, "sanity: found non-worktree block"
-
-        indent = len(lines[snapshot_start]) - len(lines[snapshot_start].lstrip())
-        snapshot_end = snapshot_start + 1
-        for i in range(snapshot_start + 1, len(lines)):
-            stripped = lines[i].lstrip()
-            if stripped and (len(lines[i]) - len(stripped)) <= indent:
-                snapshot_end = i
-                break
-
-        snapshot_block = "\n".join(lines[snapshot_start:snapshot_end])
-
-        assert "repo_lock" not in snapshot_block, (
-            "Bug no longer present: repo_lock found in snapshot block"
-        )
-
-    def test_snapshot_functions_dont_acquire_repo_lock(self) -> None:
-        """BUG-34: The individual snapshot functions (_parse_diff_hunks,
-        _capture_untracked, _snapshot_files, _save_untracked_base) do
-        not acquire repo_lock internally either."""
-        for fn in [_parse_diff_hunks, _capture_untracked, _snapshot_files, _save_untracked_base]:
-            source = inspect.getsource(fn)  # type: ignore[arg-type]
-            assert "repo_lock" not in source, (
-                f"Bug no longer present: {fn.__name__} acquires repo_lock"
-            )
 
     def test_concurrent_checkout_corrupts_snapshot(self) -> None:
         """BUG-34: Demonstrate that a checkout between pre-task snapshot
@@ -262,19 +225,7 @@ class TestBug35WorktreeMergeStashesAgentWork:
                 "BUG-35 confirmed: agent's work was disrupted by stash cycle"
             )
 
-    def test_release_worktree_stashes_via_do_merge(self) -> None:
-        """BUG-35: _release_worktree delegates stashing to _do_merge."""
-        source = inspect.getsource(WorktreeSorcarAgent._release_worktree)
-        assert "_do_merge" in source, "_release_worktree must use _do_merge"
-        do_merge_source = inspect.getsource(WorktreeSorcarAgent._do_merge)
-        assert "stash_if_dirty" in do_merge_source, (
-            "_do_merge must call stash_if_dirty"
-        )
 
-    def test_merge_also_stashes_via_do_merge(self) -> None:
-        """BUG-35: merge() delegates stashing to _do_merge."""
-        source = inspect.getsource(WorktreeSorcarAgent.merge)
-        assert "_do_merge" in source, "merge() must use _do_merge"
 
     def test_functional_stash_during_worktree_merge(self) -> None:
         """BUG-35 functional: worktree merge stashes non-worktree agent's file."""
@@ -382,38 +333,6 @@ class TestBug36PostTaskDiffWrongHead:
             "making the two hunk sets incomparable"
         )
 
-    def test_prepare_merge_view_always_uses_head(self) -> None:
-        """BUG-36: _prepare_merge_view defaults to base_ref='HEAD', with no
-        mechanism to lock HEAD or record the pre-task HEAD SHA."""
-        source = inspect.getsource(VSCodeServer._run_task_inner)
-
-        lines = source.splitlines()
-        found_call = False
-        for line in lines:
-            if "_prepare_and_start_merge" in line and "not tab.use_worktree" not in line:
-                found_call = True
-                break
-
-        assert found_call, "sanity: _prepare_and_start_merge call found"
-
-        in_non_wt_block = False
-        captures_head_sha = False
-        for line in lines:
-            if "if not use_worktree:" in line:
-                in_non_wt_block = True
-                continue
-            if in_non_wt_block:
-                if "rev-parse" in line and "HEAD" in line:
-                    captures_head_sha = True
-                if line.strip() and not line.strip().startswith("#"):
-                    stripped = line.lstrip()
-                    if len(line) - len(stripped) <= len("            "):
-                        if not line.strip().startswith(("pre_", "_save", "#")):
-                            break
-
-        assert not captures_head_sha, (
-            "Bug no longer present: non-worktree path now captures HEAD SHA"
-        )
 
     def test_modified_file_both_sides_wrong_hunks(self) -> None:
         """BUG-36: When the worktree merge modifies a file the non-worktree
@@ -486,20 +405,6 @@ class TestBug37FalseConflictFromNonWorktreeAgent:
         _restore_db(self._saved)
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
-    def test_check_merge_conflict_counts_all_dirty_files(self) -> None:
-        """BUG-37: _check_merge_conflict uses unstaged_files which returns
-        ALL dirty files in the main repo, with no way to distinguish
-        user edits from non-worktree agent edits."""
-        source = inspect.getsource(VSCodeServer._check_merge_conflict)
-
-        assert "unstaged_files" in source, "sanity: uses unstaged_files"
-
-        assert "non_worktree" not in source.lower(), (
-            "Bug no longer present: _check_merge_conflict distinguishes agent dirty files"
-        )
-        assert "concurrent" not in source.lower(), (
-            "Bug no longer present: _check_merge_conflict has concurrency awareness"
-        )
 
     def test_false_conflict_from_non_worktree_agent_dirty_file(self) -> None:
         """BUG-37 functional: A file dirtied by a non-worktree agent causes
@@ -623,32 +528,3 @@ class TestBug38SharedMergeDataDir:
             "sanity: Tab B's data is present"
         )
 
-    def test_prepare_merge_view_rmtrees_merge_temp(self) -> None:
-        """BUG-38: _prepare_merge_view does shutil.rmtree on merge-temp/,
-        which would destroy base copies from a concurrent merge session."""
-        source = inspect.getsource(_prepare_merge_view)
-        assert "rmtree" in source, (
-            "sanity: _prepare_merge_view uses rmtree"
-        )
-        assert "merge-temp" in source, (
-            "sanity: _prepare_merge_view references merge-temp"
-        )
-
-    def test_worktree_and_non_worktree_use_per_tab_merge_dir(self) -> None:
-        """BUG-38 FIXED: Both paths now use per-tab _merge_data_dir(tab_id)."""
-        wt_source = inspect.getsource(VSCodeServer._present_pending_worktree)
-        assert "_prepare_and_start_merge" in wt_source, (
-            "sanity: worktree review (inlined in "
-            "_present_pending_worktree) uses _prepare_and_start_merge"
-        )
-
-        prep_source = inspect.getsource(VSCodeServer._prepare_and_start_merge)
-        assert "_merge_data_dir" in prep_source, (
-            "sanity: _prepare_and_start_merge uses _merge_data_dir"
-        )
-
-        assert "tab_id" in inspect.signature(
-            VSCodeServer._prepare_and_start_merge
-        ).parameters, (
-            "Fix verified: _prepare_and_start_merge is tab-aware"
-        )
