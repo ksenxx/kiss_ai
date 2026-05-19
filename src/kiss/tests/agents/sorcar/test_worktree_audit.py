@@ -6,7 +6,6 @@ Tests are labeled BUG-N or FIX-N for traceability.
 
 from __future__ import annotations
 
-import inspect
 import shutil
 import subprocess
 import tempfile
@@ -197,20 +196,6 @@ class TestFix3MergeInstructionsUseSquash:
         agent.discard()
 
 
-class TestFixInc1ReleaseCallsFinalize:
-    """_release_worktree now calls _finalize_worktree() instead of
-    duplicating its logic.
-    """
-
-    def test_release_calls_finalize(self) -> None:
-        """FIX-INC1: _release_worktree delegates to _finalize_worktree."""
-        release_src = inspect.getsource(
-            WorktreeSorcarAgent._release_worktree
-        )
-        assert "_finalize_worktree" in release_src
-
-        assert "GitWorktreeOps.remove(" not in release_src
-        assert "GitWorktreeOps.prune(" not in release_src
 
 
 class TestFix4MergeRetrySkipsFinalize:

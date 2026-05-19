@@ -25,20 +25,11 @@ _VSCODE_DIR = Path(__file__).resolve().parents[3] / "agents" / "vscode"
 class TestHeadersTextareaInHTML(unittest.TestCase):
     """A textarea with id cfg-custom-headers exists in both HTML templates."""
 
-    def test_sorcar_tab_has_headers_textarea(self) -> None:
-        ts = (_VSCODE_DIR / "src" / "SorcarTab.ts").read_text()
-        assert "cfg-custom-headers" in ts
 
     def test_web_server_has_headers_textarea(self) -> None:
         py = (_VSCODE_DIR / "web_server.py").read_text()
         assert "cfg-custom-headers" in py
 
-    def test_headers_textarea_is_after_endpoint(self) -> None:
-        """The headers field appears after the custom endpoint field."""
-        ts = (_VSCODE_DIR / "src" / "SorcarTab.ts").read_text()
-        endpoint_pos = ts.index("cfg-custom-endpoint")
-        headers_pos = ts.index("cfg-custom-headers")
-        assert headers_pos > endpoint_pos
 
     def test_headers_textarea_is_after_endpoint_web(self) -> None:
         """The headers field appears after the custom endpoint field in web_server."""

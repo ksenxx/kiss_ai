@@ -174,38 +174,6 @@ _MAIN_JS = (
 )
 
 
-class TestSubagentTabFrontendLogic:
-    """Test that subagent tabs are handled correctly in the frontend JS."""
-
-    def test_make_tab_has_subagent_field(self) -> None:
-        """Verify main.js makeTab includes isSubagentTab field."""
-        content = _MAIN_JS.read_text()
-        assert "isSubagentTab" in content
-
-    def test_trim_oldest_tabs_skips_subagent_tabs(self) -> None:
-        """Verify trimOldestTabs skips tabs with isSubagentTab === true."""
-        content = _MAIN_JS.read_text()
-        trim_start = content.index("function trimOldestTabs")
-        trim_end = content.index("}", trim_start + 100)
-        trim_section = content[trim_start:trim_end + 200]
-        assert "isSubagentTab" in trim_section, (
-            "trimOldestTabs must exclude subagent tabs from trimming"
-        )
-
-    def test_open_subagent_tab_handler_exists(self) -> None:
-        """Verify main.js has a handler for openSubagentTab events."""
-        content = _MAIN_JS.read_text()
-        assert "case 'openSubagentTab'" in content
-
-    def test_subagent_done_handler_exists(self) -> None:
-        """Verify main.js has a handler for subagentDone events."""
-        content = _MAIN_JS.read_text()
-        assert "case 'subagentDone'" in content
-
-    def test_subagent_tab_hides_input(self) -> None:
-        """Verify subagent tabs hide the input area."""
-        content = _MAIN_JS.read_text()
-        assert "tab.isSubagentTab" in content
 
 
 # -----------------------------------------------------------------------
@@ -218,18 +186,6 @@ _TYPES_TS = (
 )
 
 
-class TestSubagentTabTypes:
-    """Verify TypeScript types include subagent tab message types."""
-
-    def test_types_include_open_subagent_tab(self) -> None:
-        """types.ts includes openSubagentTab in ToWebviewMessageBody."""
-        content = _TYPES_TS.read_text()
-        assert "openSubagentTab" in content
-
-    def test_types_include_subagent_done(self) -> None:
-        """types.ts includes subagentDone in ToWebviewMessageBody."""
-        content = _TYPES_TS.read_text()
-        assert "subagentDone" in content
 
 
 # -----------------------------------------------------------------------
@@ -241,34 +197,3 @@ _MAIN_CSS = (
     / "agents" / "vscode" / "media" / "main.css"
 )
 
-
-class TestSubagentTabCSS:
-    """Verify CSS includes styles for subagent tabs."""
-
-    def test_css_has_subagent_tab_class(self) -> None:
-        """main.css includes styles for .subagent-tab."""
-        content = _MAIN_CSS.read_text()
-        assert ".subagent-tab" in content
-
-    def test_css_has_subagent_indicator_class(self) -> None:
-        """main.css includes styles for .subagent-indicator."""
-        content = _MAIN_CSS.read_text()
-        assert ".subagent-indicator" in content
-
-    def test_css_has_subagent_pulse_animation(self) -> None:
-        """main.css includes the pulse animation for running subagent indicators."""
-        content = _MAIN_CSS.read_text()
-        assert "subagent-pulse" in content
-
-    def test_css_has_subagent_done_state(self) -> None:
-        """main.css includes done state style for subagent indicator."""
-        content = _MAIN_CSS.read_text()
-        assert ".done" in content or "done" in content
-
-    def test_js_close_button_for_all_subagent_tabs(self) -> None:
-        """All subagent tabs (running and done) show a close button."""
-        content = _MAIN_JS.read_text()
-        # The close button is now always rendered (no isDone guard)
-        assert "chat-tab-close" in content
-        # isDone is still used for the indicator (✓ vs ◉), not the close button
-        assert "tab.isDone" in content

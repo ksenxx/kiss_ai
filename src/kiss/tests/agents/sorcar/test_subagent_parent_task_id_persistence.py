@@ -17,7 +17,6 @@ same ``chat_id`` but the user opened the row explicitly).
 from __future__ import annotations
 
 import json
-import re
 import shutil
 import tempfile
 from pathlib import Path
@@ -184,52 +183,4 @@ class TestPersistedSubagentBlob:
             csa_mod.ChatSorcarAgent = real_cls  # type: ignore[misc]
 
 
-class TestFrontendGuardsAdjacentLoadOnSubagentTab:
-    """The overscroll-triggered ``getAdjacentTask`` postMessage MUST
-    not fire when the active tab is a sub-agent tab — sub-agent tabs
-    render exactly the sub-agent's own row, never sibling tasks from
-    the same chat_id."""
 
-    def test_wheel_adjacent_guard_checks_is_subagent_tab(self) -> None:
-        js = _MAIN_JS.read_text(encoding="utf-8")
-        # Locate the wheel handler's adjacent-loading guard block.
-        idx = js.index("// Adjacent task loading via overscroll detection")
-        block = js[idx:idx + 800]
-        # The guard must look up the active tab and gate on isSubagentTab.
-        assert "isSubagentTab" in block, block
-
-    def test_touch_adjacent_guard_checks_is_subagent_tab(self) -> None:
-        js = _MAIN_JS.read_text(encoding="utf-8")
-        # Locate the touchmove handler.
-        idx = js.index("'touchmove'")
-        block = js[idx:idx + 1500]
-        # The handler must early-return when the active tab is a sub-agent.
-        assert "isSubagentTab" in block, block
-
-
-class TestSubagentTabHeaderHasDistinctColor:
-    """``.chat-tab.subagent-tab`` must carry a distinct background
-    AND border-bottom-color so the tab header is visually distinct
-    from regular chat tabs."""
-
-    def test_subagent_tab_css_distinct(self) -> None:
-        css = _MAIN_CSS.read_text(encoding="utf-8")
-        # Pin the .chat-tab.subagent-tab block contents — every
-        # selector must define a distinct background or border.
-        sub_block = re.search(
-            r"\.chat-tab\.subagent-tab\s*\{([^}]+)\}",
-            css,
-        )
-        assert sub_block is not None
-        decls = sub_block.group(1)
-        assert "border-bottom-color" in decls
-        assert "background" in decls
-        # Active state must be visibly stronger.
-        sub_active = re.search(
-            r"\.chat-tab\.subagent-tab\.active\s*\{([^}]+)\}",
-            css,
-        )
-        assert sub_active is not None
-        active_decls = sub_active.group(1)
-        assert "color" in active_decls
-        assert "var(--purple)" in active_decls

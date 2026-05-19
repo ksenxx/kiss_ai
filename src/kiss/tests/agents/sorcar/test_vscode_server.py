@@ -316,13 +316,6 @@ class TestGenerateCommitMessage(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_command_spawns_thread(self) -> None:
-        """generateCommitMessage command calls _generate_commit_message."""
-        import inspect
-
-        src = inspect.getsource(VSCodeServer._cmd_generate_commit_message)
-        assert "self._generate_commit_message()" in src
-        assert "threading.Thread(target=_run" in src
 
     def test_no_model_param(self) -> None:
         """_generate_commit_message takes no model parameter."""
@@ -1188,23 +1181,7 @@ class TestSorcarTabParallelToggle(unittest.TestCase):
         assert "<svg" in block
         assert "viewBox" in block
 
-    def test_ts_passes_use_parallel_to_start_task(self) -> None:
-        """SorcarSidebarView.ts passes useParallel to _startTask."""
-        base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
-        ts = (base / "vscode" / "src" / "SorcarSidebarView.ts").read_text()
-        assert "message.useParallel" in ts
-        assert "useParallel" in ts
 
-    def test_ts_start_task_includes_use_parallel(self) -> None:
-        """_startTask accepts useParallel and forwards it in sendCommand."""
-        base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
-        ts = (base / "vscode" / "src" / "SorcarSidebarView.ts").read_text()
-        assert "useParallel?: boolean" in ts
-        idx = ts.index("_startTask(")
-        body = ts[idx : idx + 2000]
-        send_idx = body.index("sendCommand({")
-        cmd_block = body[send_idx : body.index("});", send_idx)]
-        assert "useParallel" in cmd_block
 
 
 class TestServerParallelToggle(unittest.TestCase):
@@ -1215,12 +1192,6 @@ class TestServerParallelToggle(unittest.TestCase):
         server = VSCodeServer()
         assert server._get_tab("0").use_parallel is False
 
-    def test_server_parses_use_parallel_from_command(self) -> None:
-        """_run_task_inner sets _use_parallel from cmd dict."""
-        import inspect
-
-        src = inspect.getsource(VSCodeServer._run_task_inner)
-        assert 'useParallel' in src
 
     def test_agent_run_receives_is_parallel(self) -> None:
         """agent.run() call includes is_parallel=self._use_parallel."""

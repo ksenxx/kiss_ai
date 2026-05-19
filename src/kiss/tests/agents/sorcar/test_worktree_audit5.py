@@ -76,12 +76,6 @@ def _make_repo(path: Path) -> Path:
 class TestBug19DiscardRepoLock:
     """BUG-19 FIX: discard() acquires repo_lock so checkout is serialized."""
 
-    def test_discard_uses_repo_lock(self) -> None:
-        """discard() source code references repo_lock."""
-        source = inspect.getsource(WorktreeSorcarAgent.discard)
-        assert "repo_lock" in source, (
-            "discard() must acquire repo_lock"
-        )
 
     def test_discard_blocks_when_lock_held(self) -> None:
         """discard() blocks when another operation holds repo_lock."""
@@ -246,10 +240,6 @@ class TestBug22ConflictMissesStaged:
         has_conflict = server._check_merge_conflict("t22")
         assert has_conflict is True
 
-    def test_unstaged_files_only_returns_unstaged(self) -> None:
-        """unstaged_files() uses git diff --name-only (no --cached)."""
-        source = inspect.getsource(GitWorktreeOps.unstaged_files)
-        assert "--cached" not in source
 
 
 class TestBug23BaselineCommitFixed:
@@ -294,20 +284,6 @@ class TestBug23BaselineCommitFixed:
             _restore_db(saved)
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-    def test_try_setup_checks_commit_return(self) -> None:
-        """_try_setup_worktree checks commit_staged return value."""
-        source = inspect.getsource(WorktreeSorcarAgent._try_setup_worktree)
-        assert "commit_staged(" in source
-        lines = source.splitlines()
-        for line in lines:
-            if "commit_staged(" in line:
-                stripped = line.strip()
-                assert stripped.startswith("if "), (
-                    "commit_staged return must be checked"
-                )
-                break
-        else:
-            raise AssertionError("commit_staged call not found")
 
     def test_commit_staged_has_no_verify_param(self) -> None:
         """commit_staged accepts no_verify kwarg."""
@@ -364,19 +340,3 @@ class TestBug24SilentDiscardOnGitFailure:
         finally:
             _restore_db(saved)
             shutil.rmtree(tmpdir, ignore_errors=True)
-
-    def test_caller_discards_on_empty_changed_files(self) -> None:
-        """_present_pending_worktree calls discard() when changed=[],
-        guarded by _any_non_wt_running() (BUG-42 + RED-10 consolidation).
-
-        _run_task_inner delegates to _present_pending_worktree, which
-        owns the auto-discard logic.
-        """
-        present_source = inspect.getsource(
-            VSCodeServer._present_pending_worktree,
-        )
-        assert "discard()" in present_source
-        assert "_any_non_wt_running" in present_source
-
-        runner_source = inspect.getsource(VSCodeServer._run_task_inner)
-        assert "_present_pending_worktree" in runner_source

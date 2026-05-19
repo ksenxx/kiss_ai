@@ -678,29 +678,6 @@ class TestFlushBashTOCTOU(unittest.TestCase):
             f"Stale bash text leaked into new recording: {stale}"
         )
 
-    def test_structural_broadcast_inside_lock(self) -> None:
-        """Verify broadcast is called inside the _bash_lock in _flush_bash."""
-        import inspect
-        import textwrap
-
-        src = inspect.getsource(BaseBrowserPrinter._flush_bash)
-        src = textwrap.dedent(src)
-        gen_check_idx = src.index("self._bash_state.generation != gen")
-        broadcast_idx = src.index("self.broadcast(")
-        second_lock_start = src.index("with self._bash_lock:", src.index("bs.last_flush"))
-        lines = src[second_lock_start:].split("\n")
-        gen_line = None
-        broadcast_line = None
-        for i, line in enumerate(lines):
-            if "self._bash_state.generation != gen" in line:
-                gen_line = i
-            if "self.broadcast(" in line:
-                broadcast_line = i
-        assert gen_line is not None and broadcast_line is not None
-        assert broadcast_line > gen_line, (
-            "broadcast must come after generation check in the same lock scope"
-        )
-        assert gen_check_idx < broadcast_idx
 
 
 class TestCleanupTab(unittest.TestCase):

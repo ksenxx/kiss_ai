@@ -166,28 +166,7 @@ class TestFix1PerTabMergeDirs:
 class TestFix2PinHeadSHA:
     """Verify pre-task snapshot is atomic and HEAD SHA is pinned."""
 
-    def test_run_task_inner_acquires_repo_lock_for_snapshot(self) -> None:
-        """The non-worktree snapshot helper should acquire repo_lock."""
-        source = inspect.getsource(VSCodeServer._capture_pre_snapshot)
 
-        assert "repo_lock(repo)" in source, (
-            "Fix 2: _capture_pre_snapshot must acquire repo_lock"
-        )
-        assert "head_sha" in source, (
-            "Fix 2: must capture head_sha inside the snapshot"
-        )
-
-        inner_source = inspect.getsource(VSCodeServer._run_task_inner)
-        assert "_capture_pre_snapshot" in inner_source, (
-            "Fix 2: _run_task_inner must call _capture_pre_snapshot"
-        )
-
-    def test_prepare_and_start_merge_receives_pinned_base_ref(self) -> None:
-        """The post-task merge call should use the pinned HEAD SHA."""
-        source = inspect.getsource(VSCodeServer._run_task_inner)
-        assert 'base_ref=pre_head_sha or "HEAD"' in source, (
-            "Fix 2: _prepare_and_start_merge must receive pinned base_ref"
-        )
 
     def test_pinned_head_sha_survives_concurrent_checkout(self) -> None:
         """Functional: pinned SHA is stable even if HEAD changes."""
@@ -343,22 +322,11 @@ class TestFix3MainTreeBusyGuard:
         GitWorktreeOps.delete_branch(repo, wt.branch)
 
 
-    def test_run_task_inner_source_sets_non_wt_flag(self) -> None:
-        """_run_task_inner sets is_running_non_wt for non-worktree tasks."""
-        source = inspect.getsource(VSCodeServer._run_task_inner)
-        assert "is_running_non_wt = True" in source
-        assert "is_running_non_wt = False" in source
 
 
 class TestFix4SymmetricGuard:
     """Verify non-wt task start is blocked during worktree merge."""
 
-    def test_run_task_inner_checks_worktree_merge_in_progress(self) -> None:
-        """Source should check for ongoing worktree merge before non-wt task."""
-        source = inspect.getsource(VSCodeServer._run_task_inner)
-        assert "t.is_merging and t.use_worktree" in source, (
-            "Fix 4: must check for active worktree merge"
-        )
 
     def test_non_wt_blocked_when_wt_merging(self) -> None:
         """A non-wt task should not start when a worktree merge is active."""

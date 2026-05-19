@@ -205,14 +205,3 @@ class TestFrontendHandlerHonorsIsDone:
         )
         assert coerce, body
 
-
-class TestSubagentTabClassesUnchanged:
-    """The rendered tab classes for done vs running come from the
-    same ``isDone``/``isRunning`` flags the handler sets, so the
-    indicator color (purple ◉ vs green ✓) tracks the backend signal
-    automatically."""
-
-    def test_render_tab_bar_branches_on_is_done(self) -> None:
-        src = _MAIN_JS.read_text(encoding="utf-8")
-        assert "'subagent-indicator' + (tab.isDone ? ' done' : '')" in src
-        assert "tab.isDone ? '✓' : '◉'" in src

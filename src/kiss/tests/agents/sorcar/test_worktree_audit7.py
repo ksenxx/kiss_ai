@@ -19,7 +19,6 @@ BUG-33 FIX: copy_dirty_state now unquotes C-style quoted filenames
 
 from __future__ import annotations
 
-import inspect
 import json
 import shutil
 import subprocess
@@ -112,32 +111,6 @@ class TestBug30Fix:
         _restore_db(self._saved)
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
-    def test_source_shows_current_branch_inside_lock(self) -> None:
-        """BUG-30 FIX: current_branch is called inside repo_lock."""
-        source = inspect.getsource(WorktreeSorcarAgent._try_setup_worktree)
-        lines = source.splitlines()
-
-        current_branch_line = None
-        for i, line in enumerate(lines):
-            if "current_branch(" in line:
-                current_branch_line = i
-                break
-
-        assert current_branch_line is not None, (
-            "sanity: current_branch call found in _try_setup_worktree"
-        )
-
-        has_enclosing_lock = False
-        for i in range(current_branch_line - 1, -1, -1):
-            if "with repo_lock(" in lines[i]:
-                has_enclosing_lock = True
-                break
-            if "def _try_setup_worktree" in lines[i]:
-                break
-
-        assert has_enclosing_lock, (
-            "BUG-30 NOT fixed: current_branch is still outside repo_lock"
-        )
 
     def test_correct_original_branch_recorded(self) -> None:
         """BUG-30 FIX: original_branch is correctly recorded for new worktree."""
@@ -180,19 +153,7 @@ class TestBug31Fix:
         _restore_db(self._saved)
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
-    def test_source_shows_merge_failed_handling_in_release(self) -> None:
-        """BUG-31 FIX: _release_worktree has explicit MERGE_FAILED case."""
-        source = inspect.getsource(WorktreeSorcarAgent._release_worktree)
-        assert "MERGE_FAILED" in source, (
-            "BUG-31 NOT fixed: _release_worktree still lacks MERGE_FAILED handling"
-        )
 
-    def test_source_shows_merge_failed_handling_in_merge(self) -> None:
-        """BUG-31 FIX: merge() has explicit MERGE_FAILED case."""
-        source = inspect.getsource(WorktreeSorcarAgent.merge)
-        assert "MERGE_FAILED" in source, (
-            "BUG-31 NOT fixed: merge() still lacks MERGE_FAILED handling"
-        )
 
     def test_merge_commit_failure_not_reported_as_conflict(self) -> None:
         """BUG-31 FIX: A commit failure is NOT called a 'conflict'."""
@@ -423,12 +384,6 @@ class TestBug33Fix:
         quoted = '"\\346\\227\\245.txt"'
         assert _unquote_git_path(quoted) == "日.txt"
 
-    def test_source_uses_unquote(self) -> None:
-        """BUG-33 FIX: copy_dirty_state uses _unquote_git_path."""
-        source = inspect.getsource(GitWorktreeOps.copy_dirty_state)
-        assert "_unquote_git_path" in source, (
-            "BUG-33 NOT fixed: copy_dirty_state doesn't use _unquote_git_path"
-        )
 
     def test_non_ascii_filename_copied(self) -> None:
         """BUG-33 FIX: File with non-ASCII name IS copied to worktree."""

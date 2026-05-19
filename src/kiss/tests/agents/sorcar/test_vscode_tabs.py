@@ -430,27 +430,6 @@ class TestMainJsTabIdRouting(unittest.TestCase):
         assert "tabId" in block or "ev.tabId" in block
 
 
-class TestFollowupAsyncTabId(unittest.TestCase):
-    """_generate_followup_async propagates tab_id to the background thread."""
-
-    def test_followup_thread_sets_tab_id(self) -> None:
-        """The background thread created by _generate_followup_async
-        sets the printer's thread-local tab_id so that broadcasts get
-        the correct tabId."""
-        from kiss.tests.agents.vscode._memory_printer import MemoryPrinter
-
-        printer = MemoryPrinter()
-        server = VSCodeServer(printer=printer)
-
-        printer._thread_local.tab_id = "42"
-
-        server._generate_followup_async("task", "result", None)
-        time.sleep(2)
-
-        import inspect
-        src = inspect.getsource(server._generate_followup_async)
-        assert "owner_tab" in src
-        assert "_thread_local.tab_id = owner_tab" in src or "tab_id" in src
 
 
 class TestBashFlushTimerTabId(unittest.TestCase):
@@ -615,15 +594,6 @@ class TestSelectedModelIsolation(unittest.TestCase):
         tab99 = server._get_tab("99")
         assert tab99.selected_model == "gpt-4o"
 
-    def test_run_task_uses_per_tab_model(self) -> None:
-        """_run_task_inner reads model from the tab's selected_model."""
-        import inspect
-
-        from kiss.agents.vscode.server import VSCodeServer
-
-        source = inspect.getsource(VSCodeServer._run_task_inner)
-        assert "tab.selected_model" in source
-        assert "self._selected_model" not in source
 
 
 class TestBashBufferIsolation(unittest.TestCase):

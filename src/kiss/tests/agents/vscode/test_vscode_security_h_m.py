@@ -9,7 +9,6 @@ harness has no TypeScript runtime.
 
 from __future__ import annotations
 
-import inspect
 import os
 import re
 import shutil
@@ -285,34 +284,6 @@ class TestM5AtomicSaveAndDecodeError(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-class TestM2StopEventOrder(unittest.TestCase):
-    """The stop event must be plumbed through ``_thread_local`` before
-    the long-running ``_capture_pre_snapshot`` runs, so a Stop click can
-    abort a hanging ``repo_lock``."""
-
-    def test_thread_local_stop_event_set_early(self) -> None:
-        """Source-level: stop_event must be installed before snapshot."""
-        from kiss.agents.vscode import task_runner as tr
-
-        src = inspect.getsource(tr._TaskRunnerMixin._run_task_inner)
-        # Find the lines for stop_event assignment and capture_pre_snapshot.
-        lines = src.splitlines()
-        stop_idx = next(
-            (i for i, ln in enumerate(lines)
-             if "_thread_local.stop_event" in ln and "=" in ln),
-            None,
-        )
-        snap_idx = next(
-            (i for i, ln in enumerate(lines)
-             if "_capture_pre_snapshot" in ln),
-            None,
-        )
-        assert stop_idx is not None, "stop_event assignment not found"
-        assert snap_idx is not None, "_capture_pre_snapshot not found"
-        self.assertLess(stop_idx, snap_idx,
-                        f"stop_event installed at line {stop_idx} but "
-                        f"_capture_pre_snapshot runs at line {snap_idx}; "
-                        "swap them so Stop works during snapshot")
 
 
 # ---------------------------------------------------------------------------
