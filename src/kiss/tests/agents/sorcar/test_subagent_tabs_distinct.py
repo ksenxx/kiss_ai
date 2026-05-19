@@ -20,7 +20,7 @@ only 2 sub-agent tabs.  Investigation showed:
 These tests guard the fix:
 
 - Backend includes ``taskIndex`` on every ``openSubagentTab`` event
-  so the frontend can prepend ``⚡N`` to disambiguate.
+  so the frontend can prepend ``N.`` to disambiguate.
 - Frontend ``openSubagentTab`` handler uses ``ev.taskIndex`` in the
   title, dedups by ``ev.tab_id`` (idempotent), and ``persistTabState``
   preserves ``isSubagentTab``/``isDone`` so sub-tabs survive webview
@@ -124,15 +124,15 @@ class TestSubagentTitlesAreVisuallyDistinct:
             "Research and summarize: The Actor model in concurrency...",
         ]
         titles = [
-            "⚡" + str(i + 1) + " " + desc[:40]
+            str(i + 1) + ". " + desc[:40]
             for i, desc in enumerate(descriptions)
         ]
         assert len(set(titles)) == 3, (
             "titles must be unique even when descriptions share prefix"
         )
-        # First 20 characters (typical visible portion in a narrow tab
+        # First few characters (typical visible portion in a narrow tab
         # bar) must already differ — this is the actual UX guarantee.
-        prefixes = [t[:6] for t in titles]
+        prefixes = [t[:4] for t in titles]
         assert len(set(prefixes)) == 3, (
-            f"first 6 chars of titles must differ: {prefixes}"
+            f"first 4 chars of titles must differ: {prefixes}"
         )

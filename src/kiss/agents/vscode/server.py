@@ -281,7 +281,7 @@ class VSCodeServer(
             # Mark sub-agent rows so the history sidebar treats them
             # as a regular task with one rendering difference: the
             # reopened tab is styled as a sub-agent tab (purple
-            # accent, ⚡ icon) and suppresses adjacent-task loading
+            # accent) and suppresses adjacent-task loading
             # for siblings in the same chat.  Persisted as just
             # ``{"parent_task_id": <int>}`` under ``extra.subagent``;
             # presence of the key implies the row is a sub-agent.
