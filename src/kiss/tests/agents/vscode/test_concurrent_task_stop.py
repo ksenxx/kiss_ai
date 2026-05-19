@@ -51,14 +51,14 @@ class TestStreamStateIsolation(unittest.TestCase):
         results: dict[str, str] = {}
 
         def wt_task() -> None:
-            printer._thread_local.tab_id = "B"
+            printer._thread_local.task_id = "B"
             printer._current_block_type = "thinking"
             barrier.wait()
             barrier2.wait()
             results["B_block_type"] = printer._current_block_type
 
         def non_wt_task() -> None:
-            printer._thread_local.tab_id = "A"
+            printer._thread_local.task_id = "A"
             printer._current_block_type = "tool_use"
             barrier.wait()
             printer.reset()
@@ -94,7 +94,7 @@ class TestRecordingIsolation(unittest.TestCase):
         results: dict[str, list[dict]] = {}
 
         def wt_task() -> None:
-            printer._thread_local.tab_id = "B"
+            printer._thread_local.task_id = "B"
             printer.start_recording()
             with printer._lock:
                 printer._record_event({"type": "thinking_start", "tabId": "B"})
@@ -105,7 +105,7 @@ class TestRecordingIsolation(unittest.TestCase):
             results["B_events"] = printer.stop_recording()
 
         def non_wt_task() -> None:
-            printer._thread_local.tab_id = "A"
+            printer._thread_local.task_id = "A"
             printer.start_recording()
             with printer._lock:
                 printer._record_event({"type": "tool_call", "name": "Read", "tabId": "A"})
@@ -134,7 +134,7 @@ class TestRecordingIsolation(unittest.TestCase):
         results: dict[str, list[dict]] = {}
 
         def task_a() -> None:
-            printer._thread_local.tab_id = "A"
+            printer._thread_local.task_id = "A"
             printer.start_recording()
             with printer._lock:
                 printer._record_event({"type": "tool_call", "name": "Bash", "tabId": "A"})
@@ -144,7 +144,7 @@ class TestRecordingIsolation(unittest.TestCase):
             results["A_events"] = printer.stop_recording()
 
         def task_b() -> None:
-            printer._thread_local.tab_id = "B"
+            printer._thread_local.task_id = "B"
             barrier.wait()
             printer.start_recording()
             with printer._lock:
@@ -166,7 +166,7 @@ class TestRecordingIsolation(unittest.TestCase):
     def test_peek_recording_returns_per_tab_events(self) -> None:
         """peek_recording returns only the calling tab's events."""
         printer = BaseBrowserPrinter()
-        printer._thread_local.tab_id = "A"
+        printer._thread_local.task_id = "A"
         printer.start_recording()
         with printer._lock:
             printer._record_event({"type": "tool_call", "name": "Read", "tabId": "A"})
@@ -197,7 +197,7 @@ class TestConcurrentStopScenario(unittest.TestCase):
         wt_events: list[dict] = []
 
         def wt_task() -> None:
-            printer._thread_local.tab_id = "wt"
+            printer._thread_local.task_id = "wt"
             printer.start_recording()
             printer._current_block_type = "thinking"
             printer.broadcast({"type": "thinking_start", "tabId": "wt"})
@@ -214,7 +214,7 @@ class TestConcurrentStopScenario(unittest.TestCase):
             wt_events.extend(printer.stop_recording())
 
         def non_wt_task() -> None:
-            printer._thread_local.tab_id = "nwt"
+            printer._thread_local.task_id = "nwt"
             printer.start_recording()
             printer._current_block_type = "tool_use"
             barrier.wait()
@@ -254,14 +254,14 @@ class TestStopWtPreservesNonWtStreamState(unittest.TestCase):
         results: dict[str, str] = {}
 
         def non_wt_task() -> None:
-            printer._thread_local.tab_id = "nwt"
+            printer._thread_local.task_id = "nwt"
             printer._current_block_type = "thinking"
             barrier.wait()
             barrier2.wait()
             results["nwt_block_type"] = printer._current_block_type
 
         def wt_task() -> None:
-            printer._thread_local.tab_id = "wt"
+            printer._thread_local.task_id = "wt"
             printer._current_block_type = "tool_use"
             barrier.wait()
             printer.reset()
@@ -296,7 +296,7 @@ class TestStopWtPreservesNonWtRecording(unittest.TestCase):
         results: dict[str, list[dict]] = {}
 
         def non_wt_task() -> None:
-            printer._thread_local.tab_id = "nwt"
+            printer._thread_local.task_id = "nwt"
             printer.start_recording()
             with printer._lock:
                 printer._record_event({"type": "thinking_start", "tabId": "nwt"})
@@ -310,7 +310,7 @@ class TestStopWtPreservesNonWtRecording(unittest.TestCase):
             results["nwt_events"] = printer.stop_recording()
 
         def wt_task() -> None:
-            printer._thread_local.tab_id = "wt"
+            printer._thread_local.task_id = "wt"
             printer.start_recording()
             with printer._lock:
                 printer._record_event({"type": "tool_call", "name": "Edit", "tabId": "wt"})
@@ -344,7 +344,7 @@ class TestStopWtPreservesNonWtRecording(unittest.TestCase):
         results: dict[str, list[dict]] = {}
 
         def non_wt_task() -> None:
-            printer._thread_local.tab_id = "nwt"
+            printer._thread_local.task_id = "nwt"
             printer.start_recording()
             with printer._lock:
                 printer._record_event({"type": "tool_call", "name": "Read", "tabId": "nwt"})
@@ -356,7 +356,7 @@ class TestStopWtPreservesNonWtRecording(unittest.TestCase):
             results["nwt_events"] = printer.stop_recording()
 
         def wt_task() -> None:
-            printer._thread_local.tab_id = "wt"
+            printer._thread_local.task_id = "wt"
             barrier.wait()
             printer.start_recording()
             with printer._lock:
@@ -394,7 +394,7 @@ class TestStopWtConcurrentScenario(unittest.TestCase):
         nwt_events: list[dict] = []
 
         def non_wt_task() -> None:
-            printer._thread_local.tab_id = "nwt"
+            printer._thread_local.task_id = "nwt"
             printer.start_recording()
             printer._current_block_type = "thinking"
             printer.broadcast({"type": "thinking_start", "tabId": "nwt"})
@@ -411,7 +411,7 @@ class TestStopWtConcurrentScenario(unittest.TestCase):
             nwt_events.extend(printer.stop_recording())
 
         def wt_task() -> None:
-            printer._thread_local.tab_id = "wt"
+            printer._thread_local.task_id = "wt"
             printer.start_recording()
             printer._current_block_type = "tool_use"
             barrier.wait()
@@ -450,7 +450,7 @@ class TestBashStreamedCrossContamination(unittest.TestCase):
         results: dict[str, bool] = {}
 
         def task_a() -> None:
-            printer._thread_local.tab_id = "A"
+            printer._thread_local.task_id = "A"
             printer.start_recording()
             with printer._bash_lock:
                 printer._bash_state.streamed = True
@@ -460,7 +460,7 @@ class TestBashStreamedCrossContamination(unittest.TestCase):
                 results["A_streamed"] = printer._bash_state.streamed
 
         def task_b() -> None:
-            printer._thread_local.tab_id = "B"
+            printer._thread_local.task_id = "B"
             printer.start_recording()
             barrier.wait()
             with printer._bash_lock:
@@ -495,7 +495,7 @@ class TestBashBufferCrossContamination(unittest.TestCase):
         results: dict[str, list[str]] = {}
 
         def task_a() -> None:
-            printer._thread_local.tab_id = "A"
+            printer._thread_local.task_id = "A"
             with printer._bash_lock:
                 printer._bash_state.buffer.append("task-A-output")
             barrier.wait()
@@ -503,7 +503,7 @@ class TestBashBufferCrossContamination(unittest.TestCase):
                 results["A_buffer"] = list(printer._bash_state.buffer)
 
         def task_b() -> None:
-            printer._thread_local.tab_id = "B"
+            printer._thread_local.task_id = "B"
             with printer._bash_lock:
                 printer._bash_state.buffer.append("task-B-output")
             barrier.wait()
@@ -541,7 +541,7 @@ class TestBashGenerationInterference(unittest.TestCase):
         results: dict[str, int] = {}
 
         def task_a() -> None:
-            printer._thread_local.tab_id = "A"
+            printer._thread_local.task_id = "A"
             with printer._bash_lock:
                 gen_before = printer._bash_state.generation
             results["A_gen_before"] = gen_before
@@ -551,7 +551,7 @@ class TestBashGenerationInterference(unittest.TestCase):
                 results["A_gen_after"] = printer._bash_state.generation
 
         def task_b() -> None:
-            printer._thread_local.tab_id = "B"
+            printer._thread_local.task_id = "B"
             barrier.wait()
             printer.reset()
             barrier2.wait()
@@ -584,7 +584,7 @@ class TestBashTimerInterference(unittest.TestCase):
         results: dict[str, bool] = {}
 
         def task_a() -> None:
-            printer._thread_local.tab_id = "A"
+            printer._thread_local.task_id = "A"
             with printer._bash_lock:
                 t = threading.Timer(999, lambda: None)
                 printer._bash_state.timer = t
@@ -597,7 +597,7 @@ class TestBashTimerInterference(unittest.TestCase):
                     printer._bash_state.timer = None
 
         def task_b() -> None:
-            printer._thread_local.tab_id = "B"
+            printer._thread_local.task_id = "B"
             barrier.wait()
             printer.reset()
             barrier2.wait()
@@ -637,7 +637,7 @@ class TestFlushBashTOCTOU(unittest.TestCase):
         5. (With fix: broadcast inside lock, no window for reset)
         """
         printer = BaseBrowserPrinter()
-        printer._thread_local.tab_id = "tab1"
+        printer._thread_local.task_id = "tab1"
 
         with printer._bash_lock:
             printer._bash_state.buffer.append("stale-from-old-turn")
@@ -646,7 +646,7 @@ class TestFlushBashTOCTOU(unittest.TestCase):
         proceed = threading.Event()
 
         def manual_flush() -> None:
-            printer._thread_local.tab_id = "tab1"
+            printer._thread_local.task_id = "tab1"
             with printer._bash_lock:
                 bs = printer._bash_state
                 gen = bs.generation
@@ -681,56 +681,56 @@ class TestFlushBashTOCTOU(unittest.TestCase):
 
 
 class TestCleanupTab(unittest.TestCase):
-    """``cleanup_tab`` removes per-tab state to prevent unbounded memory growth."""
+    """``cleanup_task`` removes per-task state to prevent unbounded memory growth."""
 
     def test_cleanup_removes_bash_state(self) -> None:
-        """After cleanup_tab, the tab's _BashState is removed from _bash_states."""
+        """After cleanup_task, the task's _BashState is removed from _bash_states."""
         printer = BaseBrowserPrinter()
-        printer._thread_local.tab_id = "tab1"
+        printer._thread_local.task_id = "tab1"
         with printer._bash_lock:
             printer._bash_state.buffer.append("data")
         assert "tab1" in printer._bash_states
-        printer.cleanup_tab("tab1")
+        printer.cleanup_task("tab1")
         assert "tab1" not in printer._bash_states
 
     def test_cleanup_cancels_pending_timer(self) -> None:
-        """cleanup_tab cancels any pending bash flush timer for the tab."""
+        """cleanup_task cancels any pending bash flush timer for the task."""
         printer = BaseBrowserPrinter()
-        printer._thread_local.tab_id = "tab1"
+        printer._thread_local.task_id = "tab1"
         t = threading.Timer(999, lambda: None)
         t.start()
         with printer._bash_lock:
             printer._bash_state.timer = t
         assert t.is_alive()
-        printer.cleanup_tab("tab1")
+        printer.cleanup_task("tab1")
         t.join(timeout=2)
-        assert not t.is_alive(), "Timer should have been cancelled by cleanup_tab"
+        assert not t.is_alive(), "Timer should have been cancelled by cleanup_task"
 
     def test_cleanup_removes_recording(self) -> None:
-        """After cleanup_tab, the tab's recording is removed from _recordings."""
+        """After cleanup_task, the task's recording is removed from _recordings."""
         printer = BaseBrowserPrinter()
-        printer._thread_local.tab_id = "tab1"
+        printer._thread_local.task_id = "tab1"
         printer.start_recording()
         assert "tab1" in printer._recordings
-        printer.cleanup_tab("tab1")
+        printer.cleanup_task("tab1")
         assert "tab1" not in printer._recordings
 
     def test_cleanup_does_not_affect_other_tabs(self) -> None:
-        """cleanup_tab for one tab leaves other tabs' state intact."""
+        """cleanup_task for one task leaves other tasks' state intact."""
         printer = BaseBrowserPrinter()
 
-        def setup_tab(tab_id: str) -> None:
-            printer._thread_local.tab_id = tab_id
+        def setup_tab(task_id: str) -> None:
+            printer._thread_local.task_id = task_id
             with printer._bash_lock:
-                printer._bash_state.buffer.append(f"data-{tab_id}")
+                printer._bash_state.buffer.append(f"data-{task_id}")
             printer.start_recording()
             with printer._lock:
-                printer._record_event({"type": "text_delta", "text": "x", "tabId": tab_id})
+                printer._record_event({"type": "text_delta", "text": "x", "taskId": task_id})
 
         barrier = threading.Barrier(2, timeout=5)
 
-        def thread_setup(tab_id: str) -> None:
-            setup_tab(tab_id)
+        def thread_setup(task_id: str) -> None:
+            setup_tab(task_id)
             barrier.wait()
 
         t1 = threading.Thread(target=thread_setup, args=("tab1",), daemon=True)
@@ -745,7 +745,7 @@ class TestCleanupTab(unittest.TestCase):
         assert "tab1" in printer._recordings
         assert "tab2" in printer._recordings
 
-        printer.cleanup_tab("tab1")
+        printer.cleanup_task("tab1")
 
         assert "tab1" not in printer._bash_states
         assert "tab2" in printer._bash_states
@@ -755,19 +755,19 @@ class TestCleanupTab(unittest.TestCase):
         assert len(printer._recordings["tab2"]) == 1
 
     def test_cleanup_nonexistent_tab_is_noop(self) -> None:
-        """cleanup_tab for a tab that doesn't exist does not raise."""
+        """cleanup_task for a task that doesn't exist does not raise."""
         printer = BaseBrowserPrinter()
-        printer.cleanup_tab("nonexistent")
+        printer.cleanup_task("nonexistent")
         assert "nonexistent" not in printer._bash_states
         assert "nonexistent" not in printer._recordings
 
     def test_cleanup_after_task_completes_frees_state(self) -> None:
         """Simulates a full lifecycle: task runs, completes, tab is closed.
 
-        After cleanup, no per-tab entries remain in _bash_states or _recordings.
+        After cleanup, no per-task entries remain in _bash_states or _recordings.
         """
         printer = BaseBrowserPrinter()
-        printer._thread_local.tab_id = "tab1"
+        printer._thread_local.task_id = "tab1"
 
         printer.start_recording()
         with printer._bash_lock:
@@ -779,7 +779,7 @@ class TestCleanupTab(unittest.TestCase):
 
         assert "tab1" in printer._bash_states
 
-        printer.cleanup_tab("tab1")
+        printer.cleanup_task("tab1")
         assert "tab1" not in printer._bash_states
         assert "tab1" not in printer._recordings
 
@@ -804,34 +804,17 @@ class TestCloseTabServer(unittest.TestCase):
         server._close_tab("tab1")
         assert "tab1" not in server._running_agent_states
 
-    def test_close_tab_cleans_printer_bash_states(self) -> None:
-        """_close_tab removes the tab's bash state from the printer."""
+    def test_close_tab_clears_subscribers(self) -> None:
+        """_close_tab removes the tab from every task's subscriber set."""
         server = self._make_server()
         server._get_tab("tab1")
-        server.printer._thread_local.tab_id = "tab1"
-        with server.printer._bash_lock:
-            server.printer._bash_state.buffer.append("data")
-        assert "tab1" in server.printer._bash_states
+        server.printer.subscribe_tab("task-A", "tab1")
+        server.printer.subscribe_tab("task-B", "tab1")
+        assert "tab1" in server.printer._subscribers["task-A"]
+        assert "tab1" in server.printer._subscribers["task-B"]
         server._close_tab("tab1")
-        assert "tab1" not in server.printer._bash_states
-
-    def test_close_tab_cleans_printer_recordings(self) -> None:
-        """_close_tab removes the tab's recording from the printer."""
-        server = self._make_server()
-        server._get_tab("tab1")
-        server.printer._thread_local.tab_id = "tab1"
-        server.printer.start_recording()
-        assert "tab1" in server.printer._recordings
-        server._close_tab("tab1")
-        assert "tab1" not in server.printer._recordings
-
-    def test_close_tab_cleans_persist_agents(self) -> None:
-        """_close_tab removes the tab's entry from _persist_agents."""
-        server = self._make_server()
-        tab = server._get_tab("tab1")
-        server.printer._persist_agents["tab1"] = tab.agent
-        server._close_tab("tab1")
-        assert "tab1" not in server.printer._persist_agents
+        assert "task-A" not in server.printer._subscribers
+        assert "task-B" not in server.printer._subscribers
 
     def test_close_tab_skips_active_task(self) -> None:
         """_close_tab does not remove a tab that has an active task."""

@@ -145,7 +145,7 @@ class TestAwaitUserResponseLoop:
         server = VSCodeServer()
         stop_event = threading.Event()
         server.printer._thread_local.stop_event = stop_event
-        server.printer._thread_local.tab_id = "42"
+        server.printer._thread_local.task_id = "42"
         q: queue_mod.Queue[str] = queue_mod.Queue(maxsize=1)
         server._get_tab("42").user_answer_queue = q
 

@@ -87,7 +87,6 @@ class _TaskRunnerMixin:
         which code-path is taken.
         """
         tab_id = cmd.get("tabId", "")
-        self.printer._thread_local.tab_id = tab_id
         try:
             self.printer.broadcast(
                 {"type": "status", "running": True, "tabId": tab_id},
@@ -307,8 +306,13 @@ class _TaskRunnerMixin:
         result_summary = "Agent Failed Abruptly"
         task_end_event: dict[str, Any] | None = None
         try:
-            self.printer.start_recording()
-            self.printer._persist_agents[tab_id] = tab.agent
+            # ``start_recording`` / ``_persist_agents`` registration
+            # / subscriber wiring is now owned by
+            # :meth:`ChatSorcarAgent.run` (it has the ``task_id`` at
+            # allocation time, which the task_runner does not).  We
+            # only need to pass the initial tab id via
+            # ``_subscribe_tab_id`` so the agent subscribes that tab
+            # to the task once the id exists.
             tab.task_history_id = None
             subtasks = parse_task_tags(prompt)
             from kiss.agents.vscode.vscode_config import load_config as _load_cfg
@@ -344,6 +348,7 @@ class _TaskRunnerMixin:
                         web_tools=_cfg_web,
                         model_config=_model_config,
                         _skip_persistence=True,
+                        _subscribe_tab_id=tab_id,
                     )
                     result_summary = self._extract_result_summary() or "No summary available"
                     task_end_event = {"type": "task_done"}
@@ -372,8 +377,13 @@ class _TaskRunnerMixin:
             try:
                 with self._state_lock:
                     tab.is_task_active = False
-                self.printer._persist_agents.pop(tab_id, None)
-                self.printer.stop_recording()
+                # Per-task printer cleanup (``stop_recording`` etc.)
+                # is owned by :meth:`ChatSorcarAgent.run`'s finally.
+                # The remaining per-task state (recording buffer,
+                # ``_persist_agents``, usage offsets) is dropped at
+                # the very end of this block — AFTER all post-task
+                # broadcasts have happened — by
+                # :meth:`BaseBrowserPrinter.cleanup_task`.
                 if not use_worktree:
                     try:
                         if tab.skip_merge:
@@ -481,6 +491,22 @@ class _TaskRunnerMixin:
                         result_summary,
                         tab.task_history_id,
                     )
+                # Free per-task printer state (recording buffer,
+                # persist-agent entry, usage offsets, bash buffer).
+                # Subscribers are preserved by ``cleanup_task`` so
+                # the async followup can still fan out to the
+                # originating tab; they are dropped when the tab
+                # itself closes via ``cleanup_tab``.
+                if tab.task_history_id is not None:
+                    self.printer.cleanup_task(tab.task_history_id)
+                # Clear the thread-local task id so a subsequent
+                # task on the same worker thread (rare; tests) does
+                # not see a stale id.
+                tl = getattr(self.printer, "_thread_local", None)
+                if tl is not None and getattr(tl, "task_id", None) == str(
+                    tab.task_history_id,
+                ):
+                    tl.task_id = None
                 tab.task_history_id = None
             except BaseException:  # pragma: no cover — cleanup interrupted
                 with self._state_lock:
@@ -545,23 +571,38 @@ class _TaskRunnerMixin:
             ).start()
 
     def _find_source_tab_for_viewer(self, viewer_tab_id: str) -> str | None:
-        """Find the source tab id that *viewer_tab_id* is subscribed to.
+        """Find a peer tab id sharing the same task as *viewer_tab_id*.
 
-        Scans the printer's ``_subscribers`` mapping (source → {viewers})
-        to find the source tab whose event stream *viewer_tab_id* is
-        receiving copies of.  Returns ``None`` when no subscription
-        exists for *viewer_tab_id*.
+        Scans the printer's ``_subscribers`` mapping
+        (``task_id -> {tab_ids}``) to locate the task that
+        *viewer_tab_id* is subscribed to, then returns another tab id
+        subscribed to the same task whose :class:`_RunningAgentState`
+        carries a live ``stop_event`` (i.e. the tab that actually
+        started the task).  Returns ``None`` when no such tab exists.
 
         Args:
             viewer_tab_id: The subscriber/viewer tab id to look up.
 
         Returns:
-            The source tab id, or ``None`` if not found.
+            A peer tab id that owns the cooperative stop event for the
+            running task, or ``None`` if not found.
         """
         with self.printer._lock:
-            for source, viewers in self.printer._subscribers.items():
+            task_key: str | None = None
+            for task_id, viewers in self.printer._subscribers.items():
                 if viewer_tab_id in viewers:
-                    return source
+                    task_key = task_id
+                    break
+            if task_key is None:
+                return None
+            peers = list(self.printer._subscribers[task_key])
+        with self._state_lock:
+            for peer in peers:
+                if peer == viewer_tab_id:
+                    continue
+                state = _RunningAgentState.running_agent_states.get(peer)
+                if state is not None and state.stop_event is not None:
+                    return peer
         return None
 
     @staticmethod
@@ -603,14 +644,21 @@ class _TaskRunnerMixin:
         stop = getattr(self.printer._thread_local, "stop_event", None)
         if stop is None:
             raise KeyboardInterrupt("No stop event set")
-        tab_id = getattr(self.printer._thread_local, "tab_id", None)
-        with self._state_lock:
-            tab = (
-                _RunningAgentState.running_agent_states.get(tab_id)
-                if tab_id is not None
-                else None
-            )
-            q = tab.user_answer_queue if tab is not None else None
+        # Resolve the answer queue via the printer's task-id ->
+        # subscriber-tabs mapping: pick the first subscribed tab that
+        # has a live ``user_answer_queue``.  Any tab subscribed to
+        # this task can answer.
+        task_key = getattr(self.printer._thread_local, "task_id", None)
+        q = None
+        if task_key:
+            with self.printer._lock:
+                tab_ids = list(self.printer._subscribers.get(task_key, ()))
+            with self._state_lock:
+                for tab_id in tab_ids:
+                    tab = _RunningAgentState.running_agent_states.get(tab_id)
+                    if tab is not None and tab.user_answer_queue is not None:
+                        q = tab.user_answer_queue
+                        break
         # M4 — when the tab has no answer queue (e.g. the tab was closed
         # mid-question) there is no path that can ever return a response.
         # Refuse to busy-loop forever; raise immediately so the agent

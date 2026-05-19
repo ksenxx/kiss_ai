@@ -462,8 +462,12 @@ class VSCodeServer(
                     wt_agent._release_worktree()
             except Exception:
                 logger.debug("Worktree release on tab close failed", exc_info=True)
+        # ``cleanup_tab`` removes *tab_id* from every task subscriber
+        # set so a stale viewer never receives events.  Per-task state
+        # (recordings, persist_agents, offsets) is owned by the agent
+        # thread and cleaned up by :meth:`_TaskRunnerMixin` /
+        # :meth:`ChatSorcarAgent.run`.
         self.printer.cleanup_tab(tab_id)
-        self.printer._persist_agents.pop(tab_id, None)
         _cleanup_merge_data(str(_merge_data_dir(tab_id)))
 
     def _new_chat(self, tab_id: str) -> None:
@@ -830,16 +834,19 @@ class VSCodeServer(
             if source is None:
                 return False
             source_tab_id = source.tab_id
-        # Subscribe the new viewer to the source tab's broadcast
-        # stream (skipping the degenerate self-subscribe when the
-        # source happens to share its tab id — e.g. when a reloaded
-        # client reuses the same uuid).  The caller still emits a
+            source_task_id = (
+                source.agent._last_task_id if source.agent is not None else None
+            )
+            if source_task_id is None:
+                source_task_id = source.task_history_id
+        # Subscribe the new viewer to the running task so live events
+        # fan out to the freshly opened tab.  The caller still emits a
         # ``status running=true`` event before the ``task_events``
         # replay so the webview's ``isRunning`` flag is set before
         # ``replayTaskEvents`` runs; otherwise ``applyChevronState``
         # would mark every replayed panel ``.chv-hidden``.
-        if source_tab_id != new_tab_id:
-            self.printer.subscribe_tab(source_tab_id, new_tab_id)
+        if source_task_id is not None and source_tab_id != new_tab_id:
+            self.printer.subscribe_tab(source_task_id, new_tab_id)
         return True
 
 
@@ -859,11 +866,15 @@ class VSCodeServer(
             result: The task result summary.
             task_id: Stable history row id for the completed task.
         """
-        owner_tab = getattr(self.printer._thread_local, "tab_id", None)
+        # Capture the task id so the worker thread can tag the
+        # ``followup_suggestion`` event correctly for fan-out via the
+        # subscriber map.  ``task_id`` is the parameter the caller
+        # passes in (the completed task's ``task_history.id``).
+        owner_task_key = str(task_id) if task_id is not None else None
 
         def _run() -> None:
-            if owner_tab is not None:
-                self.printer._thread_local.tab_id = owner_tab
+            if owner_task_key is not None:
+                self.printer._thread_local.task_id = owner_task_key
             try:
                 suggestion = generate_followup_text(
                     task, result, get_fast_model()
@@ -911,8 +922,15 @@ class VSCodeServer(
         }
         self.printer.broadcast(event)
 
-    def _generate_commit_message(self) -> None:
-        """Generate a git commit message from current changes."""
+    def _generate_commit_message(self, tab_id: str = "") -> None:
+        """Generate a git commit message from current changes.
+
+        Args:
+            tab_id: Frontend tab id that requested the message; stamped
+                on every emitted ``commitMessage`` event so the
+                printer's "system event" routing forwards the message
+                only to the originating tab.
+        """
         try:
             from pathlib import Path
 
@@ -923,6 +941,7 @@ class VSCodeServer(
                     "type": "commitMessage",
                     "message": "",
                     "error": "Not a git repository.",
+                    "tabId": tab_id,
                 })
                 return
             cached_result = _git(self.work_dir, "diff", "--cached")
@@ -932,16 +951,20 @@ class VSCodeServer(
                     "type": "commitMessage",
                     "message": "",
                     "error": "No staged changes found. Stage files with 'git add' first.",
+                    "tabId": tab_id,
                 })
                 return
             msg = generate_commit_message_from_diff(diff_text)  # pragma: no cover
-            self.printer.broadcast({"type": "commitMessage", "message": msg})  # pragma: no cover
+            self.printer.broadcast({
+                "type": "commitMessage", "message": msg, "tabId": tab_id,
+            })  # pragma: no cover
         except Exception:  # pragma: no cover — LLM API error handler
             logger.debug("Commit message generation failed", exc_info=True)
             self.printer.broadcast({
                 "type": "commitMessage",
                 "message": "",
                 "error": "Failed to generate",
+                "tabId": tab_id,
             })
 
 

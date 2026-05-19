@@ -55,7 +55,7 @@ class TestAwaitUserResponseLockingFix(unittest.TestCase):
         tab.user_answer_queue.put("hello")
 
         server.printer._thread_local.stop_event = tab.stop_event
-        server.printer._thread_local.tab_id = "test-tab"
+        server.printer._thread_local.task_id = "test-tab"
 
         lock_held = threading.Event()
         await_started = threading.Event()
@@ -69,11 +69,15 @@ class TestAwaitUserResponseLockingFix(unittest.TestCase):
                 import time
                 time.sleep(0.05)
 
+        # Subscribe the tab to its task so ``_await_user_response``
+        # can find the tab's ``user_answer_queue``.
+        server.printer.subscribe_tab("test-tab", "test-tab")
+
         def call_await() -> None:
             lock_held.wait(timeout=5)
             await_started.set()
             server.printer._thread_local.stop_event = tab.stop_event
-            server.printer._thread_local.tab_id = "test-tab"
+            server.printer._thread_local.task_id = "test-tab"
             result_box.append(server._await_user_response())
             done.set()
 

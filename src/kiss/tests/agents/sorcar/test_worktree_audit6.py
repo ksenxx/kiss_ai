@@ -253,7 +253,7 @@ class TestBug27CleanupDeletesConflictBranch:
 
 class TestBug28StartMergeSessionThreadLocal:
     """BUG-28: _start_merge_session gets tab_id from
-    printer._thread_local.tab_id.  When called from the main thread
+    printer._thread_local.task_id.  When called from the main thread
     (e.g. session replay → _emit_pending_worktree →
     _start_worktree_merge_review), the thread-local is not set,
     so is_merging is never set for the tab.

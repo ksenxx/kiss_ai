@@ -2,7 +2,7 @@
 OWN ``task_history`` row (``has_events=1``), not silently dropped.
 
 Before this fix, ``ChatSorcarAgent._run_tasks_parallel`` set
-``printer._thread_local.tab_id = sub_tab_id`` so each sub-agent's
+``printer._thread_local.task_id = sub_tab_id`` so each sub-agent's
 broadcast events were tagged with the ``sub_tab_id``, but it never
 registered the sub-agent in ``printer._persist_agents[sub_tab_id]``.
 ``BaseBrowserPrinter._persist_event`` looks up the agent in
@@ -119,7 +119,7 @@ class _RecordingPrinter(BaseBrowserPrinter):
         self.events: list[dict[str, Any]] = []
 
     def broadcast(self, event: dict[str, Any]) -> None:
-        event = self._inject_tab_id(event)
+        event = self._inject_task_id(event)
         with self._lock:
             self._record_event(event)
         self.events.append(event)
@@ -150,7 +150,7 @@ class TestSubagentEventsPersisted:
         try:
             printer = _RecordingPrinter()
             # Parent has a tab_id so sub-tab ids are deterministic.
-            printer._thread_local.tab_id = "tab-parent"
+            printer._thread_local.task_id = "tab-parent"
             # ``persist_agents`` must contain the parent registration
             # to mirror the production task_runner setup, but it's
             # NOT what we're testing — we're testing sub-agent rows.

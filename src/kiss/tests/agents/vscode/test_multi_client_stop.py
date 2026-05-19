@@ -106,7 +106,11 @@ class TestMultiClientStopResolvesSubscriber(unittest.TestCase):
         assert viewer_tab.stop_event is None
         assert viewer_tab.task_thread is None
 
-        # Subscribe viewer to source (as _replay_session does)
+        # Subscribe both the source and viewer to the source's task
+        # (in production the agent itself subscribes the source tab in
+        # ``ChatSorcarAgent.run``; here ``blocking_run`` replaces it so
+        # we subscribe manually).
+        server.printer.subscribe_tab(source_tab_id, source_tab_id)
         server.printer.subscribe_tab(source_tab_id, viewer_tab_id)
 
         # Now the viewer clicks "Stop" — this should resolve to the
@@ -193,6 +197,7 @@ class TestMultiClientStopResolvesSubscriber(unittest.TestCase):
         assert task_started.wait(timeout=5)
 
         server._get_tab(viewer_tab_id)
+        server.printer.subscribe_tab(source_tab_id, source_tab_id)
         server.printer.subscribe_tab(source_tab_id, viewer_tab_id)
 
         server._stop_task(viewer_tab_id)
@@ -336,14 +341,16 @@ class TestMultiClientStopResolvesSubscriber(unittest.TestCase):
 
         # ── 2. Viewer subscribes (as _replay_session does) ───────────────
         server._get_tab(viewer_tab_id)
+        server.printer.subscribe_tab(source_tab_id, source_tab_id)
         server.printer.subscribe_tab(source_tab_id, viewer_tab_id)
         assert viewer_tab_id in server.printer._subscribers[source_tab_id]
+        assert source_tab_id in server.printer._subscribers[source_tab_id]
 
         # ── 3. Source frontend closes while the task is running ─────────
-        # _close_tab MUST defer disposal because the task is alive.
+        # _close_tab MUST defer disposal because the task is alive,
+        # so the source_tab_id remains in every subscriber set until
+        # _dispose_if_closed runs at task end.
         server._close_tab(source_tab_id)
-        # State is still present (frontend_closed=True) so the running
-        # agent thread can finish; the subscription is preserved.
         assert source_tab_id in server._running_agent_states
         assert server._running_agent_states[source_tab_id].frontend_closed is True
         assert viewer_tab_id in server.printer._subscribers[source_tab_id]
@@ -356,11 +363,12 @@ class TestMultiClientStopResolvesSubscriber(unittest.TestCase):
             "source frontend closed"
         )
 
-        # ── 5. Task end + deferred dispose remove both state and sub ────
-        # _run_task's finally block calls _dispose_if_closed which pops
-        # the source state and runs cleanup_tab(source) → wiping the
-        # _subscribers entry.
-        # Give the cleanup a tick to complete on the worker thread.
+        # ── 5. Task end + deferred dispose remove the source tab ────────
+        # _run_task's finally block calls _dispose_if_closed which
+        # pops the source state and runs cleanup_tab(source) →
+        # removing the source tab from every subscriber set.  The
+        # viewer's subscription entry survives because the viewer
+        # tab is still open in the frontend.
         deadline = time.time() + 5.0
         while time.time() < deadline and source_tab_id in server._running_agent_states:
             time.sleep(0.01)
@@ -368,9 +376,9 @@ class TestMultiClientStopResolvesSubscriber(unittest.TestCase):
             "Source _RunningAgentState should be disposed after task end "
             "because frontend_closed=True"
         )
-        assert source_tab_id not in server.printer._subscribers, (
-            "Subscription entry for the closed source tab should be cleaned up"
-        )
+        assert source_tab_id not in server.printer._subscribers.get(
+            source_tab_id, set(),
+        ), "Source tab should be removed from its task subscriber set"
 
         # ── 6. Viewer clicks Stop again → orphan path → graceful no-op ─
         # The viewer tab has no stop_event, and no subscription remains
