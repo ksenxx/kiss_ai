@@ -2,7 +2,8 @@
 
 After the move, ``#menu-btn`` sits at the leftmost position inside
 ``#model-picker`` — *before* ``#model-btn`` — and clicking it toggles
-the History sidebar (same behaviour as ``#history-btn``).
+the History sidebar.  The tab-bar ``#history-btn`` has been removed,
+so ``#menu-btn`` is the only entry-point.
 """
 
 from __future__ import annotations
@@ -49,23 +50,15 @@ class TestMenuBtnHandlerWired(unittest.TestCase):
         self.assertIn("menuBtn", _MAIN_JS_TEXT)
 
     def test_menu_btn_click_opens_history_sidebar(self) -> None:
-        """``menuBtn`` click handler must invoke the same toggle as ``historyBtn``."""
-        # The handler is attached via ``menuBtn.addEventListener('click', ...)``
-        # and must reach the same code path as ``historyBtn`` — either by
-        # calling a shared helper or by reusing the same function reference.
+        """``menuBtn`` click handler must open the History sidebar."""
+        # The handler is attached via ``menuBtn.addEventListener('click', ...)``.
         match = re.search(
             r"menuBtn\.addEventListener\(\s*'click'\s*,\s*([A-Za-z_$][\w$]*)",
             _MAIN_JS_TEXT,
         )
         assert match is not None, "menuBtn must register a click handler in main.js"
         handler_name = match.group(1)
-        # The same handler must also be registered on ``historyBtn``.
-        self.assertIn(
-            f"historyBtn.addEventListener('click', {handler_name}",
-            _MAIN_JS_TEXT,
-            "menuBtn and historyBtn must share the same click handler",
-        )
-        # And the handler body must add 'open' to #sidebar and switch to
+        # The handler body must add 'open' to #sidebar and switch to
         # the 'history' sub-tab.
         body_match = re.search(
             r"function\s+"
@@ -192,7 +185,6 @@ _JS_TEST = r"""
 var menuBtn = _elements['menu-btn'];
 var sidebar = _elements['sidebar'];
 var sidebarOverlay = _elements['sidebar-overlay'];
-var historyBtn = _elements['history-btn'];
 var historyTab = _elements['sidebar-tab-history'];
 
 // Pre-click state
@@ -208,7 +200,6 @@ if (listeners.length === 0) {
         preOpen: preOpen,
         sidebarOpen: sidebar.classList.contains('open'),
         overlayOpen: sidebarOverlay.classList.contains('open'),
-        historyBtnActive: historyBtn.classList.contains('active'),
         historyTabActive: historyTab.classList.contains('active'),
     };
     process.stdout.write(JSON.stringify(results) + '\n');
@@ -241,10 +232,6 @@ class TestMenuBtnClickOpensHistorySidebar(unittest.TestCase):
             "Clicking #menu-btn did not add 'open' to #sidebar",
         )
         self.assertTrue(results["overlayOpen"])
-        self.assertTrue(
-            results["historyBtnActive"],
-            "Clicking #menu-btn did not activate the #history-btn indicator",
-        )
         self.assertTrue(
             results["historyTabActive"],
             "Clicking #menu-btn did not switch to the History sub-tab",

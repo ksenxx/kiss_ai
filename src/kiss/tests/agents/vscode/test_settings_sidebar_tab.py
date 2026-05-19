@@ -261,7 +261,7 @@ var _ids = [
     'model-list', 'model-name', 'file-chips', 'status-text',
     'status-tokens', 'status-budget', 'sidebar', 'sidebar-overlay',
     'sidebar-close', 'history-search', 'history-search-clear',
-    'history-list', 'history-btn', 'task-panel', 'tab-bar',
+    'history-list', 'menu-btn', 'task-panel', 'tab-bar',
     'tab-list', 'clear-btn',
     'remote-url', 'autocomplete', 'ghost-text', 'input-row',
     'merge-toolbar', 'merge-accept-all-btn', 'merge-reject-all-btn',
@@ -352,7 +352,7 @@ var console = { log: function(){}, warn: function(){}, error: function(){} };
 # ``configFormPopulated`` flips to ``true`` and subsequent close/switch
 # events trigger ``saveConfig``.
 _JS_TEST = r"""
-var historyBtn = _elements['history-btn'];
+var menuBtn = _elements['menu-btn'];
 var sidebar = _elements['sidebar'];
 var sidebarClose = _elements['sidebar-close'];
 var sidebarOverlay = _elements['sidebar-overlay'];
@@ -389,9 +389,9 @@ function _populateConfigViaMessage() {
 
 var snapshots = [];
 
-// 1. Open sidebar via history-btn → History tab active.
+// 1. Open sidebar via menu-btn → History tab active.
 _postedMessages.length = 0;
-_fire(historyBtn, 'click', {});
+_fire(menuBtn, 'click', {});
 snapshots.push(_snap('afterHistoryOpen'));
 
 // 2. Click Settings tab → posts getConfig, settings panel visible.
@@ -413,9 +413,9 @@ _postedMessages.length = 0;
 _fire(sidebarClose, 'click', {});
 snapshots.push(_snap('afterCloseFromSettings'));
 
-// 5. Re-open via history-btn → History tab active again (no stale settings).
+// 5. Re-open via menu-btn → History tab active again (no stale settings).
 _postedMessages.length = 0;
-_fire(historyBtn, 'click', {});
+_fire(menuBtn, 'click', {});
 snapshots.push(_snap('afterReopen'));
 
 // 6. Switch Settings → Frequent (also a non-settings tab) saves config.
