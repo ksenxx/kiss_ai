@@ -1412,9 +1412,13 @@ class TestMergeDiffViewColumn(unittest.TestCase):
 
     def test_do_open_merge_does_not_execute_revert_command(self) -> None:
         """_doOpenMerge no longer calls executeCommand to revert
-        (which requires the document to be the active editor)."""
+        (which requires the document to be the active editor).
+        It may use executeCommand('vscode.open') for binary files."""
         body = self._get_method_body("_doOpenMerge")
-        assert "executeCommand" not in body
+        # Must not call executeCommand for workbench.action.files.revert
+        # (the string appears in a comment; check for actual command call)
+        assert "executeCommand('workbench.action.files.revert')" not in body
+        assert 'executeCommand("workbench.action.files.revert")' not in body
 
     def test_do_open_merge_tracks_first_file_fp(self) -> None:
         """_doOpenMerge tracks firstFileFp to show only one file."""

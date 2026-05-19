@@ -132,6 +132,32 @@ def _git(cwd: str, *args: str) -> subprocess.CompletedProcess[str]:
         )
 
 
+def _git_bytes(cwd: str, *args: str) -> subprocess.CompletedProcess[bytes]:
+    """Run a git command and return raw bytes (for binary content).
+
+    Args:
+        cwd: Working directory for the git command.
+        *args: Git sub-command and arguments.
+
+    Returns:
+        CompletedProcess with stdout/stderr as bytes.
+    """
+    try:
+        return subprocess.run(
+            ["git", *args],
+            capture_output=True,
+            cwd=cwd,
+            timeout=_GIT_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            args=["git", *args],
+            returncode=124,
+            stdout=b"",
+            stderr=b"timed out",
+        )
+
+
 _HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
 
@@ -174,6 +200,10 @@ def _parse_diff_hunks(
         dm = re.match(r"^diff --git a/.* b/(.*)", line)
         if dm:
             current_file = dm.group(1)
+            continue
+        # Detect binary files: git outputs "Binary files ... differ"
+        if current_file and line.startswith("Binary files "):
+            hunks.setdefault(current_file, [])
             continue
         hunk = _parse_hunk_line(line)
         if hunk and current_file:
@@ -397,6 +427,27 @@ def _hunk_to_dict(bs: int, bc: int, cs: int, cc: int) -> dict[str, int]:
     return {"bs": bs if bc == 0 else bs - 1, "bc": bc, "cs": cs if cc == 0 else cs - 1, "cc": cc}
 
 
+def _is_binary_file(fpath: Path) -> bool:
+    """Check whether *fpath* appears to be a binary file.
+
+    Reads the first 8 KiB and looks for null bytes — the same heuristic
+    used by ``git diff``.
+
+    Args:
+        fpath: Path to the file.
+
+    Returns:
+        True when the file looks binary or cannot be read.
+    """
+    try:
+        if not fpath.is_file():
+            return False
+        chunk = fpath.read_bytes()[:8192]
+        return b"\x00" in chunk
+    except OSError:
+        return False
+
+
 def _file_as_new_hunks(fpath: Path) -> list[dict[str, int]]:
     """Return a single hunk treating the entire file as newly added.
 
@@ -499,27 +550,44 @@ def _prepare_merge_view(
             return True
         return cur != pre_file_hashes[fname]
 
+    binary_files: set[str] = set()
     for fname, hunks in post_hunks.items():
         if not _file_changed(fname):
+            continue
+        fpath = Path(work_dir) / fname
+        if not hunks and fpath.is_file() and _is_binary_file(fpath):
+            binary_files.add(fname)
             continue
         filtered = _agent_file_hunks(work_dir, fname, ub_dir, pre_hunks, hunks)
         if filtered:  # pragma: no branch – changed files always produce hunks
             file_hunks[fname] = filtered
+        elif fpath.is_file() and _is_binary_file(fpath):
+            binary_files.add(fname)
     new_files = _capture_untracked(work_dir) - pre_untracked
     for fname in new_files:
-        filtered = _file_as_new_hunks(Path(work_dir) / fname)
+        fpath = Path(work_dir) / fname
+        if fpath.is_file() and _is_binary_file(fpath):
+            binary_files.add(fname)
+            continue
+        filtered = _file_as_new_hunks(fpath)
         if filtered:
             file_hunks[fname] = filtered
     if pre_file_hashes:
         for fname in pre_untracked:
-            if fname in file_hunks or fname not in pre_file_hashes:
+            if fname in file_hunks or fname in binary_files:
+                continue
+            if fname not in pre_file_hashes:
                 continue
             if not _file_changed(fname):
+                continue
+            fpath = Path(work_dir) / fname
+            if fpath.is_file() and _is_binary_file(fpath):
+                binary_files.add(fname)
                 continue
             filtered = _agent_file_hunks(work_dir, fname, ub_dir, pre_hunks)
             if filtered:
                 file_hunks[fname] = filtered
-    if not file_hunks:
+    if not file_hunks and not binary_files:
         return {"error": "No changes"}
     merge_dir = Path(data_dir) / "merge-temp"
     if merge_dir.exists():
@@ -549,6 +617,31 @@ def _prepare_merge_view(
                 "base": str(base_path),
                 "current": str(current_path),
                 "hunks": fh,
+            },
+        )
+    for fname in sorted(binary_files):
+        current_path = Path(work_dir) / fname
+        if not current_path.is_file():
+            continue
+        base_path = merge_dir / fname
+        base_path.parent.mkdir(parents=True, exist_ok=True)
+        saved_base = ub_dir / fname
+        if saved_base.is_file():
+            shutil.copy2(saved_base, base_path)
+        else:
+            bin_result = _git_bytes(work_dir, "show", f"{base_ref}:{fname}")
+            if bin_result.returncode == 0:
+                base_path.write_bytes(bin_result.stdout)
+            else:
+                # New binary file: write an empty base
+                base_path.write_bytes(b"")
+        manifest_files.append(
+            {
+                "name": fname,
+                "base": str(base_path),
+                "current": str(current_path),
+                "hunks": [{"bs": 0, "bc": 0, "cs": 0, "cc": 0}],
+                "binary": True,
             },
         )
     if not manifest_files:
