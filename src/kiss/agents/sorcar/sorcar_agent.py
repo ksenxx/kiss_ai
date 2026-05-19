@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -396,10 +397,29 @@ class SorcarAgent(RelentlessAgent):
                 return "No settings were changed (all arguments were None)."
             return "Updated: " + ", ".join(updated)
 
+        def number_of_cores() -> int:
+            """Return the number of CPU cores available on the current machine.
+
+            Useful for choosing a reasonable ``max_workers`` value when
+            calling :func:`run_parallel`.
+
+            Returns:
+                The number of CPU cores available to the process.  Falls
+                back to the total CPU count if the per-process affinity
+                is unavailable, and to ``1`` as a final fallback.
+            """
+            try:
+                affinity = os.sched_getaffinity(0)  # type: ignore[attr-defined]
+                return len(affinity)
+            except AttributeError:
+                pass
+            return os.cpu_count() or 1
+
         tools.append(ask_user_question)
         tools.append(update_settings)
         if self._is_parallel:
             tools.append(run_parallel)
+            tools.append(number_of_cores)
         return tools
 
     def perform_task(
