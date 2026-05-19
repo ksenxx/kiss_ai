@@ -1979,13 +1979,25 @@ def _augment_merge_data(event: dict[str, Any]) -> dict[str, Any]:
     files = []
     for f in data.get("files", []):
         f = {**f}
+        # Binary files (PDFs, images, etc.) have no meaningful text
+        # representation; the MergeManager / web client open them via
+        # the native viewer.  Attempting ``read_text()`` on them would
+        # raise ``UnicodeDecodeError`` (a ``ValueError``, not
+        # ``OSError``), which previously aborted the entire
+        # ``merge_data`` broadcast and prevented the diff/merge UI
+        # from appearing for binary-only changes.
+        if f.get("binary"):
+            f["base_text"] = ""
+            f["current_text"] = ""
+            files.append(f)
+            continue
         try:
             f["base_text"] = Path(f["base"]).read_text()
-        except (OSError, KeyError):
+        except (OSError, KeyError, UnicodeDecodeError):
             f["base_text"] = ""
         try:
             f["current_text"] = Path(f["current"]).read_text()
-        except (OSError, KeyError):
+        except (OSError, KeyError, UnicodeDecodeError):
             f["current_text"] = ""
         files.append(f)
     data["files"] = files
