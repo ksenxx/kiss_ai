@@ -613,8 +613,8 @@ class VSCodeServer(
             # ``ChatSorcarAgent.running_agents`` map: presence under
             # the sub-agent's own task id means its thread is still
             # running, absence means it finished.  This lets the
-            # reopened tab render with the same ✓ green indicator the
-            # original tab ended on (instead of pulsing ◉ purple
+            # reopened tab render the same "done, no indicator" state
+            # the original tab ended on (instead of pulsing ◉ purple
             # forever because no later ``subagentDone`` arrives).
             from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
