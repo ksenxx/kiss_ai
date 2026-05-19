@@ -1523,21 +1523,6 @@ width=device-width,initial-scale=1,maximum-scale=1">
         <path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/>
         <path d="M12 7v5l4 2"/>
       </svg>
-    </button><button id="config-btn" class="tab-bar-action-btn"
-     data-tooltip="Settings" type="button">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-       stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <circle cx="12" cy="12" r="3"/>
-        <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 \
-01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 \
-01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 \
-01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 \
-010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 \
-012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 \
-0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 \
-2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 \
-4h-.09a1.65 1.65 0 00-1.51 1z"/>
-      </svg>
     </button></div>
 
     <div id="tab-status-bar">
@@ -1695,6 +1680,8 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
          type="button">History</button>
         <button id="sidebar-tab-frequent" class="sidebar-tab"
          type="button">Frequent</button>
+        <button id="sidebar-tab-settings" class="sidebar-tab"
+         type="button">Settings</button>
       </div>
       <div id="sidebar-tab-history-panel" class="sidebar-section sidebar-tab-panel">
         <div class="search-wrap">
@@ -1712,12 +1699,8 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
           <div class="sidebar-empty">No tasks yet</div>
         </div>
       </div>
-    </div>
-    <div id="sidebar-overlay"></div>
-
-    <div id="config-sidebar">
-      <button id="config-sidebar-close">&times;</button>
-      <div class="sidebar-section">
+      <div id="sidebar-tab-settings-panel"
+       class="sidebar-section sidebar-tab-panel" style="display:none;">
         <div class="sidebar-hdr">Sorcar Configuration{' ' + version if version else ''}</div>
         <div id="remote-url"></div>
         <div id="config-form">
@@ -1770,11 +1753,10 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
             <input type="text" id="cfg-key-MINIMAX_API_KEY"
              placeholder="Enter MiniMax API key">
           </label>
-
         </div>
       </div>
     </div>
-    <div id="config-sidebar-overlay"></div>
+    <div id="sidebar-overlay"></div>
 
     <div id="ask-user-modal" style="display:none;">
       <div class="modal-content">

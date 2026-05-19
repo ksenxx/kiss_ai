@@ -614,23 +614,23 @@ class TestMainCssInfiniteScroll(unittest.TestCase):
         cls.css = (base / "vscode" / "media" / "main.css").read_text()
 
     def test_sidebar_width_is_capped_at_420(self) -> None:
-        idx = self.css.index("#sidebar")
+        idx = self.css.index("#sidebar {")
         block = self.css[idx : idx + 400]
         assert "420px" in block
 
     def test_sidebar_uses_75_percent_of_viewport_width(self) -> None:
-        idx = self.css.index("#sidebar")
+        idx = self.css.index("#sidebar {")
         block = self.css[idx : idx + 400]
         assert "75vw" in block
 
     def test_sidebar_uses_full_viewport_height(self) -> None:
-        idx = self.css.index("#sidebar")
+        idx = self.css.index("#sidebar {")
         block = self.css[idx : idx + 400]
         assert "top: 0" in block
         assert "bottom: 0" in block
 
     def test_sidebar_overflow_hidden(self) -> None:
-        idx = self.css.index("#sidebar")
+        idx = self.css.index("#sidebar {")
         block = self.css[idx : idx + 500]
         assert "overflow: hidden" in block or "overflow:hidden" in block
 
