@@ -62,7 +62,7 @@ def _section(html: str, container_id: str) -> str:
     return html[m.start() :]
 
 
-_TAB_BAR_ACTIONS = ("history-btn", "config-btn")
+_TAB_BAR_ACTIONS = ("history-btn",)
 
 
 def test_webapp_tab_bar_contains_action_buttons() -> None:

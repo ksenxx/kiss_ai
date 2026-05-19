@@ -64,7 +64,7 @@ class TestBuildHtml(unittest.TestCase):
         self.assertIn('id="input-area"', html)
         self.assertIn('id="model-picker"', html)
         self.assertIn('id="sidebar"', html)
-        self.assertIn('id="config-sidebar"', html)
+        self.assertIn('id="sidebar-tab-settings-panel"', html)
         self.assertIn('id="ask-user-modal"', html)
         self.assertIn('id="send-btn"', html)
         self.assertIn('id="stop-btn"', html)
