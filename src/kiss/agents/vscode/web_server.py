@@ -424,7 +424,6 @@ def _reject_hunk_in_file(
     correctly.
 
     Args:
-        current_path: Path to the file with agent changes.
         current_path: Path to the file with agent changes (may be a
             display placeholder for deleted files).
         base_path: Path to the pre-task base copy.
@@ -434,11 +433,12 @@ def _reject_hunk_in_file(
             Defaults to *current_path* for backwards compatibility.
     """
     write_to = target_path or current_path
-        cur_lines = Path(current_path).read_text().splitlines(keepends=True)
-        cur_lines = Path(current_path).read_text().splitlines(keepends=True)
+    # Read from *write_to* (the real workspace target) when it exists
+    # so that successive partial rejections accumulate against the
+    # restored content rather than the (now-stale) placeholder.
+    try:
+        cur_lines = Path(write_to).read_text().splitlines(keepends=True)
     except OSError:
-        cur_lines = []
-        cur_lines = []
         try:
             cur_lines = Path(current_path).read_text().splitlines(keepends=True)
         except OSError:
@@ -450,37 +450,34 @@ def _reject_hunk_in_file(
 
     new_lines = (
         cur_lines[: hunk["cs"]]
+        + base_lines[hunk["bs"] : hunk["bs"] + hunk["bc"]]
         + cur_lines[hunk["cs"] + hunk["cc"] :]
     )
-    Path(current_path).write_text("".join(new_lines))
-    Path(current_path).write_text("".join(new_lines))
     Path(write_to).parent.mkdir(parents=True, exist_ok=True)
     Path(write_to).write_text("".join(new_lines))
+
 
 def _reject_all_hunks_in_file(file_data: dict[str, Any]) -> None:
     """Revert an entire file to its base version.
 
-    Simply copies the base file content over the current file.
-    Simply copies the base file content over the current file.
     Copies the base file content over the real workspace path
     (``file_data["target"]`` when present, otherwise
     ``file_data["current"]``).  Using ``target`` ensures that when the
     agent deleted a tracked file and the user rejects all hunks, the
-    the workspace file remained gone.
+    workspace file is actually restored on disk instead of being left
+    behind as a placeholder.
 
     Args:
-        file_data: File entry from merge data with ``base`` and
-            ``current`` path strings.
-            and (optionally) ``target`` path strings.
+        file_data: File entry from merge data with ``base``,
+            ``current`` and (optionally) ``target`` path strings.
     """
     write_to = file_data.get("target") or file_data["current"]
     if Path(file_data["base"]).is_file():
-        shutil.copy2(file_data["base"], file_data["current"])
         Path(write_to).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(file_data["base"], write_to)
 
-_VSCODE_ONLY_COMMANDS = frozenset({
 
+_VSCODE_ONLY_COMMANDS = frozenset({
     "focusEditor",
     "webviewFocusChanged",
     "openFile",
@@ -2747,11 +2744,11 @@ class RemoteAccessServer:
                 state.mark_resolved(*cur, "accepted")
                 state.advance()
         elif action == "reject":
+            if cur is not None:
                 fi, hi = cur
                 fd = state.files[fi]
                 hunk = fd["hunks"][hi]
                 await self._loop.run_in_executor(
-                    None, _reject_hunk_in_file, fd["current"], fd["base"], hunk,
                     None,
                     _reject_hunk_in_file,
                     fd["current"],

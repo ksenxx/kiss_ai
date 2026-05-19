@@ -36,6 +36,7 @@ from kiss.agents.sorcar.persistence import (
     _load_last_model,
     _load_latest_chat_events_by_chat_id,
     _load_model_usage,
+    _load_subagent_rows_by_parent_task_id,
     _search_history,
 )
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState, parse_task_tags
@@ -656,6 +657,74 @@ class VSCodeServer(
             "tabId": tab_id,
         })
         self._emit_pending_worktree(tab_id)
+
+        # When the user loads a PARENT task from the history sidebar,
+        # also reopen every sub-agent the parent fanned out via
+        # ``run_parallel`` so the loaded view mirrors the live
+        # execution layout (one purple sub-agent tab per fan-out
+        # task).  Sub-agent rows are skipped here — clicking a
+        # sub-agent row already converts the clicked tab into a
+        # sub-agent tab via the ``subagent_info`` branch above; we
+        # do NOT want to recursively reopen siblings on that path.
+        if subagent_info is None and isinstance(rebound_task_id, int):
+            self._open_persisted_subagent_tabs(
+                parent_task_id=rebound_task_id, parent_tab_id=tab_id,
+            )
+
+    def _open_persisted_subagent_tabs(
+        self, *, parent_task_id: int, parent_tab_id: str,
+    ) -> None:
+        """Broadcast ``openSubagentTab`` + ``task_events`` for every
+        persisted sub-agent row whose parent is *parent_task_id*.
+
+        The sub-tab ids are deterministic
+        (``f"{parent_tab_id}__sub_{sub_task_id}"``) so that clicking
+        the same parent task twice in a row updates the existing
+        sub-agent tabs in place instead of stacking duplicates — the
+        webview's ``openSubagentTab`` handler is idempotent on
+        ``tab_id``.
+
+        ``isDone`` is decided from
+        :attr:`ChatSorcarAgent.running_agents`: presence under the
+        sub-agent's own task id means its thread is still running so
+        the tab should pulse the ◉ indicator; absence means the
+        sub-agent has completed and the tab should render as a
+        finished tab without the indicator.
+
+        Args:
+            parent_task_id: ``task_history.id`` of the parent task.
+            parent_tab_id: Frontend tab id of the parent tab.  Used
+                as the prefix for the deterministic sub-tab ids.
+        """
+        from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+
+        sub_rows = _load_subagent_rows_by_parent_task_id(parent_task_id)
+        for idx, row in enumerate(sub_rows):
+            sub_task_id = row["task_id"]
+            sub_tab_id = f"{parent_tab_id}__sub_{sub_task_id}"
+            description = str(row.get("task", "") or "")
+            is_done = not (
+                isinstance(sub_task_id, int)
+                and sub_task_id in ChatSorcarAgent.running_agents
+            )
+            self.printer.broadcast({
+                "type": "openSubagentTab",
+                "tab_id": sub_tab_id,
+                "parent_tab_id": parent_tab_id,
+                "description": description,
+                "taskIndex": idx,
+                "isSubagentTab": True,
+                "isDone": is_done,
+            })
+            self.printer.broadcast({
+                "type": "task_events",
+                "events": row["events"],
+                "task": description,
+                "task_id": sub_task_id,
+                "chat_id": row.get("chat_id", ""),
+                "extra": row.get("extra", ""),
+                "tabId": sub_tab_id,
+            })
 
     def _reattach_running_chat(
         self,

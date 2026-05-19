@@ -1079,6 +1079,87 @@ def _load_chat_events_by_task_id(
         }
 
 
+def _load_subagent_rows_by_parent_task_id(
+    parent_task_id: int,
+) -> list[dict[str, object]]:
+    """Return persisted sub-agent rows whose parent is *parent_task_id*.
+
+    Used by :meth:`VSCodeServer._replay_session` when the user clicks
+    a parent task in the history sidebar: every sub-agent fanned out
+    by the parent's ``run_parallel`` tool call is reopened in its own
+    sub-agent tab so the loaded view mirrors the live execution
+    layout.
+
+    A sub-agent row is identified by ``task_history.extra`` parsing
+    to a JSON object containing
+    ``{"subagent": {"parent_task_id": <parent_task_id>}}`` — exactly
+    the shape written by
+    :meth:`ChatSorcarAgent._run_tasks_parallel`'s worker thread.
+
+    Args:
+        parent_task_id: Primary key of the parent ``task_history`` row.
+
+    Returns:
+        List of dicts ordered by ``task_history.id`` ASC (the order in
+        which the parent enqueued sub-agents).  Each dict has
+        ``task_id`` (int), ``task`` (str), ``chat_id`` (str),
+        ``events`` (list of event dicts), and ``extra`` (str, the raw
+        JSON column).  Empty list when no sub-agent rows exist.
+    """
+    if not isinstance(parent_task_id, int):
+        return []
+    out: list[dict[str, object]] = []
+    with _rw_lock.read_lock():
+        db = _get_db()
+        # Pre-filter at the SQL level on the substring of the JSON
+        # ``extra`` to avoid loading every history row into Python.
+        # The exact match (parent id + integer-valued field) is then
+        # re-validated by ``json.loads`` to defend against false
+        # positives (e.g. a row whose unrelated free-form metadata
+        # happened to embed the same substring).
+        like = f'%"parent_task_id": {parent_task_id}%'
+        rows = db.execute(
+            "SELECT id, task, chat_id, extra FROM task_history "
+            "WHERE extra LIKE ? ORDER BY id ASC",
+            (like,),
+        ).fetchall()
+        for r in rows:
+            extra_str = r["extra"] or ""
+            try:
+                parsed = json.loads(extra_str)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(parsed, dict):
+                continue
+            sub = parsed.get("subagent")
+            if not isinstance(sub, dict):
+                continue
+            if sub.get("parent_task_id") != parent_task_id:
+                continue
+            sub_task_id = int(r["id"])
+            event_rows = db.execute(
+                "SELECT event_json, timestamp FROM events "
+                "WHERE task_id = ? ORDER BY seq",
+                (sub_task_id,),
+            ).fetchall()
+            events: list[dict[str, object]] = []
+            for er in event_rows:
+                try:
+                    ev = json.loads(er["event_json"])
+                    ev["_timestamp"] = er["timestamp"]
+                    events.append(ev)
+                except (json.JSONDecodeError, TypeError):
+                    logger.debug("Exception caught", exc_info=True)
+            out.append({
+                "task_id": sub_task_id,
+                "task": r["task"],
+                "chat_id": str(r["chat_id"] or ""),
+                "events": events,
+                "extra": extra_str,
+            })
+    return out
+
+
 def _get_adjacent_task_by_chat_id(
     chat_id: str, current_task: str, direction: str
 ) -> dict[str, object] | None:
