@@ -123,12 +123,17 @@ class TestAllClosePaths(unittest.TestCase):
         """Opening the history sidebar closes the config sidebar."""
         assert "closeConfigSidebar();" in self._js
 
-    def test_open_frequent_sidebar_calls_close_config(self) -> None:
-        """openFrequentSidebar calls closeConfigSidebar."""
+    def test_history_btn_handler_closes_config_sidebar(self) -> None:
+        """Opening the unified History/Frequent sidebar closes the config sidebar.
+
+        The Frequent-tasks sub-tab now lives inside ``#sidebar`` and is only
+        reachable after clicking ``#history-btn`` (which calls
+        ``closeConfigSidebar()`` before opening the panel).
+        """
         m = re.search(
-            r"function openFrequentSidebar\(\)\s*\{(.*?)\n  \}",
+            r"historyBtn\.addEventListener\('click'.*?\}\);",
             self._js,
             re.DOTALL,
         )
-        assert m
-        assert "closeConfigSidebar();" in m.group(1)
+        assert m, "history-btn click handler not found"
+        assert "closeConfigSidebar();" in m.group(0)
