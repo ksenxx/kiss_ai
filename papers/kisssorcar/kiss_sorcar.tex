@@ -374,8 +374,8 @@ Tool usage rules are explicit and mechanical:
 <tool_rules>
 ## Tool Usage
 
-- PWD denotes current working directory and DOES NOT
-  REFER to a directory named PWD.
+- **PWD denotes current working directory** and does
+  not refer to a directory named PWD.
 - Use Write() for new files; Edit() for small changes.
 - Run Bash synchronously with timeout_seconds (default
   120s). On timeout, retry with a higher value.  For
@@ -411,7 +411,7 @@ Tool usage rules are explicit and mechanical:
 
 Each tool rule addresses a specific failure mode:
 
-\textbf{``PWD denotes current working directory and DOES NOT REFER to a directory named PWD.''}  The acronym ``PWD'' appears throughout the prompt and in user task descriptions (e.g., ``edit PWD/src/main.py'').  Without this definition, the model might interpret PWD as the Unix environment variable \texttt{\$PWD} and attempt to expand it, or---more commonly---misinterpret it as a literal directory named \texttt{PWD/} inside the workspace and create files at that path.  The explicit negative clause (``DOES NOT REFER to a directory named PWD'') was added after we observed the model creating an actual \texttt{PWD/} subdirectory in real tasks; the negative framing eliminates the literal-directory misinterpretation directly.
+\textbf{``\textbf{PWD denotes current working directory} and does not refer to a directory named PWD.''}  The acronym ``PWD'' appears throughout the prompt and in user task descriptions (e.g., ``edit PWD/src/main.py'').  Without this definition, the model might interpret PWD as the Unix environment variable \texttt{\$PWD} and attempt to expand it, or---more commonly---misinterpret it as a literal directory named \texttt{PWD/} inside the workspace and create files at that path.  The explicit negative clause (``does not refer to a directory named PWD'') was added after we observed the model creating an actual \texttt{PWD/} subdirectory in real tasks; the negative framing eliminates the literal-directory misinterpretation directly.  The opening clause is emphasized in bold (rather than the all-caps used in an earlier revision) because, with frontier models, bold markers function as reliable structural emphasis without the shouty register that all-caps imparts.
 
 \textbf{``Use Write() for new files; Edit() for small changes.''}  Without this distinction, the model may use \texttt{Write()} to overwrite an existing file with a slightly modified version, losing content it forgot to include.  By reserving \texttt{Write()} for new files and requiring \texttt{Edit()} for modifications, the instruction ensures that changes are surgical and that unchanged portions of a file are never at risk.
 
