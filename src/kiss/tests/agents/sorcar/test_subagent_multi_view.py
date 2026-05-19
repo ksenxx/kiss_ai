@@ -91,7 +91,7 @@ class TestSubagentRegistersRunningState:
         parent._chat_id = parent_chat_id
         parent._last_task_id = parent_task_id
         printer = BaseBrowserPrinter()
-        printer._thread_local.tab_id = "tab-parent"
+        printer._thread_local.task_id = "tab-parent"
         parent.printer = printer  # type: ignore[assignment]
 
         observed: dict[str, Any] = {}
@@ -129,7 +129,7 @@ class TestSubagentRegistersRunningState:
             # The parent tab id is read from the calling thread's
             # thread-local, so set it here (this thread acts as
             # the parent agent's worker).
-            printer._thread_local.tab_id = "tab-parent"
+            printer._thread_local.task_id = "tab-parent"
             worker_result["out"] = parent._run_tasks_parallel(
                 ["do something"],
                 max_workers=1,
@@ -182,10 +182,10 @@ class TestReattachRunningChatTaskIdDisambiguation:
         events: list[dict[str, Any]] = []
         server.printer.broadcast = events.append  # type: ignore[assignment]
         # Capture subscribe_tab calls.
-        subs: list[tuple[str, str]] = []
+        subs: list[tuple[Any, str]] = []
 
-        def _stub_subscribe(src: str, viewer: str) -> None:
-            subs.append((src, viewer))
+        def _stub_subscribe(task_id: Any, tab_id: str) -> None:
+            subs.append((task_id, tab_id))
 
         server.printer.subscribe_tab = _stub_subscribe  # type: ignore[assignment]
 
@@ -236,9 +236,9 @@ class TestReattachRunningChatTaskIdDisambiguation:
         into the parent's chat.
         """
         server = VSCodeServer()
-        subs: list[tuple[str, str]] = []
+        subs: list[tuple[Any, str]] = []
         server.printer.subscribe_tab = (  # type: ignore[assignment]
-            lambda source_tab_id, viewer_tab_id: subs.append((source_tab_id, viewer_tab_id))
+            lambda task_id, tab_id: subs.append((task_id, tab_id))
         )
 
         # Parent state present and running — would match the chat-id
@@ -265,9 +265,9 @@ class TestReattachRunningChatTaskIdDisambiguation:
         for chat resumes.
         """
         server = VSCodeServer()
-        subs: list[tuple[str, str]] = []
+        subs: list[tuple[Any, str]] = []
         server.printer.subscribe_tab = (  # type: ignore[assignment]
-            lambda source_tab_id, viewer_tab_id: subs.append((source_tab_id, viewer_tab_id))
+            lambda task_id, tab_id: subs.append((task_id, tab_id))
         )
 
         parent_state = _RunningAgentState("tab-parent", "test-model")
@@ -328,9 +328,9 @@ class TestReplaySessionSubscribesRunningSubagent:
         server = VSCodeServer()
         events: list[dict[str, Any]] = []
         server.printer.broadcast = events.append  # type: ignore[assignment]
-        subs: list[tuple[str, str]] = []
+        subs: list[tuple[Any, str]] = []
         server.printer.subscribe_tab = (  # type: ignore[assignment]
-            lambda source_tab_id, viewer_tab_id: subs.append((source_tab_id, viewer_tab_id))
+            lambda task_id, tab_id: subs.append((task_id, tab_id))
         )
 
         # Parent state — still running, shares chat_id with sub.

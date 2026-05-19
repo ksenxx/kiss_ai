@@ -67,24 +67,24 @@ class TestTimerFlushNoClosure:
         """Verify _timer_flush is a proper method on BaseBrowserPrinter."""
         from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 
-        assert hasattr(BaseBrowserPrinter, "_timer_flush_for_tab"), (
-            "BaseBrowserPrinter should have _timer_flush_for_tab method"
+        assert hasattr(BaseBrowserPrinter, "_timer_flush_for_task"), (
+            "BaseBrowserPrinter should have _timer_flush_for_task method"
         )
-        method = getattr(BaseBrowserPrinter, "_timer_flush_for_tab")
+        method = getattr(BaseBrowserPrinter, "_timer_flush_for_task")
         assert callable(method)
 
 
-    def test_timer_flush_for_tab_type_annotation(self) -> None:
-        """Verify _timer_flush_for_tab accepts str | None tab_id."""
+    def test_timer_flush_for_task_type_annotation(self) -> None:
+        """Verify _timer_flush_for_task accepts str | None tab_id."""
         from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 
-        hints = BaseBrowserPrinter._timer_flush_for_tab.__annotations__
-        # The tab_id parameter should accept str | None
-        assert "tab_id" in hints
+        hints = BaseBrowserPrinter._timer_flush_for_task.__annotations__
+        # The task_id parameter should accept str | None
+        assert "task_id" in hints
 
     def test_bash_timer_uses_method(self) -> None:
         """Verify the bash_stream print path creates a timer using
-        _timer_flush_for_tab (via functools.partial) instead of a closure."""
+        _timer_flush_for_task (via functools.partial) instead of a closure."""
         from functools import partial as functools_partial
 
         from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
@@ -111,7 +111,7 @@ class TestTimerFlushNoClosure:
             assert isinstance(timer_func, functools_partial), (
                 f"Timer function should be functools.partial, got {type(timer_func)}"
             )
-            assert timer_func.func == printer._timer_flush_for_tab
+            assert timer_func.func == printer._timer_flush_for_task
         # Wait for the 0.1s timer to fire.  Under coverage instrumentation
         # the timer thread is delayed noticeably, so poll up to 2 s with a
         # short backoff instead of relying on a single sleep.

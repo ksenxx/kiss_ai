@@ -166,7 +166,6 @@ class ChatSorcarAgent(SorcarAgent):
         printer = self.printer
         broadcast = getattr(printer, "broadcast", None) if printer else None
         thread_local = getattr(printer, "_thread_local", None) if printer else None
-        parent_tab_id = getattr(thread_local, "tab_id", None) if thread_local else None
         # Cooperative-stop event of the parent task thread.  Captured
         # here so each ``ThreadPoolExecutor`` worker can copy it onto
         # its own ``printer._thread_local.stop_event`` slot before
@@ -184,24 +183,25 @@ class ChatSorcarAgent(SorcarAgent):
         )
         sub_tab_ids: list[str] = []
         for i, task in enumerate(tasks):
-            if parent_tab_id:
-                sub_tab_id = f"{parent_tab_id}__sub_{i}"
+            if parent_task_id is not None:
+                sub_tab_id = f"task-{parent_task_id}__sub_{i}"
             else:
                 sub_tab_id = f"sub-{uuid.uuid4().hex[:12]}"
             sub_tab_ids.append(sub_tab_id)
             if broadcast:
+                # ``openSubagentTab`` is a task-stream event (no
+                # explicit tabId) so the printer fans it out to every
+                # tab subscribed to the parent task.  Each fanned-out
+                # copy is stamped with the subscriber's own ``tabId``
+                # — the frontend uses that as the parent placement
+                # reference.
                 broadcast({
                     "type": "openSubagentTab",
                     "tab_id": sub_tab_id,
-                    "parent_tab_id": parent_tab_id,
                     "description": task[:200],
                     "taskIndex": i,
                     "isSubagentTab": True,
                 })
-
-        persist_agents = (
-            getattr(printer, "_persist_agents", None) if printer else None
-        )
 
         # Per-sub-agent usage captured in the worker's ``finally`` block
         # so the parent can aggregate cost / tokens / steps back into
@@ -215,7 +215,6 @@ class ChatSorcarAgent(SorcarAgent):
             sub_tab_id = sub_tab_ids[idx]
             tl = getattr(printer, "_thread_local", None) if printer else None
             if tl is not None:
-                tl.tab_id = sub_tab_id
                 # Propagate the parent task thread's cooperative
                 # stop_event into this worker thread so
                 # ``printer._check_stop()`` and
@@ -237,17 +236,6 @@ class ChatSorcarAgent(SorcarAgent):
             # derivable from the row's own ``task`` column and a
             # per-tab ``isSubagentTab`` flag on the frontend.
             agent._subagent_info = {"parent_task_id": parent_task_id}
-            # Register the sub-agent in the printer's ``_persist_agents``
-            # map keyed by ``sub_tab_id`` so events broadcast by this
-            # sub-agent thread (each tagged with ``sub_tab_id`` via the
-            # printer's thread-local) get persisted to the sub-agent's
-            # OWN ``task_history`` row instead of being silently dropped.
-            # Without this, the row's ``has_events`` stays 0 and the
-            # history-sidebar click handler can't replay the events —
-            # it falls through to setting the input text on a fresh
-            # chat tab, which looks like "the sub-task didn't open".
-            if persist_agents is not None:
-                persist_agents[sub_tab_id] = agent
             # Also register a real :class:`_RunningAgentState` for the
             # sub-agent, keyed by its own ``sub_tab_id``.  Treating
             # the sub-agent as a regular task in the registry is what
@@ -294,6 +282,7 @@ class ChatSorcarAgent(SorcarAgent):
                     work_dir=work_dir,
                     printer=printer,
                     is_parallel=True,
+                    _subscribe_tab_id=sub_tab_id,
                 )
                 return result
             except Exception as exc:
@@ -311,11 +300,7 @@ class ChatSorcarAgent(SorcarAgent):
                     int(getattr(agent, "total_tokens_used", 0) or 0),
                     int(getattr(agent, "total_steps", 0) or 0),
                 )
-                if persist_agents is not None:
-                    persist_agents.pop(sub_tab_id, None)
                 _RunningAgentState.running_agent_states.pop(sub_tab_id, None)
-                if tl is not None:
-                    tl.tab_id = None
                 if broadcast:
                     broadcast({
                         "type": "subagentDone",
@@ -379,6 +364,14 @@ class ChatSorcarAgent(SorcarAgent):
             YAML string with 'success' and 'summary' keys.
         """
         skip_persistence = kwargs.pop("_skip_persistence", False)
+        # Frontend tab id that should be subscribed to this task's
+        # event stream.  When provided, the printer's
+        # ``subscribe_tab`` is called after ``task_id`` is allocated
+        # so live events fan out to that tab.  The caller (e.g.
+        # :class:`_TaskRunnerMixin`) supplies the initial tab id this
+        # way because the printer no longer carries per-thread tab
+        # state — tabs are pure subscribers indexed by ``task_id``.
+        subscribe_tab_id = kwargs.pop("_subscribe_tab_id", "")
         # Mint a fresh chat id at run-start when one is not already
         # set (e.g. a brand-new chat tab that has never resumed a
         # history entry).  Establishing the chat id BEFORE _add_task
@@ -430,25 +423,43 @@ class ChatSorcarAgent(SorcarAgent):
         # block below so the lifetime mirrors exactly "task is in
         # flight inside this ``run()`` call".
         ChatSorcarAgent.running_agents[task_id] = self
-        # Mirror ``task_id`` onto the per-thread :class:`_RunningAgentState`
-        # (when one exists for the thread-local tab id).  This makes
-        # ``task_history_id`` available DURING the run — not just
-        # after — so that
-        # :meth:`VSCodeServer._reattach_running_chat` can disambiguate
-        # by task id when multiple live states share the same
-        # ``chat_id`` (parent + parallel sub-agents).  No-op for
-        # callers that lack a thread-local tab binding (e.g. unit
-        # tests that exercise :class:`ChatSorcarAgent` directly).
+        # Bind the printer's per-task state to ``task_id``: set the
+        # agent thread's thread-local ``task_id`` so subsequent
+        # ``broadcast`` calls are tagged with this id, register
+        # ``self`` in ``_persist_agents[str(task_id)]`` so the
+        # background DB writer can be located, subscribe the caller-
+        # supplied initial tab to the stream, and start recording.
+        # All four are mirror-image cleanups in the ``finally`` block.
         # ``self.printer`` is not yet assigned at this point (the
         # base ``KissAgent.run`` sets it from the ``printer`` kwarg);
         # so consult the kwarg directly with a fall-back to
         # ``self.printer`` for callers that pre-assign it.
         printer_for_mirror = kwargs.get("printer") or getattr(self, "printer", None)
-        tl = getattr(printer_for_mirror, "_thread_local", None)
-        tl_tab_id = getattr(tl, "tab_id", None) if tl is not None else None
+        task_key = str(task_id)
+        if printer_for_mirror is not None:
+            tl = getattr(printer_for_mirror, "_thread_local", None)
+            if tl is not None:
+                tl.task_id = task_key
+            persist_map = getattr(printer_for_mirror, "_persist_agents", None)
+            if persist_map is not None:
+                persist_map[task_key] = self
+            subscribe = getattr(printer_for_mirror, "subscribe_tab", None)
+            if subscribe is not None and subscribe_tab_id:
+                subscribe(task_id, subscribe_tab_id)
+            start_rec = getattr(printer_for_mirror, "start_recording", None)
+            if start_rec is not None:
+                start_rec()
+        # Mirror ``task_id`` onto the :class:`_RunningAgentState` for
+        # the tab the caller passed in (when one exists).  This makes
+        # ``task_history_id`` available DURING the run so that
+        # :meth:`VSCodeServer._reattach_running_chat` can disambiguate
+        # by task id when multiple live states share the same
+        # ``chat_id`` (parent + parallel sub-agents).
         mirrored_state: _RunningAgentState | None = None
-        if isinstance(tl_tab_id, str) and tl_tab_id:
-            mirrored_state = _RunningAgentState.running_agent_states.get(tl_tab_id)
+        if subscribe_tab_id:
+            mirrored_state = _RunningAgentState.running_agent_states.get(
+                subscribe_tab_id,
+            )
             if mirrored_state is not None:
                 mirrored_state.task_history_id = task_id
         _record_frequent_task(prompt_template)
@@ -470,6 +481,22 @@ class ChatSorcarAgent(SorcarAgent):
             ChatSorcarAgent.running_agents.pop(task_id, None)
             if mirrored_state is not None and mirrored_state.task_history_id == task_id:
                 mirrored_state.task_history_id = None
+            # Tear down recording immediately so its memory is freed
+            # while the agent finishes its post-task bookkeeping.
+            # ``_persist_agents`` and the thread-local ``task_id``
+            # are intentionally LEFT in place so any post-task
+            # broadcasts emitted by the calling task-runner (e.g.
+            # ``task_done`` events, ``tasks_updated``) still get
+            # tagged and fanned out under this task; the caller
+            # tears those down when it finally calls
+            # :meth:`BaseBrowserPrinter.cleanup_task`.
+            if printer_for_mirror is not None:
+                stop_rec = getattr(printer_for_mirror, "stop_recording", None)
+                if stop_rec is not None:
+                    try:
+                        stop_rec()
+                    except Exception:
+                        pass
             if not skip_persistence:
                 _save_task_result(task_id=task_id, result=result_summary)
                 from kiss._version import __version__

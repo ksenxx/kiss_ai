@@ -469,7 +469,7 @@ class TestBrowserUIBranches:
         then verifies the timer is cancelled and buffer is flushed.
         """
         p = BaseBrowserPrinter()
-        p._thread_local.tab_id = "0"
+        p._thread_local.task_id = "0"
         with p._bash_lock:
             bs = p._bash_state
             bs.last_flush = time.monotonic() - 1.0

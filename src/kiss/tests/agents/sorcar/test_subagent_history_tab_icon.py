@@ -61,7 +61,7 @@ def _make_server() -> tuple[VSCodeServer, list[dict]]:
     lock = threading.Lock()
 
     def capture(event: dict) -> None:
-        ev = server.printer._inject_tab_id(event)
+        ev = server.printer._inject_task_id(event)
         with server.printer._lock:
             server.printer._record_event(ev)
         with lock:

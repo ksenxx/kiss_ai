@@ -155,7 +155,7 @@ class TestIsTaskActiveClearedOnSnapshotFailure(TestCase):
 
         tab.stop_event = threading.Event()
         tab.user_answer_queue = queue.Queue(maxsize=1)
-        server.printer._thread_local.tab_id = tab_id
+        server.printer._thread_local.task_id = tab_id
 
         try:
             server._run_task(cmd)
@@ -239,7 +239,7 @@ class TestIsRunningNonWtClearedOnSnapshotFailure(TestCase):
 
         tab.stop_event = threading.Event()
         tab.user_answer_queue = queue.Queue(maxsize=1)
-        server.printer._thread_local.tab_id = tab_id
+        server.printer._thread_local.task_id = tab_id
 
         try:
             server._run_task(cmd)

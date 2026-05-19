@@ -1,4 +1,19 @@
-"""Shared browser UI components for KISS agent viewers."""
+"""Shared browser UI components for KISS agent viewers.
+
+The printer is **task-centric**: every piece of per-stream state
+(recordings, usage offsets, bash buffering, persistence) is keyed by
+``task_id`` rather than by the frontend tab id.  Multiple browser tabs
+viewing the same task subscribe to the task's event stream via
+``_subscribers[task_id] -> {tab_id, ...}``.
+
+The agent thread sets ``_thread_local.task_id`` once its
+``task_history.id`` has been allocated; from that point every
+``broadcast()`` is recorded under the task id, persisted under the task
+id, and fanned out to every subscriber tab (each copy stamped with its
+own ``tabId``).  Events with an explicit ``tabId`` already set on the
+payload are treated as "system" events targeted at a specific tab and
+are forwarded directly without recording or persistence.
+"""
 
 import threading
 import time
@@ -73,16 +88,21 @@ class _BashState:
 
 
 class BaseBrowserPrinter(Printer):
-    """Base printer for browser-based UIs.
+    """Base printer for browser-based UIs (task-id keyed).
 
     The current block type (``_current_block_type``) is stored in
     thread-local storage so concurrent task threads can each route
     their streamed tokens to the correct (thinking vs text) panel
     without corrupting each other.  Recording and bash buffering are
-    per-tab (keyed by ``tab_id``) so one task's ``stop_recording()``
-    or ``reset()`` does not destroy another tab's state.
-    """
+    per-task (keyed by ``task_id``) so one task's ``stop_recording()``
+    or ``reset()`` does not destroy another task's state.
 
+    The set of frontend tabs that should receive a task's events is
+    looked up from ``_subscribers[task_id]``.  A tab subscribes via
+    :meth:`subscribe_tab` (e.g. when the user opens the task in a new
+    browser tab) and unsubscribes via :meth:`cleanup_tab` (when the tab
+    closes) or :meth:`unsubscribe_tab`.
+    """
 
     @property
     def _current_block_type(self) -> str:
@@ -94,17 +114,14 @@ class BaseBrowserPrinter(Printer):
 
     @property
     def _bash_state(self) -> _BashState:
-        """Return the bash buffering state for the current thread's tab.
+        """Return the bash buffering state for the current task.
 
-        Each tab gets its own ``_BashState`` so concurrent tasks on
-        different tabs cannot corrupt each other's bash buffer,
-        ``streamed`` flag, generation counter, or flush timer.
-
-        The caller should hold ``_bash_lock`` when accessing this in
-        multi-threaded production code.
+        Each task gets its own ``_BashState`` so concurrent tasks
+        cannot corrupt each other's bash buffer, ``streamed`` flag,
+        generation counter, or flush timer.  The caller must hold
+        ``_bash_lock`` when accessing this in multi-threaded code.
         """
-        raw = getattr(self._thread_local, "tab_id", None) or ""
-        key = self._resolve_tab_id(raw)
+        key = self._task_key()
         bs = self._bash_states.get(key)
         if bs is None:
             bs = _BashState()
@@ -115,176 +132,114 @@ class BaseBrowserPrinter(Printer):
         self._thread_local = threading.local()
         self._lock = threading.Lock()
         self._bash_lock = threading.Lock()
+        # All per-task maps are keyed by ``str(task_id)``.  The empty
+        # string ``""`` is used as a fallback key for events that
+        # happen on a thread with no thread-local ``task_id`` set
+        # (e.g. very early task lifecycle, or unit tests).
         self._bash_states: dict[str, _BashState] = {}
         self._tokens_offsets: dict[str, int] = {}
         self._budget_offsets: dict[str, float] = {}
         self._steps_offsets: dict[str, int] = {}
         self._recordings: dict[str, list[dict[str, Any]]] = {}
         self._persist_agents: dict[str, Any] = {}
-        # ``_tab_id_alias`` maps an OLD tab id to a NEW tab id.  A
-        # running agent thread sets its ``threading.local`` tab id
-        # once and cannot be safely mutated from another thread; the
-        # alias lets the printer transparently re-route that thread's
-        # events to a newly opened frontend tab.  Used by
-        # ``rebind_tab`` and resolved by ``_resolve_tab_id``.
-        self._tab_id_alias: dict[str, str] = {}
-        # ``_subscribers`` maps a canonical source tab id (the one the
-        # running agent thread's events are tagged with after alias
-        # resolution) to the set of additional viewer tab ids that
-        # should ALSO receive every broadcast.  Used by
-        # ``subscribe_tab`` to fan out streaming events to multiple
-        # concurrent web/VS Code clients viewing the same chat.  The
-        # fan-out copies are NOT recorded and NOT persisted: only the
-        # primary (source-tagged) event is, so the database/recording
-        # is never duplicated.
+        # ``_subscribers`` maps a task_id (str) to the set of frontend
+        # tab ids that should receive every broadcast for that task.
+        # The agent thread emits events tagged with ``taskId`` only;
+        # the transport layer (e.g. ``WebPrinter.broadcast``) fans
+        # each event out to every subscriber tab, stamping the
+        # tab-specific ``tabId`` on each fan-out copy.  The single
+        # recording per task is shared by all subscribed tabs.
         self._subscribers: dict[str, set[str]] = {}
 
-    def _resolve_tab_id(self, tab_id: str | None) -> str:
-        """Resolve *tab_id* through the alias chain.
+    @staticmethod
+    def _coerce_task_id(value: Any) -> str:
+        """Return *value* normalised to the printer's task-id string key.
 
-        Returns the final tab id after walking ``_tab_id_alias``.
-        Includes a cycle guard so a pathological alias loop returns
-        the last seen id rather than spinning forever.
-
-        Args:
-            tab_id: The tab id to resolve (may be ``None`` or ``""``).
-
-        Returns:
-            The final tab id, or ``""`` when input is falsy.
+        Accepts ``str`` and ``int`` (``task_history.id``).  Returns
+        ``""`` for ``None``/empty input so callers can treat
+        "no task" and "task id unset" uniformly.
         """
-        if not tab_id:
+        if value is None or value == "":
             return ""
-        seen: set[str] = set()
-        cur = tab_id
-        while cur in self._tab_id_alias and cur not in seen:
-            seen.add(cur)
-            cur = self._tab_id_alias[cur]
-        return cur
+        return str(value)
 
-    def rebind_tab(self, old_tab_id: str, new_tab_id: str) -> None:
-        """Re-key all per-tab state from *old_tab_id* to *new_tab_id*.
+    def _task_key(self) -> str:
+        """Return the thread-local task key for per-task state lookups.
 
-        Called by the server when the user opens a still-running task
-        from history in a freshly created tab: the agent thread keeps
-        running but its events must now flow to the new tab.  Migrates
-        ``_recordings``, ``_bash_states``, ``_tokens_offsets``,
-        ``_budget_offsets``, ``_steps_offsets``, and ``_persist_agents``
-        from the old key to the new one and installs an alias so the
-        agent thread's stored ``threading.local`` tab id keeps routing
-        correctly via ``_inject_tab_id`` and ``_record_event``.
-
-        Idempotent for ``old_tab_id == new_tab_id`` (no-op).
-
-        Args:
-            old_tab_id: The tab id the agent thread was started with.
-            new_tab_id: The freshly allocated frontend tab id.
+        Used for per-task usage offsets, recordings, and bash state.
+        Falls back to ``""`` for threads without a ``task_id`` set
+        (e.g. unit tests or pre-task lifecycle code paths).
         """
-        if not old_tab_id or not new_tab_id or old_tab_id == new_tab_id:
-            return
-        with self._lock:
-            rec = self._recordings.pop(old_tab_id, None)
-            if rec is not None:
-                self._recordings[new_tab_id] = rec
-            tok = self._tokens_offsets.pop(old_tab_id, None)
-            if tok is not None:
-                self._tokens_offsets[new_tab_id] = tok
-            bud = self._budget_offsets.pop(old_tab_id, None)
-            if bud is not None:
-                self._budget_offsets[new_tab_id] = bud
-            steps = self._steps_offsets.pop(old_tab_id, None)
-            if steps is not None:
-                self._steps_offsets[new_tab_id] = steps
-            agent = self._persist_agents.pop(old_tab_id, None)
-            if agent is not None:
-                self._persist_agents[new_tab_id] = agent
-            self._tab_id_alias[old_tab_id] = new_tab_id
-        with self._bash_lock:
-            bs = self._bash_states.pop(old_tab_id, None)
-            if bs is not None:
-                self._bash_states[new_tab_id] = bs
-
-    def subscribe_tab(self, source_tab_id: str, viewer_tab_id: str) -> None:
-        """Register *viewer_tab_id* to receive copies of events emitted
-        for *source_tab_id*.
-
-        Used by the server when a second client opens a chat whose
-        agent is already running under another tab id: instead of
-        moving the live stream to the new tab (and starving the
-        original client), each broadcast is duplicated — once tagged
-        with the original ``source_tab_id`` (recorded + persisted),
-        and once tagged with each subscribed ``viewer_tab_id``
-        (forwarded only, not recorded/persisted).
-
-        Idempotent.  No-op when *viewer_tab_id* equals
-        *source_tab_id*.  *source_tab_id* is alias-resolved first so
-        subscriptions are always stored under the canonical key.
-
-        Args:
-            source_tab_id: The original tab id whose events should be
-                duplicated.  Alias-resolved through ``_tab_id_alias``.
-            viewer_tab_id: The additional viewer tab id that should
-                also receive every broadcast.
-        """
-        if not source_tab_id or not viewer_tab_id:
-            return
-        with self._lock:
-            canonical = self._resolve_tab_id(source_tab_id)
-            if not canonical or canonical == viewer_tab_id:
-                return
-            viewers = self._subscribers.get(canonical)
-            if viewers is None:
-                viewers = set()
-                self._subscribers[canonical] = viewers
-            viewers.add(viewer_tab_id)
-
-    def _fanout_targets(self, tab_id: str | None) -> list[str]:
-        """Return a snapshot of viewer tab ids subscribed to *tab_id*.
-
-        The lookup is alias-aware: the caller passes the (already
-        injected) event's ``tabId`` and this method resolves any alias
-        before looking up the subscriber set.  Returns an empty list
-        when no subscribers exist.
-
-        Args:
-            tab_id: The event's ``tabId`` to look up subscribers for.
-
-        Returns:
-            List of viewer tab ids that should receive a fan-out copy
-            of the event.  Snapshot under ``_lock``.
-        """
-        if not tab_id:
-            return []
-        with self._lock:
-            canonical = self._resolve_tab_id(tab_id)
-            viewers = self._subscribers.get(canonical)
-            if not viewers:
-                return []
-            return [v for v in viewers if v != canonical]
-
-    def _tab_key(self) -> str:
-        """Return the thread-local tab key for per-tab state lookups.
-
-        Used for per-tab usage offsets, recordings, and bash state.
-        Falls back to the empty string for threads without a tab_id
-        (e.g. unit tests that do not set ``_thread_local.tab_id``).
-        Resolves through ``_tab_id_alias`` so a thread whose
-        ``threading.local`` still points to the OLD tab id (because a
-        ``rebind_tab`` happened from another thread) reads/writes
-        state under the NEW tab id.
-        """
-        return self._resolve_tab_id(
-            getattr(self._thread_local, "tab_id", None) or "",
+        return self._coerce_task_id(
+            getattr(self._thread_local, "task_id", None),
         )
 
-    def _inject_tab_id(self, event: dict[str, Any]) -> dict[str, Any]:
-        """Return *event* with ``tabId`` injected from thread-local storage.
+    def subscribe_tab(self, task_id: Any, tab_id: str) -> None:
+        """Subscribe *tab_id* to receive every event broadcast for *task_id*.
 
-        If the current thread has a ``tab_id`` set and the event does
-        not already contain a ``tabId`` key, returns a shallow copy of
-        *event* with the alias-resolved ``tabId`` added.  Otherwise,
-        if the event already carries a ``tabId``, it is resolved
-        through ``_tab_id_alias`` so events tagged with the OLD tab id
-        still reach the NEW tab.
+        Used by the server when the user opens a chat tab that is
+        backed by a running task: the tab subscribes to the task's
+        event stream so live events flow to that tab.  Idempotent.
+
+        Args:
+            task_id: The task identifier (``task_history.id`` int or
+                its string form).
+            tab_id: The frontend tab id to subscribe.
+        """
+        key = self._coerce_task_id(task_id)
+        if not key or not tab_id:
+            return
+        with self._lock:
+            viewers = self._subscribers.get(key)
+            if viewers is None:
+                viewers = set()
+                self._subscribers[key] = viewers
+            viewers.add(tab_id)
+
+    def unsubscribe_tab(self, task_id: Any, tab_id: str) -> None:
+        """Remove *tab_id* from the subscriber set for *task_id*.
+
+        Args:
+            task_id: The task identifier (``task_history.id`` int or
+                its string form).
+            tab_id: The frontend tab id to unsubscribe.
+        """
+        key = self._coerce_task_id(task_id)
+        if not key or not tab_id:
+            return
+        with self._lock:
+            viewers = self._subscribers.get(key)
+            if viewers is None:
+                return
+            viewers.discard(tab_id)
+            if not viewers:
+                self._subscribers.pop(key, None)
+
+    def _fanout_targets(self, task_id: Any) -> list[str]:
+        """Return a snapshot of subscriber tab ids for *task_id*.
+
+        Args:
+            task_id: The task identifier from the event's ``taskId``.
+
+        Returns:
+            List of subscriber tab ids that should receive a copy of
+            the event.  Empty when *task_id* is falsy or has no
+            subscribers.
+        """
+        key = self._coerce_task_id(task_id)
+        if not key:
+            return []
+        with self._lock:
+            viewers = self._subscribers.get(key)
+            if not viewers:
+                return []
+            return list(viewers)
+
+    def _inject_task_id(self, event: dict[str, Any]) -> dict[str, Any]:
+        """Return *event* with ``taskId`` injected from thread-local storage.
+
+        If *event* already has ``taskId`` set, it is returned unchanged.
+        Otherwise the thread-local ``task_id`` (when set) is copied in.
 
         Args:
             event: The event dictionary.
@@ -292,86 +247,107 @@ class BaseBrowserPrinter(Printer):
         Returns:
             The (possibly augmented) event dictionary.
         """
-        existing = event.get("tabId")
-        if existing is not None:
-            resolved = self._resolve_tab_id(existing)
-            if resolved != existing:
-                return {**event, "tabId": resolved}
+        if event.get("taskId") is not None:
             return event
-        tab_id = getattr(self._thread_local, "tab_id", None)
-        if tab_id is not None:
-            return {**event, "tabId": self._resolve_tab_id(tab_id)}
+        key = self._task_key()
+        if key:
+            return {**event, "taskId": key}
         return event
 
     def _persist_event(self, event: dict[str, Any]) -> None:
         """Persist a display event to the database if applicable.
 
-        Checks whether *event* is a display event type, looks up the
-        per-tab agent from ``_persist_agents``, and enqueues the event
-        for asynchronous persistence via ``_queue_chat_event`` when a
-        valid ``_last_task_id`` is present.  The background writer
-        thread batches events to keep the per-event cost sub-microsecond
-        in the hot path.
+        Looks up the agent registered for ``event["taskId"]`` and, when
+        present with a non-None ``_last_task_id``, enqueues the event
+        for asynchronous persistence via ``_queue_chat_event``.
 
         Args:
-            event: The event dictionary (must already have ``tabId``
-                injected).
+            event: The event dictionary (must already have ``taskId``
+                injected when applicable).
         """
         if event.get("type") not in _DISPLAY_EVENT_TYPES:
             return
-        evt_tab = event.get("tabId")
-        if evt_tab is None:
+        key = self._coerce_task_id(event.get("taskId"))
+        if not key:
             return
-        agent = self._persist_agents.get(self._resolve_tab_id(evt_tab))
+        agent = self._persist_agents.get(key)
         if agent is None:
             return
-        task_id = agent._last_task_id
+        task_id = getattr(agent, "_last_task_id", None)
         if task_id is not None:
             _queue_chat_event(event, task_id=task_id)
 
     @property
     def tokens_offset(self) -> int:
-        """Per-tab token-count offset used when broadcasting ``usage_info``.
+        """Per-task token-count offset used when broadcasting ``usage_info``.
 
-        Backed by a ``tab_id``-keyed dict so concurrent tasks on
-        different tabs never clobber each other's accumulated tokens
-        (A7 fix).
+        Backed by a ``task_id``-keyed dict so concurrent tasks never
+        clobber each other's accumulated tokens.
         """
-        return self._tokens_offsets.get(self._tab_key(), 0)
+        return self._tokens_offsets.get(self._task_key(), 0)
 
     @tokens_offset.setter
     def tokens_offset(self, value: int) -> None:
-        self._tokens_offsets[self._tab_key()] = value
+        self._tokens_offsets[self._task_key()] = value
 
     @property
     def budget_offset(self) -> float:
-        """Per-tab dollar-budget offset used when broadcasting ``usage_info``."""
-        return self._budget_offsets.get(self._tab_key(), 0.0)
+        """Per-task dollar-budget offset used when broadcasting ``usage_info``."""
+        return self._budget_offsets.get(self._task_key(), 0.0)
 
     @budget_offset.setter
     def budget_offset(self, value: float) -> None:
-        self._budget_offsets[self._tab_key()] = value
+        self._budget_offsets[self._task_key()] = value
 
     @property
     def steps_offset(self) -> int:
-        """Per-tab step-count offset used when broadcasting ``usage_info``."""
-        return self._steps_offsets.get(self._tab_key(), 0)
+        """Per-task step-count offset used when broadcasting ``usage_info``."""
+        return self._steps_offsets.get(self._task_key(), 0)
 
     @steps_offset.setter
     def steps_offset(self, value: int) -> None:
-        self._steps_offsets[self._tab_key()] = value
+        self._steps_offsets[self._task_key()] = value
 
     def cleanup_tab(self, tab_id: str) -> None:
-        """Remove all per-tab state for *tab_id* to free memory.
+        """Remove *tab_id* from every subscriber set.
 
-        Should be called when a tab is closed on the frontend.  Cancels
-        any pending bash flush timer and removes the tab's entries from
-        ``_bash_states`` and ``_recordings``.
+        Should be called when a frontend tab is closed.  The
+        underlying per-task state (recording, bash buffer, offsets)
+        is NOT touched here: those belong to the task, not the tab,
+        and survive a tab close so a freshly-opened tab on the same
+        task can still pick up the running stream.  Call
+        :meth:`cleanup_task` to drop the per-task state when the task
+        itself ends.
 
         Args:
-            tab_id: The frontend tab identifier to clean up.
+            tab_id: The frontend tab identifier to drop.
         """
-        key = tab_id or ""
+        if not tab_id:
+            return
+        with self._lock:
+            for task_key in list(self._subscribers.keys()):
+                viewers = self._subscribers[task_key]
+                viewers.discard(tab_id)
+                if not viewers:
+                    self._subscribers.pop(task_key, None)
+
+    def cleanup_task(self, task_id: Any) -> None:
+        """Remove all per-task state for *task_id* to free memory.
+
+        Called by the task-runner once a task has fully terminated.
+        Cancels any pending bash flush timer and drops the per-task
+        recording, persist-agent, and usage-offset entries.  The
+        subscriber set is **intentionally preserved** so any post-
+        task broadcasts (e.g. the async ``followup_suggestion``) still
+        fan out to the originating tab; subscriber cleanup happens
+        when the frontend tab itself closes via :meth:`cleanup_tab`.
+
+        Args:
+            task_id: The task identifier whose state should be freed.
+        """
+        key = self._coerce_task_id(task_id)
+        if not key:
+            return
         with self._bash_lock:
             bs = self._bash_states.pop(key, None)
             if bs is not None and bs.timer is not None:
@@ -381,21 +357,7 @@ class BaseBrowserPrinter(Printer):
             self._tokens_offsets.pop(key, None)
             self._budget_offsets.pop(key, None)
             self._steps_offsets.pop(key, None)
-            # Drop alias entries that point AT or FROM this key so the
-            # alias map does not grow without bound.
-            self._tab_id_alias.pop(key, None)
-            for src in [
-                s for s, dst in self._tab_id_alias.items() if dst == key
-            ]:
-                self._tab_id_alias.pop(src, None)
-            # Drop subscription entries that key on or fan out to this
-            # tab so ``_subscribers`` does not grow without bound.
-            self._subscribers.pop(key, None)
-            for src in list(self._subscribers.keys()):
-                viewers = self._subscribers[src]
-                viewers.discard(key)
-                if not viewers:
-                    self._subscribers.pop(src, None)
+            self._persist_agents.pop(key, None)
 
     def reset(self) -> None:
         """Reset internal streaming state for a new turn."""
@@ -408,19 +370,19 @@ class BaseBrowserPrinter(Printer):
                 self._bash_state.timer.cancel()
                 self._bash_state.timer = None
 
-    def _timer_flush_for_tab(self, tab_id: str | None) -> None:
-        """Timer callback that sets the thread-local tab_id and flushes bash.
+    def _timer_flush_for_task(self, task_id: str | None) -> None:
+        """Timer callback that sets the thread-local task_id and flushes bash.
 
-        Used by the bash-stream buffering timer.  Replaces the former
-        closure ``_timer_flush`` so that ``self`` is not captured from
-        an enclosing scope.
+        Used by the bash-stream buffering timer so the flushed event
+        is attributed to the right task even when the timer runs on a
+        worker thread that has no thread-local task_id of its own.
 
         Args:
-            tab_id: The tab identifier that owns the bash buffer, or
-                None when no tab context is available.
+            task_id: The task identifier that owns the bash buffer, or
+                ``None`` when no task context is available.
         """
-        if tab_id is not None:
-            self._thread_local.tab_id = tab_id
+        if task_id is not None:
+            self._thread_local.task_id = task_id
         self._flush_bash()
 
     def _flush_bash(self) -> None:
@@ -452,8 +414,13 @@ class BaseBrowserPrinter(Printer):
                 self.broadcast({"type": "system_output", "text": text})
 
     def start_recording(self) -> None:
-        """Start recording broadcast events for the current tab."""
-        key = self._tab_key()
+        """Start recording broadcast events for the current task.
+
+        No-op when no thread-local ``task_id`` is set.
+        """
+        key = self._task_key()
+        if not key:
+            return
         with self._lock:
             self._recordings[key] = []
 
@@ -471,64 +438,69 @@ class BaseBrowserPrinter(Printer):
         return _coalesce_events(filtered)
 
     def stop_recording(self) -> list[dict[str, Any]]:
-        """Stop recording for the current tab and return its display events.
+        """Stop recording for the current task and return its display events.
 
         Returns:
-            List of display-relevant events with consecutive deltas merged.
+            List of display-relevant events with consecutive deltas
+            merged.  Empty when no recording is active.
         """
-        key = self._tab_key()
+        key = self._task_key()
+        if not key:
+            return []
         with self._lock:
             raw = self._recordings.pop(key, [])
         return self._filter_and_coalesce(raw)
 
     def peek_recording(self) -> list[dict[str, Any]]:
-        """Return a snapshot of the current tab's recording without stopping it.
+        """Return a snapshot of the current task's recording.
 
-        Used for periodic crash-recovery flushes: the caller can persist
-        a snapshot of events to the database while recording continues.
+        Used for periodic crash-recovery flushes: the caller can
+        persist a snapshot of events to the database while recording
+        continues.
 
         Returns:
-            List of display-relevant events with consecutive deltas merged.
+            List of display-relevant events with consecutive deltas
+            merged.  Empty when no recording is active.
         """
-        key = self._tab_key()
+        key = self._task_key()
+        if not key:
+            return []
         with self._lock:
             rec = self._recordings.get(key)
             raw = list(rec) if rec is not None else []
         return self._filter_and_coalesce(raw)
 
     def _record_event(self, event: dict[str, Any]) -> None:
-        """Append event to the active recording for the event's tab.
+        """Append *event* to the active recording for its task.
 
-        Looks up the recording list by ``tabId`` from the event (set by
-        ``WebPrinter.broadcast``), falling back to the thread-local
-        ``tab_id``.  This ensures timer-thread broadcasts (bash flush)
-        are routed to the correct tab's recording.
-
-        Must be called with ``self._lock`` held.
+        Looks up the recording list by the event's ``taskId``, falling
+        back to the thread-local ``task_id``.  Must be called with
+        ``self._lock`` held.
         """
-        raw_key = (
-            event.get("tabId")
-            or getattr(self._thread_local, "tab_id", None)
-            or ""
+        key = self._coerce_task_id(
+            event.get("taskId")
+            or getattr(self._thread_local, "task_id", None),
         )
-        key = self._resolve_tab_id(raw_key)
+        if not key:
+            return
         rec = self._recordings.get(key)
         if rec is not None:
             rec.append(event)
 
     def broadcast(self, event: dict[str, Any]) -> None:
-        """Inject the thread-local tabId, record, and persist the event.
+        """Inject the thread-local taskId, record, and persist the event.
 
         Subclasses that own a transport (WSS / UDS sockets, etc.) add
-        their own emission logic AFTER calling the recording / persistence
-        path — see :class:`WebPrinter` in ``web_server.py``.  The default
-        implementation here is sufficient for tests that only need the
-        recording and persistence side effects.
+        their own emission logic AFTER calling the recording /
+        persistence path — see :class:`WebPrinter` in
+        ``web_server.py``.  The default implementation here is
+        sufficient for tests that only need the recording and
+        persistence side effects.
 
         Args:
             event: The event dictionary to broadcast.
         """
-        event = self._inject_tab_id(event)
+        event = self._inject_task_id(event)
         with self._lock:
             self._record_event(event)
         self._persist_event(event)
@@ -540,7 +512,7 @@ class BaseBrowserPrinter(Printer):
         cost: str = "N/A",
         step_count: int = 0,
     ) -> None:
-        # Apply per-tab offsets so sub-agent cost / tokens / steps that
+        # Apply per-task offsets so sub-agent cost / tokens / steps that
         # were accumulated into the printer (e.g. by ``run_parallel``)
         # are included in the final result panel.  Otherwise the parent
         # agent's displayed cost would be smaller than the sum of its
@@ -616,9 +588,9 @@ class BaseBrowserPrinter(Printer):
                     bs.buffer.clear()
                     bs.last_flush = time.monotonic()
                 elif bs.timer is None:
-                    owner_tab = getattr(self._thread_local, "tab_id", None)
+                    owner_task = getattr(self._thread_local, "task_id", None)
                     bs.timer = threading.Timer(
-                        0.1, partial(self._timer_flush_for_tab, owner_tab),
+                        0.1, partial(self._timer_flush_for_task, owner_task),
                     )
                     bs.timer.daemon = True
                     bs.timer.start()

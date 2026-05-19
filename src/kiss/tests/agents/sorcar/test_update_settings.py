@@ -654,7 +654,7 @@ class TestWebPrinterBroadcast:
 
         # Peek at the raw recording (unfiltered)
         with printer._lock:
-            key = printer._tab_key()
+            key = printer._task_key()
             raw = list(printer._recordings.get(key, []))
 
         setting_evts = [e for e in raw if e.get("type") == "updateSetting"]
@@ -691,7 +691,7 @@ class TestWebPrinterBroadcast:
         )
 
         with printer._lock:
-            key = printer._tab_key()
+            key = printer._task_key()
             raw = list(printer._recordings.get(key, []))
 
         setting_evts = [e for e in raw if e.get("type") == "updateSetting"]
@@ -725,7 +725,7 @@ class TestWebPrinterBroadcast:
         )
 
         with printer._lock:
-            key = printer._tab_key()
+            key = printer._task_key()
             raw = list(printer._recordings.get(key, []))
 
         setting_evts = [e for e in raw if e.get("type") == "updateSetting"]

@@ -56,7 +56,7 @@ class TestEventPersistenceNoDuplicate:
 
     def test_broadcast_persists_each_event_exactly_once(self) -> None:
         printer = BaseBrowserPrinter()
-        printer._thread_local.tab_id = "tab-1"
+        printer._thread_local.task_id = "tab-1"
 
         agent = ChatSorcarAgent("agent")
         task_id, _ = _add_task("hello task")

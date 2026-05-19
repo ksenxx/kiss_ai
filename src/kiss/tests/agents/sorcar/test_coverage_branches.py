@@ -38,7 +38,7 @@ class TestBaseBrowserPrinterBranches:
 
     def test_reset_clears_bash_buffer_and_timer(self):
         p = BaseBrowserPrinter()
-        p._thread_local.tab_id = "0"
+        p._thread_local.task_id = "0"
         with p._bash_lock:
             bs = p._bash_state
             bs.buffer.append("some text")
@@ -216,7 +216,7 @@ class TestVSCodeServerBranches:
         stop_event = threading.Event()
         server.printer._thread_local.stop_event = stop_event
         tab_id = "1"
-        server.printer._thread_local.tab_id = tab_id
+        server.printer._thread_local.task_id = tab_id
         user_q: queue.Queue[str] = queue.Queue(maxsize=1)
         server._get_tab(tab_id).user_answer_queue = user_q
 

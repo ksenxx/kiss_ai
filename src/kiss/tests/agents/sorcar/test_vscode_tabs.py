@@ -85,7 +85,7 @@ class TestAwaitUserResponse(unittest.TestCase):
         """_await_user_response reads from the tab-specific queue."""
         q: queue.Queue[str] = queue.Queue(maxsize=1)
         self.server._get_tab("5").user_answer_queue = q
-        self.server.printer._thread_local.tab_id = "5"
+        self.server.printer._thread_local.task_id = "5"
         stop = threading.Event()
         self.server.printer._thread_local.stop_event = stop
 
@@ -101,7 +101,7 @@ class TestAwaitUserResponse(unittest.TestCase):
         """_await_user_response raises KeyboardInterrupt when stop is set."""
         q: queue.Queue[str] = queue.Queue(maxsize=1)
         self.server._get_tab("6").user_answer_queue = q
-        self.server.printer._thread_local.tab_id = "6"
+        self.server.printer._thread_local.task_id = "6"
         stop = threading.Event()
         self.server.printer._thread_local.stop_event = stop
 
@@ -115,7 +115,7 @@ class TestAwaitUserResponse(unittest.TestCase):
 
     def test_no_tab_id_waits_until_stop(self) -> None:
         """Without tab_id, _await_user_response waits until stop is set."""
-        self.server.printer._thread_local.tab_id = None
+        self.server.printer._thread_local.task_id = None
         stop = threading.Event()
         self.server.printer._thread_local.stop_event = stop
 
@@ -136,7 +136,7 @@ class TestTabIdInjection(unittest.TestCase):
         from kiss.tests.agents.vscode._memory_printer import MemoryPrinter
 
         printer = MemoryPrinter()
-        printer._thread_local.tab_id = "7"
+        printer._thread_local.task_id = "7"
 
         printer.broadcast({"type": "askUser", "question": "What?"})
 
@@ -149,7 +149,7 @@ class TestTabIdInjection(unittest.TestCase):
         from kiss.tests.agents.vscode._memory_printer import MemoryPrinter
 
         printer = MemoryPrinter()
-        printer._thread_local.tab_id = "7"
+        printer._thread_local.task_id = "7"
 
         printer.broadcast({"type": "error", "text": "oops", "tabId": "3"})
 
@@ -380,7 +380,7 @@ class TestAskUserQuestion(unittest.TestCase):
         q: queue.Queue[str] = queue.Queue(maxsize=1)
         q.put("yes")
         self.server._get_tab("8").user_answer_queue = q
-        self.server.printer._thread_local.tab_id = "8"
+        self.server.printer._thread_local.task_id = "8"
         self.server.printer._thread_local.stop_event = threading.Event()
 
         result = self.server._ask_user_question("Continue?")
@@ -440,7 +440,7 @@ class TestBashFlushTimerTabId(unittest.TestCase):
         from kiss.tests.agents.vscode._memory_printer import MemoryPrinter
 
         printer = MemoryPrinter()
-        printer._thread_local.tab_id = "99"
+        printer._thread_local.task_id = "99"
 
         with printer._bash_lock:
             printer._bash_state.last_flush = time.monotonic()
@@ -463,7 +463,7 @@ class TestRecordingIsolation(unittest.TestCase):
         from kiss.tests.agents.vscode._memory_printer import MemoryPrinter
 
         printer = MemoryPrinter()
-        printer._thread_local.tab_id = "1"
+        printer._thread_local.task_id = "1"
 
         printer.start_recording()
 
@@ -482,7 +482,7 @@ class TestRecordingIsolation(unittest.TestCase):
 
         printer = BaseBrowserPrinter()
         printer.start_recording()
-        key = printer._tab_key()
+        key = printer._task_key()
         assert key in printer._recordings
         printer.stop_recording()
         assert key not in printer._recordings

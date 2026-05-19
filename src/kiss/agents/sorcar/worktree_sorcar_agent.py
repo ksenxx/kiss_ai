@@ -556,9 +556,11 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         (the only routing key available — there is no separate tab).
         Sub-agents launched by
         :meth:`ChatSorcarAgent._run_tasks_parallel` are plain
-        :class:`ChatSorcarAgent` instances and never call this method,
-        so they are tracked separately via the printer's
-        ``_persist_agents`` map keyed by ``sub_tab_id``.
+        :class:`ChatSorcarAgent` instances and never call this method;
+        they register themselves in the printer's ``_persist_agents``
+        map keyed by their own ``task_id`` (the string form of
+        ``task_history.id``) from inside
+        :meth:`ChatSorcarAgent.run`.
 
         Returns:
             ``True`` when a fresh entry was added (and the caller must

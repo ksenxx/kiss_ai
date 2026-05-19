@@ -5,7 +5,7 @@ updates the header when the incoming event's ``tabId`` matches the
 currently active tab (or is ``undefined``).  Previously, the backend
 emitted ``{"type": "status", "running": True/False}`` *without* a
 ``tabId`` field and relied entirely on the
-``BaseBrowserPrinter._inject_tab_id`` middleware to add the field from
+``BaseBrowserPrinter._inject_task_id`` middleware to add the field from
 the thread-local context.  When the thread-local was unset or held an
 empty string, the frontend received a tabId of ``""``, which failed the
 ``ev.tabId === activeTabId`` check and left the timer ticking forever.
@@ -80,7 +80,7 @@ class TestStatusBroadcastIncludesTabId(unittest.TestCase):
             [],
             "Every '{\"type\": \"status\", ...}' broadcast must include "
             "an explicit 'tabId' key so the frontend's tab-id matching "
-            "logic works without relying on _inject_tab_id middleware. "
+            "logic works without relying on _inject_task_id middleware. "
             f"Offending sites: {offenders}",
         )
         # Sanity: we are actually inspecting real status broadcasts —

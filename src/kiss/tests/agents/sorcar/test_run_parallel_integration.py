@@ -316,7 +316,7 @@ class TestNestedParallelReal:
         correctly across nesting levels.
         """
         printer = _CapturePrinter()
-        printer._thread_local.tab_id = "nested-events-root"
+        printer._thread_local.task_id = "nested-events-root"
 
         results = run_tasks_parallel(
             [
@@ -531,7 +531,7 @@ class _CapturePrinter(BaseBrowserPrinter):
 
     def broadcast(self, event: dict[str, Any]) -> None:
         """Capture event then delegate to parent for recording logic."""
-        event = self._inject_tab_id(event)
+        event = self._inject_task_id(event)
         with self._capture_lock:
             self.captured.append(event)
         super().broadcast(event)
@@ -545,7 +545,7 @@ class TestSubagentTabEventsE2E:
     def test_subagent_tab_events_broadcast(self) -> None:
         """run_tasks_parallel with a printer broadcasts open/done tab events."""
         printer = _CapturePrinter()
-        printer._thread_local.tab_id = "parent-e2e"
+        printer._thread_local.task_id = "parent-e2e"
 
         results = run_tasks_parallel(
             [
@@ -585,7 +585,7 @@ class TestSubagentTabEventsE2E:
     def test_subagent_streaming_events_have_tab_ids(self) -> None:
         """Streaming events from sub-agents carry the correct tabId."""
         printer = _CapturePrinter()
-        printer._thread_local.tab_id = "parent-stream"
+        printer._thread_local.task_id = "parent-stream"
 
         run_tasks_parallel(
             ["Reply with just 'hello'."],
@@ -609,7 +609,7 @@ class TestSubagentTabEventsE2E:
     def test_description_field_in_open_event(self) -> None:
         """openSubagentTab event carries 'description' field for JS frontend."""
         printer = _CapturePrinter()
-        printer._thread_local.tab_id = "parent-desc"
+        printer._thread_local.task_id = "parent-desc"
 
         run_tasks_parallel(
             ["Reply with the word DELTA."],

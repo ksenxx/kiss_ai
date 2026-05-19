@@ -35,7 +35,7 @@ class _CapturePrinter(BaseBrowserPrinter):
 
     def broadcast(self, event: dict[str, Any]) -> None:
         """Record event then delegate to parent for normal recording."""
-        event = self._inject_tab_id(event)
+        event = self._inject_task_id(event)
         with self._capture_lock:
             self.captured.append(event)
         super().broadcast(event)
@@ -61,7 +61,7 @@ class TestRunParallelStringBug:
         any actual LLM call is made; the broadcast loop runs first.
         """
         printer = _CapturePrinter()
-        printer._thread_local.tab_id = "parent-strbug"
+        printer._thread_local.task_id = "parent-strbug"
 
         try:
             run_tasks_parallel(
@@ -81,7 +81,7 @@ class TestRunParallelStringBug:
     def test_long_string_input_not_iterated(self) -> None:
         """Longer realistic-looking task string also must not be iterated."""
         printer = _CapturePrinter()
-        printer._thread_local.tab_id = "parent-long"
+        printer._thread_local.task_id = "parent-long"
 
         task_str = "Summarize file foo.py and reply with the result."
         try:
@@ -113,7 +113,7 @@ class TestRunParallelStringBug:
         # max_workers=0 the ThreadPoolExecutor surfaces ValueError after
         # the broadcast loop — still no character iteration).
         printer = _CapturePrinter()
-        printer._thread_local.tab_id = "parent-closure"
+        printer._thread_local.task_id = "parent-closure"
         agent.printer = printer
 
         try:
@@ -135,7 +135,7 @@ class TestRunParallelStringBug:
     def test_list_of_strings_still_works(self) -> None:
         """Normal list input still goes through the broadcast loop correctly."""
         printer = _CapturePrinter()
-        printer._thread_local.tab_id = "parent-normal"
+        printer._thread_local.task_id = "parent-normal"
 
         try:
             run_tasks_parallel(
@@ -162,7 +162,7 @@ class TestRunParallelStringBug:
         and broadcast 2 ``openSubagentTab`` events.
         """
         printer = _CapturePrinter()
-        printer._thread_local.tab_id = "parent-jsonstr"
+        printer._thread_local.task_id = "parent-jsonstr"
 
         try:
             run_tasks_parallel(
@@ -182,7 +182,7 @@ class TestRunParallelStringBug:
     def test_json_encoded_list_string_three_tasks(self) -> None:
         """Three-element JSON-encoded list must yield 3 sub-agent tabs."""
         printer = _CapturePrinter()
-        printer._thread_local.tab_id = "parent-jsonstr3"
+        printer._thread_local.task_id = "parent-jsonstr3"
 
         try:
             run_tasks_parallel(
@@ -205,7 +205,7 @@ class TestRunParallelStringBug:
         a single task, not parsed.
         """
         printer = _CapturePrinter()
-        printer._thread_local.tab_id = "parent-bracket"
+        printer._thread_local.task_id = "parent-bracket"
 
         try:
             run_tasks_parallel(

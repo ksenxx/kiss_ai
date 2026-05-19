@@ -174,6 +174,7 @@ class TestFormatToolCallBranches:
     def test_format_tool_call_with_all_fields(self) -> None:
         """All optional fields present in tool_input."""
         p = BaseBrowserPrinter()
+        p._thread_local.task_id = "t1"
         p.start_recording()
         p._format_tool_call("Edit", {
             "file_path": "/path/to/file.py",
@@ -283,6 +284,7 @@ class TestVSCodeServerExtractResultSummary:
     def test_extract_result_summary_with_result_event(self) -> None:
         """_extract_result_summary finds the result event."""
         server = VSCodeServer()
+        server.printer._thread_local.task_id = "t1"
         server.printer.start_recording()
         server.printer.broadcast({"type": "text_delta", "text": "hello"})
         import yaml
@@ -299,6 +301,7 @@ class TestBrowserPrinterPeekRecording:
     def test_peek_active_recording(self) -> None:
         """peek_recording returns current events without stopping."""
         p = BaseBrowserPrinter()
+        p._thread_local.task_id = "t1"
         p.start_recording()
         p.broadcast({"type": "text_delta", "text": "hello"})
         events = p.peek_recording()
