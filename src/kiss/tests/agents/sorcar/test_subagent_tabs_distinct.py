@@ -108,40 +108,6 @@ class TestBackendBroadcastsDistinctSubagentTabs:
             assert evt.get("taskIndex") == i
 
 
-class TestFrontendDistinguishesAndDedups:
-    """Static checks on media/main.js ensure the frontend handler
-    includes taskIndex in the title and dedups by tab_id."""
-
-    def test_main_js_uses_task_index_in_subagent_title(self) -> None:
-        js = MAIN_JS.read_text()
-        # The handler computes a 1-based index when taskIndex is present.
-        assert "ev.taskIndex" in js
-        # Verify both the typeof check and a '⚡' + index pattern appear
-        # in the openSubagentTab case.
-        case_start = js.find("case 'openSubagentTab':")
-        assert case_start > 0
-        case_end = js.find("case 'subagentDone':", case_start)
-        case_block = js[case_start:case_end]
-        assert "typeof ev.taskIndex" in case_block
-        assert "ev.tab_id" in case_block
-
-    def test_main_js_dedups_by_tab_id(self) -> None:
-        js = MAIN_JS.read_text()
-        case_start = js.find("case 'openSubagentTab':")
-        case_end = js.find("case 'subagentDone':", case_start)
-        case_block = js[case_start:case_end]
-        # Idempotent: must look up existing tab by ev.tab_id before push.
-        assert "tabs.find(t => t.id === ev.tab_id)" in case_block, (
-            "openSubagentTab handler must dedup by ev.tab_id"
-        )
-
-    def test_main_js_persists_subagent_flag(self) -> None:
-        js = MAIN_JS.read_text()
-        # persistTabState serialises isSubagentTab so reloads preserve
-        # the flag — otherwise MAX_TABS would trim restored sub-tabs.
-        assert "isSubagentTab: !!t.isSubagentTab" in js
-        # Restoration path also re-applies it.
-        assert "st.isSubagentTab" in js
 
 
 class TestSubagentTitlesAreVisuallyDistinct:

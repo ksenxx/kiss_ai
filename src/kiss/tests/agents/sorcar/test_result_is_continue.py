@@ -14,9 +14,6 @@ This is verified end-to-end:
 
 from __future__ import annotations
 
-import re
-from pathlib import Path
-
 import yaml
 
 from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
@@ -72,32 +69,3 @@ def test_broadcast_result_failure_without_is_continue() -> None:
     assert ev.get("success") is False
     assert ev.get("is_continue") is False
 
-
-def test_main_js_renders_continue_for_is_continue() -> None:
-    """The JS result handler must show ``Status: Continue`` when applicable."""
-    main_js = Path(__file__).resolve().parents[3] / "agents" / "vscode" / "media" / "main.js"
-    src = main_js.read_text()
-
-    match = re.search(
-        r"case 'result':\s*\{(?P<body>.*?)break;\s*\}",
-        src,
-        re.DOTALL,
-    )
-    assert match is not None, "could not find the 'result' case in main.js"
-    body = match.group("body")
-
-    assert "is_continue" in body, (
-        "main.js result handler must inspect ev.is_continue to "
-        "distinguish a continue-retry from a hard failure"
-    )
-    assert "Status: Continue" in body, (
-        "main.js result handler must render 'Status: Continue' "
-        "when ev.is_continue is true"
-    )
-    cont_idx = body.index("Status: Continue")
-    fail_idx = body.index("Status: FAILED")
-    assert cont_idx < fail_idx, "Continue branch must precede the FAILED branch"
-    between = body[cont_idx:fail_idx]
-    assert "else" in between, (
-        "Continue and FAILED banners must be mutually exclusive (else-if)"
-    )

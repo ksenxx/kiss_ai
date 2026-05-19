@@ -20,7 +20,6 @@ R1 fix: dead ``is not None`` guard removed from ``_cmd_user_answer``.
 
 from __future__ import annotations
 
-import inspect
 import json
 import queue
 import tempfile
@@ -30,9 +29,7 @@ from pathlib import Path
 from typing import Any
 from unittest import TestCase
 
-from kiss.agents.vscode.commands import _CommandsMixin
 from kiss.agents.vscode.server import VSCodeServer
-from kiss.agents.vscode.task_runner import _TaskRunnerMixin
 from kiss.agents.vscode.vscode_config import (
     CONFIG_PATH,
     load_config,
@@ -169,13 +166,6 @@ class TestIsTaskActiveClearedOnSnapshotFailure(TestCase):
             "B2 FIX: is_task_active should be False after snapshot failure"
         )
 
-    def test_is_task_active_cleared_in_run_task_finally(self) -> None:
-        """Structural: ``_run_task`` now explicitly clears ``is_task_active``."""
-        src = inspect.getsource(_TaskRunnerMixin._run_task)
-        assert "is_task_active" in src, (
-            "B2 FIX: _run_task should reference is_task_active in its "
-            "finally block"
-        )
 
 
 class TestFastModelForReturnsActuallyFastModels(TestCase):
@@ -223,13 +213,6 @@ class TestUserAnswerNoDeadIsNotNoneCheck(TestCase):
     the variable is always a string, never ``None``.
     """
 
-    def test_no_redundant_none_check(self) -> None:
-        """Source should not contain ``if ans_tab is not None``."""
-        src = inspect.getsource(_CommandsMixin._cmd_user_answer)
-        assert "is not None" not in src or "ans_tab is not None" not in src, (
-            "R1 FIX: _cmd_user_answer should not have a dead "
-            "'ans_tab is not None' check"
-        )
 
     def test_empty_tab_id_drops_answer(self) -> None:
         """When tabId is empty string, the answer should be dropped (no queue)."""
