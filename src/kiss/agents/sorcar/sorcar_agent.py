@@ -688,11 +688,16 @@ def run_tasks_parallel(
         agent = ChatSorcarAgent(f"Parallel-{task[:40]}")
         success = True
         try:
+            # ``is_parallel=True`` propagates the parallel capability so
+            # sub-agents themselves get the ``run_parallel`` tool and
+            # can invoke nested parallel execution.  Without this, nested
+            # parallel (sub-agent calls run_parallel) is impossible.
             result: str = agent.run(
                 prompt_template=task,
                 model_name=model_name,
                 work_dir=work_dir,
                 printer=printer,
+                is_parallel=True,
             )
             return result
         except Exception as exc:

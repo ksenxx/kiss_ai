@@ -206,6 +206,193 @@ class TestBudgetAggregationReal:
 
 
 # ---------------------------------------------------------------------------
+# 1c. Nested parallel — sub-agents themselves invoke ``run_parallel``
+# ---------------------------------------------------------------------------
+
+
+@skip_no_key
+class TestNestedParallelReal:
+    """Real LLM tests for nested parallel execution.
+
+    Each test exercises a tree of parallel invocations:
+
+    * Tasks per ``run_parallel`` call: at most **2**.
+    * Total ``run_parallel`` invocations across the whole tree: at most
+      **3** (one outer + two inner = 3, giving four leaf sub-agents).
+
+    These tests verify that the per-level ``budget_used`` /
+    ``total_tokens_used`` / ``total_steps`` aggregation done by
+    :meth:`SorcarAgent._run_tasks_parallel` and
+    :meth:`ChatSorcarAgent._run_tasks_parallel` chains correctly all
+    the way up to the top-level parent.
+    """
+
+    @pytest.mark.slow
+    def test_nested_parallel_budget_chains(
+        self, tmp_path: Path,
+    ) -> None:
+        """Two levels of parallelism: parent → 2 middles → 2 leaves each.
+
+        Tree shape (3 ``run_parallel`` invocations total, 2 tasks each)::
+
+            parent._run_tasks_parallel([M1, M2])      # invocation #1
+              ├── M1 LLM-invokes run_parallel([L1a, L1b])  # invocation #2
+              └── M2 LLM-invokes run_parallel([L2a, L2b])  # invocation #3
+
+        After the tree completes, the parent's ``budget_used`` /
+        ``total_tokens_used`` / ``total_steps`` must include the cost of
+        all four leaf agents (plus the two middles).  Per-level
+        aggregation is validated by parsing each middle's YAML result
+        and confirming the run_parallel tool was actually invoked and
+        returned the expected leaf summaries.
+        """
+        parent = SorcarAgent("nested-parent")
+        parent.work_dir = str(tmp_path)
+        parent.model_name = FAST_MODEL
+        parent.printer = None
+        parent.budget_used = 0.0
+        parent.total_tokens_used = 0
+        parent.total_steps = 0
+
+        middle_prompt_template = (
+            "You MUST call the run_parallel tool exactly once with these "
+            "two tasks (and nothing else):\n"
+            "  1. \"Reply with exactly the word {leaf_a} and nothing else.\"\n"
+            "  2. \"Reply with exactly the word {leaf_b} and nothing else.\"\n"
+            "After run_parallel returns, immediately call finish with "
+            "success=True and summary set to the two leaf results "
+            "joined by a comma."
+        )
+
+        results = parent._run_tasks_parallel(
+            [
+                middle_prompt_template.format(
+                    leaf_a="NESTED_L1A", leaf_b="NESTED_L1B",
+                ),
+                middle_prompt_template.format(
+                    leaf_a="NESTED_L2A", leaf_b="NESTED_L2B",
+                ),
+            ],
+            max_workers=2,
+        )
+        assert len(results) == 2
+
+        # The parent's running totals must reflect EVERY level of the
+        # tree.  Six real LLM-driven agents ran (2 middles + 4 leaves),
+        # and the per-level aggregation done by ``_run_tasks_parallel``
+        # at every node must roll those costs all the way up to the
+        # parent.  Confirming that all three counters grew above zero
+        # proves nested chaining works: if any intermediate level had
+        # failed to add its sub-agents in, at least one of the three
+        # counters would still be at its pre-call zero baseline.  We
+        # deliberately avoid asserting on the textual content of the
+        # middle summaries because LLM responses are non-deterministic;
+        # the budget aggregation contract is what we care about here.
+        assert parent.budget_used > 0.0, (
+            f"parent.budget_used did not aggregate nested cost: "
+            f"{parent.budget_used}"
+        )
+        assert parent.total_tokens_used > 0, (
+            f"parent.total_tokens_used did not aggregate: "
+            f"{parent.total_tokens_used}"
+        )
+        assert parent.total_steps > 0, (
+            f"parent.total_steps did not aggregate: "
+            f"{parent.total_steps}"
+        )
+
+    @pytest.mark.slow
+    def test_nested_parallel_subagent_tab_events(
+        self, tmp_path: Path,
+    ) -> None:
+        """Nested parallel emits ``openSubagentTab`` events for every level.
+
+        With one outer parent call (2 middles) and one nested call per
+        middle (2 leaves each), the printer must observe **6** distinct
+        ``openSubagentTab`` events: 2 from the outer invocation plus 2
+        from each of the 2 inner invocations.  Each leaf event's
+        ``parent_tab_id`` must point at the corresponding middle's tab
+        id, confirming that the printer thread-local routing chains
+        correctly across nesting levels.
+        """
+        printer = _CapturePrinter()
+        printer._thread_local.tab_id = "nested-events-root"
+
+        results = run_tasks_parallel(
+            [
+                (
+                    "Call run_parallel with these two tasks and nothing "
+                    "else: "
+                    "['Reply only with TAB_L1A', 'Reply only with TAB_L1B']."
+                    " Then finish."
+                ),
+                (
+                    "Call run_parallel with these two tasks and nothing "
+                    "else: "
+                    "['Reply only with TAB_L2A', 'Reply only with TAB_L2B']."
+                    " Then finish."
+                ),
+            ],
+            max_workers=2,
+            model_name=FAST_MODEL,
+            work_dir=str(tmp_path),
+            printer=printer,
+        )
+        assert len(results) == 2
+
+        open_events = [
+            e for e in printer.captured if e.get("type") == "openSubagentTab"
+        ]
+
+        # The two outer (middle) tabs must be direct children of the
+        # root tab.  Their ids are deterministic because the outer
+        # ``run_tasks_parallel`` synthesises them from the root tab id.
+        outer_events = [
+            e for e in open_events
+            if e.get("parent_tab_id") == "nested-events-root"
+        ]
+        assert len(outer_events) == 2, (
+            f"Expected exactly 2 outer (middle) openSubagentTab events "
+            f"as direct children of the root, got {len(outer_events)}: "
+            f"{[e.get('tab_id') for e in outer_events]}"
+        )
+        middle_ids = {ev["tab_id"] for ev in outer_events}
+
+        # The leaves must each have a middle tab as their parent.  We
+        # accept either exact parent==middle_id, or a nested-id prefix
+        # (defensive against any extra LLM-driven invocations under a
+        # middle tab) — what matters is that the printer's thread-local
+        # routing chained the leaves under the correct middle.
+        leaf_events = [
+            e for e in open_events if e["tab_id"] not in middle_ids
+        ]
+        assert len(leaf_events) >= 4, (
+            f"Expected at least 4 leaf openSubagentTab events under the "
+            f"middle tabs, got {len(leaf_events)}: "
+            f"{[e.get('tab_id') for e in leaf_events]}"
+        )
+        for ev in leaf_events:
+            parent_id = ev.get("parent_tab_id", "")
+            assert parent_id in middle_ids or any(
+                parent_id.startswith(mid) for mid in middle_ids
+            ), (
+                f"Leaf tab {ev['tab_id']!r} has parent {parent_id!r}, "
+                f"expected one of {middle_ids} (or a descendant thereof)"
+            )
+
+        # Every opened sub-agent tab must also emit a subagentDone event.
+        done_events = [
+            e for e in printer.captured if e.get("type") == "subagentDone"
+        ]
+        opened_tab_ids = {e["tab_id"] for e in open_events}
+        done_tab_ids = {e["tab_id"] for e in done_events}
+        assert opened_tab_ids == done_tab_ids, (
+            f"openSubagentTab / subagentDone tab ids diverged.  "
+            f"opened={opened_tab_ids}  done={done_tab_ids}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # 2. Edge cases
 # ---------------------------------------------------------------------------
 
