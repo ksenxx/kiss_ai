@@ -73,13 +73,13 @@ class TestTimerFlushTypeAnnotation(unittest.TestCase):
 
 
     def test_owner_tab_is_string(self) -> None:
-        """Behavioral: the captured ``owner_tab`` is actually a string."""
+        """Behavioral: the captured ``owner_task`` is actually a string."""
         printer = BaseBrowserPrinter()
-        printer._thread_local.tab_id = "test-tab-123"
+        printer._thread_local.task_id = "test-tab-123"
 
-        owner_tab = getattr(printer._thread_local, "tab_id", None)
-        assert isinstance(owner_tab, str), (
-            f"N1: owner_tab should be str, got {type(owner_tab).__name__}"
+        owner_task = getattr(printer._thread_local, "task_id", None)
+        assert isinstance(owner_task, str), (
+            f"N1: owner_task should be str, got {type(owner_task).__name__}"
         )
 
 
@@ -121,7 +121,7 @@ class TestAwaitUserResponseNoLock(unittest.TestCase):
         tab.user_answer_queue.put("yes")
 
         server.printer._thread_local.stop_event = tab.stop_event
-        server.printer._thread_local.tab_id = "t1"
+        server.printer._thread_local.task_id = "t1"
         pre_close_tab = server._running_agent_states.get("t1")
         assert pre_close_tab is not None, "Tab exists before close"
 

@@ -61,7 +61,7 @@ class _CapturePrinter(BaseBrowserPrinter):
         self.events: list[dict[str, Any]] = []
 
     def broadcast(self, event: dict[str, Any]) -> None:
-        event = self._inject_tab_id(event)
+        event = self._inject_task_id(event)
         with self._lock:
             self._record_event(event)
         self.events.append(event)
@@ -142,7 +142,7 @@ class TestPersistedSubagentBlob:
         csa_mod.ChatSorcarAgent = _StubChatAgent  # type: ignore[misc]
         try:
             printer = _CapturePrinter()
-            printer._thread_local.tab_id = "tab-parent"
+            printer._thread_local.task_id = "tab-parent"
             parent = real_cls("parent")
             parent.printer = cast(Printer | None, printer)
             parent.model_name = "stub"

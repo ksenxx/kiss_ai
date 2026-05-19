@@ -649,7 +649,7 @@ class TestBareStringTasksDoesNotSpawnPerCharacterTabs:
     def test_chat_sorcar_string_tasks_yields_single_tab(self) -> None:
         """``ChatSorcarAgent`` coerces a bare string into one task."""
         printer = _CapturePrinter()
-        printer._thread_local.tab_id = "parent-chat"
+        printer._thread_local.task_id = "parent-chat"
         agent = ChatSorcarAgent("regression-chat")
         agent.printer = printer
 
@@ -668,7 +668,7 @@ class TestBareStringTasksDoesNotSpawnPerCharacterTabs:
     def test_chat_sorcar_invalid_tasks_raises_typeerror(self) -> None:
         """Non-string, non-list-of-str inputs raise ``TypeError``."""
         printer = _CapturePrinter()
-        printer._thread_local.tab_id = "parent-chat-bad"
+        printer._thread_local.task_id = "parent-chat-bad"
         agent = ChatSorcarAgent("regression-chat-bad")
         agent.printer = printer
 
@@ -679,7 +679,7 @@ class TestBareStringTasksDoesNotSpawnPerCharacterTabs:
     def test_sorcar_string_tasks_yields_single_tab(self) -> None:
         """``SorcarAgent`` base method also coerces a bare string."""
         printer = _CapturePrinter()
-        printer._thread_local.tab_id = "parent-base"
+        printer._thread_local.task_id = "parent-base"
         agent = SorcarAgent("regression-base")
         agent.printer = printer
 

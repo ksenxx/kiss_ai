@@ -87,7 +87,7 @@ def _make_server() -> tuple[VSCodeServer, list[dict[str, Any]], threading.Lock]:
         # Mirror the real ``BaseBrowserPrinter.broadcast`` side effects
         # so ``peek_recording`` (used by ``_extract_result_summary``)
         # and persistence see the event, just without the WSS transport.
-        ev = printer._inject_tab_id(event)
+        ev = printer._inject_task_id(event)
         with printer._lock:
             printer._record_event(ev)
         printer._persist_event(ev)

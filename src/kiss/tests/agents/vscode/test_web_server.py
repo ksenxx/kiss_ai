@@ -155,16 +155,16 @@ class TestWebPrinter(unittest.TestCase):
     def test_broadcast_records_event(self) -> None:
         """Broadcast records events in the per-tab recording buffer."""
         printer = WebPrinter()
-        printer._thread_local.tab_id = "t1"
+        printer._thread_local.task_id = "t1"
         printer.start_recording()
         printer.broadcast({"type": "text_delta", "text": "hello"})
         events = printer.peek_recording()
         self.assertTrue(any(e.get("text") == "hello" for e in events))
 
-    def test_broadcast_injects_tab_id(self) -> None:
-        """Broadcast injects tabId from thread-local when missing."""
+    def test_broadcast_injects_task_id(self) -> None:
+        """Broadcast injects taskId from thread-local when missing."""
         printer = WebPrinter()
-        printer._thread_local.tab_id = "t1"
+        printer._thread_local.task_id = "t1"
         printer.start_recording()
         captured: list[dict] = []
         original_record = printer._record_event
@@ -174,8 +174,8 @@ class TestWebPrinter(unittest.TestCase):
             original_record(event)
 
         printer._record_event = spy_record  # type: ignore[assignment]
-        printer.broadcast({"type": "status", "running": False})
-        self.assertTrue(any(e.get("tabId") == "t1" for e in captured))
+        printer.broadcast({"type": "text_delta", "text": "hi"})
+        self.assertTrue(any(e.get("taskId") == "t1" for e in captured))
 
 
 def _find_free_port() -> int:
@@ -2698,7 +2698,7 @@ class TestWebPrinterBroadcastEdgeCases(IsolatedAsyncioTestCase):
             Path(cur_path).write_text("current")
 
             printer = WebPrinter()
-            printer._thread_local.tab_id = "t1"
+            printer._thread_local.task_id = "t1"
             callback_calls: list[tuple[str, dict]] = []
 
             def _cb(tab_id: str, merge_data: dict[str, Any]) -> None:
@@ -2709,13 +2709,14 @@ class TestWebPrinterBroadcastEdgeCases(IsolatedAsyncioTestCase):
             printer.broadcast(
                 {
                     "type": "merge_data",
+                    "tabId": "tab-1",
                     "data": {
                         "files": [{"base": base_path, "current": cur_path, "hunks": []}],
                     },
                 }
             )
             self.assertEqual(len(callback_calls), 1)
-            self.assertEqual(callback_calls[0][0], "t1")
+            self.assertEqual(callback_calls[0][0], "tab-1")
 
 
 class TestAuthenticationEdgeCases(IsolatedAsyncioTestCase):

@@ -70,21 +70,21 @@ def _make_server() -> tuple[VSCodeServer, list[dict]]:
     real_broadcast = BaseBrowserPrinter.broadcast
 
     def capture(event: dict) -> None:
-        # Run the real machinery (tab-id injection, recording, and
-        # multi-viewer fan-out) so alias resolution and subscriber
-        # duplication are exercised in tests, then snapshot the
-        # injected event(s).
-        ev = server.printer._inject_tab_id(event)
+        # Mirror :meth:`WebPrinter.broadcast` exactly:
+        #   * Events with explicit ``tabId`` go through verbatim.
+        #   * Other events are tagged with ``taskId`` and fanned out
+        #     to every subscriber tab, with each copy stamped with
+        #     its own ``tabId``.
+        if "tabId" in event:
+            with lock:
+                events.append(event)
+            return
+        ev = server.printer._inject_task_id(event)
         with server.printer._lock:
             server.printer._record_event(ev)
-        with lock:
-            events.append(ev)
-        # Mirror VSCodePrinter.broadcast's fan-out so subscribed
-        # viewer tab ids receive their own tagged copy in the
-        # captured event log.
-        for viewer in server.printer._fanout_targets(ev.get("tabId")):
+        for tab_id in server.printer._fanout_targets(ev.get("taskId")):
             with lock:
-                events.append({**ev, "tabId": viewer})
+                events.append({**ev, "tabId": tab_id})
 
     # Bind capture in place of the JSON-stdout-writing broadcast.
     server.printer.broadcast = capture  # type: ignore[assignment]
@@ -95,13 +95,15 @@ def _make_server() -> tuple[VSCodeServer, list[dict]]:
 
 def _start_fake_running_task(
     server: VSCodeServer, tab_id: str, chat_id: str,
+    task_id: int | None = None,
 ) -> tuple[threading.Event, threading.Event, threading.Thread]:
     """Install a fake task thread on ``tab_id`` that emits one event,
     then blocks on ``release_event`` until the test releases it.
 
-    The thread sets ``self.printer._thread_local.tab_id`` exactly like
-    the real ``_run_task`` does, so subsequent ``broadcast()`` calls
-    pick up the tab id from thread-local storage.
+    The thread sets ``self.printer._thread_local.task_id`` to the
+    string form of the task_id exactly like the real ``_run_task``
+    does, so subsequent ``broadcast()`` calls pick up the task id
+    from thread-local storage and fan out to every subscribed tab.
 
     Returns:
         ``(started_event, release_event, thread)``
@@ -109,6 +111,9 @@ def _start_fake_running_task(
     tab = server._get_tab(tab_id)
     tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
     tab.agent._chat_id = chat_id
+    if task_id is not None:
+        tab.agent._last_task_id = task_id
+        tab.task_history_id = task_id
     tab.chat_id = chat_id
     tab.is_task_active = True
     tab.stop_event = threading.Event()
@@ -118,8 +123,15 @@ def _start_fake_running_task(
     pre_release_emitted = threading.Event()
     post_release_emitted = threading.Event()
 
+    task_key = str(task_id) if task_id is not None else tab_id
+    # Subscribe the source tab to the running task so its own client
+    # receives the broadcasts (the agent thread does this inside
+    # ``ChatSorcarAgent.run`` in production; the fake task skips that
+    # path so we wire it up here).
+    server.printer.subscribe_tab(task_key, tab_id)
+
     def fake_run() -> None:
-        server.printer._thread_local.tab_id = tab_id
+        server.printer._thread_local.task_id = task_key
         server.printer.broadcast({"type": "text_delta", "text": "pre"})
         pre_release_emitted.set()
         started_event.set()
@@ -223,7 +235,7 @@ class TestResumeRunningTaskReattachesLiveEvents:
         tab_id_b = "tab-B"
 
         started, release, thread = _start_fake_running_task(
-            server, tab_id_a, chat_id,
+            server, tab_id_a, chat_id, task_id=task_id,
         )
 
         # Close tab A; backend retains _RunningAgentState because task active.
@@ -322,76 +334,6 @@ class TestResumeRunningTaskReattachesLiveEvents:
         assert len(replays) == 1
         assert replays[0]["tabId"] == tab_id_b
 
-
-class TestPrinterRebindTab:
-    """Unit tests for the alias map / rebind helper on the printer."""
-
-    def test_rebind_aliases_old_to_new_tab_id(self) -> None:
-        printer = BaseBrowserPrinter()
-        printer._thread_local.tab_id = "old"
-        printer.rebind_tab("old", "new")
-
-        ev = printer._inject_tab_id({"type": "text_delta", "text": "x"})
-        assert ev["tabId"] == "new", (
-            "Events broadcast from a thread whose thread-local tab_id "
-            "is the OLD id must resolve to the NEW id via the alias."
-        )
-
-    def test_rebind_migrates_per_tab_state(self) -> None:
-        printer = BaseBrowserPrinter()
-        printer._thread_local.tab_id = "old"
-        printer.start_recording()
-        with printer._lock:
-            printer._record_event(
-                {"type": "text_delta", "text": "a", "tabId": "old"},
-            )
-        with printer._bash_lock:
-            printer._bash_state.buffer.append("buffered")
-        printer.tokens_offset = 7
-        printer.budget_offset = 1.25
-        printer.steps_offset = 3
-
-        printer.rebind_tab("old", "new")
-
-        # Per-tab state moved under "new".
-        assert "old" not in printer._recordings
-        assert "new" in printer._recordings
-        assert "old" not in printer._bash_states
-        assert "new" in printer._bash_states
-        assert printer._bash_states["new"].buffer == ["buffered"]
-        assert printer._tokens_offsets.get("new") == 7
-        assert printer._budget_offsets.get("new") == 1.25
-        assert printer._steps_offsets.get("new") == 3
-        assert "old" not in printer._tokens_offsets
-        assert "old" not in printer._budget_offsets
-        assert "old" not in printer._steps_offsets
-
-    def test_alias_chain_resolves_to_final(self) -> None:
-        printer = BaseBrowserPrinter()
-        printer._thread_local.tab_id = "a"
-        printer.rebind_tab("a", "b")
-        printer.rebind_tab("b", "c")
-        ev = printer._inject_tab_id({"type": "text_delta", "text": "x"})
-        assert ev["tabId"] == "c"
-
-    def test_recording_lookup_follows_alias(self) -> None:
-        """An event tagged with the OLD tab id must still be appended
-        to the recording keyed by the NEW tab id after a rebind."""
-        printer = BaseBrowserPrinter()
-        printer._thread_local.tab_id = "old"
-        printer.start_recording()
-        printer.rebind_tab("old", "new")
-
-        with printer._lock:
-            printer._record_event(
-                {"type": "text_delta", "text": "after", "tabId": "old"},
-            )
-
-        # Switch to new tab id to read the recording.
-        printer._thread_local.tab_id = "new"
-        events = printer.peek_recording()
-        types = [e.get("type") for e in events]
-        assert "text_delta" in types
 
 
 if __name__ == "__main__":

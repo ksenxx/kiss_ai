@@ -316,18 +316,15 @@ class _CommandsMixin:
     def _cmd_generate_commit_message(self, cmd: dict[str, Any]) -> None:
         """Generate a git commit message in the background.
 
-        Runs the generator in a daemon thread and captures the caller's
-        ``tabId`` so all ``commitMessage`` events broadcast from the
-        worker are tagged via ``printer._thread_local.tab_id``.  This
-        prevents the result from leaking into other tabs (B5 fix).
+        Runs the generator in a daemon thread and passes the caller's
+        ``tabId`` to :meth:`_generate_commit_message` which stamps it
+        on every emitted ``commitMessage`` event so the result reaches
+        only the originating tab (B5 fix).
         """
         tab_id = cmd.get("tabId", "")
-
-        def _run() -> None:
-            self.printer._thread_local.tab_id = tab_id
-            self._generate_commit_message()
-
-        threading.Thread(target=_run, daemon=True).start()
+        threading.Thread(
+            target=self._generate_commit_message, args=(tab_id,), daemon=True,
+        ).start()
 
     def _cmd_worktree_action(self, cmd: dict[str, Any]) -> None:
         """Execute a worktree merge/discard action."""

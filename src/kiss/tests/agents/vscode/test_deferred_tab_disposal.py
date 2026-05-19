@@ -78,7 +78,9 @@ class TestDeferredDisposal:
     def test_close_tab_during_running_task_defers(self) -> None:
         server = _silent_server()
         tab_id = "tab-defer"
+        task_id = "task-defer"
         tab = server._get_tab(tab_id)
+        server.printer.subscribe_tab(task_id, tab_id)
         # Simulate "task running" — same flags _run_task sets.
         release = threading.Event()
         tab.is_task_active = True
@@ -91,16 +93,18 @@ class TestDeferredDisposal:
         thr.start()
 
         # Also pre-register a printer-side entry so we can verify
-        # cleanup_tab is called at disposal time.
-        server.printer._persist_agents[tab_id] = tab.agent  # type: ignore[assignment]
+        # cleanup_task is called at task-end time.
+        server.printer._persist_agents[task_id] = tab.agent  # type: ignore[assignment]
 
         # User closes the tab while the task is still running.
         server._close_tab(tab_id)
 
-        # Deferred: state is still present and flagged.
+        # Deferred: tab state is still present and flagged.  The
+        # per-task printer state lives on because the agent thread
+        # has not yet called ``cleanup_task``.
         assert tab_id in server._running_agent_states
         assert tab.frontend_closed is True
-        assert tab_id in server.printer._persist_agents
+        assert task_id in server.printer._persist_agents
 
         # Disposal MUST NOT happen while the task is still active.
         server._dispose_if_closed(tab_id)
@@ -112,11 +116,14 @@ class TestDeferredDisposal:
         with server._state_lock:
             tab.task_thread = None
             tab.is_task_active = False
+        # The agent thread's finally block calls ``cleanup_task``.
+        server.printer.cleanup_task(task_id)
         server._dispose_if_closed(tab_id)
 
-        # Now the state must be gone, and per-tab printer state too.
+        # Now the tab state must be gone, and per-task printer state
+        # too.
         assert tab_id not in server._running_agent_states
-        assert tab_id not in server.printer._persist_agents
+        assert task_id not in server.printer._persist_agents
 
     def test_close_tab_during_merge_defers(self) -> None:
         server = _silent_server()
@@ -169,15 +176,18 @@ class TestDeferredDisposal:
         assert tab_id not in server._running_agent_states
 
     def test_subscribers_pruned_on_deferred_disposal(self) -> None:
-        """When a viewer subscribed to a closed-then-finished source,
-        the source's subscriber set is torn down by ``cleanup_tab``."""
+        """When the source tab is closed, ``cleanup_tab`` removes it
+        from every task subscriber set so no events leak to it."""
         server = _silent_server()
         source = "tab-src"
         viewer = "tab-viewer"
+        task_id = "task-src"
         src_tab = server._get_tab(source)
         server._get_tab(viewer)
-        server.printer.subscribe_tab(source, viewer)
-        assert viewer in server.printer._subscribers.get(source, set())
+        server.printer.subscribe_tab(task_id, source)
+        server.printer.subscribe_tab(task_id, viewer)
+        assert source in server.printer._subscribers.get(task_id, set())
+        assert viewer in server.printer._subscribers.get(task_id, set())
 
         src_tab.is_task_active = True
         server._close_tab(source)
@@ -188,5 +198,7 @@ class TestDeferredDisposal:
         server._dispose_if_closed(source)
 
         assert source not in server._running_agent_states
-        # cleanup_tab dropped source from the subscriber map.
-        assert source not in server.printer._subscribers
+        # cleanup_tab dropped the source tab from the subscriber set.
+        # The viewer tab remains subscribed.
+        assert source not in server.printer._subscribers.get(task_id, set())
+        assert viewer in server.printer._subscribers.get(task_id, set())

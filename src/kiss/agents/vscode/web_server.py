@@ -1293,17 +1293,28 @@ class WebPrinter(BaseBrowserPrinter):
     def broadcast(self, event: dict[str, Any]) -> None:
         """Send *event* to every connected WebSocket client.
 
-        Injects ``tabId`` from thread-local storage (via
-        ``_inject_tab_id``), records the event for replay, persists
-        display events to the database (via ``_persist_event``), and
-        augments ``merge_data`` events with file contents for web-based
-        diff rendering.
+        Two code paths:
+
+        * Events that already carry an explicit ``tabId`` (status,
+          askUser, commitMessage, merge_data, etc.) are treated as
+          targeted "system" events: sent verbatim to all connected
+          clients (which filter by ``tabId``), but **not** recorded
+          or persisted.
+        * Events with no ``tabId`` but a thread-local ``task_id`` are
+          task events: ``taskId`` is injected, the event is recorded
+          under the task and queued for persistence, and one stamped
+          copy per subscribed tab is sent to clients.  When no tab is
+          currently subscribed the event is recorded / persisted but
+          no copy is sent over the wire.
+        * Events with neither ``tabId`` nor a resolvable ``taskId``
+          are global system events (``configData``, ``models``,
+          ``history``, ``inputHistory``, ``welcome_suggestions``,
+          ``error``, etc.) and are broadcast verbatim to every
+          connected client.
 
         Args:
             event: The event dictionary to emit.
         """
-        event = self._inject_tab_id(event)
-
         if event.get("type") == "configData":
             cfg = event.get("config")
             if isinstance(cfg, dict) and not cfg.get("work_dir"):
@@ -1320,21 +1331,33 @@ class WebPrinter(BaseBrowserPrinter):
             if evt_tab and self._merge_state_callback is not None:
                 self._merge_state_callback(evt_tab, event.get("data", {}))
 
+        if "tabId" in event:
+            # Targeted "system" event — forward verbatim, never record
+            # or persist (recording / persistence is per-task and is
+            # owned by the agent thread).
+            self._send_to_ws_clients(json.dumps(event))
+            return
+
+        event = self._inject_task_id(event)
+
+        if not event.get("taskId"):
+            # Global system event with no task context (configData,
+            # models, history, error, etc.) — broadcast verbatim to
+            # every connected client.  Not recorded, not persisted.
+            self._send_to_ws_clients(json.dumps(event))
+            return
+
         with self._lock:
             self._record_event(event)
 
         self._persist_event(event)
 
-        self._send_to_ws_clients(json.dumps(event))
-        # Fan out additional copies (one per subscribed viewer tab id)
-        # so multiple concurrent web clients viewing the same running
-        # chat each render their own correctly-tagged stream.  The
-        # copies are NOT recorded and NOT persisted — only the primary
-        # source-tagged event is — so the recording buffer and DB are
-        # never duplicated.
-        for viewer in self._fanout_targets(event.get("tabId")):
-            copy = {**event, "tabId": viewer}
-            self._send_to_ws_clients(json.dumps(copy))
+        # Fan out one stamped copy per subscribed tab.  The frontend
+        # filters incoming events by ``tabId``; an event with no
+        # subscriber is silently swallowed (which is correct: no UI
+        # is currently watching this task).
+        for tab_id in self._fanout_targets(event.get("taskId")):
+            self._send_to_ws_clients(json.dumps({**event, "tabId": tab_id}))
 
     def _send_to_ws_clients(self, data: str) -> None:
         """Send a pre-serialised JSON payload to every connected client.

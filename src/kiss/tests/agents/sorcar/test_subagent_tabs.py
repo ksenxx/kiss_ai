@@ -46,7 +46,7 @@ class _CapturePrinter(BaseBrowserPrinter):
 
     def broadcast(self, event: dict) -> None:
         """Record event and apply tab_id injection."""
-        event = self._inject_tab_id(event)
+        event = self._inject_task_id(event)
         with self._ev_lock:
             self.events.append(event)
         with self._lock:
@@ -73,7 +73,7 @@ class TestSubagentTabEvents:
         agent._use_web_tools = False
 
         parent_tab_id = "parent-tab-123"
-        printer._thread_local.tab_id = parent_tab_id
+        printer._thread_local.task_id = parent_tab_id
 
         agent.run(
             prompt_template=(
@@ -131,7 +131,7 @@ class TestSubagentTabEvents:
         agent._use_web_tools = False
 
         parent_tab_id = "parent-tab-456"
-        printer._thread_local.tab_id = parent_tab_id
+        printer._thread_local.task_id = parent_tab_id
 
         agent.run(
             prompt_template=(

@@ -59,7 +59,7 @@ def _install_capturing_run(
     per-thread state instead of running the LLM.
 
     Each invocation records, keyed by the sub-agent tab id resolved
-    from ``printer._thread_local.tab_id``:
+    from ``printer._thread_local.task_id``:
 
       * ``stop_event``: the ``stop_event`` slot visible on the
         worker thread's ``printer._thread_local`` BEFORE any agent
@@ -128,7 +128,7 @@ class TestStopEventPropagationToSubagents:
         _install_capturing_run(monkeypatch, captured=captured)
 
         printer = _RecordingPrinter()
-        printer._thread_local.tab_id = "parent-tab"
+        printer._thread_local.task_id = "parent-tab"
         parent_stop = threading.Event()
         printer._thread_local.stop_event = parent_stop
 
@@ -168,7 +168,7 @@ class TestStopEventPropagationToSubagents:
         )
 
         printer = _RecordingPrinter()
-        printer._thread_local.tab_id = "parent-stop-set"
+        printer._thread_local.task_id = "parent-stop-set"
         parent_stop = threading.Event()
         parent_stop.set()
         printer._thread_local.stop_event = parent_stop
@@ -199,7 +199,7 @@ class TestStopEventPropagationToSubagents:
         )
 
         printer = _RecordingPrinter()
-        printer._thread_local.tab_id = "root"
+        printer._thread_local.task_id = "root"
         parent_stop = threading.Event()
         printer._thread_local.stop_event = parent_stop
 

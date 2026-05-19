@@ -302,12 +302,14 @@ class TestM4AwaitUserResponseEmptyQueue(unittest.TestCase):
             class TL:
                 pass
             _thread_local = TL()
+            _lock = threading.Lock()
+            _subscribers: dict[str, set[str]] = {}
 
         class FakeServer(tr._TaskRunnerMixin):
             def __init__(self) -> None:
                 self.printer = FakePrinter()  # type: ignore[assignment]
                 self.printer._thread_local.stop_event = threading.Event()
-                self.printer._thread_local.tab_id = "ghost-tab"
+                self.printer._thread_local.task_id = "ghost-tab"
                 self._state_lock = threading.Lock()
                 self._running_agent_states: dict[str, Any] = {}  # no entry for "ghost-tab"
 

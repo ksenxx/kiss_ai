@@ -51,17 +51,17 @@ class TestA7PrinterOffsetsAreIsolated(unittest.TestCase):
     def test_offsets_are_per_tab_via_thread_local(self) -> None:
         server, _ = _make_server()
         printer = server.printer
-        printer._thread_local.tab_id = "A"
+        printer._thread_local.task_id = "A"
         printer.tokens_offset = 100
         printer.budget_offset = 1.5
         printer.steps_offset = 5
 
-        printer._thread_local.tab_id = "B"
+        printer._thread_local.task_id = "B"
         assert printer.tokens_offset == 0
         assert printer.budget_offset == 0.0
         assert printer.steps_offset == 0
 
-        printer._thread_local.tab_id = "A"
+        printer._thread_local.task_id = "A"
         assert printer.tokens_offset == 100
         assert printer.budget_offset == 1.5
         assert printer.steps_offset == 5
@@ -73,7 +73,7 @@ class TestA7PrinterOffsetsAreIsolated(unittest.TestCase):
         results: dict[str, tuple[int, float, int]] = {}
 
         def worker(tid: str, vals: tuple[int, float, int]) -> None:
-            printer._thread_local.tab_id = tid
+            printer._thread_local.task_id = tid
             printer.tokens_offset = vals[0]
             printer.budget_offset = vals[1]
             printer.steps_offset = vals[2]
@@ -96,10 +96,10 @@ class TestA7PrinterOffsetsAreIsolated(unittest.TestCase):
     def test_cleanup_tab_drops_offsets(self) -> None:
         server, _ = _make_server()
         printer = server.printer
-        printer._thread_local.tab_id = "A"
+        printer._thread_local.task_id = "A"
         printer.tokens_offset = 42
         printer.cleanup_tab("A")
-        printer._thread_local.tab_id = "A"
+        printer._thread_local.task_id = "A"
         assert printer.tokens_offset == 0
 
 
@@ -221,7 +221,7 @@ class TestC2C3ReplayRequiresTabId(unittest.TestCase):
     def tearDown(self) -> None:
         self._smod._load_latest_chat_events_by_chat_id = self._orig_loader  # type: ignore[assignment]
 
-    def test_empty_tab_id_does_not_create_tab_keyed_by_chat_id(self) -> None:
+    def test_empty_tab_id_does_not_create_task_keyed_by_chat_id(self) -> None:
         server, _ = _make_server()
         server._replay_session("some-chat-id", tab_id="")
         assert "some-chat-id" not in server._running_agent_states

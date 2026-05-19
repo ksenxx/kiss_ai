@@ -145,6 +145,7 @@ def test_noncore_tool_result_is_broadcast() -> None:
     from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 
     printer = BaseBrowserPrinter()
+    printer._thread_local.task_id = "t1"
     printer.start_recording()
 
     printer.print("screenshot", type="tool_call", tool_input={})
@@ -165,6 +166,7 @@ def test_core_tool_result_is_broadcast() -> None:
     from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 
     printer = BaseBrowserPrinter()
+    printer._thread_local.task_id = "t1"
     printer.start_recording()
 
     printer.print("Read", type="tool_call", tool_input={"file_path": "test.py"})
@@ -194,6 +196,7 @@ def test_thinking_after_noncore_tool_gets_panel_events() -> None:
     from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 
     printer = BaseBrowserPrinter()
+    printer._thread_local.task_id = "t1"
     printer.start_recording()
 
     # Turn 1: thinking → tool_call(Read) → tool_result → tool_call(screenshot)
