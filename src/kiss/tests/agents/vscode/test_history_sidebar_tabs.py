@@ -189,7 +189,7 @@ var _ids = [
     'model-list', 'model-name', 'file-chips', 'status-text',
     'status-tokens', 'status-budget', 'sidebar', 'sidebar-overlay',
     'sidebar-close', 'history-search', 'history-search-clear',
-    'history-list', 'history-btn', 'task-panel', 'tab-bar',
+    'history-list', 'menu-btn', 'task-panel', 'tab-bar',
     'tab-list', 'config-btn', 'config-sidebar', 'config-sidebar-overlay',
     'config-sidebar-close', 'config-panel', 'clear-btn',
     'remote-url', 'autocomplete', 'ghost-text', 'input-row',
@@ -272,7 +272,7 @@ var console = { log: function(){}, warn: function(){}, error: function(){} };
 """
 
 _JS_TEST = r"""
-var historyBtn = _elements['history-btn'];
+var menuBtn = _elements['menu-btn'];
 var sidebar = _elements['sidebar'];
 var tabHistoryBtn = _elements['sidebar-tab-history'];
 var tabFrequentBtn = _elements['sidebar-tab-frequent'];
@@ -293,9 +293,9 @@ function _snapshot(label) {
 
 var snapshots = [];
 
-// 1. Click history-btn → open sidebar with History tab active.
+// 1. Click menu-btn → open sidebar with History tab active.
 _postedMessages.length = 0;
-_fire(historyBtn, 'click', {});
+_fire(menuBtn, 'click', {});
 snapshots.push(_snapshot('afterHistoryBtnOpen'));
 
 // 2. Click frequent in-panel tab → show frequent panel.
@@ -337,7 +337,7 @@ class TestSidebarTabsBehaviour(unittest.TestCase):
     def test_history_btn_opens_sidebar_on_history_tab(self) -> None:
         snaps = self._run()
         s = snaps[0]
-        self.assertTrue(s["sidebarOpen"], "sidebar must open when history-btn is clicked")
+        self.assertTrue(s["sidebarOpen"], "sidebar must open when menu-btn is clicked")
         self.assertIn("getHistory", s["posted"])
         self.assertTrue(s["historyActive"], "History tab must be active")
         self.assertFalse(s["frequentActive"], "Frequent tab must not be active")

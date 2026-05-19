@@ -797,7 +797,6 @@
   const fileChips = document.getElementById('file-chips');
 
   const statusText = document.getElementById('status-text');
-  const historyBtn = document.getElementById('history-btn');
   const menuBtn = document.getElementById('menu-btn');
   const sidebar = document.getElementById('sidebar');
   const sidebarOverlay = document.getElementById('sidebar-overlay');
@@ -4131,11 +4130,9 @@
       } else {
         sidebar.classList.add('open');
         sidebarOverlay.classList.add('open');
-        historyBtn.classList.add('active');
         switchSidebarTab('history');
       }
     }
-    historyBtn.addEventListener('click', toggleHistorySidebar);
     if (menuBtn) {
       menuBtn.addEventListener('click', toggleHistorySidebar);
     }
@@ -4807,7 +4804,6 @@
     }
     sidebar.classList.remove('open');
     sidebarOverlay.classList.remove('open');
-    historyBtn.classList.remove('active');
   }
 
   /**
