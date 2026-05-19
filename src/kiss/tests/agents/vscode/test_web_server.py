@@ -1594,6 +1594,81 @@ class TestRemoteAccessServerMerge(IsolatedAsyncioTestCase):
                 content = f.read()
             self.assertEqual(content, "line1\nline2\nline3\n")
 
+    async def test_reject_all_restores_deleted_tracked_file(self) -> None:
+        """Reproduces the reported bug: when the agent deletes a tracked
+        file with content, rejecting all hunks must restore the file
+        on disk — previously the file remained deleted because the
+        reject only wrote to the ``.deleted`` placeholder used for
+        display.
+        """
+        # Simulate the agent deleting the previously-committed file.
+        # ``self._test_file`` was created and committed in asyncSetUp
+        # with content "line1\nline2\nline3\n".  Remove the unrelated
+        # post-setup edit and delete the file entirely.
+        os.unlink(self._test_file)
+        self.assertFalse(Path(self._test_file).exists())
+
+        tab_id = "reject-all-deleted-tab"
+        async with connect(
+            f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl(),
+        ) as ws:
+            await self._auth(ws)
+            await self._trigger_merge(tab_id)
+            await self._collect_until(ws, "merge_started")
+
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "mergeAction",
+                        "action": "reject-all",
+                        "tabId": tab_id,
+                    }
+                )
+            )
+            events = await self._collect_until(ws, "merge_ended", timeout=5)
+            ended = [e for e in events if e.get("type") == "merge_ended"]
+            self.assertTrue(len(ended) > 0)
+
+            self.assertTrue(
+                Path(self._test_file).is_file(),
+                "Rejecting all hunks on a deleted tracked file must "
+                "restore the file at its workspace location",
+            )
+            with open(self._test_file) as f:
+                self.assertEqual(f.read(), "line1\nline2\nline3\n")
+
+    async def test_reject_file_restores_deleted_tracked_file(self) -> None:
+        """The ``reject-file`` action on a deleted tracked file must
+        also restore the file on disk.
+        """
+        os.unlink(self._test_file)
+        self.assertFalse(Path(self._test_file).exists())
+
+        tab_id = "reject-file-deleted-tab"
+        async with connect(
+            f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl(),
+        ) as ws:
+            await self._auth(ws)
+            await self._trigger_merge(tab_id)
+            await self._collect_until(ws, "merge_started")
+
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "mergeAction",
+                        "action": "reject-file",
+                        "tabId": tab_id,
+                    }
+                )
+            )
+            await self._collect_until(ws, "merge_ended", timeout=5)
+            self.assertTrue(
+                Path(self._test_file).is_file(),
+                "reject-file on a deleted tracked file must restore it",
+            )
+            with open(self._test_file) as f:
+                self.assertEqual(f.read(), "line1\nline2\nline3\n")
+
 
 class TestGenerateSelfSignedCert(unittest.TestCase):
     """Test self-signed certificate generation."""
@@ -2390,6 +2465,51 @@ class TestRejectAllHunksInFile(unittest.TestCase):
             Path(cur_path).write_text("modified\n")
             _reject_all_hunks_in_file({"current": cur_path, "base": base_path})
             self.assertEqual(Path(cur_path).read_text(), "modified\n")
+
+    def test_writes_to_target_when_current_is_placeholder(self) -> None:
+        """When ``target`` differs from ``current`` (deleted-file case),
+        rejecting all hunks must restore the file at the workspace
+        target path, not at the display placeholder.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            placeholder = os.path.join(td, ".deleted", "foo.py")
+            Path(placeholder).parent.mkdir(parents=True)
+            Path(placeholder).write_text("")  # display stand-in
+            base_path = os.path.join(td, "base", "foo.py")
+            Path(base_path).parent.mkdir(parents=True)
+            Path(base_path).write_text("original line 1\noriginal line 2\n")
+            target = os.path.join(td, "work", "foo.py")
+            # target file was deleted by the agent — does not exist yet
+            self.assertFalse(Path(target).exists())
+            _reject_all_hunks_in_file({
+                "current": placeholder,
+                "base": base_path,
+                "target": target,
+            })
+            # The workspace path must be restored.
+            self.assertTrue(Path(target).is_file())
+            self.assertEqual(
+                Path(target).read_text(),
+                "original line 1\noriginal line 2\n",
+            )
+
+    def test_reject_hunk_writes_to_target(self) -> None:
+        """``_reject_hunk_in_file`` must restore content at the target
+        path when the visible "current" is a placeholder.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            placeholder = os.path.join(td, ".deleted", "foo.py")
+            Path(placeholder).parent.mkdir(parents=True)
+            Path(placeholder).write_text("")
+            base_path = os.path.join(td, "base", "foo.py")
+            Path(base_path).parent.mkdir(parents=True)
+            Path(base_path).write_text("a\nb\nc\n")
+            target = os.path.join(td, "work", "foo.py")
+            # Hunk says: insert 3 base lines at the start of current
+            hunk = {"cs": 0, "cc": 0, "bs": 0, "bc": 3}
+            _reject_hunk_in_file(placeholder, base_path, hunk, target)
+            self.assertTrue(Path(target).is_file())
+            self.assertEqual(Path(target).read_text(), "a\nb\nc\n")
 
 
 class TestAugmentMergeData(unittest.TestCase):

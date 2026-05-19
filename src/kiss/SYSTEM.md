@@ -128,7 +128,6 @@ Rules: no code snippets or symbol names in entries; skip one-off task details; r
 - Write integration and end-to-end tests only. Do not use mocks, patches, fakes, or test doubles. Each test must be independent and verify actual behavior.
 - Do not write structural tests which assert on the source code.
 - After modifications, run only the impacted tests.
-- Running all tests is time consuming.  So split the set of tests by the number of test methods into 10 groups and run all groups in parallel.
 - To confirm race conditions: add a random sleep (\<0.1s) before the suspected racing statements.
   </testing>
 

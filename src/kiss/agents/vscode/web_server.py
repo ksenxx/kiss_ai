@@ -407,6 +407,7 @@ def _reject_hunk_in_file(
     current_path: str,
     base_path: str,
     hunk: dict[str, int],
+    target_path: str | None = None,
 ) -> None:
     """Revert a single hunk in the current file to the base version.
 
@@ -414,16 +415,34 @@ def _reject_hunk_in_file(
     with the corresponding lines from the base file, and writes the
     result back.
 
+    When *target_path* differs from *current_path* — which happens when
+    the agent deleted a tracked file and the merge view uses a
+    ``.deleted`` placeholder as the visible "current" — the rejected
+    content is written to *target_path* (the real workspace location),
+    so the file is actually restored on disk.  Subsequent hunks read
+    from *target_path* too, so partial rejections accumulate
+    correctly.
+
     Args:
         current_path: Path to the file with agent changes.
+        current_path: Path to the file with agent changes (may be a
+            display placeholder for deleted files).
         base_path: Path to the pre-task base copy.
         hunk: Hunk dict with keys ``bs``, ``bc``, ``cs``, ``cc``
             (0-based line positions).
+        target_path: Real workspace path to write the rejection to.
+            Defaults to *current_path* for backwards compatibility.
     """
-    try:
+    write_to = target_path or current_path
+        cur_lines = Path(current_path).read_text().splitlines(keepends=True)
         cur_lines = Path(current_path).read_text().splitlines(keepends=True)
     except OSError:
         cur_lines = []
+        cur_lines = []
+        try:
+            cur_lines = Path(current_path).read_text().splitlines(keepends=True)
+        except OSError:
+            cur_lines = []
     try:
         base_lines = Path(base_path).read_text().splitlines(keepends=True)
     except OSError:
@@ -431,23 +450,34 @@ def _reject_hunk_in_file(
 
     new_lines = (
         cur_lines[: hunk["cs"]]
-        + base_lines[hunk["bs"] : hunk["bs"] + hunk["bc"]]
         + cur_lines[hunk["cs"] + hunk["cc"] :]
     )
     Path(current_path).write_text("".join(new_lines))
-
+    Path(current_path).write_text("".join(new_lines))
+    Path(write_to).parent.mkdir(parents=True, exist_ok=True)
+    Path(write_to).write_text("".join(new_lines))
 
 def _reject_all_hunks_in_file(file_data: dict[str, Any]) -> None:
     """Revert an entire file to its base version.
 
     Simply copies the base file content over the current file.
+    Simply copies the base file content over the current file.
+    Copies the base file content over the real workspace path
+    (``file_data["target"]`` when present, otherwise
+    ``file_data["current"]``).  Using ``target`` ensures that when the
+    agent deleted a tracked file and the user rejects all hunks, the
+    the workspace file remained gone.
 
     Args:
         file_data: File entry from merge data with ``base`` and
             ``current`` path strings.
+            and (optionally) ``target`` path strings.
     """
+    write_to = file_data.get("target") or file_data["current"]
     if Path(file_data["base"]).is_file():
         shutil.copy2(file_data["base"], file_data["current"])
+        Path(write_to).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(file_data["base"], write_to)
 
 _VSCODE_ONLY_COMMANDS = frozenset({
 
@@ -2717,12 +2747,17 @@ class RemoteAccessServer:
                 state.mark_resolved(*cur, "accepted")
                 state.advance()
         elif action == "reject":
-            if cur is not None:
                 fi, hi = cur
                 fd = state.files[fi]
                 hunk = fd["hunks"][hi]
                 await self._loop.run_in_executor(
                     None, _reject_hunk_in_file, fd["current"], fd["base"], hunk,
+                    None,
+                    _reject_hunk_in_file,
+                    fd["current"],
+                    fd["base"],
+                    hunk,
+                    fd.get("target"),
                 )
                 delta = hunk["bc"] - hunk["cc"]
                 for later_hi in range(hi + 1, len(fd["hunks"])):
