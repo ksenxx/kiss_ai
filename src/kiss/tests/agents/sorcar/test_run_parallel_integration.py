@@ -141,6 +141,71 @@ class TestRunTasksParallelReal:
 
 
 # ---------------------------------------------------------------------------
+# 1b. Budget aggregation — sub-agent costs roll up to the parent
+# ---------------------------------------------------------------------------
+
+
+class TestBudgetAggregationFast:
+    """Fast tests for budget/token/step aggregation that need no LLM."""
+
+    def test_empty_tasks_populates_zero_totals(self) -> None:
+        """Empty task list still fills totals_out with zeros."""
+        totals: dict[str, float] = {}
+        results = run_tasks_parallel([], totals_out=totals)
+        assert results == []
+        assert totals["budget_used"] == 0.0
+        assert totals["total_tokens_used"] == 0
+        assert totals["total_steps"] == 0
+
+    def test_totals_out_optional(self) -> None:
+        """Caller may omit totals_out; function still returns a list."""
+        results = run_tasks_parallel([])
+        assert results == []
+
+
+@skip_no_key
+class TestBudgetAggregationReal:
+    """Real LLM call to verify sub-agent costs roll up to the parent."""
+
+    @pytest.mark.slow
+    def test_parent_budget_includes_subagent_cost(
+        self, tmp_path: Path,
+    ) -> None:
+        """A SorcarAgent that invokes _run_tasks_parallel accumulates the
+        sub-agents' budget into its own ``budget_used`` (and tokens/steps).
+        """
+        parent = SorcarAgent("parent-budget")
+        # Reset is normally done by run(); we set the fields directly
+        # so we can call _run_tasks_parallel as a unit.
+        parent.work_dir = str(tmp_path)
+        parent.model_name = FAST_MODEL
+        parent.printer = None
+        parent.budget_used = 0.0
+        parent.total_tokens_used = 0
+        parent.total_steps = 0
+        before_budget = parent.budget_used
+        before_tokens = parent.total_tokens_used
+        before_steps = parent.total_steps
+
+        results = parent._run_tasks_parallel(
+            [
+                "Reply with the word 'AGG1'.",
+                "Reply with the word 'AGG2'.",
+            ],
+            max_workers=2,
+        )
+        assert len(results) == 2
+
+        # Every real LLM call costs >$0 and consumes at least one token
+        # and one step.  Verify the parent's running totals grew.
+        assert parent.budget_used > before_budget, (
+            f"parent.budget_used did not grow: {parent.budget_used}"
+        )
+        assert parent.total_tokens_used > before_tokens
+        assert parent.total_steps > before_steps
+
+
+# ---------------------------------------------------------------------------
 # 2. Edge cases
 # ---------------------------------------------------------------------------
 

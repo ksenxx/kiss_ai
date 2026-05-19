@@ -81,13 +81,33 @@ class SorcarAgent(RelentlessAgent):
         Returns:
             List of YAML result strings in the same order as *tasks*.
         """
-        return run_tasks_parallel(
+        totals: dict[str, float] = {}
+        results = run_tasks_parallel(
             tasks,
             max_workers=max_workers,
             model_name=getattr(self, "model_name", None),
             work_dir=getattr(self, "work_dir", None),
             printer=self.printer,
+            totals_out=totals,
         )
+        # Attribute the sub-agents' cost, tokens, and steps to this
+        # (parent) agent so the global accounting and UI reflect the
+        # full work done.  Without this, sub-agent budgets would be
+        # invisible to the parent agent.
+        self.budget_used += float(totals.get("budget_used", 0.0))
+        self.total_tokens_used += int(totals.get("total_tokens_used", 0))
+        self.total_steps += int(totals.get("total_steps", 0))
+        # Update the printer offsets so the live status line in the
+        # current sub-session reflects the additional spend immediately
+        # (the offsets are otherwise snapshotted only at session start).
+        if self.printer is not None:
+            try:
+                self.printer.budget_offset = self.budget_used  # type: ignore[attr-defined]
+                self.printer.tokens_offset = self.total_tokens_used  # type: ignore[attr-defined]
+                self.printer.steps_offset = self.total_steps  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        return results
 
     def _get_tools(self) -> list:
         """Build tool list, using DockerTools when docker_manager is active.
@@ -581,6 +601,7 @@ def run_tasks_parallel(
     model_name: str | None = None,
     work_dir: str | None = None,
     printer: Printer | None = None,
+    totals_out: dict[str, float] | None = None,
 ) -> list[str]:
     """Execute multiple SorcarAgent tasks concurrently using threads.
 
@@ -653,6 +674,11 @@ def run_tasks_parallel(
     # top-level import would be circular.
     from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
+    # Per-sub-agent usage so the caller can aggregate it back into the
+    # parent agent's accounting.  Each entry is a tuple of
+    # ``(budget_used, total_tokens_used, total_steps)``.
+    sub_usage: list[tuple[float, int, int]] = [(0.0, 0, 0)] * len(tasks)
+
     def _run_single(args: tuple[int, str]) -> str:
         idx, task = args
         sub_tab_id = sub_tab_ids[idx]
@@ -677,6 +703,11 @@ def run_tasks_parallel(
             )
             return error_result
         finally:
+            sub_usage[idx] = (
+                float(getattr(agent, "budget_used", 0.0) or 0.0),
+                int(getattr(agent, "total_tokens_used", 0) or 0),
+                int(getattr(agent, "total_steps", 0) or 0),
+            )
             if tl is not None:
                 tl.tab_id = None
             if broadcast:
@@ -688,6 +719,11 @@ def run_tasks_parallel(
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         results = list(pool.map(_run_single, enumerate(tasks)))
+
+    if totals_out is not None:
+        totals_out["budget_used"] = sum(u[0] for u in sub_usage)
+        totals_out["total_tokens_used"] = sum(u[1] for u in sub_usage)
+        totals_out["total_steps"] = sum(u[2] for u in sub_usage)
     return results
 
 
