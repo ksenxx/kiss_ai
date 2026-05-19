@@ -5,7 +5,7 @@ import time
 from functools import partial
 from typing import Any
 
-from kiss.agents.sorcar.persistence import _append_chat_event, _queue_chat_event
+from kiss.agents.sorcar.persistence import _queue_chat_event
 from kiss.core.printer import (
     Printer,
     extract_extras,
@@ -307,9 +307,6 @@ class BaseBrowserPrinter(Printer):
         """Persist a display event to the database if applicable.
 
         Checks whether *event* is a display event type, looks up the
-        per-tab agent from ``_persist_agents``, and appends the event
-        to the database via ``_append_chat_event`` when a valid
-        ``_last_task_id`` is present.
         per-tab agent from ``_persist_agents``, and enqueues the event
         for asynchronous persistence via ``_queue_chat_event`` when a
         valid ``_last_task_id`` is present.  The background writer
@@ -330,7 +327,6 @@ class BaseBrowserPrinter(Printer):
             return
         task_id = agent._last_task_id
         if task_id is not None:
-            _append_chat_event(event, task_id=task_id)
             _queue_chat_event(event, task_id=task_id)
 
     @property
