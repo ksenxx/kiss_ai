@@ -1634,16 +1634,6 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
                 </svg>
                 <span>Auto commit</span>
               </button>
-              <button id="demo-toggle-btn" class="menu-item">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
-                 stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                 stroke-linejoin="round">
-                  <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
-                  <line x1="8" y1="21" x2="16" y2="21"/>
-                  <line x1="12" y1="17" x2="12" y2="21"/>
-                </svg>
-                <span>Demo mode</span>
-              </button>
             </div>
             <div id="model-dropdown">
               <div class="search-wrap">
@@ -1722,6 +1712,10 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
           <label class="config-label config-checkbox">
             <input type="checkbox" id="cfg-use-web-browser" checked>
             Use web browser
+          </label>
+          <label class="config-label config-checkbox">
+            <input type="checkbox" id="cfg-demo-mode">
+            Demo mode
           </label>
           <label class="config-label">Remote password
             <input type="text" id="cfg-remote-password"

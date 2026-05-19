@@ -812,12 +812,8 @@
   // Sidebar tab elements (History / Frequent / Settings live inside
   // #sidebar — there is no separate config sidebar).
   const sidebarTabHistoryBtn = document.getElementById('sidebar-tab-history');
-  const sidebarTabFrequentBtn = document.getElementById(
-    'sidebar-tab-frequent',
-  );
-  const sidebarTabSettingsBtn = document.getElementById(
-    'sidebar-tab-settings',
-  );
+  const sidebarTabFrequentBtn = document.getElementById('sidebar-tab-frequent');
+  const sidebarTabSettingsBtn = document.getElementById('sidebar-tab-settings');
   const sidebarTabHistoryPanel = document.getElementById(
     'sidebar-tab-history-panel',
   );
@@ -837,7 +833,7 @@
   const inputClearBtn = document.getElementById('input-clear-btn');
   const worktreeToggleBtn = document.getElementById('worktree-toggle-btn');
   const parallelToggleBtn = document.getElementById('parallel-toggle-btn');
-  const demoToggleBtn = document.getElementById('demo-toggle-btn');
+  const demoToggleBtn = document.getElementById('cfg-demo-mode');
   const autocommitToggleBtn = document.getElementById('autocommit-toggle-btn');
   const taskPanel = document.getElementById('task-panel');
   const taskPanelText = document.getElementById('task-panel-text');
@@ -2864,7 +2860,7 @@
           // Web browser setting updated server-side
         } else if (sKey === 'demo_mode' && demoToggleBtn) {
           demoMode = !!sVal;
-          demoToggleBtn.classList.toggle('active', demoMode);
+          demoToggleBtn.checked = demoMode;
         } else if (sKey === 'auto_commit') {
           // Auto-commit triggered server-side
         } else if (sKey === 'auto_commit_mode' && autocommitToggleBtn) {
@@ -4045,18 +4041,16 @@
     }
 
     if (demoToggleBtn) {
-      demoToggleBtn.addEventListener('click', () => {
-        if (_demoActive) {
-          // Cancel running demo
+      demoToggleBtn.addEventListener('change', () => {
+        if (_demoActive && !demoToggleBtn.checked) {
+          // Cancel running demo when unchecked mid-replay
           if (typeof window._cancelDemoReplay === 'function')
             window._cancelDemoReplay();
           demoMode = false;
           _demoActive = false;
-          demoToggleBtn.classList.remove('active');
           return;
         }
-        demoMode = !demoMode;
-        demoToggleBtn.classList.toggle('active', demoMode);
+        demoMode = demoToggleBtn.checked;
       });
     }
 
@@ -4927,6 +4921,8 @@
     el('cfg-custom-api-key').value = cfg.custom_api_key || '';
     el('cfg-custom-headers').value = cfg.custom_headers || '';
     el('cfg-use-web-browser').checked = cfg.use_web_browser !== false;
+    el('cfg-demo-mode').checked = !!cfg.demo_mode || demoMode;
+    demoMode = el('cfg-demo-mode').checked;
     el('cfg-remote-password').value = cfg.remote_password || '';
     configFormPopulated = true;
     // Populate API key fields from current environment values
@@ -4950,6 +4946,7 @@
       custom_api_key: el('cfg-custom-api-key').value.trim(),
       custom_headers: el('cfg-custom-headers').value.trim(),
       use_web_browser: el('cfg-use-web-browser').checked,
+      demo_mode: el('cfg-demo-mode').checked,
       remote_password: el('cfg-remote-password').value.trim(),
     };
     const apiKeys = {};

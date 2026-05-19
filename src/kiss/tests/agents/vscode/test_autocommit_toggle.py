@@ -75,7 +75,7 @@ class TestAutocommitToggleInTemplate(unittest.TestCase):
         html = _read("src/SorcarTab.ts")
         assert 'id="autocommit-toggle-btn"' in html
         # The toggle lives inside the menu dropdown, alongside the
-        # sibling toggles (Use worktree / Use parallelism / Demo mode).
+        # sibling toggles (Use worktree / Use parallelism).
         dropdown_start = html.index('id="menu-dropdown"')
         dropdown_end = html.index("</div>", dropdown_start)
         snippet = html[dropdown_start:dropdown_end]

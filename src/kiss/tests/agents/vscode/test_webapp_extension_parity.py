@@ -96,7 +96,6 @@ def test_webapp_menu_dropdown_toggle_order_matches_extension() -> None:
         "worktree-toggle-btn",
         "parallel-toggle-btn",
         "autocommit-toggle-btn",
-        "demo-toggle-btn",
     )
     ext_menu = _section(_ext_html(), "menu-dropdown")
     web_menu = _section(_build_html(), "menu-dropdown")
