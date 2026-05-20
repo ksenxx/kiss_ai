@@ -380,6 +380,14 @@ class ChatSorcarAgent(SorcarAgent):
         # way because the printer no longer carries per-thread tab
         # state — tabs are pure subscribers indexed by ``task_id``.
         subscribe_tab_id = kwargs.pop("_subscribe_tab_id", "")
+        # Optional callback invoked the moment ``_add_task`` mints the
+        # backend ``task_id`` for this run.  Parallel sub-agent
+        # spawners use this hook to broadcast a ``new_tab`` message to
+        # the frontend so a fresh tab opens and ``resumeSession`` is
+        # called with the same task id — the frontend then subscribes
+        # itself to the live event stream.  This keeps backend
+        # spawners free of any frontend tab-id allocation.
+        on_task_id = kwargs.pop("_on_task_id", None)
         # Mint a fresh chat id at run-start when one is not already
         # set (e.g. a brand-new chat tab that has never resumed a
         # history entry).  Establishing the chat id BEFORE _add_task
@@ -425,6 +433,11 @@ class ChatSorcarAgent(SorcarAgent):
             prompt_template, chat_id=self._chat_id, extra=early_extra,
         )
         self._last_task_id = task_id
+        if on_task_id is not None:
+            try:
+                on_task_id(task_id)
+            except Exception:
+                pass
         # Publish ``self`` as the agent currently driving ``task_id``.
         # The entry is added the moment the row exists in
         # ``task_history`` and removed in the matching ``finally``

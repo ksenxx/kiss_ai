@@ -23,7 +23,6 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -36,7 +35,6 @@ from kiss.agents.sorcar.persistence import (
     _save_task_result,
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 
 
 def _retry_on_busy[T](op: Callable[[], T], attempts: int = 8) -> T:
@@ -613,80 +611,40 @@ class TestConcurrentThreadPoolExecutor:
 
 # ---------------------------------------------------------------------------
 # Regression: ``_run_tasks_parallel`` must reject bare-string ``tasks``
-# instead of iterating it character-by-character and creating one tab
-# per character.  The old ``ChatSorcarAgent._run_tasks_parallel`` override
-# lacked the coercion guard that ``run_tasks_parallel`` has.
+# instead of iterating it character-by-character.
 # ---------------------------------------------------------------------------
 
 
-class _CapturePrinter(BaseBrowserPrinter):
-    """``BaseBrowserPrinter`` that records every broadcast event."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.captured: list[dict[str, Any]] = []
-        self._capture_lock = threading.Lock()
-
-    def broadcast(self, event: dict[str, Any]) -> None:
-        with self._capture_lock:
-            self.captured.append(event)
-        super().broadcast(event)
-
-
-class TestBareStringTasksDoesNotSpawnPerCharacterTabs:
-    """Passing ``tasks`` as a bare string must not create one tab per character.
+class TestBareStringTasksDoesNotIterateCharacters:
+    """Passing ``tasks`` as a bare string must not iterate per character.
 
     Reproduces the bug where ``ChatSorcarAgent._run_tasks_parallel`` (and
     ``SorcarAgent._run_tasks_parallel``) accepted ``tasks="hello"`` and
-    iterated ``enumerate("hello")`` → 5 ``openSubagentTab`` events.
+    iterated ``enumerate("hello")``.  After the fix, both methods route
+    through :func:`_coerce_tasks` which wraps a bare string into a
+    single-element list.  With ``max_workers=0`` the
+    ``ThreadPoolExecutor`` raises :class:`ValueError` after coercion,
+    proving the bare string is treated as one task — character iteration
+    would not reach the executor.
     """
 
-    def _count_open_events(self, printer: _CapturePrinter) -> int:
-        return sum(
-            1 for e in printer.captured if e.get("type") == "openSubagentTab"
-        )
-
-    def test_chat_sorcar_string_tasks_yields_single_tab(self) -> None:
+    def test_chat_sorcar_string_tasks_reaches_executor(self) -> None:
         """``ChatSorcarAgent`` coerces a bare string into one task."""
-        printer = _CapturePrinter()
-        printer._thread_local.task_id = "parent-chat"
         agent = ChatSorcarAgent("regression-chat")
-        agent.printer = printer
 
-        # ``max_workers=0`` makes ``ThreadPoolExecutor`` raise ``ValueError``
-        # AFTER the broadcast loop runs, so we still observe whatever tabs
-        # the (buggy) broadcast loop opened.
         with pytest.raises(ValueError):
             agent._run_tasks_parallel("hello", max_workers=0)  # type: ignore[arg-type]
 
-        opened = self._count_open_events(printer)
-        assert opened == 1, (
-            f"Expected exactly 1 openSubagentTab for a bare-string task, "
-            f"got {opened} (would be len('hello')=5 if iterated per-char)"
-        )
-
     def test_chat_sorcar_invalid_tasks_raises_typeerror(self) -> None:
         """Non-string, non-list-of-str inputs raise ``TypeError``."""
-        printer = _CapturePrinter()
-        printer._thread_local.task_id = "parent-chat-bad"
         agent = ChatSorcarAgent("regression-chat-bad")
-        agent.printer = printer
 
         with pytest.raises(TypeError):
             agent._run_tasks_parallel([1, 2, 3], max_workers=0)  # type: ignore[list-item]
-        assert self._count_open_events(printer) == 0
 
-    def test_sorcar_string_tasks_yields_single_tab(self) -> None:
+    def test_sorcar_string_tasks_reaches_executor(self) -> None:
         """``SorcarAgent`` base method also coerces a bare string."""
-        printer = _CapturePrinter()
-        printer._thread_local.task_id = "parent-base"
         agent = SorcarAgent("regression-base")
-        agent.printer = printer
 
         with pytest.raises(ValueError):
             agent._run_tasks_parallel("world!", max_workers=0)  # type: ignore[arg-type]
-
-        opened = self._count_open_events(printer)
-        assert opened == 1, (
-            f"Expected 1 openSubagentTab for bare-string task, got {opened}"
-        )

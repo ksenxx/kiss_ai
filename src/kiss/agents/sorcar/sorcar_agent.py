@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -70,12 +69,11 @@ class SorcarAgent(RelentlessAgent):
         (e.g. ``ChatSorcarAgent`` propagates ``chat_id``).
 
         When the parent agent has a browser-based printer, each sub-agent
-        gets its own tab in the UI so users can monitor progress.  The
-        ``openSubagentTab`` event creates a read-only tab and each
-        sub-agent's events are routed there via its thread-local
-        ``task_id`` (the printer's per-task subscriber map turns the
-        backend ``task_id`` into the right frontend tab).  A
-        ``subagentDone`` event marks the tab complete.
+        broadcasts a ``new_tab`` message carrying its backend ``task_id``
+        the moment ``_add_task`` mints it.  The frontend reacts by
+        allocating a fresh tab and posting ``resumeSession`` with the
+        same task id, which subscribes the new tab to the sub-agent's
+        live event stream.  No backend tab ids are involved.
 
         Args:
             tasks: List of self-contained task description strings.
@@ -633,18 +631,18 @@ def run_tasks_parallel(
 ) -> list[str]:
     """Execute multiple SorcarAgent tasks concurrently using threads.
 
-    Each task gets its own ``SorcarAgent`` instance and runs in a separate
-    thread via :class:`~concurrent.futures.ThreadPoolExecutor`.  This is
-    ideal for I/O-bound workloads (LLM API calls, network requests) where
-    the GIL is released during I/O waits.
+    Each task gets its own ``ChatSorcarAgent`` instance and runs in a
+    separate thread via :class:`~concurrent.futures.ThreadPoolExecutor`.
+    This is ideal for I/O-bound workloads (LLM API calls, network
+    requests) where the GIL is released during I/O waits.
 
-    When *printer* is a browser-based printer (has ``broadcast`` and
-    ``_thread_local``), each sub-agent gets a dedicated UI tab.  An
-    ``openSubagentTab`` event creates the read-only tab, the sub-agent's
-    streaming events are routed there via the printer's per-task
-    subscriber map (keyed by the sub-agent's ``task_id`` set on the
-    worker thread's ``_thread_local``), and a ``subagentDone`` event
-    marks completion.
+    When *printer* is a browser-based printer (exposes ``broadcast``),
+    each sub-agent triggers a ``new_tab`` message the moment its
+    ``task_id`` is allocated.  The frontend allocates a fresh tab and
+    posts ``resumeSession`` with the same task id, which subscribes the
+    new tab to the sub-agent's live event stream.  No backend tab ids
+    are constructed here — backend identity is the database
+    ``task_id`` only.
 
     Args:
         tasks: List of task description strings.  Each string is passed as
@@ -663,8 +661,8 @@ def run_tasks_parallel(
         work_dir: Working directory for all parallel agents.  ``None`` uses
             the default (``artifact_dir/kiss_workdir``).
         printer: Optional printer from the parent agent.  When a
-            browser-based printer is supplied, sub-agent tabs are created
-            in the UI for live monitoring.
+            browser-based printer is supplied, a ``new_tab`` event is
+            broadcast for each sub-agent once it starts running.
 
     Returns:
         List of YAML result strings in the **same order** as *tasks*.
@@ -680,30 +678,6 @@ def run_tasks_parallel(
     tasks = _coerce_tasks(tasks)
 
     broadcast = getattr(printer, "broadcast", None) if printer else None
-    thread_local = getattr(printer, "_thread_local", None) if printer else None
-    # ``task_id`` is the backend per-task identifier carried on the
-    # printer's thread-local (a string, possibly synthetic for tests
-    # that drive this function directly).  We never read ``tab_id``
-    # here — tab ids are a frontend concept managed by the printer's
-    # subscriber map, not by backend agents.
-    parent_task_id = getattr(thread_local, "task_id", None) if thread_local else None
-
-    sub_tab_ids: list[str] = []
-    for i, task in enumerate(tasks):
-        if parent_task_id:
-            sub_tab_id = f"{parent_task_id}__sub_{i}"
-        else:
-            sub_tab_id = f"sub-{uuid.uuid4().hex[:12]}"
-        sub_tab_ids.append(sub_tab_id)
-        if broadcast:
-            broadcast({
-                "type": "openSubagentTab",
-                "tab_id": sub_tab_id,
-                "parent_tab_id": parent_task_id,
-                "description": task[:200],
-                "taskIndex": i,
-                "isSubagentTab": True,
-            })
 
     # Local import: ``chat_sorcar_agent`` imports from this module, so a
     # top-level import would be circular.
@@ -714,37 +688,31 @@ def run_tasks_parallel(
     # ``(budget_used, total_tokens_used, total_steps)``.
     sub_usage: list[tuple[float, int, int]] = [(0.0, 0, 0)] * len(tasks)
 
+    def _broadcast_new_tab(task_id: int) -> None:
+        if broadcast:
+            broadcast({"type": "new_tab", "task_id": int(task_id)})
+
     def _run_single(args: tuple[int, str]) -> str:
         idx, task = args
-        sub_tab_id = sub_tab_ids[idx]
-        tl = getattr(printer, "_thread_local", None) if printer else None
-        # ThreadPoolExecutor workers do not inherit the parent's
-        # thread-locals, so we explicitly tag this worker's broadcasts
-        # with ``sub_tab_id`` as its ``task_id``.  The base
-        # ``SorcarAgent`` (CLI path) has no real database task id, so
-        # the synthetic ``sub_tab_id`` doubles as the backend routing
-        # key — every event broadcast from this worker will carry
-        # ``taskId == sub_tab_id`` so subscribers of that key receive
-        # it.
-        if tl is not None:
-            tl.task_id = sub_tab_id
         agent = ChatSorcarAgent(f"Parallel-{task[:40]}")
-        success = True
         try:
             # ``is_parallel=True`` propagates the parallel capability so
             # sub-agents themselves get the ``run_parallel`` tool and
             # can invoke nested parallel execution.  Without this, nested
             # parallel (sub-agent calls run_parallel) is impossible.
+            # ``_on_task_id`` fires the ``new_tab`` broadcast the moment
+            # the sub-agent's backend task id is minted, so the frontend
+            # can open a tab and resume into the live stream.
             result: str = agent.run(
                 prompt_template=task,
                 model_name=model_name,
                 work_dir=work_dir,
                 printer=printer,
                 is_parallel=True,
+                _on_task_id=_broadcast_new_tab,
             )
             return result
         except Exception as exc:
-            success = False
             error_result: str = yaml.dump(
                 {"success": False, "summary": f"Unhandled exception: {exc}"},
                 sort_keys=False,
@@ -756,14 +724,6 @@ def run_tasks_parallel(
                 int(getattr(agent, "total_tokens_used", 0) or 0),
                 int(getattr(agent, "total_steps", 0) or 0),
             )
-            if tl is not None:
-                tl.task_id = None
-            if broadcast:
-                broadcast({
-                    "type": "subagentDone",
-                    "tab_id": sub_tab_id,
-                    "success": success,
-                })
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         results = list(pool.map(_run_single, enumerate(tasks)))
