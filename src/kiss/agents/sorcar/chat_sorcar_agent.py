@@ -7,7 +7,6 @@ management — the same workflow that the VS Code extension performs in
 
 from __future__ import annotations
 
-import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -134,10 +133,29 @@ class ChatSorcarAgent(SorcarAgent):
     ) -> list[str]:
         """Execute parallel tasks using ChatSorcarAgent sub-agents.
 
-        Each sub-agent shares this agent's ``chat_id`` so that parallel
-        tasks contribute to the same chat session history.  When the
-        parent has a browser-based printer, dedicated read-only tabs
-        are opened for each sub-agent.
+        Mirrors the structure of :func:`run_tasks_parallel` in
+        :mod:`sorcar_agent` but adds three pieces of chat-specific
+        behaviour the base helper cannot supply:
+
+        1. Each sub-agent ``resume_chat_by_id`` s the parent's
+           ``chat_id`` so all parallel tasks contribute to the same
+           chat session history.
+        2. The parent's ``task_history.id`` is recorded on every
+           sub-agent via ``_subagent_info`` so persisted rows link
+           back to the parent task.
+        3. The parent task thread's cooperative ``stop_event`` is
+           propagated onto each worker's ``printer._thread_local`` so
+           a Stop click on the parent terminates the whole task tree
+           (including nested ``_run_tasks_parallel`` calls).
+
+        When the parent has a browser-based printer, each sub-agent
+        triggers a ``new_tab`` message the moment its backend
+        ``task_id`` is minted (via the ``_on_task_id`` callback into
+        :meth:`ChatSorcarAgent.run`).  The frontend allocates a fresh
+        tab and posts ``resumeSession`` with the same task id, which
+        subscribes the new tab to the live event stream.  No backend
+        tab ids are constructed here — backend identity is the
+        database ``task_id`` only.
 
         Args:
             tasks: List of self-contained task description strings.
@@ -150,88 +168,53 @@ class ChatSorcarAgent(SorcarAgent):
             TypeError: If *tasks* is neither a ``str`` nor a ``list[str]``.
         """
         # Coerce ``str`` → ``[str]``; otherwise ``enumerate(tasks)`` would
-        # iterate a bare-string ``tasks`` character-by-character and create
-        # one sub-agent tab per character (LLM tool-call bug).
+        # iterate a bare-string ``tasks`` character-by-character and
+        # create one sub-agent per character (LLM tool-call bug).
         tasks = _coerce_tasks(tasks)
         model = getattr(self, "model_name", None)
         work_dir = getattr(self, "work_dir", None)
         chat_id = self._chat_id
-        # The parent's ``task_history.id`` is the only piece of
-        # provenance that a sub-agent row persists; it is set when
-        # the parent's ``run()`` calls ``_add_task`` and we are
-        # inside the LLM agent loop now, so ``_last_task_id`` is
-        # available.  Captured into a local so each sub-agent thread
-        # sees the parent id at spawn time.  We deliberately do NOT
-        # consult ``printer._thread_local.tab_id`` here: backend
-        # agents are agnostic of frontend tab ids — those are owned
-        # by the printer's per-task subscriber map and the extension
-        # layer.  Backend identity is the database ``task_id``.
+        # The parent's ``task_history.id`` — set when the parent's
+        # ``run()`` calls ``_add_task`` — is the only piece of
+        # provenance a sub-agent row persists.  Captured into a local
+        # so each worker sees the parent id at spawn time.
         parent_task_id = self._last_task_id
         printer = self.printer
         broadcast = getattr(printer, "broadcast", None) if printer else None
         thread_local = getattr(printer, "_thread_local", None) if printer else None
         # Cooperative-stop event of the parent task thread.  Captured
-        # here so each ``ThreadPoolExecutor`` worker can copy it onto
-        # its own ``printer._thread_local.stop_event`` slot before
-        # invoking the sub-agent.  Without this propagation a Stop
-        # click on the parent tab sets only the parent thread's
-        # event; the sub-agent worker's ``printer._check_stop()``
-        # reads a fresh (empty) thread-local and becomes a silent
-        # no-op, so sub-agents — and any nested sub-sub-agents
-        # spawned by them — keep running until completion.  Storing
-        # the same ``Event`` instance on the sub-agent's
-        # :class:`_RunningAgentState` (below) lets a direct Stop on
-        # the sub-agent's tab terminate the same task tree, too.
+        # here so each worker can copy it onto its own
+        # ``printer._thread_local.stop_event`` slot before invoking
+        # the sub-agent.  Without this propagation a Stop click on
+        # the parent tab sets only the parent thread's event; the
+        # sub-agent worker's ``printer._check_stop()`` reads a fresh
+        # (empty) thread-local and becomes a silent no-op.
         parent_stop_event = (
             getattr(thread_local, "stop_event", None) if thread_local else None
         )
-        sub_tab_ids: list[str] = []
-        for i, task in enumerate(tasks):
-            if parent_task_id is not None:
-                sub_tab_id = f"task-{parent_task_id}__sub_{i}"
-            else:
-                sub_tab_id = f"sub-{uuid.uuid4().hex[:12]}"
-            sub_tab_ids.append(sub_tab_id)
-            if broadcast:
-                # ``openSubagentTab`` is a task-stream event (no
-                # explicit tabId) so the printer fans it out to every
-                # tab subscribed to the parent task.  Each fanned-out
-                # copy is stamped with the subscriber's own ``tabId``
-                # — the frontend uses that as the parent placement
-                # reference.  The ``tab_id`` field in this payload is
-                # the *frontend* tab id of the sub-agent's new tab —
-                # a frontend concept, distinct from the backend
-                # ``task_id`` minted by ``_add_task`` inside the
-                # sub-agent's own ``run()``.
-                broadcast({
-                    "type": "openSubagentTab",
-                    "tab_id": sub_tab_id,
-                    "description": task[:200],
-                    "taskIndex": i,
-                    "isSubagentTab": True,
-                })
 
-        # Per-sub-agent usage captured in the worker's ``finally`` block
-        # so the parent can aggregate cost / tokens / steps back into
-        # its own running totals after the pool drains.  Indexed by
-        # task position so order matches *tasks*.  Each tuple is
-        # ``(budget_used, total_tokens_used, total_steps)``.
+        # Per-sub-agent usage so the parent can aggregate cost /
+        # tokens / steps back into its own running totals after the
+        # pool drains.  Indexed by task position so order matches
+        # *tasks*.  Each tuple is ``(budget_used, total_tokens_used,
+        # total_steps)``.
         sub_usage: list[tuple[float, int, int]] = [(0.0, 0, 0)] * len(tasks)
+
+        def _broadcast_new_tab(task_id: int) -> None:
+            if broadcast:
+                broadcast({"type": "new_tab", "task_id": int(task_id)})
 
         def _run_single(args: tuple[int, str]) -> str:
             idx, task = args
-            sub_tab_id = sub_tab_ids[idx]
             tl = getattr(printer, "_thread_local", None) if printer else None
             if tl is not None:
-                # Propagate the parent task thread's cooperative
-                # stop_event into this worker thread so
-                # ``printer._check_stop()`` and
-                # ``SorcarAgent.run``'s ``self._stop_event``
-                # snapshot (used to kill child subprocesses) both
-                # honour a Stop click on the parent tab.  Nested
-                # ``_run_tasks_parallel`` calls re-read this same
-                # slot, so the propagation is transitive across
-                # every level of nesting.
+                # Propagate the parent's stop_event into this worker
+                # thread so ``printer._check_stop()`` and
+                # ``SorcarAgent.run``'s ``self._stop_event`` snapshot
+                # both honour a Stop click on the parent tab.  Nested
+                # ``_run_tasks_parallel`` calls re-read this same slot,
+                # so the propagation is transitive across every level
+                # of nesting.
                 tl.stop_event = parent_stop_event
             agent = ChatSorcarAgent(f"Parallel-{task[:40]}")
             if chat_id:
@@ -239,95 +222,49 @@ class ChatSorcarAgent(SorcarAgent):
             # Persist the parent's ``task_history.id`` on the
             # sub-agent's row so the history sidebar can identify
             # the row as a sub-agent task (presence of the
-            # ``subagent`` key implies the row is a sub-agent).  All
-            # other display details (description, color, icon) are
-            # derivable from the row's own ``task`` column and a
-            # per-tab ``isSubagentTab`` flag on the frontend.
+            # ``subagent`` key implies the row is a sub-agent).
             agent._subagent_info = {"parent_task_id": parent_task_id}
-            # Also register a real :class:`_RunningAgentState` for the
-            # sub-agent, keyed by its own ``sub_tab_id``.  Treating
-            # the sub-agent as a regular task in the registry is what
-            # makes multi-view work: when a user clicks the sub-agent
-            # row in the history sidebar,
-            # :meth:`VSCodeServer._replay_session` →
-            # :meth:`VSCodeServer._reattach_running_chat` finds this
-            # state (disambiguated by ``task_history_id``, which the
-            # sub-agent's :meth:`ChatSorcarAgent.run` mirrors here
-            # once :func:`_add_task` mints the id) and subscribes the
-            # freshly-opened tab to the printer's per-tab broadcast
-            # stream so the live events ALSO flow to the new tab.
-            # ``is_subagent`` + ``parent_task_id`` are the two flag
-            # fields the frontend needs to render the sub-agent
-            # styling correctly on history reopen.
-            sub_state = _RunningAgentState(sub_tab_id, model or "")
-            sub_state.chat_id = chat_id
-            sub_state.is_task_active = True
-            sub_state.is_subagent = True
-            sub_state.parent_task_id = (
-                parent_task_id if isinstance(parent_task_id, int) else None
-            )
-            sub_state.task_thread = threading.current_thread()
-            # Share the parent's cooperative-stop ``Event`` with the
-            # sub-agent state so a Stop click that targets the
-            # sub-agent's tab directly (resolved by
-            # :meth:`_TaskRunnerMixin._stop_task`) sets the same
-            # event the parent is watching — terminating the whole
-            # task tree, not just one sub-agent.
-            sub_state.stop_event = parent_stop_event
-            _RunningAgentState.running_agent_states[sub_tab_id] = sub_state
-            success = True
             try:
-                # ``is_parallel=True`` propagates the parallel capability
-                # so sub-agents get the ``run_parallel`` tool and can
-                # themselves invoke nested parallel execution.  Budget
-                # aggregation chains correctly because each level's
-                # sub-agent ``budget_used`` already includes its own
-                # nested sub-agents' costs (captured below via
-                # ``sub_usage`` in their own pool).
+                # ``is_parallel=True`` propagates the parallel
+                # capability so sub-agents themselves get the
+                # ``run_parallel`` tool and can invoke nested parallel
+                # execution.  ``_on_task_id`` fires the ``new_tab``
+                # broadcast the moment the sub-agent's backend
+                # ``task_id`` is minted, so the frontend can open a
+                # tab and resume into the live stream.
                 result: str = agent.run(
                     prompt_template=task,
                     model_name=model,
                     work_dir=work_dir,
                     printer=printer,
                     is_parallel=True,
-                    _subscribe_tab_id=sub_tab_id,
+                    _on_task_id=_broadcast_new_tab,
                 )
                 return result
             except Exception as exc:
-                success = False
                 error_result: str = yaml.dump(
                     {"success": False, "summary": f"Unhandled exception: {exc}"},
                     sort_keys=False,
                 )
                 return error_result
             finally:
-                # Capture this sub-agent's running totals before its
-                # state is torn down so the parent can roll them up.
                 sub_usage[idx] = (
                     float(getattr(agent, "budget_used", 0.0) or 0.0),
                     int(getattr(agent, "total_tokens_used", 0) or 0),
                     int(getattr(agent, "total_steps", 0) or 0),
                 )
-                _RunningAgentState.running_agent_states.pop(sub_tab_id, None)
-                if broadcast:
-                    broadcast({
-                        "type": "subagentDone",
-                        "tab_id": sub_tab_id,
-                        "success": success,
-                    })
 
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             results = list(pool.map(_run_single, enumerate(tasks)))
 
-        # Roll the sub-agents' cost / tokens / steps into this (parent)
-        # agent's running totals so the global accounting and UI reflect
-        # the full work done.  Without this aggregation, nested parallel
-        # sub-agent budgets stay invisible to the parent.  Matches the
-        # behaviour of ``SorcarAgent._run_tasks_parallel``.  Use
-        # ``getattr`` with float/int defaults because tests that drive
-        # ``_run_tasks_parallel`` directly (without going through
-        # :meth:`run`) may not have initialised the running-totals
-        # attributes on the parent.
+        # Roll the sub-agents' cost / tokens / steps into this
+        # (parent) agent's running totals so global accounting and UI
+        # reflect the full work done.  Without this aggregation,
+        # nested parallel sub-agent budgets stay invisible to the
+        # parent.  ``getattr`` with float/int defaults because tests
+        # that drive ``_run_tasks_parallel`` directly (without going
+        # through :meth:`run`) may not have initialised the running-
+        # totals attributes on the parent.
         self.budget_used = (
             float(getattr(self, "budget_used", 0.0) or 0.0)
             + sum(u[0] for u in sub_usage)
