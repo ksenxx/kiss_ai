@@ -1148,6 +1148,31 @@ body.remote-chat #welcome > #input-area {
   animation: sidebar-running-pulse 1.5s ease-in-out infinite;
 }
 
+#running-list {
+  overflow-y: auto;
+  flex: 1;
+}
+
+.running-item {
+  flex-wrap: wrap;
+  white-space: normal;
+  align-items: center;
+  row-gap: 4px;
+}
+
+.running-item > .sidebar-item-text {
+  white-space: normal;
+  word-break: break-word;
+}
+
+.running-item-metrics {
+  flex-basis: 100%;
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+  color: color-mix(in srgb, #000 65%, transparent);
+  margin-top: 2px;
+}
+
 @keyframes sidebar-running-pulse {
   0%, 100% { opacity: 1; box-shadow: 0 0 0 1px rgb(0 0 0 / 15%); }
   50% { opacity: 0.4; box-shadow: 0 0 6px 2px rgb(46 125 50 / 50%); }
