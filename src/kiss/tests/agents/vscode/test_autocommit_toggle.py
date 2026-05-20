@@ -80,7 +80,7 @@ class TestAutocommitToggleInTemplate(unittest.TestCase):
         btn_start = html.index('id="autocommit-toggle-btn"')
         btn_end = html.index("</button>", btn_start)
         btn_html = html[btn_start:btn_end]
-        assert 'class="toggle-btn"' in btn_html
+        assert 'class="toggle-btn active"' in btn_html
         assert 'data-tooltip="Auto commit"' in btn_html
         # And it sits between ``#menu-btn`` and ``#autocommit-btn``.
         menu_pos = html.index('id="menu-btn"')
@@ -128,14 +128,14 @@ class TestAutocommitToggleJS(unittest.TestCase):
 class TestRunningAgentStateField(unittest.TestCase):
     """``_RunningAgentState`` carries the per-tab toggle state."""
 
-    def test_default_false(self) -> None:
+    def test_default_true(self) -> None:
         tab = _RunningAgentState("tab-x", "gemini")
-        assert tab.auto_commit_mode is False
+        assert tab.auto_commit_mode is True
 
     def test_settable(self) -> None:
         tab = _RunningAgentState("tab-y", "gemini")
-        tab.auto_commit_mode = True
-        assert tab.auto_commit_mode is True
+        tab.auto_commit_mode = False
+        assert tab.auto_commit_mode is False
 
 
 class _AutocommitTaskHarness(unittest.TestCase):

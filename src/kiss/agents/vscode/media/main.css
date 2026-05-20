@@ -1088,7 +1088,6 @@ body.remote-chat #welcome > #input-area {
 }
 
 .sidebar-section {
-  margin-top: 0;
   flex: 1;
   display: flex;
   flex-direction: column;

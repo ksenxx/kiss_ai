@@ -531,8 +531,8 @@ class TestPerTabAgentIsolation(unittest.TestCase):
         server, _ = _make_server()
         tab1 = server._get_tab("1")
         tab2 = server._get_tab("2")
-        tab1.use_parallel = True
-        assert tab2.use_parallel is False
+        tab1.use_parallel = False
+        assert tab2.use_parallel is True
 
     def test_task_history_id_is_per_tab(self) -> None:
         """task_history_id is independent per tab."""

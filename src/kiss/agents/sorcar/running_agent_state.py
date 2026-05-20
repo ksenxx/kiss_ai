@@ -155,14 +155,14 @@ class _RunningAgentState:
         # ``None`` once the post-task finally block has cleaned up.
         self.task_history_id: int | None = None
         self.use_worktree: bool = False
-        self.use_parallel: bool = False
+        self.use_parallel: bool = True
         # ``auto_commit_mode`` mirrors the "Auto commit" menu toggle
         # sent by the frontend on each submit.  When True, the
         # post-task lifecycle in :class:`_TaskRunnerMixin` skips the
         # interactive merge/diff workflow and auto-commits the
         # agent's changes (and in worktree mode also auto-merges into
         # the original branch).
-        self.auto_commit_mode: bool = False
+        self.auto_commit_mode: bool = True
         self.selected_model: str = default_model
         self.stop_event: threading.Event | None = None
         self.task_thread: threading.Thread | None = None
