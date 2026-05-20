@@ -1732,10 +1732,6 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
             Use web browser
           </label>
           <label class="config-label config-checkbox">
-            <input type="checkbox" id="cfg-demo-mode">
-            Demo mode
-          </label>
-          <label class="config-label config-checkbox">
             <input type="checkbox" id="cfg-use-parallel" checked>
             Use parallel agents
           </label>
@@ -1753,6 +1749,10 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
                 <line x1="12" y1="17.01" x2="12" y2="22.96"/>
               </svg>
             </button>
+          </label>
+          <label class="config-label config-checkbox">
+            <input type="checkbox" id="cfg-demo-mode">
+            Demo mode
           </label>
           <label class="config-label">Remote password
             <input type="text" id="cfg-remote-password"
