@@ -2,8 +2,8 @@
 
 Validates:
 - The button element exists in the HTML template (SorcarTab.ts).
-- The button is placed immediately to the right of the menu button in
-  #model-picker (outside the dropdown).
+- The button is placed inline next to the "Auto commit" label inside
+  the settings panel (``#cfg-auto-commit`` checkbox row).
 - The button has its own #autocommit-btn CSS, styled like #menu-btn.
 - The JS click handler sends the correct ``autocommitAction`` message.
 - The button is disabled when a task is running (setRunningState).
@@ -58,29 +58,49 @@ class TestAutocommitButtonInTemplate(unittest.TestCase):
         btn_html = html[btn_start:btn_end]
         assert "data-tooltip=" in btn_html
 
-    def test_button_right_of_menu_btn(self) -> None:
-        """The autocommit button sits to the right of the menu button.
+    def test_button_inside_auto_commit_label(self) -> None:
+        """The button sits inside the ``cfg-auto-commit`` settings label.
 
-        It must come after ``#menu-btn`` and after the inline
-        ``#worktree-toggle-btn`` which lives between ``#menu-btn`` and
-        ``#autocommit-btn``.
+        It must appear after the ``#cfg-auto-commit`` checkbox input and
+        before the label's closing ``</label>`` tag, so it renders inline
+        next to the "Auto commit" text in the settings panel.
         """
         html = _read("src/SorcarTab.ts")
-        menu_pos = html.index('id="menu-btn"')
-        worktree_pos = html.index('id="worktree-toggle-btn"')
+        checkbox_pos = html.index('id="cfg-auto-commit"')
         btn_pos = html.index('id="autocommit-btn"')
-        assert menu_pos < worktree_pos < btn_pos, (
-            "autocommit-btn should be the last button in the input "
-            "footer, after the inline worktree toggle button"
+        label_end = html.index("</label>", checkbox_pos)
+        assert checkbox_pos < btn_pos < label_end, (
+            "autocommit-btn should sit inside the cfg-auto-commit label, "
+            "after the checkbox and before </label>"
         )
 
-    def test_button_inside_model_picker(self) -> None:
-        """The button is a child of the #model-picker div."""
+    def test_button_not_in_model_picker(self) -> None:
+        """The button is no longer rendered inside ``#model-picker``."""
         html = _read("src/SorcarTab.ts")
         picker_start = html.index('id="model-picker"')
-        btn_pos = html.index('id="autocommit-btn"')
-        assert btn_pos > picker_start, (
-            "autocommit-btn should be inside #model-picker"
+        # Find the closing </div> that ends the model-picker block by
+        # tracking nested <div> tags.
+        depth = 1
+        i = html.index(">", picker_start) + 1
+        picker_end = len(html)
+        while i < len(html) and depth:
+            nxt = html.find("<", i)
+            if nxt < 0:
+                break
+            if html.startswith("<div", nxt) and html[nxt + 4] in " \t\n>":
+                depth += 1
+                i = nxt + 4
+            elif html.startswith("</div>", nxt):
+                depth -= 1
+                if depth == 0:
+                    picker_end = nxt
+                    break
+                i = nxt + len("</div>")
+            else:
+                i = nxt + 1
+        picker_html = html[picker_start:picker_end]
+        assert 'id="autocommit-btn"' not in picker_html, (
+            "autocommit-btn should no longer live inside #model-picker"
         )
 
     def test_button_has_svg_icon(self) -> None:
