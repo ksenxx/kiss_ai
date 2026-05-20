@@ -74,6 +74,7 @@ class _TaskRunnerMixin:
             self, tab_id: str, *, try_merge_review: bool,
             discard_if_empty: bool = True,
         ) -> None: ...
+        def _get_worktree_changed_files(self, tab_id: str = "") -> list[str]: ...
         def _extract_result_summary(self) -> str: ...
         def _generate_followup_async(
             self, task: str, result: str, task_id: int | None,
@@ -534,14 +535,28 @@ class _TaskRunnerMixin:
                         if effective_auto_commit:
                             # "Auto commit" toggle is ON in worktree
                             # mode — skip the worktree merge review
-                            # entirely and auto-commit + auto-merge
-                            # the worktree branch into the original
-                            # branch.  ``_handle_worktree_action`` runs
-                            # the same generate-message → commit →
+                            # entirely.  When the agent actually
+                            # modified files in the worktree, auto-
+                            # commit + auto-merge the worktree branch
+                            # into the original branch.  When the
+                            # worktree is empty (no file modifications)
+                            # there is nothing to merge — auto-discard
+                            # the empty branch so the repo isn't
+                            # polluted with a no-op merge commit and
+                            # the user isn't left with a leftover
+                            # ``kiss/wt-*`` branch to clean up by hand.
+                            # ``_handle_worktree_action`` runs the
+                            # same generate-message → commit →
                             # squash-merge → cleanup sequence as the
-                            # interactive "Merge" button.
+                            # interactive "Merge" button (or the
+                            # worktree-remove → branch-delete →
+                            # checkout-original sequence for discard).
+                            if self._get_worktree_changed_files(tab_id):
+                                action = "merge"
+                            else:
+                                action = "discard"
                             result = self._handle_worktree_action(
-                                "merge", tab_id,
+                                action, tab_id,
                             )
                             self.printer.broadcast({
                                 "type": "worktree_result",
