@@ -1033,7 +1033,14 @@ body.remote-chat #welcome > #input-area {
   gap: 4px;
   margin: 24px 0 8px;
   border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  flex-wrap: nowrap;
 }
+
+.sidebar-tabs::-webkit-scrollbar { display: none; }
 
 .sidebar-tab {
   background: none;
@@ -1044,6 +1051,8 @@ body.remote-chat #welcome > #input-area {
   font-size: var(--fs-md);
   border-bottom: 2px solid transparent;
   margin-bottom: -1px;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .sidebar-tab:hover {
