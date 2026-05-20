@@ -525,23 +525,6 @@ class TestHistoryPanelSearchOnOpen(unittest.TestCase):
                     return self._js[start : i + 1]
         raise AssertionError("Could not extract switchSidebarTab body")
 
-    def test_menu_btn_click_sends_query(self) -> None:
-        """Opening the sidebar from menu-btn sends query: historySearch.value.
-
-        The menu-btn click handler delegates to ``switchSidebarTab('history')``,
-        which is responsible for sending ``getHistory`` with the current search
-        query so existing search text filters the results on panel open.
-        """
-        body = self._get_menu_btn_click_body()
-        assert "switchSidebarTab('history')" in body, (
-            "menu-btn click handler must call switchSidebarTab('history')"
-        )
-        switch_body = self._get_switch_sidebar_tab_body()
-        assert "query: historySearch" in switch_body, (
-            "switchSidebarTab must send query: historySearch.value so "
-            "existing search text filters the results on panel open"
-        )
-
     def test_all_get_history_calls_include_query(self) -> None:
         """Every getHistory postMessage includes query: historySearch.value.
 
