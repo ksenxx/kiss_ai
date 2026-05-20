@@ -93,15 +93,12 @@ def test_webapp_input_footer_omits_tab_bar_actions() -> None:
 def test_webapp_inline_toggle_order_matches_extension() -> None:
     """Inline toggle buttons appear in the same order in both webviews.
 
-    The two toggles (use worktree / auto commit) render inline between
-    ``#menu-btn`` and ``#autocommit-btn`` in the input-footer's
-    ``#model-picker`` container.  The parallel-agents control lives in
+    Only one toggle (use worktree) renders inline between ``#menu-btn``
+    and ``#autocommit-btn`` in the input-footer's ``#model-picker``
+    container.  The parallel-agents and auto-commit controls live in
     the settings panel, not the input footer.
     """
-    ids = (
-        "worktree-toggle-btn",
-        "autocommit-toggle-btn",
-    )
+    ids = ("worktree-toggle-btn",)
     ext_picker = _section(_ext_html(), "model-picker")
     web_picker = _section(_build_html(), "model-picker")
     ext_positions = [(ext_picker.find(f'id="{i}"'), i) for i in ids]
@@ -123,20 +120,20 @@ def test_webapp_omits_work_dir_config_field() -> None:
 
 
 def test_webapp_autocommit_button_after_inline_toggles() -> None:
-    """``#autocommit-btn`` follows the three inline toggle buttons.
+    """``#autocommit-btn`` follows the inline toggle button.
 
-    The toggles now render inline between ``#menu-btn`` and
-    ``#autocommit-btn``, so the commit button must appear last in
-    the ``#model-picker`` button row.
+    The remaining inline toggle (``#worktree-toggle-btn``) renders
+    between ``#menu-btn`` and ``#autocommit-btn``, so the commit
+    button must appear last in the ``#model-picker`` button row.
     """
     web = _build_html()
     web_picker = _section(web, "model-picker")
     assert 'id="autocommit-btn"' in web_picker
-    autocommit_toggle_pos = web_picker.index('id="autocommit-toggle-btn"')
+    worktree_toggle_pos = web_picker.index('id="worktree-toggle-btn"')
     commit_pos = web_picker.index('id="autocommit-btn"')
     assert (
-        autocommit_toggle_pos < commit_pos
-    ), "autocommit-btn must follow the inline toggle buttons"
+        worktree_toggle_pos < commit_pos
+    ), "autocommit-btn must follow the inline toggle button"
 
 
 def test_webapp_delete_task_button_has_no_tooltip_attribute() -> None:

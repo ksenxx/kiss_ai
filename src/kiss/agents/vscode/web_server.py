@@ -1644,16 +1644,6 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
                 <path d="M18 9a9 9 0 01-9 9"/>
               </svg>
             </button>
-            <button id="autocommit-toggle-btn" class="toggle-btn active"
-             data-tooltip="Auto commit">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
-               stroke="currentColor" stroke-width="2" stroke-linecap="round"
-               stroke-linejoin="round">
-                <circle cx="12" cy="12" r="4"/>
-                <line x1="1.05" y1="12" x2="7" y2="12"/>
-                <line x1="17.01" y1="12" x2="22.96" y2="12"/>
-              </svg>
-            </button>
             <button id="autocommit-btn" data-tooltip="git commit">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
                stroke="currentColor" stroke-width="2" stroke-linecap="round"
@@ -1750,6 +1740,10 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
           <label class="config-label config-checkbox">
             <input type="checkbox" id="cfg-use-parallel" checked>
             Use parallel agents
+          </label>
+          <label class="config-label config-checkbox">
+            <input type="checkbox" id="cfg-auto-commit" checked>
+            Auto commit
           </label>
           <label class="config-label">Remote password
             <input type="text" id="cfg-remote-password"
