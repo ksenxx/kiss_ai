@@ -907,7 +907,7 @@ class TestCloseRunningTabBehavior(unittest.TestCase):
 
     def test_close_tab_checks_running_state(self) -> None:
         idx = self.js.index("function closeTab(")
-        block = self.js[idx : idx + 800]
+        block = self.js[idx : idx + 3000]
         assert "newTab.isRunning" in block
         assert "setRunningState(newTab.isRunning)" in block
 

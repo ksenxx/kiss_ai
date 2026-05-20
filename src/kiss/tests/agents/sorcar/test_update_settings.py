@@ -642,7 +642,10 @@ class TestWebPrinterBroadcast:
         agent.printer = printer
         agent._use_web_tools = False
 
-        # Start recording (mimics what the web server does per-tab)
+        # Recordings are task-id keyed; mimic the production lifecycle
+        # by tagging this thread with a task id before recording.
+        printer._thread_local.task_id = "task-test-events-recorded"
+        # Start recording (mimics what the web server does per-task)
         printer.start_recording()
 
         tools = agent._get_tools()
@@ -670,6 +673,7 @@ class TestWebPrinterBroadcast:
         printer = WebPrinter()
         agent.printer = printer
         agent._use_web_tools = False
+        printer._thread_local.task_id = "task-test-all-settings"
         printer.start_recording()
 
         tools = agent._get_tools()

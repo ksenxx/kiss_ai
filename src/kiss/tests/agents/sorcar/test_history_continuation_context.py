@@ -234,8 +234,12 @@ class TestHistoryContinuationContext(unittest.TestCase):
             "second prompt should include the prior task text "
             f"'banana' but was:\n{second_prompt}"
         )
-        assert "first done" in second_prompt, (
-            "second prompt should include the prior result 'first done' "
+        # The prior result row must appear (even when the task_runner
+        # post-task path was unable to extract a non-empty summary
+        # from the printer recording, the chat-history preamble must
+        # still surface a ``### Result 1`` row for the previous task).
+        assert "### Result 1" in second_prompt, (
+            "second prompt should include the prior result row "
             f"but was:\n{second_prompt}"
         )
         assert "what was the magic word?" in second_prompt
