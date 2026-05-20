@@ -607,15 +607,10 @@ class TestMainCssInfiniteScroll(unittest.TestCase):
         base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
         cls.css = (base / "vscode" / "media" / "main.css").read_text()
 
-    def test_sidebar_width_is_capped_at_420(self) -> None:
+    def test_sidebar_width_is_90_percent_of_viewport_width(self) -> None:
         idx = self.css.index("#sidebar {")
         block = self.css[idx : idx + 400]
-        assert "420px" in block
-
-    def test_sidebar_uses_75_percent_of_viewport_width(self) -> None:
-        idx = self.css.index("#sidebar {")
-        block = self.css[idx : idx + 400]
-        assert "75vw" in block
+        assert "90vw" in block
 
     def test_sidebar_uses_full_viewport_height(self) -> None:
         idx = self.css.index("#sidebar {")
