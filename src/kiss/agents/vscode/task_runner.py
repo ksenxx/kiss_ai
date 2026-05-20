@@ -305,6 +305,16 @@ class _TaskRunnerMixin:
 
         result_summary = "Agent Failed Abruptly"
         task_end_event: dict[str, Any] | None = None
+        # ``agent_returned`` captures the YAML string returned by
+        # ``tab.agent.run``.  ``WorktreeSorcarAgent.run`` catches
+        # ``Exception`` raised by the inner agent and converts it into
+        # a ``success: false`` YAML rather than re-raising — so a
+        # caught-and-suppressed failure leaves us with
+        # ``task_end_event = "task_done"`` even though the user-visible
+        # outcome is a failure.  The finally block re-parses this
+        # string to recover the true failure signal and route the
+        # post-task workflow through the interactive diff/merge view.
+        agent_returned: str = ""
         try:
             # ``start_recording`` / ``_persist_agents`` registration
             # / subscriber wiring is now owned by
@@ -334,7 +344,7 @@ class _TaskRunnerMixin:
                 # :meth:`_MergeFlowMixin._handle_autocommit_action`).
                 tab.last_user_prompt = task_prompt
                 try:
-                    tab.agent.run(
+                    agent_returned = tab.agent.run(
                         prompt_template=task_prompt,
                         model_name=model,
                         work_dir=work_dir,
@@ -411,6 +421,44 @@ class _TaskRunnerMixin:
             try:
                 with self._state_lock:
                     tab.is_task_active = False
+                # When the task ended in failure or user-stop, behave
+                # as if the "Auto commit" toggle were OFF for the
+                # post-task merge workflow.  Rationale: auto-commit is
+                # a fire-and-forget convenience that assumes the agent
+                # produced a clean, intentional set of changes.  On
+                # ``task_error`` or ``task_stopped`` the changes are
+                # by definition incomplete or unverified, so the user
+                # must be given the explicit diff/merge (non-worktree)
+                # or worktree merge-review workflow to inspect, edit,
+                # or discard the partial work.  Mirrors the existing
+                # USER_PREFS rule that the worktree branch must be
+                # preserved on stop even when auto-commit is ON.
+                # ``task_end_event.type`` covers the cases where the
+                # exception propagated out of ``tab.agent.run``.
+                # :meth:`WorktreeSorcarAgent.run` additionally catches
+                # any ``Exception`` raised by the inner run and surfaces
+                # it as a ``success: false`` YAML return value — without
+                # this YAML re-parse the post-task workflow would treat
+                # such caught-and-suppressed failures as a success and
+                # auto-commit / auto-merge partial work.
+                from kiss.core.printer import parse_result_yaml as _parse_yaml
+                _agent_parsed = (
+                    _parse_yaml(agent_returned) if agent_returned else None
+                )
+                _agent_reported_failure = bool(
+                    _agent_parsed and _agent_parsed.get("success") is False
+                )
+                task_failed = bool(
+                    (
+                        task_end_event
+                        and task_end_event.get("type")
+                        in ("task_error", "task_stopped")
+                    )
+                    or _agent_reported_failure
+                )
+                effective_auto_commit = (
+                    tab.auto_commit_mode and not task_failed
+                )
                 # Per-task printer cleanup (``stop_recording`` etc.)
                 # is owned by :meth:`ChatSorcarAgent.run`'s finally.
                 # The remaining per-task state (recording buffer,
@@ -428,7 +476,7 @@ class _TaskRunnerMixin:
                                     pre_untracked,
                                     pre_file_hashes,
                                 )
-                        elif tab.auto_commit_mode:
+                        elif effective_auto_commit:
                             # "Auto commit" toggle is ON — skip the
                             # interactive merge/diff workflow entirely
                             # and commit the agent's pending changes
@@ -483,7 +531,7 @@ class _TaskRunnerMixin:
                 self.printer.reset()
                 if use_worktree and tab.agent._wt_pending and not tab.skip_merge:
                     try:
-                        if tab.auto_commit_mode:
+                        if effective_auto_commit:
                             # "Auto commit" toggle is ON in worktree
                             # mode — skip the worktree merge review
                             # entirely and auto-commit + auto-merge
