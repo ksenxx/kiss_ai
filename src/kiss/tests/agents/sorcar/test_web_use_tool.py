@@ -262,6 +262,7 @@ class TestFocusHelpers:
 
     def test_ensure_browser_calls_focus_helpers(self, web_tool):
         """_ensure_browser should save and restore focus even in headless mode."""
+        web_tool._ensure_browser()
         web_tool._context.close()
         assert not web_tool._is_alive()
         web_tool._ensure_browser()
