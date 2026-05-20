@@ -11,9 +11,10 @@ Spec
    — into their own ``task_history`` row.  Presence of the
    ``subagent`` key implies the row is a sub-agent.
 
-2. ``VSCodeServer._get_history`` surfaces ``is_subagent: True`` and
-   ``parent_task_id: <int>`` on the session dict returned to the
-   webview.  No other sub-agent metadata is forwarded.
+2. ``VSCodeServer._get_history`` filters sub-agent rows out of the
+   listing entirely — they are an internal implementation detail of
+   the parent's ``run_parallel`` tool call and the user-facing
+   history tab should only show parent tasks.
 
 3. ``VSCodeServer._replay_session``, when the loaded row carries an
    ``extra.subagent`` blob:
@@ -112,7 +113,8 @@ def _seed_subagent_row(
 
 
 class TestHistorySurfacesSubagentMetadata:
-    """``_get_history`` must expose the minimal sub-agent marker."""
+    """``_get_history`` must omit sub-agent rows entirely; regular
+    rows pass through unchanged."""
 
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
@@ -125,7 +127,7 @@ class TestHistorySurfacesSubagentMetadata:
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_subagent_row_returns_is_subagent_and_parent_task_id(self) -> None:
+    def test_subagent_row_is_excluded_from_history_listing(self) -> None:
         chat_id = "chat-parent-1"
         parent_id, _ = th._add_task("parent task", chat_id=chat_id)
         task_id = _seed_subagent_row(
@@ -138,16 +140,10 @@ class TestHistorySurfacesSubagentMetadata:
         hist_events = [e for e in events if e.get("type") == "history"]
         assert len(hist_events) == 1
         sessions = hist_events[0]["sessions"]
-        match = [s for s in sessions if s.get("task_id") == task_id]
-        assert len(match) == 1
-        s = match[0]
-        assert s["is_subagent"] is True
-        assert s["parent_task_id"] == parent_id
-        # No legacy frontend identity is leaked.
-        assert "subagent_tab_id" not in s
-        assert "parent_tab_id" not in s
-        assert "task_index" not in s
-        assert "description" not in s
+        # The sub-agent row must NOT appear in the user-facing history.
+        assert all(s.get("task_id") != task_id for s in sessions)
+        # The parent row still appears.
+        assert any(s.get("task_id") == parent_id for s in sessions)
 
     def test_regular_row_has_no_subagent_flag(self) -> None:
         task_id, _ = th._add_task("regular task", chat_id="chat-reg-1")
