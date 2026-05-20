@@ -1187,10 +1187,10 @@ class TestSorcarTabParallelToggle(unittest.TestCase):
 class TestServerParallelToggle(unittest.TestCase):
     """Tests for parallel toggle in VSCodeServer."""
 
-    def test_server_defaults_parallel_off(self) -> None:
-        """use_parallel is False by default on new tab state."""
+    def test_server_defaults_parallel_on(self) -> None:
+        """use_parallel is True by default on new tab state."""
         server = VSCodeServer()
-        assert server._get_tab("0").use_parallel is False
+        assert server._get_tab("0").use_parallel is True
 
 
     def test_agent_run_receives_is_parallel(self) -> None:
