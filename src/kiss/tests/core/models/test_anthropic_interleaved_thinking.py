@@ -231,6 +231,7 @@ class TestInterleavedThinkingEnabled:
             _CAPTURED_HEADERS.clear()
 
         printer = BaseBrowserPrinter()
+        printer._thread_local.task_id = "interleaved-thinking-test"
         printer.start_recording()
         m = _build_model("claude-opus-4-7", anthropic_server, printer)
         m._create_message(m._build_create_kwargs())

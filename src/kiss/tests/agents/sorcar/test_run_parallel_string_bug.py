@@ -117,7 +117,10 @@ class TestRunParallelStringBug:
         agent.printer = printer
 
         try:
-            run_parallel("hello world", max_workers=0)  # type: ignore[arg-type]
+            # ``max_workers="0"`` is truthy in the closure, so it coerces to
+            # int(0) and surfaces ``ValueError`` from ``ThreadPoolExecutor``
+            # *after* the broadcast loop (the bug manifests in the loop).
+            run_parallel("hello world", max_workers="0")
         except (ValueError, TypeError):
             pass
 
