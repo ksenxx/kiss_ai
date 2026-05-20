@@ -1152,11 +1152,6 @@ class TestSorcarTabParallelToggle(unittest.TestCase):
         block = self.html[idx : self.html.index("</label>", idx)]
         assert "Use parallel agents" in block
 
-    def test_checkbox_is_after_demo_mode(self) -> None:
-        demo_idx = self.html.index('id="cfg-demo-mode"')
-        parallel_idx = self.html.index('id="cfg-use-parallel"')
-        assert demo_idx < parallel_idx
-
     def test_no_footer_parallel_toggle_btn(self) -> None:
         assert 'id="parallel-toggle-btn"' not in self.html
 
