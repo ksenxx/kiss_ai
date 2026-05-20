@@ -4082,6 +4082,29 @@
       });
     }
 
+    const remotePwToggleBtn = document.getElementById(
+      'cfg-remote-password-toggle',
+    );
+    if (remotePwToggleBtn) {
+      remotePwToggleBtn.addEventListener('click', () => {
+        const inp = document.getElementById('cfg-remote-password');
+        if (!inp) return;
+        const showing = inp.type === 'text';
+        inp.type = showing ? 'password' : 'text';
+        const eye = remotePwToggleBtn.querySelector('.icon-eye');
+        const eyeOff = remotePwToggleBtn.querySelector('.icon-eye-off');
+        if (eye) eye.style.display = showing ? '' : 'none';
+        if (eyeOff) eyeOff.style.display = showing ? 'none' : '';
+        remotePwToggleBtn.setAttribute(
+          'aria-pressed',
+          showing ? 'false' : 'true',
+        );
+        const lbl = showing ? 'Show password' : 'Hide password';
+        remotePwToggleBtn.setAttribute('aria-label', lbl);
+        remotePwToggleBtn.setAttribute('title', lbl);
+      });
+    }
+
     if (demoToggleBtn) {
       demoToggleBtn.addEventListener('change', () => {
         if (_demoActive && !demoToggleBtn.checked) {

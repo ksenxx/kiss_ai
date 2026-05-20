@@ -186,7 +186,13 @@ export function buildChatHtml(
         <div id="remote-url"></div>
         <div id="config-form">
           <label class="config-label">Remote password
-            <input type="text" id="cfg-remote-password" placeholder="Remote access password">
+            <div class="config-password-wrap">
+              <input type="password" id="cfg-remote-password" placeholder="Remote access password">
+              <button type="button" id="cfg-remote-password-toggle" class="config-password-toggle" aria-label="Show password" aria-pressed="false" title="Show password">
+                <svg class="icon-eye" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg>
+                <svg class="icon-eye-off" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:none;"><path d="M17.94 17.94A10.94 10.94 0 0 1 12 19c-7 0-11-7-11-7a19.7 19.7 0 0 1 4.22-5.06"/><path d="M9.9 4.24A10.94 10.94 0 0 1 12 4c7 0 11 7 11 7a19.7 19.7 0 0 1-3.16 4.19"/><path d="M14.12 14.12A3 3 0 0 1 9.88 9.88"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+              </button>
+            </div>
           </label>
           <label class="config-label">Max budget per task ($)
             <input type="number" id="cfg-max-budget" min="0" step="1" value="100">
