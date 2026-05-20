@@ -867,7 +867,7 @@
   const inputContainer = document.getElementById('input-container');
   const inputClearBtn = document.getElementById('input-clear-btn');
   const worktreeToggleBtn = document.getElementById('worktree-toggle-btn');
-  const parallelToggleBtn = document.getElementById('parallel-toggle-btn');
+  const parallelToggleBtn = document.getElementById('cfg-use-parallel');
   const demoToggleBtn = document.getElementById('cfg-demo-mode');
   const autocommitToggleBtn = document.getElementById('autocommit-toggle-btn');
   const taskPanel = document.getElementById('task-panel');
@@ -2789,8 +2789,7 @@
               else worktreeToggleBtn.classList.remove('active');
             }
             if (parallelToggleBtn) {
-              if (extra.is_parallel) parallelToggleBtn.classList.add('active');
-              else parallelToggleBtn.classList.remove('active');
+              parallelToggleBtn.checked = !!extra.is_parallel;
             }
             if (autocommitToggleBtn) {
               if (extra.auto_commit_mode)
@@ -2881,7 +2880,7 @@
         const sKey = ev.key;
         const sVal = ev.value;
         if (sKey === 'is_parallel' && parallelToggleBtn) {
-          parallelToggleBtn.classList.toggle('active', !!sVal);
+          parallelToggleBtn.checked = !!sVal;
         } else if (sKey === 'is_worktree' && worktreeToggleBtn) {
           worktreeToggleBtn.classList.toggle('active', !!sVal);
         } else if (sKey === 'model' && typeof sVal === 'string') {
@@ -4076,12 +4075,6 @@
         worktreeToggleBtn.classList.toggle('active');
       });
     }
-    if (parallelToggleBtn) {
-      parallelToggleBtn.addEventListener('click', () => {
-        parallelToggleBtn.classList.toggle('active');
-      });
-    }
-
     const remotePwToggleBtn = document.getElementById(
       'cfg-remote-password-toggle',
     );
@@ -4405,9 +4398,7 @@
           useWorktree: !!(
             worktreeToggleBtn && worktreeToggleBtn.classList.contains('active')
           ),
-          useParallel: !!(
-            parallelToggleBtn && parallelToggleBtn.classList.contains('active')
-          ),
+          useParallel: !!(parallelToggleBtn && parallelToggleBtn.checked),
           autoCommit: !!(
             autocommitToggleBtn &&
             autocommitToggleBtn.classList.contains('active')
@@ -4444,9 +4435,7 @@
       useWorktree: !!(
         worktreeToggleBtn && worktreeToggleBtn.classList.contains('active')
       ),
-      useParallel: !!(
-        parallelToggleBtn && parallelToggleBtn.classList.contains('active')
-      ),
+      useParallel: !!(parallelToggleBtn && parallelToggleBtn.checked),
       autoCommit: !!(
         autocommitToggleBtn && autocommitToggleBtn.classList.contains('active')
       ),
