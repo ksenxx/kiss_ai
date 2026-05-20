@@ -161,7 +161,11 @@ class ChatSorcarAgent(SorcarAgent):
         # the parent's ``run()`` calls ``_add_task`` and we are
         # inside the LLM agent loop now, so ``_last_task_id`` is
         # available.  Captured into a local so each sub-agent thread
-        # sees the parent id at spawn time.
+        # sees the parent id at spawn time.  We deliberately do NOT
+        # consult ``printer._thread_local.tab_id`` here: backend
+        # agents are agnostic of frontend tab ids — those are owned
+        # by the printer's per-task subscriber map and the extension
+        # layer.  Backend identity is the database ``task_id``.
         parent_task_id = self._last_task_id
         printer = self.printer
         broadcast = getattr(printer, "broadcast", None) if printer else None
@@ -194,7 +198,11 @@ class ChatSorcarAgent(SorcarAgent):
                 # tab subscribed to the parent task.  Each fanned-out
                 # copy is stamped with the subscriber's own ``tabId``
                 # — the frontend uses that as the parent placement
-                # reference.
+                # reference.  The ``tab_id`` field in this payload is
+                # the *frontend* tab id of the sub-agent's new tab —
+                # a frontend concept, distinct from the backend
+                # ``task_id`` minted by ``_add_task`` inside the
+                # sub-agent's own ``run()``.
                 broadcast({
                     "type": "openSubagentTab",
                     "tab_id": sub_tab_id,
