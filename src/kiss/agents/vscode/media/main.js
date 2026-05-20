@@ -4996,8 +4996,7 @@
 
       const textSpan = document.createElement('span');
       textSpan.className = 'sidebar-item-text';
-      textSpan.textContent =
-        title.length > 60 ? title.slice(0, 60) + '…' : title;
+      textSpan.textContent = title;
       div.appendChild(textSpan);
 
       const metrics = document.createElement('span');
