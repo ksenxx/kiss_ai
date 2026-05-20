@@ -1000,7 +1000,7 @@ body.remote-chat #welcome > #input-area {
   left: 0;
   top: 0;
   bottom: 0;
-  width: min(420px, 75vw);
+  width: 90vw;
   background: var(--bg2);
   border-right: 1px solid var(--border);
   transform: translateX(-100%);
