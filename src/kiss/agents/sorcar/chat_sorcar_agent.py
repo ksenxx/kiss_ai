@@ -55,22 +55,6 @@ class ChatSorcarAgent(SorcarAgent):
 
     def __init__(self, name: str) -> None:
         super().__init__(name)
-        self._chat_id: str = ""
-        self._last_task_id: int | None = None
-        # The most recent user task prompt seen by ``run()``.  Used
-        # by auto-commit code paths to include the user's intent in
-        # the generated commit message (see
-        # :func:`~kiss.agents.vscode.helpers.generate_commit_message_from_diff`).
-        # Empty string when the agent has not yet run any task.
-        self._last_user_prompt: str = ""
-        # Populated by ``_run_tasks_parallel`` on each sub-agent
-        # before it runs.  The single ``parent_task_id`` field links
-        # the sub-agent's ``task_history`` row back to the row of
-        # the parent task that spawned it.  The presence of this
-        # field on a row's ``extra.subagent`` payload is itself the
-        # signal that the row is a sub-agent task; no separate
-        # boolean is stored.  ``None`` on the top-level agent.
-        self._subagent_info: dict[str, object] | None = None
 
     @property
     def chat_id(self) -> str:
@@ -302,6 +286,23 @@ class ChatSorcarAgent(SorcarAgent):
         Returns:
             YAML string with 'success' and 'summary' keys.
         """
+        self._chat_id = ""
+        self._last_task_id: int | None = None
+        # The most recent user task prompt seen by ``run()``.  Used
+        # by auto-commit code paths to include the user's intent in
+        # the generated commit message (see
+        # :func:`~kiss.agents.vscode.helpers.generate_commit_message_from_diff`).
+        # Empty string when the agent has not yet run any task.
+        self._last_user_prompt: str = ""
+        # Populated by ``_run_tasks_parallel`` on each sub-agent
+        # before it runs.  The single ``parent_task_id`` field links
+        # the sub-agent's ``task_history`` row back to the row of
+        # the parent task that spawned it.  The presence of this
+        # field on a row's ``extra.subagent`` payload is itself the
+        # signal that the row is a sub-agent task; no separate
+        # boolean is stored.  ``None`` on the top-level agent.
+        self._subagent_info: dict[str, object] | None = None
+
         skip_persistence = kwargs.pop("_skip_persistence", False)
         # Frontend tab id that should be subscribed to this task's
         # event stream.  When provided, the printer's
