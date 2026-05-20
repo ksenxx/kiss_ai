@@ -200,6 +200,33 @@ _HISTORY_NOT_SUBAGENT = 'COALESCE(extra, \'\') NOT LIKE \'%"subagent"%\''
 _CLEAR_LAST_MODEL = "UPDATE model_usage SET is_last = 0 WHERE is_last = 1"
 
 
+def _is_failed_result(result: str) -> bool:
+    """Return True when the ``task_history.result`` text represents a
+    failed task that should be flagged with a red dot in the history
+    sidebar (``.sidebar-item-failed``).
+
+    Recognized failure markers:
+
+    * ``Task failed*`` — the standard in-process failure prefix
+      written by ``_save_task_result`` for ``task_error`` events.
+    * ``Agent Failed Abruptly`` — the sentinel inserted by
+      ``_add_task`` that survives only when the host process was
+      SIGKILL'd / OOM-killed / VS Code-reloaded mid-task before any
+      Python ``finally`` could run.
+    * ``Task terminated unexpectedly (process killed)`` — the rewrite
+      that ``_recover_orphaned_tasks`` applies to surviving sentinel
+      rows on fresh-server boot.
+
+    User-stopped runs (``Task stopped by user``) are intentionally
+    NOT marked failed here: the user explicitly halted them.
+    """
+    return (
+        result.startswith("Task failed")
+        or result == "Agent Failed Abruptly"
+        or result == "Task terminated unexpectedly (process killed)"
+    )
+
+
 def _init_tables(conn: sqlite3.Connection) -> None:
     """Create all tables and indexes."""
     conn.executescript("""

@@ -30,6 +30,7 @@ from kiss.agents.sorcar.persistence import (
     _delete_task,
     _get_adjacent_task_by_chat_id,
     _get_task_chat_id,
+    _is_failed_result,
     _load_chat_events_by_task_id,
     _load_frequent_tasks,
     _load_history,
@@ -311,10 +312,7 @@ class VSCodeServer(
                 "timestamp": entry.get("timestamp", 0),
                 "preview": task,
                 "has_events": has_events,
-                "failed": (
-                    result.startswith("Task failed")
-                    or result == "Agent Failed Abruptly"
-                ),
+                "failed": _is_failed_result(result),
                 "is_running": (
                     isinstance(entry_id, int)
                     and entry_id in running_task_ids
