@@ -1157,7 +1157,10 @@ body.remote-chat #welcome > #input-area {
   flex-wrap: wrap;
   white-space: normal;
   align-items: center;
-  row-gap: 4px;
+  row-gap: 8px;
+  padding-top: 18px;
+  padding-bottom: 18px;
+  min-height: 96px;
 }
 
 .running-item > .sidebar-item-text {
