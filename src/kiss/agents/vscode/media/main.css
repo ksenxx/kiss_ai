@@ -132,6 +132,19 @@ body {
 .config-checkbox input[type="checkbox"] { margin: 0; width: auto; }
 .config-divider { border-top: 1px solid var(--border); margin: 12px 0; }
 
+.config-password-wrap { position: relative; margin-top: 4px; }
+.config-password-wrap input { margin-top: 0 !important; padding-right: 32px !important; }
+
+.config-password-toggle {
+  position: absolute; top: 50%; right: 6px; transform: translateY(-50%);
+  display: flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; padding: 0;
+  background: transparent; border: none; color: var(--dim); cursor: pointer;
+  border-radius: 3px;
+}
+.config-password-toggle:hover { color: var(--fg); background: color-mix(in srgb, var(--fg) 8%, transparent); }
+.config-password-toggle:focus-visible { outline: 1px solid var(--accent); }
+
 
 
 #tab-list::-webkit-scrollbar { display: none; }
