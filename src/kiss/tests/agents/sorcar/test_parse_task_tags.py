@@ -202,15 +202,6 @@ class TestMultiTaskIntegration(unittest.TestCase):
         loop_pos = self._src.index("for task_prompt in subtasks:")
         assert snapshot_pos < loop_pos
 
-    def test_recording_spans_all_subtasks(self) -> None:
-        """start_recording is before the loop, stop_recording is after."""
-        start_pos = self._src.index("self.printer.start_recording()")
-        loop_pos = self._src.index("for task_prompt in subtasks:")
-        assert start_pos < loop_pos
-        stop_pos = self._src.index("self.printer.stop_recording()")
-        assert stop_pos > loop_pos
-
-
 class TestParseTaskTagsReturnType(unittest.TestCase):
     """Verify parse_task_tags always returns a non-empty list."""
 

@@ -15,11 +15,16 @@ import io
 from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 from kiss.core.print_to_console import ConsolePrinter
 
+_TASK_COUNTER = 0
+
 
 def _new_printers():
+    global _TASK_COUNTER
+    _TASK_COUNTER += 1
     buf = io.StringIO()
     console = ConsolePrinter(file=buf)
     browser = BaseBrowserPrinter()
+    browser._thread_local.task_id = f"test-tool-result-{_TASK_COUNTER}"
     browser.start_recording()
     return console, buf, browser
 

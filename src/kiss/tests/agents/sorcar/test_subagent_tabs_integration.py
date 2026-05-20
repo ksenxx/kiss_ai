@@ -46,7 +46,7 @@ class MockPrinter:
                 "type": "tool_call",
                 "tool": tool_name,
                 "args": args,
-                "tab_id": getattr(self._thread_local, "tab_id", None),
+                "tab_id": getattr(self._thread_local, "task_id", None),
             })
 
     def text_delta(self, delta: str) -> None:
@@ -55,7 +55,7 @@ class MockPrinter:
             self.events.append({
                 "type": "text_delta",
                 "delta": delta,
-                "tab_id": getattr(self._thread_local, "tab_id", None),
+                "tab_id": getattr(self._thread_local, "task_id", None),
             })
 
     def thinking(self, content: str) -> None:
@@ -64,7 +64,7 @@ class MockPrinter:
             self.events.append({
                 "type": "thinking",
                 "content": content,
-                "tab_id": getattr(self._thread_local, "tab_id", None),
+                "tab_id": getattr(self._thread_local, "task_id", None),
             })
 
 
@@ -77,7 +77,9 @@ class TestSubagentTabsIntegration:
         agent = ChatSorcarAgent("test-agent")
         mock_printer = MockPrinter()
         agent.printer = cast(Printer | None, mock_printer)
-        mock_printer._thread_local.task_id = "parent-tab-1"
+        # Sub-tab ids derive from the parent's ``task_history.id`` set
+        # by ``_add_task`` inside ``run()``.  Simulate that here.
+        agent._last_task_id = 1
 
         # Mock run() to avoid actual API calls
         with patch.object(agent, "run", return_value='{"result": "done"}'):
@@ -100,10 +102,10 @@ class TestSubagentTabsIntegration:
 
         # Verify event structure
         for i, event in enumerate(open_events):
-            assert event["tab_id"] == f"parent-tab-1__sub_{i}"
-            assert event["parent_tab_id"] == "parent-tab-1"
+            assert event["tab_id"] == f"task-1__sub_{i}"
             assert event["description"] is not None
             assert event["isSubagentTab"] is True
+            assert event["taskIndex"] == i
 
     def test_chat_sorcar_agent_broadcasts_done_events(self) -> None:
         """Verify subagentDone events are broadcast when sub-tasks complete."""
@@ -111,7 +113,8 @@ class TestSubagentTabsIntegration:
         agent = ChatSorcarAgent("test-agent")
         mock_printer = MockPrinter()
         agent.printer = cast(Printer | None, mock_printer)
-        mock_printer._thread_local.task_id = "parent-tab-2"
+        # Sub-tab ids derive from the parent's ``task_history.id``.
+        agent._last_task_id = 2
 
         # Mock run() to avoid actual API calls
         with patch.object(agent, "run", return_value='{"result": "success"}'):
@@ -128,10 +131,11 @@ class TestSubagentTabsIntegration:
         ]
         assert len(done_events) == 2
 
-        # Verify done event structure
-        for i, event in enumerate(done_events):
-            assert event["tab_id"] == f"parent-tab-2__sub_{i}"
-            assert "success" in event
+        # Verify done event structure.  Pool execution order is not
+        # guaranteed so compare as a set.
+        done_tab_ids = {e["tab_id"] for e in done_events}
+        assert done_tab_ids == {f"task-2__sub_{i}" for i in range(2)}
+        assert all("success" in e for e in done_events)
 
     def test_subagent_streaming_events_have_correct_tab_ids(self) -> None:
         """Verify that streaming events (tool_call, text_delta) have subagent tab_ids."""

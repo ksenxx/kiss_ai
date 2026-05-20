@@ -219,6 +219,7 @@ class TestVSCodeServerBranches:
         server.printer._thread_local.task_id = tab_id
         user_q: queue.Queue[str] = queue.Queue(maxsize=1)
         server._get_tab(tab_id).user_answer_queue = user_q
+        server.printer.subscribe_tab(tab_id, tab_id)
 
         def answer():
             time.sleep(0.1)

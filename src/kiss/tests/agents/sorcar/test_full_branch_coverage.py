@@ -148,6 +148,7 @@ class TestAwaitUserResponseLoop:
         server.printer._thread_local.task_id = "42"
         q: queue_mod.Queue[str] = queue_mod.Queue(maxsize=1)
         server._get_tab("42").user_answer_queue = q
+        server.printer.subscribe_tab("42", "42")
 
         def delayed_answer() -> None:
             time.sleep(1.0)

@@ -93,12 +93,12 @@ class TestA7PrinterOffsetsAreIsolated(unittest.TestCase):
         assert results["A"] == (100, 1.5, 5)
         assert results["B"] == (200, 2.5, 7)
 
-    def test_cleanup_tab_drops_offsets(self) -> None:
+    def test_cleanup_task_drops_offsets(self) -> None:
         server, _ = _make_server()
         printer = server.printer
         printer._thread_local.task_id = "A"
         printer.tokens_offset = 42
-        printer.cleanup_tab("A")
+        printer.cleanup_task("A")
         printer._thread_local.task_id = "A"
         assert printer.tokens_offset == 0
 
@@ -132,11 +132,11 @@ class TestB5CommitMessageCarriesTabId(unittest.TestCase):
         done = threading.Event()
         captured_tab_ids: list[object] = []
 
-        def stub() -> None:
-            captured_tab_ids.append(
-                getattr(server.printer._thread_local, "tab_id", None)
-            )
-            server.printer.broadcast({"type": "commitMessage", "message": "x"})
+        def stub(tab_id_arg: str = "") -> None:
+            captured_tab_ids.append(tab_id_arg)
+            server.printer.broadcast({
+                "type": "commitMessage", "message": "x", "tabId": tab_id_arg,
+            })
             done.set()
 
         server._generate_commit_message = stub  # type: ignore[assignment]

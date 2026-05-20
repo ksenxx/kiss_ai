@@ -58,8 +58,7 @@ def _install_capturing_run(
     """Replace ``ChatSorcarAgent.run`` with a stub that captures
     per-thread state instead of running the LLM.
 
-    Each invocation records, keyed by the sub-agent tab id resolved
-    from ``printer._thread_local.task_id``:
+    Each invocation records, keyed by the task prompt string:
 
       * ``stop_event``: the ``stop_event`` slot visible on the
         worker thread's ``printer._thread_local`` BEFORE any agent
@@ -89,9 +88,9 @@ def _install_capturing_run(
         assert printer is not None
         self.printer = printer
         tl = printer._thread_local
-        tab_id = getattr(tl, "tab_id", None) or "<no-tab>"
+        task_key = kwargs.get("prompt_template", "") or "<no-task>"
         stop_event = getattr(tl, "stop_event", None)
-        captured[tab_id] = {
+        captured[task_key] = {
             "stop_event": stop_event,
             "stop_event_is_set": (
                 stop_event.is_set() if stop_event is not None else None
@@ -137,16 +136,16 @@ class TestStopEventPropagationToSubagents:
 
         parent._run_tasks_parallel(["task-a", "task-b"])
 
-        sub_ids = sorted(captured.keys())
-        assert sub_ids == ["parent-tab__sub_0", "parent-tab__sub_1"], sub_ids
-        for sub_id in sub_ids:
-            ev = captured[sub_id]["stop_event"]
+        sub_keys = sorted(captured.keys())
+        assert sub_keys == ["task-a", "task-b"], sub_keys
+        for sub_key in sub_keys:
+            ev = captured[sub_key]["stop_event"]
             assert ev is parent_stop, (
-                f"Sub-agent {sub_id} did not see the parent's stop_event "
+                f"Sub-agent {sub_key} did not see the parent's stop_event "
                 f"(saw {ev!r}); fix must copy printer._thread_local.stop_event "
                 "into the worker thread before agent.run() is called."
             )
-            assert captured[sub_id]["stop_event_is_set"] is False
+            assert captured[sub_key]["stop_event_is_set"] is False
 
     def test_set_stop_event_aborts_subagent_via_check_stop(
         self, monkeypatch: pytest.MonkeyPatch,
@@ -180,7 +179,7 @@ class TestStopEventPropagationToSubagents:
             parent._run_tasks_parallel(["t1"])
 
         # The sub-agent saw the set stop_event before raising.
-        sub = captured["parent-stop-set__sub_0"]
+        sub = captured["t1"]
         assert sub["stop_event"] is parent_stop
         assert sub["stop_event_is_set"] is True
 
@@ -208,15 +207,15 @@ class TestStopEventPropagationToSubagents:
 
         parent._run_tasks_parallel(["t-outer"])
 
-        sub_id = "root__sub_0"
-        nested_id = "root__sub_0__sub_0"
-        assert sub_id in captured, sorted(captured.keys())
-        assert nested_id in captured, sorted(captured.keys())
+        sub_key = "t-outer"
+        nested_key = "nested"
+        assert sub_key in captured, sorted(captured.keys())
+        assert nested_key in captured, sorted(captured.keys())
 
-        assert captured[sub_id]["stop_event"] is parent_stop, (
+        assert captured[sub_key]["stop_event"] is parent_stop, (
             "Direct sub-agent did not inherit parent stop_event."
         )
-        assert captured[nested_id]["stop_event"] is parent_stop, (
+        assert captured[nested_key]["stop_event"] is parent_stop, (
             "Nested sub-sub-agent did not inherit parent stop_event; "
             "stop propagation must be transitive across thread-pool "
             "boundaries at every depth."
@@ -224,6 +223,6 @@ class TestStopEventPropagationToSubagents:
         # Different worker threads at each level — propagation is
         # cross-thread, not just same-thread reuse.
         assert (
-            captured[sub_id]["thread_ident"]
-            != captured[nested_id]["thread_ident"]
+            captured[sub_key]["thread_ident"]
+            != captured[nested_key]["thread_ident"]
         )
