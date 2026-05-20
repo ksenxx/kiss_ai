@@ -64,10 +64,13 @@ class TestSidebarTabsMarkup(unittest.TestCase):
     def test_extension_sidebar_has_tab_buttons_and_panels(self) -> None:
         html = _ext_html()
         for el in (
+            'id="sidebar-tab-running"',
             'id="sidebar-tab-history"',
             'id="sidebar-tab-frequent"',
+            'id="sidebar-tab-running-panel"',
             'id="sidebar-tab-history-panel"',
             'id="sidebar-tab-frequent-panel"',
+            'id="running-list"',
             'id="history-list"',
             'id="frequent-list"',
         ):
@@ -76,14 +79,33 @@ class TestSidebarTabsMarkup(unittest.TestCase):
     def test_webapp_sidebar_has_tab_buttons_and_panels(self) -> None:
         html = _build_html()
         for el in (
+            'id="sidebar-tab-running"',
             'id="sidebar-tab-history"',
             'id="sidebar-tab-frequent"',
+            'id="sidebar-tab-running-panel"',
             'id="sidebar-tab-history-panel"',
             'id="sidebar-tab-frequent-panel"',
+            'id="running-list"',
             'id="history-list"',
             'id="frequent-list"',
         ):
             self.assertIn(el, html, f"{el} missing from webapp HTML")
+
+    def test_running_tab_is_first_in_extension(self) -> None:
+        html = _ext_html()
+        running_pos = html.index('id="sidebar-tab-running"')
+        history_pos = html.index('id="sidebar-tab-history"')
+        frequent_pos = html.index('id="sidebar-tab-frequent"')
+        self.assertLess(running_pos, history_pos)
+        self.assertLess(history_pos, frequent_pos)
+
+    def test_running_tab_is_first_in_webapp(self) -> None:
+        html = _build_html()
+        running_pos = html.index('id="sidebar-tab-running"')
+        history_pos = html.index('id="sidebar-tab-history"')
+        frequent_pos = html.index('id="sidebar-tab-frequent"')
+        self.assertLess(running_pos, history_pos)
+        self.assertLess(history_pos, frequent_pos)
 
 
 # ── Node.js-driven behaviour tests ───────────────────────────────────────
@@ -197,9 +219,10 @@ var _ids = [
     'merge-accept-file-btn', 'merge-reject-file-btn',
     'merge-prev-btn', 'merge-next-btn', 'merge-file-label',
     'merge-counter', 'merge-accept-btn', 'merge-reject-btn',
-    'sidebar-tab-history', 'sidebar-tab-frequent',
-    'sidebar-tab-history-panel', 'sidebar-tab-frequent-panel',
-    'frequent-list',
+    'sidebar-tab-running', 'sidebar-tab-history', 'sidebar-tab-frequent',
+    'sidebar-tab-running-panel', 'sidebar-tab-history-panel',
+    'sidebar-tab-frequent-panel',
+    'running-list', 'frequent-list',
 ];
 for (var i = 0; i < _ids.length; i++) _elements[_ids[i]] = _makeEl('div');
 
@@ -274,8 +297,10 @@ var console = { log: function(){}, warn: function(){}, error: function(){} };
 _JS_TEST = r"""
 var menuBtn = _elements['menu-btn'];
 var sidebar = _elements['sidebar'];
+var tabRunningBtn = _elements['sidebar-tab-running'];
 var tabHistoryBtn = _elements['sidebar-tab-history'];
 var tabFrequentBtn = _elements['sidebar-tab-frequent'];
+var runningPanel = _elements['sidebar-tab-running-panel'];
 var historyPanel = _elements['sidebar-tab-history-panel'];
 var frequentPanel = _elements['sidebar-tab-frequent-panel'];
 
@@ -284,8 +309,10 @@ function _snapshot(label) {
         label: label,
         posted: _postedMessages.map(function(m) { return m.type; }),
         sidebarOpen: sidebar.classList.contains('open'),
+        runningDisplay: runningPanel.style.display,
         historyDisplay: historyPanel.style.display,
         frequentDisplay: frequentPanel.style.display,
+        runningActive: tabRunningBtn.classList.contains('active'),
         historyActive: tabHistoryBtn.classList.contains('active'),
         frequentActive: tabFrequentBtn.classList.contains('active'),
     };
@@ -293,20 +320,26 @@ function _snapshot(label) {
 
 var snapshots = [];
 
-// 1. Click menu-btn → open sidebar with History tab active.
+// 1. Click menu-btn → open sidebar with Running tab active (the
+//    first in-panel tab).
 _postedMessages.length = 0;
 _fire(menuBtn, 'click', {});
-snapshots.push(_snapshot('afterHistoryBtnOpen'));
+snapshots.push(_snapshot('afterMenuBtnOpen'));
 
-// 2. Click frequent in-panel tab → show frequent panel.
+// 2. Click history in-panel tab → show history panel.
+_postedMessages.length = 0;
+_fire(tabHistoryBtn, 'click', {});
+snapshots.push(_snapshot('afterHistoryTab'));
+
+// 3. Click frequent in-panel tab → show frequent panel.
 _postedMessages.length = 0;
 _fire(tabFrequentBtn, 'click', {});
 snapshots.push(_snapshot('afterFrequentTab'));
 
-// 3. Click history in-panel tab → back to history panel.
+// 4. Click running in-panel tab → back to running panel.
 _postedMessages.length = 0;
-_fire(tabHistoryBtn, 'click', {});
-snapshots.push(_snapshot('afterHistoryTab'));
+_fire(tabRunningBtn, 'click', {});
+snapshots.push(_snapshot('afterRunningTab'));
 
 process.stdout.write(JSON.stringify(snapshots) + '\n');
 """
@@ -334,38 +367,58 @@ class TestSidebarTabsBehaviour(unittest.TestCase):
         data: list[dict] = json.loads(result.stdout.strip().splitlines()[-1])
         return data
 
-    def test_history_btn_opens_sidebar_on_history_tab(self) -> None:
+    def test_menu_btn_opens_sidebar_on_running_tab(self) -> None:
         snaps = self._run()
         s = snaps[0]
         self.assertTrue(s["sidebarOpen"], "sidebar must open when menu-btn is clicked")
-        self.assertIn("getHistory", s["posted"])
-        self.assertTrue(s["historyActive"], "History tab must be active")
+        self.assertIn("getRunningTasks", s["posted"])
+        self.assertTrue(s["runningActive"], "Running tab must be active")
+        self.assertFalse(s["historyActive"], "History tab must not be active")
         self.assertFalse(s["frequentActive"], "Frequent tab must not be active")
         self.assertNotEqual(
-            s["historyDisplay"], "none", "History panel must be visible"
+            s["runningDisplay"], "none", "Running panel must be visible",
         )
         self.assertEqual(
-            s["frequentDisplay"], "none", "Frequent panel must be hidden"
+            s["historyDisplay"], "none", "History panel must be hidden",
         )
+        self.assertEqual(
+            s["frequentDisplay"], "none", "Frequent panel must be hidden",
+        )
+
+    def test_history_tab_switches_panel_and_fetches_history(self) -> None:
+        snaps = self._run()
+        s = snaps[1]
+        self.assertTrue(s["sidebarOpen"])
+        self.assertIn("getHistory", s["posted"])
+        self.assertTrue(s["historyActive"])
+        self.assertFalse(s["runningActive"])
+        self.assertFalse(s["frequentActive"])
+        self.assertNotEqual(s["historyDisplay"], "none")
+        self.assertEqual(s["runningDisplay"], "none")
+        self.assertEqual(s["frequentDisplay"], "none")
 
     def test_frequent_tab_switches_panel_and_fetches_tasks(self) -> None:
         snaps = self._run()
-        s = snaps[1]
+        s = snaps[2]
         self.assertTrue(s["sidebarOpen"])
         self.assertIn("getFrequentTasks", s["posted"])
         self.assertTrue(s["frequentActive"])
         self.assertFalse(s["historyActive"])
+        self.assertFalse(s["runningActive"])
         self.assertEqual(s["historyDisplay"], "none")
+        self.assertEqual(s["runningDisplay"], "none")
         self.assertNotEqual(s["frequentDisplay"], "none")
 
-    def test_history_tab_switches_back_and_fetches_history(self) -> None:
+    def test_running_tab_switches_back_and_fetches_running(self) -> None:
         snaps = self._run()
-        s = snaps[2]
+        s = snaps[3]
         self.assertTrue(s["sidebarOpen"])
-        self.assertIn("getHistory", s["posted"])
-        self.assertTrue(s["historyActive"])
+        self.assertIn("getRunningTasks", s["posted"])
+        self.assertTrue(s["runningActive"])
+        self.assertFalse(s["historyActive"])
         self.assertFalse(s["frequentActive"])
-        self.assertNotEqual(s["historyDisplay"], "none")
+        self.assertNotEqual(s["runningDisplay"], "none")
+        self.assertEqual(s["historyDisplay"], "none")
         self.assertEqual(s["frequentDisplay"], "none")
 
 

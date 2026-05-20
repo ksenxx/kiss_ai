@@ -758,6 +758,12 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         });
         break;
 
+      case 'getRunningTasks':
+        this._getClient().sendCommand({
+          type: 'getRunningTasks',
+        });
+        break;
+
       case 'deleteTask':
         this._getClient().sendCommand({
           type: 'deleteTask',

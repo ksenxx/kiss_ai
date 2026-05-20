@@ -451,11 +451,14 @@ class TestSettingsTabBehaviour(unittest.TestCase):
         data: list[dict] = json.loads(result.stdout.strip().splitlines()[-1])
         return data
 
-    def test_history_btn_opens_sidebar_history_active(self) -> None:
+    def test_menu_btn_opens_sidebar_running_active(self) -> None:
         snaps = self._run()
         s = snaps[0]
         self.assertTrue(s["sidebarOpen"])
-        self.assertTrue(s["historyActive"])
+        # The Running tab is the first in-panel tab; opening the
+        # sidebar via #menu-btn lands on Running, NOT History or
+        # Settings.
+        self.assertFalse(s["historyActive"])
         self.assertFalse(s["settingsActive"])
         self.assertEqual(s["settingsDisplay"], "none")
 
@@ -497,11 +500,14 @@ class TestSettingsTabBehaviour(unittest.TestCase):
         )
         self.assertFalse(s["sidebarOpen"], "sidebar must close")
 
-    def test_reopen_after_close_resets_to_history(self) -> None:
+    def test_reopen_after_close_resets_to_running(self) -> None:
         snaps = self._run()
         s = snaps[4]
         self.assertTrue(s["sidebarOpen"])
-        self.assertTrue(s["historyActive"])
+        # Re-opening the sidebar always starts on the Running tab
+        # (the first in-panel tab), regardless of which tab was
+        # active before closing.
+        self.assertFalse(s["historyActive"])
         self.assertFalse(s["settingsActive"])
 
     def test_switch_settings_to_frequent_saves_config(self) -> None:
