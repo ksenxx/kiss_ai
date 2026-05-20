@@ -435,7 +435,7 @@ class VSCodeServer(
                     if agent is not None else 0
                 budget = float(getattr(agent, "budget_used", 0.0) or 0.0) \
                     if agent is not None else 0.0
-                steps = int(getattr(agent, "step_count", 0) or 0) \
+                steps = int(getattr(agent, "total_steps", 0) or 0) \
                     if agent is not None else 0
                 tasks.append({
                     "tab_id": tab.tab_id,
