@@ -129,6 +129,7 @@ Rules: no code snippets or symbol names in entries; skip one-off task details; r
 - Do not write structural tests which assert on the source code.
 - After modifications, run only the impacted tests.
 - To confirm race conditions: add a random sleep (\<0.1s) before the suspected racing statements.
+- **CRITICAL**: Running all tests and collecting testing information is time consuming.  So split the set of tests equally by the number of test methods into number of cores - 2 and run all splits in parallel using run_parallel tool.
   </testing>
 
 \<pre_finish_verification>
