@@ -199,10 +199,6 @@ export function buildChatHtml(
             Use web browser
           </label>
           <label class="config-label config-checkbox">
-            <input type="checkbox" id="cfg-demo-mode">
-            Demo mode
-          </label>
-          <label class="config-label config-checkbox">
             <input type="checkbox" id="cfg-auto-commit" checked>
             Auto commit
             <button id="autocommit-btn" type="button" data-tooltip="git commit">
@@ -212,6 +208,10 @@ export function buildChatHtml(
           <label class="config-label config-checkbox">
             <input type="checkbox" id="cfg-use-parallel" checked>
             Use parallel agents
+          </label>
+          <label class="config-label config-checkbox">
+            <input type="checkbox" id="cfg-demo-mode">
+            Demo mode
           </label>
 
           <div class="config-divider"></div>
