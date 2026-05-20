@@ -259,16 +259,41 @@ class ChatSorcarAgent(SorcarAgent):
         printer = kwargs.get("printer") or getattr(self, "printer", None)
         task_key = str(task_id)
         if printer is not None:
+            # IMPORTANT: set the thread-local ``task_id`` BEFORE
+            # emitting the ``new_tab`` broadcast.  ``_run_tasks_parallel``
+            # reuses ``ThreadPoolExecutor`` worker threads across
+            # multiple sub-agents (e.g. when ``max_workers`` is less
+            # than the number of tasks); without setting this first,
+            # the ``new_tab`` event — and any other early broadcast —
+            # would be ``_inject_task_id``-stamped with the PREVIOUS
+            # sub-agent's task id that the worker thread still
+            # carries, mis-routing it through the wrong tab's stream.
+            tl = getattr(printer, "_thread_local", None)
+            if tl is not None:
+                tl.task_id = task_key
             if self._subagent_info is not None:
                 broadcast = getattr(printer, "broadcast", None)
                 if broadcast is not None:
                     try:
-                        broadcast({"type": "new_tab", "task_id": int(task_id)})
+                        # ``taskId=""`` keeps this a global system
+                        # event so it reaches every connected client —
+                        # the frontend needs the broadcast to allocate
+                        # the new tab; only after allocation does it
+                        # subscribe to ``task_id``'s stream.  Without
+                        # the explicit empty ``taskId``,
+                        # ``_inject_task_id`` would stamp the event
+                        # with the just-set ``task_key`` and
+                        # ``WebPrinter.broadcast`` would fan it out
+                        # only to subscribers of that task — of which
+                        # there are none until the frontend has
+                        # received the new_tab and subscribed.
+                        broadcast({
+                            "type": "new_tab",
+                            "task_id": int(task_id),
+                            "taskId": "",
+                        })
                     except Exception:
                         pass
-            tl = getattr(printer, "_thread_local", None)
-            if tl is not None:
-                tl.task_id = task_key
             persist_map = getattr(printer, "_persist_agents", None)
             if persist_map is not None:
                 persist_map[task_key] = self
@@ -302,6 +327,15 @@ class ChatSorcarAgent(SorcarAgent):
                         stop_rec()
                     except Exception:
                         pass
+                # Clear the thread-local ``task_id`` so the next
+                # sub-agent that runs on this same (reused)
+                # ``ThreadPoolExecutor`` worker thread does NOT
+                # inherit our task id and mis-route its broadcasts.
+                # See the symmetric note above where we set this
+                # before emitting ``new_tab``.
+                tl = getattr(printer, "_thread_local", None)
+                if tl is not None and getattr(tl, "task_id", "") == task_key:
+                    tl.task_id = ""
             if not skip_persistence:
                 _save_task_result(task_id=task_id, result=result_summary)
                 from kiss._version import __version__
