@@ -35,7 +35,6 @@ import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import (
     _load_chat_events_by_task_id,
-    _load_history,
 )
 from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 
@@ -182,10 +181,18 @@ class TestSubagentEventsPersisted:
 
             # Each sub-agent's row must have has_events=1 AND its
             # events table must contain the emitted text_delta.
-            history = _load_history(limit=50, offset=0)
+            # Note: _load_history filters out sub-agent rows via
+            # _HISTORY_NOT_SUBAGENT, so we query the DB directly here
+            # to find them.
+            db = th._get_db()
+            rows = db.execute(
+                "SELECT id, extra, has_events FROM task_history "
+                "WHERE COALESCE(extra, '') LIKE '%\"subagent\"%' "
+                "ORDER BY id ASC"
+            ).fetchall()
             sub_rows = [
-                h for h in history
-                if "subagent" in str(h.get("extra") or "")
+                {"id": r[0], "extra": r[1], "has_events": r[2]}
+                for r in rows
             ]
             assert len(sub_rows) == 3, f"expected 3 sub-agent rows, got {sub_rows}"
             for h in sub_rows:
