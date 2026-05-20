@@ -1609,7 +1609,7 @@ width=device-width,initial-scale=1,maximum-scale=1">
         </div>
         <div id="input-footer">
           <div id="model-picker">
-            <button id="menu-btn" data-tooltip="Advanced options">
+            <button id="menu-btn">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
                stroke="currentColor" stroke-width="2" stroke-linecap="round"
                stroke-linejoin="round">
