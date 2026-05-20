@@ -21,6 +21,7 @@ from kiss.agents.sorcar.persistence import (
     _save_task_extra,
     _save_task_result,
 )
+from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent, _coerce_tasks
 
 MAX_TASKS = 10
@@ -136,6 +137,14 @@ class ChatSorcarAgent(SorcarAgent):
             if chat_id:
                 agent.resume_chat_by_id(chat_id)
             agent._subagent_info = {"parent_task_id": parent_task_id}
+            sub_tab_id = f"task-{parent_task_id}__sub_{idx}"
+            sub_state = _RunningAgentState(sub_tab_id, model or "")
+            sub_state.chat_id = chat_id
+            sub_state.is_subagent = True
+            sub_state.parent_task_id = parent_task_id
+            sub_state.is_task_active = True
+            sub_state.agent = agent  # type: ignore[assignment]
+            _RunningAgentState.running_agent_states[sub_tab_id] = sub_state
             try:
                 result: str = agent.run(
                     prompt_template=task,
@@ -157,6 +166,7 @@ class ChatSorcarAgent(SorcarAgent):
                     int(getattr(agent, "total_tokens_used", 0) or 0),
                     int(getattr(agent, "total_steps", 0) or 0),
                 )
+                _RunningAgentState.running_agent_states.pop(sub_tab_id, None)
 
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             results = list(pool.map(_run_single, enumerate(tasks)))
@@ -238,6 +248,14 @@ class ChatSorcarAgent(SorcarAgent):
         )
         self._last_task_id = task_id
         ChatSorcarAgent.running_agents[task_id] = self
+        # Mirror this run's task_history_id onto the per-thread
+        # sub-agent state so ``VSCodeServer._reattach_running_chat``
+        # can disambiguate the sub-agent from its parent by task id.
+        if self._subagent_info is not None:
+            for state in _RunningAgentState.running_agent_states.values():
+                if state.agent is self:
+                    state.task_history_id = task_id
+                    break
         printer = kwargs.get("printer") or getattr(self, "printer", None)
         task_key = str(task_id)
         if printer is not None:
