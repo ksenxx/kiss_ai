@@ -185,17 +185,11 @@ export function buildChatHtml(
         <div class="sidebar-hdr">Sorcar Configuration${version ? ' ' + version : ''}</div>
         <div id="remote-url"></div>
         <div id="config-form">
+          <label class="config-label">Remote password
+            <input type="text" id="cfg-remote-password" placeholder="Remote access password">
+          </label>
           <label class="config-label">Max budget per task ($)
             <input type="number" id="cfg-max-budget" min="0" step="1" value="100">
-          </label>
-          <label class="config-label">Custom endpoint (local model)
-            <input type="text" id="cfg-custom-endpoint" placeholder="http://localhost:8080/v1">
-          </label>
-          <label class="config-label">Custom API key
-            <input type="text" id="cfg-custom-api-key" placeholder="Optional API key for custom endpoint">
-          </label>
-          <label class="config-label">Custom headers
-            <textarea id="cfg-custom-headers" rows="2" placeholder="Key:Value (one per line)"></textarea>
           </label>
           <label class="config-label config-checkbox">
             <input type="checkbox" id="cfg-use-web-browser" checked>
@@ -204,9 +198,6 @@ export function buildChatHtml(
           <label class="config-label config-checkbox">
             <input type="checkbox" id="cfg-demo-mode">
             Demo mode
-          </label>
-          <label class="config-label">Remote password
-            <input type="text" id="cfg-remote-password" placeholder="Remote access password">
           </label>
           <div class="config-divider"></div>
           <div class="sidebar-hdr" style="margin-top:8px;">API Keys</div>
@@ -227,6 +218,15 @@ export function buildChatHtml(
           </label>
           <label class="config-label">MiniMax API Key
             <input type="text" id="cfg-key-MINIMAX_API_KEY" placeholder="Enter MiniMax API key">
+          </label>
+          <label class="config-label">Custom endpoint (local model)
+            <input type="text" id="cfg-custom-endpoint" placeholder="http://localhost:8080/v1">
+          </label>
+          <label class="config-label">Custom API key
+            <input type="text" id="cfg-custom-api-key" placeholder="Optional API key for custom endpoint">
+          </label>
+          <label class="config-label">Custom headers
+            <textarea id="cfg-custom-headers" rows="2" placeholder="Key:Value (one per line)"></textarea>
           </label>
         </div>
       </div>
