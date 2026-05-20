@@ -371,8 +371,42 @@ class _TaskRunnerMixin:
                     "step_count": tab.agent.step_count,
                 })
                 break
-        except BaseException:  # pragma: no cover — async interrupt before inner try
-            task_end_event = task_end_event or {"type": "task_stopped"}
+        except BaseException as _outer_exc:
+            # Catches every flow that the inner per-subtask handlers
+            # do NOT cover:
+            #
+            # * ``BaseException`` subclasses that are not ``Exception``
+            #   and not ``KeyboardInterrupt`` (``SystemExit``,
+            #   ``GeneratorExit``, ``asyncio.CancelledError`` on
+            #   3.11+, etc.) propagated out of ``tab.agent.run``.  The
+            #   inner ``try`` does not match them and Python unwinds
+            #   straight through to here, leaving ``result_summary``
+            #   at its initial ``"Agent Failed Abruptly"`` sentinel.
+            # * Any interrupt that arrives BETWEEN ``try:`` and the
+            #   for-loop (e.g. ``_force_stop_thread`` raising
+            #   ``KeyboardInterrupt`` via
+            #   ``PyThreadState_SetAsyncExc``).
+            #
+            # Without this rewrite the cleanup finally would persist
+            # the sentinel string into ``task_history.result``, which
+            # the history sidebar surfaces verbatim as "Agent Failed
+            # Abruptly" — the bug we are fixing.  When the inner
+            # handlers already produced a meaningful
+            # ``result_summary`` (e.g. broadcast inside the loop
+            # raised) we preserve theirs.
+            if result_summary == "Agent Failed Abruptly":
+                if isinstance(_outer_exc, KeyboardInterrupt):
+                    result_summary = "Task stopped by user"
+                    task_end_event = task_end_event or {"type": "task_stopped"}
+                else:
+                    _exc_name = type(_outer_exc).__name__
+                    result_summary = f"Task failed: {_exc_name}: {_outer_exc}"
+                    task_end_event = task_end_event or {
+                        "type": "task_error",
+                        "text": f"{_exc_name}: {_outer_exc}",
+                    }
+            else:
+                task_end_event = task_end_event or {"type": "task_stopped"}
         finally:
             try:
                 with self._state_lock:

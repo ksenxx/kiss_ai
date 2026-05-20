@@ -582,6 +582,77 @@ def _resolve_task_id(
     return _most_recent_task_id(db, task)
 
 
+def _recover_orphaned_tasks(active_task_ids: set[int]) -> int:
+    """Replace the ``"Agent Failed Abruptly"`` sentinel on dead rows.
+
+    The sentinel is written by :func:`_add_task` at task-creation
+    time and is supposed to be overwritten by
+    :func:`_save_task_result` from ``_TaskRunnerMixin._run_task_inner``'s
+    cleanup ``finally``.  When the host process is killed externally
+    (SIGKILL, VS Code extension reload, OOM) mid-task the Python
+    ``finally`` never runs and the sentinel survives in the history
+    sidebar verbatim as "Agent Failed Abruptly".  Catching the
+    in-process ``BaseException`` variants in the task runner cannot
+    cover this case because no Python code runs to catch anything.
+
+    The remedy is a startup-time sweep: on every fresh ``VSCodeServer``
+    instantiation (one per Python process) we scan ``task_history``
+    for any row that still carries the sentinel AND whose id is not
+    in *active_task_ids* (the currently-running tasks in THIS
+    process), and rewrite ``result`` to a diagnostic message that
+    truthfully describes what happened.
+
+    Args:
+        active_task_ids: Row ids that are still being processed in
+            the current process and must therefore NOT be rewritten.
+            Pass an empty set at fresh-server startup — by then any
+            row carrying the sentinel must belong to a prior,
+            now-dead process.
+
+    Returns:
+        The number of rows whose ``result`` column was rewritten.
+    """
+    db = _get_db()
+    with _rw_lock.write_lock():
+        if active_task_ids:
+            # Inline the ids; SQLite has a hard limit on bound
+            # parameters (~999) but we never have that many live
+            # tasks, and the ids are integers so there is no
+            # injection surface.
+            placeholders = ",".join(str(int(t)) for t in active_task_ids)
+            sql = (
+                "UPDATE task_history "
+                "SET result = ? "
+                "WHERE result = ? "
+                f"AND id NOT IN ({placeholders})"
+            )
+            cursor = db.execute(
+                sql,
+                (
+                    "Task terminated unexpectedly (process killed)",
+                    "Agent Failed Abruptly",
+                ),
+            )
+        else:
+            cursor = db.execute(
+                "UPDATE task_history "
+                "SET result = ? "
+                "WHERE result = ?",
+                (
+                    "Task terminated unexpectedly (process killed)",
+                    "Agent Failed Abruptly",
+                ),
+            )
+        rowcount = cursor.rowcount or 0
+        db.commit()
+    if rowcount:
+        # Updated rows could belong to any chat — clear the entire
+        # autocomplete chat-context cache so stale entries don't
+        # surface a stale "Agent Failed Abruptly" line.
+        _invalidate_chat_context_cache("")
+    return rowcount
+
+
 def _save_task_result(
     result: str,
     task_id: int | None = None,

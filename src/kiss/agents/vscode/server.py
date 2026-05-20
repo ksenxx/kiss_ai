@@ -37,6 +37,7 @@ from kiss.agents.sorcar.persistence import (
     _load_latest_chat_events_by_chat_id,
     _load_model_usage,
     _load_subagent_rows_by_parent_task_id,
+    _recover_orphaned_tasks,
     _search_history,
 )
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState, parse_task_tags
@@ -99,6 +100,20 @@ class VSCodeServer(
         # transitions that span both the dict and individual
         # ``_RunningAgentState`` fields.
         _RunningAgentState.running_agent_states.clear()
+        # Sweep up "Agent Failed Abruptly" rows left behind by a prior
+        # process that was killed mid-task (SIGKILL / VS Code reload /
+        # OOM) — the Python ``finally`` in ``_TaskRunnerMixin`` cannot
+        # run when the host process dies, so the only way to clear
+        # the sentinel from those rows is here, on every fresh
+        # server boot.  At this point ``running_agent_states`` has
+        # just been cleared so no task in THIS process is active, and
+        # we pass an empty active set.
+        try:
+            _recover_orphaned_tasks(set())
+        except Exception:  # pragma: no cover — best-effort sweep
+            logger.exception(
+                "orphan-task recovery sweep failed; continuing startup",
+            )
         self.work_dir = os.environ.get("KISS_WORKDIR", os.getcwd())
         persisted = _load_last_model()
         self._default_model = (
