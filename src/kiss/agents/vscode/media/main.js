@@ -844,11 +844,15 @@
   const askUserModal = document.getElementById('ask-user-modal');
   const askUserSlot = document.getElementById('ask-user-slot');
 
-  // Sidebar tab elements (History / Frequent / Settings live inside
-  // #sidebar — there is no separate config sidebar).
+  // Sidebar tab elements (Running / History / Frequent / Settings
+  // live inside #sidebar — there is no separate config sidebar).
+  const sidebarTabRunningBtn = document.getElementById('sidebar-tab-running');
   const sidebarTabHistoryBtn = document.getElementById('sidebar-tab-history');
   const sidebarTabFrequentBtn = document.getElementById('sidebar-tab-frequent');
   const sidebarTabSettingsBtn = document.getElementById('sidebar-tab-settings');
+  const sidebarTabRunningPanel = document.getElementById(
+    'sidebar-tab-running-panel',
+  );
   const sidebarTabHistoryPanel = document.getElementById(
     'sidebar-tab-history-panel',
   );
@@ -859,8 +863,13 @@
     'sidebar-tab-settings-panel',
   );
   const frequentList = document.getElementById('frequent-list');
+  const runningList = document.getElementById('running-list');
   // Currently active sub-tab inside #sidebar.
-  let currentSidebarTab = 'history';
+  let currentSidebarTab = 'running';
+  // 5-second poll timer for the Running tab.  Started in
+  // switchSidebarTab('running') and cleared when leaving the tab so
+  // we never poll while invisible.
+  let runningPollTimer = null;
   const autocommitBtn = document.getElementById('autocommit-btn');
   const waitSpinner = document.getElementById('wait-spinner');
   const ghostOverlay = document.getElementById('ghost-overlay');
@@ -2514,6 +2523,9 @@
         break;
       case 'frequentTasks':
         renderFrequentTasks(ev.tasks || []);
+        break;
+      case 'runningTasks':
+        renderRunningTasks(ev.tasks || []);
         break;
       case 'files':
         renderAutocomplete(ev.files || []);
@@ -4197,13 +4209,14 @@
     function toggleHistorySidebar() {
       if (
         sidebar.classList.contains('open') &&
-        sidebarTabHistoryBtn.classList.contains('active')
+        sidebarTabRunningBtn &&
+        sidebarTabRunningBtn.classList.contains('active')
       ) {
         closeSidebar();
       } else {
         sidebar.classList.add('open');
         sidebarOverlay.classList.add('open');
-        switchSidebarTab('history');
+        switchSidebarTab('running');
       }
     }
     if (menuBtn) {
@@ -4211,6 +4224,11 @@
     }
     sidebarClose.addEventListener('click', closeSidebar);
     sidebarOverlay.addEventListener('click', closeSidebar);
+    if (sidebarTabRunningBtn) {
+      sidebarTabRunningBtn.addEventListener('click', () => {
+        switchSidebarTab('running');
+      });
+    }
     if (sidebarTabHistoryBtn) {
       sidebarTabHistoryBtn.addEventListener('click', () => {
         switchSidebarTab('history');
@@ -4871,20 +4889,36 @@
   }
 
   /**
-   * Show one of the in-panel sidebar tabs ("history", "frequent", or
-   * "settings") and trigger the matching backend fetch.  When switching
-   * *away* from the Settings tab while its form is populated, the form
-   * is flushed via ``saveConfig`` first.  Toggles the ``.active`` class
-   * on the tab buttons and the ``display`` of the panels.
+   * Show one of the in-panel sidebar tabs ("running", "history",
+   * "frequent", or "settings") and trigger the matching backend
+   * fetch.  When switching *away* from the Settings tab while its
+   * form is populated, the form is flushed via ``saveConfig`` first.
+   * Toggles the ``.active`` class on the tab buttons and the
+   * ``display`` of the panels.  When entering the Running tab,
+   * starts a 5s ``setInterval`` that re-requests
+   * ``getRunningTasks`` until the user navigates away (at which
+   * point the timer is cleared so we never poll while invisible).
    */
   function switchSidebarTab(tab) {
     // Save settings form if leaving the Settings tab.
     if (currentSidebarTab === 'settings' && tab !== 'settings') {
       saveSettingsIfPopulated();
     }
+    // Stop the Running-tab poll when leaving the Running tab so we
+    // never keep polling in the background.
+    if (currentSidebarTab === 'running' && tab !== 'running') {
+      if (runningPollTimer !== null) {
+        clearInterval(runningPollTimer);
+        runningPollTimer = null;
+      }
+    }
+    const isRunning = tab === 'running';
     const isHistory = tab === 'history';
     const isFrequent = tab === 'frequent';
     const isSettings = tab === 'settings';
+    if (sidebarTabRunningBtn) {
+      sidebarTabRunningBtn.classList.toggle('active', isRunning);
+    }
     if (sidebarTabHistoryBtn) {
       sidebarTabHistoryBtn.classList.toggle('active', isHistory);
     }
@@ -4893,6 +4927,9 @@
     }
     if (sidebarTabSettingsBtn) {
       sidebarTabSettingsBtn.classList.toggle('active', isSettings);
+    }
+    if (sidebarTabRunningPanel) {
+      sidebarTabRunningPanel.style.display = isRunning ? '' : 'none';
     }
     if (sidebarTabHistoryPanel) {
       sidebarTabHistoryPanel.style.display = isHistory ? '' : 'none';
@@ -4904,7 +4941,14 @@
       sidebarTabSettingsPanel.style.display = isSettings ? '' : 'none';
     }
     currentSidebarTab = tab;
-    if (isFrequent) {
+    if (isRunning) {
+      vscode.postMessage({type: 'getRunningTasks'});
+      if (runningPollTimer === null) {
+        runningPollTimer = setInterval(() => {
+          vscode.postMessage({type: 'getRunningTasks'});
+        }, 5000);
+      }
+    } else if (isFrequent) {
       vscode.postMessage({type: 'getFrequentTasks', limit: 50});
     } else if (isSettings) {
       configFormPopulated = false;
@@ -4917,6 +4961,60 @@
         generation: historyGeneration,
       });
     }
+  }
+
+  /**
+   * Render the list of currently running regular tasks in the
+   * Running tab panel.  Each task is drawn as a ``.sidebar-item``
+   * coloured by ``chatIdBgColor(chat_id)`` so it matches the
+   * History tab's per-chat colour, with three metric spans for
+   * tokens / cost / steps.  Tasks whose ``task_id`` is no longer
+   * in the latest backend response are implicitly removed because
+   * the list is fully rebuilt on every 5s poll.
+   */
+  function renderRunningTasks(tasks) {
+    if (!runningList) return;
+    if (!tasks || tasks.length === 0) {
+      runningList.innerHTML =
+        '<div class="sidebar-empty">No running tasks</div>';
+      return;
+    }
+    runningList.innerHTML = '';
+    tasks.forEach(t => {
+      const div = document.createElement('div');
+      div.className = 'sidebar-item running-item';
+      const title = String(t.title || '').trim() || 'Untitled task';
+      div.dataset.tooltip = title;
+      div.style.backgroundColor = chatIdBgColor(String(t.chat_id || ''));
+      div.style.color = '#1a1a1a';
+
+      const runningDot = document.createElement('span');
+      runningDot.className = 'sidebar-item-running';
+      runningDot.dataset.tooltip = 'Task running';
+      runningDot.setAttribute('aria-label', 'Task running');
+      div.appendChild(runningDot);
+
+      const textSpan = document.createElement('span');
+      textSpan.className = 'sidebar-item-text';
+      textSpan.textContent =
+        title.length > 60 ? title.slice(0, 60) + '…' : title;
+      div.appendChild(textSpan);
+
+      const metrics = document.createElement('span');
+      metrics.className = 'running-item-metrics';
+      const tokens = Number(t.tokens || 0);
+      const cost = Number(t.cost || 0);
+      const steps = Number(t.steps || 0);
+      metrics.textContent =
+        steps +
+        ' steps • ' +
+        tokens.toLocaleString() +
+        ' tok • $' +
+        cost.toFixed(4);
+      div.appendChild(metrics);
+
+      runningList.appendChild(div);
+    });
   }
 
   function renderFrequentTasks(tasks) {
