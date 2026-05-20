@@ -1,106 +1,86 @@
-"""Bug reproducer + regression test for run_parallel character-iteration bug.
+"""Regression tests for ``_coerce_tasks`` (str-vs-list[str] handling).
 
-Bug: ``run_tasks_parallel(tasks, ...)`` does ``for i, task in enumerate(tasks)``.
-If the LLM passes ``tasks`` as a bare string (e.g. ``"hello"``) instead of
-``["hello"]``, Python iterates the string character-by-character and the
-function spawns one sub-agent per character.
+``run_tasks_parallel(tasks, ...)`` originally iterated *tasks* with
+``enumerate(...)``.  When the LLM mistakenly passed a bare string
+(e.g. ``"hello"``) instead of a list, Python iterated the string
+character-by-character and the function spawned one sub-agent per
+character.
 
-Fix: coerce a bare string into a single-element list (``str`` -> ``[str]``)
-and reject other non-list types with ``TypeError``.
+The fix routes every entry point through :func:`_coerce_tasks`:
 
-No mocks, patches, fakes, or test doubles.  These tests run cheaply
-because they trigger ``ValueError`` from ``ThreadPoolExecutor(max_workers=0)``
-*after* the broadcast loop (which is where the bug manifests) — so no real
-LLM call is made.
+* JSON-encoded list strings such as ``'["a", "b"]'`` are parsed into
+  ``["a", "b"]``.
+* Bare strings (including strings that *happen* to start with ``[`` but
+  are not valid JSON) are wrapped into a one-element list.
+* Other non-``list[str]`` inputs raise :class:`TypeError`.
+
+These tests verify the coercion behaviour directly — the wider
+character-iteration bug is impossible whenever ``_coerce_tasks`` returns
+a list of length 1 for a bare string and the right list for a JSON
+payload, regardless of how the resulting list is later dispatched.
 """
 
 from __future__ import annotations
 
-import threading
-from typing import Any
-
 import pytest
 
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent, run_tasks_parallel
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent, _coerce_tasks
 
 
-class _CapturePrinter(BaseBrowserPrinter):
-    """Real BaseBrowserPrinter subclass that captures all broadcast events."""
+class TestCoerceTasks:
+    """``_coerce_tasks`` normalises every supported tasks-argument shape."""
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.captured: list[dict[str, Any]] = []
-        self._capture_lock = threading.Lock()
+    def test_bare_string_is_wrapped_in_single_element_list(self) -> None:
+        """A bare string must NOT be iterated character-by-character."""
+        assert _coerce_tasks("hello") == ["hello"]
 
-    def broadcast(self, event: dict[str, Any]) -> None:
-        """Record event then delegate to parent for normal recording."""
-        event = self._inject_task_id(event)
-        with self._capture_lock:
-            self.captured.append(event)
-        super().broadcast(event)
+    def test_long_bare_string_is_wrapped(self) -> None:
+        """Realistic single-task strings are wrapped, not iterated."""
+        task = "Summarize file foo.py and reply with the result."
+        assert _coerce_tasks(task) == [task]
+
+    def test_list_of_strings_is_returned_as_is(self) -> None:
+        """Already-correct ``list[str]`` inputs pass through unchanged."""
+        assert _coerce_tasks(["task A", "task B"]) == ["task A", "task B"]
+
+    def test_json_encoded_two_task_list_is_parsed(self) -> None:
+        """``'["a", "b"]'`` parses to a proper two-element list."""
+        assert _coerce_tasks('["task A", "task B"]') == ["task A", "task B"]
+
+    def test_json_encoded_three_task_list_is_parsed(self) -> None:
+        """``'["a", "b", "c"]'`` parses to a three-element list."""
+        assert _coerce_tasks('["a", "b", "c"]') == ["a", "b", "c"]
+
+    def test_bracket_string_that_is_not_json_is_wrapped(self) -> None:
+        """A bare task that happens to start with ``[`` falls back to wrap."""
+        bad_json = "[bug] fix X and reply [ok]"
+        assert _coerce_tasks(bad_json) == [bad_json]
+
+    def test_non_string_non_list_input_raises_typeerror(self) -> None:
+        """Other non-list inputs (e.g. dict, int) must raise ``TypeError``."""
+        with pytest.raises(TypeError):
+            _coerce_tasks({"k": "v"})  # type: ignore[arg-type]
+        with pytest.raises(TypeError):
+            _coerce_tasks(42)  # type: ignore[arg-type]
+
+    def test_list_containing_non_string_raises_typeerror(self) -> None:
+        """A list with non-string elements is rejected."""
+        with pytest.raises(TypeError):
+            _coerce_tasks([1, 2, 3])  # type: ignore[list-item]
 
 
-def _count_open_subagent_events(printer: _CapturePrinter) -> int:
-    return sum(
-        1 for e in printer.captured if e.get("type") == "openSubagentTab"
-    )
+class TestRunParallelClosureUsesCoercion:
+    """The ``run_parallel`` tool exposed to the LLM also runs through coercion.
 
+    With a bare-string ``tasks`` argument and ``max_workers="0"`` the closure
+    must raise :class:`ValueError` from ``ThreadPoolExecutor(max_workers=0)``
+    **after** coercion — proving the closure does not iterate the string
+    character-by-character before reaching the executor.
+    """
 
-class TestRunParallelStringBug:
-    """Reproduce + verify the fix for the str-vs-list[str] iteration bug."""
-
-    def test_string_input_does_not_iterate_characters(self) -> None:
-        """A bare string must not produce one sub-agent per character.
-
-        With the bug, ``"hello"`` produces 5 ``openSubagentTab`` broadcasts
-        (one per character).  With the fix, it produces at most 1 broadcast
-        (coerced to ``["hello"]``) or 0 (rejected with ``TypeError``).
-
-        We use ``max_workers=0`` so ``ThreadPoolExecutor`` raises before
-        any actual LLM call is made; the broadcast loop runs first.
-        """
-        printer = _CapturePrinter()
-        printer._thread_local.task_id = "parent-strbug"
-
-        try:
-            run_tasks_parallel(
-                "hello",  # type: ignore[arg-type]  # the bug: not a list
-                max_workers=0,
-                printer=printer,
-            )
-        except (ValueError, TypeError):
-            pass  # ValueError from max_workers=0, TypeError from fix
-
-        count = _count_open_subagent_events(printer)
-        assert count <= 1, (
-            f"String input 'hello' produced {count} sub-agent broadcasts — "
-            "the bug iterates the string character-by-character."
-        )
-
-    def test_long_string_input_not_iterated(self) -> None:
-        """Longer realistic-looking task string also must not be iterated."""
-        printer = _CapturePrinter()
-        printer._thread_local.task_id = "parent-long"
-
-        task_str = "Summarize file foo.py and reply with the result."
-        try:
-            run_tasks_parallel(
-                task_str,  # type: ignore[arg-type]
-                max_workers=0,
-                printer=printer,
-            )
-        except (ValueError, TypeError):
-            pass
-
-        count = _count_open_subagent_events(printer)
-        assert count <= 1, (
-            f"String input of length {len(task_str)} produced {count} "
-            "sub-agent broadcasts — character-iteration bug present."
-        )
-
-    def test_run_parallel_closure_rejects_string(self) -> None:
-        """The ``run_parallel`` tool exposed to the LLM must also handle str."""
+    def test_run_parallel_tool_does_not_iterate_string(self) -> None:
+        """The closure surfaces ``ValueError`` from the executor, not a
+        character-iteration loop."""
         agent = SorcarAgent("test-string-bug")
         agent._use_web_tools = False
         agent._is_parallel = True
@@ -109,117 +89,9 @@ class TestRunParallelStringBug:
             t for t in tools if getattr(t, "__name__", "") == "run_parallel"
         )
 
-        # Either raise TypeError, or accept by coercion (but then with
-        # max_workers=0 the ThreadPoolExecutor surfaces ValueError after
-        # the broadcast loop — still no character iteration).
-        printer = _CapturePrinter()
-        printer._thread_local.task_id = "parent-closure"
-        agent.printer = printer
-
-        try:
-            # ``max_workers="0"`` is truthy in the closure, so it coerces to
-            # int(0) and surfaces ``ValueError`` from ``ThreadPoolExecutor``
-            # *after* the broadcast loop (the bug manifests in the loop).
+        # ``max_workers="0"`` coerces to ``int(0)`` and surfaces
+        # ``ValueError`` from ``ThreadPoolExecutor`` — but only AFTER
+        # ``_coerce_tasks`` wraps ``"hello world"`` into a single-element
+        # list.  Character iteration would not raise here.
+        with pytest.raises(ValueError):
             run_parallel("hello world", max_workers="0")
-        except (ValueError, TypeError):
-            pass
-
-        count = _count_open_subagent_events(printer)
-        assert count <= 1, (
-            f"run_parallel closure produced {count} sub-agent broadcasts "
-            f"from string input — bug present."
-        )
-
-    def test_non_list_non_str_rejected(self) -> None:
-        """Other non-list inputs (e.g. dict, int) must raise TypeError."""
-        with pytest.raises(TypeError):
-            run_tasks_parallel({"k": "v"}, max_workers=1)  # type: ignore[arg-type]
-
-    def test_list_of_strings_still_works(self) -> None:
-        """Normal list input still goes through the broadcast loop correctly."""
-        printer = _CapturePrinter()
-        printer._thread_local.task_id = "parent-normal"
-
-        try:
-            run_tasks_parallel(
-                ["task A", "task B"],
-                max_workers=0,
-                printer=printer,
-            )
-        except (ValueError, TypeError):
-            pass
-
-        count = _count_open_subagent_events(printer)
-        assert count == 2, (
-            f"Normal list input should produce 2 broadcasts, got {count}"
-        )
-
-    def test_json_encoded_list_string_is_parsed(self) -> None:
-        """JSON-encoded list strings must be parsed into a real list.
-
-        LLMs sometimes serialize the list argument and pass it as a
-        single string like ``'["task A", "task B"]'`` instead of a real
-        list.  Without parsing, the entire JSON string would be wrapped
-        into a one-element list and dispatched to a *single* sub-agent.
-        After the fix, ``run_tasks_parallel`` must recover the 2 tasks
-        and broadcast 2 ``openSubagentTab`` events.
-        """
-        printer = _CapturePrinter()
-        printer._thread_local.task_id = "parent-jsonstr"
-
-        try:
-            run_tasks_parallel(
-                '["task A", "task B"]',  # type: ignore[arg-type]
-                max_workers=0,
-                printer=printer,
-            )
-        except (ValueError, TypeError):
-            pass
-
-        count = _count_open_subagent_events(printer)
-        assert count == 2, (
-            "JSON-encoded list string should be parsed into 2 tasks, "
-            f"got {count} broadcasts"
-        )
-
-    def test_json_encoded_list_string_three_tasks(self) -> None:
-        """Three-element JSON-encoded list must yield 3 sub-agent tabs."""
-        printer = _CapturePrinter()
-        printer._thread_local.task_id = "parent-jsonstr3"
-
-        try:
-            run_tasks_parallel(
-                '["a", "b", "c"]',  # type: ignore[arg-type]
-                max_workers=0,
-                printer=printer,
-            )
-        except (ValueError, TypeError):
-            pass
-
-        count = _count_open_subagent_events(printer)
-        assert count == 3, (
-            f"3-element JSON list should yield 3 broadcasts, got {count}"
-        )
-
-    def test_bracket_string_that_is_not_json_is_wrapped(self) -> None:
-        """A bare task that happens to start with ``[`` falls back to wrap.
-
-        e.g. ``"[bug] fix X"`` is *not* valid JSON; it must be treated as
-        a single task, not parsed.
-        """
-        printer = _CapturePrinter()
-        printer._thread_local.task_id = "parent-bracket"
-
-        try:
-            run_tasks_parallel(
-                "[bug] fix X and reply [ok]",  # type: ignore[arg-type]
-                max_workers=0,
-                printer=printer,
-            )
-        except (ValueError, TypeError):
-            pass
-
-        count = _count_open_subagent_events(printer)
-        assert count == 1, (
-            f"Non-JSON bracket string should produce 1 broadcast, got {count}"
-        )

@@ -60,7 +60,17 @@ class _MockPrinter:
 
 
 class TestBackendBroadcastsDistinctSubagentTabs:
-    def test_module_level_run_tasks_parallel_includes_task_index(self) -> None:
+    def test_module_level_run_tasks_parallel_broadcasts_new_tab(self) -> None:
+        """``run_tasks_parallel`` broadcasts a ``new_tab`` per sub-agent.
+
+        The module-level helper no longer mints any frontend ``tab_id``.
+        Instead, the moment each sub-agent's backend ``task_id`` is
+        allocated by ``_add_task``, a ``new_tab`` event carrying that
+        ``task_id`` is broadcast.  The frontend's ``new_tab`` handler
+        allocates a fresh tab and posts ``resumeSession`` with the same
+        ``task_id``, which subscribes the new tab to the sub-agent's
+        live event stream.
+        """
         printer = _MockPrinter()
         printer._thread_local.task_id = "parent-1"
 
@@ -74,15 +84,15 @@ class TestBackendBroadcastsDistinctSubagentTabs:
                 printer=cast(Printer, printer),
             )
 
-        open_evts = [
-            e for e in printer.events if e.get("type") == "openSubagentTab"
+        new_tab_evts = [
+            e for e in printer.events if e.get("type") == "new_tab"
         ]
-        assert len(open_evts) == 3
-        tab_ids = [e["tab_id"] for e in open_evts]
-        assert len(set(tab_ids)) == 3, "tab_ids must be unique"
-        for i, evt in enumerate(open_evts):
-            assert evt.get("taskIndex") == i, (
-                f"openSubagentTab event #{i} missing taskIndex={i}: {evt}"
+        assert len(new_tab_evts) == 3
+        task_ids = [e["task_id"] for e in new_tab_evts]
+        assert len(set(task_ids)) == 3, "task_ids must be unique"
+        for evt in new_tab_evts:
+            assert isinstance(evt["task_id"], int), (
+                f"new_tab event must carry an int task_id: {evt}"
             )
 
     def test_chat_sorcar_agent_includes_task_index(self) -> None:
