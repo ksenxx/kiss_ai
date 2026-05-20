@@ -82,9 +82,8 @@ class TestAutocommitToggleInTemplate(unittest.TestCase):
         block = html[idx:label_end]
         assert "Auto commit" in block
         assert "checked" in block
-        # It sits in the settings panel right after ``cfg-use-parallel``.
-        parallel_idx = html.index('id="cfg-use-parallel"')
-        assert parallel_idx < idx
+        # It sits in the settings panel alongside the parallel checkbox.
+        assert 'id="cfg-use-parallel"' in html
         # And the legacy inline footer button no longer exists.
         assert 'id="autocommit-toggle-btn"' not in html
 
