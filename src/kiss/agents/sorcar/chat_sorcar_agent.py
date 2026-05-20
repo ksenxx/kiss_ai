@@ -36,21 +36,6 @@ class ChatSorcarAgent(SorcarAgent):
     from the VS Code extension as a standalone reusable agent.
     """
 
-    # Process-global map of ``task_history.id`` (the database primary
-    # key minted by :func:`_add_task`) → the :class:`ChatSorcarAgent`
-    # instance currently executing that task.  Every ``run()`` call —
-    # top-level chat tasks as well as parallel sub-agent tasks
-    # spawned by :meth:`_run_tasks_parallel` — inserts itself here
-    # immediately after the task row is written to ``sorcar.db`` and
-    # removes itself in the ``finally`` block once ``run()`` returns
-    # (or raises).  External observers can use this map to ask
-    # "which agent (if any) is currently driving task X?" without
-    # having to scan :attr:`_RunningAgentState.running_agent_states`
-    # (which is keyed by frontend tab id and tracks per-tab UI
-    # state, not per-task agents).  Insertions and removals on
-    # distinct ``task_id`` keys never collide so no lock is required
-    # — CPython dict ``__setitem__`` / ``pop`` are atomic under the
-    # GIL.
     running_agents: dict[int, ChatSorcarAgent] = {}
 
     def __init__(self, name: str) -> None:
@@ -117,100 +102,30 @@ class ChatSorcarAgent(SorcarAgent):
     ) -> list[str]:
         """Execute parallel tasks using ChatSorcarAgent sub-agents.
 
-        Mirrors the structure of :func:`run_tasks_parallel` in
-        :mod:`sorcar_agent` but adds three pieces of chat-specific
-        behaviour the base helper cannot supply:
-
-        1. Each sub-agent ``resume_chat_by_id`` s the parent's
-           ``chat_id`` so all parallel tasks contribute to the same
-           chat session history.
-        2. The parent's ``task_history.id`` is recorded on every
-           sub-agent via ``_subagent_info`` so persisted rows link
-           back to the parent task.
-        3. The parent task thread's cooperative ``stop_event`` is
-           propagated onto each worker's ``printer._thread_local`` so
-           a Stop click on the parent terminates the whole task tree
-           (including nested ``_run_tasks_parallel`` calls).
-
-        This method itself has no knowledge of backend task ids or any
-        frontend concepts.  Each spawned sub-agent receives its
-        ``_subagent_info`` marker here, and :meth:`ChatSorcarAgent.run`
-        in the sub-agent thread reads that marker to drive any
-        sub-agent-specific behaviour (e.g. broadcasting ``new_tab`` to
-        a browser-based frontend so a fresh tab opens and subscribes
-        to the live event stream).
-
-        Args:
-            tasks: List of self-contained task description strings.
-            max_workers: Maximum concurrent threads (``None`` = auto).
-
-        Returns:
-            List of YAML result strings in the same order as *tasks*.
-
-        Raises:
-            TypeError: If *tasks* is neither a ``str`` nor a ``list[str]``.
         """
-        # Coerce ``str`` → ``[str]``; otherwise ``enumerate(tasks)`` would
-        # iterate a bare-string ``tasks`` character-by-character and
-        # create one sub-agent per character (LLM tool-call bug).
         tasks = _coerce_tasks(tasks)
         model = getattr(self, "model_name", None)
         work_dir = getattr(self, "work_dir", None)
         chat_id = self._chat_id
-        # The parent's ``task_history.id`` — set when the parent's
-        # ``run()`` calls ``_add_task`` — is the only piece of
-        # provenance a sub-agent row persists.  Captured into a local
-        # so each worker sees the parent id at spawn time.
         parent_task_id = self._last_task_id
         printer = self.printer
         thread_local = getattr(printer, "_thread_local", None) if printer else None
-        # Cooperative-stop event of the parent task thread.  Captured
-        # here so each worker can copy it onto its own
-        # ``printer._thread_local.stop_event`` slot before invoking
-        # the sub-agent.  Without this propagation a Stop click on
-        # the parent tab sets only the parent thread's event; the
-        # sub-agent worker's ``printer._check_stop()`` reads a fresh
-        # (empty) thread-local and becomes a silent no-op.
         parent_stop_event = (
             getattr(thread_local, "stop_event", None) if thread_local else None
         )
 
-        # Per-sub-agent usage so the parent can aggregate cost /
-        # tokens / steps back into its own running totals after the
-        # pool drains.  Indexed by task position so order matches
-        # *tasks*.  Each tuple is ``(budget_used, total_tokens_used,
-        # total_steps)``.
         sub_usage: list[tuple[float, int, int]] = [(0.0, 0, 0)] * len(tasks)
 
         def _run_single(args: tuple[int, str]) -> str:
             idx, task = args
             tl = getattr(printer, "_thread_local", None) if printer else None
             if tl is not None:
-                # Propagate the parent's stop_event into this worker
-                # thread so ``printer._check_stop()`` and
-                # ``SorcarAgent.run``'s ``self._stop_event`` snapshot
-                # both honour a Stop click on the parent tab.  Nested
-                # ``_run_tasks_parallel`` calls re-read this same slot,
-                # so the propagation is transitive across every level
-                # of nesting.
                 tl.stop_event = parent_stop_event
             agent = ChatSorcarAgent(f"Parallel-{task[:40]}")
             if chat_id:
                 agent.resume_chat_by_id(chat_id)
-            # Persist the parent's ``task_history.id`` on the
-            # sub-agent's row so the history sidebar can identify
-            # the row as a sub-agent task (presence of the
-            # ``subagent`` key implies the row is a sub-agent).
             agent._subagent_info = {"parent_task_id": parent_task_id}
             try:
-                # ``is_parallel=True`` propagates the parallel
-                # capability so sub-agents themselves get the
-                # ``run_parallel`` tool and can invoke nested parallel
-                # execution.  The ``new_tab`` broadcast (so the
-                # frontend opens a tab and resumes into the live
-                # stream) is owned by :meth:`ChatSorcarAgent.run` in
-                # the sub-agent thread; it triggers automatically
-                # because ``_subagent_info`` was set above.
                 result: str = agent.run(
                     prompt_template=task,
                     model_name=model,
@@ -235,14 +150,6 @@ class ChatSorcarAgent(SorcarAgent):
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             results = list(pool.map(_run_single, enumerate(tasks)))
 
-        # Roll the sub-agents' cost / tokens / steps into this
-        # (parent) agent's running totals so global accounting and UI
-        # reflect the full work done.  Without this aggregation,
-        # nested parallel sub-agent budgets stay invisible to the
-        # parent.  ``getattr`` with float/int defaults because tests
-        # that drive ``_run_tasks_parallel`` directly (without going
-        # through :meth:`run`) may not have initialised the running-
-        # totals attributes on the parent.
         self.budget_used = (
             float(getattr(self, "budget_used", 0.0) or 0.0)
             + sum(u[0] for u in sub_usage)
@@ -288,56 +195,18 @@ class ChatSorcarAgent(SorcarAgent):
         """
         self._chat_id = ""
         self._last_task_id: int | None = None
-        # The most recent user task prompt seen by ``run()``.  Used
-        # by auto-commit code paths to include the user's intent in
-        # the generated commit message (see
-        # :func:`~kiss.agents.vscode.helpers.generate_commit_message_from_diff`).
-        # Empty string when the agent has not yet run any task.
         self._last_user_prompt: str = ""
-        # Populated by ``_run_tasks_parallel`` on each sub-agent
-        # before it runs.  The single ``parent_task_id`` field links
-        # the sub-agent's ``task_history`` row back to the row of
-        # the parent task that spawned it.  The presence of this
-        # field on a row's ``extra.subagent`` payload is itself the
-        # signal that the row is a sub-agent task; no separate
-        # boolean is stored.  ``None`` on the top-level agent.
         self._subagent_info: dict[str, object] | None = None
 
         skip_persistence = kwargs.pop("_skip_persistence", False)
-        # Frontend tab id that should be subscribed to this task's
-        # event stream.  When provided, the printer's
-        # ``subscribe_tab`` is called after ``task_id`` is allocated
-        # so live events fan out to that tab.  The caller (e.g.
-        # :class:`_TaskRunnerMixin`) supplies the initial tab id this
-        # way because the printer no longer carries per-thread tab
-        # state — tabs are pure subscribers indexed by ``task_id``.
         subscribe_tab_id = kwargs.pop("_subscribe_tab_id", "")
-        # Mint a fresh chat id at run-start when one is not already
-        # set (e.g. a brand-new chat tab that has never resumed a
-        # history entry).  Establishing the chat id BEFORE _add_task
-        # ensures every persisted event is tagged with the same
-        # canonical chat id.  ``tab_id`` (frontend routing key) and
-        # ``chat_id`` (persistence key) are orthogonal; the extension
-        # layer maintains its own chat_id ↔ tab_id index for routing.
         if self._chat_id == "":
             self._chat_id = uuid.uuid4().hex
 
-        # Stash the raw user prompt BEFORE any chat-context
-        # augmentation so auto-commit (worktree finalize, the
-        # ``update_settings(auto_commit=True)`` tool, etc.) can include
-        # the user's own words — not the synthetic
-        # ``## Previous tasks...`` augmented prompt — in the generated
-        # commit message.
         self._last_user_prompt = prompt_template
 
         agent_prompt = self.build_chat_prompt(prompt_template)
 
-        # Build an initial ``extra`` payload with values known at task
-        # creation time so the history sidebar can display them
-        # immediately — even while the task is still running.  Post-
-        # completion values (tokens, cost) are merged by the final
-        # ``_save_task_extra`` call in the ``finally`` block below (or
-        # by ``task_runner.py`` for the VS Code path).
         from kiss._version import __version__
 
         early_extra: dict[str, object] = {
@@ -357,16 +226,6 @@ class ChatSorcarAgent(SorcarAgent):
             prompt_template, chat_id=self._chat_id, extra=early_extra,
         )
         self._last_task_id = task_id
-        # When this run is a sub-agent (its ``_subagent_info`` marker
-        # was set by a parallel executor before calling ``run``),
-        # broadcast a ``new_tab`` message to the frontend.  This is
-        # the single hook that informs a browser-based frontend that
-        # a fresh sub-agent task exists: the frontend's ``new_tab``
-        # handler allocates a tab and posts ``resumeSession`` with
-        # the same task id to subscribe to the live event stream.
-        # Keeping this self-broadcast inside ``run`` (rather than
-        # inside the parallel executor) means the executors carry no
-        # task-id or frontend knowledge at all.
         if self._subagent_info is not None:
             broadcast_for_subagent = (
                 kwargs.get("printer") or getattr(self, "printer", None)
@@ -378,23 +237,7 @@ class ChatSorcarAgent(SorcarAgent):
                         broadcast({"type": "new_tab", "task_id": int(task_id)})
                     except Exception:
                         pass
-        # Publish ``self`` as the agent currently driving ``task_id``.
-        # The entry is added the moment the row exists in
-        # ``task_history`` and removed in the matching ``finally``
-        # block below so the lifetime mirrors exactly "task is in
-        # flight inside this ``run()`` call".
         ChatSorcarAgent.running_agents[task_id] = self
-        # Bind the printer's per-task state to ``task_id``: set the
-        # agent thread's thread-local ``task_id`` so subsequent
-        # ``broadcast`` calls are tagged with this id, register
-        # ``self`` in ``_persist_agents[str(task_id)]`` so the
-        # background DB writer can be located, subscribe the caller-
-        # supplied initial tab to the stream, and start recording.
-        # All four are mirror-image cleanups in the ``finally`` block.
-        # ``self.printer`` is not yet assigned at this point (the
-        # base ``KissAgent.run`` sets it from the ``printer`` kwarg);
-        # so consult the kwarg directly with a fall-back to
-        # ``self.printer`` for callers that pre-assign it.
         printer_for_mirror = kwargs.get("printer") or getattr(self, "printer", None)
         task_key = str(task_id)
         if printer_for_mirror is not None:
@@ -410,12 +253,6 @@ class ChatSorcarAgent(SorcarAgent):
             start_rec = getattr(printer_for_mirror, "start_recording", None)
             if start_rec is not None:
                 start_rec()
-        # Mirror ``task_id`` onto the :class:`_RunningAgentState` for
-        # the tab the caller passed in (when one exists).  This makes
-        # ``task_history_id`` available DURING the run so that
-        # :meth:`VSCodeServer._reattach_running_chat` can disambiguate
-        # by task id when multiple live states share the same
-        # ``chat_id`` (parent + parallel sub-agents).
         mirrored_state: _RunningAgentState | None = None
         if subscribe_tab_id:
             mirrored_state = _RunningAgentState.running_agent_states.get(
@@ -442,15 +279,6 @@ class ChatSorcarAgent(SorcarAgent):
             ChatSorcarAgent.running_agents.pop(task_id, None)
             if mirrored_state is not None and mirrored_state.task_history_id == task_id:
                 mirrored_state.task_history_id = None
-            # Tear down recording immediately so its memory is freed
-            # while the agent finishes its post-task bookkeeping.
-            # ``_persist_agents`` and the thread-local ``task_id``
-            # are intentionally LEFT in place so any post-task
-            # broadcasts emitted by the calling task-runner (e.g.
-            # ``task_done`` events, ``tasks_updated``) still get
-            # tagged and fanned out under this task; the caller
-            # tears those down when it finally calls
-            # :meth:`BaseBrowserPrinter.cleanup_task`.
             if printer_for_mirror is not None:
                 stop_rec = getattr(printer_for_mirror, "stop_recording", None)
                 if stop_rec is not None:
