@@ -520,21 +520,44 @@
   }
 
   function closeTab(tabId) {
-    const idx = tabs.findIndex(t => {
+    const origIdx = tabs.findIndex(t => {
       return t.id === tabId;
     });
-    if (idx < 0) return;
-    tabs.splice(idx, 1);
-    vscode.postMessage({type: 'closeTab', tabId: tabId});
-    if (activeTabId === tabId) {
+    if (origIdx < 0) return;
+    // Collect *tabId* and every (transitive) descendant via
+    // ``parentTabId`` chains so closing a parent tab also closes the
+    // tabs of its sub-agents — and the sub-agents of those sub-agents,
+    // recursively.  Closure detection runs against a snapshot of the
+    // current ``tabs`` array; mutation happens afterwards.
+    const toClose = new Set([tabId]);
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const t of tabs) {
+        if (t.parentTabId && toClose.has(t.parentTabId) && !toClose.has(t.id)) {
+          toClose.add(t.id);
+          grew = true;
+        }
+      }
+    }
+    const activeWasClosed = toClose.has(activeTabId);
+    // Remove every doomed tab from the ``tabs`` array and notify the
+    // backend.  Iterate over an explicit id list (not over ``tabs``)
+    // because we mutate ``tabs`` inside the loop.
+    for (const id of toClose) {
+      const i = tabs.findIndex(t => t.id === id);
+      if (i >= 0) tabs.splice(i, 1);
+      vscode.postMessage({type: 'closeTab', tabId: id});
+    }
+    if (activeWasClosed) {
       if (tabs.length === 0) {
         // Last tab closed — create a fresh chat instead of closing
         // the secondary sidebar.
         createNewTab();
         return;
       }
-      // Switch to an adjacent tab
-      const newIdx = Math.min(idx, tabs.length - 1);
+      // Switch to an adjacent tab (clamp to the new array length).
+      const newIdx = Math.min(origIdx, tabs.length - 1);
       const newTab = tabs[newIdx];
       restoreTab(newTab);
       // Restore running state for the new tab
@@ -743,6 +766,7 @@
         backendChatId: t.backendChatId || '',
         isSubagentTab: !!t.isSubagentTab,
         isDone: !!t.isDone,
+        parentTabId: t.parentTabId || '',
       };
     });
     const activeIdx = tabs.findIndex(t => {
@@ -773,6 +797,7 @@
           tab.isDone = !!st.isDone;
           tab.isRunning = !st.isDone;
         }
+        if (st.parentTabId) tab.parentTabId = st.parentTabId;
         tabs.push(tab);
       });
       const idx = saved.activeTabIndex || 0;
@@ -3133,6 +3158,16 @@
           subTab.title = title;
         }
         subTab.isSubagentTab = true;
+        // Remember the parent → child relationship so closing the parent
+        // tab can recursively close every (nested) sub-agent tab it
+        // spawned.  ``ev.parent_tab_id`` is set by the sorcar/server
+        // emitters; for the chat_sorcar broadcast path the daemon stamps
+        // ``ev.tabId`` with the subscriber's (= parent's) tab id, so we
+        // fall back to that.
+        const parentId = ev.parent_tab_id || ev.tabId || '';
+        if (parentId && parentId !== subTab.id) {
+          subTab.parentTabId = parentId;
+        }
         // ``isDone`` is set by the backend for history-loaded sub-agent
         // tabs whose execution already completed — without this flag
         // the tab would forever pulse the running ◉ indicator (no
