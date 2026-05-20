@@ -4111,7 +4111,12 @@
     }
 
     if (autocommitBtn) {
-      autocommitBtn.addEventListener('click', () => {
+      autocommitBtn.addEventListener('click', (e) => {
+        // The button now lives inside the cfg-auto-commit <label>; stop
+        // the click from propagating to the label and toggling the
+        // sibling checkbox.
+        e.preventDefault();
+        e.stopPropagation();
         vscode.postMessage({
           type: 'autocommitAction',
           action: 'commit',
