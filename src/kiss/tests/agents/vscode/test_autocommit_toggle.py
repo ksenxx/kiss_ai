@@ -4,7 +4,7 @@ Validates:
 - The toggle exists in both ``SorcarTab.ts`` (extension webview) and
   the standalone remote-access ``web_server.py`` HTML template,
   rendered inline between ``#menu-btn`` and ``#autocommit-btn``
-  alongside ``worktree-toggle-btn`` and ``parallel-toggle-btn``.
+  alongside ``worktree-toggle-btn``.
 - ``main.js`` references the toggle and forwards its state as
   ``autoCommit`` on submit/run messages.
 - ``_RunningAgentState`` carries an ``auto_commit_mode`` field that

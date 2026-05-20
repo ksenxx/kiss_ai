@@ -93,13 +93,13 @@ def test_webapp_input_footer_omits_tab_bar_actions() -> None:
 def test_webapp_inline_toggle_order_matches_extension() -> None:
     """Inline toggle buttons appear in the same order in both webviews.
 
-    The three toggles (use worktree / use parallelism / auto commit)
-    render inline between ``#menu-btn`` and ``#autocommit-btn`` in the
-    input-footer's ``#model-picker`` container.
+    The two toggles (use worktree / auto commit) render inline between
+    ``#menu-btn`` and ``#autocommit-btn`` in the input-footer's
+    ``#model-picker`` container.  The parallel-agents control lives in
+    the settings panel, not the input footer.
     """
     ids = (
         "worktree-toggle-btn",
-        "parallel-toggle-btn",
         "autocommit-toggle-btn",
     )
     ext_picker = _section(_ext_html(), "model-picker")

@@ -1114,10 +1114,10 @@ class TestMainJsParallelToggle(unittest.TestCase):
         cls._js = (base / "vscode" / "media" / "main.js").read_text()
 
     def test_has_parallel_toggle_btn_element(self) -> None:
-        assert "parallel-toggle-btn" in self._js
+        assert "cfg-use-parallel" in self._js
 
-    def test_toggle_adds_active_class(self) -> None:
-        assert "parallelToggleBtn.classList.toggle('active')" in self._js
+    def test_toggle_uses_checkbox_checked(self) -> None:
+        assert "parallelToggleBtn.checked" in self._js
 
     def test_parallel_toggle_btn_variable(self) -> None:
         assert "parallelToggleBtn" in self._js
@@ -1125,7 +1125,7 @@ class TestMainJsParallelToggle(unittest.TestCase):
     def test_js_sends_use_parallel_in_submit(self) -> None:
         """main.js includes useParallel in submit message."""
         assert "useParallel" in self._js
-        assert "parallelToggleBtn.classList.contains('active')" in self._js
+        assert "parallelToggleBtn.checked" in self._js
 
 
 class TestMainCssParallelToggle(unittest.TestCase):
@@ -1152,7 +1152,7 @@ class TestMainCssParallelToggle(unittest.TestCase):
 
 
 class TestSorcarTabParallelToggle(unittest.TestCase):
-    """Test that SorcarTab.ts HTML includes the parallel toggle button."""
+    """Test that SorcarTab.ts settings panel includes the parallel checkbox."""
 
     html: str
 
@@ -1161,25 +1161,21 @@ class TestSorcarTabParallelToggle(unittest.TestCase):
         base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
         cls.html = (base / "vscode" / "src" / "SorcarTab.ts").read_text()
 
-    def test_has_parallel_toggle_btn(self) -> None:
-        assert 'id="parallel-toggle-btn"' in self.html
+    def test_has_use_parallel_checkbox(self) -> None:
+        assert 'id="cfg-use-parallel"' in self.html
 
-    def test_has_use_parallelism_menu_label(self) -> None:
-        idx = self.html.index('id="parallel-toggle-btn"')
-        block = self.html[idx : self.html.index("</button>", idx)]
-        assert "Use parallelism" in block
+    def test_has_use_parallel_agents_label(self) -> None:
+        idx = self.html.index('id="cfg-use-parallel"')
+        block = self.html[idx : self.html.index("</label>", idx)]
+        assert "Use parallel agents" in block
 
-    def test_button_is_after_worktree(self) -> None:
-        worktree_idx = self.html.index('id="worktree-toggle-btn"')
-        parallel_idx = self.html.index('id="parallel-toggle-btn"')
-        assert worktree_idx < parallel_idx
+    def test_checkbox_is_after_demo_mode(self) -> None:
+        demo_idx = self.html.index('id="cfg-demo-mode"')
+        parallel_idx = self.html.index('id="cfg-use-parallel"')
+        assert demo_idx < parallel_idx
 
-    def test_has_svg_icon(self) -> None:
-        """Button should have a parallel-lines SVG icon."""
-        idx = self.html.index('id="parallel-toggle-btn"')
-        block = self.html[idx : idx + 500]
-        assert "<svg" in block
-        assert "viewBox" in block
+    def test_no_footer_parallel_toggle_btn(self) -> None:
+        assert 'id="parallel-toggle-btn"' not in self.html
 
 
 
