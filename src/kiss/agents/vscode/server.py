@@ -609,8 +609,20 @@ class VSCodeServer(
                 chat_id = str(result.get("chat_id", "") or chat_id)
         if not result:
             result = _load_latest_chat_events_by_chat_id(chat_id)
-        if not result or not result.get("events"):
+        if not result:
             return
+        # NOTE: do NOT early-return on empty ``events``.  When a
+        # sub-agent has just been spawned by ``run_parallel`` and
+        # broadcasts ``new_tab`` (carrying its own ``task_id``), the
+        # frontend round-trips a ``resumeSession`` back here long
+        # before the async event-writer thread has flushed any
+        # events to the DB.  Returning early on an empty events list
+        # would skip ``_reattach_running_chat`` below, so the new
+        # tab would never get subscribed to the sub-agent's live
+        # event stream and subsequent broadcasts would have no
+        # fan-out target.  Proceeding with an empty events list is
+        # harmless: ``task_events`` with ``events=[]`` is a no-op
+        # for the frontend's replay loop.
 
         # Inspect ``extra`` BEFORE re-attaching so we know whether to
         # flip the freshly-allocated tab into sub-agent styling.  The
