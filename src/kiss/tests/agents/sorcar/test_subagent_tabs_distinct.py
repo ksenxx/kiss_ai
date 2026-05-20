@@ -1,31 +1,14 @@
-"""Regression tests: 3 parallel sub-agents must produce 3 distinct,
-visually distinguishable subagent tabs.
+"""Regression tests: 3 parallel sub-agents must produce 3 distinct
+``new_tab`` broadcasts so the frontend can allocate 3 distinct tabs.
 
-A user reported that running ``run_parallel`` with 3 tasks displayed
-only 2 sub-agent tabs.  Investigation showed:
-
-1. Both backend implementations (``run_tasks_parallel`` module-level
-   and ``ChatSorcarAgent._run_tasks_parallel``) DO broadcast 3
-   distinct ``openSubagentTab`` events with distinct ``tab_id``s.
-
-2. The frontend ``openSubagentTab`` case in ``media/main.js`` DOES
-   push 3 tab objects to the tabs array.
-
-3. The root cause was visual: when all three tasks shared a long
-   common prefix (e.g. ``"Research and summarize: ..."``), the tab
-   titles — taken from the first 40 characters of the description —
-   looked identical in the truncated tab bar.  Users counted them
-   as a single tab.
-
-These tests guard the fix:
-
-- Backend includes ``taskIndex`` on every ``openSubagentTab`` event
-  so the frontend can prepend ``N.`` to disambiguate.
-- Frontend ``openSubagentTab`` handler uses ``ev.taskIndex`` in the
-  title, dedups by ``ev.tab_id`` (idempotent), and ``persistTabState``
-  preserves ``isSubagentTab``/``isDone`` so sub-tabs survive webview
-  reloads (otherwise they would be reclassified as regular tabs and
-  trimmed by ``MAX_TABS`` on the next reload).
+When ``_run_tasks_parallel`` (either the module-level helper or
+``ChatSorcarAgent._run_tasks_parallel``) spawns N sub-agents, each
+sub-agent's ``ChatSorcarAgent.run`` detects ``self._subagent_info is
+not None`` immediately after ``_add_task`` and self-broadcasts a
+``new_tab`` event carrying the freshly-minted backend ``task_id``.
+The frontend's ``new_tab`` handler then allocates a tab via
+``createNewTab`` and posts ``resumeSession`` with the same ``task_id``,
+subscribing the new tab to the sub-agent's live event stream.
 """
 
 from __future__ import annotations
@@ -95,27 +78,43 @@ class TestBackendBroadcastsDistinctSubagentTabs:
                 f"new_tab event must carry an int task_id: {evt}"
             )
 
-    def test_chat_sorcar_agent_includes_task_index(self) -> None:
+    def test_chat_sorcar_agent_run_tasks_parallel_broadcasts_new_tab(
+        self,
+    ) -> None:
+        """``ChatSorcarAgent._run_tasks_parallel`` yields 3 ``new_tab``
+        broadcasts — one per sub-agent.
+
+        The parallel executor itself emits no tab events; it only
+        pre-sets ``_subagent_info`` on each freshly-constructed
+        sub-agent.  Each sub-agent's ``ChatSorcarAgent.run`` then
+        broadcasts a ``new_tab`` carrying its backend ``task_id``
+        immediately after ``_add_task``, *before* ``super().run()``
+        runs (which we mock out).  Patching ``SorcarAgent.run``
+        (instead of the ChatSorcarAgent instance method) keeps the
+        ``ChatSorcarAgent.run`` prefix — and therefore the
+        broadcast — intact.
+        """
         agent = ChatSorcarAgent("test")
         printer = _MockPrinter()
         agent.printer = cast(Printer | None, printer)
         printer._thread_local.task_id = "parent-2"
 
-        with patch.object(
-            agent,
-            "run",
+        with patch(
+            "kiss.agents.sorcar.sorcar_agent.SorcarAgent.run",
             return_value='{"success": true, "summary": "ok"}',
         ):
             agent._run_tasks_parallel(["A", "B", "C"], max_workers=1)
 
-        open_evts = [
-            e for e in printer.events if e.get("type") == "openSubagentTab"
+        new_tab_evts = [
+            e for e in printer.events if e.get("type") == "new_tab"
         ]
-        assert len(open_evts) == 3
-        tab_ids = [e["tab_id"] for e in open_evts]
-        assert len(set(tab_ids)) == 3
-        for i, evt in enumerate(open_evts):
-            assert evt.get("taskIndex") == i
+        assert len(new_tab_evts) == 3
+        task_ids = [e["task_id"] for e in new_tab_evts]
+        assert len(set(task_ids)) == 3, "task_ids must be unique"
+        for evt in new_tab_evts:
+            assert isinstance(evt["task_id"], int), (
+                f"new_tab event must carry an int task_id: {evt}"
+            )
 
 
 
