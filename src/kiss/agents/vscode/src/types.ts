@@ -224,7 +224,8 @@ type ToWebviewMessageBody =
       isSubagentTab?: boolean;
       isDone?: boolean;
     }
-  | {type: 'subagentDone'; tab_id?: string; success?: boolean};
+  | {type: 'subagentDone'; tab_id?: string; success?: boolean}
+  | {type: 'new_tab'; task_id: number};
 
 /** Command sent to Python backend */
 export interface AgentCommand {
