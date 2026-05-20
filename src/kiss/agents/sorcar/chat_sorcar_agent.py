@@ -237,31 +237,27 @@ class ChatSorcarAgent(SorcarAgent):
             prompt_template, chat_id=self._chat_id, extra=early_extra,
         )
         self._last_task_id = task_id
-        if self._subagent_info is not None:
-            broadcast_for_subagent = (
-                kwargs.get("printer") or getattr(self, "printer", None)
-            )
-            if broadcast_for_subagent is not None:
-                broadcast = getattr(broadcast_for_subagent, "broadcast", None)
+        ChatSorcarAgent.running_agents[task_id] = self
+        printer = kwargs.get("printer") or getattr(self, "printer", None)
+        task_key = str(task_id)
+        if printer is not None:
+            if self._subagent_info is not None:
+                broadcast = getattr(printer, "broadcast", None)
                 if broadcast is not None:
                     try:
                         broadcast({"type": "new_tab", "task_id": int(task_id)})
                     except Exception:
                         pass
-        ChatSorcarAgent.running_agents[task_id] = self
-        printer_for_mirror = kwargs.get("printer") or getattr(self, "printer", None)
-        task_key = str(task_id)
-        if printer_for_mirror is not None:
-            tl = getattr(printer_for_mirror, "_thread_local", None)
+            tl = getattr(printer, "_thread_local", None)
             if tl is not None:
                 tl.task_id = task_key
-            persist_map = getattr(printer_for_mirror, "_persist_agents", None)
+            persist_map = getattr(printer, "_persist_agents", None)
             if persist_map is not None:
                 persist_map[task_key] = self
-            subscribe = getattr(printer_for_mirror, "subscribe_tab", None)
+            subscribe = getattr(printer, "subscribe_tab", None)
             if subscribe is not None and subscribe_tab_id:
                 subscribe(task_id, subscribe_tab_id)
-            start_rec = getattr(printer_for_mirror, "start_recording", None)
+            start_rec = getattr(printer, "start_recording", None)
             if start_rec is not None:
                 start_rec()
         _record_frequent_task(prompt_template)
@@ -281,8 +277,8 @@ class ChatSorcarAgent(SorcarAgent):
             raise
         finally:
             ChatSorcarAgent.running_agents.pop(task_id, None)
-            if printer_for_mirror is not None:
-                stop_rec = getattr(printer_for_mirror, "stop_recording", None)
+            if printer is not None:
+                stop_rec = getattr(printer, "stop_recording", None)
                 if stop_rec is not None:
                     try:
                         stop_rec()
