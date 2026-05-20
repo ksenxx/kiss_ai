@@ -64,16 +64,16 @@ class SorcarAgent(RelentlessAgent):
     ) -> list[str]:
         """Execute multiple independent tasks concurrently using parallel agents.
 
-        Each task gets its own ``SorcarAgent`` instance.  Subclasses can
+        Each task gets its own ``ChatSorcarAgent`` instance.  Subclasses can
         override this method to change the agent type or pass extra context
         (e.g. ``ChatSorcarAgent`` propagates ``chat_id``).
 
-        When the parent agent has a browser-based printer, each sub-agent
-        broadcasts a ``new_tab`` message carrying its backend ``task_id``
-        the moment ``_add_task`` mints it.  The frontend reacts by
-        allocating a fresh tab and posting ``resumeSession`` with the
-        same task id, which subscribes the new tab to the sub-agent's
-        live event stream.  No backend tab ids are involved.
+        This method is a pure parallel executor.  It has no knowledge of
+        backend task ids or any frontend concepts (tabs, ``new_tab``
+        broadcasts, etc.).  Any sub-agent-specific frontend behaviour is
+        owned by the sub-agent itself — see
+        :meth:`ChatSorcarAgent.run`, which self-broadcasts a ``new_tab``
+        message whenever it detects ``self._subagent_info`` is set.
 
         Args:
             tasks: List of self-contained task description strings.
@@ -636,13 +636,12 @@ def run_tasks_parallel(
     This is ideal for I/O-bound workloads (LLM API calls, network
     requests) where the GIL is released during I/O waits.
 
-    When *printer* is a browser-based printer (exposes ``broadcast``),
-    each sub-agent triggers a ``new_tab`` message the moment its
-    ``task_id`` is allocated.  The frontend allocates a fresh tab and
-    posts ``resumeSession`` with the same task id, which subscribes the
-    new tab to the sub-agent's live event stream.  No backend tab ids
-    are constructed here — backend identity is the database
-    ``task_id`` only.
+    This helper is a pure parallel executor: it has no knowledge of
+    backend task ids or any frontend concepts.  It simply marks each
+    spawned agent as a sub-agent (via ``_subagent_info``) and the
+    sub-agent itself owns any sub-agent-specific behaviour (such as
+    broadcasting ``new_tab`` to a browser-based frontend) inside its
+    own ``run()`` method.
 
     Args:
         tasks: List of task description strings.  Each string is passed as
@@ -660,9 +659,10 @@ def run_tasks_parallel(
             default from persistence (same as :meth:`SorcarAgent.run`).
         work_dir: Working directory for all parallel agents.  ``None`` uses
             the default (``artifact_dir/kiss_workdir``).
-        printer: Optional printer from the parent agent.  When a
-            browser-based printer is supplied, a ``new_tab`` event is
-            broadcast for each sub-agent once it starts running.
+        printer: Optional printer from the parent agent.  Forwarded
+            verbatim to each sub-agent's ``run`` so live events
+            continue to flow through the same channel.  The executor
+            itself does not call any printer methods.
 
     Returns:
         List of YAML result strings in the **same order** as *tasks*.
@@ -677,8 +677,6 @@ def run_tasks_parallel(
     """
     tasks = _coerce_tasks(tasks)
 
-    broadcast = getattr(printer, "broadcast", None) if printer else None
-
     # Local import: ``chat_sorcar_agent`` imports from this module, so a
     # top-level import would be circular.
     from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
@@ -688,28 +686,30 @@ def run_tasks_parallel(
     # ``(budget_used, total_tokens_used, total_steps)``.
     sub_usage: list[tuple[float, int, int]] = [(0.0, 0, 0)] * len(tasks)
 
-    def _broadcast_new_tab(task_id: int) -> None:
-        if broadcast:
-            broadcast({"type": "new_tab", "task_id": int(task_id)})
-
     def _run_single(args: tuple[int, str]) -> str:
         idx, task = args
         agent = ChatSorcarAgent(f"Parallel-{task[:40]}")
+        # Mark the spawned agent as a sub-agent.  ``ChatSorcarAgent.run``
+        # reads this marker to drive its own sub-agent-specific
+        # behaviour (e.g. broadcasting ``new_tab`` to a browser-based
+        # frontend, persisting the ``subagent`` extra field).  This
+        # keeps the parallel executor itself free of any task-id or
+        # frontend knowledge.  The base ``SorcarAgent`` path has no
+        # parent ``task_id`` to record, so ``parent_task_id`` is
+        # ``None`` here; the chat-aware override sets the real parent
+        # id.
+        agent._subagent_info = {"parent_task_id": None}
         try:
             # ``is_parallel=True`` propagates the parallel capability so
             # sub-agents themselves get the ``run_parallel`` tool and
             # can invoke nested parallel execution.  Without this, nested
             # parallel (sub-agent calls run_parallel) is impossible.
-            # ``_on_task_id`` fires the ``new_tab`` broadcast the moment
-            # the sub-agent's backend task id is minted, so the frontend
-            # can open a tab and resume into the live stream.
             result: str = agent.run(
                 prompt_template=task,
                 model_name=model_name,
                 work_dir=work_dir,
                 printer=printer,
                 is_parallel=True,
-                _on_task_id=_broadcast_new_tab,
             )
             return result
         except Exception as exc:

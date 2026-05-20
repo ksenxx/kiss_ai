@@ -148,14 +148,13 @@ class ChatSorcarAgent(SorcarAgent):
            a Stop click on the parent terminates the whole task tree
            (including nested ``_run_tasks_parallel`` calls).
 
-        When the parent has a browser-based printer, each sub-agent
-        triggers a ``new_tab`` message the moment its backend
-        ``task_id`` is minted (via the ``_on_task_id`` callback into
-        :meth:`ChatSorcarAgent.run`).  The frontend allocates a fresh
-        tab and posts ``resumeSession`` with the same task id, which
-        subscribes the new tab to the live event stream.  No backend
-        tab ids are constructed here — backend identity is the
-        database ``task_id`` only.
+        This method itself has no knowledge of backend task ids or any
+        frontend concepts.  Each spawned sub-agent receives its
+        ``_subagent_info`` marker here, and :meth:`ChatSorcarAgent.run`
+        in the sub-agent thread reads that marker to drive any
+        sub-agent-specific behaviour (e.g. broadcasting ``new_tab`` to
+        a browser-based frontend so a fresh tab opens and subscribes
+        to the live event stream).
 
         Args:
             tasks: List of self-contained task description strings.
@@ -180,7 +179,6 @@ class ChatSorcarAgent(SorcarAgent):
         # so each worker sees the parent id at spawn time.
         parent_task_id = self._last_task_id
         printer = self.printer
-        broadcast = getattr(printer, "broadcast", None) if printer else None
         thread_local = getattr(printer, "_thread_local", None) if printer else None
         # Cooperative-stop event of the parent task thread.  Captured
         # here so each worker can copy it onto its own
@@ -199,10 +197,6 @@ class ChatSorcarAgent(SorcarAgent):
         # *tasks*.  Each tuple is ``(budget_used, total_tokens_used,
         # total_steps)``.
         sub_usage: list[tuple[float, int, int]] = [(0.0, 0, 0)] * len(tasks)
-
-        def _broadcast_new_tab(task_id: int) -> None:
-            if broadcast:
-                broadcast({"type": "new_tab", "task_id": int(task_id)})
 
         def _run_single(args: tuple[int, str]) -> str:
             idx, task = args
@@ -228,17 +222,17 @@ class ChatSorcarAgent(SorcarAgent):
                 # ``is_parallel=True`` propagates the parallel
                 # capability so sub-agents themselves get the
                 # ``run_parallel`` tool and can invoke nested parallel
-                # execution.  ``_on_task_id`` fires the ``new_tab``
-                # broadcast the moment the sub-agent's backend
-                # ``task_id`` is minted, so the frontend can open a
-                # tab and resume into the live stream.
+                # execution.  The ``new_tab`` broadcast (so the
+                # frontend opens a tab and resumes into the live
+                # stream) is owned by :meth:`ChatSorcarAgent.run` in
+                # the sub-agent thread; it triggers automatically
+                # because ``_subagent_info`` was set above.
                 result: str = agent.run(
                     prompt_template=task,
                     model_name=model,
                     work_dir=work_dir,
                     printer=printer,
                     is_parallel=True,
-                    _on_task_id=_broadcast_new_tab,
                 )
                 return result
             except Exception as exc:
@@ -317,14 +311,6 @@ class ChatSorcarAgent(SorcarAgent):
         # way because the printer no longer carries per-thread tab
         # state — tabs are pure subscribers indexed by ``task_id``.
         subscribe_tab_id = kwargs.pop("_subscribe_tab_id", "")
-        # Optional callback invoked the moment ``_add_task`` mints the
-        # backend ``task_id`` for this run.  Parallel sub-agent
-        # spawners use this hook to broadcast a ``new_tab`` message to
-        # the frontend so a fresh tab opens and ``resumeSession`` is
-        # called with the same task id — the frontend then subscribes
-        # itself to the live event stream.  This keeps backend
-        # spawners free of any frontend tab-id allocation.
-        on_task_id = kwargs.pop("_on_task_id", None)
         # Mint a fresh chat id at run-start when one is not already
         # set (e.g. a brand-new chat tab that has never resumed a
         # history entry).  Establishing the chat id BEFORE _add_task
@@ -370,11 +356,27 @@ class ChatSorcarAgent(SorcarAgent):
             prompt_template, chat_id=self._chat_id, extra=early_extra,
         )
         self._last_task_id = task_id
-        if on_task_id is not None:
-            try:
-                on_task_id(task_id)
-            except Exception:
-                pass
+        # When this run is a sub-agent (its ``_subagent_info`` marker
+        # was set by a parallel executor before calling ``run``),
+        # broadcast a ``new_tab`` message to the frontend.  This is
+        # the single hook that informs a browser-based frontend that
+        # a fresh sub-agent task exists: the frontend's ``new_tab``
+        # handler allocates a tab and posts ``resumeSession`` with
+        # the same task id to subscribe to the live event stream.
+        # Keeping this self-broadcast inside ``run`` (rather than
+        # inside the parallel executor) means the executors carry no
+        # task-id or frontend knowledge at all.
+        if self._subagent_info is not None:
+            broadcast_for_subagent = (
+                kwargs.get("printer") or getattr(self, "printer", None)
+            )
+            if broadcast_for_subagent is not None:
+                broadcast = getattr(broadcast_for_subagent, "broadcast", None)
+                if broadcast is not None:
+                    try:
+                        broadcast({"type": "new_tab", "task_id": int(task_id)})
+                    except Exception:
+                        pass
         # Publish ``self`` as the agent currently driving ``task_id``.
         # The entry is added the moment the row exists in
         # ``task_history`` and removed in the matching ``finally``
