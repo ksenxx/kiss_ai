@@ -3129,6 +3129,25 @@
         setReady(isErr ? 'Error' : 'Stopped', ev.tabId);
         break;
       }
+      case 'new_tab': {
+        // Backend → frontend request to open a fresh chat tab and
+        // resume an existing task into it.  ``task_id`` is the
+        // backend's identity for the task; the frontend allocates a
+        // tab id via ``createNewTab`` (frontend-only concept) and
+        // then posts ``resumeSession`` back to the backend.  The
+        // server's ``_cmd_resume_session`` handler supports a
+        // task-id-only resume (no ``chatId`` required).
+        if (ev.task_id === undefined || ev.task_id === null) break;
+        const createdNewTab = createNewTab();
+        if (createdNewTab) {
+          vscode.postMessage({
+            type: 'resumeSession',
+            taskId: ev.task_id,
+            tabId: activeTabId,
+          });
+        }
+        break;
+      }
       case 'openSubagentTab': {
         // Trim so trailing newlines from the backend description don't
         // bleed into taskPanelHTML and resurface in the user's clipboard
