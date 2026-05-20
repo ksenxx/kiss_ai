@@ -41,7 +41,7 @@ DEFAULTS: dict[str, Any] = {
     # ``update_settings(auto_commit_mode=...)`` (distinct from the
     # one-shot ``auto_commit=True`` trigger used by the legacy icon
     # button).
-    "auto_commit_mode": False,
+    "auto_commit_mode": True,
 }
 
 API_KEY_ENV_VARS: frozenset[str] = frozenset({
