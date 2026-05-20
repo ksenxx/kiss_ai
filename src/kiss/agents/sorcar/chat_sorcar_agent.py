@@ -21,7 +21,6 @@ from kiss.agents.sorcar.persistence import (
     _save_task_extra,
     _save_task_result,
 )
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent, _coerce_tasks
 
 MAX_TASKS = 10
@@ -265,13 +264,6 @@ class ChatSorcarAgent(SorcarAgent):
             start_rec = getattr(printer_for_mirror, "start_recording", None)
             if start_rec is not None:
                 start_rec()
-        mirrored_state: _RunningAgentState | None = None
-        if subscribe_tab_id:
-            mirrored_state = _RunningAgentState.running_agent_states.get(
-                subscribe_tab_id,
-            )
-            if mirrored_state is not None:
-                mirrored_state.task_history_id = task_id
         _record_frequent_task(prompt_template)
 
         result_summary = ""
@@ -289,8 +281,6 @@ class ChatSorcarAgent(SorcarAgent):
             raise
         finally:
             ChatSorcarAgent.running_agents.pop(task_id, None)
-            if mirrored_state is not None and mirrored_state.task_history_id == task_id:
-                mirrored_state.task_history_id = None
             if printer_for_mirror is not None:
                 stop_rec = getattr(printer_for_mirror, "stop_recording", None)
                 if stop_rec is not None:

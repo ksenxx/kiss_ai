@@ -239,8 +239,12 @@ class VSCodeServer(
         """Return the set of task_history row ids with alive worker threads.
 
         Scans all per-tab ``_RunningAgentState`` entries and collects the
-        ``task_history_id`` of those whose ``task_thread`` is still alive.
-        Must be called WITHOUT holding ``_state_lock`` — acquires it internally.
+        live task id of those whose ``task_thread`` is still alive.
+        Prefers ``tab.agent._last_task_id`` (set by the agent the moment
+        it allocates the task row) and falls back to
+        ``tab.task_history_id`` for the post-run window when the agent
+        reference has already been cleared.  Must be called WITHOUT
+        holding ``_state_lock`` — acquires it internally.
 
         Returns:
             Set of ``task_history.id`` values that are currently running.
@@ -248,7 +252,11 @@ class VSCodeServer(
         running: set[int] = set()
         with self._state_lock:
             for tab in _RunningAgentState.running_agent_states.values():
-                tid = tab.task_history_id
+                tid = (
+                    tab.agent._last_task_id
+                    if tab.agent is not None and tab.agent._last_task_id is not None
+                    else tab.task_history_id
+                )
                 if (
                     tid is not None
                     and tab.task_thread is not None
@@ -813,7 +821,12 @@ class VSCodeServer(
             # never reached.
             if task_id is not None:
                 for t in _RunningAgentState.running_agent_states.values():
-                    if t.task_history_id != task_id:
+                    live_tid = (
+                        t.agent._last_task_id
+                        if t.agent is not None and t.agent._last_task_id is not None
+                        else t.task_history_id
+                    )
+                    if live_tid != task_id:
                         continue
                     alive = (
                         t.task_thread is not None and t.task_thread.is_alive()
