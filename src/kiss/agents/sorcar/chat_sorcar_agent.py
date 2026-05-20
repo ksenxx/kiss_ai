@@ -40,6 +40,18 @@ class ChatSorcarAgent(SorcarAgent):
 
     def __init__(self, name: str) -> None:
         super().__init__(name)
+        # These four attributes are initialized once at construction and
+        # must NOT be reset at the start of ``run()``.  The parallel
+        # executor (``_run_tasks_parallel``) constructs a fresh
+        # sub-agent and pre-sets ``_subagent_info`` (and ``_chat_id``
+        # via ``resume_chat_by_id``) BEFORE calling ``run()``; a
+        # per-run reset would clobber them and silently disable the
+        # ``new_tab`` broadcast that wires the sub-agent's event stream
+        # to a fresh frontend tab.
+        self._chat_id: str = ""
+        self._subagent_info: dict[str, object] | None = None
+        self._last_task_id: int | None = None
+        self._last_user_prompt: str = ""
 
     @property
     def chat_id(self) -> str:
@@ -193,15 +205,15 @@ class ChatSorcarAgent(SorcarAgent):
         Returns:
             YAML string with 'success' and 'summary' keys.
         """
-        self._chat_id = ""
-        self._last_task_id: int | None = None
-        self._last_user_prompt: str = ""
-        self._subagent_info: dict[str, object] | None = None
-
         skip_persistence = kwargs.pop("_skip_persistence", False)
         subscribe_tab_id = kwargs.pop("_subscribe_tab_id", "")
+        # Mint a fresh chat id only if no caller (or prior ``run()``)
+        # already established one.  Resetting unconditionally here would
+        # discard the ``chat_id`` that ``_run_tasks_parallel`` propagates
+        # from the parent via ``resume_chat_by_id``.
         if self._chat_id == "":
             self._chat_id = uuid.uuid4().hex
+        self._last_task_id = None
 
         self._last_user_prompt = prompt_template
 
