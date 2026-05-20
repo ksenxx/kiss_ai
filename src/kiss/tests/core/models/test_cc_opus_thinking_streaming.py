@@ -260,6 +260,7 @@ class TestCCOpusTextStreamingInToolMode:
         merges consecutive text_delta events for storage efficiency.
         """
         printer = BaseBrowserPrinter()
+        printer._thread_local.task_id = "test-task-1"
         printer.start_recording()
 
         m = ClaudeCodeModel(
@@ -302,6 +303,7 @@ class TestCCOpusTextStreamingInToolMode:
     def test_thinking_tokens_still_stream_in_tool_mode(self) -> None:
         """Thinking tokens must stream incrementally during tool generation."""
         printer = BaseBrowserPrinter()
+        printer._thread_local.task_id = "test-task-2"
         printer.start_recording()
 
         m = ClaudeCodeModel(
@@ -356,6 +358,7 @@ class TestCCOpusTextStreamingInToolMode:
     def test_text_tokens_stream_when_tool_calls_present(self) -> None:
         """Text tokens must stream even when the response contains tool calls."""
         printer = BaseBrowserPrinter()
+        printer._thread_local.task_id = "test-task-3"
         printer.start_recording()
 
         m = ClaudeCodeModel(

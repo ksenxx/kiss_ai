@@ -86,6 +86,7 @@ class TestAwaitUserResponse(unittest.TestCase):
         q: queue.Queue[str] = queue.Queue(maxsize=1)
         self.server._get_tab("5").user_answer_queue = q
         self.server.printer._thread_local.task_id = "5"
+        self.server.printer.subscribe_tab("5", "5")
         stop = threading.Event()
         self.server.printer._thread_local.stop_event = stop
 
@@ -102,6 +103,7 @@ class TestAwaitUserResponse(unittest.TestCase):
         q: queue.Queue[str] = queue.Queue(maxsize=1)
         self.server._get_tab("6").user_answer_queue = q
         self.server.printer._thread_local.task_id = "6"
+        self.server.printer.subscribe_tab("6", "6")
         stop = threading.Event()
         self.server.printer._thread_local.stop_event = stop
 
@@ -137,6 +139,7 @@ class TestTabIdInjection(unittest.TestCase):
 
         printer = MemoryPrinter()
         printer._thread_local.task_id = "7"
+        printer.subscribe_tab("7", "7")
 
         printer.broadcast({"type": "askUser", "question": "What?"})
 
@@ -381,6 +384,7 @@ class TestAskUserQuestion(unittest.TestCase):
         q.put("yes")
         self.server._get_tab("8").user_answer_queue = q
         self.server.printer._thread_local.task_id = "8"
+        self.server.printer.subscribe_tab("8", "8")
         self.server.printer._thread_local.stop_event = threading.Event()
 
         result = self.server._ask_user_question("Continue?")
@@ -481,6 +485,7 @@ class TestRecordingIsolation(unittest.TestCase):
         from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 
         printer = BaseBrowserPrinter()
+        printer._thread_local.task_id = "rec-1"
         printer.start_recording()
         key = printer._task_key()
         assert key in printer._recordings

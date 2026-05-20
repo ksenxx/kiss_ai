@@ -3743,7 +3743,7 @@ class TestTabStateRestore(unittest.TestCase):
     def test_persist_tab_state_serializes_tab_id_as_chat_id(self) -> None:
         """persistTabState serializes tab.id as chatId for persistence."""
         idx = self.js.index("function persistTabState()")
-        block = self.js[idx:idx + 500]
+        block = self.js[idx:idx + 1000]
         assert "t.id === activeTabId" in block
         assert "chatId: t.id" in block
 

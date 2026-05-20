@@ -490,6 +490,7 @@ class TestBrowserUIBranches:
         recording for a custom (non-core) tool.
         """
         p = BaseBrowserPrinter()
+        p._thread_local.task_id = "0"
         p.start_recording()
         p.print("some result", type="tool_result", tool_name="custom_tool", is_error=False)
         events = p.stop_recording()

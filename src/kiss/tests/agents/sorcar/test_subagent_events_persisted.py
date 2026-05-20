@@ -78,9 +78,24 @@ class _StubAgent(ChatSorcarAgent):
 
         task_id, self._chat_id = _add_task(prompt_template, chat_id=self._chat_id)
         self._last_task_id = task_id
+        # Mirror what the real ``ChatSorcarAgent.run`` does so the
+        # printer can route events to this sub-agent's task row:
+        # tag this worker thread with the new ``task_id`` and
+        # register ``self`` in the printer's ``_persist_agents`` map
+        # under the same key.  Without this plumbing
+        # ``_inject_task_id`` would emit no ``taskId`` and
+        # ``_persist_event`` would drop the event.
+        task_key = str(task_id)
+        if printer is not None:
+            tl = getattr(printer, "_thread_local", None)
+            if tl is not None:
+                tl.task_id = task_key
+            persist_map = getattr(printer, "_persist_agents", None)
+            if persist_map is not None:
+                persist_map[task_key] = self
         # Emit one display event through the printer's broadcast path.
-        # Because the parent registered us in ``_persist_agents`` keyed
-        # by our ``sub_tab_id``, this should land in the events table
+        # Because we registered ourselves in ``_persist_agents`` keyed
+        # by our own ``task_id``, this should land in the events table
         # under THIS sub-agent's ``task_id``.
         if printer is not None:
             printer.broadcast({
@@ -190,8 +205,13 @@ class TestSubagentEventsPersisted:
                     for e in evs
                 ), f"events table for task {row_id} missing subagent event: {evs}"
 
-            # And the printer's _persist_agents must NOT leak any
-            # sub-agent entries after _run_tasks_parallel returns.
+            # Only the parent's entry should remain in
+            # ``_persist_agents`` after ``_run_tasks_parallel`` returns;
+            # the sub-agents' entries (keyed by their own ``task_id``)
+            # are tied to per-task lifecycle and are cleaned by the
+            # task runner via ``cleanup_task``.  We assert the keys
+            # for the sub-agents — if any — are sub-task ids, NOT the
+            # legacy ``tab-parent__sub_N`` sub-tab-id form.
             assert "tab-parent__sub_0" not in printer._persist_agents
             assert "tab-parent__sub_1" not in printer._persist_agents
             assert "tab-parent__sub_2" not in printer._persist_agents

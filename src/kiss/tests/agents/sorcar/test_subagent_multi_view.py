@@ -99,18 +99,26 @@ class TestSubagentRegistersRunningState:
         done = threading.Event()
 
         def fake_run(self: ChatSorcarAgent, **_kw: Any) -> str:
-            # Capture the sub-agent's own state mid-run.
-            tl_tab_id = getattr(printer._thread_local, "tab_id", None)
-            assert isinstance(tl_tab_id, str)
-            st = _RunningAgentState.running_agent_states.get(tl_tab_id)
-            observed["tab_id"] = tl_tab_id
+            # Capture the sub-agent's own state mid-run.  The
+            # current ``ChatSorcarAgent._run_tasks_parallel`` keys
+            # sub-agent states by ``f"task-{parent_task_id}__sub_{i}"``
+            # and registers exactly one such ``is_subagent`` state
+            # per concurrent sub-agent, so scan the registry for it
+            # rather than reading a thread-local that no longer
+            # carries the tab id in pool workers.
+            sub_states = [
+                s for s in _RunningAgentState.running_agent_states.values()
+                if s.is_subagent
+            ]
+            assert len(sub_states) == 1, sub_states
+            st = sub_states[0]
+            observed["tab_id"] = st.tab_id
             observed["state"] = st
-            if st is not None:
-                observed["chat_id"] = st.chat_id
-                observed["is_subagent"] = st.is_subagent
-                observed["parent_task_id"] = st.parent_task_id
-                observed["task_history_id"] = st.task_history_id
-                observed["is_task_active"] = st.is_task_active
+            observed["chat_id"] = st.chat_id
+            observed["is_subagent"] = st.is_subagent
+            observed["parent_task_id"] = st.parent_task_id
+            observed["task_history_id"] = st.task_history_id
+            observed["is_task_active"] = st.is_task_active
             gate.set()
             done.wait(timeout=2)
             return '{"success": true, "summary": "ok"}'
@@ -142,8 +150,10 @@ class TestSubagentRegistersRunningState:
             assert gate.wait(timeout=5), "fake_run never reached"
 
             # While the sub-agent thread is paused inside fake_run,
-            # assert the registry shape.
-            assert observed["tab_id"] == "tab-parent__sub_0"
+            # assert the registry shape.  The sub-agent's tab id is
+            # ``f"task-{parent_task_id}__sub_0"`` (deterministic) so
+            # ``_reattach_running_chat`` can disambiguate by task id.
+            assert observed["tab_id"] == f"task-{parent_task_id}__sub_0"
             assert observed["state"] is not None
             assert observed["chat_id"] == parent_chat_id
             assert observed["is_subagent"] is True
@@ -161,7 +171,7 @@ class TestSubagentRegistersRunningState:
         # After the sub-agent thread exits the registry entry must be
         # popped so a follow-up history click does not re-attach to a
         # dead thread.
-        assert "tab-parent__sub_0" not in (
+        assert f"task-{parent_task_id}__sub_0" not in (
             _RunningAgentState.running_agent_states
         )
 
@@ -208,14 +218,17 @@ class TestReattachRunningChatTaskIdDisambiguation:
             sub_state
         )
 
-        # Click sub-agent row → task_id=200 → subscribe the new tab to
-        # the SUB-agent's stream (``tab-parent__sub_0``), NOT the
-        # parent's stream.
+        # Click sub-agent row → task_id=200 → subscribe the new tab
+        # to the SUB-agent's event stream (keyed on its own
+        # ``task_history_id=200``), NOT the parent's (which has
+        # ``task_history_id=100``).  The printer routes per-task-id,
+        # so passing 200 — not the source's ``tab_id`` — proves the
+        # disambiguation worked.
         ok = server._reattach_running_chat(
             "shared-chat", "tab-history-click", task_id=200,
         )
         assert ok is True
-        assert subs == [("tab-parent__sub_0", "tab-history-click")]
+        assert subs == [(200, "tab-history-click")]
 
         # Click a fresh tab with no task_id → falls back to chat_id
         # matching; the first eligible state wins.  The exact match
@@ -280,7 +293,9 @@ class TestReattachRunningChatTaskIdDisambiguation:
             "chat-A", "tab-history-click", task_id=999,
         )
         assert ok is True
-        assert subs == [("tab-parent", "tab-history-click")]
+        # Fallback found the parent (chat-id match); the printer is
+        # subscribed per ``task_history_id``, so the call key is 100.
+        assert subs == [(100, "tab-history-click")]
 
 
 class TestReplaySessionSubscribesRunningSubagent:
@@ -358,10 +373,11 @@ class TestReplaySessionSubscribesRunningSubagent:
         )
 
         # 1. subscribe_tab was called to multi-view the sub-agent's
-        #    stream — not the parent's.
-        assert ("tab-parent__sub_0", new_tab_id) in subs
+        #    stream — not the parent's.  The printer keys per
+        #    ``task_history_id`` so the expected call uses ``sub_id``.
+        assert (sub_id, new_tab_id) in subs
         # The parent must NOT have been subscribed.
-        assert ("tab-parent", new_tab_id) not in subs
+        assert (parent_id, new_tab_id) not in subs
 
         # 2. openSubagentTab fires BEFORE task_events so the frontend
         #    sees sub-agent styling before any replayed events.
