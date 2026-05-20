@@ -130,9 +130,6 @@ export function buildChatHtml(
             <button id="worktree-toggle-btn" class="toggle-btn" data-tooltip="Use worktree">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 01-9 9"/></svg>
             </button>
-            <button id="autocommit-btn" data-tooltip="git commit">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><line x1="1.05" y1="12" x2="7" y2="12"/><line x1="17.01" y1="12" x2="22.96" y2="12"/><line x1="12" y1="1.05" x2="12" y2="7"/><line x1="12" y1="17.01" x2="12" y2="22.96"/></svg>
-            </button>
             <div id="model-dropdown">
               <div class="search-wrap">
                 <input type="text" id="model-search" placeholder="Search models...">
@@ -206,6 +203,9 @@ export function buildChatHtml(
           <label class="config-label config-checkbox">
             <input type="checkbox" id="cfg-auto-commit" checked>
             Auto commit
+            <button id="autocommit-btn" type="button" data-tooltip="git commit">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><line x1="1.05" y1="12" x2="7" y2="12"/><line x1="17.01" y1="12" x2="22.96" y2="12"/><line x1="12" y1="1.05" x2="12" y2="7"/><line x1="12" y1="17.01" x2="12" y2="22.96"/></svg>
+            </button>
           </label>
           <div class="config-divider"></div>
           <div class="sidebar-hdr" style="margin-top:8px;">API Keys</div>
