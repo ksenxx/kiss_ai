@@ -71,7 +71,7 @@ class _FakeAgent:
         self._last_user_prompt = prompt
         self.total_tokens_used = tokens
         self.budget_used = cost
-        self.step_count = steps
+        self.total_steps = steps
 
 
 def _spawn_blocking_thread() -> tuple[threading.Thread, threading.Event]:
