@@ -195,6 +195,8 @@ _HISTORY_SELECT = (
     "FROM task_history "
 )
 
+_HISTORY_NOT_SUBAGENT = 'COALESCE(extra, \'\') NOT LIKE \'%"subagent"%\''
+
 _CLEAR_LAST_MODEL = "UPDATE model_usage SET is_last = 0 WHERE is_last = 1"
 
 
@@ -479,7 +481,11 @@ def _load_history(limit: int = 0, offset: int = 0) -> list[_HistoryEntry]:
     with _rw_lock.read_lock():
         db = _get_db()
         effective_limit = limit if limit > 0 else -1
-        sql = _HISTORY_SELECT + "ORDER BY timestamp DESC LIMIT ? OFFSET ?"
+        sql = (
+            _HISTORY_SELECT
+            + f"WHERE {_HISTORY_NOT_SUBAGENT} "
+            + "ORDER BY timestamp DESC LIMIT ? OFFSET ?"
+        )
         rows = db.execute(sql, (effective_limit, offset)).fetchall()
         return [dict(r) for r in rows]
 
@@ -530,7 +536,9 @@ def _search_history(
         escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         rows = db.execute(
             _HISTORY_SELECT
-            + "WHERE task LIKE ? ESCAPE '\\' ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+            + "WHERE task LIKE ? ESCAPE '\\' "
+            + f"AND {_HISTORY_NOT_SUBAGENT} "
+            + "ORDER BY timestamp DESC LIMIT ? OFFSET ?",
             (f"%{escaped}%", limit, offset),
         ).fetchall()
         return [dict(r) for r in rows]
@@ -538,9 +546,6 @@ def _search_history(
 
 def _get_history_entry(idx: int) -> _HistoryEntry | None:
     """Get a single history entry by its index (0 = most recent). Thread-safe.
-
-    Args:
-        idx: Zero-based index into the history list.
 
     Returns:
         The entry dict, or ``None`` if the index is out of range.

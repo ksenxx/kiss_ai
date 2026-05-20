@@ -160,11 +160,16 @@ class TestPersistedSubagentBlob:
 
             parent._run_tasks_parallel(["sub A", "sub B"], max_workers=1)
 
-            history = th._load_history(limit=50, offset=0)
-            sub_rows = [
-                h for h in history
-                if "subagent" in str(h.get("extra") or "")
-            ]
+            # Sub-agent rows are filtered out of the user-facing
+            # ``_load_history`` listing.  To verify the persisted
+            # blob shape we query the DB directly.
+            with th._rw_lock.read_lock():
+                db = th._get_db()
+                rows = db.execute(
+                    "SELECT extra FROM task_history "
+                    "WHERE extra LIKE '%\"subagent\"%' ORDER BY id ASC",
+                ).fetchall()
+            sub_rows = [dict(r) for r in rows]
             assert len(sub_rows) == 2, sub_rows
             for h in sub_rows:
                 extra = json.loads(str(h["extra"]))
