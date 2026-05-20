@@ -1030,7 +1030,7 @@ body.remote-chat #welcome > #input-area {
 .sidebar-tabs {
   display: flex;
   gap: 4px;
-  margin: 24px 0 0;
+  margin: 24px 0 8px;
   border-bottom: 1px solid var(--border);
 }
 
@@ -1060,13 +1060,14 @@ body.remote-chat #welcome > #input-area {
   flex-direction: column;
   overflow: hidden;
   min-height: 0;
-  margin-top: 0;
+  margin-top: 2px;
 }
 
 #frequent-list {
   flex: 1;
   overflow-y: auto;
   scrollbar-width: thin;
+  margin-top: 2px;
 }
 
 .frequent-item {
@@ -1093,6 +1094,7 @@ body.remote-chat #welcome > #input-area {
   flex-direction: column;
   overflow: hidden;
   min-height: 0;
+  margin-top: 2px;
 }
 
 #history-list {
