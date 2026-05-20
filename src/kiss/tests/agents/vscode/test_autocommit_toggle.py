@@ -1,11 +1,11 @@
-"""Integration tests for the inline "Auto commit" toggle button.
+"""Integration tests for the "Auto commit" toggle checkbox.
 
 Validates:
-- The toggle exists in both ``SorcarTab.ts`` (extension webview) and
-  the standalone remote-access ``web_server.py`` HTML template,
-  rendered inline between ``#menu-btn`` and ``#autocommit-btn``
-  alongside ``worktree-toggle-btn``.
-- ``main.js`` references the toggle and forwards its state as
+- The toggle exists as ``id="cfg-auto-commit"`` in the Settings panel
+  in both ``SorcarTab.ts`` (extension webview) and the standalone
+  remote-access ``web_server.py`` HTML template, positioned right
+  after ``cfg-use-parallel`` and defaulting to ``checked``.
+- ``main.js`` references the checkbox and forwards its state as
   ``autoCommit`` on submit/run messages.
 - ``_RunningAgentState`` carries an ``auto_commit_mode`` field that
   defaults to ``False``.
@@ -70,51 +70,51 @@ def _make_server(work_dir: str) -> tuple[VSCodeServer, list[dict]]:
 
 
 class TestAutocommitToggleInTemplate(unittest.TestCase):
-    """The toggle button exists inline in the input-footer HTML."""
+    """The toggle exists as a settings-panel checkbox in both templates."""
 
     def test_sorcar_tab_template(self) -> None:
         html = _read("src/SorcarTab.ts")
-        assert 'id="autocommit-toggle-btn"' in html
-        # The toggle is an inline icon-only button with class
-        # ``toggle-btn`` and an "Auto commit" tooltip.
-        btn_start = html.index('id="autocommit-toggle-btn"')
-        btn_end = html.index("</button>", btn_start)
-        btn_html = html[btn_start:btn_end]
-        assert 'class="toggle-btn active"' in btn_html
-        assert 'data-tooltip="Auto commit"' in btn_html
-        # And it sits between ``#menu-btn`` and ``#autocommit-btn``.
-        menu_pos = html.index('id="menu-btn"')
-        toggle_pos = html.index('id="autocommit-toggle-btn"')
-        commit_pos = html.index('id="autocommit-btn"')
-        assert menu_pos < toggle_pos < commit_pos
+        assert 'id="cfg-auto-commit"' in html
+        # The checkbox lives inside a ``config-label config-checkbox``
+        # wrapper labelled "Auto commit" and defaults to ``checked``.
+        idx = html.index('id="cfg-auto-commit"')
+        label_end = html.index("</label>", idx)
+        block = html[idx:label_end]
+        assert "Auto commit" in block
+        assert "checked" in block
+        # It sits in the settings panel right after ``cfg-use-parallel``.
+        parallel_idx = html.index('id="cfg-use-parallel"')
+        assert parallel_idx < idx
+        # And the legacy inline footer button no longer exists.
+        assert 'id="autocommit-toggle-btn"' not in html
 
     def test_web_server_template(self) -> None:
         html = _read("web_server.py")
-        assert 'id="autocommit-toggle-btn"' in html
-        # The remote-access HTML positions the toggle between
-        # ``#menu-btn`` and ``#autocommit-btn``.
-        menu_pos = html.index('id="menu-btn"')
-        toggle_pos = html.index('id="autocommit-toggle-btn"')
-        commit_pos = html.index('id="autocommit-btn"')
-        assert menu_pos < toggle_pos < commit_pos
+        assert 'id="cfg-auto-commit"' in html
+        idx = html.index('id="cfg-auto-commit"')
+        label_end = html.index("</label>", idx)
+        block = html[idx:label_end]
+        assert "Auto commit" in block
+        assert "checked" in block
+        parallel_idx = html.index('id="cfg-use-parallel"')
+        assert parallel_idx < idx
+        assert 'id="autocommit-toggle-btn"' not in html
 
 
 class TestAutocommitToggleJS(unittest.TestCase):
-    """The frontend wires the toggle into the submit messages."""
+    """The frontend wires the checkbox into the submit messages."""
 
     def test_element_reference(self) -> None:
         js = _read("media/main.js")
         # Tolerate the line break that ``prettier`` inserts around
         # long ``getElementById`` arguments.
         normalised = " ".join(js.split())
-        assert "'autocommit-toggle-btn'" in normalised
+        assert "'cfg-auto-commit'" in normalised
         assert "autocommitToggleBtn" in js
-
-    def test_click_handler_toggles_active(self) -> None:
-        js = _read("media/main.js")
-        idx = js.index("autocommitToggleBtn.addEventListener('click'")
-        snippet = js[idx:idx + 400]
-        assert "autocommitToggleBtn.classList.toggle('active'" in snippet
+        # State is read from the checkbox's ``.checked`` property.
+        assert "autocommitToggleBtn.checked" in js
+        # And the old click-listener that toggled an ``active`` class is gone.
+        assert "autocommitToggleBtn.addEventListener('click'" not in js
 
     def test_submit_messages_include_auto_commit(self) -> None:
         js = _read("media/main.js")

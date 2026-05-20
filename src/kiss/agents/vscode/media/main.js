@@ -869,7 +869,7 @@
   const worktreeToggleBtn = document.getElementById('worktree-toggle-btn');
   const parallelToggleBtn = document.getElementById('cfg-use-parallel');
   const demoToggleBtn = document.getElementById('cfg-demo-mode');
-  const autocommitToggleBtn = document.getElementById('autocommit-toggle-btn');
+  const autocommitToggleBtn = document.getElementById('cfg-auto-commit');
   const taskPanel = document.getElementById('task-panel');
   const taskPanelText = document.getElementById('task-panel-text');
   const taskPanelChevron = document.getElementById('task-panel-chevron');
@@ -2792,9 +2792,7 @@
               parallelToggleBtn.checked = !!extra.is_parallel;
             }
             if (autocommitToggleBtn) {
-              if (extra.auto_commit_mode)
-                autocommitToggleBtn.classList.add('active');
-              else autocommitToggleBtn.classList.remove('active');
+              autocommitToggleBtn.checked = !!extra.auto_commit_mode;
             }
           } catch (_e) {
             /* ignore malformed extra */
@@ -2898,7 +2896,7 @@
         } else if (sKey === 'auto_commit') {
           // Auto-commit triggered server-side
         } else if (sKey === 'auto_commit_mode' && autocommitToggleBtn) {
-          autocommitToggleBtn.classList.toggle('active', !!sVal);
+          autocommitToggleBtn.checked = !!sVal;
         } else if (sKey === 'custom_endpoint' && typeof sVal === 'string') {
           const epEl = document.getElementById('cfg-custom-endpoint');
           if (epEl) epEl.value = sVal;
@@ -4122,16 +4120,6 @@
       });
     }
 
-    if (autocommitToggleBtn) {
-      // The toggle state is mirrored to the backend on every submit
-      // via the ``autoCommit`` flag on the run/submit messages.  Like
-      // the sibling worktree / parallel toggles, it is not persisted
-      // across page reloads — the user re-arms it per session.
-      autocommitToggleBtn.addEventListener('click', () => {
-        autocommitToggleBtn.classList.toggle('active');
-      });
-    }
-
     if (inputClearBtn) {
       inputClearBtn.addEventListener('click', () => {
         inp.value = '';
@@ -4399,10 +4387,7 @@
             worktreeToggleBtn && worktreeToggleBtn.classList.contains('active')
           ),
           useParallel: !!(parallelToggleBtn && parallelToggleBtn.checked),
-          autoCommit: !!(
-            autocommitToggleBtn &&
-            autocommitToggleBtn.classList.contains('active')
-          ),
+          autoCommit: !!(autocommitToggleBtn && autocommitToggleBtn.checked),
           workDir: curTab.workDir || '',
         });
         // Tell backend to skip merge/diff for the currently running task
@@ -4436,9 +4421,7 @@
         worktreeToggleBtn && worktreeToggleBtn.classList.contains('active')
       ),
       useParallel: !!(parallelToggleBtn && parallelToggleBtn.checked),
-      autoCommit: !!(
-        autocommitToggleBtn && autocommitToggleBtn.classList.contains('active')
-      ),
+      autoCommit: !!(autocommitToggleBtn && autocommitToggleBtn.checked),
     };
     if (curTab && curTab.workDir) msg.workDir = curTab.workDir;
     vscode.postMessage(msg);
