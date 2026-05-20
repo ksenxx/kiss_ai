@@ -80,6 +80,37 @@ class TestHistoryFailedFlag(unittest.TestCase):
         self.assertTrue(by_task["crash task"]["failed"])
         self.assertFalse(by_task["stop task"]["failed"])
 
+    def test_failed_flag_for_process_killed_recovery(self) -> None:
+        """A row left as ``"Agent Failed Abruptly"`` by a SIGKILL'd
+        previous process gets rewritten by ``_recover_orphaned_tasks``
+        on fresh-server startup to::
+
+            "Task terminated unexpectedly (process killed)"
+
+        which represents a real failure and must therefore surface a
+        red dot in the history sidebar (``failed=True``).
+        """
+        killed_id, _ = th._add_task("killed task")
+        th._save_task_result(
+            result="Task terminated unexpectedly (process killed)",
+            task_id=killed_id,
+        )
+
+        # Real recovery flow: sentinel row left by a prior process,
+        # rewritten by ``_recover_orphaned_tasks``.
+        recovered_id, _ = th._add_task("recovered task")
+        # Leave the sentinel in place and let the recovery sweep
+        # rewrite it, exactly as it would on fresh-server boot.
+        th._recover_orphaned_tasks(set())
+
+        self.server._handle_command({"type": "getHistory"})
+        sessions = self._sessions()
+        by_task = {s["preview"]: s for s in sessions}
+
+        self.assertTrue(by_task["killed task"]["failed"])
+        self.assertTrue(by_task["recovered task"]["failed"])
+        del recovered_id
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
