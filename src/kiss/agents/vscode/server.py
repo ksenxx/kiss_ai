@@ -199,8 +199,16 @@ class VSCodeServer(
         (frontend-only concept) via ``createNewTab`` and then posts a
         ``resumeSession`` command back with the same ``task_id`` —
         ``_cmd_resume_session`` accepts a task-id-only resume payload.
+
+        ``taskId=""`` keeps this a global system event so it reaches
+        every connected client; otherwise ``WebPrinter.broadcast``
+        would fan it out only to subscribers of the freshly-minted
+        task (of which there are none until the frontend has
+        received this broadcast and allocated the tab).
         """
-        self.printer.broadcast({"type": "new_tab", "task_id": int(task_id)})
+        self.printer.broadcast(
+            {"type": "new_tab", "task_id": int(task_id), "taskId": ""},
+        )
 
     def _get_models(self) -> None:
         """Send available models list with usage counts and pricing."""

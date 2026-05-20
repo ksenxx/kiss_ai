@@ -355,8 +355,13 @@ class TestBroadcastNewTabHelper(unittest.TestCase):
         printer = _CapturingPrinter()
         server = VSCodeServer(printer=printer)
         server.broadcast_new_tab(7)
+        # Explicit empty ``taskId`` keeps this a global system event
+        # so the broadcast reaches every connected client (the
+        # frontend needs the event to allocate the new tab; only
+        # after allocation does it subscribe to the task's stream).
         self.assertEqual(
-            printer.events, [{"type": "new_tab", "task_id": 7}],
+            printer.events,
+            [{"type": "new_tab", "task_id": 7, "taskId": ""}],
         )
 
     def test_helper_coerces_task_id_to_int(self) -> None:
@@ -367,7 +372,8 @@ class TestBroadcastNewTabHelper(unittest.TestCase):
         # branch on the field's runtime type.
         server.broadcast_new_tab("11")  # type: ignore[arg-type]
         self.assertEqual(
-            printer.events, [{"type": "new_tab", "task_id": 11}],
+            printer.events,
+            [{"type": "new_tab", "task_id": 11, "taskId": ""}],
         )
 
 
