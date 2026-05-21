@@ -294,8 +294,6 @@ class ChannelRunner:
         Raises:
             RuntimeError: If connection or channel lookup fails.
         """
-        from kiss.core.base import Base
-
         if not self._backend.connect():
             raise RuntimeError(f"Failed to connect: {self._backend.connection_info}")
         logger.info("Connected: %s", self._backend.connection_info)

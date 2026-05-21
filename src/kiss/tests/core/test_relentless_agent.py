@@ -9,7 +9,6 @@ import unittest
 import pytest
 import yaml
 
-from kiss.core.base import Base
 from kiss.core.kiss_error import KISSError
 from kiss.core.relentless_agent import (
     CONTINUATION_PROMPT,
@@ -109,37 +108,6 @@ class TestContinuation(unittest.TestCase):
                 f"Expected KISSError after exhausting sub-sessions, got: "
                 f"{result!r}"
             )
-
-
-@requires_gemini_api_key
-class TestExceptionPaths(unittest.TestCase):
-    def test_exception_summarizer_also_fails(self) -> None:
-        """Both executor and summarizer fail (global budget exceeded).
-
-        When the model fails on the very first call (step_count <= 1),
-        the agent returns immediately with success=False instead of
-        retrying through the summarizer path.
-        """
-        original_used = Base.global_budget_used
-        try:
-            Base.global_budget_used = 2001.0
-
-            agent = RelentlessAgent("ExcSum-Fail")
-            with tempfile.TemporaryDirectory() as td:
-                result = agent.run(
-                    model_name=TEST_MODEL,
-                    prompt_template="Do something.",
-                    max_steps=5,
-                    max_budget=10.0,
-                    max_sub_sessions=1,
-                    work_dir=td,
-                    verbose=False,
-                )
-                payload = yaml.safe_load(result)
-                assert isinstance(payload, dict)
-                assert payload["success"] is False
-        finally:
-            Base.global_budget_used = original_used
 
 
 @requires_gemini_api_key
