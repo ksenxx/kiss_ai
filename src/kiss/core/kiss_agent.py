@@ -403,12 +403,10 @@ class KISSAgent(Base):
         """Check budget and step limits, raise KISSError if exceeded.
 
         Raises:
-            KISSError: If agent budget, global budget, or step limit is exceeded.
+            KISSError: If agent budget or step limit is exceeded.
         """
         if self.budget_used > self.max_budget:
             raise KISSError(f"Agent {self.name} budget exceeded.")
-        if Base.get_global_budget_used() > 2000.0:
-            raise KISSError("Global budget exceeded.")
         if self.step_count > self.max_steps:
             raise KISSError(f"Agent {self.name} exceeded {self.max_steps} steps.")
 
@@ -441,8 +439,6 @@ class KISSAgent(Base):
                 self.model.model_name, input_tokens, output_tokens, cache_read, cache_write
             )
             self.budget_used += cost
-            with Base._class_lock:
-                Base.global_budget_used += cost
         except Exception as e:  # pragma: no cover
             logger.debug("Exception caught", exc_info=True)
             logger.error(
@@ -454,13 +450,10 @@ class KISSAgent(Base):
         try:
             max_tokens = get_max_context_length(self.model.model_name)
             capped_tokens = self.total_tokens_used % max_tokens
-            global_max = 2000.0
-            global_budget_used = Base.get_global_budget_used()
             return (
                 f"Steps: {self.step_count}/{self.max_steps}, "
                 f"Tokens: {capped_tokens:,}/{max_tokens:,}, "
                 f"Budget: ${self.budget_used:.4f}/${self.max_budget:.2f}, "
-                f"Global Budget: ${global_budget_used:.4f}/${global_max:.2f}"
             )
         except Exception:  # pragma: no cover
             logger.debug("Exception caught", exc_info=True)

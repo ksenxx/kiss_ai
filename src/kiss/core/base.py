@@ -56,20 +56,7 @@ class Base:
     """Base class for all KISS agents with common state management and persistence."""
 
     agent_counter: ClassVar[int] = 1
-    global_budget_used: ClassVar[float] = 0.0
     _class_lock: ClassVar[threading.Lock] = threading.Lock()
-
-    @classmethod
-    def get_global_budget_used(cls) -> float:
-        """Return the global budget total under the shared class lock."""
-        with cls._class_lock:
-            return cls.global_budget_used
-
-    @classmethod
-    def reset_global_budget(cls) -> None:
-        """Reset the shared process-wide budget counter to zero."""
-        with cls._class_lock:
-            cls.global_budget_used = 0.0
 
     model_name: str
     messages: list[dict[str, Any]]
@@ -151,8 +138,6 @@ class Base:
             "model": self.model_name,
             "budget_used": self.budget_used,
             "total_budget": getattr(self, "max_budget", 10.0),
-            "global_budget_used": Base.global_budget_used,
-            "global_max_budget": 2000.0,
             "tokens_used": self.total_tokens_used,
             "max_tokens": max_tokens,
             "step_count": self.step_count,
