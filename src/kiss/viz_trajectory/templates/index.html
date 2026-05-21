@@ -370,7 +370,6 @@
                 <span>Steps: ${traj.step_count}/${traj.max_steps}</span>
                 <span>Tokens: ${formatTokens(traj.tokens_used || 0, traj.max_tokens || 0)}</span>
                 <span>Agent Budget: ${formatMoney(traj.agent_budget_used)} / ${formatMoney(traj.agent_max_budget, 2)}</span>
-                <span>Global Budget: ${formatMoney(traj.global_budget_used)} / ${formatMoney(traj.global_max_budget, 2)}</span>
                 <span>Start: ${formatTimestamp(traj.run_start_timestamp)}</span>
                 <span>End: ${formatTimestamp(traj.run_end_timestamp)}</span>
             `;
