@@ -49,7 +49,6 @@ def _parse_trajectory_yaml(file_path: Path) -> dict:
         or data.get("total_budget")
         or 0.0
     )
-    global_max_budget = data.get("global_max_budget") or agent_cfg.get("global_max_budget") or 0.0
 
     return {
         "name": data.get("name", "Unknown"),
@@ -64,8 +63,6 @@ def _parse_trajectory_yaml(file_path: Path) -> dict:
         "max_tokens": data.get("max_tokens", 0),
         "agent_budget_used": data.get("budget_used", 0.0),
         "agent_max_budget": agent_max_budget,
-        "global_budget_used": data.get("global_budget_used", 0.0),
-        "global_max_budget": global_max_budget,
         "messages": messages,
     }
 

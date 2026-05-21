@@ -133,17 +133,6 @@ class TestArtifactDirLazy:
 
 
 
-class TestGlobalBudgetReset:
-    def test_reset_method_exists(self) -> None:
-        """Base.reset_global_budget() class method exists."""
-        from kiss.core.base import Base
-
-        assert hasattr(Base, "reset_global_budget")
-        assert callable(Base.reset_global_budget)
-
-
-
-
 
 
 
