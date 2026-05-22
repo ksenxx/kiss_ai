@@ -128,16 +128,13 @@ BINARY_ATTACHMENT_OPEN_RE = re.compile(
 BINARY_ATTACHMENT_CLOSE = "<</KISS_BINARY_ATTACHMENT>>"
 
 # MIME types the ``Read`` tool is willing to embed inline in its return
-# value.  Audio/video are intentionally excluded — those would explode the
-# response size while most providers can't ingest them as tool results
-# anyway.
-READ_TOOL_BINARY_MIME_TYPES = {
-    "image/jpeg",
-    "image/png",
-    "image/gif",
-    "image/webp",
-    "application/pdf",
-}
+# value.  Set equal to :data:`SUPPORTED_MIME_TYPES` so audio/video are
+# also encoded as sentinel-wrapped base64; each model backend then decides
+# whether it can actually ingest the bytes (e.g. OpenAI Chat Completions
+# accepts ``input_audio``; Gemini accepts any ``inline_data`` MIME;
+# Anthropic transcribes audio to text and drops video; text-CLI backends
+# drop the bytes after lifting the placeholder text).
+READ_TOOL_BINARY_MIME_TYPES = set(SUPPORTED_MIME_TYPES)
 
 
 def encode_binary_attachment(mime_type: str, data: bytes) -> str:

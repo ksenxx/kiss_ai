@@ -34,6 +34,21 @@ _PNG_1x1 = bytes.fromhex(
 # 0x80+ bytes that would fail strict UTF-8 decoding).
 _PDF_BYTES = b"%PDF-1.4\n\x89\xc3\x28binarystream\n%%EOF"
 
+# Tiny synthetic WAV (44-byte RIFF header + a couple of PCM samples).  The
+# header begins with the ASCII tag ``RIFF`` but the embedded length fields
+# include non-ASCII bytes that fail UTF-8 decoding, so the Read tool hits
+# the binary branch.
+_WAV_BYTES = (
+    b"RIFF\x24\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00"
+    b"\x44\xac\x00\x00\x88\x58\x01\x00\x02\x00\x10\x00"
+    b"data\x00\x00\x00\x00"
+)
+
+# Tiny synthetic MP4 (just an ``ftyp`` box).  Triggers the binary branch
+# because byte ``\x18`` etc. are valid UTF-8 but the box payload contains
+# non-UTF-8 bytes.
+_MP4_BYTES = b"\x00\x00\x00\x18ftypisom\x00\x00\x00\x00isomavc1\xff\xfe"
+
 
 @pytest.fixture
 def temp_dir():
@@ -271,3 +286,272 @@ def test_default_tool_result_strips_base64_to_avoid_context_bloat(temp_dir):
     assert expected_b64 not in appended["content"]
     assert "<<KISS_BINARY_ATTACHMENT" not in appended["content"]
     assert "[attached image/png," in appended["content"]
+
+
+def test_read_audio_file_encodes_as_attachment(temp_dir):
+    """Audio files (WAV) are now embedded as sentinel-wrapped base64."""
+    wav = temp_dir / "clip.wav"
+    wav.write_bytes(_WAV_BYTES)
+    result = UsefulTools().Read(str(wav))
+
+    assert "<<KISS_BINARY_ATTACHMENT mime_type=audio/" in result
+    _, attachments = parse_binary_attachments(result)
+    assert len(attachments) == 1
+    assert attachments[0].mime_type.startswith("audio/")
+    assert attachments[0].data == _WAV_BYTES
+
+
+def test_read_video_file_encodes_as_attachment(temp_dir):
+    """Video files (MP4) are now embedded as sentinel-wrapped base64."""
+    mp4 = temp_dir / "movie.mp4"
+    mp4.write_bytes(_MP4_BYTES)
+    result = UsefulTools().Read(str(mp4))
+
+    _, attachments = parse_binary_attachments(result)
+    assert len(attachments) == 1
+    assert attachments[0].mime_type == "video/mp4"
+    assert attachments[0].data == _MP4_BYTES
+
+
+def test_openai_tool_result_appends_image_user_message(temp_dir):
+    """OpenAICompatibleModel lifts a PNG attachment into a follow-up user msg."""
+    from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
+
+    png_path = temp_dir / "screenshot.png"
+    png_path.write_bytes(_PNG_1x1)
+    read_output = UsefulTools().Read(str(png_path))
+
+    model = OpenAICompatibleModel(
+        "openrouter/openai/gpt-4o",
+        base_url="https://openrouter.ai/api/v1",
+        api_key="sk-test",
+    )
+    model.conversation = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_42",
+                    "type": "function",
+                    "function": {"name": "Read", "arguments": "{}"},
+                }
+            ],
+        }
+    ]
+    model.add_function_results_to_conversation_and_return(
+        [("Read", {"result": read_output})]
+    )
+
+    # Tool message: plain text only, no base64.
+    tool_msg = model.conversation[-2]
+    assert tool_msg["role"] == "tool"
+    assert tool_msg["tool_call_id"] == "call_42"
+    assert "<<KISS_BINARY_ATTACHMENT" not in tool_msg["content"]
+    assert "[attached image/png," in tool_msg["content"]
+
+    # Follow-up user message with image_url part carrying the data URL.
+    user_msg = model.conversation[-1]
+    assert user_msg["role"] == "user"
+    assert isinstance(user_msg["content"], list)
+    parts = user_msg["content"]
+    image_parts = [p for p in parts if p.get("type") == "image_url"]
+    assert len(image_parts) == 1
+    data_url = image_parts[0]["image_url"]["url"]
+    assert data_url.startswith("data:image/png;base64,")
+    assert base64.b64decode(data_url.split(",", 1)[1]) == _PNG_1x1
+
+
+def test_openai_tool_result_appends_audio_user_message(temp_dir):
+    """OpenAICompatibleModel lifts an audio attachment as input_audio part."""
+    from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
+
+    wav = temp_dir / "clip.wav"
+    wav.write_bytes(_WAV_BYTES)
+    read_output = UsefulTools().Read(str(wav))
+
+    model = OpenAICompatibleModel(
+        "openai/gpt-4o-audio-preview",
+        base_url="https://api.openai.com/v1",
+        api_key="sk-test",
+    )
+    model.conversation = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_99",
+                    "type": "function",
+                    "function": {"name": "Read", "arguments": "{}"},
+                }
+            ],
+        }
+    ]
+    model.add_function_results_to_conversation_and_return(
+        [("Read", {"result": read_output})]
+    )
+
+    user_msg = model.conversation[-1]
+    audio_parts = [p for p in user_msg["content"] if p.get("type") == "input_audio"]
+    assert len(audio_parts) == 1
+    assert audio_parts[0]["input_audio"]["format"] == "wav"
+    assert base64.b64decode(audio_parts[0]["input_audio"]["data"]) == _WAV_BYTES
+
+
+def test_openai_tool_result_drops_video_with_no_follow_up(temp_dir):
+    """OpenAICompatibleModel drops video attachments (no MIME support)."""
+    from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
+
+    mp4 = temp_dir / "movie.mp4"
+    mp4.write_bytes(_MP4_BYTES)
+    read_output = UsefulTools().Read(str(mp4))
+
+    model = OpenAICompatibleModel(
+        "openai/gpt-4o",
+        base_url="https://api.openai.com/v1",
+        api_key="sk-test",
+    )
+    model.conversation = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_v",
+                    "type": "function",
+                    "function": {"name": "Read", "arguments": "{}"},
+                }
+            ],
+        }
+    ]
+    model.add_function_results_to_conversation_and_return(
+        [("Read", {"result": read_output})]
+    )
+
+    # Only the tool message should be appended — no follow-up user message
+    # because video has no supported content-part type.
+    assert model.conversation[-1]["role"] == "tool"
+    assert "[attached video/mp4," in model.conversation[-1]["content"]
+
+
+def test_gemini_tool_result_routes_attachment_via_user_message(temp_dir):
+    """GeminiModel lifts a PNG attachment into a follow-up user msg.
+
+    The attachment must be present on the new user message so that
+    :meth:`_convert_conversation_to_gemini_contents` can render it via
+    ``Part.from_bytes`` for the API call.
+    """
+    from kiss.core.models.gemini_model import GeminiModel
+
+    png_path = temp_dir / "screenshot.png"
+    png_path.write_bytes(_PNG_1x1)
+    read_output = UsefulTools().Read(str(png_path))
+
+    model = GeminiModel("gemini-2.5-pro", api_key="key")
+    model.conversation = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_g",
+                    "type": "function",
+                    "function": {"name": "Read", "arguments": "{}"},
+                }
+            ],
+        }
+    ]
+    model.add_function_results_to_conversation_and_return(
+        [("Read", {"result": read_output})]
+    )
+
+    # Tool message comes first, follow-up user message with attachments next.
+    tool_msg = model.conversation[-2]
+    assert tool_msg["role"] == "tool"
+    assert "<<KISS_BINARY_ATTACHMENT" not in tool_msg["content"]
+
+    user_msg = model.conversation[-1]
+    assert user_msg["role"] == "user"
+    attachments = user_msg["attachments"]
+    assert len(attachments) == 1
+    assert attachments[0].mime_type == "image/png"
+    assert attachments[0].data == _PNG_1x1
+
+    # Confirm the conversion path produces a Part with inline_data of the
+    # right MIME type.
+    contents = model._convert_conversation_to_gemini_contents()
+    last = contents[-1]
+    assert last.role == "user"
+    has_inline = False
+    for part in last.parts or []:
+        inline = getattr(part, "inline_data", None)
+        if inline is not None and inline.mime_type == "image/png":
+            has_inline = True
+            break
+    assert has_inline
+
+
+def test_gemini_tool_result_routes_video_attachment(temp_dir):
+    """GeminiModel passes video bytes through (Gemini accepts video/mp4)."""
+    from kiss.core.models.gemini_model import GeminiModel
+
+    mp4 = temp_dir / "movie.mp4"
+    mp4.write_bytes(_MP4_BYTES)
+    read_output = UsefulTools().Read(str(mp4))
+
+    model = GeminiModel("gemini-2.5-pro", api_key="key")
+    model.conversation = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_gv",
+                    "type": "function",
+                    "function": {"name": "Read", "arguments": "{}"},
+                }
+            ],
+        }
+    ]
+    model.add_function_results_to_conversation_and_return(
+        [("Read", {"result": read_output})]
+    )
+
+    user_msg = model.conversation[-1]
+    assert user_msg["role"] == "user"
+    assert user_msg["attachments"][0].mime_type == "video/mp4"
+
+
+def test_anthropic_tool_result_drops_video(temp_dir):
+    """Anthropic skips video attachments in tool results (no native support)."""
+    from kiss.core.models.anthropic_model import AnthropicModel
+
+    mp4 = temp_dir / "movie.mp4"
+    mp4.write_bytes(_MP4_BYTES)
+    read_output = UsefulTools().Read(str(mp4))
+
+    model = AnthropicModel("claude-sonnet-4-5", api_key="sk-test")
+    model.conversation = [
+        {"role": "user", "content": "read it"},
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_vid",
+                    "name": "Read",
+                    "input": {"file_path": str(mp4)},
+                }
+            ],
+        },
+    ]
+    model.add_function_results_to_conversation_and_return(
+        [("Read", {"result": read_output})]
+    )
+
+    block = model.conversation[-1]["content"][0]
+    types = [b["type"] for b in block["content"]]
+    # No image/document/audio block — video is dropped.  Only text remains.
+    assert types == ["text"]
+    assert "[attached video/mp4," in block["content"][0]["text"]

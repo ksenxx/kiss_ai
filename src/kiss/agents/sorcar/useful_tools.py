@@ -194,7 +194,8 @@ class UsefulTools:
                 return (
                     f"Error: Cannot read binary file: {file_path} "
                     f"(size: {size} bytes, mime={mime_type or 'unknown'}). "
-                    f"The Read tool only embeds image/PDF binaries; use a "
+                    f"The Read tool only embeds binaries with a supported "
+                    f"MIME type (images, PDFs, audio, video); use a "
                     f"different tool to handle this binary file."
                 )
             lines = text.splitlines(keepends=True)
