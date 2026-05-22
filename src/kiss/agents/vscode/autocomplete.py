@@ -163,14 +163,20 @@ class _AutocompleteMixin:
         Task processes never receive ``complete`` commands, so the
         worker thread and queue are only created for service processes
         that actually need autocomplete.
+
+        The check-then-init is performed under ``_state_lock`` so two
+        concurrent callers cannot both observe ``None`` and spawn
+        duplicate worker threads (which would leak an orphan thread
+        consuming from an unreferenced queue).
         """
-        if self._complete_worker is not None:
-            return
-        self._complete_queue = queue.Queue()
-        self._complete_worker = threading.Thread(
-            target=self._complete_worker_loop, daemon=True
-        )
-        self._complete_worker.start()
+        with self._state_lock:
+            if self._complete_worker is not None:
+                return
+            self._complete_queue = queue.Queue()
+            self._complete_worker = threading.Thread(
+                target=self._complete_worker_loop, daemon=True
+            )
+            self._complete_worker.start()
 
     def _refresh_file_cache(self, then_emit_for_prefix: str | None = None) -> None:
         """Refresh the file cache from disk in a background thread.
