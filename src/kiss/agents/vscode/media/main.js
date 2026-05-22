@@ -4266,6 +4266,19 @@
         historySearch.focus();
       });
     }
+    // History filter bar: 3 category checkboxes + From/To date range.
+    // Filtering is purely client-side over rows already in the DOM.
+    // ``applyHistoryFilterVisibility()`` toggles ``display`` on each
+    // row based on the row's ``data-category`` and ``data-timestamp``
+    // attributes set in ``renderHistory``.
+    const hfRunning = document.getElementById('hf-running');
+    const hfErrors = document.getElementById('hf-errors');
+    const hfCompleted = document.getElementById('hf-completed');
+    const hfFrom = document.getElementById('hf-from');
+    const hfTo = document.getElementById('hf-to');
+    [hfRunning, hfErrors, hfCompleted, hfFrom, hfTo].forEach(el => {
+      if (el) el.addEventListener('change', applyHistoryFilterVisibility);
+    });
     historyList.addEventListener('scroll', () => {
       if (historyLoading || !historyHasMore) return;
       if (
@@ -4752,6 +4765,15 @@
       // class flips the row into a wrap-with-metrics layout
       // (multi-line text, metrics row on its own line).
       div.className = 'sidebar-item running-item';
+      // Stamp the row with its filter-bar category and timestamp so
+      // ``applyHistoryFilterVisibility()`` can toggle ``display`` on
+      // each row in O(n) without re-rendering the list.
+      div.dataset.category = s.is_running
+        ? 'running'
+        : s.failed
+          ? 'errors'
+          : 'completed';
+      div.dataset.timestamp = String(Number(s.timestamp || 0));
       const itemText = s.title || s.preview || 'Untitled';
       div.dataset.tooltip = s.preview || itemText;
       div.style.backgroundColor = chatIdBgColor(String(s.id));
@@ -4884,6 +4906,71 @@
     historyOffset += sessions.length;
     if (sessions.length < 50) {
       historyHasMore = false;
+    }
+    applyHistoryFilterVisibility();
+  }
+
+  /**
+   * Show/hide rows in the history sidebar based on the filter bar
+   * state (Running / Errors / Completed checkboxes and From / To
+   * date inputs).  Reads ``data-category`` and ``data-timestamp``
+   * stamped on each row by ``renderHistory``.  When every row is
+   * hidden, replaces the list with a "No matching tasks" placeholder
+   * unless the unfiltered list was itself empty.
+   */
+  function applyHistoryFilterVisibility() {
+    const hfRunning = document.getElementById('hf-running');
+    const hfErrors = document.getElementById('hf-errors');
+    const hfCompleted = document.getElementById('hf-completed');
+    const hfFrom = document.getElementById('hf-from');
+    const hfTo = document.getElementById('hf-to');
+    if (!hfRunning || !hfErrors || !hfCompleted) return;
+    const showRunning = hfRunning.checked;
+    const showErrors = hfErrors.checked;
+    const showCompleted = hfCompleted.checked;
+    // Date inputs are <input type=date> with value="YYYY-MM-DD".
+    // Convert to local-midnight epoch seconds for inclusive bounds.
+    let fromTs = -Infinity;
+    let toTs = Infinity;
+    if (hfFrom && hfFrom.value) {
+      const d = new Date(hfFrom.value + 'T00:00:00');
+      if (!isNaN(d.getTime())) fromTs = d.getTime() / 1000;
+    }
+    if (hfTo && hfTo.value) {
+      const d = new Date(hfTo.value + 'T23:59:59.999');
+      if (!isNaN(d.getTime())) toTs = d.getTime() / 1000;
+    }
+    const rows = historyList.querySelectorAll('.sidebar-item');
+    let visible = 0;
+    rows.forEach(row => {
+      const cat = row.dataset.category;
+      const ts = Number(row.dataset.timestamp || 0);
+      let catOk = false;
+      if (cat === 'running') catOk = showRunning;
+      else if (cat === 'errors') catOk = showErrors;
+      else if (cat === 'completed') catOk = showCompleted;
+      const dateOk = ts >= fromTs && ts <= toTs;
+      if (catOk && dateOk) {
+        row.style.display = '';
+        visible++;
+      } else {
+        row.style.display = 'none';
+      }
+    });
+    // Manage the "no matches" placeholder.  Only show it when there
+    // are rows in the list but the filter hides them all — never
+    // when the unfiltered list was already empty (the existing "No
+    // conversations yet" placeholder handles that case).
+    let placeholder = historyList.querySelector('.sidebar-empty-filter');
+    if (rows.length > 0 && visible === 0) {
+      if (!placeholder) {
+        placeholder = document.createElement('div');
+        placeholder.className = 'sidebar-empty sidebar-empty-filter';
+        placeholder.textContent = 'No tasks match the filter';
+        historyList.appendChild(placeholder);
+      }
+    } else if (placeholder) {
+      placeholder.remove();
     }
   }
 
