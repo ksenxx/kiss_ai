@@ -879,8 +879,18 @@ class VSCodeServer(
                         return st.tab_id
 
             if chat_id:
+                # Exclude ``sub_tab_id`` itself: ``_replay_session``
+                # calls ``_get_tab(sub_tab_id)`` before this resolver
+                # runs, which pre-registers a non-subagent state for
+                # the freshly opened sub-tab and copies the resumed
+                # session's ``chat_id`` onto it.  Without the guard
+                # below, that state would match here and we'd return
+                # the sub-tab's own id, creating a self-referential
+                # parent_tab_id and a self-loop in the frontend's
+                # parent→child cascade-close registry.
                 chat_matches = [
-                    st for st in non_sub_states if st.chat_id == chat_id
+                    st for st in non_sub_states
+                    if st.chat_id == chat_id and st.tab_id != sub_tab_id
                 ]
                 if len(chat_matches) == 1:
                     return chat_matches[0].tab_id
