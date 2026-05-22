@@ -1593,6 +1593,29 @@ def _record_frequent_task(task: str) -> None:
         db.commit()
 
 
+def _delete_frequent_task(task: str) -> bool:
+    """Delete a row from the ``frequent_tasks`` table by task text.
+
+    Args:
+        task: The exact task description string identifying the row.
+
+    Returns:
+        True if a matching row existed and was deleted, False otherwise.
+    """
+    if not task:
+        return False
+    db = _get_db()
+    with _rw_lock.write_lock():
+        row = db.execute(
+            "SELECT 1 FROM frequent_tasks WHERE task = ?", (task,),
+        ).fetchone()
+        if row is None:
+            return False
+        db.execute("DELETE FROM frequent_tasks WHERE task = ?", (task,))
+        db.commit()
+        return True
+
+
 def _load_frequent_tasks(limit: int = 50) -> list[dict[str, object]]:
     """Return the top *limit* most-frequent tasks (highest count first).
 

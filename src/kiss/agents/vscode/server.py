@@ -27,6 +27,7 @@ from typing import Any
 from kiss.agents.sorcar.persistence import (
     _append_chat_event,
     _chat_has_tasks,
+    _delete_frequent_task,
     _delete_task,
     _get_adjacent_task_by_chat_id,
     _get_task_chat_id,
@@ -456,6 +457,20 @@ class VSCodeServer(
             "chatId": chat_id,
             "chatHasMoreTasks": _chat_has_tasks(chat_id),
         })
+
+    def _handle_delete_frequent_task(self, task: str) -> None:
+        """Delete a row from the ``frequent_tasks`` table and rebroadcast.
+
+        After deletion succeeds, re-emits the current frequent tasks
+        list so any other open webview rerenders without the deleted
+        row.  The originating webview removes the row optimistically.
+
+        Args:
+            task: The exact task description string identifying the row.
+        """
+        if not _delete_frequent_task(task):
+            return
+        self._get_frequent_tasks()
 
     def _get_frequent_tasks(self, limit: int = 50) -> None:
         """Send the top *limit* most-frequent tasks (highest count first).
