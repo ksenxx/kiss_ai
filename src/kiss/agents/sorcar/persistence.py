@@ -108,6 +108,15 @@ _init_tables_lock = threading.Lock()
 
 _chat_context_text_cache: dict[str, str] = {}
 _chat_context_cache_lock = threading.Lock()
+# Per-chat invalidation generation counter.  Bumped on every cache
+# invalidation (and once-globally when the whole cache is cleared so
+# all in-flight readers see a generation change).  Readers capture the
+# generation *before* the SQL read and only store their result if the
+# generation hasn't advanced — preventing a slow reader from
+# overwriting a fresh cache entry that a faster reader produced after
+# a concurrent write+invalidate.
+_chat_context_cache_gen: dict[str, int] = {}
+_chat_context_cache_global_gen: int = 0
 
 
 def _invalidate_chat_context_cache(chat_id: str = "") -> None:
@@ -116,11 +125,17 @@ def _invalidate_chat_context_cache(chat_id: str = "") -> None:
     When *chat_id* is empty, the entire cache is cleared (used by test
     fixtures that swap the underlying database file).
     """
+    global _chat_context_cache_global_gen
     with _chat_context_cache_lock:
         if chat_id:
             _chat_context_text_cache.pop(chat_id, None)
+            _chat_context_cache_gen[chat_id] = (
+                _chat_context_cache_gen.get(chat_id, 0) + 1
+            )
         else:
             _chat_context_text_cache.clear()
+            _chat_context_cache_gen.clear()
+            _chat_context_cache_global_gen += 1
 
 
 # ---------------------------------------------------------------------------
@@ -1418,8 +1433,15 @@ def _load_chat_context_text(chat_id: str) -> str:
     """
     if not chat_id:
         return ""
+    # Capture the per-chat generation BEFORE the SQL read so that any
+    # concurrent ``_invalidate_chat_context_cache(chat_id)`` (driven by
+    # a writer that committed during our read) bumps the counter and
+    # makes us skip the store — preventing a stale overwrite of a
+    # fresher value another reader may have just published.
     with _chat_context_cache_lock:
         cached = _chat_context_text_cache.get(chat_id)
+        snapshot_gen = _chat_context_cache_gen.get(chat_id, 0)
+        snapshot_global_gen = _chat_context_cache_global_gen
     if cached is not None:
         return cached
     parts: list[str] = []
@@ -1432,7 +1454,17 @@ def _load_chat_context_text(chat_id: str) -> str:
             parts.append(result)
     text = "\n".join(parts)
     with _chat_context_cache_lock:
-        _chat_context_text_cache[chat_id] = text
+        # Only publish our result if no invalidation occurred between
+        # the pre-read snapshot and now.  Otherwise our data is
+        # potentially stale — leave whatever fresher entry (or empty
+        # slot) is already there alone.
+        current_gen = _chat_context_cache_gen.get(chat_id, 0)
+        current_global_gen = _chat_context_cache_global_gen
+        if (
+            current_gen == snapshot_gen
+            and current_global_gen == snapshot_global_gen
+        ):
+            _chat_context_text_cache[chat_id] = text
     return text
 
 
