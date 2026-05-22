@@ -31,7 +31,7 @@ class _AutocompleteMixin:
     if TYPE_CHECKING:
         printer: BaseBrowserPrinter
         work_dir: str
-        _state_lock: threading.Lock
+        _state_lock: threading.RLock
         _complete_queue: queue.Queue[tuple[str, int, str, str, str]] | None
         _complete_worker: threading.Thread | None
         _complete_seq_latest: int

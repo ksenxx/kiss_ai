@@ -568,22 +568,32 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             was already present (the existing owner is responsible
             for cleanup).
         """
-        for state in _RunningAgentState.running_agent_states.values():
-            if state.chat_id == self._chat_id:
-                return False
-        state = _RunningAgentState(
-            self._chat_id,
-            getattr(self, "model_name", "") or "",
-            agent=self,
-        )
-        # Tag the state with the canonical chat id so subsequent
-        # lookups (e.g. multi-viewer subscribe, ``_unregister_running_state``)
-        # can route by chat id without depending on the dict key.
-        state.chat_id = self._chat_id
-        state.selected_model = getattr(self, "model_name", "") or state.selected_model
-        state.is_task_active = True
-        _RunningAgentState.running_agent_states[self._chat_id] = state
-        return True
+        # Acquire the shared ``_registry_lock`` for the whole
+        # scan-then-modify so a concurrent sub-agent thread cannot
+        # resize ``running_agent_states`` while we iterate, and so
+        # the insertion is atomic w.r.t. the VS Code server's
+        # iteration loops (which hold the very same lock under the
+        # ``_state_lock`` alias).
+        with _RunningAgentState._registry_lock:
+            for state in _RunningAgentState.running_agent_states.values():
+                if state.chat_id == self._chat_id:
+                    return False
+            state = _RunningAgentState(
+                self._chat_id,
+                getattr(self, "model_name", "") or "",
+                agent=self,
+            )
+            # Tag the state with the canonical chat id so subsequent
+            # lookups (e.g. multi-viewer subscribe,
+            # ``_unregister_running_state``) can route by chat id
+            # without depending on the dict key.
+            state.chat_id = self._chat_id
+            state.selected_model = (
+                getattr(self, "model_name", "") or state.selected_model
+            )
+            state.is_task_active = True
+            _RunningAgentState.running_agent_states[self._chat_id] = state
+            return True
 
     def _unregister_running_state(self) -> None:
         """Remove ``self``'s entry from :attr:`_RunningAgentState.running_agent_states`.
@@ -592,15 +602,20 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         path (e.g. the VS Code server) may have replaced it mid-run;
         in that case the new owner is responsible for its own cleanup.
         """
-        target_key: str | None = None
-        for key, state in _RunningAgentState.running_agent_states.items():
-            if state.agent is self and state.chat_id == self._chat_id:
-                target_key = key
-                break
-        if target_key is not None:
-            current = _RunningAgentState.running_agent_states[target_key]
-            current.is_task_active = False
-            _RunningAgentState.running_agent_states.pop(target_key, None)
+        # Scan-then-pop must be atomic w.r.t. concurrent producers
+        # (parallel sub-agents in :meth:`ChatSorcarAgent._run_tasks_parallel`,
+        # the VS Code server's tab lifecycle handlers) so the dict is
+        # never resized between the lookup and the pop.
+        with _RunningAgentState._registry_lock:
+            target_key: str | None = None
+            for key, state in _RunningAgentState.running_agent_states.items():
+                if state.agent is self and state.chat_id == self._chat_id:
+                    target_key = key
+                    break
+            if target_key is not None:
+                current = _RunningAgentState.running_agent_states[target_key]
+                current.is_task_active = False
+                _RunningAgentState.running_agent_states.pop(target_key, None)
 
     def run(  # type: ignore[override]
         self,

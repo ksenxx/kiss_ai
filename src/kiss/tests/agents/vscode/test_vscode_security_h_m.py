@@ -128,7 +128,7 @@ class TestH9AutocompleteNonBlocking(unittest.TestCase):
             def __init__(self) -> None:
                 self.printer = StubPrinter()  # type: ignore[assignment]
                 self.work_dir = "/"
-                self._state_lock = threading.Lock()
+                self._state_lock = threading.RLock()
                 self._complete_queue = None
                 self._complete_worker = None
                 self._complete_seq_latest = 0
@@ -310,7 +310,7 @@ class TestM4AwaitUserResponseEmptyQueue(unittest.TestCase):
                 self.printer = FakePrinter()  # type: ignore[assignment]
                 self.printer._thread_local.stop_event = threading.Event()
                 self.printer._thread_local.task_id = "ghost-tab"
-                self._state_lock = threading.Lock()
+                self._state_lock = threading.RLock()
                 self._running_agent_states: dict[str, Any] = {}  # no entry for "ghost-tab"
 
         srv = FakeServer()
