@@ -305,7 +305,16 @@ class ChatSorcarAgent(SorcarAgent):
                         pass
             persist_map = getattr(printer, "_persist_agents", None)
             if persist_map is not None:
-                persist_map[task_key] = self
+                # Mutate ``_persist_agents`` under the printer's
+                # ``_lock`` so the registration is serialised against
+                # ``cleanup_task`` (pop under ``_lock``) and the
+                # ``_persist_event`` lookup (get under ``_lock``).
+                printer_lock = getattr(printer, "_lock", None)
+                if printer_lock is not None:
+                    with printer_lock:
+                        persist_map[task_key] = self
+                else:
+                    persist_map[task_key] = self
             subscribe = getattr(printer, "subscribe_tab", None)
             if subscribe is not None and subscribe_tab_id:
                 subscribe(task_id, subscribe_tab_id)
