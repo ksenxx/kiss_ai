@@ -4749,7 +4749,10 @@
 
     sessions.forEach(s => {
       const div = document.createElement('div');
-      div.className = 'sidebar-item';
+      // Match the Running tab's visual layout: the ``running-item``
+      // class flips the row into a wrap-with-metrics layout
+      // (multi-line text, metrics row on its own line).
+      div.className = 'sidebar-item running-item';
       const itemText = s.title || s.preview || 'Untitled';
       div.dataset.tooltip = s.preview || itemText;
       div.style.backgroundColor = chatIdBgColor(String(s.id));
@@ -4818,6 +4821,23 @@
         div.appendChild(delBtn);
         div.appendChild(confirmWrap);
       }
+
+      // Metrics row (steps • tokens • cost) — matches the Running
+      // tab.  ``flex-basis: 100%`` on .running-item-metrics drops
+      // this onto its own line below the running/failed dot, the
+      // task text, and the delete button.
+      const metrics = document.createElement('span');
+      metrics.className = 'running-item-metrics';
+      const tokens = Number(s.tokens || 0);
+      const cost = Number(s.cost || 0);
+      const steps = Number(s.steps || 0);
+      metrics.textContent =
+        steps +
+        ' steps • ' +
+        tokens.toLocaleString() +
+        ' tok • $' +
+        cost.toFixed(4);
+      div.appendChild(metrics);
 
       div.addEventListener('click', () => {
         if (demoMode && typeof window._startDemoReplay === 'function') {

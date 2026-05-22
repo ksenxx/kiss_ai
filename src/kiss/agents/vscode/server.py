@@ -326,6 +326,9 @@ class VSCodeServer(
                     isinstance(entry_id, int)
                     and entry_id in running_task_ids
                 ),
+                "tokens": 0,
+                "cost": 0.0,
+                "steps": 0,
             }
             # Mark sub-agent rows so the history sidebar treats them
             # as a regular task with one rendering difference: the
@@ -334,6 +337,12 @@ class VSCodeServer(
             # for siblings in the same chat.  Persisted as just
             # ``{"parent_task_id": <int>}`` under ``extra.subagent``;
             # presence of the key implies the row is a sub-agent.
+            #
+            # ``extra`` also holds the post-completion metrics
+            # (``tokens``, ``cost``, ``steps``) written by
+            # ``_TaskRunnerMixin._run_task_inner`` so the history
+            # sidebar can render each row with the same metrics
+            # line as the Running tab.
             extra_raw = str(entry.get("extra", "") or "")
             if extra_raw:
                 try:
@@ -347,6 +356,18 @@ class VSCodeServer(
                         pid = sub.get("parent_task_id")
                         if isinstance(pid, int):
                             session["parent_task_id"] = pid
+                    try:
+                        session["tokens"] = int(extra_obj.get("tokens", 0) or 0)
+                    except (TypeError, ValueError):
+                        session["tokens"] = 0
+                    try:
+                        session["cost"] = float(extra_obj.get("cost", 0.0) or 0.0)
+                    except (TypeError, ValueError):
+                        session["cost"] = 0.0
+                    try:
+                        session["steps"] = int(extra_obj.get("steps", 0) or 0)
+                    except (TypeError, ValueError):
+                        session["steps"] = 0
             sessions.append(session)
         self.printer.broadcast({
             "type": "history", "sessions": sessions,

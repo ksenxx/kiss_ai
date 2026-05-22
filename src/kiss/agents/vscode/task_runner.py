@@ -522,6 +522,7 @@ class _TaskRunnerMixin:
                         "version": __version__,
                         "tokens": tab.agent.total_tokens_used,
                         "cost": round(tab.agent.budget_used, 6),
+                        "steps": int(getattr(tab.agent, "total_steps", 0) or 0),
                         "is_parallel": tab.use_parallel,
                         "is_worktree": use_worktree,
                         "auto_commit_mode": tab.auto_commit_mode,
