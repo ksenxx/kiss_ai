@@ -42,6 +42,7 @@ export type FromWebviewMessage =
   | {type: 'getHistory'; query?: string; offset?: number; generation?: number}
   | {type: 'getFrequentTasks'; limit?: number}
   | {type: 'deleteTask'; taskId: number}
+  | {type: 'deleteFrequentTask'; task: string}
   | {type: 'getFiles'; prefix: string}
   | {type: 'userAnswer'; answer: string; tabId?: string}
   | {type: 'userActionDone'}
@@ -237,6 +238,7 @@ export interface AgentCommand {
     | 'getHistory'
     | 'getFrequentTasks'
     | 'deleteTask'
+    | 'deleteFrequentTask'
     | 'getFiles'
     | 'userAnswer'
     | 'recordFileUsage'
