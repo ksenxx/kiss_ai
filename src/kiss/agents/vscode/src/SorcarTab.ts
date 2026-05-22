@@ -156,7 +156,6 @@ export function buildChatHtml(
       <div class="sidebar-tabs">
         <button id="sidebar-tab-history" class="sidebar-tab active" type="button">History</button>
         <button id="sidebar-tab-frequent" class="sidebar-tab" type="button">Frequent</button>
-        <button id="sidebar-tab-settings" class="sidebar-tab" type="button">Settings</button>
       </div>
       <div id="sidebar-tab-history-panel" class="sidebar-section sidebar-tab-panel">
         <div class="search-wrap">
@@ -172,7 +171,12 @@ export function buildChatHtml(
           <div class="sidebar-empty">No tasks yet</div>
         </div>
       </div>
-      <div id="sidebar-tab-settings-panel" class="sidebar-section sidebar-tab-panel" style="display:none;">
+    </div>
+    <div id="sidebar-overlay"></div>
+
+    <div id="settings-panel">
+      <button id="settings-panel-close">&times;</button>
+      <div class="sidebar-section">
         <div class="sidebar-hdr">Sorcar Configuration${version ? ' ' + version : ''}</div>
         <div id="remote-url"></div>
         <div id="config-form">
@@ -240,7 +244,7 @@ export function buildChatHtml(
         </div>
       </div>
     </div>
-    <div id="sidebar-overlay"></div>
+    <div id="settings-overlay"></div>
 
     <div id="ask-user-modal" style="display:none;">
       <div class="modal-content">

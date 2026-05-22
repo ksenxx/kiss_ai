@@ -489,6 +489,20 @@
       else tabBar.appendChild(addBtn);
     }
 
+    // Settings button (gear icon) sits to the right of the "+" button.
+    const existingSettings = tabBar.querySelector('.chat-tab-settings');
+    if (!existingSettings) {
+      const settingsBtn = document.createElement('div');
+      settingsBtn.className = 'chat-tab chat-tab-settings';
+      settingsBtn.title = 'Settings';
+      settingsBtn.innerHTML =
+        '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
+      settingsBtn.addEventListener('click', () => {
+        openSettingsPanel();
+      });
+      tabBar.appendChild(settingsBtn);
+    }
+
     // Scroll the active tab into view
     const activeEl = tabList.querySelector('.chat-tab.active');
     if (activeEl)
@@ -844,23 +858,20 @@
   const askUserModal = document.getElementById('ask-user-modal');
   const askUserSlot = document.getElementById('ask-user-slot');
 
-  // Sidebar tab elements (History / Frequent / Settings live inside
-  // #sidebar — there is no separate config sidebar).
+  // Sidebar tab elements (History / Frequent live inside #sidebar).
+  // Settings has its own standalone right-anchored panel (#settings-panel).
   const sidebarTabHistoryBtn = document.getElementById('sidebar-tab-history');
   const sidebarTabFrequentBtn = document.getElementById('sidebar-tab-frequent');
-  const sidebarTabSettingsBtn = document.getElementById('sidebar-tab-settings');
   const sidebarTabHistoryPanel = document.getElementById(
     'sidebar-tab-history-panel',
   );
   const sidebarTabFrequentPanel = document.getElementById(
     'sidebar-tab-frequent-panel',
   );
-  const sidebarTabSettingsPanel = document.getElementById(
-    'sidebar-tab-settings-panel',
-  );
+  const settingsPanel = document.getElementById('settings-panel');
+  const settingsOverlay = document.getElementById('settings-overlay');
+  const settingsPanelClose = document.getElementById('settings-panel-close');
   const frequentList = document.getElementById('frequent-list');
-  // Currently active sub-tab inside #sidebar.
-  let currentSidebarTab = 'history';
   const autocommitBtn = document.getElementById('autocommit-btn');
   const waitSpinner = document.getElementById('wait-spinner');
   const ghostOverlay = document.getElementById('ghost-overlay');
@@ -4222,10 +4233,11 @@
         switchSidebarTab('frequent');
       });
     }
-    if (sidebarTabSettingsBtn) {
-      sidebarTabSettingsBtn.addEventListener('click', () => {
-        switchSidebarTab('settings');
-      });
+    if (settingsPanelClose) {
+      settingsPanelClose.addEventListener('click', closeSettingsPanel);
+    }
+    if (settingsOverlay) {
+      settingsOverlay.addEventListener('click', closeSettingsPanel);
     }
     historySearch.addEventListener('input', () => {
       resetHistoryPagination();
@@ -4884,37 +4896,46 @@
   }
 
   function closeSidebar() {
-    if (currentSidebarTab === 'settings') {
-      saveSettingsIfPopulated();
-    }
     sidebar.classList.remove('open');
     sidebarOverlay.classList.remove('open');
   }
 
   /**
-   * Show one of the in-panel sidebar tabs ("history", "frequent",
-   * or "settings") and trigger the matching backend fetch.  When
-   * switching *away* from the Settings tab while its form is
-   * populated, the form is flushed via ``saveConfig`` first.
-   * Toggles the ``.active`` class on the tab buttons and the
-   * ``display`` of the panels.
+   * Open the standalone Settings panel (slides in from the right) and
+   * request the current config from the backend so the form is freshly
+   * populated.
+   */
+  function openSettingsPanel() {
+    if (!settingsPanel) return;
+    settingsPanel.classList.add('open');
+    if (settingsOverlay) settingsOverlay.classList.add('open');
+    configFormPopulated = false;
+    vscode.postMessage({type: 'getConfig'});
+  }
+
+  /**
+   * Close the standalone Settings panel.  If the config form is
+   * populated, flush it to the backend via ``saveConfig`` first.
+   */
+  function closeSettingsPanel() {
+    saveSettingsIfPopulated();
+    if (settingsPanel) settingsPanel.classList.remove('open');
+    if (settingsOverlay) settingsOverlay.classList.remove('open');
+  }
+
+  /**
+   * Show one of the in-panel sidebar tabs ("history" or "frequent")
+   * and trigger the matching backend fetch.  Toggles the ``.active``
+   * class on the tab buttons and the ``display`` of the panels.
    */
   function switchSidebarTab(tab) {
-    // Save settings form if leaving the Settings tab.
-    if (currentSidebarTab === 'settings' && tab !== 'settings') {
-      saveSettingsIfPopulated();
-    }
     const isHistory = tab === 'history';
     const isFrequent = tab === 'frequent';
-    const isSettings = tab === 'settings';
     if (sidebarTabHistoryBtn) {
       sidebarTabHistoryBtn.classList.toggle('active', isHistory);
     }
     if (sidebarTabFrequentBtn) {
       sidebarTabFrequentBtn.classList.toggle('active', isFrequent);
-    }
-    if (sidebarTabSettingsBtn) {
-      sidebarTabSettingsBtn.classList.toggle('active', isSettings);
     }
     if (sidebarTabHistoryPanel) {
       sidebarTabHistoryPanel.style.display = isHistory ? '' : 'none';
@@ -4922,15 +4943,8 @@
     if (sidebarTabFrequentPanel) {
       sidebarTabFrequentPanel.style.display = isFrequent ? '' : 'none';
     }
-    if (sidebarTabSettingsPanel) {
-      sidebarTabSettingsPanel.style.display = isSettings ? '' : 'none';
-    }
-    currentSidebarTab = tab;
     if (isFrequent) {
       vscode.postMessage({type: 'getFrequentTasks', limit: 50});
-    } else if (isSettings) {
-      configFormPopulated = false;
-      vscode.postMessage({type: 'getConfig'});
     } else {
       resetHistoryPagination();
       vscode.postMessage({
