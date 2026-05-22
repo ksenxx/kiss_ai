@@ -732,9 +732,24 @@ class VSCodeServer(
                 isinstance(sub_task_id, int)
                 and sub_task_id in ChatSorcarAgent.running_agents
             )
+            # Look up the parent's frontend tab id so the frontend can
+            # record the parent → child relationship.  Without this,
+            # closing the parent tab would not cascade-close this
+            # sub-agent tab (see ``closeTab`` in media/main.js, which
+            # walks ``parentTabId`` chains).  Scan the per-tab state
+            # registry for the parent task's :class:`_RunningAgentState`;
+            # its ``tab_id`` field is the parent's frontend routing key.
+            parent_tab_id_for_sub = ""
+            parent_tid = subagent_info.get("parent_task_id")
+            if isinstance(parent_tid, int):
+                for st in _RunningAgentState.running_agent_states.values():
+                    if st.task_history_id == parent_tid and not st.is_subagent:
+                        parent_tab_id_for_sub = st.tab_id
+                        break
             self.printer.broadcast({
                 "type": "openSubagentTab",
                 "tab_id": tab_id,
+                "parent_tab_id": parent_tab_id_for_sub,
                 "description": str(result.get("task", "") or ""),
                 "isSubagentTab": True,
                 "isDone": is_done,
