@@ -1169,6 +1169,19 @@ body.remote-chat #welcome > #input-area {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  white-space: normal;
+}
+
+/* Show up to two lines of task text per frequent-tasks row, then ellipsize. */
+.frequent-item > .sidebar-item-text {
+  white-space: normal;
+  word-break: break-word;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
 }
 
 .frequent-item-count {
