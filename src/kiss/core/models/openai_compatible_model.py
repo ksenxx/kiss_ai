@@ -21,6 +21,7 @@ from kiss.core.models.model import (
     TokenCallback,
     _build_text_based_tools_prompt,
     _parse_text_based_tool_calls,
+    parse_binary_attachments,
 )
 
 logger = logging.getLogger(__name__)
@@ -165,39 +166,114 @@ class OpenAICompatibleModel(Model):
             self.conversation.append({"role": "system", "content": system_instruction})
         content: str | list[dict[str, Any]] = prompt
         if attachments:
-            parts: list[dict[str, Any]] = []
-            for att in attachments:
-                if att.mime_type.startswith("image/"):
-                    parts.append(
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": att.to_data_url()},
-                        }
-                    )
-                elif att.mime_type == "application/pdf":
-                    parts.append(
-                        {
-                            "type": "file",
-                            "file": {"file_data": att.to_data_url()},
-                        }
-                    )
-                elif att.mime_type.startswith("audio/"):
-                    fmt = _audio_mime_to_format(att.mime_type)
-                    parts.append(
-                        {
-                            "type": "input_audio",
-                            "input_audio": {"data": att.to_base64(), "format": fmt},
-                        }
-                    )
-                elif att.mime_type.startswith("video/"):
-                    logger.warning(
-                        "OpenAI Chat Completions does not support video attachments; "
-                        "skipping %s.",
-                        att.mime_type,
-                    )
+            parts = self._attachments_to_content_parts(attachments)
             parts.append({"type": "text", "text": prompt})
             content = parts
         self.conversation.append({"role": "user", "content": content})
+
+    @staticmethod
+    def _attachment_to_content_part(att: Attachment) -> dict[str, Any] | None:
+        """Convert a single :class:`Attachment` to an OpenAI content-part dict.
+
+        Returns ``None`` for unsupported MIME types (e.g. video, which OpenAI
+        Chat Completions does not accept), logging a warning so the caller
+        knows the attachment was dropped.
+
+        Args:
+            att: The attachment to convert.
+
+        Returns:
+            A content-part dict suitable for the ``content`` array of a
+            chat-completions message, or ``None`` if the MIME type is not
+            supported by OpenAI Chat Completions.
+        """
+        if att.mime_type.startswith("image/"):
+            return {"type": "image_url", "image_url": {"url": att.to_data_url()}}
+        if att.mime_type == "application/pdf":
+            return {"type": "file", "file": {"file_data": att.to_data_url()}}
+        if att.mime_type.startswith("audio/"):
+            fmt = _audio_mime_to_format(att.mime_type)
+            return {
+                "type": "input_audio",
+                "input_audio": {"data": att.to_base64(), "format": fmt},
+            }
+        logger.warning(
+            "OpenAI Chat Completions does not support %s attachments; skipping.",
+            att.mime_type,
+        )
+        return None
+
+    @classmethod
+    def _attachments_to_content_parts(
+        cls, attachments: list[Attachment]
+    ) -> list[dict[str, Any]]:
+        """Convert attachments to a list of OpenAI content-part dicts.
+
+        Unsupported MIME types are silently dropped (with a warning).
+
+        Args:
+            attachments: The attachments to convert.
+
+        Returns:
+            A list of content-part dicts.  May be shorter than *attachments*
+            if some MIME types were not supported.
+        """
+        parts: list[dict[str, Any]] = []
+        for att in attachments:
+            part = cls._attachment_to_content_part(att)
+            if part is not None:
+                parts.append(part)
+        return parts
+
+    def add_function_results_to_conversation_and_return(
+        self, function_results: list[tuple[str, dict[str, Any]]]
+    ) -> None:
+        """Add tool results to the conversation, lifting binary attachments.
+
+        The OpenAI Chat Completions ``tool`` role only accepts string
+        content, so binary attachments produced by the ``Read`` tool (e.g. a
+        PNG screenshot or an MP3 audio file) cannot live inside the tool
+        message.  Each tool message is appended with the sentinel payload
+        stripped to a short placeholder; if attachments were present, a
+        follow-up ``user`` message carrying ``image_url`` / ``file`` /
+        ``input_audio`` content parts is appended right after so the model
+        can actually see the file.  Unsupported MIME types (e.g. video) are
+        dropped with a warning.
+
+        Args:
+            function_results: List of ``(function_name, result_dict)`` tuples.
+        """
+        tool_calls = self._find_tool_call_ids_from_last_assistant()
+        pending_attachments: list[Attachment] = []
+
+        for i, (func_name, result_dict) in enumerate(function_results):
+            result_content = result_dict.get("result", str(result_dict))
+            result_content, attachments = parse_binary_attachments(result_content)
+            if self.usage_info_for_messages:
+                result_content = f"{result_content}\n\n{self.usage_info_for_messages}"
+
+            tool_call_id = (
+                tool_calls[i][1] if i < len(tool_calls) else f"call_{func_name}_{i}"
+            )
+            self.conversation.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": result_content,
+                }
+            )
+            pending_attachments.extend(attachments)
+
+        if pending_attachments:
+            parts = self._attachments_to_content_parts(pending_attachments)
+            if parts:
+                parts.append(
+                    {
+                        "type": "text",
+                        "text": "[attachments from previous tool result(s)]",
+                    }
+                )
+                self.conversation.append({"role": "user", "content": parts})
 
     def _is_deepseek_reasoning_model(self) -> bool:
         """Check if this is a DeepSeek R1 reasoning model.
