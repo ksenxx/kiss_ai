@@ -5278,7 +5278,9 @@
 
       const textSpan = document.createElement('span');
       textSpan.className = 'sidebar-item-text';
-      textSpan.textContent = text.length > 60 ? text.slice(0, 60) + '…' : text;
+      // Show the full text; CSS line-clamp on .frequent-item > .sidebar-item-text
+      // clips it to two lines with an ellipsis.
+      textSpan.textContent = text;
       div.appendChild(textSpan);
 
       const cnt = document.createElement('span');
