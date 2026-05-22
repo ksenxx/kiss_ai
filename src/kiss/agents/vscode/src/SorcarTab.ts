@@ -130,6 +130,9 @@ export function buildChatHtml(
             <button id="worktree-toggle-btn" class="toggle-btn" data-tooltip="Use worktree">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 01-9 9"/></svg>
             </button>
+            <button id="frequent-tasks-btn" class="toggle-btn" data-tooltip="Frequent tasks">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+            </button>
             <div id="model-dropdown">
               <div class="search-wrap">
                 <input type="text" id="model-search" placeholder="Search models...">
@@ -153,11 +156,8 @@ export function buildChatHtml(
 
     <div id="sidebar">
       <button id="sidebar-close">&times;</button>
-      <div class="sidebar-tabs">
-        <button id="sidebar-tab-history" class="sidebar-tab active" type="button">History</button>
-        <button id="sidebar-tab-frequent" class="sidebar-tab" type="button">Frequent</button>
-      </div>
       <div id="sidebar-tab-history-panel" class="sidebar-section sidebar-tab-panel">
+        <div class="sidebar-hdr">History</div>
         <div class="search-wrap">
           <input type="text" id="history-search" placeholder="Search history...">
           <button class="search-clear-btn" id="history-search-clear" style="display:none;">&times;</button>
@@ -166,13 +166,19 @@ export function buildChatHtml(
           <div class="sidebar-empty">No conversations yet</div>
         </div>
       </div>
-      <div id="sidebar-tab-frequent-panel" class="sidebar-section sidebar-tab-panel" style="display:none;">
+    </div>
+    <div id="sidebar-overlay"></div>
+
+    <div id="frequent-panel">
+      <button id="frequent-panel-close">&times;</button>
+      <div class="sidebar-section sidebar-tab-panel">
+        <div class="sidebar-hdr">Frequent tasks</div>
         <div id="frequent-list">
           <div class="sidebar-empty">No tasks yet</div>
         </div>
       </div>
     </div>
-    <div id="sidebar-overlay"></div>
+    <div id="frequent-overlay"></div>
 
     <div id="settings-panel">
       <button id="settings-panel-close">&times;</button>
