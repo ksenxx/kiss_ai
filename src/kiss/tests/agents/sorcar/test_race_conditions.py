@@ -154,7 +154,7 @@ class TestAutocompleteWorkerDoubleSpawn:
         # Build a bare instance carrying only the attributes touched
         # by ``_ensure_complete_worker``.
         instance = _AutocompleteMixin()
-        instance._state_lock = threading.Lock()  # type: ignore[attr-defined]
+        instance._state_lock = threading.RLock()  # type: ignore[attr-defined]
         instance._complete_queue = None  # type: ignore[attr-defined]
         instance._complete_worker = None  # type: ignore[attr-defined]
 

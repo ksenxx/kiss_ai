@@ -144,7 +144,11 @@ class ChatSorcarAgent(SorcarAgent):
             sub_state.parent_task_id = parent_task_id
             sub_state.is_task_active = True
             sub_state.agent = agent  # type: ignore[assignment]
-            _RunningAgentState.running_agent_states[sub_tab_id] = sub_state
+            # Route the insert through the locked helper so peer
+            # parallel sub-agents and VS Code server iteration loops
+            # never observe the dict mid-resize and never raise
+            # ``RuntimeError: dictionary changed size during iteration``.
+            _RunningAgentState.register(sub_tab_id, sub_state)
             try:
                 result: str = agent.run(
                     prompt_template=task,
@@ -166,7 +170,7 @@ class ChatSorcarAgent(SorcarAgent):
                     int(getattr(agent, "total_tokens_used", 0) or 0),
                     int(getattr(agent, "total_steps", 0) or 0),
                 )
-                _RunningAgentState.running_agent_states.pop(sub_tab_id, None)
+                _RunningAgentState.unregister(sub_tab_id)
 
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             results = list(pool.map(_run_single, enumerate(tasks)))
@@ -252,10 +256,15 @@ class ChatSorcarAgent(SorcarAgent):
         # sub-agent state so ``VSCodeServer._reattach_running_chat``
         # can disambiguate the sub-agent from its parent by task id.
         if self._subagent_info is not None:
-            for state in _RunningAgentState.running_agent_states.values():
-                if state.agent is self:
-                    state.task_history_id = task_id
-                    break
+            # Hold the shared registry lock while scanning so a peer
+            # sub-agent registering / unregistering in
+            # :meth:`_run_tasks_parallel` cannot resize the dict
+            # underneath us.
+            with _RunningAgentState._registry_lock:
+                for state in _RunningAgentState.running_agent_states.values():
+                    if state.agent is self:
+                        state.task_history_id = task_id
+                        break
         printer = kwargs.get("printer") or getattr(self, "printer", None)
         task_key = str(task_id)
         if printer is not None:
