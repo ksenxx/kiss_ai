@@ -1216,7 +1216,7 @@ body.remote-chat #welcome > #input-area {
    the history list inside #sidebar-tab-history-panel. */
 .history-filter-bar {
   display: flex; align-items: center; gap: 6px; flex-wrap: nowrap;
-  margin-bottom: 10px; font-size: var(--fs-base);
+  margin-bottom: 10px; font-size: var(--fs-md);
   color: var(--fg); white-space: nowrap; overflow-x: auto;
 }
 
@@ -1234,7 +1234,7 @@ body.remote-chat #welcome > #input-area {
   flex: 0 1 auto; min-width: 0; width: 7.5em;
   background: color-mix(in srgb, var(--fg) 5%, transparent);
   border: 1px solid var(--border); border-radius: 4px;
-  color: var(--fg); font-size: var(--fs-base);
+  color: var(--fg); font-size: var(--fs-md);
   padding: 2px 4px; outline: none; box-sizing: border-box;
   font-family: inherit;
 }
