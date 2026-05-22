@@ -298,6 +298,46 @@ class VSCodeServer(
                     running.add(tid)
         return running
 
+    def _overlay_live_metrics(
+        self, session: dict[str, Any], task_id: int,
+    ) -> None:
+        """Replace persisted metrics with live agent data for a running task.
+
+        Scans ``_RunningAgentState.running_agent_states`` for a tab whose
+        live task id matches *task_id* and overwrites the ``tokens``,
+        ``cost``, and ``steps`` fields in *session* with current values
+        from the running agent, including the in-progress executor's
+        ``step_count``.  Must be called WITHOUT holding ``_state_lock``.
+
+        Args:
+            session: The history session dict to update in place.
+            task_id: The ``task_history.id`` of the running task.
+        """
+        with self._state_lock:
+            for tab in _RunningAgentState.running_agent_states.values():
+                agent = tab.agent
+                if agent is None:
+                    continue
+                live_tid = (
+                    agent._last_task_id
+                    if agent._last_task_id is not None
+                    else tab.task_history_id
+                )
+                if live_tid != task_id:
+                    continue
+                session["tokens"] = int(
+                    getattr(agent, "total_tokens_used", 0) or 0
+                )
+                session["cost"] = float(
+                    getattr(agent, "budget_used", 0.0) or 0.0
+                )
+                steps = int(getattr(agent, "total_steps", 0) or 0)
+                cur = getattr(agent, "_current_executor", None)
+                if cur is not None:
+                    steps += int(getattr(cur, "step_count", 0) or 0)
+                session["steps"] = steps
+                break
+
     def _get_history(self, query: str | None, offset: int = 0, generation: int = 0) -> None:
         """Send conversation history with pagination support."""
         if query:
@@ -368,6 +408,12 @@ class VSCodeServer(
                         session["steps"] = int(extra_obj.get("steps", 0) or 0)
                     except (TypeError, ValueError):
                         session["steps"] = 0
+            # For running tasks, overlay live metrics from the agent
+            # so the history panel shows current steps/tokens/cost
+            # instead of the stale persisted values (which are only
+            # written at task completion).
+            if session.get("is_running") and isinstance(entry_id, int):
+                self._overlay_live_metrics(session, entry_id)
             sessions.append(session)
         self.printer.broadcast({
             "type": "history", "sessions": sessions,
@@ -465,6 +511,10 @@ class VSCodeServer(
                     if agent is not None else 0.0
                 steps = int(getattr(agent, "total_steps", 0) or 0) \
                     if agent is not None else 0
+                if agent is not None:
+                    cur = getattr(agent, "_current_executor", None)
+                    if cur is not None:
+                        steps += int(getattr(cur, "step_count", 0) or 0)
                 tasks.append({
                     "tab_id": tab.tab_id,
                     "chat_id": tab.chat_id,
