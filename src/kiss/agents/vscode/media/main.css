@@ -1273,6 +1273,84 @@ body.remote-chat #welcome > #input-area {
   border-color: var(--accent); outline: none;
 }
 
+/* Custom in-webview calendar popup opened by ``.history-filter-date-btn``.
+   The native <input type=date> picker (input.showPicker / focus+click)
+   is unreliable inside VS Code webviews, so we render our own popup
+   here.  Picking a day writes ``YYYY-MM-DD`` into the adjacent date
+   input and dispatches a ``change`` event so the existing filter
+   listener runs. */
+.kiss-datepicker {
+  position: fixed; z-index: 10000;
+  background: var(--bg, #1e1e1e);
+  border: 1px solid var(--border); border-radius: 6px;
+  box-shadow: 0 6px 18px rgb(0 0 0 / 35%);
+  padding: 8px; width: 220px;
+  font-size: var(--fs-md); color: var(--fg);
+  user-select: none;
+}
+
+.kiss-datepicker .dp-hdr {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 6px;
+}
+.kiss-datepicker .dp-title { font-weight: 600; }
+
+.kiss-datepicker .dp-nav {
+  background: transparent; border: none; color: var(--fg);
+  cursor: pointer; padding: 2px 8px; font-size: 16px;
+  line-height: 1; border-radius: 4px;
+}
+
+.kiss-datepicker .dp-nav:hover {
+  background: color-mix(in srgb, var(--fg) 15%, transparent);
+}
+
+.kiss-datepicker .dp-grid {
+  display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px;
+}
+
+.kiss-datepicker .dp-dn {
+  text-align: center; font-size: 11px;
+  color: color-mix(in srgb, var(--fg) 60%, transparent);
+  padding: 2px 0;
+}
+
+.kiss-datepicker .dp-day {
+  background: transparent; border: 1px solid transparent;
+  color: var(--fg); cursor: pointer;
+  padding: 4px 0; font-size: 12px;
+  border-radius: 4px; text-align: center;
+  font-family: inherit;
+}
+
+.kiss-datepicker .dp-day.dp-empty {
+  visibility: hidden; cursor: default;
+}
+
+.kiss-datepicker .dp-day:hover {
+  background: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+.kiss-datepicker .dp-today { border-color: var(--accent); }
+
+.kiss-datepicker .dp-sel {
+  background: var(--accent); color: #fff;
+}
+
+.kiss-datepicker .dp-foot {
+  display: flex; justify-content: space-between; margin-top: 6px;
+}
+
+.kiss-datepicker .dp-foot button {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  border: 1px solid var(--border); color: var(--fg);
+  padding: 3px 8px; border-radius: 4px; cursor: pointer;
+  font-size: 11px; font-family: inherit;
+}
+
+.kiss-datepicker .dp-foot button:hover {
+  background: color-mix(in srgb, var(--fg) 15%, transparent);
+}
+
 .sidebar-item {
   padding: 7px 10px 3.5px; background: color-mix(in srgb, var(--fg) 3%, transparent);
   border: 1px solid color-mix(in srgb, var(--fg) 8%, transparent); border-radius: 8px;

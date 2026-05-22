@@ -4280,28 +4280,26 @@
       if (el) el.addEventListener('change', applyHistoryFilterVisibility);
     });
     // The calendar selector buttons sit next to each date textbox and
-    // open the native date picker (the inside picker indicator is
-    // hidden in CSS so it never overlaps the typed date text).
+    // open a custom in-webview calendar popup.  The native
+    // <input type=date> picker (showPicker / focus+click) is unreliable
+    // inside VS Code webviews — it often does nothing because the
+    // embedded Chromium build either blocks ``showPicker`` without
+    // recent user activation or shows the picker behind the webview.
+    // A custom popup avoids both issues and gives consistent styling
+    // across the extension and the remote browser chat.
     const hfFromBtn = document.getElementById('hf-from-btn');
     const hfToBtn = document.getElementById('hf-to-btn');
-    function openDatePicker(input) {
-      if (!input) return;
-      if (typeof input.showPicker === 'function') {
-        try {
-          input.showPicker();
-          return;
-        } catch (_e) {
-          /* fall through to focus/click fallback below */
-        }
-      }
-      input.focus();
-      input.click();
-    }
     if (hfFromBtn) {
-      hfFromBtn.addEventListener('click', () => openDatePicker(hfFrom));
+      hfFromBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        openCustomDatePicker(hfFrom, hfFromBtn);
+      });
     }
     if (hfToBtn) {
-      hfToBtn.addEventListener('click', () => openDatePicker(hfTo));
+      hfToBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        openCustomDatePicker(hfTo, hfToBtn);
+      });
     }
     historyList.addEventListener('scroll', () => {
       if (historyLoading || !historyHasMore) return;
@@ -4932,6 +4930,197 @@
       historyHasMore = false;
     }
     applyHistoryFilterVisibility();
+  }
+
+  /**
+   * Open a custom in-webview calendar popup anchored next to the
+   * supplied date input.  Picking a day sets ``input.value`` to the
+   * ISO ``YYYY-MM-DD`` string (the same format ``<input type=date>``
+   * produces) and dispatches a ``change`` event so the existing
+   * history filter listener runs.  Closes on outside click or Escape.
+   *
+   * @param {HTMLInputElement} input - the adjacent date text input to
+   *   populate (e.g. ``#hf-from`` or ``#hf-to``).
+   * @param {HTMLElement} anchorBtn - the calendar icon button used
+   *   to anchor the popup position.
+   */
+  function openCustomDatePicker(input, anchorBtn) {
+    if (!input) return;
+    const existing = document.getElementById('kiss-datepicker-pop');
+    if (existing) {
+      const sameInput = existing._kissInput === input;
+      existing.remove();
+      if (sameInput) return; // toggle off when same button clicked twice
+    }
+    const MONTHS = [
+      'January',
+      'February',
+      'March',
+      'April',
+      'May',
+      'June',
+      'July',
+      'August',
+      'September',
+      'October',
+      'November',
+      'December',
+    ];
+    const DAYS = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
+    const pop = document.createElement('div');
+    pop.id = 'kiss-datepicker-pop';
+    pop.className = 'kiss-datepicker';
+    pop._kissInput = input;
+    // Seed viewed month from input value if present, else today
+    let cursor = null;
+    if (input.value) {
+      const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(input.value);
+      if (m) cursor = new Date(+m[1], +m[2] - 1, +m[3]);
+    }
+    if (!cursor || isNaN(cursor.getTime())) cursor = new Date();
+    let viewYear = cursor.getFullYear();
+    let viewMonth = cursor.getMonth();
+
+    function pad2(n) {
+      return n < 10 ? '0' + n : '' + n;
+    }
+    function isoOf(y, m, d) {
+      return y + '-' + pad2(m + 1) + '-' + pad2(d);
+    }
+
+    function render() {
+      const today = new Date();
+      const selVal = input.value;
+      let html = '';
+      html += '<div class="dp-hdr">';
+      html +=
+        '<button type="button" class="dp-nav" data-nav="prev" ' +
+        'aria-label="Previous month">&lsaquo;</button>';
+      html +=
+        '<span class="dp-title">' +
+        esc(MONTHS[viewMonth] + ' ' + viewYear) +
+        '</span>';
+      html +=
+        '<button type="button" class="dp-nav" data-nav="next" ' +
+        'aria-label="Next month">&rsaquo;</button>';
+      html += '</div>';
+      html += '<div class="dp-grid">';
+      for (let i = 0; i < DAYS.length; i++)
+        html += '<div class="dp-dn">' + DAYS[i] + '</div>';
+      const firstDow = new Date(viewYear, viewMonth, 1).getDay();
+      const daysInMonth = new Date(viewYear, viewMonth + 1, 0).getDate();
+      for (let i = 0; i < firstDow; i++)
+        html += '<div class="dp-day dp-empty"></div>';
+      for (let d = 1; d <= daysInMonth; d++) {
+        const iso = isoOf(viewYear, viewMonth, d);
+        const isToday =
+          d === today.getDate() &&
+          viewMonth === today.getMonth() &&
+          viewYear === today.getFullYear();
+        const isSel = iso === selVal;
+        let cls = 'dp-day';
+        if (isToday) cls += ' dp-today';
+        if (isSel) cls += ' dp-sel';
+        html +=
+          '<button type="button" class="' +
+          cls +
+          '" data-date="' +
+          iso +
+          '">' +
+          d +
+          '</button>';
+      }
+      html += '</div>';
+      html += '<div class="dp-foot">';
+      html += '<button type="button" class="dp-clear">Clear</button>';
+      html += '<button type="button" class="dp-today-btn">Today</button>';
+      html += '</div>';
+      pop.innerHTML = html;
+    }
+
+    function position() {
+      const anchor = anchorBtn || input;
+      const rect = anchor.getBoundingClientRect();
+      const popH = pop.offsetHeight || 260;
+      const popW = pop.offsetWidth || 220;
+      let top = rect.bottom + 4;
+      if (top + popH > window.innerHeight - 4)
+        top = Math.max(4, rect.top - popH - 4);
+      let left = rect.left;
+      if (left + popW > window.innerWidth - 4)
+        left = Math.max(4, window.innerWidth - popW - 4);
+      pop.style.top = top + 'px';
+      pop.style.left = left + 'px';
+    }
+
+    function commit(value) {
+      input.value = value;
+      input.dispatchEvent(new Event('change', {bubbles: true}));
+      closePicker();
+    }
+
+    function closePicker() {
+      document.removeEventListener('mousedown', onDocClick, true);
+      document.removeEventListener('keydown', onKey, true);
+      window.removeEventListener('resize', position);
+      if (pop.parentNode) pop.parentNode.removeChild(pop);
+    }
+
+    function onDocClick(e) {
+      if (pop.contains(e.target)) return;
+      if (anchorBtn && anchorBtn.contains(e.target)) return;
+      closePicker();
+    }
+
+    function onKey(e) {
+      if (e.key === 'Escape') closePicker();
+    }
+
+    pop.addEventListener('click', e => {
+      const nav = e.target.closest('[data-nav]');
+      if (nav) {
+        if (nav.dataset.nav === 'prev') {
+          viewMonth--;
+          if (viewMonth < 0) {
+            viewMonth = 11;
+            viewYear--;
+          }
+        } else {
+          viewMonth++;
+          if (viewMonth > 11) {
+            viewMonth = 0;
+            viewYear++;
+          }
+        }
+        render();
+        return;
+      }
+      const day = e.target.closest('[data-date]');
+      if (day) {
+        commit(day.dataset.date);
+        return;
+      }
+      if (e.target.closest('.dp-clear')) {
+        commit('');
+        return;
+      }
+      if (e.target.closest('.dp-today-btn')) {
+        const t = new Date();
+        commit(isoOf(t.getFullYear(), t.getMonth(), t.getDate()));
+        return;
+      }
+    });
+
+    render();
+    document.body.appendChild(pop);
+    position();
+    // Defer outside-click registration so the originating click that
+    // opened the picker does not immediately close it.
+    setTimeout(() => {
+      document.addEventListener('mousedown', onDocClick, true);
+      document.addEventListener('keydown', onKey, true);
+      window.addEventListener('resize', position);
+    }, 0);
   }
 
   /**
