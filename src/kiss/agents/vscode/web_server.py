@@ -1644,6 +1644,15 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
                 <path d="M18 9a9 9 0 01-9 9"/>
               </svg>
             </button>
+            <button id="frequent-tasks-btn" class="toggle-btn"
+             data-tooltip="Frequent tasks">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round"
+               stroke-linejoin="round">
+                <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 \
+12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+              </svg>
+            </button>
             <div id="model-dropdown">
               <div class="search-wrap">
                 <input type="text" id="model-search" placeholder="Search models...">
@@ -1674,16 +1683,9 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
 
     <div id="sidebar">
       <button id="sidebar-close">&times;</button>
-      <div class="sidebar-tabs">
-        <button id="sidebar-tab-history" class="sidebar-tab active"
-         type="button">History</button>
-        <button id="sidebar-tab-frequent" class="sidebar-tab"
-         type="button">Frequent</button>
-        <button id="sidebar-tab-settings" class="sidebar-tab"
-         type="button">Settings</button>
-      </div>
       <div id="sidebar-tab-history-panel"
        class="sidebar-section sidebar-tab-panel">
+        <div class="sidebar-hdr">History</div>
         <div class="search-wrap">
           <input type="text" id="history-search" placeholder="Search history...">
           <button class="search-clear-btn" id="history-search-clear"
@@ -1714,39 +1716,60 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
           <div class="sidebar-empty">No conversations yet</div>
         </div>
       </div>
-      <div id="sidebar-tab-frequent-panel"
-       class="sidebar-section sidebar-tab-panel" style="display:none;">
+    </div>
+    <div id="sidebar-overlay"></div>
+
+    <div id="frequent-panel">
+      <button id="frequent-panel-close">&times;</button>
+      <div class="sidebar-section sidebar-tab-panel">
+        <div class="sidebar-hdr">Frequent tasks</div>
         <div id="frequent-list">
           <div class="sidebar-empty">No tasks yet</div>
         </div>
       </div>
-      <div id="sidebar-tab-settings-panel"
-       class="sidebar-section sidebar-tab-panel" style="display:none;">
+    </div>
+    <div id="frequent-overlay"></div>
+
+    <div id="settings-panel">
+      <button id="settings-panel-close">&times;</button>
+      <div class="sidebar-section">
         <div class="sidebar-hdr">Sorcar Configuration{' ' + version if version else ''}</div>
         <div id="remote-url"></div>
         <div id="config-form">
+          <label class="config-label">Remote password
+            <div class="config-password-wrap">
+              <input type="password" id="cfg-remote-password"
+               placeholder="Remote access password">
+              <button type="button" id="cfg-remote-password-toggle"
+               class="config-password-toggle"
+               aria-label="Show password" aria-pressed="false"
+               title="Show password">
+                <svg class="icon-eye" width="16" height="16" viewBox="0 0 24 24"
+                 fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/>
+                  <circle cx="12" cy="12" r="3"/>
+                </svg>
+                <svg class="icon-eye-off" width="16" height="16"
+                 viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                 aria-hidden="true" style="display:none;">
+                  <path d="M17.94 17.94A10.94 10.94 0 0 1 12 19c-7 0-11-7-11-7\
+a19.7 19.7 0 0 1 4.22-5.06"/>
+                  <path d="M9.9 4.24A10.94 10.94 0 0 1 12 4c7 0 11 7 11 7\
+a19.7 19.7 0 0 1-3.16 4.19"/>
+                  <path d="M14.12 14.12A3 3 0 0 1 9.88 9.88"/>
+                  <line x1="1" y1="1" x2="23" y2="23"/>
+                </svg>
+              </button>
+            </div>
+          </label>
           <label class="config-label">Max budget per task ($)
             <input type="number" id="cfg-max-budget" min="0" step="1" value="100">
-          </label>
-          <label class="config-label">Custom endpoint (local model)
-            <input type="text" id="cfg-custom-endpoint"
-             placeholder="http://localhost:8080/v1">
-          </label>
-          <label class="config-label">Custom API key
-            <input type="text" id="cfg-custom-api-key"
-             placeholder="Optional API key for custom endpoint">
-          </label>
-          <label class="config-label">Custom headers
-            <textarea id="cfg-custom-headers" rows="2"
-             placeholder="Key:Value (one per line)"></textarea>
           </label>
           <label class="config-label config-checkbox">
             <input type="checkbox" id="cfg-use-web-browser" checked>
             Use web browser
-          </label>
-          <label class="config-label config-checkbox">
-            <input type="checkbox" id="cfg-use-parallel" checked>
-            Use parallel agents
           </label>
           <label class="config-label config-checkbox">
             <input type="checkbox" id="cfg-auto-commit" checked>
@@ -1764,13 +1787,14 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
             </button>
           </label>
           <label class="config-label config-checkbox">
+            <input type="checkbox" id="cfg-use-parallel" checked>
+            Use parallel agents
+          </label>
+          <label class="config-label config-checkbox">
             <input type="checkbox" id="cfg-demo-mode">
             Demo mode
           </label>
-          <label class="config-label">Remote password
-            <input type="text" id="cfg-remote-password"
-             placeholder="Remote access password">
-          </label>
+
           <div class="config-divider"></div>
           <div class="sidebar-hdr" style="margin-top:8px;">API Keys</div>
           <label class="config-label">Gemini API Key
@@ -1797,10 +1821,22 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
             <input type="text" id="cfg-key-MINIMAX_API_KEY"
              placeholder="Enter MiniMax API key">
           </label>
+          <label class="config-label">Custom endpoint (local model)
+            <input type="text" id="cfg-custom-endpoint"
+             placeholder="http://localhost:8080/v1">
+          </label>
+          <label class="config-label">Custom API key
+            <input type="text" id="cfg-custom-api-key"
+             placeholder="Optional API key for custom endpoint">
+          </label>
+          <label class="config-label">Custom headers
+            <textarea id="cfg-custom-headers" rows="2"
+             placeholder="Key:Value (one per line)"></textarea>
+          </label>
         </div>
       </div>
     </div>
-    <div id="sidebar-overlay"></div>
+    <div id="settings-overlay"></div>
 
     <div id="ask-user-modal" style="display:none;">
       <div class="modal-content">
