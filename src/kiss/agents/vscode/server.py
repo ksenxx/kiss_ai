@@ -472,63 +472,6 @@ class VSCodeServer(
             "tasks": _load_frequent_tasks(limit=limit),
         })
 
-    def _get_running_tasks(self) -> None:
-        """Send the list of currently running regular tasks.
-
-        Enumerates :attr:`_RunningAgentState.running_agent_states` for
-        tabs whose worker thread is still alive and which are NOT
-        sub-agents.  For each running task collects ``chat_id``,
-        ``task_id`` (preferring ``tab.agent._last_task_id`` per
-        ``USER_PREFS.md``), the user prompt as the title, and live
-        usage metrics (``tokens``, ``cost``, ``steps``) read directly
-        off the running agent.  Broadcasts a ``runningTasks`` event
-        whose ``tasks`` field is a list of dicts.
-        """
-        tasks: list[dict[str, Any]] = []
-        with self._state_lock:
-            for tab in _RunningAgentState.running_agent_states.values():
-                if tab.is_subagent:
-                    continue
-                thread = tab.task_thread
-                if thread is None or not thread.is_alive():
-                    continue
-                agent = tab.agent
-                task_id: int | None = None
-                if agent is not None and agent._last_task_id is not None:
-                    task_id = agent._last_task_id
-                elif tab.task_history_id is not None:
-                    task_id = tab.task_history_id
-                if task_id is None:
-                    continue
-                title = ""
-                if agent is not None and agent._last_user_prompt:
-                    title = agent._last_user_prompt
-                elif tab.last_user_prompt:
-                    title = tab.last_user_prompt
-                tokens = int(getattr(agent, "total_tokens_used", 0) or 0) \
-                    if agent is not None else 0
-                budget = float(getattr(agent, "budget_used", 0.0) or 0.0) \
-                    if agent is not None else 0.0
-                steps = int(getattr(agent, "total_steps", 0) or 0) \
-                    if agent is not None else 0
-                if agent is not None:
-                    cur = getattr(agent, "_current_executor", None)
-                    if cur is not None:
-                        steps += int(getattr(cur, "step_count", 0) or 0)
-                tasks.append({
-                    "tab_id": tab.tab_id,
-                    "chat_id": tab.chat_id,
-                    "task_id": task_id,
-                    "title": title,
-                    "tokens": tokens,
-                    "cost": budget,
-                    "steps": steps,
-                })
-        self.printer.broadcast({
-            "type": "runningTasks",
-            "tasks": tasks,
-        })
-
     def _get_input_history(self) -> None:
         """Send deduplicated task texts for arrow-key cycling.
 

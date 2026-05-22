@@ -1157,11 +1157,6 @@ body.remote-chat #welcome > #input-area {
   animation: sidebar-running-pulse 1.5s ease-in-out infinite;
 }
 
-#running-list {
-  overflow-y: auto;
-  flex: 1;
-}
-
 .running-item {
   flex-wrap: wrap;
   white-space: normal;
