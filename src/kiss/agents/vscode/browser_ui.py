@@ -270,7 +270,14 @@ class BaseBrowserPrinter(Printer):
         key = self._coerce_task_id(event.get("taskId"))
         if not key:
             return
-        agent = self._persist_agents.get(key)
+        # Look up the registered agent under ``_lock`` so a concurrent
+        # ``cleanup_task`` (which pops from ``_persist_agents`` under
+        # the same lock) cannot remove the entry between our ``get``
+        # and our use of the returned agent.  Holding the lock also
+        # serialises us against ``ChatSorcarAgent.run`` registering
+        # a fresh agent under the same key.
+        with self._lock:
+            agent = self._persist_agents.get(key)
         if agent is None:
             return
         task_id = getattr(agent, "_last_task_id", None)

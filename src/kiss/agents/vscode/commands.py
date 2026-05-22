@@ -214,20 +214,33 @@ class _CommandsMixin:
             _record_file_usage(path)
 
     def _cmd_user_answer(self, cmd: dict[str, Any]) -> None:
-        """Route a user answer to the correct tab's queue."""
+        """Route a user answer to the correct tab's queue.
+
+        The drain-then-put sequence is held under ``_state_lock`` so
+        two concurrent ``userAnswer`` commands cannot both observe
+        the queue as empty, both call ``q.put`` on the ``maxsize=1``
+        queue, and wedge the second handler thread forever.  Using
+        ``put_nowait`` after the drain — combined with the lock —
+        guarantees the call never blocks: the queue is guaranteed
+        empty by the just-completed drain, and any concurrent
+        ``userAnswer`` is serialised behind us.
+        """
         ans_tab = cmd.get("tabId", "")
         with self._state_lock:
             ans_state = _RunningAgentState.running_agent_states.get(ans_tab)
             q = ans_state.user_answer_queue if ans_state is not None else None
-        if q is None:
-            logger.debug("userAnswer dropped: no queue for tabId=%s", ans_tab)
-            return
-        while not q.empty():
+            if q is None:
+                logger.debug("userAnswer dropped: no queue for tabId=%s", ans_tab)
+                return
+            while not q.empty():
+                try:
+                    q.get_nowait()
+                except queue.Empty:  # pragma: no cover — race guard
+                    break
             try:
-                q.get_nowait()
-            except queue.Empty:  # pragma: no cover — race guard
-                break
-        q.put(cmd.get("answer", ""))
+                q.put_nowait(cmd.get("answer", ""))
+            except queue.Full:  # pragma: no cover — drained immediately above
+                pass
 
     def _cmd_resume_session(self, cmd: dict[str, Any]) -> None:
         """Replay a previous chat session.
