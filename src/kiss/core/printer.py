@@ -79,6 +79,9 @@ def lang_for_path(path: str) -> str:
 def truncate_result(content: str) -> str:
     """Truncate long content to MAX_RESULT_LEN, keeping the first and last halves.
 
+    Also strips out base64 binary-attachment payloads emitted by the ``Read``
+    tool so the terminal/webview never has to render kilobytes of base64.
+
     Args:
         content: The string to truncate.
 
@@ -86,6 +89,11 @@ def truncate_result(content: str) -> str:
         str: The original string if short enough, otherwise the first and last
             halves joined by a truncation marker.
     """
+    # Lazy import keeps printer.py free of model-layer dependencies for
+    # consumers (e.g. browser_ui) that may not have models loaded.
+    from kiss.core.models.model import parse_binary_attachments
+
+    content, _ = parse_binary_attachments(content)
     if len(content) <= MAX_RESULT_LEN:
         return content
     half = MAX_RESULT_LEN // 2
