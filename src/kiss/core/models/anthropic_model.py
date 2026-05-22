@@ -452,6 +452,36 @@ class AnthropicModel(Model):
                         content_blocks.append({"type": "image", "source": source})
                     elif att.mime_type == "application/pdf":
                         content_blocks.append({"type": "document", "source": source})
+                    elif att.mime_type.startswith("audio/"):
+                        # Anthropic Messages API does not accept audio content
+                        # blocks.  Transcribe via Whisper when possible so the
+                        # model still sees the spoken content; otherwise drop
+                        # the bytes with a warning.
+                        try:
+                            text = transcribe_audio(att.data, att.mime_type)
+                            content_blocks.append(
+                                {
+                                    "type": "text",
+                                    "text": f"[Audio transcription]\n{text}",
+                                }
+                            )
+                        except Exception:
+                            logger.warning(
+                                "Anthropic does not support %s tool-result "
+                                "attachments and automatic transcription "
+                                "failed; dropping.",
+                                att.mime_type,
+                            )
+                    elif att.mime_type.startswith("video/"):
+                        logger.warning(
+                            "Anthropic does not support %s tool-result "
+                            "attachments; dropping.",
+                            att.mime_type,
+                        )
+                if not content_blocks:
+                    content_blocks.append(
+                        {"type": "text", "text": plain_text or result_content}
+                    )
                 tool_results_blocks.append(
                     {
                         "type": "tool_result",
