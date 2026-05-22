@@ -5286,6 +5286,58 @@
       cnt.textContent = String(t.count);
       div.appendChild(cnt);
 
+      // Delete button + inline confirm/cancel — mirrors the layout used
+      // by the History sidebar rows so the user gets a consistent
+      // "click trash → confirm Delete or Cancel" flow.  On confirm we
+      // optimistically remove the row from the DOM and ask the backend
+      // to delete the row from the ``frequent_tasks`` table.
+      const delBtn = document.createElement('button');
+      delBtn.className = 'sidebar-item-delete';
+      delBtn.dataset.tooltip = 'Delete';
+      delBtn.setAttribute('aria-label', 'Delete frequent task');
+      delBtn.innerHTML =
+        '<svg width="11" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>';
+
+      const confirmWrap = document.createElement('span');
+      confirmWrap.className = 'sidebar-item-confirm';
+      confirmWrap.style.display = 'none';
+
+      const confirmBtn = document.createElement('button');
+      confirmBtn.className = 'sidebar-confirm-yes';
+      confirmBtn.dataset.tooltip = 'Confirm delete';
+      confirmBtn.textContent = 'Delete';
+
+      const cancelBtn = document.createElement('button');
+      cancelBtn.className = 'sidebar-confirm-no';
+      cancelBtn.dataset.tooltip = 'Cancel';
+      cancelBtn.textContent = 'Cancel';
+
+      confirmWrap.appendChild(confirmBtn);
+      confirmWrap.appendChild(cancelBtn);
+
+      delBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        delBtn.style.display = 'none';
+        cnt.style.display = 'none';
+        confirmWrap.style.display = '';
+      });
+
+      confirmBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        vscode.postMessage({type: 'deleteFrequentTask', task: text});
+        div.remove();
+      });
+
+      cancelBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        confirmWrap.style.display = 'none';
+        delBtn.style.display = '';
+        cnt.style.display = '';
+      });
+
+      div.appendChild(delBtn);
+      div.appendChild(confirmWrap);
+
       div.addEventListener('click', () => {
         inp.value = text;
         syncClearBtn();

@@ -2512,7 +2512,8 @@ class TestSorcarSidebarViewMessageHandling(unittest.TestCase):
             "worktreeAction", "resolveDroppedPaths", "focusEditor",
             "closeTab", "getWelcomeSuggestions",
             "webviewFocusChanged", "autocommitAction", "setSkipMerge",
-            "getConfig", "saveConfig", "deleteTask", "getFrequentTasks",
+            "getConfig", "saveConfig", "deleteTask", "deleteFrequentTask",
+            "getFrequentTasks",
             "getRunningTasks", "pickFolder", "sizeReport",
         }
         extra = sidebar_cases - known
