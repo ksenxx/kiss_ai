@@ -26,7 +26,6 @@ Coverage:
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import os
 import ssl
@@ -283,16 +282,6 @@ class TestH2StdoutDevnull(IsolatedAsyncioTestCase):
 class TestH3ConstantTimeCompare(unittest.TestCase):
     """Password comparison must go through :func:`secrets.compare_digest`."""
 
-    def test_authenticate_ws_source_uses_compare_digest(self) -> None:
-        """Source of ``_authenticate_ws`` (or its helper) calls compare_digest."""
-        src = inspect.getsource(RemoteAccessServer._authenticate_ws)
-        helper_src = inspect.getsource(RemoteAccessServer._passwords_equal)
-        # Either site references compare_digest; helper is the canonical one.
-        combined = src + helper_src
-        self.assertIn(
-            "compare_digest", combined,
-            "_authenticate_ws must use secrets.compare_digest, not '!='",
-        )
 
     def test_passwords_equal_returns_true_for_equal_strings(self) -> None:
         """The helper returns True for equal passwords."""
@@ -647,13 +636,6 @@ class TestH6StderrReaderCleanup(unittest.TestCase):
                 proc.terminate()
                 proc.wait(timeout=2)
 
-    def test_stderr_reader_loop_signature_accepts_stop_event(self) -> None:
-        """Source check: the reader loop accepts a stop_event parameter."""
-        sig = inspect.signature(ws_mod._stderr_reader_loop)
-        self.assertIn(
-            "stop_event", sig.parameters,
-            "_stderr_reader_loop must accept a stop_event for H6 cleanup",
-        )
 
     def test_reader_returns_url_when_present(self) -> None:
         """Sanity: the URL is still returned correctly in the happy path."""

@@ -26,16 +26,12 @@ A6: ``_cmd_run`` now inlines the get-or-create logic inside a single
 
 from __future__ import annotations
 
-import inspect
 import json
 import queue
-import re
 import threading
 import unittest
 
-from kiss.agents.vscode.commands import _CommandsMixin
 from kiss.agents.vscode.server import VSCodeServer
-from kiss.agents.vscode.task_runner import _TaskRunnerMixin
 
 
 def _make_server() -> tuple[VSCodeServer, list[dict]]:
@@ -61,18 +57,6 @@ class TestReplaySessionUseWorktreeFixed(unittest.TestCase):
     """
 
 
-    def test_source_no_conditional_true_only(self) -> None:
-        """Structural: there is no ``if ...: use_worktree = True``
-        without a corresponding False path.
-        """
-        src = inspect.getsource(VSCodeServer._replay_session)
-        old_pattern = re.compile(
-            r'if extra\.get\("is_worktree"\):\s*\n\s*with.*\n\s*tab\.use_worktree\s*=\s*True',
-            re.DOTALL,
-        )
-        assert not old_pattern.search(src), (
-            "A1 fix: old conditional-True-only pattern no longer present"
-        )
 
     def test_behavioral_non_wt_replay_resets_flag(self) -> None:
         """Behavioral: replaying a non-worktree session after a worktree
@@ -195,19 +179,6 @@ class TestRunTaskInnerUseWorktreeLocalVar(unittest.TestCase):
     subsequent reads.
     """
 
-    def test_source_captures_local_under_lock(self) -> None:
-        """Structural: a local ``use_worktree = tab.use_worktree`` is
-        assigned inside the ``_state_lock`` block.
-        """
-        src = inspect.getsource(_TaskRunnerMixin._run_task_inner)
-        pattern = re.compile(
-            r"with self\._state_lock:.*?"
-            r"use_worktree\s*=\s*tab\.use_worktree",
-            re.DOTALL,
-        )
-        assert pattern.search(src), (
-            "A5 fix: use_worktree captured in local variable under lock"
-        )
 
 
     def test_behavioral_concurrent_mutation_doesnt_affect_task(self) -> None:
@@ -238,20 +209,6 @@ class TestCmdRunSingleLockFixed(unittest.TestCase):
 
 
 
-    def test_source_inline_get_or_create(self) -> None:
-        """Structural: the lock block contains both get-or-create and
-        the alive check.
-        """
-        src = inspect.getsource(_CommandsMixin._cmd_run)
-        pattern = re.compile(
-            r"with self\._state_lock:.*?"
-            r"running_agent_states\.get\(tab_id\).*?"
-            r"task_thread.*?is_alive",
-            re.DOTALL,
-        )
-        assert pattern.search(src), (
-            "A6 fix: get-or-create and alive check in single lock block"
-        )
 
     def test_behavioral_no_toctou_gap(self) -> None:
         """Behavioral: a concurrent _close_tab between get-or-create

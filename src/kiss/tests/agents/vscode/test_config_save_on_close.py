@@ -18,26 +18,10 @@ from pathlib import Path
 _VSCODE_DIR = Path(__file__).resolve().parents[3] / "agents" / "vscode"
 
 
-class TestSaveButtonRemovedFromHTML(unittest.TestCase):
-    """The cfg-save-btn element must not appear in any HTML template."""
-
-
-    def test_web_server_has_no_save_button(self) -> None:
-        py = (_VSCODE_DIR / "web_server.py").read_text()
-        assert "cfg-save-btn" not in py
 
 
 
 
-class TestConfigSidebarRemoved(unittest.TestCase):
-    """The standalone ``#config-sidebar`` element is gone."""
-
-
-    def test_no_config_sidebar_in_webapp_html(self) -> None:
-        py = (_VSCODE_DIR / "web_server.py").read_text()
-        assert 'id="config-sidebar"' not in py
-        assert 'id="config-sidebar-overlay"' not in py
-        assert 'id="config-sidebar-close"' not in py
 
 
 

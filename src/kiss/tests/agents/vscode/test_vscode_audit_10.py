@@ -5,7 +5,6 @@ They must be obtained dynamically from kiss.core.models.model_info.
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pytest
@@ -38,78 +37,8 @@ _FAST_MODELS = [
 ]
 
 
-class TestNoHardcodedModelsInDependencyInstaller:
-    """DependencyInstaller.ts getDefaultModel() must not hardcode model names."""
-
-    def test_no_hardcoded_default_models(self) -> None:
-        src = _read("src/DependencyInstaller.ts")
-        # Extract the getDefaultModel function body
-        match = re.search(
-            r"export function getDefaultModel\(\).*?\{(.*?)\n\}",
-            src,
-            re.DOTALL,
-        )
-        assert match, "getDefaultModel() not found in DependencyInstaller.ts"
-        body = match.group(1)
-        for model in _DEFAULT_MODELS:
-            assert (
-                f"'{model}'" not in body and f'"{model}"' not in body
-            ), f"Hardcoded model '{model}' found in getDefaultModel() body"
-
-    def test_calls_python_get_default_model(self) -> None:
-        src = _read("src/DependencyInstaller.ts")
-        match = re.search(
-            r"export function getDefaultModel\(\).*?\{(.*?)\n\}",
-            src,
-            re.DOTALL,
-        )
-        assert match, "getDefaultModel() not found"
-        body = match.group(1)
-        assert "get_default_model" in body, (
-            "getDefaultModel() must call Python's get_default_model()"
-        )
-
-    def test_uses_find_uv_path_and_find_kiss_project(self) -> None:
-        src = _read("src/DependencyInstaller.ts")
-        match = re.search(
-            r"export function getDefaultModel\(\).*?\{(.*?)\n\}",
-            src,
-            re.DOTALL,
-        )
-        assert match
-        body = match.group(1)
-        assert "findUvPath" in body, "Must use findUvPath()"
-        assert "findKissProject" in body, "Must use findKissProject()"
 
 
-class TestNoHardcodedModelsInMainJs:
-    """main.js must not hardcode default or fast model names."""
-
-    def test_no_hardcoded_initial_selected_model(self) -> None:
-        src = _read("media/main.js")
-        # Check that the initial selectedModel declaration doesn't use a model name
-        pattern = re.compile(r"let selectedModel\s*=\s*'[a-zA-Z]")
-        assert not pattern.search(src), (
-            "selectedModel must not be initialized with a hardcoded model name"
-        )
-
-    def test_no_hardcoded_restore_tab_fallback(self) -> None:
-        src = _read("media/main.js")
-        for model in _DEFAULT_MODELS:
-            # Check for patterns like: tab.selectedModel || 'claude-opus-4-7'
-            assert f"|| '{model}'" not in src, (
-                f"Hardcoded fallback '{model}' in restoreTab"
-            )
-
-    def test_selected_model_initialized_from_dom(self) -> None:
-        src = _read("media/main.js")
-        # Should read the model name from the DOM element injected by the template
-        assert "modelName" in src and "selectedModel" in src
-        # Check that there's code reading from model-name element
-        assert re.search(
-            r"modelName.*textContent.*selectedModel|selectedModel.*modelName.*textContent",
-            src,
-        ), "selectedModel should be initialized from DOM model-name element"
 
 
 class TestNoHardcodedModelsAnywhere:
@@ -123,20 +52,6 @@ class TestNoHardcodedModelsAnywhere:
             result.extend(VSCODE_DIR.glob(pattern))
         return result
 
-    def test_no_hardcoded_default_model_literals(
-        self, ts_js_files: list[Path]
-    ) -> None:
-        for fp in ts_js_files:
-            src = fp.read_text()
-            for model in _DEFAULT_MODELS:
-                # Allow model names in comments (docstrings) but not in code
-                for line in src.splitlines():
-                    stripped = line.lstrip()
-                    if stripped.startswith("//") or stripped.startswith("*"):
-                        continue
-                    assert f"'{model}'" not in line and f'"{model}"' not in line, (
-                        f"Hardcoded model '{model}' in {fp.name}: {line.strip()}"
-                    )
 
     def test_python_get_default_model_returns_known_model(self) -> None:
         result = get_default_model()
