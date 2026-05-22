@@ -4874,12 +4874,29 @@
       const tokens = Number(s.tokens || 0);
       const cost = Number(s.cost || 0);
       const steps = Number(s.steps || 0);
+      const ts = Number(s.timestamp || 0);
+      let when = '';
+      if (ts > 0) {
+        const d = new Date(ts * 1000);
+        if (!isNaN(d.getTime())) {
+          when =
+            ' • ' +
+            d.toLocaleString(undefined, {
+              year: 'numeric',
+              month: 'short',
+              day: 'numeric',
+              hour: '2-digit',
+              minute: '2-digit',
+            });
+        }
+      }
       metrics.textContent =
         steps +
         ' steps • ' +
         tokens.toLocaleString() +
         ' tok • $' +
-        cost.toFixed(4);
+        cost.toFixed(4) +
+        when;
       div.appendChild(metrics);
 
       div.addEventListener('click', () => {
