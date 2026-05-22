@@ -287,8 +287,12 @@ body {
 }
 
 .chat-tab.subagent-tab .subagent-indicator.done {
+  /* Sub-agent finished: kill the pulse animation but keep the purple
+   * colour, so the tab title shows a SOLID purple ◉ instead of the
+   * running pulse.  This is the user-visible "this sub-agent is
+   * done" signal in the tab bar. */
   animation: none;
-  color: var(--green);
+  opacity: 1;
 }
 
 @keyframes subagent-pulse {

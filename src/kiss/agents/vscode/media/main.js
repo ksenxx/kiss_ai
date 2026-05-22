@@ -415,20 +415,20 @@
       el.dataset.tabId = tab.id;
 
       if (tab.isSubagentTab) {
-        // Subagent tab indicator — only render the pulsing ◉ while the
-        // sub-agent is actively running.  Once it's done (either fresh
-        // completion or a non-running sub-agent loaded from history),
-        // suppress the green / red status circle: the purple
-        // .subagent-tab accent is enough to identify the tab as a
-        // sub-agent, and an idle indicator on a long-finished history
-        // tab adds noise without conveying new information.
-        if (!tab.isDone) {
-          const subIndicator = document.createElement('span');
-          subIndicator.className = 'subagent-indicator';
-          subIndicator.textContent = '◉';
-          subIndicator.title = 'Running';
-          el.appendChild(subIndicator);
-        }
+        // Subagent tab indicator — always render the purple ◉.  While
+        // the sub-agent is running it pulses (default ``.subagent-
+        // indicator`` animation).  Once the sub-agent is done the
+        // indicator gains the ``.done`` modifier class which kills the
+        // pulse animation, leaving a solid purple circle.  We keep the
+        // glyph (instead of dropping it entirely) so the user gets a
+        // clear "this sub-agent finished" signal in the tab title
+        // rather than the indicator simply disappearing.
+        const subIndicator = document.createElement('span');
+        subIndicator.className =
+          'subagent-indicator' + (tab.isDone ? ' done' : '');
+        subIndicator.textContent = '◉';
+        subIndicator.title = tab.isDone ? 'Done' : 'Running';
+        el.appendChild(subIndicator);
       } else {
         if (tab.isRunning) {
           const spinner = document.createElement('span');
