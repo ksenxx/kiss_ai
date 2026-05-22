@@ -2711,8 +2711,13 @@
         // 'taskDeleted' broadcast can decide whether to close this tab.
         if (teTab && ev.task_id !== undefined && ev.task_id !== null)
           teTab.currentTaskId = ev.task_id;
-        // Non-active tab: render into a document fragment without touching the DOM
-        if (teTabId !== activeTabId && teTab) {
+        // Non-active tab: render into a document fragment without touching the DOM.
+        // When teTabId targets a different tab but that tab hasn't been
+        // created yet (teTab is null), silently drop the event so
+        // sub-agent events never fall through to the active (parent) tab.
+        if (teTabId !== activeTabId) {
+          if (!teTab) break;
+
           const taskTitle = (ev.task || '').trim();
           if (taskTitle) {
             teTab.title =
