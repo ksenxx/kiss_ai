@@ -858,19 +858,17 @@
   const askUserModal = document.getElementById('ask-user-modal');
   const askUserSlot = document.getElementById('ask-user-slot');
 
-  // Sidebar tab elements (History / Frequent live inside #sidebar).
-  // Settings has its own standalone right-anchored panel (#settings-panel).
-  const sidebarTabHistoryBtn = document.getElementById('sidebar-tab-history');
-  const sidebarTabFrequentBtn = document.getElementById('sidebar-tab-frequent');
-  const sidebarTabHistoryPanel = document.getElementById(
-    'sidebar-tab-history-panel',
-  );
-  const sidebarTabFrequentPanel = document.getElementById(
-    'sidebar-tab-frequent-panel',
-  );
+  // #sidebar hosts only the History list now.  The Frequent tasks list
+  // lives in its own standalone bottom-anchored panel (#frequent-panel),
+  // and Settings has its own standalone right-anchored panel
+  // (#settings-panel).
   const settingsPanel = document.getElementById('settings-panel');
   const settingsOverlay = document.getElementById('settings-overlay');
   const settingsPanelClose = document.getElementById('settings-panel-close');
+  const frequentPanel = document.getElementById('frequent-panel');
+  const frequentOverlay = document.getElementById('frequent-overlay');
+  const frequentPanelClose = document.getElementById('frequent-panel-close');
+  const frequentTasksBtn = document.getElementById('frequent-tasks-btn');
   const frequentList = document.getElementById('frequent-list');
   const autocommitBtn = document.getElementById('autocommit-btn');
   const waitSpinner = document.getElementById('wait-spinner');
@@ -4206,16 +4204,17 @@
       }
     });
     function toggleHistorySidebar() {
-      if (
-        sidebar.classList.contains('open') &&
-        sidebarTabHistoryBtn &&
-        sidebarTabHistoryBtn.classList.contains('active')
-      ) {
+      if (sidebar.classList.contains('open')) {
         closeSidebar();
       } else {
         sidebar.classList.add('open');
         sidebarOverlay.classList.add('open');
-        switchSidebarTab('history');
+        resetHistoryPagination();
+        vscode.postMessage({
+          type: 'getHistory',
+          query: historySearch ? historySearch.value : '',
+          generation: historyGeneration,
+        });
       }
     }
     if (menuBtn) {
@@ -4223,15 +4222,20 @@
     }
     sidebarClose.addEventListener('click', closeSidebar);
     sidebarOverlay.addEventListener('click', closeSidebar);
-    if (sidebarTabHistoryBtn) {
-      sidebarTabHistoryBtn.addEventListener('click', () => {
-        switchSidebarTab('history');
+    if (frequentTasksBtn) {
+      frequentTasksBtn.addEventListener('click', () => {
+        if (frequentPanel && frequentPanel.classList.contains('open')) {
+          closeFrequentPanel();
+        } else {
+          openFrequentPanel();
+        }
       });
     }
-    if (sidebarTabFrequentBtn) {
-      sidebarTabFrequentBtn.addEventListener('click', () => {
-        switchSidebarTab('frequent');
-      });
+    if (frequentPanelClose) {
+      frequentPanelClose.addEventListener('click', closeFrequentPanel);
+    }
+    if (frequentOverlay) {
+      frequentOverlay.addEventListener('click', closeFrequentPanel);
     }
     if (settingsPanelClose) {
       settingsPanelClose.addEventListener('click', closeSettingsPanel);
@@ -4924,35 +4928,20 @@
   }
 
   /**
-   * Show one of the in-panel sidebar tabs ("history" or "frequent")
-   * and trigger the matching backend fetch.  Toggles the ``.active``
-   * class on the tab buttons and the ``display`` of the panels.
+   * Open the standalone Frequent tasks panel (slides up from the
+   * bottom) and request the current frequent tasks from the backend.
    */
-  function switchSidebarTab(tab) {
-    const isHistory = tab === 'history';
-    const isFrequent = tab === 'frequent';
-    if (sidebarTabHistoryBtn) {
-      sidebarTabHistoryBtn.classList.toggle('active', isHistory);
-    }
-    if (sidebarTabFrequentBtn) {
-      sidebarTabFrequentBtn.classList.toggle('active', isFrequent);
-    }
-    if (sidebarTabHistoryPanel) {
-      sidebarTabHistoryPanel.style.display = isHistory ? '' : 'none';
-    }
-    if (sidebarTabFrequentPanel) {
-      sidebarTabFrequentPanel.style.display = isFrequent ? '' : 'none';
-    }
-    if (isFrequent) {
-      vscode.postMessage({type: 'getFrequentTasks', limit: 50});
-    } else {
-      resetHistoryPagination();
-      vscode.postMessage({
-        type: 'getHistory',
-        query: historySearch ? historySearch.value : '',
-        generation: historyGeneration,
-      });
-    }
+  function openFrequentPanel() {
+    if (!frequentPanel) return;
+    frequentPanel.classList.add('open');
+    if (frequentOverlay) frequentOverlay.classList.add('open');
+    vscode.postMessage({type: 'getFrequentTasks', limit: 50});
+  }
+
+  /** Close the standalone Frequent tasks panel. */
+  function closeFrequentPanel() {
+    if (frequentPanel) frequentPanel.classList.remove('open');
+    if (frequentOverlay) frequentOverlay.classList.remove('open');
   }
 
   function renderFrequentTasks(tasks) {
@@ -4986,7 +4975,7 @@
         inp.style.height = 'auto';
         inp.style.height = inp.scrollHeight + 'px';
         inp.focus();
-        closeSidebar();
+        closeFrequentPanel();
       });
       frequentList.appendChild(div);
     });
