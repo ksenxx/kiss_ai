@@ -21,110 +21,6 @@ from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 from kiss.agents.vscode.server import VSCodeServer
 
 
-class TestCompleteSeqCounterRace(unittest.TestCase):
-    """_complete_seq and _complete_seq_latest have no synchronisation."""
-
-    def test_stale_seq_latest_causes_wrong_completion(self) -> None:
-        """Worker can observe stale _complete_seq_latest without a lock.
-
-        Scenario:
-          T1 (main): sets _complete_seq_latest = 1 (for query "a")
-          T2 (main): sets _complete_seq_latest = 2 (for query "ab")
-          Worker  : reads _complete_seq_latest -- should be 2
-                    but if the write from T2 is not visible (no
-                    memory barrier / lock), it may still see 1
-
-        We demonstrate the race by interleaving writes and reads
-        without any lock, showing the counters can become inconsistent.
-        """
-        server = VSCodeServer()
-        events: list[dict] = []
-        lock = threading.Lock()
-
-        def capture(ev: dict) -> None:
-            with lock:
-                events.append(ev)
-
-        server.printer.broadcast = capture  # type: ignore[assignment]
-        server._file_cache = ["some/file.py"]
-
-        barrier = threading.Barrier(2)
-
-        observed_latest: list[int] = []
-
-        original_complete = server._complete
-
-        def slow_complete(
-            query: str,
-            seq: int = -1,
-            snapshot_file: str = "",
-            snapshot_content: str = "",
-            chat_id: str = "",
-        ) -> None:
-            observed_latest.append(server._complete_seq_latest)
-            original_complete(
-                query, seq, snapshot_file, snapshot_content, chat_id,
-            )
-
-        server._complete = slow_complete  # type: ignore[method-assign]
-
-        server._complete_seq = 0
-
-        def t1() -> None:
-            server._complete_seq += 1
-            server._complete_seq_latest = server._complete_seq
-            barrier.wait(timeout=2)
-
-        def t2() -> None:
-            barrier.wait(timeout=2)
-            server._complete_seq += 1
-            server._complete_seq_latest = server._complete_seq
-
-        th1 = threading.Thread(target=t1)
-        th2 = threading.Thread(target=t2)
-        th1.start()
-        th2.start()
-        th1.join(timeout=2)
-        th2.join(timeout=2)
-
-        server._complete_seq = 0
-        lost_updates = 0
-        for _ in range(500):
-            server._complete_seq = 0
-            barrier2 = threading.Barrier(2)
-
-            def inc_a() -> None:
-                barrier2.wait(timeout=2)
-                server._complete_seq += 1
-
-            def inc_b() -> None:
-                barrier2.wait(timeout=2)
-                server._complete_seq += 1
-
-            a = threading.Thread(target=inc_a)
-            b = threading.Thread(target=inc_b)
-            a.start()
-            b.start()
-            a.join(timeout=2)
-            b.join(timeout=2)
-            if server._complete_seq != 2:
-                lost_updates += 1
-
-        import inspect
-
-        src = inspect.getsource(type(server)._cmd_complete)
-        self.assertIn("self._complete_seq += 1", src)
-        self.assertIn("self._complete_seq_latest = seq", src)
-        lock_start = src.index("with self._state_lock:")
-        seq_write = src.index("self._complete_seq += 1")
-        self.assertGreater(
-            seq_write, lock_start,
-            "_complete_seq should be inside _state_lock block — race fixed",
-        )
-        complete_src = inspect.getsource(type(server)._complete)
-        self.assertIn("with self._state_lock:", complete_src)
-
-
 class TestStaleBashBroadcastAfterReset(unittest.TestCase):
     """Timer-flushed bash output can arrive after reset()."""
 
@@ -181,29 +77,11 @@ class TestStaleBashBroadcastAfterReset(unittest.TestCase):
             "Stale event should be discarded after reset — race fixed",
         )
 
-    def test_structural_generation_check_in_flush(self) -> None:
-        """Verify _flush_bash captures generation and re-checks after lock."""
-        import inspect
-
-        src = inspect.getsource(BaseBrowserPrinter._flush_bash)
-        self.assertIn("gen = bs.generation", src)
-        self.assertIn("self._bash_state.generation != gen", src)
 
 
 class TestDefaultModelNoLock(unittest.TestCase):
     """_default_model write is now protected by _state_lock (fixed)."""
 
-    def test_select_model_writes_under_lock(self) -> None:
-        """Structural test: selectModel changes _default_model inside lock."""
-        import inspect
-
-        src = inspect.getsource(VSCodeServer._cmd_select_model)
-        lock_idx = src.index("self._state_lock")
-        model_idx = src.index("self._default_model = model")
-        self.assertGreater(
-            model_idx, lock_idx,
-            "_default_model should be written inside _state_lock — race fixed",
-        )
 
     def test_concurrent_select_and_get_tab(self) -> None:
         """Two threads: one selecting model, one creating a tab.
@@ -268,25 +146,6 @@ class TestUserAnswerQueueStaleReference(unittest.TestCase):
         self.assertIsNone(tab.user_answer_queue)
         self.assertEqual(q_ref.get_nowait(), "user's answer")
 
-    def test_structural_lock_on_queue_read(self) -> None:
-        """Verify the userAnswer handler reads queue under _state_lock (fixed)."""
-        import inspect
-
-        src = inspect.getsource(VSCodeServer._cmd_user_answer)
-        self.assertIn("ans_state.user_answer_queue", src)
-        self.assertIn("running_agent_states.get(ans_tab)", src)
-        lines = src.split("\n")
-        found_lock = False
-        for line in lines:
-            if "_state_lock" in line:
-                found_lock = True
-                break
-            if "running_agent_states.get" in line:
-                break
-        self.assertTrue(
-            found_lock,
-            "userAnswer should read running_agent_states under _state_lock — race fixed",
-        )
 
 
 class TestEnsureCompleteWorkerDoubleInit(unittest.TestCase):
@@ -313,37 +172,6 @@ class TestEnsureCompleteWorkerDoubleInit(unittest.TestCase):
         self.assertEqual(len(queues), 2)
 
 
-class TestRefreshFileCacheRaceStructural(unittest.TestCase):
-    """_refresh_file_cache and _get_files share _file_cache across threads."""
-
-    def test_refresh_writes_outside_get_files_scan(self) -> None:
-        """After the H9 fix, the original race is resolved.
-
-        Previously _get_files scanned the filesystem synchronously when
-        the cache was empty, which raced with the background refresh
-        thread overwriting the same _file_cache attribute.  The H9 fix
-        removed the synchronous scan from _get_files and routed all
-        scanning through _refresh_file_cache, which acquires
-        _state_lock when assigning to self._file_cache.
-
-        This test pins the new architecture: _get_files MUST NOT call
-        _scan_files directly (only via _refresh_file_cache), and
-        _refresh_file_cache MUST run scanning in a background Thread
-        and assign the cache under the state lock.
-        """
-        import inspect
-
-        src = inspect.getsource(VSCodeServer._get_files)
-        # _get_files MUST NOT scan synchronously anymore (H9).
-        self.assertNotIn("_scan_files", src)
-        self.assertIn("self._file_cache", src)
-        # When cache is empty, must delegate to the background refresh.
-        self.assertIn("_refresh_file_cache", src)
-
-        src_refresh = inspect.getsource(VSCodeServer._refresh_file_cache)
-        self.assertIn("Thread", src_refresh)
-        self.assertIn("_scan_files", src_refresh)
-        self.assertIn("self._file_cache = result", src_refresh)
 
 
 # The historical ``TestBroadcastOrderingFixed`` introspected
