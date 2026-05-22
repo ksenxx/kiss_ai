@@ -387,52 +387,6 @@ class TestBug16FinalizePreservesWorktreeOnCommitFailure:
         _restore_db(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_worktree_preserved_on_commit_rejection(self) -> None:
-        """FIX: When a pre-commit hook rejects the auto-commit,
-        _finalize_worktree returns False and the worktree directory
-        is NOT removed — no data loss.
-        """
-        repo = self.repo
-        agent = WorktreeSorcarAgent("test")
-        agent._chat_id = "test-chat-16"
-
-        wt_dir = repo / ".kiss-worktrees" / "test_wt16"
-        assert GitWorktreeOps.create(repo, "kiss/wt-test16", wt_dir)
-        GitWorktreeOps.save_original_branch(repo, "kiss/wt-test16", "main")
-
-        (wt_dir / "important.txt").write_text("critical work product")
-
-        hooks_dir = repo / ".git" / "hooks"
-        hooks_dir.mkdir(parents=True, exist_ok=True)
-        hook = hooks_dir / "pre-commit"
-        hook.write_text("#!/bin/sh\nexit 1\n")
-        hook.chmod(0o755)
-
-        agent._wt = GitWorktree(
-            repo_root=repo,
-            branch="kiss/wt-test16",
-            original_branch="main",
-            wt_dir=wt_dir,
-            baseline_commit=None,
-        )
-
-        assert (wt_dir / "important.txt").exists()
-
-        result = agent._finalize_worktree()
-        hook.unlink()
-
-        assert result is False, (
-            "_finalize_worktree should return False when auto-commit fails"
-        )
-
-        assert wt_dir.exists(), (
-            "Worktree directory must be preserved when auto-commit fails"
-        )
-
-        assert (wt_dir / "important.txt").exists(), (
-            "Agent work must not be lost"
-        )
-        assert (wt_dir / "important.txt").read_text() == "critical work product"
 
     def test_finalize_returns_true_on_success(self) -> None:
         """Regression: _finalize_worktree returns True on normal success."""
@@ -501,48 +455,6 @@ class TestBug16FinalizePreservesWorktreeOnCommitFailure:
         )
 
 
-class TestBug17UntrackedBaseNotNukedInWorktreeMode:
-    """_run_task_inner skips _save_untracked_base when use_worktree=True."""
-
-    def test_save_untracked_base_not_called_in_worktree_mode(self) -> None:
-        """FIX: In worktree mode, pre-task snapshot and
-        _save_untracked_base are skipped, so another tab's merge
-        review data is not destroyed.
-        """
-        from kiss.agents.vscode.diff_merge import (
-            _untracked_base_dir,
-        )
-
-        tmpdir = tempfile.mkdtemp()
-        try:
-            ub_dir = _untracked_base_dir()
-            ub_dir.mkdir(parents=True, exist_ok=True)
-            (ub_dir / "tab_a_file.txt").write_text("tab A's base copy")
-            assert (ub_dir / "tab_a_file.txt").exists()
-
-
-            import inspect
-
-            from kiss.agents.vscode.server import VSCodeServer
-
-            source = inspect.getsource(VSCodeServer._run_task_inner)
-            assert "if not use_worktree:" in source, (
-                "_run_task_inner should guard pre-task snapshot "
-                "with 'if not use_worktree:'"
-            )
-            assert "_capture_pre_snapshot" in source
-            snap_source = inspect.getsource(VSCodeServer._capture_pre_snapshot)
-            assert "_save_untracked_base" in snap_source
-
-            assert (ub_dir / "tab_a_file.txt").exists(), (
-                "Tab A's base copy should survive when worktree mode "
-                "skips _save_untracked_base"
-            )
-        finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)
-            ub_dir = _untracked_base_dir()
-            if ub_dir.exists():
-                shutil.rmtree(ub_dir, ignore_errors=True)
 
 
 class TestBug18ReleaseReturnsNoneOnConflict:

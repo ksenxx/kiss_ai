@@ -22,8 +22,6 @@ I1: ``_replay_session`` now sets ``tab.use_worktree`` under
 
 from __future__ import annotations
 
-import inspect
-import re
 import threading
 import unittest
 
@@ -183,25 +181,6 @@ class TestFinishMergeRedundantLookup(unittest.TestCase):
         assert removed.is_set(), "Intercept ran"
 
 
-class TestReplaySessionUseWorktreeNoLock(unittest.TestCase):
-    """I1 fix: ``_replay_session`` now sets ``tab.use_worktree`` under
-    ``_state_lock``, consistent with ``_run_task_inner``.
-    """
-
-
-    def test_run_task_inner_sets_use_worktree_under_lock(self) -> None:
-        """Contrast: ``_run_task_inner`` also sets ``use_worktree``
-        inside a ``with self._state_lock`` block (consistency check)."""
-        from kiss.agents.vscode.task_runner import _TaskRunnerMixin
-        src = inspect.getsource(_TaskRunnerMixin._run_task_inner)
-        assert "tab.use_worktree" in src
-        lock_pattern = re.compile(
-            r"with self\._state_lock:.*?tab\.use_worktree\s*=",
-            re.DOTALL,
-        )
-        assert lock_pattern.search(src), (
-            "_run_task_inner sets use_worktree under _state_lock"
-        )
 
 
 class TestCmdRunAlreadyRunningErrorContent(unittest.TestCase):

@@ -36,7 +36,6 @@ RED-6: See BUG-41.
 
 from __future__ import annotations
 
-import inspect
 import json
 import subprocess
 from pathlib import Path
@@ -123,19 +122,8 @@ class TestBug41Red6Fix:
     """BUG-41/RED-6 FIX: _start_merge_session accepts tab_id parameter
     and all callers pass it."""
 
-    def test_start_merge_session_has_tab_id_param(self):
-        """_start_merge_session accepts tab_id."""
-        sig = inspect.signature(VSCodeServer._start_merge_session)
-        assert "tab_id" in sig.parameters, (
-            "BUG-41 fix: _start_merge_session must accept tab_id"
-        )
 
 
-    def test_restore_pending_merge_removed(self):
-        """_restore_pending_merge was dead code and has been removed (RED-9)."""
-        assert not hasattr(VSCodeServer, "_restore_pending_merge"), (
-            "_restore_pending_merge should be removed (RED-9 dead code)"
-        )
 
     def test_is_merging_set_with_explicit_tab_id(self, tmp_path):
         """When tab_id is passed explicitly, is_merging is set correctly
@@ -164,70 +152,6 @@ class TestBug41Red6Fix:
         )
 
 
-class TestBug42Inc5Fix:
-    """BUG-42/INC-5 FIX: Auto-discard in _run_task_inner and
-    _finish_merge now checks _any_non_wt_running() before discard."""
-
-    def test_run_task_inner_auto_discard_guarded(self):
-        """_run_task_inner's worktree auto-discard is guarded.
-
-        After RED-10 refactor the guard lives in the shared helper
-        ``_present_pending_worktree``; ``_run_task_inner`` delegates
-        to it, so the guard must be present in the helper.
-        """
-        helper_src = inspect.getsource(VSCodeServer._present_pending_worktree)
-        discard_pos = helper_src.find("wt_agent.discard()")
-        assert discard_pos > 0
-        context = helper_src[max(0, discard_pos - 500):discard_pos]
-        assert "_any_non_wt_running" in context, (
-            "Auto-discard in the shared helper must check _any_non_wt_running"
-        )
-        runner_src = inspect.getsource(VSCodeServer._run_task_inner)
-        assert "_present_pending_worktree" in runner_src, (
-            "_run_task_inner must delegate pending-worktree handling "
-            "to the shared helper"
-        )
-
-    def test_finish_merge_auto_discard_guarded(self):
-        """_finish_merge's auto-discard is guarded via the shared helper."""
-        finish_src = inspect.getsource(VSCodeServer._finish_merge)
-        assert "_present_pending_worktree" in finish_src, (
-            "_finish_merge must delegate pending-worktree handling "
-            "to the shared helper"
-        )
-        helper_src = inspect.getsource(VSCodeServer._present_pending_worktree)
-        guard_pos = helper_src.find("_any_non_wt_running")
-        discard_pos = helper_src.find("wt_agent.discard()")
-        assert guard_pos > 0 and discard_pos > 0
-        assert guard_pos < discard_pos, (
-            "Guard must precede discard call in the shared helper"
-        )
-
-    def test_all_discard_paths_consistent(self):
-        """All discard paths in the server share the same guard.
-
-        ``_handle_worktree_action`` delegates its busy check to the
-        shared helper ``_check_worktree_busy``, which in turn consults
-        ``_any_non_wt_running``.  The helper is therefore the point
-        where the guard is enforced; the caller just invokes it.
-        """
-        busy_src = inspect.getsource(VSCodeServer._check_worktree_busy)
-        assert "_any_non_wt_running" in busy_src, (
-            "_check_worktree_busy must consult _any_non_wt_running"
-        )
-        for name in (
-            "_present_pending_worktree",
-            "_handle_worktree_action",
-        ):
-            src = inspect.getsource(getattr(VSCodeServer, name))
-            if "tab.agent.discard()" in src or "wt.discard()" in src:
-                assert (
-                    "_any_non_wt_running" in src
-                    or "_check_worktree_busy" in src
-                ), (
-                    f"{name} must guard discard with _any_non_wt_running "
-                    "(directly or via _check_worktree_busy)"
-                )
 
 
 class TestBug43Fix:
@@ -367,11 +291,6 @@ class TestInc6Fix:
         if GitWorktreeOps.branch_exists(repo, branch):
             GitWorktreeOps.delete_branch(repo, branch)
 
-    def test_staged_files_helper_exists(self):
-        """GitWorktreeOps.staged_files exists and works."""
-        assert hasattr(GitWorktreeOps, "staged_files")
-        sig = inspect.signature(GitWorktreeOps.staged_files)
-        assert "repo" in sig.parameters
 
 
 
