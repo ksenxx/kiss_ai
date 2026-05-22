@@ -4923,7 +4923,12 @@
         if (s.has_events && s.id) {
           const created = createNewTab();
           if (created) {
-            setTaskText(s.preview || s.title || '');
+            const taskText = s.preview || s.title || '';
+            setTaskText(taskText);
+            // Also copy the task text into the chat input textbox so the
+            // user can edit and resubmit it without retyping.
+            inp.value = taskText;
+            syncClearBtn();
             vscode.postMessage({
               type: 'resumeSession',
               id: s.id,
