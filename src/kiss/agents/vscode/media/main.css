@@ -1211,6 +1211,35 @@ body.remote-chat #welcome > #input-area {
 .sidebar-section .search-wrap { margin-bottom: 10px; }
 #history-search:focus { border-color: var(--accent); }
 
+/* History filter bar: single-line row with 3 category checkboxes
+   and From / To date pickers.  Lives between the search box and
+   the history list inside #sidebar-tab-history-panel. */
+.history-filter-bar {
+  display: flex; align-items: center; gap: 6px; flex-wrap: nowrap;
+  margin-bottom: 10px; font-size: var(--fs-base);
+  color: var(--fg); white-space: nowrap; overflow-x: auto;
+}
+
+.history-filter-chk {
+  display: inline-flex; align-items: center; gap: 3px;
+  cursor: pointer; user-select: none;
+  color: color-mix(in srgb, var(--fg) 80%, transparent);
+}
+
+.history-filter-chk input[type="checkbox"] {
+  margin: 0; cursor: pointer;
+}
+
+.history-filter-date {
+  flex: 0 1 auto; min-width: 0; width: 7.5em;
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+  border: 1px solid var(--border); border-radius: 4px;
+  color: var(--fg); font-size: var(--fs-base);
+  padding: 2px 4px; outline: none; box-sizing: border-box;
+  font-family: inherit;
+}
+.history-filter-date:focus { border-color: var(--accent); }
+
 .sidebar-item {
   padding: 7px 10px; background: color-mix(in srgb, var(--fg) 3%, transparent);
   border: 1px solid color-mix(in srgb, var(--fg) 8%, transparent); border-radius: 8px;
