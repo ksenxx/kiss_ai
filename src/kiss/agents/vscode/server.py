@@ -736,37 +736,16 @@ class VSCodeServer(
             # record the parent → child relationship.  Without this,
             # closing the parent tab would not cascade-close this
             # sub-agent tab (see ``closeTab`` in media/main.js, which
-            # walks ``parentTabId`` chains).  Scan the per-tab state
-            # registry for the parent task's :class:`_RunningAgentState`;
-            # its ``tab_id`` field is the parent's frontend routing key.
-            #
-            # IMPORTANT: while the parent task is still running,
-            # ``st.task_history_id`` is ``None`` — it only gets
-            # populated in the task_runner's per-subtask ``finally``
-            # block AFTER the run completes.  But the parent agent
-            # has already allocated its ``task_history`` row at run
-            # start, exposed as ``st.agent._last_task_id`` (the same
-            # source :meth:`_get_running_task_ids` consults to decide
-            # which tabs are live).  Prefer ``_last_task_id`` so the
-            # lookup succeeds during the active spawn window —
-            # falling back to ``task_history_id`` only for post-run
-            # / re-opened parents whose agent reference has cleared.
-            parent_tab_id_for_sub = ""
-            parent_tid = subagent_info.get("parent_task_id")
-            if isinstance(parent_tid, int):
-                with self._state_lock:
-                    for st in _RunningAgentState.running_agent_states.values():
-                        if st.is_subagent:
-                            continue
-                        st_tid = (
-                            st.agent._last_task_id
-                            if st.agent is not None
-                            and st.agent._last_task_id is not None
-                            else st.task_history_id
-                        )
-                        if st_tid == parent_tid:
-                            parent_tab_id_for_sub = st.tab_id
-                            break
+            # walks ``parentTabId`` chains).
+            parent_tid_raw = subagent_info.get("parent_task_id")
+            parent_tid: int | None = (
+                parent_tid_raw if isinstance(parent_tid_raw, int) else None
+            )
+            parent_tab_id_for_sub = self._resolve_parent_tab_id_for_sub(
+                parent_task_id=parent_tid,
+                chat_id=chat_id,
+                sub_tab_id=tab_id,
+            )
             self.printer.broadcast({
                 "type": "openSubagentTab",
                 "tab_id": tab_id,
@@ -814,6 +793,88 @@ class VSCodeServer(
             self._open_persisted_subagent_tabs(
                 parent_task_id=rebound_task_id, parent_tab_id=tab_id,
             )
+
+    def _resolve_parent_tab_id_for_sub(
+        self,
+        *,
+        parent_task_id: int | None,
+        chat_id: str,
+        sub_tab_id: str,
+    ) -> str:
+        """Return the frontend tab id of the parent agent owning the
+        sub-agent currently being opened on *sub_tab_id*.
+
+        Used to populate ``parent_tab_id`` on the ``openSubagentTab``
+        broadcast so the webview can record the parent → child
+        relationship that drives cascade-close (see ``closeTab`` in
+        media/main.js, which walks ``parentTabId`` chains).  A blank
+        return value breaks that cascade, so this helper tries every
+        signal we have before giving up.
+
+        Lookup order (each tier skips sub-agent states):
+
+        1. **Task-id match.**  Scan
+           :attr:`_RunningAgentState.running_agent_states` for a
+           non-subagent state whose ``agent._last_task_id`` (set at
+           run-start, before the per-subtask ``finally`` writes
+           ``task_history_id``) or ``task_history_id`` equals
+           *parent_task_id*.  This is the primary, unambiguous match.
+
+        2. **Chat-id match.**  Sub-agents inherit ``chat_id`` from
+           the parent (see ``ChatSorcarAgent._run_tasks_parallel``).
+           Scan for non-subagent states whose ``chat_id`` matches.
+           If exactly one such state exists, use it.  More than one
+           is ambiguous — bail out so we don't pick the wrong tab.
+
+        3. **Synthetic-tab-id parse.**  Live sub-agent tab ids are
+           generated as ``f"task-{parent_task_id}__sub_{idx}"`` by
+           :meth:`ChatSorcarAgent._run_tasks_parallel` and as
+           ``f"{parent_tab_id}__sub_{sub_task_id}"`` by
+           :meth:`_open_persisted_subagent_tabs`.  Split on
+           ``"__sub_"`` and, if the prefix matches a known
+           non-subagent ``tab_id``, use it.
+
+        If every tier fails, log a WARNING (silent ``""`` would
+        manifest as the cascade-close bug from a downstream
+        feature) and return ``""``.
+        """
+        with self._state_lock:
+            non_sub_states = [
+                st for st in _RunningAgentState.running_agent_states.values()
+                if not st.is_subagent
+            ]
+
+            if parent_task_id is not None:
+                for st in non_sub_states:
+                    st_tid = (
+                        st.agent._last_task_id
+                        if st.agent is not None
+                        and st.agent._last_task_id is not None
+                        else st.task_history_id
+                    )
+                    if st_tid == parent_task_id:
+                        return st.tab_id
+
+            if chat_id:
+                chat_matches = [
+                    st for st in non_sub_states if st.chat_id == chat_id
+                ]
+                if len(chat_matches) == 1:
+                    return chat_matches[0].tab_id
+
+            if "__sub_" in sub_tab_id:
+                prefix = sub_tab_id.rsplit("__sub_", 1)[0]
+                for st in non_sub_states:
+                    if st.tab_id == prefix:
+                        return st.tab_id
+
+        logger.warning(
+            "Could not resolve parent tab id for sub-agent "
+            "(sub_tab_id=%r, parent_task_id=%r, chat_id=%r); "
+            "cascade-close from parent will not reach this sub-tab.",
+            sub_tab_id, parent_task_id, chat_id,
+        )
+        return ""
 
     def _open_persisted_subagent_tabs(
         self, *, parent_task_id: int, parent_tab_id: str,
