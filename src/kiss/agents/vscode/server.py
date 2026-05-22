@@ -357,7 +357,7 @@ class VSCodeServer(
             session: dict[str, Any] = {
                 "id": chat_id,
                 "task_id": entry_id,
-                "title": task[:50] + "..." if len(task) > 50 else task,
+                "title": task,
                 "timestamp": entry.get("timestamp", 0),
                 "preview": task,
                 "has_events": has_events,
