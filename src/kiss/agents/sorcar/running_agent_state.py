@@ -84,7 +84,47 @@ class _RunningAgentState:
     # the registry self-typed (a dict of this very class).
     # Producers / consumers MUST hold ``VSCodeServer._state_lock``
     # for any multi-step access (read-then-modify, scan-then-modify).
+    # ``VSCodeServer._state_lock`` is bound to the very same
+    # :class:`threading.RLock` instance held in :attr:`_registry_lock`
+    # below so callers outside the VS Code server (parallel sub-agent
+    # spawners in :class:`ChatSorcarAgent`, registration helpers in
+    # :class:`WorktreeSorcarAgent`) can guard their multi-step access
+    # against the server's iteration loops without having to import
+    # the server class.
     running_agent_states: dict[str, _RunningAgentState] = {}
+
+    # Process-global lock guarding ``running_agent_states`` against
+    # concurrent mutation / iteration.  ``RLock`` (re-entrant) to
+    # support nested acquisition by the same thread — the VS Code
+    # server occasionally calls helpers that themselves re-enter
+    # ``with self._state_lock:`` from within an already-locked
+    # critical section.  Bound to ``VSCodeServer._state_lock`` in
+    # :meth:`VSCodeServer.__init__` so the two names reference the
+    # exact same lock object.
+    _registry_lock: threading.RLock = threading.RLock()
+
+    @classmethod
+    def register(cls, tab_id: str, state: _RunningAgentState) -> None:
+        """Atomically install *state* in :attr:`running_agent_states` under *tab_id*.
+
+        Holds :attr:`_registry_lock` so the insert is serialised
+        against the VS Code server's iteration loops (which hold the
+        very same lock via ``VSCodeServer._state_lock``) and against
+        peer producers (parallel sub-agent spawners, worktree
+        register / unregister helpers).
+        """
+        with cls._registry_lock:
+            cls.running_agent_states[tab_id] = state
+
+    @classmethod
+    def unregister(cls, tab_id: str) -> None:
+        """Atomically remove *tab_id* from :attr:`running_agent_states`.
+
+        No-op when no entry is present.  See :meth:`register` for
+        the locking discipline.
+        """
+        with cls._registry_lock:
+            cls.running_agent_states.pop(tab_id, None)
 
     __slots__ = (
         "agent",

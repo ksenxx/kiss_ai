@@ -56,7 +56,7 @@ class _MergeFlowMixin:
     if TYPE_CHECKING:
         printer: BaseBrowserPrinter
         work_dir: str
-        _state_lock: threading.Lock
+        _state_lock: threading.RLock
 
         def _get_tab(self, tab_id: str) -> _RunningAgentState: ...
         def _any_non_wt_running(self) -> bool: ...

@@ -697,7 +697,7 @@ class TestFuzzAutocompletePrefix(unittest.TestCase):
             def __init__(self) -> None:
                 self.printer = StubPrinter()  # type: ignore[assignment]
                 self.work_dir = "/"
-                self._state_lock = threading.Lock()
+                self._state_lock = threading.RLock()
                 self._complete_queue = None
                 self._complete_worker = None
                 self._complete_seq_latest = 0

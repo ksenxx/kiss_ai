@@ -291,7 +291,7 @@ class TestCmdSaveConfigHandlesHeaders(unittest.TestCase):
             def __init__(self) -> None:
                 self.printer = FakePrinter()  # type: ignore[assignment]
                 self.work_dir = "/tmp"
-                self._state_lock = threading.Lock()
+                self._state_lock = threading.RLock()
                 self._running_agent_states: dict[str, Any] = {}
                 self._default_model = ""
 

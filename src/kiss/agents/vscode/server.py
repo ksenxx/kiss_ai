@@ -122,7 +122,16 @@ class VSCodeServer(
             or os.environ.get("KISS_MODEL", "")
             or get_default_model()
         )
-        self._state_lock = threading.Lock()
+        # Share the lock that guards ``_RunningAgentState.running_agent_states``
+        # so producers outside this module (parallel sub-agent spawners
+        # in :class:`ChatSorcarAgent`, registration helpers in
+        # :class:`WorktreeSorcarAgent`) can serialise their mutations
+        # against the server's iteration loops without re-importing the
+        # server class.  Using the registry's ``RLock`` (re-entrant)
+        # also fixes a latent self-deadlock where an existing
+        # ``with self._state_lock:`` critical section would call into
+        # a helper that itself tried to re-acquire the same lock.
+        self._state_lock = _RunningAgentState._registry_lock
         self._complete_seq: int = 0
         self._complete_seq_latest: int = -1
         self._complete_queue: queue.Queue[tuple[str, int, str, str, str]] | None = None
