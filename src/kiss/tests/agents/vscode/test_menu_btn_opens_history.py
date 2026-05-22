@@ -50,8 +50,8 @@ class TestMenuBtnHandlerWired(unittest.TestCase):
         self.assertIn("getElementById('menu-btn')", _MAIN_JS_TEXT)
         self.assertIn("menuBtn", _MAIN_JS_TEXT)
 
-    def test_menu_btn_click_opens_running_sidebar(self) -> None:
-        """``menuBtn`` click handler must open the Running sidebar."""
+    def test_menu_btn_click_opens_history_sidebar(self) -> None:
+        """``menuBtn`` click handler must open the (history) sidebar."""
         # The handler is attached via ``menuBtn.addEventListener('click', ...)``.
         match = re.search(
             r"menuBtn\.addEventListener\(\s*'click'\s*,\s*([A-Za-z_$][\w$]*)",
@@ -59,8 +59,8 @@ class TestMenuBtnHandlerWired(unittest.TestCase):
         )
         assert match is not None, "menuBtn must register a click handler in main.js"
         handler_name = match.group(1)
-        # The handler body must add 'open' to #sidebar and switch to
-        # the 'running' sub-tab (the first in-panel tab).
+        # The handler body must add 'open' to #sidebar and request the
+        # latest history from the backend.
         body_match = re.search(
             r"function\s+"
             + re.escape(handler_name)
@@ -72,7 +72,7 @@ class TestMenuBtnHandlerWired(unittest.TestCase):
         )
         body = body_match.group(1)
         self.assertIn("sidebar.classList.add('open')", body)
-        self.assertIn("switchSidebarTab('running')", body)
+        self.assertIn("getHistory", body)
 
 
 _JS_PREAMBLE = r"""
@@ -186,7 +186,6 @@ _JS_TEST = r"""
 var menuBtn = _elements['menu-btn'];
 var sidebar = _elements['sidebar'];
 var sidebarOverlay = _elements['sidebar-overlay'];
-var runningTab = _elements['sidebar-tab-running'];
 
 // Pre-click state
 var preOpen = sidebar.classList.contains('open');
@@ -197,21 +196,28 @@ if (listeners.length === 0) {
     process.stdout.write(JSON.stringify({error: 'no menu-btn click listener'}) + '\n');
 } else {
     listeners[0]();
+    var postedGetHistory = false;
+    for (var i = 0; i < _postedMessages.length; i++) {
+        if (_postedMessages[i] && _postedMessages[i].type === 'getHistory') {
+            postedGetHistory = true;
+            break;
+        }
+    }
     var results = {
         preOpen: preOpen,
         sidebarOpen: sidebar.classList.contains('open'),
         overlayOpen: sidebarOverlay.classList.contains('open'),
-        runningTabActive: runningTab.classList.contains('active'),
+        postedGetHistory: postedGetHistory,
     };
     process.stdout.write(JSON.stringify(results) + '\n');
 }
 """
 
 
-class TestMenuBtnClickOpensRunningSidebar(unittest.TestCase):
-    """Integration: clicking ``#menu-btn`` must open the Running sidebar."""
+class TestMenuBtnClickOpensHistorySidebar(unittest.TestCase):
+    """Integration: clicking ``#menu-btn`` must open the History sidebar."""
 
-    def test_click_opens_sidebar_and_activates_running_tab(self) -> None:
+    def test_click_opens_sidebar_and_posts_get_history(self) -> None:
         import json
 
         full_js = _JS_PREAMBLE + "\n" + _MAIN_JS_TEXT + "\n" + _JS_TEST
@@ -234,8 +240,8 @@ class TestMenuBtnClickOpensRunningSidebar(unittest.TestCase):
         )
         self.assertTrue(results["overlayOpen"])
         self.assertTrue(
-            results["runningTabActive"],
-            "Clicking #menu-btn did not switch to the Running sub-tab",
+            results["postedGetHistory"],
+            "Clicking #menu-btn did not post 'getHistory' to the backend",
         )
 
 

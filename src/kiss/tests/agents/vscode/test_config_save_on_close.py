@@ -1,14 +1,14 @@
-"""Tests that the settings sub-tab saves configuration on close/switch.
+"""Tests that the standalone Settings panel saves configuration on close.
 
-The "Save Configuration" button was removed long ago, and the entire
-``#config-sidebar`` panel has now been merged into ``#sidebar`` as a
-``Settings`` sub-tab.  Configuration must be saved automatically when
+The "Save Configuration" button was removed long ago, and the
+``#config-sidebar`` panel was first merged into the unified ``#sidebar``
+and later split out into a dedicated ``#settings-panel`` that slides in
+from the right.  Configuration is now saved automatically when the
+standalone Settings panel is closed while its form is populated; the
+helper ``saveSettingsIfPopulated`` is invoked by ``closeSettingsPanel``.
 
-* the unified sidebar is closed while the Settings tab is active, or
-* the user switches away from the Settings tab to ``History`` /
-  ``Frequent``.
-
-These tests pin both behaviours by reading the real ``main.js``.
+These tests pin the surviving auto-save behaviour by reading the real
+``main.js``.
 """
 
 import re
@@ -69,41 +69,22 @@ class TestSettingsSavesOnCloseOrSwitch(unittest.TestCase):
             j += 1
         raise AssertionError(f"unterminated {name}")
 
-    def test_close_sidebar_saves_settings(self) -> None:
-        body = self._extract_fn("closeSidebar")
-        assert "currentSidebarTab" in body, (
-            "closeSidebar must inspect currentSidebarTab"
-        )
-        assert "'settings'" in body, "closeSidebar must check the settings tab"
-        assert "saveSettingsIfPopulated" in body or "saveConfig" in body, (
-            "closeSidebar must save the settings form before closing"
+    def test_close_settings_panel_saves_settings(self) -> None:
+        body = self._extract_fn("closeSettingsPanel")
+        assert "saveSettingsIfPopulated" in body, (
+            "closeSettingsPanel must save the settings form before closing"
         )
 
-    def test_switch_sidebar_tab_saves_on_leaving_settings(self) -> None:
-        body = self._extract_fn("switchSidebarTab")
-        assert "currentSidebarTab" in body
-        assert "'settings'" in body
-        assert "saveSettingsIfPopulated" in body or "saveConfig" in body
+    def test_open_settings_panel_posts_get_config(self) -> None:
+        body = self._extract_fn("openSettingsPanel")
+        # Opening the panel must request the latest config from the backend.
+        assert "getConfig" in body
+        # And reset the populated flag so a subsequent close won't re-save
+        # stale values that were never populated by a fresh fetch.
+        assert "configFormPopulated = false" in body
 
     def test_save_settings_helper_is_guarded_by_form_populated(self) -> None:
         helper = self._extract_fn("saveSettingsIfPopulated")
         assert "configFormPopulated" in helper
         assert "collectConfigForm()" in helper
         assert "saveConfig" in helper
-
-    def test_settings_tab_button_switches_to_settings(self) -> None:
-        """Clicking the in-panel Settings button calls switchSidebarTab('settings')."""
-        m = re.search(
-            r"sidebarTabSettingsBtn\.addEventListener\('click'.*?\}\);",
-            self._js,
-            re.DOTALL,
-        )
-        assert m, "sidebarTabSettingsBtn click handler not found"
-        assert "switchSidebarTab('settings')" in m.group(0)
-
-    def test_switch_to_settings_posts_get_config(self) -> None:
-        body = self._extract_fn("switchSidebarTab")
-        # Settings branch must request the latest config from the backend.
-        assert "getConfig" in body
-        # And reset the populated flag so a subsequent close won't re-save.
-        assert "configFormPopulated = false" in body

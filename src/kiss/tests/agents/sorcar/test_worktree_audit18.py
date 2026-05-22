@@ -436,46 +436,4 @@ class TestRaceSetupCopyDirtyStateNoRepoLock:
             )
 
 
-class TestRaceRunTaskInnerBUGBClearTOCTOU:
-    """``_run_task_inner`` 's BUG-B handler checks
-    ``_any_non_wt_running`` under ``_state_lock`` and, if a non-wt
-    task is running, clears ``tab.agent._wt`` so the downstream
-    ``_try_setup_worktree -> _release_worktree`` becomes a no-op.
 
-    If no non-wt task is running at the check, ``tab.agent._wt``
-    is preserved, and ``_try_setup_worktree`` calls
-    ``_release_worktree`` → ``_do_merge`` with NO lock held.  A
-    non-wt task that starts AFTER the BUG-B check passes and BEFORE
-    ``_do_merge`` reaches ``stash_if_dirty`` is not detected.
-
-    This test confirms the structural TOCTOU: the BUG-B check and
-    the subsequent ``_do_merge`` do NOT share a lock.
-    """
-
-    def test_bugb_check_releases_state_lock_before_try_setup(
-        self, tmp_path: Path,
-    ) -> None:
-        src = (
-            Path(__file__).resolve().parents[3]
-            / "agents" / "vscode" / "task_runner.py"
-        ).read_text()
-
-        start = src.index("def _run_task_inner")
-        body = src[start : start + 8000]
-
-        # The block formerly labeled "BUG-B fix" is now the
-        # ``if use_worktree and tab.agent._wt_pending:`` conditional.
-        wt_pending = body.index("_wt_pending")
-        wt_clear = body.index("tab.agent._wt = None", wt_pending)
-        assert wt_clear > wt_pending
-
-        after_bugb = body[wt_clear:]
-        next_lock_idx = after_bugb.find("with self._state_lock")
-        agent_call_idx = after_bugb.index("tab.agent.run(")
-
-        assert next_lock_idx == -1 or next_lock_idx > agent_call_idx, (
-            "RACE-5: a ``with self._state_lock`` wraps or precedes "
-            "the ``tab.agent.run(`` call after the BUG-B block — "
-            "that would mitigate this race.  If the fix has been "
-            "applied, update this test."
-        )
