@@ -172,7 +172,16 @@ class UsefulTools:
         """
         try:
             resolved = Path(file_path).resolve()
-            text = resolved.read_text()
+            try:
+                text = resolved.read_text()
+            except UnicodeDecodeError:
+                logger.debug("Binary file detected", exc_info=True)
+                size = resolved.stat().st_size
+                return (
+                    f"Error: Cannot read binary file: {file_path} "
+                    f"(size: {size} bytes). The Read tool only supports text "
+                    f"files; use a different tool to handle this binary file."
+                )
             lines = text.splitlines(keepends=True)
             if len(lines) > max_lines:
                 return (
