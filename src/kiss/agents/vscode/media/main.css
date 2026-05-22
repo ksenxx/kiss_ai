@@ -1062,12 +1062,16 @@ body.remote-chat #welcome > #input-area {
 /* ── Frequent tasks panel (slides up from the bottom) ─────── */
 #frequent-panel {
   position: fixed;
-  left: 0;
-  right: 0;
+  left: 5%;
+  right: 5%;
   bottom: 0;
-  height: 60vh;
+  width: 90%;
+  height: 75vh;
   background: var(--bg2);
-  border-top: 1px solid var(--border);
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-top-left-radius: 8px;
+  border-top-right-radius: 8px;
   transform: translateY(100%);
   transition: transform 0.2s ease;
   z-index: 200;
