@@ -1689,6 +1689,21 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
           <button class="search-clear-btn" id="history-search-clear"
            style="display:none;">&times;</button>
         </div>
+        <div class="history-filter-bar">
+          <label class="history-filter-chk" title="Show running tasks">
+            <input type="checkbox" id="hf-running" checked>Running
+          </label>
+          <label class="history-filter-chk" title="Show tasks that finished with error">
+            <input type="checkbox" id="hf-errors" checked>Errors
+          </label>
+          <label class="history-filter-chk" title="Show successfully completed tasks">
+            <input type="checkbox" id="hf-completed" checked>Completed
+          </label>
+          <input type="date" id="hf-from" class="history-filter-date"
+           title="From date" aria-label="From date">
+          <input type="date" id="hf-to" class="history-filter-date"
+           title="To date" aria-label="To date">
+        </div>
         <div id="history-list">
           <div class="sidebar-empty">No conversations yet</div>
         </div>
