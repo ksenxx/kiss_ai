@@ -175,6 +175,7 @@ class RelentlessAgent(Base):
         self.budget_used: float = 0.0
         self.total_tokens_used: int = 0
         self.total_steps: int = 0
+        self._current_executor: KISSAgent | None = None
         self.docker_image = docker_image
         self.docker_manager: Any = None
         self.task_description: str = ""
@@ -229,6 +230,7 @@ class RelentlessAgent(Base):
                 self.printer.budget_offset = self.budget_used  # type: ignore[attr-defined]
                 self.printer.steps_offset = self.total_steps  # type: ignore[attr-defined]
             executor = KISSAgent(f"{self.name} Session-{session}")
+            self._current_executor = executor
             try:
                 result = executor.run(
                     model_name=self.model_name,
@@ -253,6 +255,7 @@ class RelentlessAgent(Base):
                     or not isinstance(exc, KISSError)
                     or executor.step_count <= 1
                 ):
+                    self._current_executor = None
                     self.budget_used += executor.budget_used
                     self.total_tokens_used += executor.total_tokens_used
                     self.total_steps += executor.step_count
@@ -316,6 +319,7 @@ class RelentlessAgent(Base):
                     sort_keys=False,
                 )
 
+            self._current_executor = None
             self.budget_used += executor.budget_used
             self.total_tokens_used += executor.total_tokens_used
             self.total_steps += executor.step_count
