@@ -739,13 +739,34 @@ class VSCodeServer(
             # walks ``parentTabId`` chains).  Scan the per-tab state
             # registry for the parent task's :class:`_RunningAgentState`;
             # its ``tab_id`` field is the parent's frontend routing key.
+            #
+            # IMPORTANT: while the parent task is still running,
+            # ``st.task_history_id`` is ``None`` — it only gets
+            # populated in the task_runner's per-subtask ``finally``
+            # block AFTER the run completes.  But the parent agent
+            # has already allocated its ``task_history`` row at run
+            # start, exposed as ``st.agent._last_task_id`` (the same
+            # source :meth:`_get_running_task_ids` consults to decide
+            # which tabs are live).  Prefer ``_last_task_id`` so the
+            # lookup succeeds during the active spawn window —
+            # falling back to ``task_history_id`` only for post-run
+            # / re-opened parents whose agent reference has cleared.
             parent_tab_id_for_sub = ""
             parent_tid = subagent_info.get("parent_task_id")
             if isinstance(parent_tid, int):
-                for st in _RunningAgentState.running_agent_states.values():
-                    if st.task_history_id == parent_tid and not st.is_subagent:
-                        parent_tab_id_for_sub = st.tab_id
-                        break
+                with self._state_lock:
+                    for st in _RunningAgentState.running_agent_states.values():
+                        if st.is_subagent:
+                            continue
+                        st_tid = (
+                            st.agent._last_task_id
+                            if st.agent is not None
+                            and st.agent._last_task_id is not None
+                            else st.task_history_id
+                        )
+                        if st_tid == parent_tid:
+                            parent_tab_id_for_sub = st.tab_id
+                            break
             self.printer.broadcast({
                 "type": "openSubagentTab",
                 "tab_id": tab_id,
