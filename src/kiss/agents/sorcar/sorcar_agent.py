@@ -724,6 +724,23 @@ def run_tasks_parallel(
                 int(getattr(agent, "total_tokens_used", 0) or 0),
                 int(getattr(agent, "total_steps", 0) or 0),
             )
+            # Broadcast ``subagentDone`` so the frontend can stop
+            # the running indicator on the sub-agent tab.
+            if printer is not None:
+                broadcast_fn = getattr(printer, "broadcast", None)
+                if broadcast_fn is not None:
+                    tl = getattr(printer, "_thread_local", None)
+                    parent_key = getattr(tl, "task_id", "") if tl else ""
+                    sub_tab = f"{parent_key}__sub_{idx}" if parent_key else ""
+                    if sub_tab:
+                        try:
+                            broadcast_fn({
+                                "type": "subagentDone",
+                                "tab_id": sub_tab,
+                                "tabId": "",
+                            })
+                        except Exception:
+                            pass
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         results = list(pool.map(_run_single, enumerate(tasks)))

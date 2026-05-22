@@ -380,6 +380,7 @@ class _TaskRunnerMixin:
                     "total_tokens": tab.agent.total_tokens_used,
                     "cost": f"${tab.agent.budget_used:.4f}",
                     "step_count": tab.agent.step_count,
+                    "tabId": tab_id,
                 })
                 break
         except BaseException as _outer_exc:
@@ -582,7 +583,18 @@ class _TaskRunnerMixin:
                     except BaseException:
                         logger.debug("Worktree merge review error", exc_info=True)
                 if task_end_event:  # pragma: no branch — always set
-                    self.printer.broadcast(task_end_event)
+                    # Stamp the event with the owning tab so it reaches
+                    # only this tab's subscribers (not every connected
+                    # client).  ``ChatSorcarAgent.run()``'s finally
+                    # clears the thread-local ``task_id`` before we get
+                    # here, so without an explicit ``tabId`` the
+                    # printer would treat this as a global system event
+                    # and the frontend would apply it to whatever tab
+                    # happens to be active — e.g. a sub-agent tab
+                    # opened by ``run_parallel``'s ``new_tab`` broadcast
+                    # — instead of the parent tab that actually owns
+                    # the task.
+                    self.printer.broadcast({**task_end_event, "tabId": tab_id})
                 if tab.task_history_id is not None:
                     self._generate_followup_async(
                         prompt,
@@ -613,7 +625,7 @@ class _TaskRunnerMixin:
                         tab.is_running_non_wt = False
                 logger.debug("Cleanup interrupted", exc_info=True)
                 if task_end_event:
-                    self.printer.broadcast(task_end_event)
+                    self.printer.broadcast({**task_end_event, "tabId": tab_id})
 
     def _stop_task(self, tab_id: str = "") -> None:
         """Signal the agent to stop.
