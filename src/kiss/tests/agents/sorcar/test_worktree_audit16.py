@@ -102,8 +102,13 @@ class _RecordingPrinter:
 
 class TestBug68FinishMergeNoBroadcastOnEmptyNonWtBusy:
     """``_finish_merge`` with no worktree changes and a concurrent
-    non-wt task must broadcast ``worktree_done`` so the user is
-    notified — consistent with ``_emit_pending_worktree``."""
+    non-wt task must preserve the branch (auto-discard is blocked)
+    WITHOUT broadcasting the meaningless ``worktree_done`` prompt.
+
+    The frontend renders ``worktree_done`` as "Auto-commit and merge
+    or Discard?", which makes no sense when there are zero changed
+    files.  The branch stays in ``git branch`` for manual cleanup.
+    """
 
     def test_finish_merge_empty_wt_non_wt_busy(self, tmp_path: Path) -> None:
         repo = _make_repo(tmp_path / "repo")
@@ -127,10 +132,11 @@ class TestBug68FinishMergeNoBroadcastOnEmptyNonWtBusy:
         server._finish_merge(tab_id)
 
         wt_done = [e for e in printer.events if e.get("type") == "worktree_done"]
-        assert wt_done, (
-            "BUG-68: _finish_merge did not broadcast worktree_done "
-            "when auto-discard was blocked by a non-wt task.  The "
-            f"user is left unaware of the pending branch.  Events: {printer.events}"
+        assert not wt_done, (
+            "worktree_done must NOT be broadcast for an empty worktree "
+            "even when auto-discard is blocked by a busy non-wt task — "
+            "the resulting merge/discard prompt is meaningless when "
+            f"there are no changes.  Events: {printer.events}"
         )
         assert agent._wt is not None, (
             "BUG-68: worktree was discarded despite non-wt being busy."
