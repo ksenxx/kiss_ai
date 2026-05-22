@@ -1274,7 +1274,7 @@ body.remote-chat #welcome > #input-area {
 }
 
 .sidebar-item {
-  padding: 7px 10px; background: color-mix(in srgb, var(--fg) 3%, transparent);
+  padding: 7px 10px 3.5px; background: color-mix(in srgb, var(--fg) 3%, transparent);
   border: 1px solid color-mix(in srgb, var(--fg) 8%, transparent); border-radius: 8px;
   margin-bottom: 4px; cursor: pointer; font-size: var(--fs-base);
   color: var(--fg); overflow: hidden; text-overflow: ellipsis;
@@ -1305,7 +1305,7 @@ body.remote-chat #welcome > #input-area {
   align-items: center;
   row-gap: 8px;
   padding-top: 18px;
-  padding-bottom: 18px;
+  padding-bottom: 9px;
   min-height: 96px;
 }
 
