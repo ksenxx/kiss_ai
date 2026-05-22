@@ -135,6 +135,54 @@ class TestOpenSubagentTabIncludesParentTabId:
             "can cascade-close the sub-agent tab when its parent is closed"
         )
 
+    def test_replay_subagent_uses_agent_last_task_id_while_parent_running(
+        self,
+    ) -> None:
+        """During the active spawn window the parent's
+        ``_RunningAgentState.task_history_id`` is still ``None`` —
+        ``_run_task`` zeroes it at task start and only re-populates
+        it in the per-subtask ``finally`` block AFTER ``agent.run``
+        returns.  The parent's task row id is exposed on the live
+        agent as ``agent._last_task_id``.  The lookup must consult
+        ``_last_task_id`` (mirroring :meth:`_get_running_task_ids`)
+        so parent_tab_id resolves while the parent is still running
+        — this is the path the cascade-close bug travels."""
+
+        class _StubAgent:
+            def __init__(self, last_task_id: int) -> None:
+                self._last_task_id = last_task_id
+
+        chat_id = "chat-parent-live"
+        parent_id, _ = th._add_task("parent task", chat_id=chat_id)
+        sub_task_id = _seed_subagent_row(
+            parent_task_id=parent_id,
+            chat_id=chat_id,
+            description="Sub-task: live",
+        )
+        server, events = _make_server()
+
+        parent_state = _RunningAgentState("tab-parent-live", "test-model")
+        parent_state.chat_id = chat_id
+        # Mirror the live state: task_history_id NOT yet populated,
+        # but the agent has already allocated the parent's row id.
+        parent_state.task_history_id = None
+        parent_state.agent = _StubAgent(parent_id)  # type: ignore[assignment]
+        parent_state.is_subagent = False
+        _RunningAgentState.running_agent_states["tab-parent-live"] = parent_state
+
+        server._replay_session(
+            chat_id=chat_id,
+            tab_id="tab-sub-live",
+            task_id=sub_task_id,
+        )
+
+        opens = [e for e in events if e.get("type") == "openSubagentTab"]
+        assert len(opens) == 1, f"events={events}"
+        assert opens[0]["parent_tab_id"] == "tab-parent-live", (
+            "parent_tab_id must resolve via agent._last_task_id while "
+            "the parent task is still running (task_history_id=None)"
+        )
+
     def test_replay_subagent_parent_tab_empty_when_parent_not_running(
         self,
     ) -> None:

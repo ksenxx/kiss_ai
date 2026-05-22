@@ -2430,7 +2430,7 @@
     const sm = text.match(/Steps:\s*(\d+)\/\d+/);
     if (tm) statusTokens.textContent = 'Tokens: ' + tm[1];
     if (bm) statusBudget.textContent = 'Cost: ' + bm[1];
-    if (sm) updateStepCount(parseInt(sm[1], 1));
+    if (sm) updateStepCount(parseInt(sm[1], 10));
   }
 
   function clearUsageMetrics() {
