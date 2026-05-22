@@ -170,6 +170,24 @@ class ChatSorcarAgent(SorcarAgent):
                     int(getattr(agent, "total_tokens_used", 0) or 0),
                     int(getattr(agent, "total_steps", 0) or 0),
                 )
+                # Broadcast ``subagentDone`` so the frontend can stop
+                # the running indicator on the sub-agent tab.  The
+                # event is a targeted "system" event (explicit
+                # ``tabId``) so the printer sends it verbatim to
+                # every connected client; the frontend's ``case
+                # 'subagentDone':`` handler finds the sub-tab by
+                # ``tab_id`` and flips ``isDone=true``.
+                if printer is not None:
+                    broadcast = getattr(printer, "broadcast", None)
+                    if broadcast is not None:
+                        try:
+                            broadcast({
+                                "type": "subagentDone",
+                                "tab_id": sub_tab_id,
+                                "tabId": "",
+                            })
+                        except Exception:
+                            pass
                 _RunningAgentState.unregister(sub_tab_id)
 
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
