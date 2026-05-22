@@ -6,10 +6,7 @@ Also verifies cross-process safety of _record_model_usage and _save_last_model.
 """
 
 import queue
-import threading
 from pathlib import Path
-
-from kiss.core.base import Base
 
 
 def _drain(q: queue.Queue) -> list[dict]:
