@@ -162,6 +162,19 @@ export function buildChatHtml(
           <input type="text" id="history-search" placeholder="Search history...">
           <button class="search-clear-btn" id="history-search-clear" style="display:none;">&times;</button>
         </div>
+        <div class="history-filter-bar">
+          <label class="history-filter-chk" title="Show running tasks">
+            <input type="checkbox" id="hf-running" checked>Running
+          </label>
+          <label class="history-filter-chk" title="Show tasks that finished with error">
+            <input type="checkbox" id="hf-errors" checked>Errors
+          </label>
+          <label class="history-filter-chk" title="Show successfully completed tasks">
+            <input type="checkbox" id="hf-completed" checked>Completed
+          </label>
+          <input type="date" id="hf-from" class="history-filter-date" title="From date" aria-label="From date">
+          <input type="date" id="hf-to" class="history-filter-date" title="To date" aria-label="To date">
+        </div>
         <div id="history-list">
           <div class="sidebar-empty">No conversations yet</div>
         </div>
