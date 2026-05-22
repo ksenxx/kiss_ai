@@ -26,8 +26,6 @@ import tempfile
 import threading
 from pathlib import Path
 
-import pytest
-
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
@@ -185,18 +183,6 @@ class TestOpenSubagentTabIncludesParentTabId:
             "the parent task is still running (task_history_id=None)"
         )
 
-    @pytest.mark.xfail(
-        reason=(
-            "Production bug: VSCodeServer._replay_session calls "
-            "_get_tab(tab_id) which pre-registers a non-subagent "
-            "_RunningAgentState for the freshly opened sub-tab with the "
-            "resumed chat_id. _resolve_parent_tab_id_for_sub's chat-id "
-            "tier then matches this very tab as the 'parent' and "
-            "returns the sub-tab's own id instead of ''. The chat-id "
-            "tier should exclude sub_tab_id from candidates."
-        ),
-        strict=True,
-    )
     def test_replay_subagent_parent_tab_empty_when_parent_not_running(
         self,
     ) -> None:
