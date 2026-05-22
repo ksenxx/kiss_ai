@@ -1701,8 +1701,14 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
           </label>
           <input type="date" id="hf-from" class="history-filter-date"
            title="From date" aria-label="From date">
+          <button type="button" id="hf-from-btn"
+           class="history-filter-date-btn"
+           title="Pick From date" aria-label="Pick From date">📅</button>
           <input type="date" id="hf-to" class="history-filter-date"
            title="To date" aria-label="To date">
+          <button type="button" id="hf-to-btn"
+           class="history-filter-date-btn"
+           title="Pick To date" aria-label="Pick To date">📅</button>
         </div>
         <div id="history-list">
           <div class="sidebar-empty">No conversations yet</div>

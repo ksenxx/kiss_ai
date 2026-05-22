@@ -4279,6 +4279,30 @@
     [hfRunning, hfErrors, hfCompleted, hfFrom, hfTo].forEach(el => {
       if (el) el.addEventListener('change', applyHistoryFilterVisibility);
     });
+    // The calendar selector buttons sit next to each date textbox and
+    // open the native date picker (the inside picker indicator is
+    // hidden in CSS so it never overlaps the typed date text).
+    const hfFromBtn = document.getElementById('hf-from-btn');
+    const hfToBtn = document.getElementById('hf-to-btn');
+    function openDatePicker(input) {
+      if (!input) return;
+      if (typeof input.showPicker === 'function') {
+        try {
+          input.showPicker();
+          return;
+        } catch (_e) {
+          /* fall through to focus/click fallback below */
+        }
+      }
+      input.focus();
+      input.click();
+    }
+    if (hfFromBtn) {
+      hfFromBtn.addEventListener('click', () => openDatePicker(hfFrom));
+    }
+    if (hfToBtn) {
+      hfToBtn.addEventListener('click', () => openDatePicker(hfTo));
+    }
     historyList.addEventListener('scroll', () => {
       if (historyLoading || !historyHasMore) return;
       if (

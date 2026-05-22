@@ -1240,6 +1240,39 @@ body.remote-chat #welcome > #input-area {
 }
 .history-filter-date:focus { border-color: var(--accent); }
 
+/* Hide the native picker indicator so it does not overlap the
+   text in the date input; clicking the adjacent button below
+   opens the date picker instead. */
+.history-filter-date::-webkit-calendar-picker-indicator {
+  display: none; appearance: none;
+}
+
+.history-filter-date::-webkit-inner-spin-button,
+.history-filter-date::-webkit-clear-button {
+  display: none;
+}
+
+/* Standalone calendar picker button placed next to each date
+   textbox.  Clicking it opens the native date picker via
+   ``showPicker()`` and replaces the invisible picker indicator
+   that was overlapping the textbox content. */
+.history-filter-date-btn {
+  flex: 0 0 auto;
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+  border: 1px solid var(--border); border-radius: 4px;
+  color: var(--fg); font-size: var(--fs-md);
+  padding: 1px 5px; cursor: pointer; line-height: 1;
+  font-family: inherit;
+}
+
+.history-filter-date-btn:hover {
+  background: color-mix(in srgb, var(--fg) 12%, transparent);
+}
+
+.history-filter-date-btn:focus {
+  border-color: var(--accent); outline: none;
+}
+
 .sidebar-item {
   padding: 7px 10px; background: color-mix(in srgb, var(--fg) 3%, transparent);
   border: 1px solid color-mix(in srgb, var(--fg) 8%, transparent); border-radius: 8px;
