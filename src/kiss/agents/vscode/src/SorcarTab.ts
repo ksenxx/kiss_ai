@@ -154,17 +154,11 @@ export function buildChatHtml(
     <div id="sidebar">
       <button id="sidebar-close">&times;</button>
       <div class="sidebar-tabs">
-        <button id="sidebar-tab-running" class="sidebar-tab active" type="button">Running</button>
-        <button id="sidebar-tab-history" class="sidebar-tab" type="button">History</button>
+        <button id="sidebar-tab-history" class="sidebar-tab active" type="button">History</button>
         <button id="sidebar-tab-frequent" class="sidebar-tab" type="button">Frequent</button>
         <button id="sidebar-tab-settings" class="sidebar-tab" type="button">Settings</button>
       </div>
-      <div id="sidebar-tab-running-panel" class="sidebar-section sidebar-tab-panel">
-        <div id="running-list">
-          <div class="sidebar-empty">No running tasks</div>
-        </div>
-      </div>
-      <div id="sidebar-tab-history-panel" class="sidebar-section sidebar-tab-panel" style="display:none;">
+      <div id="sidebar-tab-history-panel" class="sidebar-section sidebar-tab-panel">
         <div class="search-wrap">
           <input type="text" id="history-search" placeholder="Search history...">
           <button class="search-clear-btn" id="history-search-clear" style="display:none;">&times;</button>
