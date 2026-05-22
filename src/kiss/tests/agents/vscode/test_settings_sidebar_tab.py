@@ -4,16 +4,25 @@ refactor.
 The chat webview previously had a separate ``config-btn`` in the tab-bar
 that opened a dedicated ``#config-sidebar``.  An intermediate refactor
 merged the History/Frequent/Settings panels into a single tabbed
-``#sidebar``.  The current extension layout has split the Settings UI
-out again into a standalone ``#settings-panel`` (sibling of
-``#sidebar``) so it is independent of the History sidebar.
+``#sidebar``.  Both the VS Code extension (``SorcarTab.ts``) and the
+standalone web server (``web_server.py::_build_html``) have since
+split the Settings and Frequent UIs out into standalone
+``#settings-panel`` / ``#frequent-panel`` siblings of ``#sidebar`` —
+which now hosts only the History panel.
 
-These tests pin the surviving invariants:
+These tests pin the surviving invariants on both surfaces:
 
 * The tab-bar no longer ships ``config-btn``.
 * The legacy ``#config-sidebar`` markup is gone.
-* The Settings form (``cfg-*`` controls) is reachable inside a panel
-  on both surfaces.
+* The old tabbed-sidebar buttons (``sidebar-tab-history``,
+  ``sidebar-tab-frequent``, ``sidebar-tab-settings``) and their
+  ``-panel`` siblings for Frequent / Settings are gone.
+* The Settings form (``cfg-*`` controls) lives inside
+  ``#settings-panel`` on both surfaces.
+* ``#frequent-panel`` exists with a ``#frequent-list`` on both
+  surfaces.
+* A ``#frequent-tasks-btn`` toggle lives in the model-picker footer on
+  both surfaces.
 """
 
 from __future__ import annotations
@@ -82,18 +91,45 @@ class TestSettingsTabMarkup(unittest.TestCase):
         self.assertNotIn('id="config-sidebar-overlay"', html)
         self.assertNotIn('id="config-sidebar-close"', html)
 
-    def test_webapp_sidebar_has_settings_tab_button_and_panel(self) -> None:
-        sidebar = _section(_build_html(), "sidebar")
-        self.assertTrue(sidebar)
+    def test_old_tabbed_sidebar_buttons_removed_from_extension(self) -> None:
+        html = _ext_html()
         for el in (
             'id="sidebar-tab-history"',
             'id="sidebar-tab-frequent"',
             'id="sidebar-tab-settings"',
-            'id="sidebar-tab-history-panel"',
             'id="sidebar-tab-frequent-panel"',
             'id="sidebar-tab-settings-panel"',
         ):
-            self.assertIn(el, sidebar, f"{el} missing from #sidebar in webapp HTML")
+            self.assertNotIn(
+                el,
+                html,
+                f"{el} should be gone from SorcarTab.ts (tabbed-sidebar layout)",
+            )
+
+    def test_old_tabbed_sidebar_buttons_removed_from_webapp(self) -> None:
+        html = _build_html()
+        for el in (
+            'id="sidebar-tab-history"',
+            'id="sidebar-tab-frequent"',
+            'id="sidebar-tab-settings"',
+            'id="sidebar-tab-frequent-panel"',
+            'id="sidebar-tab-settings-panel"',
+        ):
+            self.assertNotIn(
+                el,
+                html,
+                f"{el} should be gone from webapp HTML (tabbed-sidebar layout)",
+            )
+
+    def test_webapp_sidebar_contains_only_history(self) -> None:
+        sidebar = _section(_build_html(), "sidebar")
+        self.assertTrue(sidebar, "could not locate #sidebar in webapp HTML")
+        self.assertIn('id="sidebar-tab-history-panel"', sidebar)
+        self.assertIn('id="history-list"', sidebar)
+        # The settings / frequent forms must NOT be nested inside #sidebar.
+        self.assertNotIn('id="frequent-list"', sidebar)
+        self.assertNotIn('id="cfg-max-budget"', sidebar)
+        self.assertNotIn('id="config-form"', sidebar)
 
     def test_extension_settings_panel_contains_config_form(self) -> None:
         # In the extension the settings UI lives in the standalone
@@ -119,8 +155,8 @@ class TestSettingsTabMarkup(unittest.TestCase):
             )
 
     def test_webapp_settings_panel_contains_config_form(self) -> None:
-        panel = _section(_build_html(), "sidebar-tab-settings-panel")
-        self.assertTrue(panel, "#sidebar-tab-settings-panel missing in webapp HTML")
+        panel = _section(_build_html(), "settings-panel")
+        self.assertTrue(panel, "#settings-panel missing in webapp HTML")
         for inp in (
             'id="cfg-max-budget"',
             'id="cfg-custom-endpoint"',
@@ -135,8 +171,36 @@ class TestSettingsTabMarkup(unittest.TestCase):
             self.assertIn(
                 inp,
                 panel,
-                f"{inp} must live inside #sidebar-tab-settings-panel in webapp HTML",
+                f"{inp} must live inside #settings-panel in webapp HTML",
             )
+
+    def test_extension_frequent_panel_present(self) -> None:
+        panel = _section(_ext_html(), "frequent-panel")
+        self.assertTrue(panel, "#frequent-panel missing in SorcarTab.ts")
+        self.assertIn('id="frequent-list"', panel)
+
+    def test_webapp_frequent_panel_present(self) -> None:
+        panel = _section(_build_html(), "frequent-panel")
+        self.assertTrue(panel, "#frequent-panel missing in webapp HTML")
+        self.assertIn('id="frequent-list"', panel)
+
+    def test_extension_has_frequent_tasks_btn(self) -> None:
+        self.assertIn('id="frequent-tasks-btn"', _ext_html())
+
+    def test_webapp_has_frequent_tasks_btn(self) -> None:
+        self.assertIn('id="frequent-tasks-btn"', _build_html())
+
+    def test_webapp_has_overlays(self) -> None:
+        html = _build_html()
+        self.assertIn('id="sidebar-overlay"', html)
+        self.assertIn('id="frequent-overlay"', html)
+        self.assertIn('id="settings-overlay"', html)
+
+    def test_extension_has_overlays(self) -> None:
+        html = _ext_html()
+        self.assertIn('id="sidebar-overlay"', html)
+        self.assertIn('id="frequent-overlay"', html)
+        self.assertIn('id="settings-overlay"', html)
 
 
 if __name__ == "__main__":
