@@ -17,6 +17,7 @@ from kiss.core.models.model import (
     Model,
     ThinkingCallback,
     TokenCallback,
+    parse_binary_attachments,
     transcribe_audio,
 )
 
@@ -436,13 +437,36 @@ class AnthropicModel(Model):
             if tool_use_id is None:
                 tool_use_id = f"toolu_{func_name}_{i}"
 
-            tool_results_blocks.append(
-                {
-                    "type": "tool_result",
-                    "tool_use_id": tool_use_id,
-                    "content": result_content,
-                }
-            )
+            plain_text, attachments = parse_binary_attachments(result_content)
+            if attachments:
+                content_blocks: list[dict[str, Any]] = []
+                if plain_text.strip():
+                    content_blocks.append({"type": "text", "text": plain_text})
+                for att in attachments:
+                    source = {
+                        "type": "base64",
+                        "media_type": att.mime_type,
+                        "data": att.to_base64(),
+                    }
+                    if att.mime_type.startswith("image/"):
+                        content_blocks.append({"type": "image", "source": source})
+                    elif att.mime_type == "application/pdf":
+                        content_blocks.append({"type": "document", "source": source})
+                tool_results_blocks.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": content_blocks,
+                    }
+                )
+            else:
+                tool_results_blocks.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": result_content,
+                    }
+                )
 
         self.conversation.append({"role": "user", "content": tool_results_blocks})
 

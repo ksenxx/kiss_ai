@@ -118,6 +118,87 @@ class Attachment:
         return f"data:{self.mime_type};base64,{self.to_base64()}"
 
 
+# Tool results that include binary file contents (e.g. ``Read`` on a PNG)
+# embed each file inside these sentinel markers so that model implementations
+# can lift the payload into a real image/document content block instead of
+# shipping kilobytes of base64 as plain text.
+BINARY_ATTACHMENT_OPEN_RE = re.compile(
+    r"<<KISS_BINARY_ATTACHMENT mime_type=([^>\s]+)>>"
+)
+BINARY_ATTACHMENT_CLOSE = "<</KISS_BINARY_ATTACHMENT>>"
+
+# MIME types the ``Read`` tool is willing to embed inline in its return
+# value.  Audio/video are intentionally excluded — those would explode the
+# response size while most providers can't ingest them as tool results
+# anyway.
+READ_TOOL_BINARY_MIME_TYPES = {
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "image/webp",
+    "application/pdf",
+}
+
+
+def encode_binary_attachment(mime_type: str, data: bytes) -> str:
+    """Encode ``data`` for inline transport inside a tool result string.
+
+    Args:
+        mime_type: MIME type label (e.g. ``"image/png"``).
+        data: Raw file bytes.
+
+    Returns:
+        A sentinel-wrapped base64 payload that
+        :func:`parse_binary_attachments` will later decode back into an
+        :class:`Attachment`.
+    """
+    payload = base64.b64encode(data).decode("ascii")
+    return (
+        f"<<KISS_BINARY_ATTACHMENT mime_type={mime_type}>>"
+        f"{payload}{BINARY_ATTACHMENT_CLOSE}"
+    )
+
+
+def parse_binary_attachments(text: str) -> tuple[str, list[Attachment]]:
+    """Split a tool result string into plain text + binary attachments.
+
+    Scans ``text`` for ``<<KISS_BINARY_ATTACHMENT ...>>...<<...>>`` blocks
+    produced by :func:`encode_binary_attachment` and returns the residual
+    plain text (with each block replaced by a short
+    ``[attached image/png, N bytes]`` placeholder) along with the decoded
+    :class:`Attachment` list.
+
+    Args:
+        text: Raw tool result content possibly containing sentinel blocks.
+
+    Returns:
+        ``(plain_text, attachments)``.  If the input has no sentinels,
+        returns ``(text, [])`` unchanged.
+    """
+    attachments: list[Attachment] = []
+    out_parts: list[str] = []
+    cursor = 0
+    for match in BINARY_ATTACHMENT_OPEN_RE.finditer(text):
+        open_start, open_end = match.span()
+        close_idx = text.find(BINARY_ATTACHMENT_CLOSE, open_end)
+        if close_idx == -1:  # pragma: no cover – defensive: malformed sentinel
+            break
+        mime_type = match.group(1)
+        b64_payload = text[open_end:close_idx]
+        try:
+            data = base64.b64decode(b64_payload, validate=False)
+        except Exception:  # pragma: no cover – validate=False is permissive
+            logger.debug("Failed to decode binary attachment", exc_info=True)
+            cursor = close_idx + len(BINARY_ATTACHMENT_CLOSE)
+            continue
+        out_parts.append(text[cursor:open_start])
+        out_parts.append(f"[attached {mime_type}, {len(data)} bytes]")
+        attachments.append(Attachment(data=data, mime_type=mime_type))
+        cursor = close_idx + len(BINARY_ATTACHMENT_CLOSE)
+    out_parts.append(text[cursor:])
+    return "".join(out_parts), attachments
+
+
 _AUDIO_MIME_TO_EXT: dict[str, str] = {
     "audio/mpeg": ".mp3",
     "audio/mp3": ".mp3",
@@ -338,6 +419,11 @@ class Model(ABC):
 
         for i, (func_name, result_dict) in enumerate(function_results):
             result_content = result_dict.get("result", str(result_dict))
+            # Strip binary attachment payloads — the default OpenAI-style
+            # ``role: tool`` message does not accept image content blocks,
+            # so we drop the base64 bytes and keep only the placeholder
+            # text so the conversation does not balloon to megabytes.
+            result_content, _ = parse_binary_attachments(result_content)
             if self.usage_info_for_messages:
                 result_content = f"{result_content}\n\n{self.usage_info_for_messages}"
 
