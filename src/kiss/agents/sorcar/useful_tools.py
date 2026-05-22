@@ -1,6 +1,7 @@
 """Useful tools for agents: file editing and bash execution."""
 
 import logging
+import mimetypes
 import os
 import shutil
 import signal
@@ -10,6 +11,11 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+
+from kiss.core.models.model import (
+    READ_TOOL_BINARY_MIME_TYPES,
+    encode_binary_attachment,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -176,11 +182,20 @@ class UsefulTools:
                 text = resolved.read_text()
             except UnicodeDecodeError:
                 logger.debug("Binary file detected", exc_info=True)
+                mime_type, _ = mimetypes.guess_type(str(resolved))
+                if mime_type in READ_TOOL_BINARY_MIME_TYPES:
+                    data = resolved.read_bytes()
+                    header = (
+                        f"Read binary file {file_path} as {mime_type} "
+                        f"({len(data)} bytes); content attached below.\n"
+                    )
+                    return header + encode_binary_attachment(mime_type, data)
                 size = resolved.stat().st_size
                 return (
                     f"Error: Cannot read binary file: {file_path} "
-                    f"(size: {size} bytes). The Read tool only supports text "
-                    f"files; use a different tool to handle this binary file."
+                    f"(size: {size} bytes, mime={mime_type or 'unknown'}). "
+                    f"The Read tool only embeds image/PDF binaries; use a "
+                    f"different tool to handle this binary file."
                 )
             lines = text.splitlines(keepends=True)
             if len(lines) > max_lines:
