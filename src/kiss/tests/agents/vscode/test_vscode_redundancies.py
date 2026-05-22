@@ -39,7 +39,7 @@ class TestCmdRunUsesGetTab:
         server = VSCodeServer.__new__(VSCodeServer)
         server._running_agent_states.clear()
         server._default_model = "test-model"
-        server._state_lock = threading.Lock()
+        server._state_lock = threading.RLock()
         tab = server._get_tab("new-tab")
         assert tab is not None
         assert tab.selected_model == "test-model"
@@ -52,7 +52,7 @@ class TestCmdRunUsesGetTab:
         server = VSCodeServer.__new__(VSCodeServer)
         server._running_agent_states.clear()
         server._default_model = "test-model"
-        server._state_lock = threading.Lock()
+        server._state_lock = threading.RLock()
         tab1 = server._get_tab("t1")
         tab2 = server._get_tab("t1")
         assert tab1 is tab2

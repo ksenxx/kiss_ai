@@ -67,7 +67,7 @@ class _CommandsMixin:
     if TYPE_CHECKING:
         printer: BaseBrowserPrinter
         work_dir: str
-        _state_lock: threading.Lock
+        _state_lock: threading.RLock
         _default_model: str
         _complete_seq: int
         _complete_seq_latest: int

@@ -292,14 +292,6 @@ class TestUserAnswerQueueStaleReference(unittest.TestCase):
 class TestEnsureCompleteWorkerDoubleInit(unittest.TestCase):
     """_ensure_complete_worker is not thread-safe (check-then-act)."""
 
-    def test_structural_no_lock(self) -> None:
-        """Method has no lock around check-then-act."""
-        import inspect
-
-        src = inspect.getsource(VSCodeServer._ensure_complete_worker)
-        self.assertNotIn("_state_lock", src)
-        self.assertNotIn("self._lock", src)
-
     def test_double_call_creates_two_queues(self) -> None:
         """Concurrent calls can create two separate queues/workers."""
         server = VSCodeServer()
