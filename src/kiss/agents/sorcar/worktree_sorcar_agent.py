@@ -439,83 +439,94 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         Returns:
             Worktree work directory path, or ``None`` on failure.
         """
-        released_branch = self._release_worktree()
+        # RACE-2 fix: hold ``repo_lock`` for the entire release +
+        # worktree-create + copy-dirty-state + baseline-commit
+        # sequence.  Previously only the inner ``_release_worktree``
+        # / ``current_branch`` call held the lock; concurrent
+        # ``_handle_worktree_action`` or non-wt task-start handlers
+        # could interleave with ``copy_dirty_state`` and
+        # ``baseline`` commit, snapshotting an inconsistent main
+        # tree.  The lock is re-entrant
+        # (:func:`git_worktree.repo_lock` is an ``RLock``) so the
+        # ``_do_merge`` invoked by ``_release_worktree`` re-acquires
+        # it cleanly on the same thread.
+        with repo_lock(repo):
+            released_branch = self._release_worktree()
 
-        original_branch: str | None
-        if released_branch is not None:
-            original_branch = released_branch
-        else:
-            with repo_lock(repo):
+            original_branch: str | None
+            if released_branch is not None:
+                original_branch = released_branch
+            else:
                 original_branch = GitWorktreeOps.current_branch(repo)
-        if original_branch is None:
-            logger.warning("Detached HEAD, running task directly")
-            return None
-
-        if work_dir_str:
-            try:
-                offset = Path(work_dir_str).resolve().relative_to(repo.resolve())
-            except ValueError:  # pragma: no cover
-                logger.warning("work_dir not inside repo, running directly")
+            if original_branch is None:
+                logger.warning("Detached HEAD, running task directly")
                 return None
-        else:
-            offset = Path(".")
 
-        try:
-            GitWorktreeOps.ensure_excluded(repo)
-        except Exception:  # pragma: no cover — filesystem permission error
-            logger.warning("Failed to update git exclude", exc_info=True)
+            if work_dir_str:
+                try:
+                    offset = Path(work_dir_str).resolve().relative_to(repo.resolve())
+                except ValueError:  # pragma: no cover
+                    logger.warning("work_dir not inside repo, running directly")
+                    return None
+            else:
+                offset = Path(".")
 
-        branch = f"kiss/wt-{self._chat_id}-{int(time.time())}"
-        base_branch = branch
-        suffix = 1
-        while GitWorktreeOps.branch_exists(repo, branch):  # pragma: no branch
-            branch = f"{base_branch}-{suffix}"
-            suffix += 1
+            try:
+                GitWorktreeOps.ensure_excluded(repo)
+            except Exception:  # pragma: no cover — filesystem permission error
+                logger.warning("Failed to update git exclude", exc_info=True)
 
-        slug = branch.replace("/", "_")
-        wt_dir = repo / ".kiss-worktrees" / slug
+            branch = f"kiss/wt-{self._chat_id}-{int(time.time())}"
+            base_branch = branch
+            suffix = 1
+            while GitWorktreeOps.branch_exists(repo, branch):  # pragma: no branch
+                branch = f"{base_branch}-{suffix}"
+                suffix += 1
 
-        if not GitWorktreeOps.create(repo, branch, wt_dir):
-            # pragma: no cover — git worktree add failure
-            GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
-            return None
+            slug = branch.replace("/", "_")
+            wt_dir = repo / ".kiss-worktrees" / slug
 
-        if not GitWorktreeOps.save_original_branch(repo, branch, original_branch):
-            # pragma: no cover — git config failure
-            GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
-            return None
+            if not GitWorktreeOps.create(repo, branch, wt_dir):
+                # pragma: no cover — git worktree add failure
+                GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
+                return None
 
-        baseline_commit: str | None = None
-        if GitWorktreeOps.copy_dirty_state(repo, wt_dir):
-            GitWorktreeOps.stage_all(wt_dir)
-            if GitWorktreeOps.commit_staged(
-                wt_dir,
-                "kiss: baseline from dirty state",
-                no_verify=True,
-            ):
-                baseline_commit = GitWorktreeOps.head_sha(wt_dir)
-                if baseline_commit:
-                    GitWorktreeOps.save_baseline_commit(
-                        repo,
-                        branch,
-                        baseline_commit,
-                    )
+            if not GitWorktreeOps.save_original_branch(repo, branch, original_branch):
+                # pragma: no cover — git config failure
+                GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
+                return None
 
-        self._wt = GitWorktree(
-            repo_root=repo,
-            branch=branch,
-            original_branch=original_branch,
-            wt_dir=wt_dir,
-            baseline_commit=baseline_commit,
-        )
+            baseline_commit: str | None = None
+            if GitWorktreeOps.copy_dirty_state(repo, wt_dir):
+                GitWorktreeOps.stage_all(wt_dir)
+                if GitWorktreeOps.commit_staged(
+                    wt_dir,
+                    "kiss: baseline from dirty state",
+                    no_verify=True,
+                ):
+                    baseline_commit = GitWorktreeOps.head_sha(wt_dir)
+                    if baseline_commit:
+                        GitWorktreeOps.save_baseline_commit(
+                            repo,
+                            branch,
+                            baseline_commit,
+                        )
 
-        user_prefs = repo / "USER_PREFS.md"
-        if user_prefs.is_file():
-            shutil.copy2(str(user_prefs), str(wt_dir / "USER_PREFS.md"))
+            self._wt = GitWorktree(
+                repo_root=repo,
+                branch=branch,
+                original_branch=original_branch,
+                wt_dir=wt_dir,
+                baseline_commit=baseline_commit,
+            )
 
-        wt_work_dir = wt_dir / offset
-        wt_work_dir.mkdir(parents=True, exist_ok=True)
-        return wt_work_dir
+            user_prefs = repo / "USER_PREFS.md"
+            if user_prefs.is_file():
+                shutil.copy2(str(user_prefs), str(wt_dir / "USER_PREFS.md"))
+
+            wt_work_dir = wt_dir / offset
+            wt_work_dir.mkdir(parents=True, exist_ok=True)
+            return wt_work_dir
 
 
     def _flush_warnings(self, printer: Any) -> None:
