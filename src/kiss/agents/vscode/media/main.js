@@ -4775,7 +4775,6 @@
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'sidebar-item-copy';
-    btn.dataset.tooltip = 'Copy task to clipboard';
     btn.setAttribute('aria-label', 'Copy task to clipboard');
     btn.innerHTML = PANEL_COPY_SVG;
 
