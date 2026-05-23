@@ -4756,6 +4756,63 @@
     if (idx >= 0) items[idx].scrollIntoView({block: 'nearest'});
   }
 
+  /**
+   * Build a sidebar copy-to-clipboard button for a history/frequent task row.
+   *
+   * Clicking the returned button copies the supplied task text to the
+   * system clipboard via ``navigator.clipboard.writeText`` (falling
+   * back to a temporary textarea + ``document.execCommand('copy')``
+   * when the async clipboard API is unavailable, e.g. in older
+   * webview hosts).  After a successful copy the trash-shaped icon
+   * briefly swaps to a check mark for visual confirmation.  Click
+   * propagation is stopped so the surrounding row's click handler
+   * (which would reopen the task / fill the input) does not fire.
+   *
+   * @param {string} text - the full task text to copy.
+   * @returns {HTMLButtonElement}
+   */
+  function makeSidebarCopyButton(text) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'sidebar-item-copy';
+    btn.dataset.tooltip = 'Copy task to clipboard';
+    btn.setAttribute('aria-label', 'Copy task to clipboard');
+    btn.innerHTML = PANEL_COPY_SVG;
+
+    const flash = () => {
+      btn.innerHTML = PANEL_CHECK_SVG;
+      btn.classList.add('copied');
+      setTimeout(() => {
+        btn.innerHTML = PANEL_COPY_SVG;
+        btn.classList.remove('copied');
+      }, 1500);
+    };
+
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      e.preventDefault();
+      const payload = String(text == null ? '' : text);
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(payload).then(flash, () => {});
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = payload;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try {
+          document.execCommand('copy');
+          flash();
+        } finally {
+          document.body.removeChild(ta);
+        }
+      }
+    });
+
+    return btn;
+  }
+
   function chatIdBgColor(chatId) {
     if (!chatId) return 'hsl(0, 0%, 75%)';
     let hash = 5381;
@@ -4826,6 +4883,14 @@
       div.appendChild(textSpan);
 
       if (s.task_id) {
+        // Copy-to-clipboard button — sits immediately left of the
+        // trash icon so the user can grab the full task text without
+        // first reopening the task.  ``s.preview`` carries the full
+        // task text (see server._get_history where ``preview`` is set
+        // to the task string verbatim); ``itemText`` is the fallback.
+        const copyBtn = makeSidebarCopyButton(s.preview || itemText);
+        div.appendChild(copyBtn);
+
         const delBtn = document.createElement('button');
         delBtn.className = 'sidebar-item-delete';
         delBtn.innerHTML =
@@ -5297,6 +5362,13 @@
       cnt.className = 'frequent-item-count';
       cnt.textContent = String(t.count);
       div.appendChild(cnt);
+
+      // Copy-to-clipboard button — placed immediately left of the
+      // trash icon so the user can copy the full task text without
+      // first selecting/reopening the task.  ``text`` is the full
+      // task string straight from the ``frequent_tasks.task`` column.
+      const copyBtn = makeSidebarCopyButton(text);
+      div.appendChild(copyBtn);
 
       // Delete button + inline confirm/cancel — mirrors the layout used
       // by the History sidebar rows so the user gets a consistent
