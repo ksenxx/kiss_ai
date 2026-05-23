@@ -142,6 +142,15 @@ _MAX_ATTACHMENTS = 32
 # JSON payload cannot push tens of MB through the broadcast pipeline.
 _MAX_PROMPT_BYTES = 1_000_000
 
+# Maximum length of a single newline-delimited JSON command line read
+# from a UDS or WSS client.  The default ``asyncio.StreamReader`` limit
+# is 64 KiB which is smaller than even a modest base64-encoded image
+# attachment — a single ``submit`` with an attached PNG/PDF would
+# overflow the reader, raise ``LimitOverrunError`` and silently drop
+# the user's task.  Bumped to 64 MiB so attachments up to a few MB
+# each (capped by ``_MAX_ATTACHMENTS``) can be delivered as one line.
+_MAX_LINE_BYTES = 64 * 1024 * 1024
+
 # Grace period (seconds) between a WebSocket connection dropping and
 # the deferred ``closeTab`` actually firing for every tab seen on
 # that connection.  Browsers do not reliably send a "closeTab" before
@@ -3427,6 +3436,7 @@ class RemoteAccessServer:
             ssl=self._ssl_context,
             ping_interval=None,
             ping_timeout=None,
+            max_size=_MAX_LINE_BYTES,
             create_connection=_HeadAwareServerConnection,
         )
 
@@ -3445,6 +3455,7 @@ class RemoteAccessServer:
                     )
             self._uds_server = await asyncio.start_unix_server(
                 self._uds_handler, path=str(self._uds_path),
+                limit=_MAX_LINE_BYTES,
             )
             os.chmod(self._uds_path, 0o600)
         except Exception:
