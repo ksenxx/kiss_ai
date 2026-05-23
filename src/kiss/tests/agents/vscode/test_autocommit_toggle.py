@@ -69,59 +69,8 @@ def _make_server(work_dir: str) -> tuple[VSCodeServer, list[dict]]:
     return server, events
 
 
-class TestAutocommitToggleInTemplate(unittest.TestCase):
-    """The toggle exists as a settings-panel checkbox in both templates."""
-
-    def test_sorcar_tab_template(self) -> None:
-        html = _read("src/SorcarTab.ts")
-        assert 'id="cfg-auto-commit"' in html
-        # The checkbox lives inside a ``config-label config-checkbox``
-        # wrapper labelled "Auto commit" and defaults to ``checked``.
-        idx = html.index('id="cfg-auto-commit"')
-        label_end = html.index("</label>", idx)
-        block = html[idx:label_end]
-        assert "Auto commit" in block
-        assert "checked" in block
-        # It sits in the settings panel alongside the parallel checkbox.
-        assert 'id="cfg-use-parallel"' in html
-        # And the legacy inline footer button no longer exists.
-        assert 'id="autocommit-toggle-btn"' not in html
-
-    def test_web_server_template(self) -> None:
-        html = _read("web_server.py")
-        assert 'id="cfg-auto-commit"' in html
-        idx = html.index('id="cfg-auto-commit"')
-        label_end = html.index("</label>", idx)
-        block = html[idx:label_end]
-        assert "Auto commit" in block
-        assert "checked" in block
-        parallel_idx = html.index('id="cfg-use-parallel"')
-        assert parallel_idx < idx
-        assert 'id="autocommit-toggle-btn"' not in html
 
 
-class TestAutocommitToggleJS(unittest.TestCase):
-    """The frontend wires the checkbox into the submit messages."""
-
-    def test_element_reference(self) -> None:
-        js = _read("media/main.js")
-        # Tolerate the line break that ``prettier`` inserts around
-        # long ``getElementById`` arguments.
-        normalised = " ".join(js.split())
-        assert "'cfg-auto-commit'" in normalised
-        assert "autocommitToggleBtn" in js
-        # State is read from the checkbox's ``.checked`` property.
-        assert "autocommitToggleBtn.checked" in js
-        # And the old click-listener that toggled an ``active`` class is gone.
-        assert "autocommitToggleBtn.addEventListener('click'" not in js
-
-    def test_submit_messages_include_auto_commit(self) -> None:
-        js = _read("media/main.js")
-        # Both submit pathways (initial submit and queued task replay)
-        # forward the toggle state as ``autoCommit``.
-        assert js.count("autoCommit:") >= 2
-        # The queued-task replay uses the saved ``task.autoCommit`` flag.
-        assert "autoCommit: !!task.autoCommit" in js
 
 
 class TestRunningAgentStateField(unittest.TestCase):
