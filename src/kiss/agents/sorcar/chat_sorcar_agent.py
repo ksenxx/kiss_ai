@@ -120,6 +120,23 @@ class ChatSorcarAgent(SorcarAgent):
         work_dir = getattr(self, "work_dir", None)
         chat_id = self._chat_id
         parent_task_id = self._last_task_id
+        # Resolve the parent's frontend tab id from the running-agent
+        # registry so we can thread it through ``_subagent_info`` to
+        # each sub-agent.  The sub-agent's ``new_tab`` broadcast (in
+        # :meth:`run` below) stamps the payload with
+        # ``parent_tab_id``; the frontend's ``case 'new_tab':`` /
+        # ``case 'openSubagentTab':`` handlers then ignore the event
+        # when no local tab has that id — which is the case for
+        # webviews bound to a different chat.  Without this routing
+        # hint, the global ``new_tab`` broadcast (``taskId=""``)
+        # reaches every connected WS / UDS client and every webview
+        # materialises phantom sub-agent tabs.
+        parent_tab_id = ""
+        with _RunningAgentState._registry_lock:
+            for tid, state in _RunningAgentState.running_agent_states.items():
+                if state.agent is self:
+                    parent_tab_id = tid
+                    break
         printer = self.printer
         thread_local = getattr(printer, "_thread_local", None) if printer else None
         parent_stop_event = (
@@ -136,7 +153,10 @@ class ChatSorcarAgent(SorcarAgent):
             agent = ChatSorcarAgent(f"Parallel-{task[:40]}")
             if chat_id:
                 agent.resume_chat_by_id(chat_id)
-            agent._subagent_info = {"parent_task_id": parent_task_id}
+            agent._subagent_info = {
+                "parent_task_id": parent_task_id,
+                "parent_tab_id": parent_tab_id,
+            }
             sub_tab_id = f"task-{parent_task_id}__sub_{idx}"
             sub_state = _RunningAgentState(sub_tab_id, model or "")
             sub_state.chat_id = chat_id
@@ -314,9 +334,19 @@ class ChatSorcarAgent(SorcarAgent):
                         # only to subscribers of that task — of which
                         # there are none until the frontend has
                         # received the new_tab and subscribed.
+                        # Include ``parent_tab_id`` so the frontend
+                        # can drop the event in webviews that don't
+                        # own the parent tab (e.g. webviews bound to
+                        # a different chat).  See the symmetric
+                        # ``openSubagentTab`` guard in main.js.
+                        sub_info = self._subagent_info or {}
+                        parent_tab_id_payload = sub_info.get(
+                            "parent_tab_id", "",
+                        )
                         broadcast({
                             "type": "new_tab",
                             "task_id": int(task_id),
+                            "parent_tab_id": parent_tab_id_payload,
                             "taskId": "",
                         })
                     except Exception:
