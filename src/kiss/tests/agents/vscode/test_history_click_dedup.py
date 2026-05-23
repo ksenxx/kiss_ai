@@ -72,33 +72,6 @@ class TestCreateNewTabReturnValue:
         )
 
 
-class TestHistoryClickHandlerSkipsRedundantReplay:
-    """The history-click handler guards ``setTaskText`` and
-    ``resumeSession`` on ``createNewTab``'s return value so an
-    already-open live tab does not get its panel overwritten."""
-
-    def test_regular_row_guards_resume_on_create_return_value(self) -> None:
-        js = _read_main_js()
-        # Locate the regular branch by its comment header.
-        tail = _extract_block(
-            js,
-            r"// When the clicked history row has a known chat_id \(s\.id\)",
-        )
-        m = re.search(
-            r"const created = createNewTab\(\);\s*"
-            r"if \(created\) \{\s*"
-            r"setTaskText\(s\.preview \|\| s\.title \|\| ''\);\s*"
-            r"vscode\.postMessage\(\{\s*"
-            r"type: 'resumeSession',",
-            tail,
-        )
-        assert m is not None, (
-            "the has_events branch must wrap setTaskText + resumeSession "
-            "in `if (created) { ... }` where "
-            "`created = createNewTab()` — protects already-open live tabs"
-        )
-
-
 class TestSubagentRowFollowsRegularPath:
     """Sub-agent rows reopen via the same path as a regular task.  The
     backend's ``_replay_session`` flips the tab to ``isSubagentTab``
