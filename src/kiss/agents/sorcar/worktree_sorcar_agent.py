@@ -11,6 +11,7 @@ import logging
 import shutil
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -83,9 +84,12 @@ def _manual_merge_cmd(wt: GitWorktree) -> str:
 class WorktreeSorcarAgent(ChatSorcarAgent):
     """SorcarAgent that isolates every task in a git worktree.
 
-    State is stored entirely in git (branches and config) — no sidecar
-    files.  On process restart, ``_restore_from_git()`` reconstructs all
-    instance attributes from git queries.
+    Each ``run()`` call creates a brand-new worktree on a fresh branch.
+    Worktrees are not associated with the agent's ``chat_id``: branch
+    names use a unique time + random suffix, and there is no
+    cross-process state restoration based on chat session.  Any
+    previous worktree owned by this agent instance is auto-merged
+    (or kept on conflict) before the new one is created.
 
     Attributes:
         _wt: The current/pending worktree state, or ``None`` when idle.
@@ -127,41 +131,6 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
     def _baseline_commit(self) -> str | None:
         """SHA of the baseline commit (user's dirty state), or ``None``."""
         return self._wt.baseline_commit if self._wt else None
-
-
-    def _restore_from_git(self, repo: Path) -> None:
-        """Restore pending-branch state from git (no sidecar files).
-
-        Queries git for any ``kiss/wt-<chat_id>-*`` branch.  If found,
-        restores state from ``git config``.  If the config entry is
-        missing (crash between worktree creation and config write),
-        falls back to the current HEAD branch of the main worktree.
-
-        Args:
-            repo: Git repo root path.
-        """
-        if self._wt is not None:
-            return
-        prefix = f"kiss/wt-{self._chat_id}-"
-        branch = GitWorktreeOps.find_pending_branch(repo, prefix)
-        if branch is None:
-            return
-
-        original = GitWorktreeOps.load_original_branch(repo, branch)
-        if original is None:
-            original = GitWorktreeOps.current_branch(repo)
-
-        baseline = GitWorktreeOps.load_baseline_commit(repo, branch)
-
-        slug = branch.replace("/", "_")
-        wt_dir = repo / ".kiss-worktrees" / slug
-        self._wt = GitWorktree(
-            repo_root=repo,
-            branch=branch,
-            original_branch=original,
-            wt_dir=wt_dir,
-            baseline_commit=baseline,
-        )
 
 
     def _auto_commit_worktree(self) -> bool:
@@ -476,7 +445,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             except Exception:  # pragma: no cover — filesystem permission error
                 logger.warning("Failed to update git exclude", exc_info=True)
 
-            branch = f"kiss/wt-{self._chat_id}-{int(time.time())}"
+            branch = f"kiss/wt-{int(time.time())}-{uuid.uuid4().hex[:8]}"
             base_branch = branch
             suffix = 1
             while GitWorktreeOps.branch_exists(repo, branch):  # pragma: no branch
@@ -680,8 +649,6 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                 logger.warning("Not a git repo, running task directly")
                 self._flush_warnings(kwargs.get("printer"))
                 return super().run(prompt_template=prompt_template, **kwargs)
-
-            self._restore_from_git(repo)
 
             wt_work_dir = self._try_setup_worktree(repo, work_dir_str)
             if wt_work_dir is None:

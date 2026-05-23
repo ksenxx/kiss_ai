@@ -65,49 +65,20 @@ class _MergeFlowMixin:
     def _ensure_wt_agent(
         self, tab: _RunningAgentState,
     ) -> WorktreeSorcarAgent | None:
-        """Return a worktree-aware agent for *tab*.
+        """Return the worktree-aware agent for *tab*, or ``None``.
 
-        Returns ``tab.agent`` directly when a task / merge is still
-        in flight (its worktree state is already populated by
-        :meth:`WorktreeSorcarAgent.run`).  Otherwise builds a
-        short-lived **ephemeral** agent and restores worktree state
-        from git via :meth:`WorktreeSorcarAgent._restore_from_git`,
-        so worktree post-task operations (merge / discard, conflict
-        check, changed-files listing, release on tab close) keep
-        working after the transient task agent has been disposed.
-
-        The ephemeral agent is NOT cached back onto ``tab.agent`` —
-        the user wanted no long-lived agent across task boundaries,
-        and persisting one here would defeat that.  Callers should
-        treat the returned agent as a local-scope value and not
-        share it across distinct UI operations.
+        Worktrees are no longer associated with chat sessions: every
+        ``run()`` call mints a fresh branch and there is no
+        cross-process restoration.  This method therefore returns
+        ``tab.agent`` as-is — it is the only authoritative source of
+        worktree state.  When the agent has been disposed (task ended
+        and the tab released its reference) there is no worktree to
+        operate on and ``None`` is returned.
 
         Returns:
-            The agent, or ``None`` if no git repo is available.
+            The agent stored on ``tab``, or ``None``.
         """
-        agent = tab.agent
-        if agent is not None and (
-            tab.is_task_active or tab.is_merging
-            or agent._wt_pending or agent._wt_branch
-        ):
-            # Active task / merge owns its worktree state, OR an
-            # already-restored agent — return as-is.
-            return agent
-        repo = GitWorktreeOps.discover_repo(Path(self.work_dir))
-        if repo is None:
-            return agent  # may be None
-        if agent is None:
-            agent = WorktreeSorcarAgent("Sorcar VS Code")
-        if tab.chat_id:
-            # Sync chat id onto the agent so ``_restore_from_git``
-            # can find the ``kiss/wt-{chat_id}-*`` branch.  The agent
-            # may have been lazily auto-allocated by ``_get_tab``
-            # before the tab's chat id was populated (e.g. when
-            # ``_replay_session`` calls ``_get_tab`` before setting
-            # ``tab.chat_id`` from the persisted history row).
-            agent._chat_id = tab.chat_id
-        agent._restore_from_git(repo)
-        return agent
+        return tab.agent
 
     def _start_merge_session(
         self, merge_json_path: str, tab_id: str = "",
@@ -427,9 +398,10 @@ class _MergeFlowMixin:
     def _emit_pending_worktree(self, tab_id: str = "") -> None:
         """Emit merge review or ``worktree_done`` for a pending worktree branch.
 
-        Called after replaying a session.  Restores worktree state
-        from git (for post-restart resume) and delegates to
-        :meth:`_present_pending_worktree`.
+        Worktrees are no longer associated with chat sessions, so
+        there is no cross-process restoration to perform here.  This
+        helper now simply delegates to :meth:`_present_pending_worktree`
+        when the tab's transient agent still holds a pending worktree.
 
         Args:
             tab_id: The tab to check for pending worktree.
@@ -437,7 +409,6 @@ class _MergeFlowMixin:
         tab = self._get_tab(tab_id)
         if not tab.use_worktree:
             return
-        self._ensure_worktree_state(tab_id)
         self._present_pending_worktree(tab_id, try_merge_review=True)
 
     def _present_pending_worktree(
@@ -522,36 +493,6 @@ class _MergeFlowMixin:
             "tabId": tab_id,
         }
         self.printer.broadcast(event)
-
-    def _ensure_worktree_state(self, tab_id: str = "") -> None:
-        """Restore agent worktree state from git if not already set.
-
-        Discovers the repo root and calls ``_restore_from_git()`` so
-        that ``merge()``/``discard()`` work even after a server process
-        restart where in-memory state was lost.
-        Only applicable when using the worktree agent.
-
-        Args:
-            tab_id: The tab whose worktree state to restore.
-        """
-        tab = self._get_tab(tab_id)
-        if not tab.use_worktree:
-            return
-        wt_agent = self._ensure_wt_agent(tab)
-        if wt_agent is None:
-            return
-        # ``_ensure_wt_agent`` already calls ``_restore_from_git`` when
-        # it builds an ephemeral agent.  Only call it again when the
-        # tab's existing agent is in use (e.g. an in-flight task whose
-        # worktree state hasn't been populated yet).
-        if tab.agent is wt_agent:
-            repo_root = wt_agent._repo_root
-            if repo_root is None:
-                repo_root = GitWorktreeOps.discover_repo(Path(self.work_dir))
-                if repo_root is None:
-                    return
-            wt_agent._restore_from_git(repo_root)
-
 
     def _check_merge_conflict(self, tab_id: str = "") -> bool:
         """Check if merging the worktree branch into original would conflict.
@@ -783,9 +724,6 @@ class _MergeFlowMixin:
         wt_agent = self._ensure_wt_agent(tab)
         if wt_agent is None:
             return {"success": False, "message": "Not a git repository"}
-        if not wt_agent._wt_pending:
-            self._ensure_worktree_state(tab_id)
-            wt_agent = self._ensure_wt_agent(tab) or wt_agent
         wt = wt_agent
         if action == "merge":
             verb = "merging"

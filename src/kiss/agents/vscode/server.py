@@ -581,11 +581,12 @@ class VSCodeServer(
                 never created (e.g. ``closeTab`` for an unknown id).
         """
         if tab is not None:
-            # Build an ephemeral worktree-aware agent to release any
-            # still-pending worktree branch.  When the tab's task
-            # agent was already disposed (the common case at tab
-            # close after the task ended), ``_ensure_wt_agent``
-            # restores worktree state from git.
+            # Release any still-pending worktree branch held by the
+            # tab's transient agent.  When the agent has already been
+            # disposed (the common case at tab close after the task
+            # ended), there is nothing to release: each task creates
+            # a fresh worktree and the agent is the sole authority on
+            # its state.
             try:
                 wt_agent = self._ensure_wt_agent(tab)
                 if wt_agent is not None and wt_agent._wt_pending:

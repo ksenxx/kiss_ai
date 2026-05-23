@@ -271,12 +271,6 @@ ______________________________________________________________________
 
   - `repo`: Git repo root path.
 
-- **find_pending_branch** — Find the latest `kiss/wt-*` branch matching a prefix.<br/>`find_pending_branch(repo: Path, prefix: str) -> str | None`
-
-  - `repo`: Git repo root path.
-  - `prefix`: Branch name prefix (e.g. `kiss/wt-<chat_id[:12]>-`).
-  - **Returns:** The lexicographically last matching branch, or `None`.
-
 - **load_original_branch** — Load the original branch from git config.<br/>`load_original_branch(repo: Path, branch: str) -> str | None`
 
   - `repo`: Git repo root path.

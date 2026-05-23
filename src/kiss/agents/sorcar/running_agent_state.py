@@ -57,11 +57,9 @@ class _RunningAgentState:
     completes.  A fresh :class:`WorktreeSorcarAgent` is created at
     :meth:`_CommandsMixin._cmd_run` before the worker thread starts
     and disposed in :meth:`_TaskRunnerMixin._run_task`'s outer
-    ``finally``.  Operations that need agent / worktree state outside
-    of an active task (worktree merge / discard / release, conflict
-    check, changed-files listing, autocommit) build a short-lived
-    ephemeral agent and restore worktree state from git via
-    :meth:`WorktreeSorcarAgent._restore_from_git`.
+    ``finally``.  Each worktree task creates its own fresh worktree
+    and branch independent of any chat id; there is no cross-task
+    restoration of worktree state from git.
 
     Long-lived per-tab state — the canonical ``chat_id``, the most
     recently completed ``last_task_id``, sticky UI flags
