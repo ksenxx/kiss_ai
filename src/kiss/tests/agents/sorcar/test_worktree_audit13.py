@@ -253,7 +253,6 @@ class TestRed7DeadCodeRemoved:
             "cleanup_partial",
             "cleanup_orphans",
             "ensure_excluded",
-            "find_pending_branch",
             "stage_all",
             "staged_diff",
             "unstaged_files",
