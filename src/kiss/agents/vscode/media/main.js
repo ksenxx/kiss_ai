@@ -3120,6 +3120,15 @@
         // then posts ``resumeSession`` back to the backend.  The
         // server's ``_cmd_resume_session`` handler supports a
         // task-id-only resume (no ``chatId`` required).
+        //
+        // Sub-agent ``new_tab`` events carry ``parent_tab_id``.  The
+        // backend broadcasts them to ALL connected webviews (no
+        // per-client routing for global system events), so a webview
+        // that doesn't own the parent run_parallel tab must NOT
+        // materialise a phantom sub-agent tab.  Skip when the parent
+        // tab is not present locally.
+        if (ev.parent_tab_id && !tabs.find(t => t.id === ev.parent_tab_id))
+          break;
         if (ev.task_id === undefined || ev.task_id === null) break;
         const createdNewTab = createNewTab();
         if (createdNewTab) {
@@ -3132,6 +3141,14 @@
         break;
       }
       case 'openSubagentTab': {
+        // ``openSubagentTab`` is broadcast verbatim to ALL connected
+        // webviews (no per-client routing).  A webview whose local
+        // ``tabs[]`` does not contain the ``parent_tab_id`` does not
+        // own the parent run_parallel tab and must NOT materialise a
+        // phantom sub-agent tab — otherwise sub-tabs leak across
+        // unrelated chats / chat_ids.
+        if (ev.parent_tab_id && !tabs.find(t => t.id === ev.parent_tab_id))
+          break;
         // Trim so trailing newlines from the backend description don't
         // bleed into taskPanelHTML and resurface in the user's clipboard
         // when they copy-select the task panel.
@@ -3255,7 +3272,6 @@
             activeTab.currentTaskId !== null &&
             String(activeTab.currentTaskId) !== String(ev.taskId)
           ) {
-            // eslint-disable-next-line no-console
             console.warn(
               'Dropping mis-routed',
               ev.type,
