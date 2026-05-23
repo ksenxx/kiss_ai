@@ -23,9 +23,9 @@ persistence DB per test) and verify that:
 from __future__ import annotations
 
 from kiss.tests.agents.sorcar.test_worktree_no_autocommit_branch import (
-    _WorktreeNoAutocommitBase,
-    _patch_parent_run_create_file,
     _list_kiss_wt_branches,
+    _patch_parent_run_create_file,
+    _WorktreeNoAutocommitBase,
 )
 
 
