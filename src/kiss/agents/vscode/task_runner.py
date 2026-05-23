@@ -104,10 +104,9 @@ class _TaskRunnerMixin:
                     tab.is_running_non_wt = False
                     # Dispose the transient agent — a fresh one is
                     # built per task in ``_CommandsMixin._cmd_run``.
-                    # Worktree post-task operations (merge / discard,
-                    # conflict check, changed-files, release) build
-                    # ephemeral agents on demand and restore state
-                    # from git via ``_restore_from_git``.
+                    # Each worktree task creates a brand-new worktree
+                    # and branch (independent of chat id), so there is
+                    # no cross-task restoration of worktree state.
                     if tab.agent is not None:
                         tab.last_task_id = (
                             tab.agent._last_task_id or tab.last_task_id

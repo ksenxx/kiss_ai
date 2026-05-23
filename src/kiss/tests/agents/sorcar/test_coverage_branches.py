@@ -25,7 +25,6 @@ from kiss.agents.sorcar.useful_tools import (
 from kiss.agents.sorcar.web_use_tool import (
     WebUseTool,
 )
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.browser_ui import (
     BaseBrowserPrinter,
     _coalesce_events,
@@ -232,45 +231,6 @@ class TestVSCodeServerBranches:
         assert result == "my answer"
         ask_events = [e for e in events if e["type"] == "askUser"]
         assert len(ask_events) == 1
-
-    def test_emit_pending_worktree_with_branch(self, tmp_path):
-        """_emit_pending_worktree emits worktree_done when branch exists."""
-        server, events = self._make_server()
-        tab = server._get_tab("0")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.use_worktree = True
-        repo = tmp_path / "repo"
-        repo.mkdir()
-        subprocess.run(["git", "init"], cwd=str(repo), capture_output=True)
-        subprocess.run(["git", "config", "user.email", "test@test.com"],
-                       cwd=str(repo), capture_output=True)
-        subprocess.run(["git", "config", "user.name", "Test"],
-                       cwd=str(repo), capture_output=True)
-        (repo / "f.txt").write_text("hello")
-        subprocess.run(["git", "add", "."], cwd=str(repo), capture_output=True)
-        subprocess.run(["git", "commit", "-m", "init"],
-                       cwd=str(repo), capture_output=True)
-        chat_id = tab.agent._chat_id
-        branch = f"kiss/wt-{chat_id}-1234567890"
-        subprocess.run(["git", "branch", branch],
-                       cwd=str(repo), capture_output=True)
-        subprocess.run(["git", "config", f"branch.{branch}.kiss-original", "main"],
-                       cwd=str(repo), capture_output=True)
-        subprocess.run(["git", "checkout", branch],
-                       cwd=str(repo), capture_output=True)
-        (repo / "f.txt").write_text("changed")
-        subprocess.run(["git", "add", "."], cwd=str(repo), capture_output=True)
-        subprocess.run(["git", "commit", "-m", "change"],
-                       cwd=str(repo), capture_output=True)
-        subprocess.run(["git", "checkout", "main"],
-                       cwd=str(repo), capture_output=True)
-
-        server.work_dir = str(repo)
-        server._emit_pending_worktree("0")
-        wt_events = [e for e in events if e.get("type") == "worktree_done"]
-        assert len(wt_events) == 1
-        assert wt_events[0]["branch"] == branch
-        assert "f.txt" in wt_events[0]["changedFiles"]
 
     def test_emit_pending_worktree_not_a_repo(self, tmp_path):
         """_emit_pending_worktree does nothing when not in a git repo."""

@@ -322,55 +322,6 @@ class TestBug10Fix:
         _restore_db(self.db_saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_replay_session_restores_use_worktree(self) -> None:
-        """After restart, _replay_session sets use_worktree=True from
-        persisted extra data, and emits worktree_done or merge_started.
-        """
-
-        server1, events1 = _make_server(self.repo)
-        tab1 = server1._get_tab("0")
-        tab1.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab1.use_worktree = True
-        tab1.agent.run(prompt_template="task1", work_dir=str(self.repo))
-        assert tab1.agent._wt_pending
-        chat_id = tab1.agent.chat_id
-        task_id = tab1.agent._last_task_id
-        assert task_id is not None
-
-        wt_dir = tab1.agent._wt_dir
-        assert wt_dir is not None
-        (wt_dir / "agent_output.txt").write_text("agent work\n")
-
-        _append_chat_event(
-            {"type": "text_delta", "text": "working..."},
-            task_id=task_id,
-        )
-        th._save_task_extra(
-            {"is_worktree": True, "model": "test"},
-            task_id=task_id,
-        )
-
-        server2, events2 = _make_server(self.repo)
-
-        server2._replay_session(chat_id, "0")
-
-        tab2 = server2._get_tab("0")
-        tab2.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        assert tab2.use_worktree is True, (
-            "BUG-10 FIX: use_worktree should be restored from persisted data"
-        )
-
-        wt_events = [
-            e for e in events2
-            if e["type"] in ("worktree_done", "merge_started")
-        ]
-        assert len(wt_events) >= 1, (
-            "BUG-10 FIX: worktree_done or merge_started should be emitted "
-            "after restart"
-        )
-
-        tab1.agent.discard()
-
     def test_replay_session_without_worktree_keeps_false(self) -> None:
         """When extra doesn't have is_worktree, use_worktree stays False."""
 
@@ -399,59 +350,4 @@ class TestBug10Fix:
         assert tab2.use_worktree is False
 
 
-class TestBug11Fix:
-    """With BUG-10 fixed, the real restart flow now works without
-    manually setting use_worktree=True.
-    """
 
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        self.db_saved = _redirect_db(self.tmpdir)
-        self.repo = _make_repo(Path(self.tmpdir) / "repo")
-        self.original_run = _patch_super_run()
-
-    def teardown_method(self) -> None:
-        _unpatch_super_run(self.original_run)
-        _restore_db(self.db_saved)
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_real_restart_flow_emits_worktree_done(self) -> None:
-        """Without manually setting use_worktree=True, pending worktree
-        is visible after restart thanks to BUG-10 fix.
-        """
-
-        server1, events1 = _make_server(self.repo)
-        tab1 = server1._get_tab("0")
-        tab1.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab1.use_worktree = True
-        tab1.agent.run(prompt_template="task1", work_dir=str(self.repo))
-        chat_id = tab1.agent.chat_id
-        task_id = tab1.agent._last_task_id
-        assert task_id is not None
-
-        wt_dir = tab1.agent._wt_dir
-        assert wt_dir is not None
-        (wt_dir / "agent_output.txt").write_text("agent work\n")
-
-        _append_chat_event(
-            {"type": "text_delta", "text": "working..."},
-            task_id=task_id,
-        )
-        th._save_task_extra(
-            {"is_worktree": True, "model": "test"},
-            task_id=task_id,
-        )
-
-        server_real, events_real = _make_server(self.repo)
-        server_real._replay_session(chat_id, "0")
-
-        wt_real = [
-            e for e in events_real
-            if e["type"] in ("worktree_done", "merge_started")
-        ]
-        assert len(wt_real) >= 1, (
-            "BUG-11 FIX: pending worktree should be visible after "
-            "restart without manual use_worktree=True"
-        )
-
-        tab1.agent.discard()
