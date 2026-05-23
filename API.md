@@ -332,10 +332,10 @@ ______________________________________________________________________
   - `repo`: Root of the git repository to scan.
   - **Returns:** Summary of findings and any cleanup actions taken.
 
-**`repo_lock`** — Return a per-repo threading lock for multi-step git operations. Concurrent tabs operating on the same main repository must serialize their checkout → stash → merge → pop sequences to prevent interleaving that could corrupt the working tree.<br/>`def repo_lock(repo: Path) -> threading.Lock`
+**`repo_lock`** — Return a per-repo re-entrant lock for multi-step git operations. Concurrent tabs operating on the same main repository must serialize their checkout → stash → merge → pop sequences to prevent interleaving that could corrupt the working tree. The lock is an :class:`threading.RLock` (re-entrant) so a caller holding the lock for an outer multi-step operation (e.g. `_try_setup_worktree` releasing a previous worktree before creating a new one) can safely call inner helpers (`_do_merge`, `discard`) that re-acquire the same lock on the same thread. Cross-thread acquisitions still block as expected.<br/>`def repo_lock(repo: Path) -> threading.RLock`
 
 - `repo`: Git repo root path.
-- **Returns:** A :class:`threading.Lock` specific to the resolved repo path.
+- **Returns:** A :class:`threading.RLock` specific to the resolved repo path.
 
 ______________________________________________________________________
 
