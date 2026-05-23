@@ -193,6 +193,68 @@ class TestUdsListener(IsolatedAsyncioTestCase):
             except Exception:
                 pass
 
+    async def test_submit_with_large_attachment_is_processed(self) -> None:
+        """A ``submit`` whose JSON line exceeds the default 64 KiB
+        ``asyncio.StreamReader`` limit (e.g. a base64-encoded image
+        attachment) must still be parsed and produce a ``setTaskText``
+        broadcast.  Regression test for the bug where any task with an
+        attached image/PDF was silently dropped because the UDS
+        ``readline()`` raised ``LimitOverrunError`` and the handler's
+        outer ``except Exception`` closed the connection.
+        """
+        reader, writer = await asyncio.open_unix_connection(
+            str(self.uds_path),
+        )
+        try:
+            writer.write(
+                json.dumps(
+                    {"type": "ready", "tabId": "tab-uds-att",
+                     "restoredTabs": []},
+                ).encode("utf-8") + b"\n",
+            )
+            await writer.drain()
+            await self._drain_events(reader, "focusInput", timeout=2.0)
+
+            # Build a submit whose serialised JSON length far exceeds
+            # 64 KiB — the legacy default StreamReader limit.  200 KiB
+            # of base64 data is plenty to overflow the old buffer.
+            big_b64 = "A" * (200 * 1024)
+            submit = {
+                "type": "submit",
+                "tabId": "tab-uds-att",
+                "prompt": "look at this image",
+                "model": "",
+                "workDir": self.tmpdir,
+                "attachments": [
+                    {
+                        "name": "screenshot.png",
+                        "mimeType": "image/png",
+                        "data": big_b64,
+                    },
+                ],
+                "useWorktree": False,
+                "useParallel": False,
+            }
+            line = json.dumps(submit).encode("utf-8") + b"\n"
+            self.assertGreater(len(line), 64 * 1024)
+            writer.write(line)
+            await writer.drain()
+
+            # The handler echoes the prompt via ``setTaskText`` before
+            # invoking the task runner — its arrival proves the line
+            # was successfully read and dispatched.
+            echo = await self._drain_events(
+                reader, "setTaskText", timeout=5.0,
+            )
+            self.assertEqual(echo.get("text"), "look at this image")
+            self.assertEqual(echo.get("tabId"), "tab-uds-att")
+        finally:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+
     async def test_stop_async_removes_socket(self) -> None:
         """``stop_async`` unlinks the socket file on shutdown."""
         # asyncTearDown calls stop_async after this; bind a fresh
