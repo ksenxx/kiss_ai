@@ -344,6 +344,14 @@ class RelentlessAgent(Base):
                         f"### Session {i + 1}\n{s}" for i, s in enumerate(summaries)
                     )
                     result = yaml.dump(payload, sort_keys=False)
+                    # Re-emit a final result event so the front-end's Result
+                    # panel reflects the merged multi-session outcome (and
+                    # shows FAILED for terminal failures after one or more
+                    # continuations).  The inner KISSAgent only emitted the
+                    # last session's per-session result, which on a failure
+                    # would be the last "Continue" status — hiding the
+                    # final failure from the user.
+                    self._broadcast_final_result(payload)
                 return result
 
             summary = payload.get("summary", "")
@@ -358,7 +366,55 @@ class RelentlessAgent(Base):
                     progress_text=all_summaries,
                     continuation_number=session + 1,
                 )
-        raise KISSError(f"Task failed after {self.max_sub_sessions} sub-sessions")
+        # All ``max_sub_sessions`` were exhausted without a terminal
+        # result.  Emit a FAILED Result event carrying the merged
+        # progress so the front-end's Result panel shows the failure
+        # (otherwise the user only sees a stale "Status: Continue"
+        # from the last per-session result).
+        exhaustion_message = (
+            f"Task failed after {self.max_sub_sessions} sub-sessions"
+        )
+        merged_summary = "\n\n---\n\n".join(
+            f"### Session {i + 1}\n{s}" for i, s in enumerate(summaries)
+        )
+        if merged_summary:
+            merged_summary = f"{exhaustion_message}\n\n{merged_summary}"
+        else:
+            merged_summary = exhaustion_message
+        self._broadcast_final_result(
+            {
+                "success": False,
+                "is_continue": False,
+                "summary": merged_summary,
+            }
+        )
+        raise KISSError(exhaustion_message)
+
+    def _broadcast_final_result(self, payload: dict[str, Any]) -> None:
+        """Emit a final ``type="result"`` event with aggregated totals.
+
+        Called from :meth:`perform_task` whenever the multi-session loop
+        completes (either with a merged success/failure summary or
+        after exhausting all sub-sessions).  The inner :class:`KISSAgent`
+        only emits per-session results, so without this final broadcast
+        the front-end's Result panel would show the LAST per-session
+        status (e.g. "Continue") instead of the true terminal outcome.
+
+        Args:
+            payload: Dict with ``success``, ``is_continue`` and
+                ``summary`` keys that will be YAML-dumped as the event
+                content.
+        """
+        if self.printer is None:
+            return
+        result_yaml = yaml.dump(payload, sort_keys=False)
+        self.printer.print(
+            result_yaml,
+            type="result",
+            step_count=self.total_steps,
+            total_tokens=self.total_tokens_used,
+            cost=f"${self.budget_used:.4f}",
+        )
 
     def run(
         self,
