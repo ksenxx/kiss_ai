@@ -96,19 +96,35 @@ class TestStartMergeSessionRouted(unittest.TestCase):
 
 class TestWorktreeProgressRouted(unittest.TestCase):
     def test_worktree_progress_carries_tab_id(self) -> None:
+        import tempfile
+        from pathlib import Path as _Path
+
+        from kiss.agents.sorcar.git_worktree import GitWorktree
+
         server, events = _make_server()
         tab = server._get_tab("t-13")
         tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.use_worktree = True
-        tab.agent._wt = object()  # type: ignore[assignment]
+        # The merge handler now reads ``wt._repo_root`` to acquire
+        # the per-repo serialization lock — use a real ``GitWorktree``
+        # so that property has a valid ``Path`` value.
+        with tempfile.TemporaryDirectory() as td:
+            tab.agent._wt = GitWorktree(
+                repo_root=_Path(td),
+                branch="kiss/wt-x",
+                original_branch="main",
+                wt_dir=_Path(td) / ".kiss-worktrees" / "kiss_wt-x",
+            )
 
-        def fake_merge() -> str:
-            return "Successfully merged"
+            def fake_merge() -> str:
+                return "Successfully merged"
 
-        tab.agent.merge = fake_merge  # type: ignore[assignment]
+            tab.agent.merge = fake_merge  # type: ignore[assignment]
 
-        result = server._handle_worktree_action("merge", tab_id="t-13")
-        assert result["success"] is True
+            result = server._handle_worktree_action(
+                "merge", tab_id="t-13",
+            )
+            assert result["success"] is True
 
         wp = [e for e in events if e.get("type") == "worktree_progress"]
         assert len(wp) == 1

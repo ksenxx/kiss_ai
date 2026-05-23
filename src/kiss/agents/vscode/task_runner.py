@@ -68,7 +68,7 @@ class _TaskRunnerMixin:
             self, action: str, tab_id: str = "",
         ) -> None: ...
         def _handle_worktree_action(
-            self, action: str, tab_id: str = "",
+            self, action: str, tab_id: str = "", *, internal: bool = False,
         ) -> dict[str, Any]: ...
         def _present_pending_worktree(
             self, tab_id: str, *, try_merge_review: bool,
@@ -255,29 +255,48 @@ class _TaskRunnerMixin:
         # index is populated before any subsequent command races the
         # worker thread.  See ``_CommandsMixin._cmd_run``.
 
-        if not use_worktree:
-            with self._state_lock:
-                if any(
-                    t.is_merging and t.use_worktree
-                    for t in _RunningAgentState.running_agent_states.values()
-                ):
-                    tab.is_task_active = False
-                    self.printer.broadcast({
-                        "type": "error",
-                        "text": "A worktree merge is in progress. "
-                        "Wait for it to finish before starting a task.",
-                        "tabId": tab_id,
-                    })
-                    return
-
         pre_hunks: dict[str, list[tuple[int, int, int, int]]] = {}
         pre_untracked: set[str] = set()
         pre_file_hashes: dict[str, str] | None = None
         pre_head_sha: str | None = None
         if not use_worktree:
-            with self._state_lock:
-                tab.is_running_non_wt = True
-                deferred = tab.deferred_snapshot
+            # RACE-1 fix: atomically check the worktree-merge guard
+            # AND mark this tab as non-wt active.  Splitting the
+            # check and the ``is_running_non_wt = True`` set into two
+            # separate ``_state_lock`` acquisitions left a TOCTOU
+            # window in which a worktree merge handler could set
+            # ``is_merging = True`` between the check and the set,
+            # then proceed to merge while this tab's agent began
+            # writing to the main tree.  Holding the lock across
+            # both eliminates that window.  Holding ``repo_lock``
+            # briefly here additionally blocks the task-start path
+            # behind any in-flight ``_handle_worktree_action`` /
+            # ``_try_setup_worktree`` body on the same repo.
+            repo_for_guard = GitWorktreeOps.discover_repo(Path(work_dir))
+            guard_lock: Any = (
+                repo_lock(repo_for_guard) if repo_for_guard else None
+            )
+            if guard_lock is not None:
+                guard_lock.acquire()
+            try:
+                with self._state_lock:
+                    if any(
+                        t.is_merging and t.use_worktree
+                        for t in _RunningAgentState.running_agent_states.values()
+                    ):
+                        tab.is_task_active = False
+                        self.printer.broadcast({
+                            "type": "error",
+                            "text": "A worktree merge is in progress. "
+                            "Wait for it to finish before starting a task.",
+                            "tabId": tab_id,
+                        })
+                        return
+                    tab.is_running_non_wt = True
+                    deferred = tab.deferred_snapshot
+            finally:
+                if guard_lock is not None:
+                    guard_lock.release()
             if deferred is not None:
                 pre_head_sha, pre_hunks, pre_untracked, pre_file_hashes = (
                     deferred
@@ -421,8 +440,16 @@ class _TaskRunnerMixin:
                 task_end_event = task_end_event or {"type": "task_stopped"}
         finally:
             try:
-                with self._state_lock:
-                    tab.is_task_active = False
+                # RACE-3 fix: keep ``is_task_active = True`` through
+                # the post-task cleanup so a concurrent
+                # ``_handle_worktree_action`` (driven by a misclick
+                # on the merge/discard button) cannot pass its
+                # ``_check_worktree_busy`` guard and mutate
+                # ``tab.agent._wt`` while this thread is still
+                # inside ``_present_pending_worktree``.  The flag is
+                # cleared by ``_finalize_task_active`` at the very
+                # end of the cleanup block (and again in the BaseException
+                # branch below to keep failure recovery monotonic).
                 # When the task ended in failure or user-stop, behave
                 # as if the "Auto commit" toggle were OFF for the
                 # post-task merge workflow.  Rationale: auto-commit is
@@ -557,8 +584,16 @@ class _TaskRunnerMixin:
                                 action = "merge"
                             else:
                                 action = "discard"
+                            # ``internal=True`` bypasses the
+                            # ``is_task_active`` guard — the auto-
+                            # merge runs on the same task thread
+                            # that owns the flag (RACE-3 fix kept
+                            # ``is_task_active = True`` through the
+                            # post-task cleanup; clearing it before
+                            # the auto-merge would reopen the
+                            # window for a concurrent user click).
                             result = self._handle_worktree_action(
-                                action, tab_id,
+                                action, tab_id, internal=True,
                             )
                             self.printer.broadcast({
                                 "type": "worktree_result",
@@ -582,6 +617,16 @@ class _TaskRunnerMixin:
                             )
                     except BaseException:
                         logger.debug("Worktree merge review error", exc_info=True)
+                # RACE-3 fix: clear ``is_task_active`` only AFTER the
+                # post-task worktree presentation (auto-discard /
+                # merge-review start / ``worktree_done`` broadcast)
+                # has completed.  Before this point the flag is the
+                # only signal preventing
+                # ``_handle_worktree_action("discard"|"merge")`` from
+                # racing the task thread to clear ``agent._wt`` —
+                # see ``_check_worktree_busy``.
+                with self._state_lock:
+                    tab.is_task_active = False
                 if task_end_event:  # pragma: no branch — always set
                     # Stamp the event with the owning tab so it reaches
                     # only this tab's subscribers (not every connected
