@@ -575,28 +575,6 @@ class GitWorktreeOps:
             f.write(f"\n{entry}\n")
 
     @staticmethod
-    def find_pending_branch(repo: Path, prefix: str) -> str | None:
-        """Find the latest ``kiss/wt-*`` branch matching a prefix.
-
-        Args:
-            repo: Git repo root path.
-            prefix: Branch name prefix (e.g. ``kiss/wt-<chat_id[:12]>-``).
-
-        Returns:
-            The lexicographically last matching branch, or ``None``.
-        """
-        result = _git(
-            "for-each-ref",
-            "--format=%(refname:short)",
-            f"refs/heads/{prefix}*",
-            cwd=repo,
-        )
-        branches = result.stdout.strip().splitlines()
-        if not branches:
-            return None
-        return sorted(branches)[-1]
-
-    @staticmethod
     def load_original_branch(repo: Path, branch: str) -> str | None:
         """Load the original branch from git config.
 

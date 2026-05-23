@@ -154,38 +154,6 @@ class TestWorktreeSorcarAgent:
         assert check.returncode != 0
 
 
-    def test_missing_config_detached_head(self) -> None:
-        agent = self._agent(chat_id="1000")
-        agent.run(prompt_template="task1", work_dir=str(self.repo))
-        branch = agent._wt_branch
-        assert branch is not None
-
-        _git("config", "--unset", f"branch.{branch}.kiss-original",
-             cwd=self.repo)
-
-        head = _git("rev-parse", "HEAD", cwd=self.repo)
-        subprocess.run(
-            ["git", "-C", str(self.repo), "checkout", head.stdout.strip()],
-            capture_output=True, check=True,
-        )
-
-        agent2 = self._agent(chat_id="1000")
-        agent2._restore_from_git(self.repo)
-        assert agent2._wt_branch == branch
-        assert agent2._original_branch is None
-
-        msg = agent2.merge()
-        assert "Cannot merge" in msg
-        assert "original branch is unknown" in msg
-
-        msg = agent2.discard()
-        assert "Discarded" in msg
-
-        subprocess.run(
-            ["git", "-C", str(self.repo), "checkout", "main"],
-            capture_output=True, check=True,
-        )
-
     def test_merge_instructions_idle(self) -> None:
         agent = self._agent()
         assert agent.merge_instructions() == "No pending worktree task."
