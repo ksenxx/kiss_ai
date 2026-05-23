@@ -717,6 +717,13 @@ class TestServerWorktreeWorkflow:
         the branch, which surfaced as the "worktree branch is not
         getting created" symptom in the
         ``use_worktree=True`` + ``autoCommit=False`` mode.
+
+        The branch is preserved (``_wt_pending`` stays True) but the
+        ``worktree_done`` event — which the frontend renders as the
+        "Auto-commit and merge or Discard?" prompt — must NOT be
+        broadcast when there are no changes to merge.  Showing that
+        prompt for an empty worktree is meaningless and was the user-
+        reported bug.
         """
         _unpatch_super_run(self.original_run)
         self.original_run = _patch_super_run(raise_exc=RuntimeError("boom"))
@@ -731,7 +738,7 @@ class TestServerWorktreeWorkflow:
         })
 
         wt_events = [e for e in events if e["type"] == "worktree_done"]
-        assert len(wt_events) == 1
+        assert wt_events == []
         # ``WorktreeSorcarAgent.run`` swallows non-KISSError exceptions
         # from the parent class and returns a YAML failure summary, so
         # the task wrapper still emits ``task_done`` (not ``task_error``).
@@ -740,7 +747,12 @@ class TestServerWorktreeWorkflow:
         assert _agent(server)._wt_pending
 
     def test_worktree_no_changes_preserved_on_stop(self) -> None:
-        """Worktree branch is preserved when user stops with no file changes."""
+        """Worktree branch is preserved when user stops with no file changes.
+
+        ``_wt_pending`` stays True so the branch survives, but no
+        ``worktree_done`` is broadcast — there is nothing to merge or
+        discard, so the frontend prompt would be meaningless.
+        """
         _unpatch_super_run(self.original_run)
         self.original_run = _patch_super_run(raise_exc=KeyboardInterrupt("stopped"))
 
@@ -757,7 +769,7 @@ class TestServerWorktreeWorkflow:
         assert len(stopped_events) == 1
         assert _agent(server)._wt_pending
         wt_events = [e for e in events if e["type"] == "worktree_done"]
-        assert len(wt_events) == 1
+        assert wt_events == []
 
     def test_worktree_merge_review_shown_on_failure_with_changes(self) -> None:
         """Merge/diff review UI is shown when agent fails after making changes.

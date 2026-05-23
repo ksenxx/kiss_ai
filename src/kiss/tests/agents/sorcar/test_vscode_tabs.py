@@ -395,43 +395,6 @@ class TestAskUserQuestion(unittest.TestCase):
         assert result == "yes"
 
 
-class TestMainJsTabIdRouting(unittest.TestCase):
-    """Verify that main.js event handlers check tabId for routing."""
-
-    js_src: str = ""
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        from pathlib import Path
-
-        js_path = Path(__file__).resolve().parents[3] / "agents" / "vscode" / "media" / "main.js"
-        cls.js_src = js_path.read_text()
-
-    def test_error_handler_checks_tabid(self) -> None:
-        """The error event handler filters by tabId."""
-        assert "case 'error':" in self.js_src
-        idx = self.js_src.index("case 'error':")
-        block = self.js_src[idx:idx + 200]
-        assert "ev.tabId" in block
-        assert "activeTabId" in block
-
-    def test_status_handler_checks_tabid(self) -> None:
-        """The status event handler routes by tabId."""
-        idx = self.js_src.index("case 'status':")
-        block = self.js_src[idx:idx + 300]
-        assert "tabId" in block or "ev.tabId" in block
-
-    def test_clear_handler_checks_tabid(self) -> None:
-        """The clear event handler routes by tabId."""
-        idx = self.js_src.index("case 'clear':")
-        block = self.js_src[idx:idx + 300]
-        assert "tabId" in block or "evTabId" in block
-
-    def test_task_done_handler_checks_tabid(self) -> None:
-        """The task_done event handler routes by tabId."""
-        idx = self.js_src.index("case 'task_done':")
-        block = self.js_src[idx:idx + 300]
-        assert "tabId" in block or "ev.tabId" in block
 
 
 

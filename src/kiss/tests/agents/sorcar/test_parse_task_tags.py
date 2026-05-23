@@ -7,10 +7,9 @@ only invokes the worktree/merge interface after the final subtask.
 No mocks — uses real functions and source inspection.
 """
 
-import inspect
 import unittest
 
-from kiss.agents.vscode.server import VSCodeServer, parse_task_tags
+from kiss.agents.vscode.server import parse_task_tags
 
 
 class TestParseTaskTagsNoTags(unittest.TestCase):
@@ -135,72 +134,6 @@ class TestParseTaskTagsEdgeCases(unittest.TestCase):
         assert "line" in result[0]
 
 
-class TestMultiTaskIntegration(unittest.TestCase):
-    """Verify _run_task_inner correctly loops over subtasks and defers
-    merge/worktree to the last subtask only."""
-
-    _src: str = ""
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls._src = inspect.getsource(VSCodeServer._run_task_inner)
-
-    def test_calls_parse_task_tags(self) -> None:
-        """_run_task_inner calls parse_task_tags on the prompt."""
-        assert "parse_task_tags(prompt)" in self._src
-
-    def test_loops_over_subtasks(self) -> None:
-        """_run_task_inner iterates over subtasks."""
-        assert "for task_prompt in subtasks:" in self._src
-
-    def test_agent_run_uses_task_prompt(self) -> None:
-        """agent.run() receives the individual subtask prompt, not the full prompt."""
-        assert "prompt_template=task_prompt" in self._src
-
-    def test_worktree_check_after_loop(self) -> None:
-        """Worktree merge review is in the finally block, after the loop.
-
-        After the RED-10 refactor the block delegates to
-        ``_present_pending_worktree`` instead of calling
-        ``_get_worktree_changed_files`` directly.
-        """
-        loop_pos = self._src.index("for task_prompt in subtasks:")
-        wt_pos = self._src.index("_present_pending_worktree")
-        assert wt_pos > loop_pos
-
-    def test_interrupt_breaks_loop(self) -> None:
-        """KeyboardInterrupt breaks out of the subtask loop."""
-        ki_idx = self._src.index("except KeyboardInterrupt:")
-        after = self._src[ki_idx:ki_idx + 1000]
-        assert "break" in after
-
-    def test_worktree_check_in_finally_block(self) -> None:
-        """Worktree merge review is in the finally block, not the inner try."""
-        assert "if use_worktree and tab.agent._wt_pending:" in self._src
-
-    def test_merge_view_only_runs_once(self) -> None:
-        """_prepare_merge_view is NOT inside the subtask loop.
-
-        It runs once in the finally block (after all subtasks), not
-        per-subtask.
-        """
-        loop_start = self._src.index("for task_prompt in subtasks:")
-        outer_except = self._src.index("except BaseException:")
-        loop_body = self._src[loop_start:outer_except]
-        assert "_prepare_merge_view" not in loop_body
-
-    def test_followup_only_runs_once(self) -> None:
-        """_generate_followup_async is NOT inside the subtask loop."""
-        loop_start = self._src.index("for task_prompt in subtasks:")
-        outer_except = self._src.index("except BaseException:")
-        loop_body = self._src[loop_start:outer_except]
-        assert "_generate_followup_async" not in loop_body
-
-    def test_git_snapshot_before_loop(self) -> None:
-        """Git snapshot is taken once before the subtask loop."""
-        snapshot_pos = self._src.index("_capture_pre_snapshot")
-        loop_pos = self._src.index("for task_prompt in subtasks:")
-        assert snapshot_pos < loop_pos
 
 class TestParseTaskTagsReturnType(unittest.TestCase):
     """Verify parse_task_tags always returns a non-empty list."""

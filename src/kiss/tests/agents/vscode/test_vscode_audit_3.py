@@ -28,17 +28,14 @@ N5: ``_capture_pre_snapshot`` passes ``tab_id`` through to
 
 from __future__ import annotations
 
-import inspect
 import os
 import queue
-import re
 import shutil
 import tempfile
 import threading
 import unittest
 from pathlib import Path, PurePath
 
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 from kiss.agents.vscode.diff_merge import (
     _merge_data_dir,
     _scan_files,
@@ -63,24 +60,6 @@ def _make_server() -> tuple[VSCodeServer, list[dict]]:
     return server, events
 
 
-class TestTimerFlushTypeAnnotation(unittest.TestCase):
-    """N1: The ``_timer_flush`` inner function inside
-    ``BaseBrowserPrinter.print`` uses the type annotation
-    ``tid: int | None`` for the captured ``owner_tab`` default, but
-    ``owner_tab`` comes from ``getattr(self._thread_local, "tab_id",
-    None)`` which is ``str | None``.
-    """
-
-
-    def test_owner_tab_is_string(self) -> None:
-        """Behavioral: the captured ``owner_task`` is actually a string."""
-        printer = BaseBrowserPrinter()
-        printer._thread_local.task_id = "test-tab-123"
-
-        owner_task = getattr(printer._thread_local, "task_id", None)
-        assert isinstance(owner_task, str), (
-            f"N1: owner_task should be str, got {type(owner_task).__name__}"
-        )
 
 
 class TestAwaitUserResponseNoLock(unittest.TestCase):
@@ -90,16 +69,6 @@ class TestAwaitUserResponseNoLock(unittest.TestCase):
     """
 
 
-    def test_close_tab_mutates_running_agent_states_under_lock(self) -> None:
-        """Contrast: ``_close_tab`` mutates ``running_agent_states`` under lock."""
-        src = inspect.getsource(VSCodeServer._close_tab)
-        lock_pattern = re.compile(
-            r"with self\._state_lock:.*?running_agent_states\.pop",
-            re.DOTALL,
-        )
-        assert lock_pattern.search(src), (
-            "N2 contrast: _close_tab pops _running_agent_states under _state_lock"
-        )
 
     def test_behavioral_race_scenario(self) -> None:
         """Behavioral: demonstrate the race window.

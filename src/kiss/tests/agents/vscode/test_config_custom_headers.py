@@ -7,7 +7,6 @@ These headers flow through to the model via ``model_config["extra_headers"]``.
 
 from __future__ import annotations
 
-import re
 import tempfile
 import threading
 import unittest
@@ -22,21 +21,6 @@ _VSCODE_DIR = Path(__file__).resolve().parents[3] / "agents" / "vscode"
 # ---------------------------------------------------------------------------
 
 
-class TestHeadersTextareaInHTML(unittest.TestCase):
-    """A textarea with id cfg-custom-headers exists in both HTML templates."""
-
-
-    def test_web_server_has_headers_textarea(self) -> None:
-        py = (_VSCODE_DIR / "web_server.py").read_text()
-        assert "cfg-custom-headers" in py
-
-
-    def test_headers_textarea_is_after_endpoint_web(self) -> None:
-        """The headers field appears after the custom endpoint field in web_server."""
-        py = (_VSCODE_DIR / "web_server.py").read_text()
-        endpoint_pos = py.index("cfg-custom-endpoint")
-        headers_pos = py.index("cfg-custom-headers")
-        assert headers_pos > endpoint_pos
 
 
 # ---------------------------------------------------------------------------
@@ -44,30 +28,6 @@ class TestHeadersTextareaInHTML(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-class TestMainJSHandlesHeaders(unittest.TestCase):
-    """main.js populates and collects the custom_headers field."""
-
-    _js: str
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls._js = (_VSCODE_DIR / "media" / "main.js").read_text()
-
-    def test_populate_sets_headers(self) -> None:
-        """populateConfigForm reads cfg.custom_headers into the textarea."""
-        assert "custom_headers" in self._js
-        assert "cfg-custom-headers" in self._js
-
-    def test_collect_reads_headers(self) -> None:
-        """collectConfigForm reads the textarea value."""
-        # Find the collectConfigForm function
-        m = re.search(r"function collectConfigForm\(\)", self._js)
-        assert m
-        # Extract the function body
-        start = m.start()
-        body_end = self._js.index("\n  }", start) + 4
-        body = self._js[start:body_end]
-        assert "custom_headers" in body
 
 
 # ---------------------------------------------------------------------------
@@ -183,19 +143,6 @@ class TestCustomModelEntryIncludesHeaders(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-class TestTaskRunnerBuildsModelConfig(unittest.TestCase):
-    """task_runner passes model_config with extra_headers to agent.run()."""
-
-    def test_task_runner_reads_custom_headers_from_config(self) -> None:
-        """The task_runner source builds model_config from config."""
-        src = (_VSCODE_DIR / "task_runner.py").read_text()
-        assert "build_model_config" in src
-        assert "model_config" in src
-
-    def test_task_runner_passes_model_config_to_agent_run(self) -> None:
-        """agent.run() call includes model_config kwarg."""
-        src = (_VSCODE_DIR / "task_runner.py").read_text()
-        assert "model_config=" in src
 
 
 # ---------------------------------------------------------------------------

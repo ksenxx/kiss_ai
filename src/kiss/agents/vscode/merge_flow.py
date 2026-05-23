@@ -503,6 +503,15 @@ class _MergeFlowMixin:
             if not non_wt_busy:
                 wt_agent.discard()
                 return
+        if not changed:
+            # Branch is preserved (discard_if_empty=False) but the
+            # worktree has no changes — there is nothing to merge,
+            # so suppress the "Auto-commit and merge or Discard?"
+            # prompt that the ``worktree_done`` frontend handler
+            # renders unconditionally.  The branch remains in
+            # ``git branch`` for manual inspection / cleanup, but
+            # the user is not bothered with a meaningless prompt.
+            return
         event: dict[str, Any] = {
             "type": "worktree_done",
             "branch": wt_agent._wt_branch,

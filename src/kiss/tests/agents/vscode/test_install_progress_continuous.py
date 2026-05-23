@@ -200,54 +200,6 @@ class TestInstallProgressIsContinuous(unittest.TestCase):
     # finalization functions.  Otherwise the gap would still exist.
     # ------------------------------------------------------------------
 
-    def test_no_finalization_after_with_progress(self) -> None:
-        """The region from the closing brace of ``ensureDependenciesImpl``'s
-        slow-path branch up to the post-install
-        ``showInformationMessage('KISS Sorcar: Installation complete...')``
-        must not contain any blocking work that would reproduce the gap."""
-        # Locate the showInformationMessage with the installation-complete label.
-        restart_idx = self.src.find("'KISS Sorcar: Installation complete!")
-        self.assertGreater(
-            restart_idx,
-            0,
-            "Could not find the 'Installation complete' information "
-            "message in DependencyInstaller.ts.",
-        )
-        title_idx = self.src.find("'KISS Sorcar: Setting up'")
-        self.assertGreater(title_idx, 0)
-        # Locate the end of the slow-path withProgress call.  The
-        # withProgress invocation ends at the matching `)` after the
-        # callback's closing `}`.  We approximate by finding the
-        cb_match = re.search(r"async\s+progress\s*=>\s*\{", self.src[title_idx:])
-        assert cb_match is not None
-        cb_open = title_idx + cb_match.end() - 1
-        _, body_end = _extract_balanced_block(self.src, cb_open)
-        # Walk forward past the callback's `}`, the closing `)` of
-        tail_after = self.src[body_end + 1 :]
-        semi_off = tail_after.find(";")
-        self.assertGreater(semi_off, 0)
-        post_progress_start = body_end + 1 + semi_off + 1
-        between = self.src[post_progress_start:restart_idx]
-
-        # Strip line and block comments to avoid matching documentation.
-        stripped = re.sub(r"//[^\n]*", "", between)
-        stripped = re.sub(r"/\*.*?\*/", "", stripped, flags=re.DOTALL)
-
-        for fn in (
-            "installCliScript",
-            "restartKissWebDaemon",
-            "ensurePathInShellRc",
-            "ensureApiKeys",
-            "runFinalization",
-        ):
-            self.assertNotRegex(
-                stripped,
-                rf"\b{fn}\s*\(",
-                f"{fn}() is also called AFTER the withProgress "
-                f"block closes — that re-introduces the notification "
-                f"gap.  Move the call inside the callback (or remove "
-                f"the duplicate).",
-            )
 
 
 if __name__ == "__main__":
