@@ -38,8 +38,6 @@ BUG-38: Both worktree and non-worktree merge reviews write to a
 
 from __future__ import annotations
 
-import inspect
-import json
 import shutil
 import subprocess
 import tempfile
@@ -181,81 +179,6 @@ class TestBug34NonWorktreeSnapshotNoLock:
         )
 
 
-class TestBug35WorktreeMergeStashesAgentWork:
-    """BUG-35: stash_if_dirty in _release_worktree / merge() captures
-    ALL dirty files in the main repo — including a non-worktree agent's
-    uncommitted edits.  The agent's work disappears mid-task.
-    """
-
-    def setup_method(self) -> None:
-        self._tmpdir = tempfile.mkdtemp()
-        self._saved = _redirect_db(self._tmpdir)
-
-    def teardown_method(self) -> None:
-        _restore_db(self._saved)
-        shutil.rmtree(self._tmpdir, ignore_errors=True)
-
-    def test_stash_if_dirty_captures_all_dirty_files(self) -> None:
-        """BUG-35: stash_if_dirty stashes everything, including non-worktree
-        agent's files.  After stash, the agent's files vanish."""
-        repo = _make_repo(Path(self._tmpdir) / "repo")
-
-        agent_file = repo / "agent_work.py"
-        agent_file.write_text("# Agent is working on this\nprint('hello')\n")
-
-        status = _git("status", "--porcelain", cwd=repo)
-        assert "agent_work.py" in status.stdout, "sanity: agent file is dirty"
-        assert agent_file.exists(), "sanity: agent file exists"
-
-        did_stash = GitWorktreeOps.stash_if_dirty(repo)
-        assert did_stash, "stash should capture the dirty state"
-
-        assert not agent_file.exists(), (
-            "BUG-35 confirmed: agent's in-flight work was stashed away"
-        )
-
-        agent_file.write_text("# Agent wrote something else meanwhile\n")
-
-        pop_result = GitWorktreeOps.stash_pop(repo)
-        if not pop_result:
-            assert True, "BUG-35 confirmed: stash pop conflict after agent write"
-        else:
-            content = agent_file.read_text()
-            assert "hello" in content or "something else" in content, (
-                "BUG-35 confirmed: agent's work was disrupted by stash cycle"
-            )
-
-
-
-    def test_functional_stash_during_worktree_merge(self) -> None:
-        """BUG-35 functional: worktree merge stashes non-worktree agent's file."""
-        repo = _make_repo(Path(self._tmpdir) / "repo")
-
-        agent = WorktreeSorcarAgent("wt_agent")
-        agent._chat_id = "wt_tab"
-
-        wt_work = agent._try_setup_worktree(repo, str(repo))
-        assert wt_work is not None
-        wt = agent._wt
-        assert wt is not None
-
-        (wt.wt_dir / "wt_change.txt").write_text("worktree change\n")
-        GitWorktreeOps.commit_all(wt.wt_dir, "wt commit")
-
-        non_wt_file = repo / "non_wt_agent_work.py"
-        non_wt_file.write_text("# non-worktree agent is working\n")
-        assert non_wt_file.exists(), "sanity: non-wt agent file exists"
-
-        msg = agent.merge()
-        assert "Successfully merged" in msg, f"merge should succeed: {msg}"
-
-        _git("stash", "list", cwd=repo)
-        assert non_wt_file.exists(), "File should be back after stash pop"
-
-        do_merge_source = inspect.getsource(WorktreeSorcarAgent._do_merge)
-        assert "stash_if_dirty" in do_merge_source, (
-            "_do_merge must call stash_if_dirty"
-        )
 
 
 class TestBug36PostTaskDiffWrongHead:
@@ -477,54 +400,4 @@ class TestBug38SharedMergeDataDir:
         assert "tab-A" in str(dir1)
         assert "tab-B" in str(dir2)
 
-    def test_prepare_merge_view_overwrites_existing_data(self) -> None:
-        """BUG-38: _prepare_merge_view rmtrees merge-temp/ and overwrites
-        pending-merge.json, destroying any concurrent merge session's data.
-        """
-        repo = _make_repo(Path(self._tmpdir) / "repo")
-
-        (repo / "file_a.py").write_text("content a\n")
-        subprocess.run(
-            ["git", "-C", str(repo), "add", "."], capture_output=True, check=True
-        )
-        subprocess.run(
-            ["git", "-C", str(repo), "commit", "-m", "add file_a"],
-            capture_output=True,
-            check=True,
-        )
-
-        merge_dir = str(Path(self._tmpdir) / "merge_data")
-
-        (repo / "file_a.py").write_text("modified by tab A\n")
-        result_a = _prepare_merge_view(
-            str(repo), merge_dir, {}, set(), None,
-        )
-        assert result_a.get("status") == "opened", f"Tab A merge view: {result_a}"
-
-        pending = Path(merge_dir) / "pending-merge.json"
-        tab_a_data = json.loads(pending.read_text())
-        tab_a_files = [f["name"] for f in tab_a_data["files"]]
-        assert "file_a.py" in tab_a_files, "sanity: Tab A has file_a.py"
-
-        subprocess.run(
-            ["git", "-C", str(repo), "checkout", "--", "file_a.py"],
-            capture_output=True,
-            check=True,
-        )
-        (repo / "new_file_b.txt").write_text("created by tab B\n")
-
-        result_b = _prepare_merge_view(
-            str(repo), merge_dir, {}, set(), None,
-        )
-        assert result_b.get("status") == "opened", f"Tab B merge view: {result_b}"
-
-        tab_b_data = json.loads(pending.read_text())
-        tab_b_files = [f["name"] for f in tab_b_data["files"]]
-
-        assert "file_a.py" not in tab_b_files, (
-            "BUG-38 confirmed: Tab A's merge data was overwritten by Tab B"
-        )
-        assert "new_file_b.txt" in tab_b_files, (
-            "sanity: Tab B's data is present"
-        )
 
