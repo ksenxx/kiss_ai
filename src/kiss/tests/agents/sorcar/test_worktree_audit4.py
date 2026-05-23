@@ -296,7 +296,18 @@ class TestBug15ConcurrentReleaseUsesLocking:
             "repo_lock must return different locks for different repos"
         )
 
-        assert isinstance(lock1, type(threading.Lock()))
+        # ``repo_lock`` returns a re-entrant ``threading.RLock``
+        # (RACE-2 fix: same thread can re-acquire across
+        # ``_try_setup_worktree`` → ``_release_worktree`` →
+        # ``_do_merge`` without deadlock).
+        assert lock1.acquire(blocking=False)
+        try:
+            assert lock1.acquire(blocking=False), (
+                "repo_lock must be re-entrant (RLock)"
+            )
+            lock1.release()
+        finally:
+            lock1.release()
 
     def test_concurrent_releases_are_serialized(self) -> None:
         """FIX: Two concurrent _release_worktree calls are serialized
