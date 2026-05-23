@@ -5,8 +5,7 @@ events to a dedicated subagent tab. These tests verify:
 - openSubagentTab events are broadcast for each sub-task
 - Streaming events carry the subagent tab_id
 - subagentDone events are broadcast when sub-tasks complete
-- The frontend JS correctly handles subagent tabs (no input area,
-  not counted toward MAX_TABS)
+- The frontend JS correctly handles subagent tabs (no input area)
 - TypeScript types include the new message types
 
 Uses real LLM calls with claude-haiku-4-5 and tight budgets.
