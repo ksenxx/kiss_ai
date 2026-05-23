@@ -3236,6 +3236,37 @@
           if (bgTab) processOutputEventForBgTab(ev, bgTab);
           break;
         }
+        // Defensive guard: a misrouted result / usage_info event
+        // whose ``taskId`` does not match the active tab's
+        // ``currentTaskId`` would otherwise stamp a sub-agent's
+        // Result panel (tokens, cost, summary) onto the parent
+        // tab's DOM after the parent's own Result + SUGGESTED NEXT.
+        // The wire-level path is supposed to fan such events out
+        // ONLY to the sub-agent's subscriber tab, but any future
+        // regression (or any third path that broadcasts without
+        // tabId stamping) would surface as duplicate Result panels
+        // in the parent.  Drop the event here so the symptom never
+        // reaches the user.
+        if (ev.taskId && (ev.type === 'result' || ev.type === 'usage_info')) {
+          const activeTab = tabs.find(t => t.id === activeTabId);
+          if (
+            activeTab &&
+            activeTab.currentTaskId !== undefined &&
+            activeTab.currentTaskId !== null &&
+            String(activeTab.currentTaskId) !== String(ev.taskId)
+          ) {
+            // eslint-disable-next-line no-console
+            console.warn(
+              'Dropping mis-routed',
+              ev.type,
+              'event for task',
+              ev.taskId,
+              'in active tab whose currentTaskId is',
+              activeTab.currentTaskId,
+            );
+            break;
+          }
+        }
         processOutputEvent(ev);
         if (isActiveTabRunning()) showSpinner();
         sb();
