@@ -720,6 +720,13 @@ class _MergeFlowMixin:
         Checks both the tab's own task and any non-worktree task running
         on the main tree (BUG-35, BUG-72 fixes).
 
+        Must be called with ``_state_lock`` already held (RACE-1 fix)
+        so the caller can atomically set ``tab.is_merging = True``
+        before releasing the lock — otherwise a non-wt task on
+        another tab could pass its own ``is_merging`` guard in the
+        TOCTOU window between this check returning ``None`` and the
+        caller acquiring ``_state_lock`` again to set the flag.
+
         Args:
             tab: The per-tab state to check.
             verb: Human-readable action name (e.g. ``"merging"``).
@@ -727,26 +734,31 @@ class _MergeFlowMixin:
         Returns:
             Error dict with ``success: False`` when busy, otherwise ``None``.
         """
-        with self._state_lock:
-            if tab.is_task_active:
-                return {
-                    "success": False,
-                    "message": (
-                        f"A worktree task is still running on this tab. "
-                        f"Wait for it to finish (or stop it) before {verb}."
-                    ),
-                }
-            if self._any_non_wt_running():
-                return {
-                    "success": False,
-                    "message": (
-                        "Another tab is running a task on the main working "
-                        f"tree. Wait for it to finish before {verb}."
-                    ),
-                }
+        if tab.is_task_active:
+            return {
+                "success": False,
+                "message": (
+                    f"A worktree task is still running on this tab. "
+                    f"Wait for it to finish (or stop it) before {verb}."
+                ),
+            }
+        if self._any_non_wt_running():
+            return {
+                "success": False,
+                "message": (
+                    "Another tab is running a task on the main working "
+                    f"tree. Wait for it to finish before {verb}."
+                ),
+            }
         return None
 
-    def _handle_worktree_action(self, action: str, tab_id: str = "") -> dict[str, Any]:
+    def _handle_worktree_action(
+        self,
+        action: str,
+        tab_id: str = "",
+        *,
+        internal: bool = False,
+    ) -> dict[str, Any]:
         """Execute a worktree merge/discard/manual action.
 
         Restores agent worktree state from git if needed (e.g. after a
@@ -755,6 +767,12 @@ class _MergeFlowMixin:
         Args:
             action: One of ``"merge"`` or ``"discard"``.
             tab_id: The tab whose worktree to act on.
+            internal: When True, bypass the ``_check_worktree_busy``
+                guard.  Used by ``_run_task_inner``'s post-task
+                auto-merge / auto-discard block (RACE-3 fix), which
+                runs on the same task thread that owns
+                ``tab.is_task_active = True`` and therefore would
+                otherwise be refused by its own guard.
 
         Returns:
             Dict with ``success`` bool and ``message`` string.
@@ -770,23 +788,47 @@ class _MergeFlowMixin:
             wt_agent = self._ensure_wt_agent(tab) or wt_agent
         wt = wt_agent
         if action == "merge":
-            busy = self._check_worktree_busy(tab, "merging")
-            if busy:
-                return busy
-            progress_event: dict[str, Any] = {
-                "type": "worktree_progress",
-                "message": "Generating commit message…",
-            }
-            if tab_id:
-                progress_event["tabId"] = tab_id
-            self.printer.broadcast(progress_event)
-            msg = wt.merge()
-            success = "Successfully merged" in msg
-            return {"success": success, "message": msg}
+            verb = "merging"
         elif action == "discard":
-            busy = self._check_worktree_busy(tab, "discarding")
-            if busy:
-                return busy
-            msg = wt.discard()
-            return {"success": True, "message": msg}
-        return {"success": False, "message": f"Unknown action: {action}"}
+            verb = "discarding"
+        else:
+            return {"success": False, "message": f"Unknown action: {action}"}
+        # RACE-1 / RACE-2 fix: atomically (a) verify nothing else is
+        # touching the main tree, (b) claim it for this tab by setting
+        # ``is_merging = True``.  Both happen under ``_state_lock`` so
+        # a concurrent non-wt task-start (whose guard is also under
+        # ``_state_lock``) sees the flag and refuses.  Holding
+        # ``repo_lock`` for the slow body additionally serializes
+        # with ``_try_setup_worktree``'s release phase and with any
+        # concurrent ``_handle_worktree_action`` invocation on a
+        # different tab pointed at the same repo.  ``is_merging`` is
+        # set BEFORE acquiring ``repo_lock`` so the flag is visible
+        # to non-wt task-start guards even when this thread is
+        # currently blocked on the lock.
+        repo_root = wt._repo_root
+        if repo_root is None:
+            return {"success": False, "message": "Not a git repository"}
+        with self._state_lock:
+            if not internal:
+                busy = self._check_worktree_busy(tab, verb)
+                if busy:
+                    return busy
+            tab.is_merging = True
+        try:
+            with repo_lock(repo_root):
+                if action == "merge":
+                    progress_event: dict[str, Any] = {
+                        "type": "worktree_progress",
+                        "message": "Generating commit message…",
+                    }
+                    if tab_id:
+                        progress_event["tabId"] = tab_id
+                    self.printer.broadcast(progress_event)
+                    msg = wt.merge()
+                    success = "Successfully merged" in msg
+                    return {"success": success, "message": msg}
+                msg = wt.discard()
+                return {"success": True, "message": msg}
+        finally:
+            with self._state_lock:
+                tab.is_merging = False
