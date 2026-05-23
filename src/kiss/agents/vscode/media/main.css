@@ -1432,7 +1432,8 @@ body.remote-chat #welcome > #input-area {
   50% { opacity: 0.4; box-shadow: 0 0 6px 2px rgb(46 125 50 / 50%); }
 }
 
-.sidebar-item-delete {
+.sidebar-item-delete,
+.sidebar-item-copy {
   flex-shrink: 0; border: none; cursor: pointer; padding: 2px 0; margin-left: 2px;
   border-radius: 3px; line-height: 1; display: flex; align-items: center;
   color: #000; opacity: 0.45;
@@ -1440,7 +1441,10 @@ body.remote-chat #welcome > #input-area {
   transition: opacity 0.15s, background 0.15s;
 }
 
-.sidebar-item-delete:hover { opacity: 0.9; background: color-mix(in srgb, #000 10%, transparent); }
+.sidebar-item-delete:hover,
+.sidebar-item-copy:hover { opacity: 0.9; background: color-mix(in srgb, #000 10%, transparent); }
+
+.sidebar-item-copy.copied { opacity: 0.9; color: #006400; }
 
 .sidebar-item-confirm {
   display: flex; align-items: center; gap: 4px; flex-shrink: 0; margin-left: 6px;
