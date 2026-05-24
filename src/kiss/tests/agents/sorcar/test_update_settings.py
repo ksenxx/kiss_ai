@@ -229,11 +229,8 @@ class TestWorkingDirectory:
         assert agent.work_dir == resolved
         assert target.exists()
 
-        # ``work_dir`` is not in ``DEFAULTS``, so ``save_config`` drops it
-        # from the persisted file.  Only the in-memory agent state and
-        # broadcast event are observable.
         cfg = json.loads(vscode_config.CONFIG_PATH.read_text())
-        assert "work_dir" not in cfg
+        assert cfg["work_dir"] == resolved
 
         evts = _setting_events(printer)
         assert len(evts) == 1
@@ -314,9 +311,8 @@ class TestDemoMode:
         assert evts[0]["key"] == "demo_mode"
         assert evts[0]["value"] is True
 
-        # demo_mode is not in DEFAULTS, so save_config silently drops it
-        assert not vscode_config.CONFIG_PATH.exists() or \
-            "demo_mode" not in json.loads(vscode_config.CONFIG_PATH.read_text())
+        cfg = json.loads(vscode_config.CONFIG_PATH.read_text())
+        assert cfg["demo_mode"] is True
 
 
 class TestAutoCommit:
@@ -570,12 +566,11 @@ class TestWorktreeSorcarAgentNoPrinter:
         assert "custom_endpoint=http://localhost:11434/v1" in result
         assert "custom_headers=<updated>" in result
 
-        # Config file should contain persisted values (only DEFAULTS keys)
-        # ``is_worktree`` and ``work_dir`` are NOT in DEFAULTS, so
-        # ``save_config`` drops them.
         cfg = json.loads(vscode_config.CONFIG_PATH.read_text())
         assert cfg["max_budget"] == 5.0
-        assert "work_dir" not in cfg
+        assert cfg["work_dir"] == str(wd.resolve())
+        assert cfg["is_worktree"] is True
+        assert cfg["is_parallel"] is True
         assert cfg["use_web_browser"] is False
         assert cfg["custom_endpoint"] == "http://localhost:11434/v1"
         assert cfg["custom_headers"] == "X-Slack:true"
@@ -812,6 +807,92 @@ class TestApiKeysCannotBeUpdated:
                     f"API key '{forbidden}' should not be documented as a"
                     " supported update_settings parameter."
                 )
+
+
+class TestSettingsPersistAcrossTasks:
+    """Settings changed via update_settings must survive into the next task.
+
+    Regression test: ``save_config`` previously dropped keys that were
+    missing from ``DEFAULTS`` (e.g. ``is_worktree``, ``demo_mode``,
+    ``work_dir``, ``is_parallel``), so those settings silently reverted
+    to their defaults on the next ``load_config()`` call.
+    """
+
+    def test_is_parallel_persists(self) -> None:
+        """is_parallel must be saved to config and reloaded."""
+        _agent, _printer, tools = _make_agent_and_printer()
+        update = _find_tool(tools, "update_settings")
+        update(is_parallel=True)
+
+        cfg = vscode_config.load_config()
+        assert cfg.get("is_parallel") is True
+
+    def test_is_worktree_persists(self) -> None:
+        """is_worktree must be saved to config and reloaded."""
+        _agent, _printer, tools = _make_agent_and_printer()
+        update = _find_tool(tools, "update_settings")
+        update(is_worktree=True)
+
+        cfg = vscode_config.load_config()
+        assert cfg.get("is_worktree") is True
+
+    def test_demo_mode_persists(self) -> None:
+        """demo_mode must be saved to config and reloaded."""
+        _agent, _printer, tools = _make_agent_and_printer()
+        update = _find_tool(tools, "update_settings")
+        update(demo_mode=True)
+
+        cfg = vscode_config.load_config()
+        assert cfg.get("demo_mode") is True
+
+    def test_working_directory_persists(self, tmp_path: Path) -> None:
+        """working_directory must be saved to config and reloaded."""
+        _agent, _printer, tools = _make_agent_and_printer()
+        update = _find_tool(tools, "update_settings")
+        target = tmp_path / "persist_wd"
+        update(working_directory=str(target))
+
+        cfg = vscode_config.load_config()
+        assert cfg.get("work_dir") == str(target.resolve())
+
+    def test_model_name_persists(self) -> None:
+        """model_name must be persisted via _save_last_model."""
+        from kiss.agents.sorcar.persistence import _load_last_model
+
+        _agent, _printer, tools = _make_agent_and_printer()
+        update = _find_tool(tools, "update_settings")
+        update(model_name="gemini-2.5-pro")
+
+        assert _load_last_model() == "gemini-2.5-pro"
+
+    def test_all_settings_survive_roundtrip(self, tmp_path: Path) -> None:
+        """Every config-persisted setting survives save → load."""
+        _agent, _printer, tools = _make_agent_and_printer()
+        update = _find_tool(tools, "update_settings")
+
+        wd = tmp_path / "roundtrip_wd"
+        update(
+            is_parallel=True,
+            is_worktree=True,
+            max_budget=42.0,
+            working_directory=str(wd),
+            use_web_browser=False,
+            demo_mode=True,
+            remote_password="secret",
+            custom_endpoint="http://localhost:8080/v1",
+            custom_headers="X-Test:val",
+        )
+
+        cfg = vscode_config.load_config()
+        assert cfg["is_parallel"] is True
+        assert cfg["is_worktree"] is True
+        assert cfg["max_budget"] == 42.0
+        assert cfg["work_dir"] == str(wd.resolve())
+        assert cfg["use_web_browser"] is False
+        assert cfg["demo_mode"] is True
+        assert cfg["remote_password"] == "secret"
+        assert cfg["custom_endpoint"] == "http://localhost:8080/v1"
+        assert cfg["custom_headers"] == "X-Test:val"
 
 
 class TestConfigPersistenceIsolation:
