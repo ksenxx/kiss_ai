@@ -42,6 +42,13 @@ DEFAULTS: dict[str, Any] = {
     # one-shot ``auto_commit=True`` trigger used by the legacy icon
     # button).
     "auto_commit_mode": True,
+    # Settings below were previously missing from DEFAULTS, causing
+    # ``save_config`` to silently drop them.  Added so that
+    # ``update_settings`` changes persist across tasks.
+    "is_parallel": True,
+    "is_worktree": False,
+    "demo_mode": False,
+    "work_dir": "",
 }
 
 API_KEY_ENV_VARS: frozenset[str] = frozenset({
