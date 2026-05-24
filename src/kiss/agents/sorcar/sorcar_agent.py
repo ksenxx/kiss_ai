@@ -249,6 +249,7 @@ class SorcarAgent(RelentlessAgent):
             if is_parallel is not None:
                 self._is_parallel = bool(is_parallel)
                 updated.append(f"is_parallel={self._is_parallel}")
+                _save_setting_to_config("is_parallel", self._is_parallel)
                 if broadcast:
                     broadcast({
                         "type": "updateSetting",
@@ -269,6 +270,8 @@ class SorcarAgent(RelentlessAgent):
             if model_name is not None:
                 self.model_name = model_name
                 updated.append(f"model={model_name}")
+                from kiss.agents.sorcar.persistence import _save_last_model
+                _save_last_model(model_name)
                 if broadcast:
                     broadcast({
                         "type": "updateSetting",
