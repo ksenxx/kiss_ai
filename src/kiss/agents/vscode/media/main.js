@@ -3130,13 +3130,26 @@
         if (ev.parent_tab_id && !tabs.find(t => t.id === ev.parent_tab_id))
           break;
         if (ev.task_id === undefined || ev.task_id === null) break;
+        // Remember the parent tab id BEFORE createNewTab changes
+        // activeTabId, so we can switch back after wiring the
+        // sub-agent tab.
+        const parentTabBeforeNew = ev.parent_tab_id || '';
         const createdNewTab = createNewTab();
         if (createdNewTab) {
+          // Capture the sub-agent tab id before switching back.
+          const subAgentTabId = activeTabId;
           vscode.postMessage({
             type: 'resumeSession',
             taskId: ev.task_id,
-            tabId: activeTabId,
+            tabId: subAgentTabId,
           });
+          // Switch back to the parent (non-sub-agent) tab so the
+          // user stays focused on the main task.  Sub-agent tabs
+          // are still accessible via the tab bar if the user wants
+          // to inspect them.
+          if (parentTabBeforeNew) {
+            switchToTab(parentTabBeforeNew);
+          }
         }
         break;
       }
