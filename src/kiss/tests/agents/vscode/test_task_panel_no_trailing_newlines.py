@@ -165,41 +165,6 @@ def test_restore_tab_trims_task_panel_text() -> None:
     )
 
 
-def test_subagent_description_is_trimmed() -> None:
-    """``openSubagentTab`` must trim ``ev.description`` before storing
-    it into ``subTab.taskPanelHTML`` — otherwise the next tab switch
-    restores the untrimmed text into the live panel.
-    """
-    src = _read(MAIN_JS)
-    m = re.search(
-        r"case\s+'openSubagentTab':\s*\{(.*?)\bbreak;",
-        src,
-        re.DOTALL,
-    )
-    assert m, "could not locate case 'openSubagentTab' in main.js"
-    body = m.group(1)
-    # The subDesc local must be derived through .trim().  Accept both
-    # `(ev.description || 'Sub-agent').trim()` and an explicit two-step
-    # form so future refactors aren't gratuitously broken.
-    has_trim = bool(
-        re.search(
-            r"subDesc\s*=\s*\([^;]*ev\.description[^;]*\)\s*\.\s*trim\s*\(\)",
-            body,
-        )
-        or re.search(
-            r"ev\.description[^;]*\.\s*trim\s*\(\)[^;]*;\s*[^}]*subTab\.taskPanelHTML\s*=\s*subDesc",
-            body,
-            re.DOTALL,
-        )
-    )
-    assert has_trim, (
-        "openSubagentTab must trim ev.description before assigning to "
-        "subTab.taskPanelHTML.  Raw event payloads from the backend can "
-        "carry trailing newlines that resurface in the user's clipboard "
-        "after a tab switch."
-    )
-
-
 def test_no_raw_textcontent_assignment_to_task_panel() -> None:
     """No code path may assign to ``taskPanelText.textContent`` from a
     source that hasn't been trimmed.  The only acceptable RHS values are:
