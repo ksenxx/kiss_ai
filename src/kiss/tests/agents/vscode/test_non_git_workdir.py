@@ -130,12 +130,6 @@ class TestNonGitCommandsDoNotCrash(_NonGitHarness):
         self.server._handle_command({"type": "closeTab", "tabId": "t-close"})
         assert "t-close" not in self.server._running_agent_states
 
-    def test_set_skip_merge(self) -> None:
-        self.server._handle_command(
-            {"type": "setSkipMerge", "tabId": "t-skip", "skip": True},
-        )
-        assert self.server._get_tab("t-skip").skip_merge is True
-
     def test_user_answer_no_queue(self) -> None:
         self.server._handle_command(
             {"type": "userAnswer", "tabId": "t-noq", "answer": "hi"},

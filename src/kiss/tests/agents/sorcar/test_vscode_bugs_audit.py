@@ -3,8 +3,8 @@
 
 Bugs
 ----
-B1: ``_cmd_run`` now broadcasts ``status: running: True`` (not False)
-    when a task is already running.
+B1: ``_cmd_run`` silently drops a duplicate ``run`` while a task is
+    already running — no error, no status broadcast.
 B2: ``_close_tab`` now also checks ``task_thread.is_alive()`` and
     refuses to remove a tab with a live thread.
 B3: ``_hunk_to_dict`` now treats ``bs`` and ``cs`` symmetrically:
@@ -44,16 +44,17 @@ def _make_server() -> tuple[VSCodeServer, list[dict]]:
     return server, events
 
 
-class TestCmdRunSpuriousStatusFalse(unittest.TestCase):
-    """B1 fix: When a second ``run`` command is sent while a task is
-    already running, ``_cmd_run`` now broadcasts ``running: True``
-    so the frontend correctly reflects the alive task.
+class TestCmdRunDuplicateSilentDrop(unittest.TestCase):
+    """When a second ``run`` command is sent while a task is already
+    running, ``_cmd_run`` silently drops it: no error, no status
+    broadcast, no new thread.  Adding a task while one is running
+    must do nothing.
     """
 
     def setUp(self) -> None:
         self.server, self.events = _make_server()
 
-    def test_duplicate_run_broadcasts_running_true_while_task_is_alive(self) -> None:
+    def test_duplicate_run_emits_no_events_while_task_is_alive(self) -> None:
         tab = self.server._get_tab("t1")
         tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         blocker = threading.Event()
@@ -61,18 +62,14 @@ class TestCmdRunSpuriousStatusFalse(unittest.TestCase):
         thread.start()
         tab.task_thread = thread
 
+        events_before = len(self.events)
         self.server._handle_command({"type": "run", "tabId": "t1", "prompt": "x"})
 
         assert thread.is_alive()
-
-        status_events = [
-            e for e in self.events
-            if e.get("type") == "status" and e.get("tabId") == "t1"
-        ]
-        assert len(status_events) == 1
-        assert status_events[0]["running"] is True, (
-            "B1 fix: status should say running=True while task is alive"
-        )
+        # The duplicate run must produce zero broadcasts.
+        assert len(self.events) == events_before
+        # And task_thread is still the original blocker thread (no new run).
+        assert tab.task_thread is thread
 
         blocker.set()
         thread.join(timeout=2)
@@ -183,15 +180,15 @@ class TestFinishMergeRedundantLookup(unittest.TestCase):
 
 
 
-class TestCmdRunAlreadyRunningErrorContent(unittest.TestCase):
-    """When a duplicate run arrives, the error and status events carry
-    the correct tabId and the status says running=True (B1 fix).
+class TestCmdRunDuplicateSilentDropNoErrorBroadcast(unittest.TestCase):
+    """A duplicate ``run`` while a task is alive emits zero broadcasts —
+    no error, no status, nothing on any tab id.
     """
 
     def setUp(self) -> None:
         self.server, self.events = _make_server()
 
-    def test_error_and_status_both_carry_tab_id(self) -> None:
+    def test_no_error_or_status_for_alive_task(self) -> None:
         tab = self.server._get_tab("t1")
         tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         blocker = threading.Event()
@@ -199,22 +196,12 @@ class TestCmdRunAlreadyRunningErrorContent(unittest.TestCase):
         thread.start()
         tab.task_thread = thread
 
+        events_before = len(self.events)
         self.server._handle_command({"type": "run", "tabId": "t1", "prompt": "x"})
 
-        error_events = [
-            e for e in self.events
-            if e.get("type") == "error" and e.get("tabId") == "t1"
-        ]
-        status_events = [
-            e for e in self.events
-            if e.get("type") == "status" and e.get("tabId") == "t1"
-        ]
-        assert len(error_events) == 1, "Expected one error event"
-        assert "already running" in error_events[0]["text"].lower()
-        assert len(status_events) == 1, "Expected one status event"
-        assert status_events[0]["running"] is True, (
-            "B1 fix: status says running=True while task is alive"
-        )
+        new_events = self.events[events_before:]
+        assert not any(e.get("type") == "error" for e in new_events)
+        assert not any(e.get("type") == "status" for e in new_events)
 
         blocker.set()
         thread.join(timeout=2)

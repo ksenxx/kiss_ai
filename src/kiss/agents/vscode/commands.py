@@ -131,15 +131,9 @@ class _CommandsMixin:
                 tab = _RunningAgentState(tab_id, self._default_model)
                 _RunningAgentState.running_agent_states[tab_id] = tab
             if tab.task_thread is not None and tab.task_thread.is_alive():
-                self.printer.broadcast({
-                    "type": "error",
-                    "text": "Task already running",
-                    "tabId": tab_id,
-                })
-                self.printer.broadcast({"type": "status", "running": True, "tabId": tab_id})
+                # A task is already running for this tab — silently drop
+                # the new submit so the user sees no visible effect.
                 return
-            if "skipMerge" in cmd:
-                tab.skip_merge = bool(cmd["skipMerge"])
             tab.stop_event = threading.Event()
             tab.user_answer_queue = queue.Queue(maxsize=1)
             # Establish the canonical chat id for this run.  When
@@ -448,19 +442,6 @@ class _CommandsMixin:
             self._last_active_file = ""
             self._last_active_content = ""
 
-    def _cmd_set_skip_merge(self, cmd: dict[str, Any]) -> None:
-        """Set the skip_merge flag on a tab.
-
-        When skip_merge is True, the task completion flow will skip the
-        merge review and autocommit prompt.  Used by the frontend to
-        defer merge/diff until all queued tasks have finished.
-        """
-        tab_id = cmd.get("tabId", "")
-        skip = bool(cmd.get("skip", False))
-        tab = self._get_tab(tab_id)
-        with self._state_lock:
-            tab.skip_merge = skip
-
     _HANDLERS: dict[str, Any] = {
         "run": _cmd_run,
         "stop": _cmd_stop,
@@ -483,7 +464,6 @@ class _CommandsMixin:
         "generateCommitMessage": _cmd_generate_commit_message,
         "worktreeAction": _cmd_worktree_action,
         "autocommitAction": _cmd_autocommit_action,
-        "setSkipMerge": _cmd_set_skip_merge,
         "setWorkDir": _cmd_set_work_dir,
         "getConfig": _cmd_get_config,
         "saveConfig": _cmd_save_config,
