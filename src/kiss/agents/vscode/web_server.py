@@ -2771,8 +2771,6 @@ class RemoteAccessServer:
             "useWorktree": cmd.get("useWorktree", False),
             "useParallel": cmd.get("useParallel", False),
         }
-        if "skipMerge" in cmd:
-            run_cmd["skipMerge"] = cmd["skipMerge"]
         await self._run_cmd(run_cmd)
 
     def _register_merge_state(

@@ -292,24 +292,18 @@ class _TaskRunnerMixin:
                         })
                         return
                     tab.is_running_non_wt = True
-                    deferred = tab.deferred_snapshot
             finally:
                 if guard_lock is not None:
                     guard_lock.release()
-            if deferred is not None:
+            try:
+                repo = GitWorktreeOps.discover_repo(Path(work_dir))
                 pre_head_sha, pre_hunks, pre_untracked, pre_file_hashes = (
-                    deferred
+                    self._capture_pre_snapshot(work_dir, repo, tab_id)
                 )
-            else:
-                try:
-                    repo = GitWorktreeOps.discover_repo(Path(work_dir))
-                    pre_head_sha, pre_hunks, pre_untracked, pre_file_hashes = (
-                        self._capture_pre_snapshot(work_dir, repo, tab_id)
-                    )
-                except BaseException:
-                    with self._state_lock:
-                        tab.is_running_non_wt = False
-                    raise
+            except BaseException:
+                with self._state_lock:
+                    tab.is_running_non_wt = False
+                raise
 
         if use_worktree and tab.agent._wt_pending:
             with self._state_lock:
@@ -520,27 +514,15 @@ class _TaskRunnerMixin:
                 # :meth:`BaseBrowserPrinter.cleanup_task`.
                 if not use_worktree:
                     try:
-                        if tab.skip_merge:
-                            with self._state_lock:
-                                tab.deferred_snapshot = (
-                                    pre_head_sha,
-                                    pre_hunks,
-                                    pre_untracked,
-                                    pre_file_hashes,
-                                )
-                        elif effective_auto_commit:
+                        if effective_auto_commit:
                             # "Auto commit" toggle is ON — skip the
                             # interactive merge/diff workflow entirely
                             # and commit the agent's pending changes
                             # directly.  Mirrors the user clicking
                             # "Auto commit" on the autocommit prompt
                             # without ever opening the merge view.
-                            with self._state_lock:
-                                tab.deferred_snapshot = None
                             self._handle_autocommit_action("commit", tab_id)
                         else:
-                            with self._state_lock:
-                                tab.deferred_snapshot = None
                             merge_started = self._prepare_and_start_merge(
                                 work_dir, pre_hunks, pre_untracked, pre_file_hashes,
                                 base_ref=pre_head_sha or "HEAD",
@@ -582,7 +564,7 @@ class _TaskRunnerMixin:
                 )
                 self.printer.broadcast({"type": "tasks_updated"})
                 self.printer.reset()
-                if use_worktree and tab.agent._wt_pending and not tab.skip_merge:
+                if use_worktree and tab.agent._wt_pending:
                     try:
                         if effective_auto_commit:
                             # "Auto commit" toggle is ON in worktree
