@@ -708,25 +708,6 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                 received_types.add(ev["type"])
             self.assertIn("configData", received_types)
 
-    async def test_ws_set_skip_merge(self) -> None:
-        """setSkipMerge command does not produce an error."""
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
-            await ws.send(json.dumps({"type": "auth", "password": ""}))
-            await asyncio.wait_for(ws.recv(), timeout=5)
-
-            await ws.send(
-                json.dumps(
-                    {
-                        "type": "setSkipMerge",
-                        "tabId": "skip-tab",
-                        "skip": True,
-                    }
-                )
-            )
-            await ws.send(json.dumps({"type": "getModels"}))
-            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
-            self.assertEqual(resp["type"], "models")
-
     async def test_ws_stop_no_error(self) -> None:
         """stop command with no running task does not produce an error."""
         async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
@@ -950,7 +931,6 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                 {"type": "generateCommitMessage"},
                 {"type": "worktreeAction", "action": "discard", "tabId": "t"},
                 {"type": "autocommitAction", "action": "skip", "tabId": "t"},
-                {"type": "setSkipMerge", "tabId": "t", "skip": False},
                 {"type": "saveConfig", "config": {}, "apiKeys": {}},
                 {"type": "openFile", "path": "/tmp/x"},
                 {"type": "focusEditor"},
@@ -3085,62 +3065,6 @@ class TestHandleReadyRestoredTabs(IsolatedAsyncioTestCase):
                     break
             types = [e.get("type") for e in events]
             self.assertIn("models", types)
-
-
-class TestSubmitWithSkipMerge(IsolatedAsyncioTestCase):
-    """Test submit command with skipMerge field."""
-
-    async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
-        self._orig_config = None
-        if CONFIG_PATH.exists():
-            self._orig_config = CONFIG_PATH.read_text()
-        save_config({"remote_password": ""})
-
-        self.server = RemoteAccessServer(
-            host="127.0.0.1",
-            port=self.port,
-            work_dir=tempfile.mkdtemp(),
-        )
-        await self.server.start_async()
-
-    async def asyncTearDown(self) -> None:
-        await self.server.stop_async()
-        if self._orig_config is not None:
-            CONFIG_PATH.write_text(self._orig_config)
-        elif CONFIG_PATH.exists():
-            CONFIG_PATH.unlink()
-
-    async def test_submit_with_skip_merge(self) -> None:
-        """submit with skipMerge includes it in the translated run command."""
-        async with connect(
-            f"wss://127.0.0.1:{self.port}/ws",
-            ssl=_no_verify_ssl(),
-        ) as ws:
-            await ws.send(json.dumps({"type": "auth", "password": ""}))
-            await asyncio.wait_for(ws.recv(), timeout=5)
-
-            await ws.send(
-                json.dumps(
-                    {
-                        "type": "submit",
-                        "prompt": "test task",
-                        "model": "gemini-2.5-flash",
-                        "tabId": "t1",
-                        "skipMerge": True,
-                    }
-                )
-            )
-            events: list[dict] = []
-            for _ in range(10):
-                try:
-                    raw = await asyncio.wait_for(ws.recv(), timeout=3)
-                    events.append(json.loads(raw))
-                except TimeoutError:
-                    break
-            types = [e.get("type") for e in events]
-            self.assertIn("setTaskText", types)
-            self.assertIn("status", types)
 
 
 class TestSendWelcomeInfoFallbacks(IsolatedAsyncioTestCase):
