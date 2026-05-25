@@ -111,8 +111,15 @@
   // Adjacent task scroll state (Cursor-style chat thread navigation)
   // Tab.id is a frontend-only UUID string; chat_id is an int assigned by the DB.
   let currentTaskName = ''; // the originally loaded task
-  let oldestLoadedTask = ''; // topmost task in the view (for scrolling up)
-  let newestLoadedTask = ''; // bottommost task in the view (for scrolling down)
+  // DB row ids identifying the topmost / bottommost tasks currently
+  // rendered in #output.  These are the values sent over the wire to
+  // the backend's getAdjacentTask handler — using the row id (rather
+  // than the task description string) ensures that duplicate task
+  // texts within a chat are navigated unambiguously.  ``null`` means
+  // "no id known yet" (e.g. fresh tab before any task ran).
+  let currentTaskId = null; // task_id of the originally loaded task
+  let oldestLoadedTaskId = null; // task_id of the topmost loaded task
+  let newestLoadedTaskId = null; // task_id of the bottommost loaded task
   let adjacentLoading = false;
   let noPrevTask = false; // true when server says no prev exists
   let noNextTask = false; // true when server says no next exists
@@ -293,6 +300,7 @@
       else taskPanel.classList.remove('visible');
     }
     currentTaskName = (tab.taskPanelHTML || '').trim();
+    currentTaskId = tab.currentTaskId !== undefined ? tab.currentTaskId : null;
     updateChevronIcon(!!tab.panelsExpandedMap[currentTaskName]);
     if (statusText) {
       statusText.textContent = tab.statusTextContent || 'Ready';
@@ -1039,8 +1047,8 @@
 
   function resetAdjacentState() {
     adjacentLoading = false;
-    oldestLoadedTask = currentTaskName;
-    newestLoadedTask = currentTaskName;
+    oldestLoadedTaskId = currentTaskId;
+    newestLoadedTaskId = currentTaskId;
     noPrevTask = false;
     noNextTask = false;
     overscrollAccum = 0;
@@ -1112,10 +1120,12 @@
       O.insertBefore(container, O.firstChild);
       const newScrollHeight = O.scrollHeight;
       O.scrollTop += newScrollHeight - prevScrollHeight;
-      oldestLoadedTask = task;
+      if (taskId !== undefined && taskId !== null && taskId !== '')
+        oldestLoadedTaskId = taskId;
     } else {
       O.appendChild(container);
-      newestLoadedTask = task;
+      if (taskId !== undefined && taskId !== null && taskId !== '')
+        newestLoadedTaskId = taskId;
     }
     const tab = tabs.find(x => {
       return x.id === activeTabId;
@@ -2153,7 +2163,7 @@
       const atTop = O.scrollTop <= 0;
       const atBottom = O.scrollTop + O.clientHeight >= O.scrollHeight - 2;
 
-      if (atTop && e.deltaY < 0 && !noPrevTask && oldestLoadedTask) {
+      if (atTop && e.deltaY < 0 && !noPrevTask && oldestLoadedTaskId != null) {
         // Scrolling up at top — load task before the oldest loaded
         if (overscrollDir !== 'prev') {
           overscrollAccum = 0;
@@ -2173,11 +2183,16 @@
           vscode.postMessage({
             type: 'getAdjacentTask',
             tabId: activeTabId,
-            task: oldestLoadedTask,
+            taskId: oldestLoadedTaskId,
             direction: 'prev',
           });
         }
-      } else if (atBottom && e.deltaY > 0 && !noNextTask && newestLoadedTask) {
+      } else if (
+        atBottom &&
+        e.deltaY > 0 &&
+        !noNextTask &&
+        newestLoadedTaskId != null
+      ) {
         // Scrolling down at bottom — load task after the newest loaded
         if (overscrollDir !== 'next') {
           overscrollAccum = 0;
@@ -2197,7 +2212,7 @@
           vscode.postMessage({
             type: 'getAdjacentTask',
             tabId: activeTabId,
-            task: newestLoadedTask,
+            taskId: newestLoadedTaskId,
             direction: 'next',
           });
         }
@@ -2243,7 +2258,12 @@
       const atTop = O.scrollTop <= 0;
       const atBottom = O.scrollTop + O.clientHeight >= O.scrollHeight - 2;
 
-      if (atTop && touchDelta < 0 && !noPrevTask && oldestLoadedTask) {
+      if (
+        atTop &&
+        touchDelta < 0 &&
+        !noPrevTask &&
+        oldestLoadedTaskId != null
+      ) {
         // Pulling down at top — load previous task
         if (overscrollDir !== 'prev') {
           overscrollAccum = 0;
@@ -2263,7 +2283,7 @@
           vscode.postMessage({
             type: 'getAdjacentTask',
             tabId: activeTabId,
-            task: oldestLoadedTask,
+            taskId: oldestLoadedTaskId,
             direction: 'prev',
           });
         }
@@ -2271,7 +2291,7 @@
         atBottom &&
         touchDelta > 0 &&
         !noNextTask &&
-        newestLoadedTask
+        newestLoadedTaskId != null
       ) {
         // Pushing up at bottom — load next task
         if (overscrollDir !== 'next') {
@@ -2292,7 +2312,7 @@
           vscode.postMessage({
             type: 'getAdjacentTask',
             tabId: activeTabId,
-            task: newestLoadedTask,
+            taskId: newestLoadedTaskId,
             direction: 'next',
           });
         }
@@ -2745,7 +2765,12 @@
         // Active tab: render directly into the DOM
         if (ev.task) {
           currentTaskName = ev.task;
-          resetAdjacentState(); // sets oldest/newest to currentTaskName
+          // Keep currentTaskId in sync with the active task whose
+          // events are reaching this tab so that adjacent scrolling
+          // queries the right DB row id.
+          if (ev.task_id !== undefined && ev.task_id !== null)
+            currentTaskId = ev.task_id;
+          resetAdjacentState(); // sets oldest/newest to current task
           setTaskText(ev.task);
           if (welcome) {
             welcome.style.display = 'none';
@@ -2800,6 +2825,11 @@
         if (ev.tabId === undefined || ev.tabId === activeTabId) {
           if (stt) {
             currentTaskName = stt;
+            // setTaskText fires before a task_id is assigned (the row
+            // is created later by taskExecuted), so clear the id —
+            // adjacent scrolling stays disabled until taskExecuted
+            // delivers the real row id.
+            currentTaskId = null;
             resetAdjacentState();
             if (welcome) {
               welcome.style.display = 'none';
@@ -3304,6 +3334,17 @@
             String(adoptTab.currentTaskId) !== String(ev.taskId)
           ) {
             adoptTab.currentTaskId = ev.taskId;
+            // Keep the global currentTaskId (used by adjacent
+            // scrolling to identify the boundary task by DB row id)
+            // in sync with the active tab's adopted id.
+            currentTaskId = ev.taskId;
+            // Re-seed oldest/newest boundary ids whenever none has
+            // been loaded yet (no .adjacent-task containers), so a
+            // fresh task immediately becomes the scroll anchor.
+            if (oldestLoadedTaskId === null && newestLoadedTaskId === null) {
+              oldestLoadedTaskId = ev.taskId;
+              newestLoadedTaskId = ev.taskId;
+            }
           }
         }
         if (ev.taskId && (ev.type === 'result' || ev.type === 'usage_info')) {

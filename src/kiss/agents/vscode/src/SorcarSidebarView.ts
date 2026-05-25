@@ -871,7 +871,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         this._getClient().sendCommand({
           type: 'getAdjacentTask',
           tabId: adjTabId,
-          task: message.task,
+          taskId: message.taskId,
           direction: message.direction,
         });
         break;

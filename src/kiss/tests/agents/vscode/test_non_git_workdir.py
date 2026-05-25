@@ -149,7 +149,7 @@ class TestNonGitCommandsDoNotCrash(_NonGitHarness):
     def test_get_adjacent_task_no_history(self) -> None:
         self.server._handle_command(
             {"type": "getAdjacentTask", "tabId": "t-adj",
-             "task": "", "direction": "prev"},
+             "taskId": None, "direction": "prev"},
         )
         evt = self._events_of("adjacent_task_events")
         assert evt and evt[-1]["task"] == ""
