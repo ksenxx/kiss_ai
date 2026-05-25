@@ -722,6 +722,54 @@ def _save_task_result(
     _invalidate_chat_context_cache(affected_chat_id)
 
 
+def _set_task_favorite(task_id: int, is_favorite: bool) -> bool:
+    """Toggle the ``is_favorite`` flag inside ``task_history.extra``.
+
+    Performs a merge-update on the JSON-encoded ``extra`` column:
+    loads any existing extra dict, sets ``is_favorite`` to the given
+    boolean, and writes the merged object back.  Unlike
+    :func:`_save_task_extra` (which overwrites the entire column),
+    this preserves other keys such as ``tokens``, ``cost``, ``steps``,
+    ``model``, and ``subagent``.
+
+    Thread-safe: drains the background event queue first so the
+    favourite flag write is ordered after any in-flight event inserts
+    for the same task, then acquires the process-wide write lock.
+
+    Args:
+        task_id: Primary key of the ``task_history`` row to update.
+        is_favorite: New value for the ``is_favorite`` flag.
+
+    Returns:
+        True when the row existed and was updated, False otherwise.
+    """
+    _flush_chat_events()
+    db = _get_db()
+    with _rw_lock.write_lock():
+        row = db.execute(
+            "SELECT extra FROM task_history WHERE id = ?", (task_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        extra_raw = row["extra"] or ""
+        extra_obj: dict[str, object]
+        if extra_raw:
+            try:
+                parsed = json.loads(extra_raw)
+            except (json.JSONDecodeError, TypeError):
+                parsed = None
+            extra_obj = parsed if isinstance(parsed, dict) else {}
+        else:
+            extra_obj = {}
+        extra_obj["is_favorite"] = bool(is_favorite)
+        db.execute(
+            "UPDATE task_history SET extra = ? WHERE id = ?",
+            (json.dumps(extra_obj), task_id),
+        )
+        db.commit()
+        return True
+
+
 def _save_task_extra(
     extra: dict[str, object],
     task_id: int | None = None,
