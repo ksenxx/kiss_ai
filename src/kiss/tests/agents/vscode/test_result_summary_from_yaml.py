@@ -120,7 +120,7 @@ class _PromptCapture:
         # round-trips, so the task runner's YAML parsing of the
         # return value recovers the exact summary string regardless
         # of punctuation it contains.
-        return _yaml.dump({"success": True, "summary": summary})
+        return str(_yaml.dump({"success": True, "summary": summary}))
 
 
 def _patch_parent_run(capture: _PromptCapture) -> Any:
