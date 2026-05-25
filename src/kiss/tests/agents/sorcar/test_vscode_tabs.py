@@ -248,12 +248,18 @@ class TestConcurrentTabs(unittest.TestCase):
 
         assert done[0] and done[1], f"Both tasks should have run: {done}"
 
-    def test_duplicate_run_on_same_tab_rejected(self) -> None:
-        """A second run on the same tab is rejected while first is running."""
+    def test_duplicate_run_on_same_tab_dropped_silently(self) -> None:
+        """A second run on the same tab is silently dropped while first is running.
+
+        The user-visible behaviour is that nothing happens: no error
+        broadcast, no new task thread, no status flap.
+        """
         started = threading.Event()
         release = threading.Event()
+        call_count = [0]
 
         def slow_run(cmd: dict) -> None:
+            call_count[0] += 1
             started.set()
             release.wait(timeout=5)
 
@@ -264,12 +270,15 @@ class TestConcurrentTabs(unittest.TestCase):
         })
         started.wait(timeout=3)
 
+        events_before = len(self.events)
         self.server._handle_command({
             "type": "run", "prompt": "task2", "model": "m", "tabId": "1",
         })
 
-        errors = [e for e in self.events if e["type"] == "error"]
-        assert any("already running" in e.get("text", "").lower() for e in errors)
+        # No error broadcast, no status broadcast, no new run.
+        new_events = self.events[events_before:]
+        assert all(e.get("type") != "error" for e in new_events)
+        assert call_count[0] == 1
 
         release.set()
         time.sleep(0.5)

@@ -184,12 +184,14 @@ class TestVSCodeServerBranches:
         return server, events
 
     def test_handle_command_run_already_running(self):
+        """A run command while a task is alive is silently dropped."""
         server, events = self._make_server()
         t = threading.Thread(target=lambda: time.sleep(5), daemon=True)
         t.start()
         server._get_tab("0").task_thread = t
         server._handle_command({"type": "run", "prompt": "test", "tabId": "0"})
-        assert any("already running" in e.get("text", "") for e in events)
+        # No error, no status broadcast — silent drop.
+        assert not any(e.get("type") == "error" for e in events)
         t.join(timeout=0.1)
 
     def test_handle_command_stop_no_event(self):

@@ -63,8 +63,8 @@ class _RunningAgentState:
 
     Long-lived per-tab state — the canonical ``chat_id``, the most
     recently completed ``last_task_id``, sticky UI flags
-    (``use_worktree``, ``use_parallel``, ``selected_model``,
-    ``skip_merge``), and lifecycle bookkeeping — lives directly on
+    (``use_worktree``, ``use_parallel``, ``selected_model``), and
+    lifecycle bookkeeping — lives directly on
     this state so it survives across task boundaries without
     requiring an agent instance.
     """
@@ -141,8 +141,6 @@ class _RunningAgentState:
         "is_merging",
         "is_running_non_wt",
         "is_task_active",
-        "skip_merge",
-        "deferred_snapshot",
         "frontend_closed",
         "is_subagent",
         "parent_task_id",
@@ -208,16 +206,6 @@ class _RunningAgentState:
         self.is_merging: bool = False
         self.is_running_non_wt: bool = False
         self.is_task_active: bool = False
-        self.skip_merge: bool = False
-        self.deferred_snapshot: (
-            tuple[
-                str | None,
-                dict[str, list[tuple[int, int, int, int]]],
-                set[str],
-                dict[str, str] | None,
-            ]
-            | None
-        ) = None
         # ``True`` once the frontend has issued ``closeTab`` for this
         # tab while a task / merge was still in flight.  The tab state
         # is then kept alive (so the running agent can finish) and
