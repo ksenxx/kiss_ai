@@ -150,7 +150,7 @@ class TestAdjacentTaskEventsCarryTaskId:
         th._append_chat_event({"type": "text_delta", "text": "x"}, task_id=id1)
         server, events = _make_server()
 
-        server._get_adjacent_task(chat_id, "second", "prev", "tab-1")
+        server._get_adjacent_task(chat_id, id2, "prev", "tab-1")
 
         adj = [e for e in events if e.get("type") == "adjacent_task_events"]
         assert len(adj) == 1, f"expected one adjacent_task_events, got {events}"
