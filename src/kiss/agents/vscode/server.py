@@ -725,27 +725,32 @@ class VSCodeServer(
             is_subagent=subagent_info is not None,
         )
 
-        tab = self._get_tab(tab_id)
-        # Associate the resumed chat id with this tab so a follow-up
-        # prompt typed here will be carried into the agent built by
-        # the next ``_cmd_run``.  With multi-viewer subscribe
-        # semantics the source tab (running the live task) keeps
-        # its own ``_RunningAgentState``; the new tab just needs to
-        # remember which chat session it belongs to.
+        # Loading a (completed or running-elsewhere) task into this
+        # tab is a VIEW operation — no agent will run here, so we
+        # MUST NOT eagerly create a fresh ``_RunningAgentState``
+        # registry entry or a ``WorktreeSorcarAgent``.  The new tab
+        # only needs the persisted events rendered in its webview
+        # (and, when ``rebound_running`` is true, a printer
+        # subscription to the live source tab — already established
+        # above by ``_reattach_running_chat`` via ``subscribe_tab``).
+        #
+        # If a ``_RunningAgentState`` already exists for ``tab_id``
+        # (e.g. the user previously launched a task in this tab and
+        # is now viewing a different chat in the same tab), update it
+        # in place but do NOT create one if absent.  In particular we
+        # still want to: (a) associate the resumed ``chat_id`` so a
+        # follow-up ``_cmd_run`` continues the same chat, and (b)
+        # clear ``frontend_closed`` so a pending deferred-dispose
+        # does not tear down the tab the user is actively viewing.
         with self._state_lock:
-            tab.chat_id = chat_id
-            tab.use_worktree = bool(
-                extra_raw.get("is_worktree")
-                if isinstance(extra_raw, dict) else False,
-            )
-            # If a prior ``closeTab`` for this tab id had flipped the
-            # deferred-disposal flag (e.g. the web server's grace
-            # timer fired during a slow reload while a task was still
-            # running), the frontend has now explicitly re-claimed the
-            # tab via ``resumeSession``.  Clear the flag so the next
-            # lifecycle-end transition does not dispose a tab the user
-            # is actively viewing again.
-            tab.frontend_closed = False
+            tab = _RunningAgentState.running_agent_states.get(tab_id)
+            if tab is not None:
+                tab.chat_id = chat_id
+                tab.use_worktree = bool(
+                    extra_raw.get("is_worktree")
+                    if isinstance(extra_raw, dict) else False,
+                )
+                tab.frontend_closed = False
 
         if subagent_info is not None:
             # Convert the freshly created regular tab into a sub-agent
