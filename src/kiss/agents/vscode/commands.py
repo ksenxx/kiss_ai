@@ -109,6 +109,9 @@ class _CommandsMixin:
         ) -> None: ...
         def _handle_delete_task(self, task_id: int) -> None: ...
         def _handle_delete_frequent_task(self, task: str) -> None: ...
+        def _handle_set_favorite(
+            self, task_id: int, is_favorite: bool,
+        ) -> None: ...
 
 
     def _cmd_run(self, cmd: dict[str, Any]) -> None:
@@ -204,6 +207,14 @@ class _CommandsMixin:
         task = cmd.get("task")
         if isinstance(task, str) and task:
             self._handle_delete_frequent_task(task)
+
+    def _cmd_set_favorite(self, cmd: dict[str, Any]) -> None:
+        """Persist the favourite flag on a task history row."""
+        task_id = cmd.get("taskId")
+        if task_id is None:
+            return
+        is_favorite = bool(cmd.get("isFavorite", False))
+        self._handle_set_favorite(int(task_id), is_favorite)
 
     def _cmd_get_files(self, cmd: dict[str, Any]) -> None:
         """Send file list for autocomplete."""
@@ -451,6 +462,7 @@ class _CommandsMixin:
         "getFrequentTasks": _cmd_get_frequent_tasks,
         "deleteTask": _cmd_delete_task,
         "deleteFrequentTask": _cmd_delete_frequent_task,
+        "setFavorite": _cmd_set_favorite,
         "getFiles": _cmd_get_files,
         "recordFileUsage": _cmd_record_file_usage,
         "userAnswer": _cmd_user_answer,

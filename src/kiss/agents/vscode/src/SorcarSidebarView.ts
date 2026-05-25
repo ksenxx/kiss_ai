@@ -762,6 +762,14 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         });
         break;
 
+      case 'setFavorite':
+        this._getClient().sendCommand({
+          type: 'setFavorite',
+          taskId: message.taskId,
+          isFavorite: message.isFavorite,
+        });
+        break;
+
       case 'deleteFrequentTask':
         this._getClient().sendCommand({
           type: 'deleteFrequentTask',
