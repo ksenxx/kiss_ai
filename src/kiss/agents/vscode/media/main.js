@@ -674,39 +674,18 @@
   /**
    * Create a new chat tab.
    *
-   * If ``presetId`` is supplied AND a tab keyed by that id is already
-   * open, the existing tab is focused and the function returns
-   * ``false`` WITHOUT creating a new tab (no ``newChat`` message is
-   * sent, no inputValue carry-over, no ``setRunningState`` reset).
-   * Callers that follow ``createNewTab(presetId)`` with side effects
-   * meant for a fresh tab (e.g. ``setTaskText``, ``resumeSession``)
-   * MUST check the return value to avoid clobbering the live state
-   * of the already-open tab.
-   *
-   * Returns ``true`` when a new tab was actually created.
+   * Always allocates a fresh tab with a newly minted uuid.  The
+   * frontend never dedupes by tab id when the user clicks a history
+   * row — the backend is the multi-client source of truth and may
+   * be observed concurrently from several browsers/webviews, so the
+   * "focus the existing tab keyed by this id" shortcut would only
+   * be correct for a single-client setup.
    */
-  function createNewTab(presetId) {
+  function createNewTab() {
     // Preserve any typed text so it carries over to the new tab
     const pendingText = inp.value || '';
-    // If a presetId is supplied (e.g. the sub-agent reopen path
-    // routes by the persisted sub-agent tab id) and a tab keyed by
-    // that id is already open, just focus it — do not duplicate.
-    if (presetId) {
-      const existingTab = tabs.find(t => t.id === presetId);
-      if (existingTab) {
-        switchToTab(presetId);
-        return false;
-      }
-    }
     saveCurrentTab();
     const tab = makeTab('new chat');
-    // When ``presetId`` is supplied, force the new tab's id to it so
-    // the existing routing key (e.g. the sub-agent tab id) is reused.
-    // When omitted, ``makeTab`` already minted a random uuid via
-    // ``genTabId``.
-    if (presetId) {
-      tab.id = presetId;
-    }
     tab.inputValue = pendingText;
     tabs.push(tab);
     activeTabId = tab.id;
@@ -731,7 +710,6 @@
     vscode.postMessage({type: 'newChat', tabId: tab.id});
     vscode.postMessage({type: 'getWelcomeSuggestions'});
     focusInputWithRetry();
-    return true;
   }
 
   function updateActiveTabTitle(title) {
@@ -3163,22 +3141,20 @@
         // activeTabId, so we can switch back after wiring the
         // sub-agent tab.
         const parentTabBeforeNew = ev.parent_tab_id || '';
-        const createdNewTab = createNewTab();
-        if (createdNewTab) {
-          // Capture the sub-agent tab id before switching back.
-          const subAgentTabId = activeTabId;
-          vscode.postMessage({
-            type: 'resumeSession',
-            taskId: ev.task_id,
-            tabId: subAgentTabId,
-          });
-          // Switch back to the parent (non-sub-agent) tab so the
-          // user stays focused on the main task.  Sub-agent tabs
-          // are still accessible via the tab bar if the user wants
-          // to inspect them.
-          if (parentTabBeforeNew) {
-            switchToTab(parentTabBeforeNew);
-          }
+        createNewTab();
+        // Capture the sub-agent tab id before switching back.
+        const subAgentTabId = activeTabId;
+        vscode.postMessage({
+          type: 'resumeSession',
+          taskId: ev.task_id,
+          tabId: subAgentTabId,
+        });
+        // Switch back to the parent (non-sub-agent) tab so the
+        // user stays focused on the main task.  Sub-agent tabs
+        // are still accessible via the tab bar if the user wants
+        // to inspect them.
+        if (parentTabBeforeNew) {
+          switchToTab(parentTabBeforeNew);
         }
         break;
       }
@@ -4999,21 +4975,19 @@
         // are orthogonal — the same chat may be live-viewed from
         // multiple tabs, each with its own routing key.
         if (s.has_events && s.id) {
-          const created = createNewTab();
-          if (created) {
-            const taskText = s.preview || s.title || '';
-            setTaskText(taskText);
-            // Also copy the task text into the chat input textbox so the
-            // user can edit and resubmit it without retyping.
-            inp.value = taskText;
-            syncClearBtn();
-            vscode.postMessage({
-              type: 'resumeSession',
-              id: s.id,
-              taskId: s.task_id,
-              tabId: activeTabId,
-            });
-          }
+          createNewTab();
+          const taskText = s.preview || s.title || '';
+          setTaskText(taskText);
+          // Also copy the task text into the chat input textbox so the
+          // user can edit and resubmit it without retyping.
+          inp.value = taskText;
+          syncClearBtn();
+          vscode.postMessage({
+            type: 'resumeSession',
+            id: s.id,
+            taskId: s.task_id,
+            tabId: activeTabId,
+          });
         } else {
           createNewTab();
           inp.value = s.preview || s.title || '';
