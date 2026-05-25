@@ -379,31 +379,7 @@ class _TaskRunnerMixin:
                         _skip_persistence=True,
                         _subscribe_tab_id=tab_id,
                     )
-                    # Prefer the summary embedded in the YAML the agent
-                    # returned: ``ChatSorcarAgent.run``'s ``finally``
-                    # block has already called ``stop_recording`` by
-                    # the time control returns here, which pops the
-                    # recording buffer and clears the thread-local
-                    # ``task_id``.  ``_extract_result_summary`` would
-                    # then peek into an empty recording and return ""
-                    # for every task — causing "No summary available"
-                    # to be persisted into ``task_history.result`` and
-                    # later surfaced as the prior-task result inside
-                    # the next task's ``build_chat_prompt`` preamble.
-                    from kiss.core.printer import (
-                        parse_result_yaml as _parse_run_yaml,
-                    )
-                    _run_parsed = (
-                        _parse_run_yaml(agent_returned)
-                        if agent_returned else None
-                    )
-                    if _run_parsed and _run_parsed.get("summary"):
-                        result_summary = str(_run_parsed["summary"])
-                    else:
-                        result_summary = (
-                            self._extract_result_summary()
-                            or "No summary available"
-                        )
+                    result_summary = self._extract_result_summary() or "No summary available"
                     task_end_event = {"type": "task_done"}
                 except KeyboardInterrupt:
                     result_summary = "Task stopped by user"
