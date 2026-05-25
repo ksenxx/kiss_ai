@@ -296,22 +296,61 @@ function findNodeDirWindows(baseDir: string): string {
 }
 
 /**
+ * Pure-TypeScript replica of Python's ``get_default_model()`` priority
+ * order from ``kiss.core.models.model_info``.  Used as a fallback when
+ * the .venv is not yet available (first-time setup) so the model
+ * picker is never rendered blank.
+ *
+ * Priority order (must match Python):
+ *   Anthropic > OpenAI > Gemini > OpenRouter > Together AI >
+ *   Claude Code CLI > Codex CLI > ``"No model"``.
+ *
+ * Keep the strings in sync with ``get_default_model`` in
+ * ``src/kiss/core/models/model_info.py``.
+ */
+export function getFallbackDefaultModel(): string {
+  const env = process.env;
+  if (env.ANTHROPIC_API_KEY) return 'claude-opus-4-7';
+  if (env.OPENAI_API_KEY) return 'gpt-5.5';
+  if (env.GEMINI_API_KEY) return 'gemini-3.1-pro-preview';
+  if (env.OPENROUTER_API_KEY) return 'openrouter/anthropic/claude-opus-4.7';
+  if (env.TOGETHER_API_KEY) return 'Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8';
+  const whichCmd = process.platform === 'win32' ? 'where' : 'which';
+  try {
+    execFileSync(whichCmd, ['claude'], {stdio: 'ignore', timeout: 2_000});
+    return 'cc/opus';
+  } catch {
+    /* not installed */
+  }
+  try {
+    execFileSync(whichCmd, ['codex'], {stdio: 'ignore', timeout: 2_000});
+    return 'codex/default';
+  } catch {
+    /* not installed */
+  }
+  return 'No model';
+}
+
+/**
  * Return the best default model name by calling Python's canonical
  * ``get_default_model()`` from ``kiss.core.models.model_info``.
  *
  * Requires ``uv`` and the KISS project ``.venv`` to be available.
- * Returns an empty string when the Python call fails (e.g. during
- * first-time setup before dependencies are installed).  The backend
- * will send the real model via the ``showWelcome`` event in that case.
+ * When the Python call fails (e.g. during first-time setup before
+ * dependencies are installed), falls back to a pure-TypeScript
+ * replica that checks the same API-key env vars and CLI executables.
+ * This guarantees the model picker never renders blank on a fresh
+ * install — the backend still overrides the value via the ``models``
+ * event once the daemon is up.
  */
 export function getDefaultModel(): string {
   const uvPath = findUvPath();
   const kissProject = findKissProject();
-  if (!uvPath || !kissProject) return '';
+  if (!uvPath || !kissProject) return getFallbackDefaultModel();
   try {
     // H1 — argv-form so quotes / shell metacharacters in either path
     // (both come from user-controlled HOME / settings) cannot inject.
-    return execFileSync(
+    const out = execFileSync(
       uvPath,
       [
         'run',
@@ -324,8 +363,9 @@ export function getDefaultModel(): string {
       ],
       {encoding: 'utf-8', timeout: 15_000, stdio: ['ignore', 'pipe', 'ignore']},
     ).trim();
+    return out || getFallbackDefaultModel();
   } catch {
-    return '';
+    return getFallbackDefaultModel();
   }
 }
 
