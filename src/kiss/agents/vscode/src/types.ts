@@ -41,6 +41,7 @@ export type FromWebviewMessage =
   | {type: 'getFrequentTasks'; limit?: number}
   | {type: 'deleteTask'; taskId: number}
   | {type: 'deleteFrequentTask'; task: string}
+  | {type: 'setFavorite'; taskId: number; isFavorite: boolean}
   | {type: 'getFiles'; prefix: string}
   | {type: 'userAnswer'; answer: string; tabId?: string}
   | {type: 'userActionDone'}
@@ -236,6 +237,7 @@ export interface AgentCommand {
     | 'getFrequentTasks'
     | 'deleteTask'
     | 'deleteFrequentTask'
+    | 'setFavorite'
     | 'getFiles'
     | 'userAnswer'
     | 'recordFileUsage'
@@ -277,4 +279,5 @@ export interface AgentCommand {
   skip?: boolean;
   config?: Record<string, unknown>;
   apiKeys?: Record<string, string>;
+  isFavorite?: boolean;
 }

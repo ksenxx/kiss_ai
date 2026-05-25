@@ -41,6 +41,7 @@ from kiss.agents.sorcar.persistence import (
     _load_subagent_rows_by_parent_task_id,
     _recover_orphaned_tasks,
     _search_history,
+    _set_task_favorite,
 )
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState, parse_task_tags
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
@@ -370,6 +371,7 @@ class VSCodeServer(
                 "tokens": 0,
                 "cost": 0.0,
                 "steps": 0,
+                "is_favorite": False,
             }
             # Mark sub-agent rows so the history sidebar treats them
             # as a regular task with one rendering difference: the
@@ -409,6 +411,9 @@ class VSCodeServer(
                         session["steps"] = int(extra_obj.get("steps", 0) or 0)
                     except (TypeError, ValueError):
                         session["steps"] = 0
+                    session["is_favorite"] = bool(
+                        extra_obj.get("is_favorite", False)
+                    )
             # For running tasks, overlay live metrics from the agent
             # so the history panel shows current steps/tokens/cost
             # instead of the stale persisted values (which are only
@@ -457,6 +462,22 @@ class VSCodeServer(
             "chatId": chat_id,
             "chatHasMoreTasks": _chat_has_tasks(chat_id),
         })
+
+    def _handle_set_favorite(self, task_id: int, is_favorite: bool) -> None:
+        """Persist the favourite flag on a task history row.
+
+        Merges ``{"is_favorite": <bool>}`` into the row's ``extra``
+        JSON column, preserving other keys (tokens, cost, steps,
+        subagent metadata).  No broadcast is emitted: the originating
+        webview updates its star icon optimistically on click, and
+        the next ``getHistory`` refresh will reflect the persisted
+        flag for all other clients.
+
+        Args:
+            task_id: Primary key of the ``task_history`` row.
+            is_favorite: New value for the ``is_favorite`` flag.
+        """
+        _set_task_favorite(task_id, is_favorite)
 
     def _handle_delete_frequent_task(self, task: str) -> None:
         """Delete a row from the ``frequent_tasks`` table and rebroadcast.

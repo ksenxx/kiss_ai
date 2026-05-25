@@ -1433,18 +1433,23 @@ body.remote-chat #welcome > #input-area {
 }
 
 .sidebar-item-delete,
-.sidebar-item-copy {
+.sidebar-item-copy,
+.sidebar-item-favorite {
   flex-shrink: 0; border: none; cursor: pointer; padding: 2px 0; margin-left: 2px;
   border-radius: 3px; line-height: 1; display: flex; align-items: center;
   color: #000; opacity: 0.45;
   background: none;
-  transition: opacity 0.15s, background 0.15s;
+  transition: opacity 0.15s, background 0.15s, color 0.15s;
 }
 
 .sidebar-item-delete:hover,
-.sidebar-item-copy:hover { opacity: 0.9; background: color-mix(in srgb, #000 10%, transparent); }
+.sidebar-item-copy:hover,
+.sidebar-item-favorite:hover { opacity: 0.9; background: color-mix(in srgb, #000 10%, transparent); }
 
 .sidebar-item-copy.copied { opacity: 0.9; color: #006400; }
+
+.sidebar-item-favorite.favorited { color: #f5b400; opacity: 1; }
+.sidebar-item-favorite.favorited:hover { color: #f5b400; opacity: 1; }
 
 .sidebar-item-confirm {
   display: flex; align-items: center; gap: 4px; flex-shrink: 0; margin-left: 6px;
