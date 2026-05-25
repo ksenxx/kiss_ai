@@ -1161,17 +1161,20 @@ class VSCodeServer(
         return ""
 
     def _get_adjacent_task(
-        self, chat_id: str, task: str, direction: str, tab_id: str = "",
+        self, chat_id: str, task_id: int | None, direction: str, tab_id: str = "",
     ) -> None:
         """Send events for the adjacent task in the same chat session.
 
         Args:
             chat_id: The string chat session identifier.
-            task: Current task description string (used as timestamp reference).
+            task_id: DB row id of the current task (used as timestamp
+                reference).  Using the row id (rather than the task
+                text) makes navigation unambiguous when the same task
+                description appears multiple times in a chat.
             direction: ``"prev"`` or ``"next"``.
             tab_id: Frontend tab identifier used to route the event.
         """
-        result = _get_adjacent_task_by_chat_id(chat_id, task, direction)
+        result = _get_adjacent_task_by_chat_id(chat_id, task_id, direction)
         event: dict[str, Any] = {
             "type": "adjacent_task_events",
             "direction": direction,

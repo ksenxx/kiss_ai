@@ -97,7 +97,8 @@ class _CommandsMixin:
         def _ensure_complete_worker(self) -> None: ...
         def _get_input_history(self) -> None: ...
         def _get_adjacent_task(
-            self, chat_id: str, task: str, direction: str, tab_id: str = "",
+            self, chat_id: str, task_id: int | None, direction: str,
+            tab_id: str = "",
         ) -> None: ...
         def _generate_commit_message(self) -> None: ...
         def _handle_worktree_action(
@@ -322,13 +323,22 @@ class _CommandsMixin:
         had no chat_id the handler fell back to the globally-latest
         chat in history, causing arrow-key navigation in one tab to
         traverse a *different* tab's conversation (C1 fix).
+
+        The current task is identified by its DB row id (``taskId``);
+        navigating by id (rather than the task description text)
+        unambiguously handles duplicate task texts within a chat.
         """
         tab_id = cmd.get("tabId", "")
         adj_tab = self._get_tab(tab_id)
         chat_id = adj_tab.chat_id
+        raw_task_id = cmd.get("taskId")
+        try:
+            task_id = int(raw_task_id) if raw_task_id is not None else None
+        except (TypeError, ValueError):
+            task_id = None
         self._get_adjacent_task(
             chat_id,
-            cmd.get("task", ""),
+            task_id,
             cmd.get("direction", "prev"),
             tab_id,
         )

@@ -678,7 +678,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                     {
                         "type": "getAdjacentTask",
                         "tabId": "adj-tab",
-                        "task": "test",
+                        "taskId": None,
                         "direction": "prev",
                     }
                 )
@@ -936,7 +936,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                 {"type": "getInputHistory"},
                 {"type": "getConfig"},
                 {"type": "getWelcomeSuggestions"},
-                {"type": "getAdjacentTask", "tabId": "t", "task": "x", "direction": "prev"},
+                {"type": "getAdjacentTask", "tabId": "t", "taskId": None, "direction": "prev"},
                 {"type": "selectModel", "model": "gemini-2.5-pro", "tabId": "t"},
                 {"type": "newChat", "tabId": "all-t"},
                 {"type": "closeTab", "tabId": "all-t"},
