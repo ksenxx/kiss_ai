@@ -4867,6 +4867,46 @@
       div.appendChild(textSpan);
 
       if (s.task_id) {
+        // Favourite (star) button — flips the persisted
+        // ``is_favorite`` flag on the task's ``extra`` JSON column.
+        // The icon shows a filled star when favourited, outline
+        // otherwise.  Click toggles both the UI and the backend
+        // state optimistically.
+        const FAV_FILLED_SVG =
+          '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>';
+        const FAV_OUTLINE_SVG =
+          '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>';
+        const favBtn = document.createElement('button');
+        favBtn.type = 'button';
+        favBtn.className = 'sidebar-item-favorite';
+        const applyFavState = () => {
+          if (s.is_favorite) {
+            favBtn.classList.add('favorited');
+            favBtn.dataset.tooltip = 'Unfavourite';
+            favBtn.setAttribute('aria-label', 'Unfavourite task');
+            favBtn.innerHTML = FAV_FILLED_SVG;
+          } else {
+            favBtn.classList.remove('favorited');
+            favBtn.dataset.tooltip = 'Favourite';
+            favBtn.setAttribute('aria-label', 'Favourite task');
+            favBtn.innerHTML = FAV_OUTLINE_SVG;
+          }
+        };
+        applyFavState();
+        favBtn.addEventListener('click', e => {
+          e.stopPropagation();
+          e.preventDefault();
+          const next = !s.is_favorite;
+          s.is_favorite = next;
+          applyFavState();
+          vscode.postMessage({
+            type: 'setFavorite',
+            taskId: s.task_id,
+            isFavorite: next,
+          });
+        });
+        div.appendChild(favBtn);
+
         // Copy-to-clipboard button — sits immediately left of the
         // trash icon so the user can grab the full task text without
         // first reopening the task.  ``s.preview`` carries the full
