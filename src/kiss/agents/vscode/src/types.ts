@@ -71,7 +71,7 @@ export type FromWebviewMessage =
   | {
       type: 'getAdjacentTask';
       tabId?: string;
-      task: string;
+      taskId: number | null;
       direction: 'prev' | 'next';
     }
   | {type: 'getConfig'}
@@ -269,7 +269,7 @@ export interface AgentCommand {
   answer?: string;
   path?: string;
   chatId?: number | string;
-  taskId?: number;
+  taskId?: number | null;
   activeFileContent?: string;
   action?: 'merge' | 'discard' | 'all-done' | 'commit' | 'skip';
   useWorktree?: boolean;
