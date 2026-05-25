@@ -33,8 +33,6 @@ export type FromWebviewMessage =
       autoCommit?: boolean;
       tabId?: string;
       workDir?: string;
-      skipMerge?: boolean;
-      reuseProcess?: boolean;
     }
   | {type: 'stop'; tabId?: string}
   | {type: 'selectModel'; model: string; tabId?: string}
@@ -64,7 +62,6 @@ export type FromWebviewMessage =
   | {type: 'getInputHistory'}
   | {type: 'worktreeAction'; action: 'merge' | 'discard'; tabId?: string}
   | {type: 'autocommitAction'; action: 'commit' | 'skip'; tabId?: string}
-  | {type: 'setSkipMerge'; tabId?: string; skip: boolean}
   | {type: 'resolveDroppedPaths'; uris: string[]}
   | {type: 'webviewFocusChanged'; focused: boolean}
   | {type: 'pickFolder'; currentPath?: string}
@@ -252,7 +249,6 @@ export interface AgentCommand {
     | 'worktreeAction'
     | 'autocommitAction'
     | 'getAdjacentTask'
-    | 'setSkipMerge'
     | 'setWorkDir'
     | 'getConfig'
     | 'saveConfig';
@@ -279,7 +275,6 @@ export interface AgentCommand {
   direction?: 'prev' | 'next';
   tabId?: string;
   skip?: boolean;
-  skipMerge?: boolean;
   config?: Record<string, unknown>;
   apiKeys?: Record<string, string>;
 }

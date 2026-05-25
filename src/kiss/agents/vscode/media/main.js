@@ -192,7 +192,6 @@
       askQuestionEl: null,
       askInputEl: null,
       askSubmitEl: null,
-      taskQueue: [],
     };
   }
 
@@ -3374,7 +3373,9 @@
   }
 
   function updateInputDisabled() {
-    // Only block input during merge — not while running (tasks queue locally)
+    // Only block input during merge.  While a task is running the
+    // user can still type but ``sendMessage`` silently drops any
+    // submit — no queueing.
     const blocked = isMerging;
     inp.disabled = blocked;
     sendBtn.disabled = blocked;
@@ -3386,12 +3387,10 @@
 
   function setRunningState(running) {
     isRunning = running;
-    // Show both send and stop buttons when running so users can queue tasks
     sendBtn.style.display = 'flex';
     stopBtn.style.display = running ? 'flex' : 'none';
 
     updateInputDisabled();
-    updateQueueIndicator();
     if (running) {
       startTimer();
     } else {
@@ -3421,7 +3420,6 @@
 
   function setReady(label, tabId) {
     // Mark the tab as no longer running
-    const tid = tabId !== undefined ? tabId : activeTabId;
     let doneTab = null;
     if (tabId !== undefined) {
       doneTab = tabs.find(t => {
@@ -3442,14 +3440,6 @@
       inp.focus();
     }
     renderTabBar();
-
-    // Process the next queued task if any
-    if (!doneTab) doneTab = tabs.find(t => t.id === tid);
-    if (doneTab && doneTab.taskQueue && doneTab.taskQueue.length > 0) {
-      setTimeout(() => {
-        submitNextQueuedTask(doneTab);
-      }, 200);
-    }
   }
 
   function addError(text) {
@@ -4536,42 +4526,8 @@
       return t.id === activeTabId;
     });
 
-    // If a task is running, queue this task locally for later execution
-    if (isRunning) {
-      if (curTab) {
-        curTab.taskQueue.push({
-          prompt: prompt,
-          model: selectedModel,
-          attachments: attachments.map(a => ({
-            name: a.name,
-            mimeType: a.type,
-            data: a.data,
-          })),
-          useWorktree: !!(
-            worktreeToggleBtn && worktreeToggleBtn.classList.contains('active')
-          ),
-          useParallel: !!(parallelToggleBtn && parallelToggleBtn.checked),
-          autoCommit: !!(autocommitToggleBtn && autocommitToggleBtn.checked),
-          workDir: curTab.workDir || '',
-        });
-        // Tell backend to skip merge/diff for the currently running task
-        // since there are now queued tasks that should run first.
-        vscode.postMessage({
-          type: 'setSkipMerge',
-          tabId: activeTabId,
-          skip: true,
-        });
-        inp.value = '';
-        inp.style.height = 'auto';
-        attachments = [];
-        renderFileChips();
-        clearGhost();
-        histIdx = -1;
-        if (inputClearBtn) inputClearBtn.style.display = 'none';
-        updateQueueIndicator();
-      }
-      return;
-    }
+    // If a task is already running for this tab, do nothing.
+    if (isRunning) return;
 
     const msg = {
       type: 'submit',
@@ -4596,55 +4552,6 @@
     clearGhost();
     histIdx = -1;
     if (inputClearBtn) inputClearBtn.style.display = 'none';
-  }
-
-  /** Submit the next queued task for a tab. */
-  function submitNextQueuedTask(tab) {
-    if (!tab || !tab.taskQueue || tab.taskQueue.length === 0) return;
-    const task = tab.taskQueue.shift();
-    updateQueueIndicator();
-    // If there are still more queued tasks, skip merge for this task.
-    // If this is the last task, allow merge to run.
-    const hasMoreQueued = tab.taskQueue.length > 0;
-    const msg = {
-      type: 'submit',
-      prompt: task.prompt,
-      model: task.model,
-      tabId: tab.id,
-      attachments: task.attachments || [],
-      useWorktree: !!task.useWorktree,
-      useParallel: !!task.useParallel,
-      autoCommit: !!task.autoCommit,
-      skipMerge: hasMoreQueued,
-      reuseProcess: true,
-    };
-    if (task.workDir) msg.workDir = task.workDir;
-    vscode.postMessage(msg);
-  }
-
-  /** Update the queue count indicator badge near the stop button. */
-  function updateQueueIndicator() {
-    let badge = document.getElementById('queue-badge');
-    const curTab = tabs.find(t => t.id === activeTabId);
-    const count = curTab && curTab.taskQueue ? curTab.taskQueue.length : 0;
-    if (count === 0) {
-      if (badge) badge.style.display = 'none';
-      return;
-    }
-    if (!badge) {
-      badge = document.createElement('span');
-      badge.id = 'queue-badge';
-      badge.style.cssText =
-        'display:inline-flex;align-items:center;justify-content:center;' +
-        'min-width:18px;height:18px;padding:0 5px;border-radius:9px;' +
-        'background:var(--vscode-badge-background, #4d4d4d);' +
-        'color:var(--vscode-badge-foreground, #fff);' +
-        'font-size:11px;font-weight:600;margin-right:4px;';
-      // Insert before stopBtn
-      stopBtn.parentNode.insertBefore(badge, stopBtn);
-    }
-    badge.textContent = count + ' queued';
-    badge.style.display = 'inline-flex';
   }
 
   /**
