@@ -3277,6 +3277,35 @@
         // tabId stamping) would surface as duplicate Result panels
         // in the parent.  Drop the event here so the symptom never
         // reaches the user.
+        // Keep ``currentTaskId`` in sync with the active task whose
+        // events are reaching this tab.  ``currentTaskId`` is set by
+        // ``task_events`` when the user loads a task from history,
+        // but no ``task_events`` replay fires for a freshly-submitted
+        // task — so without this adoption step a tab that previously
+        // loaded an OLD task would keep its stale ``currentTaskId``
+        // and the misroute guard below would drop the NEW task's
+        // terminal ``result`` / ``usage_info`` events, leaving the
+        // chat frozen at the last ``tool_call(finish)`` panel.  Only
+        // events routed to the active tab reach this branch (the
+        // bg-tab early-return above already peels sub-agent events
+        // off), so updating ``currentTaskId`` here is safe and does
+        // not weaken the cross-tab defense.  Skip ``result`` /
+        // ``usage_info`` themselves so a genuinely misrouted result
+        // can still be dropped by the guard below.
+        if (
+          ev.taskId !== undefined &&
+          ev.taskId !== null &&
+          ev.type !== 'result' &&
+          ev.type !== 'usage_info'
+        ) {
+          const adoptTab = tabs.find(t => t.id === activeTabId);
+          if (
+            adoptTab &&
+            String(adoptTab.currentTaskId) !== String(ev.taskId)
+          ) {
+            adoptTab.currentTaskId = ev.taskId;
+          }
+        }
         if (ev.taskId && (ev.type === 'result' || ev.type === 'usage_info')) {
           const activeTab = tabs.find(t => t.id === activeTabId);
           if (
