@@ -655,36 +655,25 @@ def _recover_orphaned_tasks(active_task_ids: set[int]) -> int:
         The number of rows whose ``result`` column was rewritten.
     """
     db = _get_db()
+    # Inline the ids; SQLite has a hard limit on bound parameters
+    # (~999) but we never have that many live tasks, and the ids are
+    # integers so there is no injection surface.
+    not_in_clause = (
+        f"AND id NOT IN ({','.join(str(int(t)) for t in active_task_ids)})"
+        if active_task_ids
+        else ""
+    )
+    sql = (
+        "UPDATE task_history SET result = ? WHERE result = ? " + not_in_clause
+    )
     with _rw_lock.write_lock():
-        if active_task_ids:
-            # Inline the ids; SQLite has a hard limit on bound
-            # parameters (~999) but we never have that many live
-            # tasks, and the ids are integers so there is no
-            # injection surface.
-            placeholders = ",".join(str(int(t)) for t in active_task_ids)
-            sql = (
-                "UPDATE task_history "
-                "SET result = ? "
-                "WHERE result = ? "
-                f"AND id NOT IN ({placeholders})"
-            )
-            cursor = db.execute(
-                sql,
-                (
-                    "Task terminated unexpectedly (process killed)",
-                    "Agent Failed Abruptly",
-                ),
-            )
-        else:
-            cursor = db.execute(
-                "UPDATE task_history "
-                "SET result = ? "
-                "WHERE result = ?",
-                (
-                    "Task terminated unexpectedly (process killed)",
-                    "Agent Failed Abruptly",
-                ),
-            )
+        cursor = db.execute(
+            sql,
+            (
+                "Task terminated unexpectedly (process killed)",
+                "Agent Failed Abruptly",
+            ),
+        )
         rowcount = cursor.rowcount or 0
         db.commit()
     if rowcount:
@@ -1096,6 +1085,40 @@ def _list_recent_chats(limit: int = 10) -> list[dict[str, object]]:
         return result
 
 
+def _fetch_events_for_task_id(
+    db: sqlite3.Connection, task_id: int,
+) -> list[dict[str, object]]:
+    """Load and decode the event rows for *task_id* in seq order.
+
+    Each surviving event dict has its ``_timestamp`` field injected
+    from the matching ``events.timestamp`` column.  Rows whose
+    ``event_json`` fails to decode are silently dropped (logged at
+    DEBUG level).  Callers must hold ``_rw_lock.read_lock()`` (or
+    ``write_lock()``) when invoking this helper.
+
+    Args:
+        db: Active database connection.
+        task_id: Primary key of the ``task_history`` row.
+
+    Returns:
+        List of event dicts with ``_timestamp`` injected.
+    """
+    event_rows = db.execute(
+        "SELECT event_json, timestamp FROM events "
+        "WHERE task_id = ? ORDER BY seq",
+        (task_id,),
+    ).fetchall()
+    events: list[dict[str, object]] = []
+    for r in event_rows:
+        try:
+            ev = json.loads(r["event_json"])
+            ev["_timestamp"] = r["timestamp"]
+            events.append(ev)
+        except (json.JSONDecodeError, TypeError):
+            logger.debug("Exception caught", exc_info=True)
+    return events
+
+
 def _load_latest_chat_events_by_chat_id(
     chat_id: str,
 ) -> dict[str, object] | None:
@@ -1125,26 +1148,12 @@ def _load_latest_chat_events_by_chat_id(
         if not row:
             return None
         task_id = row["id"]
-        task = row["task"]
-        extra_str = row["extra"] or ""
-        event_rows = db.execute(
-            "SELECT event_json, timestamp FROM events WHERE task_id = ? ORDER BY seq",
-            (task_id,),
-        ).fetchall()
-        events: list[dict[str, object]] = []
-        for r in event_rows:
-            try:
-                ev = json.loads(r["event_json"])
-                ev["_timestamp"] = r["timestamp"]
-                events.append(ev)
-            except (json.JSONDecodeError, TypeError):
-                logger.debug("Exception caught", exc_info=True)
         return {
-            "task": task,
+            "task": row["task"],
             "task_id": task_id,
-            "events": events,
+            "events": _fetch_events_for_task_id(db, task_id),
             "chat_id": chat_id,
-            "extra": extra_str,
+            "extra": row["extra"] or "",
         }
 
 
@@ -1173,27 +1182,12 @@ def _load_chat_events_by_task_id(
         ).fetchone()
         if not row:
             return None
-        task = row["task"]
-        chat_id = str(row["chat_id"] or "")
-        extra_str = row["extra"] or ""
-        event_rows = db.execute(
-            "SELECT event_json, timestamp FROM events WHERE task_id = ? ORDER BY seq",
-            (task_id,),
-        ).fetchall()
-        events: list[dict[str, object]] = []
-        for r in event_rows:
-            try:
-                ev = json.loads(r["event_json"])
-                ev["_timestamp"] = r["timestamp"]
-                events.append(ev)
-            except (json.JSONDecodeError, TypeError):
-                logger.debug("Exception caught", exc_info=True)
         return {
-            "task": task,
+            "task": row["task"],
             "task_id": task_id,
-            "events": events,
-            "chat_id": chat_id,
-            "extra": extra_str,
+            "events": _fetch_events_for_task_id(db, task_id),
+            "chat_id": str(row["chat_id"] or ""),
+            "extra": row["extra"] or "",
         }
 
 
@@ -1255,24 +1249,11 @@ def _load_subagent_rows_by_parent_task_id(
             if sub.get("parent_task_id") != parent_task_id:
                 continue
             sub_task_id = int(r["id"])
-            event_rows = db.execute(
-                "SELECT event_json, timestamp FROM events "
-                "WHERE task_id = ? ORDER BY seq",
-                (sub_task_id,),
-            ).fetchall()
-            events: list[dict[str, object]] = []
-            for er in event_rows:
-                try:
-                    ev = json.loads(er["event_json"])
-                    ev["_timestamp"] = er["timestamp"]
-                    events.append(ev)
-                except (json.JSONDecodeError, TypeError):
-                    logger.debug("Exception caught", exc_info=True)
             out.append({
                 "task_id": sub_task_id,
                 "task": r["task"],
                 "chat_id": str(r["chat_id"] or ""),
-                "events": events,
+                "events": _fetch_events_for_task_id(db, sub_task_id),
                 "extra": extra_str,
             })
     return out
@@ -1329,20 +1310,11 @@ def _get_adjacent_task_by_chat_id(
             return None
 
         adj_id = adj["id"]
-        adj_task = adj["task"]
-        event_rows = db.execute(
-            "SELECT event_json, timestamp FROM events WHERE task_id = ? ORDER BY seq",
-            (adj_id,),
-        ).fetchall()
-        events: list[dict[str, object]] = []
-        for r in event_rows:
-            try:
-                ev = json.loads(r["event_json"])
-                ev["_timestamp"] = r["timestamp"]
-                events.append(ev)
-            except (json.JSONDecodeError, TypeError):
-                logger.debug("Exception caught", exc_info=True)
-        return {"task": adj_task, "task_id": adj_id, "events": events}
+        return {
+            "task": adj["task"],
+            "task_id": adj_id,
+            "events": _fetch_events_for_task_id(db, adj_id),
+        }
 
 
 def _load_chat_context(chat_id: str) -> list[_HistoryEntry]:
@@ -1488,36 +1460,51 @@ def _load_last_model() -> str:
         return row["model"] if row else ""
 
 
+def _upsert_model_last_used(model: str, increment: bool) -> None:
+    """Mark *model* as last-used, optionally incrementing its counter.
+
+    Clears the ``is_last`` flag on every other row and either inserts
+    a fresh row for *model* (count=0 or count=1 depending on
+    *increment*) or updates the existing row to set ``is_last=1`` and
+    optionally bump ``count``.  The two statements run inside one
+    ``write_lock`` so the table never holds more than one row with
+    ``is_last = 1``.
+
+    Args:
+        model: The model name to mark as last-used.
+        increment: When ``True``, also increment the model's
+            ``count`` (semantics of ``_record_model_usage``).  When
+            ``False``, leave ``count`` unchanged on update and
+            initialise to 0 on insert (semantics of
+            ``_save_last_model``).
+    """
+    initial_count = 1 if increment else 0
+    update_clause = (
+        "count = count + 1, is_last = 1" if increment else "is_last = 1"
+    )
+    sql = (
+        f"INSERT INTO model_usage (model, count, is_last) VALUES (?, {initial_count}, 1) "
+        f"ON CONFLICT(model) DO UPDATE SET {update_clause}"
+    )
+    db = _get_db()
+    with _rw_lock.write_lock():
+        db.execute(_CLEAR_LAST_MODEL)
+        db.execute(sql, (model,))
+        db.commit()
+
+
 def _save_last_model(model: str) -> None:
     """Persist the selected model name without incrementing usage count.
-
-    Multi-statement transaction — uses _db_lock for atomicity.
 
     Args:
         model: The model name to save as the last-selected model.
     """
-    db = _get_db()
-    with _rw_lock.write_lock():
-        db.execute(_CLEAR_LAST_MODEL)
-        db.execute(
-            "INSERT INTO model_usage (model, count, is_last) VALUES (?, 0, 1) "
-            "ON CONFLICT(model) DO UPDATE SET is_last = 1",
-            (model,),
-        )
-        db.commit()
+    _upsert_model_last_used(model, increment=False)
 
 
 def _record_model_usage(model: str) -> None:
     """Increment a model's usage counter and mark it as last-used."""
-    db = _get_db()
-    with _rw_lock.write_lock():
-        db.execute(_CLEAR_LAST_MODEL)
-        db.execute(
-            "INSERT INTO model_usage (model, count, is_last) VALUES (?, 1, 1) "
-            "ON CONFLICT(model) DO UPDATE SET count = count + 1, is_last = 1",
-            (model,),
-        )
-        db.commit()
+    _upsert_model_last_used(model, increment=True)
 
 
 def _load_file_usage() -> dict[str, int]:
