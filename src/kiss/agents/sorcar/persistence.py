@@ -1279,14 +1279,17 @@ def _load_subagent_rows_by_parent_task_id(
 
 
 def _get_adjacent_task_by_chat_id(
-    chat_id: str, current_task: str, direction: str
+    chat_id: str, current_task_id: int | None, direction: str
 ) -> dict[str, object] | None:
-    """Return the adjacent task within a chat session, relative to *current_task*.
+    """Return the adjacent task within a chat session, relative to *current_task_id*.
 
     Args:
         chat_id: The string chat session identifier.
-        current_task: The current task description string used to find
-            the reference timestamp within the chat.
+        current_task_id: The DB row id of the current task used to find
+            the reference timestamp within the chat.  Using the row id
+            (rather than the task description string) ensures that
+            duplicate task texts within the same chat are navigated
+            unambiguously.
         direction: ``"prev"`` for the earlier task, ``"next"`` for the
             later task in the same chat session.
 
@@ -1294,15 +1297,14 @@ def _get_adjacent_task_by_chat_id(
         A dict with ``task`` (str), ``task_id`` (int) and ``events``
         (list of event dicts), or ``None`` if no adjacent task exists.
     """
-    if not chat_id or not current_task:
+    if not chat_id or current_task_id is None:
         return None
     with _rw_lock.read_lock():
         db = _get_db()
         row = db.execute(
             "SELECT id, timestamp FROM task_history "
-            "WHERE chat_id = ? AND task = ? "
-            "ORDER BY timestamp DESC LIMIT 1",
-            (chat_id, current_task),
+            "WHERE id = ? AND chat_id = ?",
+            (current_task_id, chat_id),
         ).fetchone()
         if not row:
             return None

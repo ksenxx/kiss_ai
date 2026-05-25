@@ -136,7 +136,7 @@ class TestAdjacentTaskRouted(unittest.TestCase):
         server, events = _make_server()
         server._get_adjacent_task(
             chat_id="does-not-exist",
-            task="",
+            task_id=None,
             direction="prev",
             tab_id="t-17",
         )
@@ -151,7 +151,7 @@ class TestAdjacentTaskRouted(unittest.TestCase):
         server._cmd_get_adjacent_task({
             "type": "getAdjacentTask",
             "tabId": "t-19",
-            "task": "",
+            "taskId": None,
             "direction": "prev",
         })
         ate = [e for e in events if e.get("type") == "adjacent_task_events"]
@@ -169,7 +169,7 @@ class TestAdjacentTaskRouted(unittest.TestCase):
         server, events = _make_server()
         server._get_adjacent_task(
             chat_id="does-not-exist",
-            task="",
+            task_id=None,
             direction="prev",
             tab_id="",
         )

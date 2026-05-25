@@ -130,7 +130,7 @@ class TestChatEvents:
         time.sleep(0.01)
         task_id2, _ = th._add_task("adj-second", chat_id="adj1")
         th._append_chat_event({"ev": "b"}, task_id=task_id2)
-        prev = th._get_adjacent_task_by_chat_id("adj1", "adj-second", "prev")
+        prev = th._get_adjacent_task_by_chat_id("adj1", task_id2, "prev")
         assert prev is not None
         prev_events = prev["events"]
         assert isinstance(prev_events, list)
@@ -138,6 +138,40 @@ class TestChatEvents:
         assert isinstance(prev_events[0], dict)
         assert "_timestamp" in prev_events[0]
         assert isinstance(prev_events[0]["_timestamp"], float)
+
+    def test_adjacent_task_by_id_disambiguates_duplicate_texts(self):
+        """Two rows in the same chat sharing identical ``task`` text
+        must still be navigated unambiguously by row id — earlier row's
+        ``prev`` is the unique prior row, later row's ``prev`` is the
+        earlier duplicate.  This is the failure mode that the
+        task-text-based lookup couldn't handle."""
+        first_id, _ = th._add_task("first-and-only", chat_id="dup")
+        th._append_chat_event({"ev": "first"}, task_id=first_id)
+        time.sleep(0.01)
+        dup_a_id, _ = th._add_task("same-text", chat_id="dup")
+        th._append_chat_event({"ev": "dup-a"}, task_id=dup_a_id)
+        time.sleep(0.01)
+        dup_b_id, _ = th._add_task("same-text", chat_id="dup")
+        th._append_chat_event({"ev": "dup-b"}, task_id=dup_b_id)
+        # prev from the second duplicate must be the first duplicate
+        prev_of_b = th._get_adjacent_task_by_chat_id("dup", dup_b_id, "prev")
+        assert prev_of_b is not None
+        assert prev_of_b["task_id"] == dup_a_id
+        prev_b_events = prev_of_b["events"]
+        assert isinstance(prev_b_events, list)
+        assert prev_b_events[0]["ev"] == "dup-a"
+        # prev from the first duplicate must be the unique earlier row
+        prev_of_a = th._get_adjacent_task_by_chat_id("dup", dup_a_id, "prev")
+        assert prev_of_a is not None
+        assert prev_of_a["task_id"] == first_id
+        # next from the first duplicate must reach the second duplicate
+        next_of_a = th._get_adjacent_task_by_chat_id("dup", dup_a_id, "next")
+        assert next_of_a is not None
+        assert next_of_a["task_id"] == dup_b_id
+        # None when the id is not in the chat
+        assert th._get_adjacent_task_by_chat_id("dup", 999_999, "prev") is None
+        # None when id is None
+        assert th._get_adjacent_task_by_chat_id("dup", None, "prev") is None
 
     def test_event_timestamp_in_raw_db(self):
         """Verify the timestamp column exists in the events table at the DB level."""
