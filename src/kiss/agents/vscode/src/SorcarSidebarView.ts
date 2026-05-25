@@ -611,7 +611,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     useParallel?: boolean,
     tabId?: string,
     workDir?: string,
-    skipMerge?: boolean,
     autoCommit?: boolean,
   ): void {
     const effectiveWorkDir = workDir || this._getWorkDir();
@@ -628,7 +627,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       useParallel,
       autoCommit,
       tabId,
-      skipMerge,
     });
   }
 
@@ -700,7 +698,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           message.useParallel,
           tabId,
           effectiveWorkDir,
-          message.skipMerge,
           message.autoCommit,
         );
         break;
@@ -969,16 +966,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           type: 'autocommitAction',
           action: acAction,
           tabId: acTabId,
-        });
-        break;
-      }
-
-      case 'setSkipMerge': {
-        const smTabId = message.tabId;
-        this._getClient().sendCommand({
-          type: 'setSkipMerge',
-          tabId: smTabId,
-          skip: message.skip,
         });
         break;
       }
