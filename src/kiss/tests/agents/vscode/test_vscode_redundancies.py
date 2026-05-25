@@ -74,5 +74,104 @@ class TestAutocommitPromptExtracted:
         )
 
 
+# ── Redundancy 3: one-shot non-agentic LLM call boilerplate extracted ──
+
+
+class TestOneShotLlmExtracted:
+    """Verify ``helpers._run_oneshot_llm`` exists and is referenced.
+
+    Both ``generate_commit_message_from_diff`` and
+    ``generate_followup_text`` previously open-coded the same
+    ``KISSAgent(...).run(... is_agentic=False, verbose=False)``
+    boilerplate with ``try/except`` + ``clean_llm_output`` +
+    fallback.  After the refactor, both delegate to a single shared
+    helper ``_run_oneshot_llm``.
+    """
+
+    def test_run_oneshot_llm_exists(self) -> None:
+        """``helpers._run_oneshot_llm`` must be defined."""
+        from kiss.agents.vscode import helpers
+
+        assert hasattr(helpers, "_run_oneshot_llm"), (
+            "vscode.helpers is missing _run_oneshot_llm; "
+            "the duplicated try/except + KISSAgent.run pattern "
+            "should be extracted here"
+        )
+
+    def test_callers_use_run_oneshot_llm(self) -> None:
+        """Both LLM helpers must funnel through ``_run_oneshot_llm``.
+
+        Verifies the boilerplate is actually shared (not just present
+        as a dead helper) by reading the module source and asserting
+        every direct ``KISSAgent(...).run(`` call has been removed
+        from ``helpers.py``.
+        """
+        import inspect
+
+        from kiss.agents.vscode import helpers
+
+        src = inspect.getsource(helpers)
+        # Only the shared helper may instantiate KISSAgent directly.
+        assert src.count("KISSAgent(") == 1, (
+            "Expected exactly one KISSAgent() instantiation in "
+            "vscode/helpers.py (inside _run_oneshot_llm); found "
+            f"{src.count('KISSAgent(')}"
+        )
+
+
+# ── Redundancy 4: sorcar/persistence.py shared helpers ──
+
+
+class TestPersistenceSharedHelpers:
+    """Verify shared helpers exist in ``sorcar.persistence``.
+
+    Four near-identical "load events for task_id" blocks were
+    collapsed into ``_fetch_events_for_task_id``.  Two parallel
+    "clear is_last + UPSERT model_usage" branches were collapsed
+    into ``_upsert_model_last_used``.
+    """
+
+    def test_fetch_events_for_task_id_exists(self) -> None:
+        """``persistence._fetch_events_for_task_id`` must be defined."""
+        from kiss.agents.sorcar import persistence
+
+        assert hasattr(persistence, "_fetch_events_for_task_id"), (
+            "sorcar.persistence is missing _fetch_events_for_task_id; "
+            "the duplicated event-row loading loop should be "
+            "extracted here"
+        )
+
+    def test_upsert_model_last_used_exists(self) -> None:
+        """``persistence._upsert_model_last_used`` must be defined."""
+        from kiss.agents.sorcar import persistence
+
+        assert hasattr(persistence, "_upsert_model_last_used"), (
+            "sorcar.persistence is missing _upsert_model_last_used; "
+            "the duplicated _CLEAR_LAST_MODEL + UPSERT pattern "
+            "should be extracted here"
+        )
+
+    def test_save_and_record_delegate_to_upsert(self) -> None:
+        """``_save_last_model`` / ``_record_model_usage`` must call the helper.
+
+        Asserts they delegate (don't duplicate the SQL) by reading
+        the module source and counting ``_CLEAR_LAST_MODEL`` SQL
+        execution sites — only the shared helper should issue it.
+        """
+        import inspect
+
+        from kiss.agents.sorcar import persistence
+
+        src = inspect.getsource(persistence)
+        # Exactly one execution site (inside _upsert_model_last_used),
+        # plus the constant definition itself.
+        assert src.count("db.execute(_CLEAR_LAST_MODEL)") == 1, (
+            "Expected exactly one db.execute(_CLEAR_LAST_MODEL) "
+            "call site in sorcar/persistence.py (inside "
+            "_upsert_model_last_used); found "
+            f"{src.count('db.execute(_CLEAR_LAST_MODEL)')}"
+        )
+
+
 
 
