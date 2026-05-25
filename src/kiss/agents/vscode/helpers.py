@@ -14,6 +14,52 @@ def clean_llm_output(text: str) -> str:
     return text.strip('"').strip("'")
 
 
+def _run_oneshot_llm(
+    agent_name: str,
+    prompt_template: str,
+    arguments: dict[str, str],
+    model: str,
+    fallback: str,
+    failure_log: str,
+) -> str:
+    """Run a single non-agentic LLM call and return the cleaned text.
+
+    Wraps the boilerplate shared by *every* short LLM helper in this
+    module: construct a :class:`KISSAgent`, call ``run`` with
+    ``is_agentic=False`` and ``verbose=False``, clean the response,
+    and fall back to *fallback* on any exception or empty response.
+
+    Args:
+        agent_name: Display name for the underlying ``KISSAgent``
+            instance.
+        prompt_template: The prompt template passed to ``KISSAgent.run``.
+        arguments: Template-arguments dict passed to ``KISSAgent.run``.
+        model: The model name to use for generation.
+        fallback: Returned verbatim on any exception or empty
+            response.
+        failure_log: Message used for the ``logger.debug`` call on
+            exception (with ``exc_info=True``).
+
+    Returns:
+        Cleaned LLM output text, or *fallback* on failure.
+    """
+    from kiss.core.kiss_agent import KISSAgent
+
+    try:
+        agent = KISSAgent(agent_name)
+        raw = agent.run(
+            model_name=model,
+            prompt_template=prompt_template,
+            arguments=arguments,
+            is_agentic=False,
+            verbose=False,
+        )
+        return clean_llm_output(raw) or fallback
+    except Exception:
+        logger.debug(failure_log, exc_info=True)
+        return fallback
+
+
 def clip_autocomplete_suggestion(query: str, suggestion: str) -> str:
     """Return the autocomplete continuation, stripped of the query prefix.
 
@@ -101,57 +147,46 @@ def generate_commit_message_from_diff(
         The cleaned commit-message string, or ``"kiss: auto-commit agent work"``
         on failure.
     """
-    from kiss.core.kiss_agent import KISSAgent
-
     fallback = "kiss: auto-commit agent work"
     if not diff_text:
-        if user_prompt:
-            return _append_user_prompt(fallback, user_prompt)
-        return fallback
-    try:
-        agent = KISSAgent("Commit Message Generator")
-        if user_prompt:
-            context = (
-                f"User task prompt:\n{user_prompt}\n\nDiff:\n{diff_text}"
-            )
-            template = (
-                "Generate a concise git commit message for these "
-                "changes. The user's task prompt is provided for "
-                "context — use it to phrase the subject line in "
-                "terms of the user's INTENT, not just the mechanical "
-                "diff. Use conventional commit format with a clear "
-                "subject line (type: description) and optionally a "
-                "body with bullet points for multiple changes. Do "
-                "NOT quote or repeat the user prompt — it will be "
-                "appended separately. Return ONLY the commit message "
-                "text, no quotes or markdown fences.\n\n{context}"
-            )
-        else:
-            context = f"Diff:\n{diff_text}"
-            template = (
-                "Generate a concise git commit message for these "
-                "changes. Use conventional commit format with a "
-                "clear subject line (type: description) and "
-                "optionally a body with bullet points for multiple "
-                "changes. Return ONLY the commit message text, no "
-                "quotes or markdown fences.\n\n{context}"
-            )
-        raw = agent.run(
-            model_name=get_fast_model(),
-            prompt_template=template,
-            arguments={"context": context},
-            is_agentic=False,
-            verbose=False,
+        return (
+            _append_user_prompt(fallback, user_prompt)
+            if user_prompt
+            else fallback
         )
-        msg = clean_llm_output(raw) or fallback
-        if user_prompt:
-            msg = _append_user_prompt(msg, user_prompt)
-        return msg
-    except Exception:
-        logger.debug("Commit message generation failed", exc_info=True)
-        if user_prompt:
-            return _append_user_prompt(fallback, user_prompt)
-        return fallback
+    if user_prompt:
+        context = f"User task prompt:\n{user_prompt}\n\nDiff:\n{diff_text}"
+        template = (
+            "Generate a concise git commit message for these "
+            "changes. The user's task prompt is provided for "
+            "context — use it to phrase the subject line in "
+            "terms of the user's INTENT, not just the mechanical "
+            "diff. Use conventional commit format with a clear "
+            "subject line (type: description) and optionally a "
+            "body with bullet points for multiple changes. Do "
+            "NOT quote or repeat the user prompt — it will be "
+            "appended separately. Return ONLY the commit message "
+            "text, no quotes or markdown fences.\n\n{context}"
+        )
+    else:
+        context = f"Diff:\n{diff_text}"
+        template = (
+            "Generate a concise git commit message for these "
+            "changes. Use conventional commit format with a "
+            "clear subject line (type: description) and "
+            "optionally a body with bullet points for multiple "
+            "changes. Return ONLY the commit message text, no "
+            "quotes or markdown fences.\n\n{context}"
+        )
+    msg = _run_oneshot_llm(
+        agent_name="Commit Message Generator",
+        prompt_template=template,
+        arguments={"context": context},
+        model=get_fast_model(),
+        fallback=fallback,
+        failure_log="Commit message generation failed",
+    )
+    return _append_user_prompt(msg, user_prompt) if user_prompt else msg
 
 
 def _append_user_prompt(message: str, user_prompt: str) -> str:
@@ -185,28 +220,21 @@ def generate_followup_text(task: str, result: str, model: str) -> str:
     Returns:
         Suggestion text, or empty string on failure.
     """
-    from kiss.core.kiss_agent import KISSAgent
-
-    try:
-        agent = KISSAgent("Followup Proposer")
-        raw = agent.run(
-            model_name=model,
-            prompt_template=(
-                "A developer just completed this task:\n"
-                "Task: {task}\n"
-                "Result summary: {result}\n\n"
-                "Suggest ONE short, concrete follow-up task they "
-                "might want to do next. Return ONLY the task "
-                "description as a single plain-text sentence."
-            ),
-            arguments={"task": task, "result": result},
-            is_agentic=False,
-            verbose=False,
-        )
-        return clean_llm_output(raw)
-    except Exception:
-        logger.debug("Followup generation failed", exc_info=True)
-        return ""
+    return _run_oneshot_llm(
+        agent_name="Followup Proposer",
+        prompt_template=(
+            "A developer just completed this task:\n"
+            "Task: {task}\n"
+            "Result summary: {result}\n\n"
+            "Suggest ONE short, concrete follow-up task they "
+            "might want to do next. Return ONLY the task "
+            "description as a single plain-text sentence."
+        ),
+        arguments={"task": task, "result": result},
+        model=model,
+        fallback="",
+        failure_log="Followup generation failed",
+    )
 
 
 def rank_file_suggestions(
