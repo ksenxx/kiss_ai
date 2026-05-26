@@ -163,7 +163,7 @@ These agents are in `src/kiss/agents/third_party_agents/`.
 
 ## 🤖 Models Supported
 
-**546 models** across 8 provider categories (OpenAI, Anthropic, Gemini, Together AI, MiniMax, OpenRouter, Claude Code CLI, Codex CLI) with built-in pricing, context lengths, and capability flags.
+**542 models** across 8 provider categories (OpenAI, Anthropic, Gemini, Together AI, MiniMax, OpenRouter, Claude Code CLI, Codex CLI) with built-in pricing, context lengths, and capability flags.
 
 **Generation Models** (text generation with function calling support):
 
@@ -190,7 +190,7 @@ These agents are in `src/kiss/agents/third_party_agents/`.
 - **Together AI (DeepCogito)**: cogito-v1-preview (llama-70B/8B/70B-Turbo, qwen-14B/32B), cogito-v2-1-671b
 - **Together AI (NVIDIA)**: Llama-3.1-Nemotron-70B, Nemotron-Nano-9B-v2
 - **Together AI (Other)**: arcee-ai/trinity-mini, essentialai/rnj-1-instruct
-- **OpenRouter**: Access to 335 models from 52 providers via unified API, including OpenAI, Anthropic, Google, Meta Llama, DeepSeek, Qwen, Amazon Nova, Cohere, X.AI Grok, MiniMax, ByteDance Seed, MoonshotAI, Mistral, NVIDIA, Z.AI/GLM, AllenAI, Perplexity, NousResearch, Baidu ERNIE, Xiaomi, Reka AI, Arcee AI, Perceptron, and others
+- **OpenRouter**: Access to 330 models from 51 providers via unified API, including OpenAI, Anthropic, Google, Meta Llama, DeepSeek, Qwen, Amazon Nova, Cohere, X.AI Grok, MiniMax, ByteDance Seed, MoonshotAI, Mistral, NVIDIA, Z.AI/GLM, AllenAI, Perplexity, NousResearch, Baidu ERNIE, Xiaomi, Reka AI, Arcee AI, Perceptron, and others
 
 **Embedding Models** (for RAG and semantic search):
 
