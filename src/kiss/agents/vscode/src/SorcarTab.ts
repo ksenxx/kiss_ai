@@ -26,7 +26,7 @@ export function getVersion(): string {
 }
 
 /**
- * Read ``src/kiss/TRICKS.md`` and return one entry per ``## Trick``
+ * Read ``src/kiss/INJECTIONS.md`` and return one entry per ``## Trick``
  * section.  Returns an empty list if the file is missing — the Tricks
  * button still renders, just with an empty list.
  */
@@ -34,7 +34,7 @@ export function getTricks(): string[] {
   try {
     const kissRoot = findKissProject();
     if (!kissRoot) return [];
-    const tricksFile = path.join(kissRoot, 'src', 'kiss', 'TRICKS.md');
+    const tricksFile = path.join(kissRoot, 'src', 'kiss', 'INJECTIONS.md');
     const text = fs.readFileSync(tricksFile, 'utf-8');
     const tricks: string[] = [];
     const sections = text.split(/^##\s+/m);

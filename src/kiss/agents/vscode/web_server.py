@@ -1952,15 +1952,15 @@ def _read_version() -> str:
 
 
 def _read_tricks() -> list[str]:
-    """Parse ``src/kiss/TRICKS.md`` and return the trick texts.
+    """Parse ``src/kiss/INJECTIONS.md`` and return the trick texts.
 
     The file contains a series of ``## Trick`` sections, each followed
     by a blank line and a one-line trick.  Returns an empty list if the
-    file is missing or unparseable, so a deployment without TRICKS.md
-    still renders the button (with an empty list).
+    file is missing or unparseable, so a deployment without
+    INJECTIONS.md still renders the button (with an empty list).
     """
     try:
-        tfile = Path(__file__).parent.parent.parent / "TRICKS.md"
+        tfile = Path(__file__).parent.parent.parent / "INJECTIONS.md"
         text = tfile.read_text()
     except Exception:
         return []
