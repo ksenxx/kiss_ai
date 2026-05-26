@@ -240,8 +240,7 @@ class _CommandsMixin:
         """
         ans_tab = cmd.get("tabId", "")
         with self._state_lock:
-            ans_state = _RunningAgentState.running_agent_states.get(ans_tab)
-            q = ans_state.user_answer_queue if ans_state is not None else None
+            q = self._resolve_user_answer_queue(ans_tab)
             if q is None:
                 logger.debug("userAnswer dropped: no queue for tabId=%s", ans_tab)
                 return
@@ -254,6 +253,66 @@ class _CommandsMixin:
                 q.put_nowait(cmd.get("answer", ""))
             except queue.Full:  # pragma: no cover — drained immediately above
                 pass
+
+    def _resolve_user_answer_queue(
+        self, ans_tab: str,
+    ) -> queue.Queue[str] | None:
+        """Locate the answer queue an ``ask_user_question`` is waiting on.
+
+        Routing precedence:
+
+        1. The frontend tab id ``ans_tab`` itself, when its
+           ``_RunningAgentState`` holds a non-None ``user_answer_queue``.
+           This is the common path: a single-window user answers from
+           the same tab that launched the task.
+
+        2. Otherwise, the queue of any tab that shares a task
+           subscription with ``ans_tab``.  This covers the multi-viewer
+           case where one tab (e.g. a browser viewer of a chat owned by
+           the VS Code extension's tab) renders the askUser modal and
+           submits the answer: the broadcast was fan-stamped with the
+           viewer's tab id, but the live ``user_answer_queue`` lives on
+           the task-owner tab.  Without this fallback, the answer is
+           silently dropped and the agent thread waits forever (or
+           until the stop event eventually fires) — surfaced by users
+           as "the answer was not delivered immediately".
+
+        Args:
+            ans_tab: Frontend tab id carried by the ``userAnswer``
+                command.
+
+        Returns:
+            The resolved answer queue, or ``None`` when no live
+            ``ask_user_question`` waiter can be associated with the
+            command.  Must be called with ``_state_lock`` held.
+        """
+        ans_state = _RunningAgentState.running_agent_states.get(ans_tab)
+        if ans_state is not None and ans_state.user_answer_queue is not None:
+            return ans_state.user_answer_queue
+        # Multi-viewer fallback: find a co-subscriber tab whose
+        # ``user_answer_queue`` is live.  ``_subscribers`` is keyed by
+        # task id; ``ans_tab`` and the owner tab share at least one
+        # task id when the viewer is observing the owner's task.
+        printer_lock = getattr(self.printer, "_lock", None)
+        subs_map = getattr(self.printer, "_subscribers", {})
+        if printer_lock is None:
+            return None
+        with printer_lock:
+            shared_tasks = [
+                task_id
+                for task_id, viewers in subs_map.items()
+                if ans_tab in viewers
+            ]
+            candidate_tabs: list[str] = []
+            for task_id in shared_tasks:
+                candidate_tabs.extend(subs_map.get(task_id, ()))
+        for tab_id in candidate_tabs:
+            if tab_id == ans_tab:
+                continue
+            state = _RunningAgentState.running_agent_states.get(tab_id)
+            if state is not None and state.user_answer_queue is not None:
+                return state.user_answer_queue
+        return None
 
     def _cmd_append_user_message(self, cmd: dict[str, Any]) -> None:
         """Queue a user message to be injected into the running agent's context.
