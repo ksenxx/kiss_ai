@@ -4,6 +4,7 @@ The History sidebar panel renders a single-line filter bar between
 the search box and the history list with:
 
 * three category checkboxes — ``Running`` / ``Errors`` / ``Completed``
+* three category checkboxes — ``Running`` / ``Errors`` / ``Completed``
 * two date inputs — ``From`` / ``To``
 
 This test asserts the HTML, CSS, and JS surfaces all line up: the
@@ -13,6 +14,7 @@ and the client-side filter helper plus listener wiring is present in
 ``main.js``.
 """
 
+served page contains the five form controls with the expected IDs in
 from __future__ import annotations
 
 import re
@@ -51,7 +53,7 @@ class TestHistoryFilterPanel(unittest.TestCase):
         for did in ("hf-from", "hf-to"):
             self.assertIn(f'id="{did}"', bar)
             self.assertIn('type="date"', bar)
-        for label in ("Running", "Errors", "Success"):
+        for label in ("Running", "Errors", "Completed"):
             self.assertIn(label, bar)
 
     def test_css_styles_filter_bar(self) -> None:
@@ -69,6 +71,7 @@ class TestHistoryFilterPanel(unittest.TestCase):
     def test_js_wires_filter_visibility(self) -> None:
         """``main.js`` defines the visibility helper and binds change
         listeners on every filter control."""
+        for label in ("Running", "Errors", "Success"):
         js = (
             Path(web_server.__file__).parent / "media" / "main.js"
         ).read_text(encoding="utf-8")
@@ -91,3 +94,4 @@ class TestHistoryFilterPanel(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+        # Listener wiring covers all five controls.
