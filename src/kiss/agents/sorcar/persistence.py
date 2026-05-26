@@ -1339,10 +1339,19 @@ def _get_adjacent_task_by_chat_id(
             return None
         ts = row["timestamp"]
 
+        # Sub-agent rows (those carrying a ``subagent`` marker in
+        # ``extra``) are internal implementation detail of the parent's
+        # ``run_parallel`` tool call and must NEVER appear when the user
+        # adjacent-scrolls between tasks in the chat webview — they
+        # already render inside the parent task's panel.  Filter them
+        # out at the SQL level so the LIMIT 1 lands on the next *parent*
+        # row rather than a sub-agent that happens to sit between two
+        # parent tasks chronologically.
         if direction == "prev":
             adj = db.execute(
                 "SELECT id, task FROM task_history "
                 "WHERE chat_id = ? AND timestamp < ? "
+                f"AND {_HISTORY_NOT_SUBAGENT} "
                 "ORDER BY timestamp DESC LIMIT 1",
                 (chat_id, ts),
             ).fetchone()
@@ -1350,6 +1359,7 @@ def _get_adjacent_task_by_chat_id(
             adj = db.execute(
                 "SELECT id, task FROM task_history "
                 "WHERE chat_id = ? AND timestamp > ? "
+                f"AND {_HISTORY_NOT_SUBAGENT} "
                 "ORDER BY timestamp ASC LIMIT 1",
                 (chat_id, ts),
             ).fetchone()
