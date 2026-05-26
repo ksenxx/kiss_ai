@@ -510,7 +510,7 @@ class _TaskRunnerMixin:
                 # must be given the explicit diff/merge (non-worktree)
                 # or worktree merge-review workflow to inspect, edit,
                 # or discard the partial work.  Mirrors the existing
-                # USER_PREFS rule that the worktree branch must be
+                # invariant that the worktree branch must be
                 # preserved on stop even when auto-commit is ON.
                 # ``task_end_event.type`` covers the cases where the
                 # exception propagated out of ``tab.agent.run``.
