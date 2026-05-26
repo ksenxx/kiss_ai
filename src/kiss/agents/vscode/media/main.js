@@ -4347,9 +4347,10 @@
     const hfRunning = document.getElementById('hf-running');
     const hfErrors = document.getElementById('hf-errors');
     const hfCompleted = document.getElementById('hf-completed');
+    const hfFavorite = document.getElementById('hf-favorite');
     const hfFrom = document.getElementById('hf-from');
     const hfTo = document.getElementById('hf-to');
-    [hfRunning, hfErrors, hfCompleted, hfFrom, hfTo].forEach(el => {
+    [hfRunning, hfErrors, hfCompleted, hfFavorite, hfFrom, hfTo].forEach(el => {
       if (el) el.addEventListener('change', applyHistoryFilterVisibility);
     });
     // The calendar selector buttons sit next to each date textbox and
@@ -4842,6 +4843,10 @@
           ? 'errors'
           : 'completed';
       div.dataset.timestamp = String(Number(s.timestamp || 0));
+      // ``data-favorite`` mirrors the persisted ``is_favorite`` flag
+      // so ``applyHistoryFilterVisibility()`` can include/exclude the
+      // row when the Favorite checkbox in the filter bar is toggled.
+      div.dataset.favorite = s.is_favorite ? '1' : '0';
       const itemText = s.title || s.preview || 'Untitled';
       div.dataset.tooltip = s.preview || itemText;
       div.style.backgroundColor = chatIdBgColor(String(s.id));
@@ -4899,6 +4904,11 @@
           const next = !s.is_favorite;
           s.is_favorite = next;
           applyFavState();
+          // Keep ``data-favorite`` in sync with the toggled state so
+          // the Favorite filter checkbox immediately reflects the
+          // change without waiting for a re-render.
+          div.dataset.favorite = next ? '1' : '0';
+          applyHistoryFilterVisibility();
           vscode.postMessage({
             type: 'setFavorite',
             taskId: s.task_id,
@@ -5239,22 +5249,25 @@
 
   /**
    * Show/hide rows in the history sidebar based on the filter bar
-   * state (Running / Errors / Completed checkboxes and From / To
-   * date inputs).  Reads ``data-category`` and ``data-timestamp``
-   * stamped on each row by ``renderHistory``.  When every row is
-   * hidden, replaces the list with a "No matching tasks" placeholder
-   * unless the unfiltered list was itself empty.
+   * state (Running / Errors / Completed / Favorite checkboxes and
+   * From / To date inputs).  Reads ``data-category``,
+   * ``data-timestamp`` and ``data-favorite`` stamped on each row by
+   * ``renderHistory``.  When every row is hidden, replaces the list
+   * with a "No matching tasks" placeholder unless the unfiltered list
+   * was itself empty.
    */
   function applyHistoryFilterVisibility() {
     const hfRunning = document.getElementById('hf-running');
     const hfErrors = document.getElementById('hf-errors');
     const hfCompleted = document.getElementById('hf-completed');
+    const hfFavorite = document.getElementById('hf-favorite');
     const hfFrom = document.getElementById('hf-from');
     const hfTo = document.getElementById('hf-to');
     if (!hfRunning || !hfErrors || !hfCompleted) return;
     const showRunning = hfRunning.checked;
     const showErrors = hfErrors.checked;
     const showCompleted = hfCompleted.checked;
+    const onlyFavorite = hfFavorite && hfFavorite.checked;
     // Date inputs are <input type=date> with value="YYYY-MM-DD".
     // Convert to local-midnight epoch seconds for inclusive bounds.
     let fromTs = -Infinity;
@@ -5277,7 +5290,8 @@
       else if (cat === 'errors') catOk = showErrors;
       else if (cat === 'completed') catOk = showCompleted;
       const dateOk = ts >= fromTs && ts <= toTs;
-      if (catOk && dateOk) {
+      const favOk = !onlyFavorite || row.dataset.favorite === '1';
+      if (catOk && dateOk && favOk) {
         row.style.display = '';
         visible++;
       } else {
