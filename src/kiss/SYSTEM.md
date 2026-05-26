@@ -77,8 +77,6 @@ Write simple, clean, readable code with minimal indirection. These rules exist b
 ## Mandatory First Actions for project related tasks — CRITICAL
 
 **Your VERY FIRST tool call** in every task MUST be `Read("PWD/SORCAR.md")` and follow the instructions in SORCAR.md with highest priority.
-**Your SECOND tool call** is `Read("PWD/USER_PREFS.md")`. After immediately
-reading USER_PREFS.md, update it based on frequent user bahaviors you have noticed in the current task and previous tasks. Use those behavioral instructions exactly in the rest of the task.
 
 ## Pre-flight Checks
 
