@@ -118,6 +118,84 @@ class Attachment:
         return f"data:{self.mime_type};base64,{self.to_base64()}"
 
 
+# Tool results that include binary file contents (e.g. ``Read`` on a PNG)
+# embed each file inside these sentinel markers so that model implementations
+# can lift the payload into a real image/document content block instead of
+# shipping kilobytes of base64 as plain text.
+BINARY_ATTACHMENT_OPEN_RE = re.compile(
+    r"<<KISS_BINARY_ATTACHMENT mime_type=([^>\s]+)>>"
+)
+BINARY_ATTACHMENT_CLOSE = "<</KISS_BINARY_ATTACHMENT>>"
+
+# MIME types the ``Read`` tool is willing to embed inline in its return
+# value.  Set equal to :data:`SUPPORTED_MIME_TYPES` so audio/video are
+# also encoded as sentinel-wrapped base64; each model backend then decides
+# whether it can actually ingest the bytes (e.g. OpenAI Chat Completions
+# accepts ``input_audio``; Gemini accepts any ``inline_data`` MIME;
+# Anthropic transcribes audio to text and drops video; text-CLI backends
+# drop the bytes after lifting the placeholder text).
+READ_TOOL_BINARY_MIME_TYPES = set(SUPPORTED_MIME_TYPES)
+
+
+def encode_binary_attachment(mime_type: str, data: bytes) -> str:
+    """Encode ``data`` for inline transport inside a tool result string.
+
+    Args:
+        mime_type: MIME type label (e.g. ``"image/png"``).
+        data: Raw file bytes.
+
+    Returns:
+        A sentinel-wrapped base64 payload that
+        :func:`parse_binary_attachments` will later decode back into an
+        :class:`Attachment`.
+    """
+    payload = base64.b64encode(data).decode("ascii")
+    return (
+        f"<<KISS_BINARY_ATTACHMENT mime_type={mime_type}>>"
+        f"{payload}{BINARY_ATTACHMENT_CLOSE}"
+    )
+
+
+def parse_binary_attachments(text: str) -> tuple[str, list[Attachment]]:
+    """Split a tool result string into plain text + binary attachments.
+
+    Scans ``text`` for ``<<KISS_BINARY_ATTACHMENT ...>>...<<...>>`` blocks
+    produced by :func:`encode_binary_attachment` and returns the residual
+    plain text (with each block replaced by a short
+    ``[attached image/png, N bytes]`` placeholder) along with the decoded
+    :class:`Attachment` list.
+
+    Args:
+        text: Raw tool result content possibly containing sentinel blocks.
+
+    Returns:
+        ``(plain_text, attachments)``.  If the input has no sentinels,
+        returns ``(text, [])`` unchanged.
+    """
+    attachments: list[Attachment] = []
+    out_parts: list[str] = []
+    cursor = 0
+    for match in BINARY_ATTACHMENT_OPEN_RE.finditer(text):
+        open_start, open_end = match.span()
+        close_idx = text.find(BINARY_ATTACHMENT_CLOSE, open_end)
+        if close_idx == -1:  # pragma: no cover – defensive: malformed sentinel
+            break
+        mime_type = match.group(1)
+        b64_payload = text[open_end:close_idx]
+        try:
+            data = base64.b64decode(b64_payload, validate=False)
+        except Exception:  # pragma: no cover – validate=False is permissive
+            logger.debug("Failed to decode binary attachment", exc_info=True)
+            cursor = close_idx + len(BINARY_ATTACHMENT_CLOSE)
+            continue
+        out_parts.append(text[cursor:open_start])
+        out_parts.append(f"[attached {mime_type}, {len(data)} bytes]")
+        attachments.append(Attachment(data=data, mime_type=mime_type))
+        cursor = close_idx + len(BINARY_ATTACHMENT_CLOSE)
+    out_parts.append(text[cursor:])
+    return "".join(out_parts), attachments
+
+
 _AUDIO_MIME_TO_EXT: dict[str, str] = {
     "audio/mpeg": ".mp3",
     "audio/mp3": ".mp3",
@@ -338,6 +416,11 @@ class Model(ABC):
 
         for i, (func_name, result_dict) in enumerate(function_results):
             result_content = result_dict.get("result", str(result_dict))
+            # Strip binary attachment payloads — the default OpenAI-style
+            # ``role: tool`` message does not accept image content blocks,
+            # so we drop the base64 bytes and keep only the placeholder
+            # text so the conversation does not balloon to megabytes.
+            result_content, _ = parse_binary_attachments(result_content)
             if self.usage_info_for_messages:
                 result_content = f"{result_content}\n\n{self.usage_info_for_messages}"
 
@@ -401,6 +484,51 @@ class Model(ABC):
         """
         self.usage_info_for_messages = usage_info
 
+    def _estimate_conversation_tokens(self, msgs: list[Any] | None = None) -> int:
+        """Rough estimate of conversation size in tokens (chars / 4).
+
+        Args:
+            msgs: Message list to estimate. Defaults to self.conversation.
+        """
+        total_chars = 0
+        for msg in (msgs if msgs is not None else self.conversation):
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                total_chars += len(content)
+            elif isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict):
+                        for v in block.values():
+                            if isinstance(v, str):
+                                total_chars += len(v)
+        return total_chars // 2
+
+    def compact_conversation(self, max_context_tokens: int) -> None:
+        """Drop old messages to keep conversation within half the context limit.
+
+        Preserves the initial user/human messages and keeps the last N messages,
+        decrementing N from 50 until the conversation fits within half the token
+        limit. Falls back to keeping only the initial messages if nothing fits.
+        """
+        if self._estimate_conversation_tokens() <= int(max_context_tokens * 0.7):
+            return
+
+        keep_start = 0
+        for i, msg in enumerate(self.conversation):
+            if msg.get("role") in ("user", "human"):
+                keep_start = i + 1
+                break
+
+        keep_recent = 30
+        while keep_recent > 0:
+            tail_start = max(keep_start, len(self.conversation) - keep_recent)
+            candidate = self.conversation[:keep_start] + self.conversation[tail_start:]
+            if self._estimate_conversation_tokens(candidate) <= max_context_tokens // 2:
+                self.conversation = candidate
+                return
+            keep_recent -= 1
+
+        self.conversation = self.conversation[:keep_start]
 
     def _resolve_openai_tools_schema(
         self,
@@ -420,6 +548,10 @@ class Model(ABC):
         if tools_schema is not None:
             return tools_schema
         return self._build_openai_tools_schema(function_map)
+
+    # =========================================================================
+    # Helper methods for building tool schemas (shared across implementations)
+    # ========================================================================
 
     def _build_openai_tools_schema(
         self, function_map: dict[str, Callable[..., Any]]

@@ -142,6 +142,39 @@ _MAX_ATTACHMENTS = 32
 # JSON payload cannot push tens of MB through the broadcast pipeline.
 _MAX_PROMPT_BYTES = 1_000_000
 
+# Maximum length of a single newline-delimited JSON command line read
+# from a UDS or WSS client.  The default ``asyncio.StreamReader`` limit
+# is 64 KiB which is smaller than even a modest base64-encoded image
+# attachment — a single ``submit`` with an attached PNG/PDF would
+# overflow the reader, raise ``LimitOverrunError`` and silently drop
+# the user's task.  Bumped to 64 MiB so attachments up to a few MB
+# each (capped by ``_MAX_ATTACHMENTS``) can be delivered as one line.
+_MAX_LINE_BYTES = 64 * 1024 * 1024
+
+# Grace period (seconds) between a WebSocket connection dropping and
+# the deferred ``closeTab`` actually firing for every tab seen on
+# that connection.  Browsers do not reliably send a "closeTab" before
+# the WSS shuts down (and ``beforeunload``/``pagehide`` WebSocket
+# writes are routinely dropped), so a brief grace window is the
+# canonical way to distinguish a transient reconnect/reload from an
+# intentional browser close.  A fresh ``ready`` message that
+# re-claims a tab id (current ``tabId`` or any entry in
+# ``restoredTabs``) cancels the pending close before it fires.  10s
+# is long enough to cover typical reloads on a slow link without
+# letting an orphaned ``_RunningAgentState`` linger meaningfully.
+_TAB_CLOSE_GRACE = 10.0
+
+# Path to the localhost Unix-domain socket exposed by
+# :class:`RemoteAccessServer` in addition to the public WSS port.
+# Local clients (the VS Code extension) connect to this socket over
+# the SAME newline-delimited JSON protocol that browsers speak over
+# WSS — no password challenge is performed because POSIX filesystem
+# permissions (mode 0o600) restrict access to the owning user.  A
+# fresh ``RemoteAccessServer(uds_path=...)`` argument overrides this
+# location for tests so multiple instances do not race on the same
+# socket file.
+_UDS_PATH = Path.home() / ".kiss" / "sorcar.sock"
+
 
 def _tunnel_backoff_delay(failure_count: int) -> int:
     """Return the backoff delay for *failure_count* consecutive failures.
@@ -383,6 +416,7 @@ def _reject_hunk_in_file(
     current_path: str,
     base_path: str,
     hunk: dict[str, int],
+    target_path: str | None = None,
 ) -> None:
     """Revert a single hunk in the current file to the base version.
 
@@ -390,16 +424,34 @@ def _reject_hunk_in_file(
     with the corresponding lines from the base file, and writes the
     result back.
 
+    When *target_path* differs from *current_path* — which happens when
+    the agent deleted a tracked file and the merge view uses a
+    ``.deleted`` placeholder as the visible "current" — the rejected
+    content is written to *target_path* (the real workspace location),
+    so the file is actually restored on disk.  Subsequent hunks read
+    from *target_path* too, so partial rejections accumulate
+    correctly.
+
     Args:
-        current_path: Path to the file with agent changes.
+        current_path: Path to the file with agent changes (may be a
+            display placeholder for deleted files).
         base_path: Path to the pre-task base copy.
         hunk: Hunk dict with keys ``bs``, ``bc``, ``cs``, ``cc``
             (0-based line positions).
+        target_path: Real workspace path to write the rejection to.
+            Defaults to *current_path* for backwards compatibility.
     """
+    write_to = target_path or current_path
+    # Read from *write_to* (the real workspace target) when it exists
+    # so that successive partial rejections accumulate against the
+    # restored content rather than the (now-stale) placeholder.
     try:
-        cur_lines = Path(current_path).read_text().splitlines(keepends=True)
+        cur_lines = Path(write_to).read_text().splitlines(keepends=True)
     except OSError:
-        cur_lines = []
+        try:
+            cur_lines = Path(current_path).read_text().splitlines(keepends=True)
+        except OSError:
+            cur_lines = []
     try:
         base_lines = Path(base_path).read_text().splitlines(keepends=True)
     except OSError:
@@ -410,23 +462,31 @@ def _reject_hunk_in_file(
         + base_lines[hunk["bs"] : hunk["bs"] + hunk["bc"]]
         + cur_lines[hunk["cs"] + hunk["cc"] :]
     )
-    Path(current_path).write_text("".join(new_lines))
+    Path(write_to).parent.mkdir(parents=True, exist_ok=True)
+    Path(write_to).write_text("".join(new_lines))
 
 
 def _reject_all_hunks_in_file(file_data: dict[str, Any]) -> None:
     """Revert an entire file to its base version.
 
-    Simply copies the base file content over the current file.
+    Copies the base file content over the real workspace path
+    (``file_data["target"]`` when present, otherwise
+    ``file_data["current"]``).  Using ``target`` ensures that when the
+    agent deleted a tracked file and the user rejects all hunks, the
+    workspace file is actually restored on disk instead of being left
+    behind as a placeholder.
 
     Args:
-        file_data: File entry from merge data with ``base`` and
-            ``current`` path strings.
+        file_data: File entry from merge data with ``base``,
+            ``current`` and (optionally) ``target`` path strings.
     """
+    write_to = file_data.get("target") or file_data["current"]
     if Path(file_data["base"]).is_file():
-        shutil.copy2(file_data["base"], file_data["current"])
+        Path(write_to).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(file_data["base"], write_to)
+
 
 _VSCODE_ONLY_COMMANDS = frozenset({
-
     "focusEditor",
     "webviewFocusChanged",
     "openFile",
@@ -974,24 +1034,89 @@ def _get_ntfy_url() -> str:
     return ""
 
 
-def _post_url_to_message_board(url: str) -> None:
+_NTFY_BASE_URL = "https://ntfy.sh"
+
+
+def _fetch_last_ntfy_message(
+    topic: str, base_url: str = _NTFY_BASE_URL,
+) -> str | None:
+    """Return the most recent message body posted to ``{base_url}/{topic}``.
+
+    Queries ntfy.sh's poll endpoint (``/{topic}/json?poll=1``) which
+    returns cached messages (default retention 12h) as newline-
+    delimited JSON.  Only entries with ``event == "message"`` are
+    considered; the last one wins because the server returns events
+    in chronological order.
+
+    Args:
+        topic: ntfy.sh topic name (without leading slash).
+        base_url: Override the ntfy server URL (used by tests).
+
+    Returns:
+        The body (``message`` field) of the most recent cached
+        message, or ``None`` if the topic has no cached messages or
+        the request fails.
+    """
+    try:
+        req = urllib.request.Request(
+            f"{base_url}/{topic}/json?poll=1",
+            headers={"User-Agent": "kiss-web"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+    except Exception:
+        logger.debug("Failed to fetch last ntfy message", exc_info=True)
+        return None
+    last: str | None = None
+    for line in body.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if obj.get("event") != "message":
+            continue
+        msg = obj.get("message")
+        if isinstance(msg, str):
+            last = msg
+    return last
+
+
+def _post_url_to_message_board(
+    url: str, base_url: str = _NTFY_BASE_URL,
+) -> None:
     """Post the active Cloudflare URL to ntfy.sh as a private message.
 
     Uses the machine-stable topic from :func:`_get_machine_topic` so
     the URL can be retrieved by subscribing to the same topic.  The
     message is posted with a title indicating it is a KISS Sorcar
-    remote URL update.  Failures are logged but never raised.
+    remote URL update.  Before posting, the most recent cached
+    message on the topic is fetched via :func:`_fetch_last_ntfy_message`;
+    if it already matches ``url`` the post is skipped so subscribers
+    are not woken up by duplicate notifications when a watchdog
+    restart or named-tunnel re-registration produces the same public
+    hostname.  Failures are logged but never raised.
 
     Args:
         url: The ``https://`` URL to publish.
+        base_url: Override the ntfy server URL (used by tests).
     """
     if not url or url.startswith("https://localhost"):
         return
     try:
         topic = _get_machine_topic()
+        last = _fetch_last_ntfy_message(topic, base_url=base_url)
+        if last is not None and last.strip() == url.strip():
+            logger.info(
+                "Skipping ntfy.sh post for %s; last message on "
+                "topic %s already has the same URL", url, topic,
+            )
+            return
         data = url.encode("utf-8")
         req = urllib.request.Request(
-            f"https://ntfy.sh/{topic}",
+            f"{base_url}/{topic}",
             data=data,
             method="POST",
             headers={
@@ -1218,6 +1343,12 @@ class WebPrinter(BaseBrowserPrinter):
     def __init__(self) -> None:
         super().__init__()
         self._ws_clients: set[ServerConnection] = set()
+        # Unix-domain socket writers (local extension clients).  Same
+        # newline-delimited JSON protocol as WSS clients; broadcasts
+        # fan out to both sets in lockstep so a browser viewer and a
+        # VS Code extension viewer of the same chat tab observe an
+        # identical event stream.
+        self._uds_writers: set[asyncio.StreamWriter] = set()
         self._ws_lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._merge_state_callback: (
@@ -1236,17 +1367,28 @@ class WebPrinter(BaseBrowserPrinter):
     def broadcast(self, event: dict[str, Any]) -> None:
         """Send *event* to every connected WebSocket client.
 
-        Injects ``tabId`` from thread-local storage (via
-        ``_inject_tab_id``), records the event for replay, persists
-        display events to the database (via ``_persist_event``), and
-        augments ``merge_data`` events with file contents for web-based
-        diff rendering.
+        Two code paths:
+
+        * Events that already carry an explicit ``tabId`` (status,
+          askUser, commitMessage, merge_data, etc.) are treated as
+          targeted "system" events: sent verbatim to all connected
+          clients (which filter by ``tabId``), but **not** recorded
+          or persisted.
+        * Events with no ``tabId`` but a thread-local ``task_id`` are
+          task events: ``taskId`` is injected, the event is recorded
+          under the task and queued for persistence, and one stamped
+          copy per subscribed tab is sent to clients.  When no tab is
+          currently subscribed the event is recorded / persisted but
+          no copy is sent over the wire.
+        * Events with neither ``tabId`` nor a resolvable ``taskId``
+          are global system events (``configData``, ``models``,
+          ``history``, ``inputHistory``, ``welcome_suggestions``,
+          ``error``, etc.) and are broadcast verbatim to every
+          connected client.
 
         Args:
             event: The event dictionary to emit.
         """
-        event = self._inject_tab_id(event)
-
         if event.get("type") == "configData":
             cfg = event.get("config")
             if isinstance(cfg, dict) and not cfg.get("work_dir"):
@@ -1263,33 +1405,103 @@ class WebPrinter(BaseBrowserPrinter):
             if evt_tab and self._merge_state_callback is not None:
                 self._merge_state_callback(evt_tab, event.get("data", {}))
 
+        if "tabId" in event:
+            # Targeted "system" event — forward verbatim, never record
+            # or persist (recording / persistence is per-task and is
+            # owned by the agent thread).
+            self._send_to_ws_clients(json.dumps(event))
+            return
+
+        event = self._inject_task_id(event)
+
+        if not event.get("taskId"):
+            # Global system event with no task context (configData,
+            # models, history, error, etc.) — broadcast verbatim to
+            # every connected client.  Not recorded, not persisted.
+            self._send_to_ws_clients(json.dumps(event))
+            return
+
         with self._lock:
             self._record_event(event)
 
         self._persist_event(event)
 
-        data = json.dumps(event)
+        # Fan out one stamped copy per subscribed tab.  The frontend
+        # filters incoming events by ``tabId``; an event with no
+        # subscriber is silently swallowed (which is correct: no UI
+        # is currently watching this task).
+        for tab_id in self._fanout_targets(event.get("taskId")):
+            self._send_to_ws_clients(json.dumps({**event, "tabId": tab_id}))
+
+    def _send_to_ws_clients(self, data: str) -> None:
+        """Send a pre-serialised JSON payload to every connected client.
+
+        Factored out of :meth:`broadcast` so fan-out copies for
+        subscribed viewer tab ids reuse the same dispatch and pending-
+        future tracking as the primary broadcast.  Fans out to BOTH
+        WSS clients and local Unix-domain socket writers in lockstep.
+
+        Args:
+            data: The JSON payload (already encoded with ``json.dumps``).
+        """
         with self._ws_lock:
             clients = list(self._ws_clients)
+            writers = list(self._uds_writers)
         loop = self._loop
+        if loop is None or not loop.is_running():
+            return
         for ws in clients:
-            if loop is not None and loop.is_running():
-                try:
-                    fut = asyncio.run_coroutine_threadsafe(
-                        ws.send(data), loop,
-                    )
-                except Exception:
-                    logger.debug("Failed to send to WS client", exc_info=True)
-                    continue
-                # M8: track the future so a stuck/slow peer's pending
-                # sends can be cancelled when the client disconnects.
-                with self._ws_lock:
-                    pending = self._pending_sends.get(ws)
-                    if pending is not None:
-                        pending.add(fut)
-                fut.add_done_callback(
-                    partial(self._discard_pending_send, ws),
+            try:
+                fut = asyncio.run_coroutine_threadsafe(
+                    ws.send(data), loop,
                 )
+            except Exception:
+                logger.debug("Failed to send to WS client", exc_info=True)
+                continue
+            # M8: track the future so a stuck/slow peer's pending
+            # sends can be cancelled when the client disconnects.
+            with self._ws_lock:
+                pending = self._pending_sends.get(ws)
+                if pending is not None:
+                    pending.add(fut)
+            fut.add_done_callback(
+                partial(self._discard_pending_send, ws),
+            )
+        for writer in writers:
+            try:
+                fut = asyncio.run_coroutine_threadsafe(
+                    self._uds_send(writer, data), loop,
+                )
+            except Exception:
+                logger.debug("Failed to send to UDS client", exc_info=True)
+                continue
+            with self._ws_lock:
+                pending = self._pending_sends.get(writer)
+                if pending is not None:
+                    pending.add(fut)
+            fut.add_done_callback(
+                partial(self._discard_pending_send, writer),
+            )
+
+    async def _uds_send(
+        self, writer: asyncio.StreamWriter, data: str,
+    ) -> None:
+        """Write a newline-delimited JSON payload to a UDS client.
+
+        Mirrors ``ServerConnection.send`` for Unix-domain socket
+        peers.  On any write failure, the writer is removed from the
+        active set so subsequent broadcasts skip it.
+
+        Args:
+            writer: The asyncio stream writer for the UDS connection.
+            data: The JSON payload (already encoded with ``json.dumps``).
+        """
+        try:
+            writer.write(data.encode("utf-8") + b"\n")
+            await writer.drain()
+        except Exception:
+            logger.debug("Failed to write to UDS client", exc_info=True)
+            self.remove_uds_writer(writer)
 
     def add_client(self, ws: ServerConnection) -> None:
         """Register a WebSocket client for event broadcasting.
@@ -1320,16 +1532,50 @@ class WebPrinter(BaseBrowserPrinter):
             except Exception:
                 logger.debug("Failed to cancel pending send", exc_info=True)
 
-    def _discard_pending_send(self, ws: ServerConnection, fut: Any) -> None:
+    def add_uds_writer(self, writer: asyncio.StreamWriter) -> None:
+        """Register a Unix-domain socket writer for event broadcasting.
+
+        Args:
+            writer: The asyncio stream writer to add.
+        """
+        with self._ws_lock:
+            self._uds_writers.add(writer)
+            self._pending_sends.setdefault(writer, set())
+
+    def remove_uds_writer(self, writer: asyncio.StreamWriter) -> None:
+        """Remove a Unix-domain socket writer from event broadcasting.
+
+        Cancels any pending ``run_coroutine_threadsafe`` futures for
+        this writer so a permanently stuck send queue cannot keep the
+        underlying coroutine alive after the peer is gone.
+
+        Args:
+            writer: The asyncio stream writer to remove.
+        """
+        with self._ws_lock:
+            self._uds_writers.discard(writer)
+            pending = self._pending_sends.pop(writer, set())
+        for fut in pending:
+            try:
+                fut.cancel()
+            except Exception:
+                logger.debug(
+                    "Failed to cancel pending UDS send", exc_info=True,
+                )
+
+    def _discard_pending_send(self, client: Any, fut: Any) -> None:
         """Remove a completed send future from the per-client pending set.
 
         Called via :meth:`concurrent.futures.Future.add_done_callback`
         once the wrapped coroutine finishes (or errors).  Keeps the
         :attr:`_pending_sends` set bounded so it does not grow without
         limit on a long-running healthy connection.
+
+        ``client`` may be a :class:`ServerConnection` (WSS) or an
+        :class:`asyncio.StreamWriter` (UDS).
         """
         with self._ws_lock:
-            pending = self._pending_sends.get(ws)
+            pending = self._pending_sends.get(client)
             if pending is not None:
                 pending.discard(fut)
 
@@ -1345,6 +1591,7 @@ def _build_html() -> str:
         The complete HTML string.
     """
     version = _read_version()
+    tricks_json = json.dumps(_read_tricks())
     shim = _WS_SHIM_JS
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -1418,6 +1665,37 @@ width=device-width,initial-scale=1,maximum-scale=1">
       <div id="welcome">
         <h2>Welcome to KISS Sorcar</h2>
         <p>Your AI assistant. Ask me anything!</p>
+        <div id="welcome-config" class="welcome-config">
+          <div id="welcome-remote-url"></div>
+          <label class="config-label welcome-config-label">Remote password
+            <div class="config-password-wrap">
+              <input type="password" id="welcome-cfg-remote-password"
+               placeholder="Remote access password">
+              <button type="button" id="welcome-cfg-remote-password-toggle"
+               class="config-password-toggle"
+               aria-label="Show password" aria-pressed="false"
+               title="Show password">
+                <svg class="icon-eye" width="16" height="16" viewBox="0 0 24 24"
+                 fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/>
+                  <circle cx="12" cy="12" r="3"/>
+                </svg>
+                <svg class="icon-eye-off" width="16" height="16"
+                 viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                 aria-hidden="true" style="display:none;">
+                  <path d="M17.94 17.94A10.94 10.94 0 0 1 12 19c-7 0-11-7-11-7\
+a19.7 19.7 0 0 1 4.22-5.06"/>
+                  <path d="M9.9 4.24A10.94 10.94 0 0 1 12 4c7 0 11 7 11 7\
+a19.7 19.7 0 0 1-3.16 4.19"/>
+                  <path d="M14.12 14.12A3 3 0 0 1 9.88 9.88"/>
+                  <line x1="1" y1="1" x2="23" y2="23"/>
+                </svg>
+              </button>
+            </div>
+          </label>
+        </div>
         <div id="suggestions"></div>
       </div>
     </div>
@@ -1437,6 +1715,15 @@ width=device-width,initial-scale=1,maximum-scale=1">
         </div>
         <div id="input-footer">
           <div id="model-picker">
+            <button id="menu-btn">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round"
+               stroke-linejoin="round">
+                <line x1="3" y1="6" x2="21" y2="6"/>
+                <line x1="3" y1="12" x2="21" y2="12"/>
+                <line x1="3" y1="18" x2="21" y2="18"/>
+              </svg>
+            </button>
             <button id="model-btn" data-tooltip="Select model">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
                stroke="currentColor" stroke-width="2">
@@ -1452,94 +1739,26 @@ width=device-width,initial-scale=1,maximum-scale=1">
 a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
               </svg>
             </button>
-            <button id="menu-btn" data-tooltip="Advanced options">
+            <button id="frequent-tasks-btn" class="toggle-btn"
+             data-tooltip="Frequent tasks">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
-               stroke="currentColor" stroke-width="2" stroke-linecap="round"
+               stroke="currentColor" stroke-width="2.5" stroke-linecap="round"
                stroke-linejoin="round">
-                <line x1="3" y1="6" x2="21" y2="6"/>
-                <line x1="3" y1="12" x2="21" y2="12"/>
-                <line x1="3" y1="18" x2="21" y2="18"/>
+                <line x1="6" y1="20" x2="6" y2="14"/>
+                <line x1="12" y1="20" x2="12" y2="9"/>
+                <line x1="18" y1="20" x2="18" y2="4"/>
               </svg>
             </button>
-            <div id="menu-dropdown">
-              <button id="worktree-toggle-btn" class="menu-item">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
-                 stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                 stroke-linejoin="round">
-                  <line x1="6" y1="3" x2="6" y2="15"/>
-                  <circle cx="18" cy="6" r="3"/>
-                  <circle cx="6" cy="18" r="3"/>
-                  <path d="M18 9a9 9 0 01-9 9"/>
-                </svg>
-                <span>Use worktree</span>
-              </button>
-              <button id="parallel-toggle-btn" class="menu-item">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
-                 stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                 stroke-linejoin="round">
-                  <line x1="6" y1="4" x2="6" y2="20"/>
-                  <line x1="12" y1="4" x2="12" y2="20"/>
-                  <line x1="18" y1="4" x2="18" y2="20"/>
-                </svg>
-                <span>Use parallelism</span>
-              </button>
-              <button id="autocommit-btn" class="menu-item">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
-                 stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                 stroke-linejoin="round">
-                  <circle cx="12" cy="12" r="4"/>
-                  <line x1="1.05" y1="12" x2="7" y2="12"/>
-                  <line x1="17.01" y1="12" x2="22.96" y2="12"/>
-                  <line x1="12" y1="1.05" x2="12" y2="7"/>
-                  <line x1="12" y1="17.01" x2="12" y2="22.96"/>
-                </svg>
-                <span>Auto commit</span>
-              </button>
-              <button id="demo-toggle-btn" class="menu-item">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
-                 stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                 stroke-linejoin="round">
-                  <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
-                  <line x1="8" y1="21" x2="16" y2="21"/>
-                  <line x1="12" y1="17" x2="12" y2="21"/>
-                </svg>
-                <span>Demo mode</span>
-              </button>
-              <div class="menu-divider"></div>
-              <button id="frequent-btn" class="menu-item">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
-                 stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                 stroke-linejoin="round">
-                  <polyline points="20 12 18 7 14 17 10 5 6 14 4 12"/>
-                </svg>
-                <span>Frequent tasks</span>
-              </button>
-              <button id="history-btn" class="menu-item">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
-                 stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                 stroke-linejoin="round">
-                  <polyline points="15 18 9 12 15 6"/>
-                </svg>
-                <span>History</span>
-              </button>
-              <button id="config-btn" class="menu-item">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
-                 stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                 stroke-linejoin="round">
-                  <circle cx="12" cy="12" r="3"/>
-                  <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 \
-2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 \
-1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06\
-.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1\
-H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 \
-2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 \
-014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 \
-2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 \
-4h-.09a1.65 1.65 0 00-1.51 1z"/>
-                </svg>
-                <span>Settings</span>
-              </button>
-            </div>
+            <button id="tricks-btn" class="toggle-btn"
+             data-tooltip="Inject instruction">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2.5" stroke-linecap="round"
+               stroke-linejoin="round">
+                <path d="M9 18h6"/>
+                <path d="M10 22h4"/>
+                <path d="M12 2a7 7 0 00-4 12.7c.7.6 1 1.4 1 2.3h6c0-.9.3-1.7 1-2.3A7 7 0 0012 2z"/>
+              </svg>
+            </button>
             <div id="model-dropdown">
               <div class="search-wrap">
                 <input type="text" id="model-search" placeholder="Search models...">
@@ -1570,12 +1789,40 @@ H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 \
 
     <div id="sidebar">
       <button id="sidebar-close">&times;</button>
-      <div class="sidebar-section">
-        <div class="sidebar-hdr">Recent Conversations</div>
+      <div id="sidebar-tab-history-panel"
+       class="sidebar-section sidebar-tab-panel">
+        <div class="sidebar-hdr">History</div>
         <div class="search-wrap">
           <input type="text" id="history-search" placeholder="Search history...">
           <button class="search-clear-btn" id="history-search-clear"
            style="display:none;">&times;</button>
+        </div>
+        <div class="history-filter-bar">
+          <label class="history-filter-chk" title="Show running tasks">
+            <input type="checkbox" id="hf-running" checked>Running
+          </label>
+          <label class="history-filter-chk" title="Show tasks that finished with error">
+            <input type="checkbox" id="hf-errors" checked>Errored
+          </label>
+          <label class="history-filter-chk" title="Show successfully completed tasks">
+            <input type="checkbox" id="hf-completed" checked>Succeeded
+          </label>
+          <label class="history-filter-chk"
+           title="Show only tasks marked as favourite">
+            <input type="checkbox" id="hf-favorite">Favorites
+          </label>
+          <label for="hf-from" class="history-filter-date-lbl">From:</label>
+          <input type="date" id="hf-from" class="history-filter-date"
+           title="From date" aria-label="From date">
+          <button type="button" id="hf-from-btn"
+           class="history-filter-date-btn"
+           title="Pick From date" aria-label="Pick From date">📅</button>
+          <label for="hf-to" class="history-filter-date-lbl">To:</label>
+          <input type="date" id="hf-to" class="history-filter-date"
+           title="To date" aria-label="To date">
+          <button type="button" id="hf-to-btn"
+           class="history-filter-date-btn"
+           title="Pick To date" aria-label="Pick To date">📅</button>
         </div>
         <div id="history-list">
           <div class="sidebar-empty">No conversations yet</div>
@@ -1584,51 +1831,97 @@ H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 \
     </div>
     <div id="sidebar-overlay"></div>
 
-    <div id="frequent-sidebar">
-      <button id="frequent-sidebar-close">&times;</button>
-      <div class="sidebar-section">
-        <div class="sidebar-hdr">Frequent Tasks</div>
+    <div id="frequent-panel">
+      <button id="frequent-panel-close">&times;</button>
+      <div class="sidebar-section sidebar-tab-panel">
+        <div class="sidebar-hdr">Frequent tasks</div>
         <div id="frequent-list">
           <div class="sidebar-empty">No tasks yet</div>
         </div>
       </div>
     </div>
-    <div id="frequent-sidebar-overlay"></div>
+    <div id="frequent-overlay"></div>
 
-    <div id="config-sidebar">
-      <button id="config-sidebar-close">&times;</button>
+    <div id="tricks-panel">
+      <button id="tricks-panel-close">&times;</button>
+      <div class="sidebar-section sidebar-tab-panel">
+        <div class="sidebar-hdr">Inject</div>
+        <div id="tricks-list">
+          <div class="sidebar-empty">No tricks available</div>
+        </div>
+      </div>
+    </div>
+    <div id="tricks-overlay"></div>
+
+    <div id="settings-panel">
+      <button id="settings-panel-close">&times;</button>
       <div class="sidebar-section">
         <div class="sidebar-hdr">Sorcar Configuration{' ' + version if version else ''}</div>
         <div id="remote-url"></div>
         <div id="config-form">
+          <label class="config-label">Remote password
+            <div class="config-password-wrap">
+              <input type="password" id="cfg-remote-password"
+               placeholder="Remote access password">
+              <button type="button" id="cfg-remote-password-toggle"
+               class="config-password-toggle"
+               aria-label="Show password" aria-pressed="false"
+               title="Show password">
+                <svg class="icon-eye" width="16" height="16" viewBox="0 0 24 24"
+                 fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/>
+                  <circle cx="12" cy="12" r="3"/>
+                </svg>
+                <svg class="icon-eye-off" width="16" height="16"
+                 viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                 aria-hidden="true" style="display:none;">
+                  <path d="M17.94 17.94A10.94 10.94 0 0 1 12 19c-7 0-11-7-11-7\
+a19.7 19.7 0 0 1 4.22-5.06"/>
+                  <path d="M9.9 4.24A10.94 10.94 0 0 1 12 4c7 0 11 7 11 7\
+a19.7 19.7 0 0 1-3.16 4.19"/>
+                  <path d="M14.12 14.12A3 3 0 0 1 9.88 9.88"/>
+                  <line x1="1" y1="1" x2="23" y2="23"/>
+                </svg>
+              </button>
+            </div>
+          </label>
           <label class="config-label">Max budget per task ($)
             <input type="number" id="cfg-max-budget" min="0" step="1" value="100">
-          </label>
-          <label class="config-label">Custom endpoint (local model)
-            <input type="text" id="cfg-custom-endpoint"
-             placeholder="http://localhost:8080/v1">
-          </label>
-          <label class="config-label">Custom API key
-            <input type="text" id="cfg-custom-api-key"
-             placeholder="Optional API key for custom endpoint">
           </label>
           <label class="config-label config-checkbox">
             <input type="checkbox" id="cfg-use-web-browser" checked>
             Use web browser
           </label>
-          <label class="config-label">Remote password
-            <input type="text" id="cfg-remote-password"
-             placeholder="Remote access password">
+          <label class="config-label config-checkbox">
+            <input type="checkbox" id="cfg-auto-commit" checked>
+            Auto commit
+            <button id="autocommit-btn" type="button" data-tooltip="git commit">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round"
+               stroke-linejoin="round">
+                <circle cx="12" cy="12" r="4"/>
+                <line x1="1.05" y1="12" x2="7" y2="12"/>
+                <line x1="17.01" y1="12" x2="22.96" y2="12"/>
+                <line x1="12" y1="1.05" x2="12" y2="7"/>
+                <line x1="12" y1="17.01" x2="12" y2="22.96"/>
+              </svg>
+            </button>
           </label>
-          <label class="config-label">Working directory
-            <div style="display:flex;gap:4px;align-items:center;">
-              <input type="text" id="cfg-work-dir"
-               placeholder="Default: current workspace folder" style="flex:1;">
-              <button type="button" id="cfg-work-dir-browse"
-               title="Browse for folder"
-               style="padding:4px 8px;cursor:pointer;display:none;">Browse</button>
-            </div>
+          <label class="config-label config-checkbox">
+            <input type="checkbox" id="cfg-use-parallel" checked>
+            Use parallel agents
           </label>
+          <label class="config-label config-checkbox">
+            <input type="checkbox" id="cfg-use-worktree" checked>
+            Use worktree
+          </label>
+          <label class="config-label config-checkbox">
+            <input type="checkbox" id="cfg-demo-mode">
+            Demo mode
+          </label>
+
           <div class="config-divider"></div>
           <div class="sidebar-hdr" style="margin-top:8px;">API Keys</div>
           <label class="config-label">Gemini API Key
@@ -1655,11 +1948,22 @@ H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 \
             <input type="text" id="cfg-key-MINIMAX_API_KEY"
              placeholder="Enter MiniMax API key">
           </label>
-
+          <label class="config-label">Custom endpoint (local model)
+            <input type="text" id="cfg-custom-endpoint"
+             placeholder="http://localhost:8080/v1">
+          </label>
+          <label class="config-label">Custom API key
+            <input type="text" id="cfg-custom-api-key"
+             placeholder="Optional API key for custom endpoint">
+          </label>
+          <label class="config-label">Custom headers
+            <textarea id="cfg-custom-headers" rows="2"
+             placeholder="Key:Value (one per line)"></textarea>
+          </label>
         </div>
       </div>
     </div>
-    <div id="config-sidebar-overlay"></div>
+    <div id="settings-overlay"></div>
 
     <div id="ask-user-modal" style="display:none;">
       <div class="modal-content">
@@ -1686,6 +1990,7 @@ H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 \
   <script src="/media/highlight.min.js"></script>
   <script src="/media/marked.min.js"></script>
   <script>{shim}</script>
+  <script>window.__TRICKS__ = {tricks_json};</script>
   <script src="/media/main.js"></script>
   <script src="/media/demo.js"></script>
 </body>
@@ -1702,6 +2007,34 @@ def _read_version() -> str:
     except Exception:
         pass
     return ""
+
+
+def _read_tricks() -> list[str]:
+    """Parse ``src/kiss/INJECTIONS.md`` and return the trick texts.
+
+    The file contains a series of ``## Trick`` sections, each followed
+    by a blank line and a one-line trick.  Returns an empty list if the
+    file is missing or unparseable, so a deployment without
+    INJECTIONS.md still renders the button (with an empty list).
+    """
+    try:
+        tfile = Path(__file__).parent.parent.parent / "INJECTIONS.md"
+        text = tfile.read_text()
+    except Exception:
+        return []
+    tricks: list[str] = []
+    # Split on H2 headings, then keep only sections whose title is
+    # "Trick".  ``re.split`` with a capturing group preserves the
+    # heading so we can identify each section.
+    sections = re.split(r"^##\s+", text, flags=re.MULTILINE)
+    for section in sections[1:]:
+        lines = section.splitlines()
+        if not lines or lines[0].strip() != "Trick":
+            continue
+        body = "\n".join(lines[1:]).strip()
+        if body:
+            tricks.append(body)
+    return tricks
 
 
 _WS_SHIM_JS = r"""
@@ -1857,13 +2190,25 @@ def _augment_merge_data(event: dict[str, Any]) -> dict[str, Any]:
     files = []
     for f in data.get("files", []):
         f = {**f}
+        # Binary files (PDFs, images, etc.) have no meaningful text
+        # representation; the MergeManager / web client open them via
+        # the native viewer.  Attempting ``read_text()`` on them would
+        # raise ``UnicodeDecodeError`` (a ``ValueError``, not
+        # ``OSError``), which previously aborted the entire
+        # ``merge_data`` broadcast and prevented the diff/merge UI
+        # from appearing for binary-only changes.
+        if f.get("binary"):
+            f["base_text"] = ""
+            f["current_text"] = ""
+            files.append(f)
+            continue
         try:
             f["base_text"] = Path(f["base"]).read_text()
-        except (OSError, KeyError):
+        except (OSError, KeyError, UnicodeDecodeError):
             f["base_text"] = ""
         try:
             f["current_text"] = Path(f["current"]).read_text()
-        except (OSError, KeyError):
+        except (OSError, KeyError, UnicodeDecodeError):
             f["current_text"] = ""
         files.append(f)
     data["files"] = files
@@ -1951,6 +2296,7 @@ class RemoteAccessServer:
         certfile: str | None = None,
         keyfile: str | None = None,
         url_file: str | Path | None = None,
+        uds_path: str | Path | None = None,
     ) -> None:
         source_shell_env()
 
@@ -1978,12 +2324,11 @@ class RemoteAccessServer:
         # config provides one.
         self.work_dir: str = work_dir or ""
 
-        self._vscode_server = VSCodeServer()
-        if self.work_dir:
-            self._vscode_server.work_dir = self.work_dir
         self._printer = WebPrinter()
         self._printer.work_dir = self.work_dir
-        self._vscode_server.printer = self._printer  # type: ignore[assignment]
+        self._vscode_server = VSCodeServer(printer=self._printer)
+        if self.work_dir:
+            self._vscode_server.work_dir = self.work_dir
 
         self._html_bytes = _build_html().encode("utf-8")
         self._tunnel_proc: subprocess.Popen[str] | None = None
@@ -2007,8 +2352,23 @@ class RemoteAccessServer:
         # to apply a much longer backoff than the regular exponential
         # one so the per-IP cooldown actually has time to clear.
         self._tunnel_rate_limited = False
+        # Last Cloudflare tunnel URL posted to the ntfy.sh message
+        # board.  Tracked so a watchdog restart that yields the *same*
+        # public hostname (e.g. an adopted cloudflared, or a named
+        # tunnel re-registering) does not re-publish the unchanged URL
+        # to subscribers.
+        self._last_posted_url: str | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ws_server: Any = None
+        # Unix-domain socket listener for local clients (the VS Code
+        # extension).  Bound in :meth:`_setup_server` and torn down
+        # in :meth:`stop_async`.  Tests pass an explicit
+        # ``uds_path`` so concurrent instances do not race on the
+        # shared default ``~/.kiss/sorcar.sock``.
+        self._uds_path: Path = (
+            Path(uds_path) if uds_path else _UDS_PATH
+        )
+        self._uds_server: asyncio.Server | None = None
         self._watchdog_task: asyncio.Task[None] | None = None
         self._local_url = f"https://localhost:{self.port}"
         self._merge_states: dict[str, _WebMergeState] = {}
@@ -2025,6 +2385,16 @@ class RemoteAccessServer:
         # belonging to those tabs so the dict does not grow unbounded
         # over many short-lived sessions.
         self._ws_tabs: dict[ServerConnection, set[str]] = {}
+        # Deferred-disposal state for tabs whose WebSocket connection
+        # has dropped but whose backend ``_RunningAgentState`` should survive a
+        # short grace window so a reload / transient reconnect can
+        # re-claim it.  See :meth:`_schedule_tab_close`.
+        self._pending_tab_closes: dict[str, asyncio.TimerHandle] = {}
+        self._pending_tab_closes_lock = threading.Lock()
+        # Strong references for in-flight ``closeTab`` tasks dispatched
+        # by :meth:`_fire_pending_tab_close`.  Without this set the
+        # asyncio runtime can GC the task while it is still pending.
+        self._pending_close_tasks: set[asyncio.Task[None]] = set()
         self._printer._merge_state_callback = self._register_merge_state
         self._active_url: str | None = None
         self._last_ips: frozenset[str] = frozenset()
@@ -2033,7 +2403,7 @@ class RemoteAccessServer:
 
 
     async def _process_request(
-        self, connection: ServerConnection, request: Request
+        self, _connection: ServerConnection, request: Request
     ) -> Response | None:
         """Serve HTTP requests for the HTML page and static assets.
 
@@ -2041,7 +2411,7 @@ class RemoteAccessServer:
         ``None`` to let the WebSocket handshake proceed for ``/ws``.
 
         Args:
-            connection: The server connection (unused for HTTP).
+            _connection: The server connection (unused for HTTP).
             request: The incoming HTTP request.
 
         Returns:
@@ -2164,6 +2534,107 @@ class RemoteAccessServer:
             None, self._vscode_server._handle_command, cmd,
         )
 
+    def _schedule_tab_close(self, tab_id: str) -> None:
+        """Schedule a deferred ``closeTab`` for *tab_id* after a grace period.
+
+        Called from :meth:`_ws_handler`'s ``finally`` block whenever a
+        WebSocket connection drops, for every tab id that was seen on
+        that connection.  Because browsers cannot reliably emit a
+        ``closeTab`` before the WSS shuts down (``beforeunload`` /
+        ``pagehide`` WebSocket writes are commonly buffered then
+        dropped), the grace timer is the canonical way to detect that
+        the frontend tab is truly gone — a reload / transient
+        reconnect that re-claims the same tab id within
+        :data:`_TAB_CLOSE_GRACE` seconds calls
+        :meth:`_cancel_pending_tab_close` to abort the disposal.
+
+        If a previous timer was already armed for *tab_id*, it is
+        cancelled and replaced (extending the grace window each time
+        the same tab id appears on a new dropped connection).
+
+        Args:
+            tab_id: The frontend tab identifier whose backend state
+                should be torn down once the grace period elapses,
+                unless cancelled by a reconnect.
+        """
+        if not tab_id:
+            return
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            return
+        with self._pending_tab_closes_lock:
+            existing = self._pending_tab_closes.pop(tab_id, None)
+            if existing is not None:
+                try:
+                    existing.cancel()
+                except Exception:
+                    logger.debug(
+                        "Cancel of stale pending close failed",
+                        exc_info=True,
+                    )
+            handle = loop.call_later(
+                _TAB_CLOSE_GRACE,
+                self._fire_pending_tab_close,
+                tab_id,
+            )
+            self._pending_tab_closes[tab_id] = handle
+
+    def _cancel_pending_tab_close(self, tab_id: str) -> None:
+        """Cancel a pending deferred ``closeTab`` for *tab_id*.
+
+        Called from :meth:`_handle_ready` when a fresh WebSocket
+        connection re-claims a tab id (either as the current
+        ``tabId`` or as an entry in ``restoredTabs``).  Idempotent and
+        safe for unknown tab ids — if no timer was armed for *tab_id*
+        the call is a no-op.
+
+        Args:
+            tab_id: The frontend tab identifier being re-claimed.
+        """
+        if not tab_id:
+            return
+        with self._pending_tab_closes_lock:
+            handle = self._pending_tab_closes.pop(tab_id, None)
+        if handle is not None:
+            try:
+                handle.cancel()
+            except Exception:
+                logger.debug(
+                    "Cancel of pending tab close failed", exc_info=True,
+                )
+
+    def _fire_pending_tab_close(self, tab_id: str) -> None:
+        """Execute the deferred ``closeTab`` for *tab_id*.
+
+        Runs on the asyncio event loop after :data:`_TAB_CLOSE_GRACE`
+        seconds elapse without a reconnect cancelling the timer.
+        Pops the merge state (if any) for *tab_id* and dispatches the
+        ``closeTab`` command through :meth:`_run_cmd`, which routes
+        through :class:`VSCodeServer._close_tab`.  When the tab is
+        idle, ``_close_tab`` disposes the ``_RunningAgentState`` immediately;
+        when a task or merge review is still in flight, it flips
+        ``frontend_closed=True`` and lets the existing deferred-
+        disposal hook (:meth:`VSCodeServer._dispose_if_closed`) tear
+        down the state once the lifecycle ends — never interrupting
+        the running agent.
+
+        Args:
+            tab_id: The frontend tab identifier whose grace window
+                has elapsed.
+        """
+        with self._pending_tab_closes_lock:
+            self._pending_tab_closes.pop(tab_id, None)
+        with self._merge_states_lock:
+            self._merge_states.pop(tab_id, None)
+        if self._loop is None or not self._loop.is_running():
+            return
+        task = asyncio.ensure_future(
+            self._run_cmd({"type": "closeTab", "tabId": tab_id}),
+            loop=self._loop,
+        )
+        self._pending_close_tasks.add(task)
+        task.add_done_callback(self._pending_close_tasks.discard)
+
     async def _ws_handler(self, websocket: ServerConnection) -> None:
         """Handle a WebSocket client connection.
 
@@ -2213,13 +2684,84 @@ class RemoteAccessServer:
         except Exception:
             logger.debug("WS handler error", exc_info=True)
         finally:
-            # M6: drop merge states owned by this connection.
+            # Deferred disposal: schedule a ``closeTab`` for every
+            # tab id this connection touched, with a short grace
+            # window so a reload / transient reconnect can re-claim
+            # the same tab ids and cancel the pending close.  Merge
+            # state is also popped lazily inside
+            # :meth:`_fire_pending_tab_close` so a reconnect within
+            # the grace window keeps the merge review intact.
             tabs = self._ws_tabs.pop(websocket, set())
-            if tabs:
-                with self._merge_states_lock:
-                    for tab in tabs:
-                        self._merge_states.pop(tab, None)
+            for tab in tabs:
+                self._schedule_tab_close(tab)
             self._printer.remove_client(websocket)
+
+    async def _uds_handler(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        """Handle a local Unix-domain socket client connection.
+
+        Speaks the SAME newline-delimited JSON protocol as
+        :meth:`_ws_handler` but skips the password challenge — POSIX
+        filesystem permissions (mode 0o600 on the socket file) gate
+        access to the owning user.  Used by the VS Code extension so
+        the same :class:`VSCodeServer` instance serves both local and
+        remote clients out of one process, eliminating the per-tab
+        Python subprocess plumbing.
+
+        Args:
+            reader: Asyncio stream reader for the connection.
+            writer: Asyncio stream writer for the connection.  Also
+                registered with :class:`WebPrinter` so backend
+                broadcasts reach this peer.
+        """
+        self._printer.add_uds_writer(writer)
+        tabs_seen: set[str] = set()
+        try:
+            while True:
+                line = await reader.readline()
+                if not line:
+                    break
+                try:
+                    cmd = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(cmd, dict):
+                    continue
+                tab_id = cmd.get("tabId", "")
+                if isinstance(tab_id, str) and tab_id:
+                    tabs_seen.add(tab_id)
+                cmd_type = cmd.get("type", "")
+                if cmd_type in _VSCODE_ONLY_COMMANDS:
+                    continue
+                if cmd_type == "ready":
+                    await self._handle_ready(cmd, writer)
+                    continue
+                if cmd_type == "submit":
+                    await self._handle_submit(cmd)
+                    continue
+                if cmd_type == "getWelcomeSuggestions":
+                    await self._send_welcome_info()
+                    continue
+                if cmd_type == "mergeAction":
+                    action = cmd.get("action", "")
+                    if action != "all-done":
+                        await self._handle_web_merge_action(cmd)
+                        continue
+                cmd = _translate_webview_command(cmd)
+                await self._run_cmd(cmd)
+        except Exception:
+            logger.debug("UDS handler error", exc_info=True)
+        finally:
+            for tab in tabs_seen:
+                self._schedule_tab_close(tab)
+            self._printer.remove_uds_writer(writer)
+            try:
+                writer.close()
+            except Exception:
+                logger.debug("UDS writer close failed", exc_info=True)
 
 
     async def _send_welcome_info(self) -> None:
@@ -2267,8 +2809,27 @@ class RemoteAccessServer:
                 msg["ntfyUrl"] = ntfy_url
             self._printer.broadcast(msg)
 
+    @staticmethod
+    async def _endpoint_send(endpoint: Any, data: str) -> None:
+        """Send ``data`` to either a WSS or a UDS endpoint.
+
+        ``endpoint`` is either a :class:`ServerConnection` (WSS) or
+        an :class:`asyncio.StreamWriter` (UDS).  This helper hides
+        the protocol difference so :meth:`_handle_ready` and
+        :meth:`_uds_handler` share a single dispatch path.
+
+        Args:
+            endpoint: The connection to send to.
+            data: The JSON payload (already encoded with ``json.dumps``).
+        """
+        if isinstance(endpoint, asyncio.StreamWriter):
+            endpoint.write(data.encode("utf-8") + b"\n")
+            await endpoint.drain()
+        else:
+            await endpoint.send(data)
+
     async def _handle_ready(
-        self, cmd: dict[str, Any], websocket: ServerConnection,
+        self, cmd: dict[str, Any], websocket: Any,
     ) -> None:
         """Translate the webview ``ready`` command into backend commands.
 
@@ -2282,12 +2843,19 @@ class RemoteAccessServer:
             websocket: The client connection (for direct replies).
         """
         tab_id = cmd.get("tabId", "")
+        # A fresh ``ready`` is the unambiguous signal that the
+        # frontend has reconnected and is re-claiming whatever tab
+        # ids it carries.  Cancel the deferred ``closeTab`` for the
+        # current tab id (and every restored tab below) so a reload
+        # within :data:`_TAB_CLOSE_GRACE` keeps the backend state.
+        self._cancel_pending_tab_close(tab_id)
         for init_cmd in ("getModels", "getInputHistory", "getConfig"):
             await self._run_cmd({"type": init_cmd})
         await self._send_welcome_info()
         try:
-            await websocket.send(
-                json.dumps({"type": "focusInput", "tabId": tab_id})
+            await self._endpoint_send(
+                websocket,
+                json.dumps({"type": "focusInput", "tabId": tab_id}),
             )
         except Exception:
             pass
@@ -2305,11 +2873,14 @@ class RemoteAccessServer:
             )
             restored = restored[:_MAX_RESTORED_TABS]
         for rt in restored:
+            rt_id = rt.get("tabId", "")
+            if rt_id:
+                self._cancel_pending_tab_close(rt_id)
             chat_id = rt.get("chatId", "")
             if chat_id:
                 await self._run_cmd(
                     {"type": "resumeSession", "chatId": chat_id,
-                     "tabId": rt.get("tabId", "")},
+                     "tabId": rt_id},
                 )
 
     async def _handle_submit(self, cmd: dict[str, Any]) -> None:
@@ -2353,8 +2924,6 @@ class RemoteAccessServer:
             "useWorktree": cmd.get("useWorktree", False),
             "useParallel": cmd.get("useParallel", False),
         }
-        if "skipMerge" in cmd:
-            run_cmd["skipMerge"] = cmd["skipMerge"]
         await self._run_cmd(run_cmd)
 
     def _register_merge_state(
@@ -2409,7 +2978,12 @@ class RemoteAccessServer:
                 fd = state.files[fi]
                 hunk = fd["hunks"][hi]
                 await self._loop.run_in_executor(
-                    None, _reject_hunk_in_file, fd["current"], fd["base"], hunk,
+                    None,
+                    _reject_hunk_in_file,
+                    fd["current"],
+                    fd["base"],
+                    hunk,
+                    fd.get("target"),
                 )
                 delta = hunk["bc"] - hunk["cc"]
                 for later_hi in range(hi + 1, len(fd["hunks"])):
@@ -2807,11 +3381,12 @@ class RemoteAccessServer:
         if ntfy_url:
             msg["ntfyUrl"] = ntfy_url
         self._printer.broadcast(msg)
-        if self.use_tunnel:
+        if self.use_tunnel and self._active_url != self._last_posted_url:
             assert self._loop is not None
             await self._loop.run_in_executor(
                 None, _post_url_to_message_board, self._active_url,
             )
+            self._last_posted_url = self._active_url
 
     def _terminate_tunnel_proc(self, kill_adopted: bool = False) -> None:
         """Terminate ``_tunnel_proc`` and reset per-process state.
@@ -3013,8 +3588,35 @@ class RemoteAccessServer:
             ssl=self._ssl_context,
             ping_interval=None,
             ping_timeout=None,
+            max_size=_MAX_LINE_BYTES,
             create_connection=_HeadAwareServerConnection,
         )
+
+        # Bind the local Unix-domain socket for the VS Code extension.
+        # File permissions (mode 0o600) restrict access to the owning
+        # user, replacing the WSS password challenge for local peers.
+        try:
+            self._uds_path.parent.mkdir(parents=True, exist_ok=True)
+            if self._uds_path.exists() or self._uds_path.is_symlink():
+                try:
+                    self._uds_path.unlink()
+                except OSError:
+                    logger.debug(
+                        "Could not unlink stale UDS socket at %s",
+                        self._uds_path, exc_info=True,
+                    )
+            self._uds_server = await asyncio.start_unix_server(
+                self._uds_handler, path=str(self._uds_path),
+                limit=_MAX_LINE_BYTES,
+            )
+            os.chmod(self._uds_path, 0o600)
+        except Exception:
+            logger.warning(
+                "Failed to bind UDS at %s; local extension clients "
+                "will fall back to WSS",
+                self._uds_path, exc_info=True,
+            )
+            self._uds_server = None
 
         tunnel_url: str | None = None
         if self.use_tunnel:
@@ -3076,10 +3678,11 @@ class RemoteAccessServer:
 
         _save_url_file(self._url_file, self._local_url, tunnel_url)
         self._active_url = tunnel_url or self._local_url
-        if self.use_tunnel:
+        if self.use_tunnel and self._active_url != self._last_posted_url:
             await self._loop.run_in_executor(
                 None, _post_url_to_message_board, self._active_url,
             )
+            self._last_posted_url = self._active_url
 
         self._last_ips = _get_local_ips()
         self._watchdog_task = asyncio.create_task(self._watchdog())
@@ -3123,12 +3726,42 @@ class RemoteAccessServer:
             except asyncio.CancelledError:
                 pass
             self._watchdog_task = None
+        # Cancel any armed deferred-close timers so a server shutdown
+        # does not leave dangling ``call_later`` handles in the loop.
+        with self._pending_tab_closes_lock:
+            handles = list(self._pending_tab_closes.values())
+            self._pending_tab_closes.clear()
+        for handle in handles:
+            try:
+                handle.cancel()
+            except Exception:
+                logger.debug(
+                    "Cancel of pending tab close on shutdown failed",
+                    exc_info=True,
+                )
         if self._ws_server is not None:
             self._ws_server.close()
             try:
                 await asyncio.wait_for(self._ws_server.wait_closed(), timeout=2)
             except TimeoutError:
                 pass
+        if self._uds_server is not None:
+            self._uds_server.close()
+            try:
+                await asyncio.wait_for(
+                    self._uds_server.wait_closed(), timeout=2,
+                )
+            except TimeoutError:
+                pass
+            self._uds_server = None
+            try:
+                self._uds_path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                logger.debug(
+                    "UDS unlink on shutdown failed", exc_info=True,
+                )
         self._stop_tunnel()
         _remove_url_file(self._url_file)
 

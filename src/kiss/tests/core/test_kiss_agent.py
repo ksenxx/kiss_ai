@@ -105,10 +105,8 @@ def _make_agent(model_obj: Any, max_steps: int = 5) -> KISSAgent:
 @pytest.fixture(autouse=True)
 def _restore_base_state() -> Iterator[None]:
     original_counter = Base.agent_counter
-    original_budget = Base.global_budget_used
     yield
     Base.agent_counter = original_counter
-    Base.global_budget_used = original_budget
 
 
 @requires_gemini_api_key

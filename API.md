@@ -115,12 +115,13 @@ ______________________________________________________________________
   - `ask_user_question_callback`: Optional callback used by the ask_user_question tool to collect a text response from the user.
   - **Returns:** YAML string with 'success' and 'summary' keys.
 
-**`run_tasks_parallel`** — Execute multiple SorcarAgent tasks concurrently using threads. Each task gets its own `SorcarAgent` instance and runs in a separate thread via :class:`~concurrent.futures.ThreadPoolExecutor`. This is ideal for I/O-bound workloads (LLM API calls, network requests) where the GIL is released during I/O waits.<br/>`def run_tasks_parallel(tasks: list[str], max_workers: int | None = None, model: str | None = None, work_dir: str | None = None) -> list[str]`
+**`run_tasks_parallel`** — Execute multiple SorcarAgent tasks concurrently using threads. Each task gets its own `ChatSorcarAgent` instance and runs in a separate thread via :class:`~concurrent.futures.ThreadPoolExecutor`. This is ideal for I/O-bound workloads (LLM API calls, network requests) where the GIL is released during I/O waits. This helper is a pure parallel executor: it has no knowledge of backend task ids or any frontend concepts. It simply marks each spawned agent as a sub-agent (via `_subagent_info`) and the sub-agent itself owns any sub-agent-specific behaviour (such as broadcasting `new_tab` to a browser-based frontend) inside its own `run()` method.<br/>`def run_tasks_parallel(tasks: list[str], max_workers: int | None = None, model_name: str | None = None, work_dir: str | None = None, printer: Printer | None = None, totals_out: dict[str, float] | None = None) -> list[str]`
 
 - `tasks`: List of task description strings. Each string is passed as the `prompt_template` argument to :meth:`SorcarAgent.run`. Example:: [ "Summarize file A", "Summarize file B", ]
 - `max_workers`: Maximum number of threads. `None` lets :class:`~concurrent.futures.ThreadPoolExecutor` pick a default (typically `min(32, cpu_count + 4)`).
-- `model`: LLM model name for all parallel agents. `None` uses the default from persistence (same as :meth:`SorcarAgent.run`).
+- `model_name`: LLM model name for all parallel agents. `None` uses the default from persistence (same as :meth:`SorcarAgent.run`).
 - `work_dir`: Working directory for all parallel agents. `None` uses the default (`artifact_dir/kiss_workdir`).
+- `printer`: Optional printer from the parent agent. Forwarded verbatim to each sub-agent's `run` so live events continue to flow through the same channel. The executor itself does not call any printer methods.
 - **Returns:** List of YAML result strings in the **same order** as *tasks*. Each string contains `success` and `summary` keys. If a task raises an unhandled exception the corresponding entry is a YAML string with `success: false` and the traceback in `summary`.
 
 **`cli_ask_user_question`** — CLI callback for agent questions (prints and reads from stdin).<br/>`def cli_ask_user_question(question: str) -> str`
@@ -238,7 +239,7 @@ ______________________________________________________________________
   - `repo`: Git repo root path.
   - **Returns:** True if the pop succeeded, False on conflict or error.
 
-- **squash_merge_branch** — Squash-merge a branch and commit the result. Uses `git merge --squash` to apply all changes from *branch*, then commits them. The commit message is taken from git's auto-generated `SQUASH_MSG`. On conflict, resets to a clean state with `git reset --hard`.<br/>`squash_merge_branch(repo: Path, branch: str) -> MergeResult`
+- **squash_merge_branch** — Squash-merge a branch and commit the result. Uses `git merge --squash` to apply all changes from *branch*, then commits the staged result using the HEAD commit message of *branch* (see :meth:`_merge_commit_message`). On conflict, resets to a clean state with `git reset --hard`.<br/>`squash_merge_branch(repo: Path, branch: str) -> MergeResult`
 
   - `repo`: Git repo root path.
   - `branch`: Branch to squash-merge.
@@ -269,12 +270,6 @@ ______________________________________________________________________
 - **ensure_excluded** — Add `.kiss-worktrees/` to local git exclude (not .gitignore). Uses `<git_common_dir>/info/exclude` so the agent never modifies any tracked file in the user's repo.<br/>`ensure_excluded(repo: Path) -> None`
 
   - `repo`: Git repo root path.
-
-- **find_pending_branch** — Find the latest `kiss/wt-*` branch matching a prefix.<br/>`find_pending_branch(repo: Path, prefix: str) -> str | None`
-
-  - `repo`: Git repo root path.
-  - `prefix`: Branch name prefix (e.g. `kiss/wt-<chat_id[:12]>-`).
-  - **Returns:** The lexicographically last matching branch, or `None`.
 
 - **load_original_branch** — Load the original branch from git config.<br/>`load_original_branch(repo: Path, branch: str) -> str | None`
 
@@ -331,10 +326,10 @@ ______________________________________________________________________
   - `repo`: Root of the git repository to scan.
   - **Returns:** Summary of findings and any cleanup actions taken.
 
-**`repo_lock`** — Return a per-repo threading lock for multi-step git operations. Concurrent tabs operating on the same main repository must serialize their checkout → stash → merge → pop sequences to prevent interleaving that could corrupt the working tree.<br/>`def repo_lock(repo: Path) -> threading.Lock`
+**`repo_lock`** — Return a per-repo re-entrant lock for multi-step git operations. Concurrent tabs operating on the same main repository must serialize their checkout → stash → merge → pop sequences to prevent interleaving that could corrupt the working tree. The lock is an :class:`threading.RLock` (re-entrant) so a caller holding the lock for an outer multi-step operation (e.g. `_try_setup_worktree` releasing a previous worktree before creating a new one) can safely call inner helpers (`_do_merge`, `discard`) that re-acquire the same lock on the same thread. Cross-thread acquisitions still block as expected.<br/>`def repo_lock(repo: Path) -> threading.RLock`
 
 - `repo`: Git repo root path.
-- **Returns:** A :class:`threading.Lock` specific to the resolved repo path.
+- **Returns:** A :class:`threading.RLock` specific to the resolved repo path.
 
 ______________________________________________________________________
 

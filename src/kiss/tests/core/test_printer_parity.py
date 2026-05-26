@@ -17,6 +17,7 @@ def _make_printers():
     buf = io.StringIO()
     console = ConsolePrinter(file=buf)
     browser = BaseBrowserPrinter()
+    browser._thread_local.task_id = "test-task"
     browser.start_recording()
     return console, buf, browser
 
@@ -216,5 +217,5 @@ class TestFullAgentSequenceParity:
         r = [e for e in events if e["type"] == "result"]
         assert r[-1]["success"] is True
         assert "Bug fixed" in r[-1]["summary"]
-        assert r[-1]["cost"] == "$0.05"
+        assert r[-1]["cost"] == "$0.0500"
         assert r[-1]["total_tokens"] == 500

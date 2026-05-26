@@ -30,17 +30,19 @@ export type FromWebviewMessage =
       attachments: Attachment[];
       useWorktree?: boolean;
       useParallel?: boolean;
+      autoCommit?: boolean;
       tabId?: string;
       workDir?: string;
-      skipMerge?: boolean;
-      reuseProcess?: boolean;
     }
   | {type: 'stop'; tabId?: string}
+  | {type: 'appendUserMessage'; prompt: string; tabId?: string}
   | {type: 'selectModel'; model: string; tabId?: string}
   | {type: 'getModels'}
   | {type: 'getHistory'; query?: string; offset?: number; generation?: number}
   | {type: 'getFrequentTasks'; limit?: number}
   | {type: 'deleteTask'; taskId: number}
+  | {type: 'deleteFrequentTask'; task: string}
+  | {type: 'setFavorite'; taskId: number; isFavorite: boolean}
   | {type: 'getFiles'; prefix: string}
   | {type: 'userAnswer'; answer: string; tabId?: string}
   | {type: 'userActionDone'}
@@ -51,9 +53,9 @@ export type FromWebviewMessage =
       tabId?: string;
       restoredTabs?: Array<{tabId: string; chatId: string}>;
     }
-  | {type: 'resumeSession'; id: number; taskId?: number; tabId?: string}
+  | {type: 'resumeSession'; id: string; taskId?: number; tabId?: string}
   | {type: 'getWelcomeSuggestions'}
-  | {type: 'complete'; query: string}
+  | {type: 'complete'; query: string; tabId?: string}
   | {type: 'mergeAction'; action: string; tabId?: string}
   | {type: 'newChat'; tabId?: string}
   | {type: 'generateCommitMessage'}
@@ -62,14 +64,13 @@ export type FromWebviewMessage =
   | {type: 'getInputHistory'}
   | {type: 'worktreeAction'; action: 'merge' | 'discard'; tabId?: string}
   | {type: 'autocommitAction'; action: 'commit' | 'skip'; tabId?: string}
-  | {type: 'setSkipMerge'; tabId?: string; skip: boolean}
   | {type: 'resolveDroppedPaths'; uris: string[]}
   | {type: 'webviewFocusChanged'; focused: boolean}
   | {type: 'pickFolder'; currentPath?: string}
   | {
       type: 'getAdjacentTask';
       tabId?: string;
-      task: string;
+      taskId: number | null;
       direction: 'prev' | 'next';
     }
   | {type: 'getConfig'}
@@ -212,25 +213,39 @@ type ToWebviewMessageBody =
       taskId: number;
       chatHasMoreTasks: boolean;
     }
-  | {type: 'measureSize'};
+  | {type: 'measureSize'}
+  | {type: 'updateSetting'; key: string; value: unknown}
+  | {
+      type: 'openSubagentTab';
+      tab_id?: string;
+      parent_tab_id?: string;
+      task_description?: string;
+      task_index?: number;
+      isSubagentTab?: boolean;
+      isDone?: boolean;
+    }
+  | {type: 'subagentDone'; tab_id?: string; success?: boolean}
+  | {type: 'new_tab'; task_id: number};
 
 /** Command sent to Python backend */
 export interface AgentCommand {
   type:
     | 'run'
     | 'stop'
+    | 'appendUserMessage'
     | 'getModels'
     | 'selectModel'
     | 'getHistory'
     | 'getFrequentTasks'
     | 'deleteTask'
+    | 'deleteFrequentTask'
+    | 'setFavorite'
     | 'getFiles'
     | 'userAnswer'
     | 'recordFileUsage'
     | 'resumeSession'
     | 'complete'
     | 'mergeAction'
-    | 'refreshFiles'
     | 'newChat'
     | 'closeTab'
     | 'generateCommitMessage'
@@ -238,7 +253,7 @@ export interface AgentCommand {
     | 'worktreeAction'
     | 'autocommitAction'
     | 'getAdjacentTask'
-    | 'setSkipMerge'
+    | 'setWorkDir'
     | 'getConfig'
     | 'saveConfig';
   prompt?: string;
@@ -254,16 +269,17 @@ export interface AgentCommand {
   answer?: string;
   path?: string;
   chatId?: number | string;
-  taskId?: number;
+  taskId?: number | null;
   activeFileContent?: string;
   action?: 'merge' | 'discard' | 'all-done' | 'commit' | 'skip';
   useWorktree?: boolean;
   useParallel?: boolean;
+  autoCommit?: boolean;
   task?: string;
   direction?: 'prev' | 'next';
   tabId?: string;
   skip?: boolean;
-  skipMerge?: boolean;
   config?: Record<string, unknown>;
   apiKeys?: Record<string, string>;
+  isFavorite?: boolean;
 }

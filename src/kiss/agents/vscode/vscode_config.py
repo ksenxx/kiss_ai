@@ -30,8 +30,24 @@ DEFAULTS: dict[str, Any] = {
     "max_budget": 100,
     "custom_endpoint": "",
     "custom_api_key": "",
+    "custom_headers": "",
     "use_web_browser": True,
     "remote_password": "",
+    # ``auto_commit_mode`` is the persistent "Auto commit" toggle in
+    # the menu dropdown.  When True, post-task processing skips the
+    # interactive merge/diff workflow and auto-commits the agent's
+    # changes.  In worktree mode the worktree is additionally
+    # auto-merged into the original branch.  Mirrored via
+    # ``update_settings(auto_commit_mode=...)`` (distinct from the
+    # one-shot ``auto_commit=True`` trigger used by the legacy icon
+    # button).
+    "auto_commit_mode": True,
+    # Settings below were previously missing from DEFAULTS, causing
+    # ``save_config`` to silently drop them.  Added so that
+    # ``update_settings`` changes persist across tasks.
+    "is_parallel": True,
+    "is_worktree": True,
+    "demo_mode": False,
     "work_dir": "",
 }
 
@@ -239,9 +255,7 @@ def _refresh_config() -> None:
 def apply_config_to_env(cfg: dict[str, Any]) -> None:
     """Apply loaded config values to the running process.
 
-    Sets ``max_budget`` on the default config and updates
-    ``KISS_WORKDIR`` in ``os.environ`` when ``work_dir`` is non-empty
-    so that the running server picks up work-dir changes immediately.
+    Sets ``max_budget`` on the default config.
 
     Args:
         cfg: The configuration dict (from :func:`load_config`).
@@ -250,10 +264,6 @@ def apply_config_to_env(cfg: dict[str, Any]) -> None:
 
     budget = cfg.get("max_budget", DEFAULTS["max_budget"])
     config_module.DEFAULT_CONFIG.max_budget = float(budget)
-
-    work_dir = cfg.get("work_dir", "")
-    if work_dir:
-        os.environ["KISS_WORKDIR"] = work_dir
 
 
 def get_custom_model_entry(cfg: dict[str, Any]) -> dict[str, Any] | None:
@@ -268,7 +278,14 @@ def get_custom_model_entry(cfg: dict[str, Any]) -> dict[str, Any] | None:
     endpoint = cfg.get("custom_endpoint", "")
     if not endpoint:
         return None
-    return {
+    headers: dict[str, str] = {}
+    raw_headers = cfg.get("custom_headers", "")
+    if raw_headers:
+        for line in raw_headers.splitlines():
+            if ":" in line:
+                key, value = line.split(":", 1)
+                headers[key.strip()] = value.strip()
+    entry: dict[str, Any] = {
         "name": f"custom/{endpoint.rstrip('/').split('/')[-1]}",
         "inp": 0,
         "out": 0,
@@ -276,7 +293,42 @@ def get_custom_model_entry(cfg: dict[str, Any]) -> dict[str, Any] | None:
         "vendor": "Custom",
         "endpoint": endpoint,
         "api_key": cfg.get("custom_api_key", ""),
+        "extra_headers": headers,
     }
+    return entry
+
+
+def build_model_config(cfg: dict[str, Any]) -> dict[str, Any] | None:
+    """Build a model_config dict from the settings panel configuration.
+
+    Constructs the ``model_config`` dictionary that can be passed to
+    ``agent.run()`` so that the custom endpoint and any custom HTTP
+    headers are forwarded to the underlying model client.
+
+    Args:
+        cfg: The configuration dict (from :func:`load_config`).
+
+    Returns:
+        A model_config dict with ``base_url`` and optionally
+        ``extra_headers``, or ``None`` if no custom endpoint is set.
+    """
+    endpoint = cfg.get("custom_endpoint", "")
+    if not endpoint:
+        return None
+    result: dict[str, Any] = {"base_url": endpoint}
+    api_key = cfg.get("custom_api_key", "")
+    if api_key:
+        result["api_key"] = api_key
+    raw_headers = cfg.get("custom_headers", "")
+    if raw_headers:
+        headers: dict[str, str] = {}
+        for line in raw_headers.splitlines():
+            if ":" in line:
+                key, value = line.split(":", 1)
+                headers[key.strip()] = value.strip()
+        if headers:
+            result["extra_headers"] = headers
+    return result
 
 
 def source_shell_env() -> None:

@@ -21,6 +21,7 @@ from kiss.core.models.model import (
     TokenCallback,
     _build_text_based_tools_prompt,
     _parse_text_based_tool_calls,
+    parse_binary_attachments,
 )
 
 logger = logging.getLogger(__name__)
@@ -165,39 +166,114 @@ class OpenAICompatibleModel(Model):
             self.conversation.append({"role": "system", "content": system_instruction})
         content: str | list[dict[str, Any]] = prompt
         if attachments:
-            parts: list[dict[str, Any]] = []
-            for att in attachments:
-                if att.mime_type.startswith("image/"):
-                    parts.append(
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": att.to_data_url()},
-                        }
-                    )
-                elif att.mime_type == "application/pdf":
-                    parts.append(
-                        {
-                            "type": "file",
-                            "file": {"file_data": att.to_data_url()},
-                        }
-                    )
-                elif att.mime_type.startswith("audio/"):
-                    fmt = _audio_mime_to_format(att.mime_type)
-                    parts.append(
-                        {
-                            "type": "input_audio",
-                            "input_audio": {"data": att.to_base64(), "format": fmt},
-                        }
-                    )
-                elif att.mime_type.startswith("video/"):
-                    logger.warning(
-                        "OpenAI Chat Completions does not support video attachments; "
-                        "skipping %s.",
-                        att.mime_type,
-                    )
+            parts = self._attachments_to_content_parts(attachments)
             parts.append({"type": "text", "text": prompt})
             content = parts
         self.conversation.append({"role": "user", "content": content})
+
+    @staticmethod
+    def _attachment_to_content_part(att: Attachment) -> dict[str, Any] | None:
+        """Convert a single :class:`Attachment` to an OpenAI content-part dict.
+
+        Returns ``None`` for unsupported MIME types (e.g. video, which OpenAI
+        Chat Completions does not accept), logging a warning so the caller
+        knows the attachment was dropped.
+
+        Args:
+            att: The attachment to convert.
+
+        Returns:
+            A content-part dict suitable for the ``content`` array of a
+            chat-completions message, or ``None`` if the MIME type is not
+            supported by OpenAI Chat Completions.
+        """
+        if att.mime_type.startswith("image/"):
+            return {"type": "image_url", "image_url": {"url": att.to_data_url()}}
+        if att.mime_type == "application/pdf":
+            return {"type": "file", "file": {"file_data": att.to_data_url()}}
+        if att.mime_type.startswith("audio/"):
+            fmt = _audio_mime_to_format(att.mime_type)
+            return {
+                "type": "input_audio",
+                "input_audio": {"data": att.to_base64(), "format": fmt},
+            }
+        logger.warning(
+            "OpenAI Chat Completions does not support %s attachments; skipping.",
+            att.mime_type,
+        )
+        return None
+
+    @classmethod
+    def _attachments_to_content_parts(
+        cls, attachments: list[Attachment]
+    ) -> list[dict[str, Any]]:
+        """Convert attachments to a list of OpenAI content-part dicts.
+
+        Unsupported MIME types are silently dropped (with a warning).
+
+        Args:
+            attachments: The attachments to convert.
+
+        Returns:
+            A list of content-part dicts.  May be shorter than *attachments*
+            if some MIME types were not supported.
+        """
+        parts: list[dict[str, Any]] = []
+        for att in attachments:
+            part = cls._attachment_to_content_part(att)
+            if part is not None:
+                parts.append(part)
+        return parts
+
+    def add_function_results_to_conversation_and_return(
+        self, function_results: list[tuple[str, dict[str, Any]]]
+    ) -> None:
+        """Add tool results to the conversation, lifting binary attachments.
+
+        The OpenAI Chat Completions ``tool`` role only accepts string
+        content, so binary attachments produced by the ``Read`` tool (e.g. a
+        PNG screenshot or an MP3 audio file) cannot live inside the tool
+        message.  Each tool message is appended with the sentinel payload
+        stripped to a short placeholder; if attachments were present, a
+        follow-up ``user`` message carrying ``image_url`` / ``file`` /
+        ``input_audio`` content parts is appended right after so the model
+        can actually see the file.  Unsupported MIME types (e.g. video) are
+        dropped with a warning.
+
+        Args:
+            function_results: List of ``(function_name, result_dict)`` tuples.
+        """
+        tool_calls = self._find_tool_call_ids_from_last_assistant()
+        pending_attachments: list[Attachment] = []
+
+        for i, (func_name, result_dict) in enumerate(function_results):
+            result_content = result_dict.get("result", str(result_dict))
+            result_content, attachments = parse_binary_attachments(result_content)
+            if self.usage_info_for_messages:
+                result_content = f"{result_content}\n\n{self.usage_info_for_messages}"
+
+            tool_call_id = (
+                tool_calls[i][1] if i < len(tool_calls) else f"call_{func_name}_{i}"
+            )
+            self.conversation.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": result_content,
+                }
+            )
+            pending_attachments.extend(attachments)
+
+        if pending_attachments:
+            parts = self._attachments_to_content_parts(pending_attachments)
+            if parts:
+                parts.append(
+                    {
+                        "type": "text",
+                        "text": "[attachments from previous tool result(s)]",
+                    }
+                )
+                self.conversation.append({"role": "user", "content": parts})
 
     def _is_deepseek_reasoning_model(self) -> bool:
         """Check if this is a DeepSeek R1 reasoning model.
@@ -213,6 +289,99 @@ class OpenAICompatibleModel(Model):
     def _is_openrouter_anthropic(self) -> bool:
         """Check if this is an OpenRouter Anthropic model (Claude via OpenRouter)."""
         return self.model_name.startswith("openrouter/anthropic/")
+
+    def _normalize_content_blocks(self, content: Any) -> list[dict[str, Any]]:
+        """Normalize content blocks to JSON-serializable dicts.
+
+        Drops text blocks whose text is empty or whitespace-only, because
+        many APIs reject them with invalid_request_error about non-whitespace text.
+
+        Args:
+            content: The content blocks from a response.
+
+        Returns:
+            list[dict[str, Any]]: Normalized content blocks as dictionaries.
+        """
+        blocks: list[dict[str, Any]] = []
+        if content is None:
+            return blocks
+        for block in content:
+            if isinstance(block, dict):
+                # Drop pre-existing whitespace-only text dicts too.
+                if block.get("type") == "text" and not block.get("text", "").strip():
+                    continue
+                blocks.append(block)
+                continue
+            block_type = getattr(block, "type", None)
+            if block_type == "text":
+                text = getattr(block, "text", "")
+                if not text.strip():
+                    continue
+                blocks.append({"type": "text", "text": text})
+            elif block_type == "tool_use":
+                blocks.append(
+                    {
+                        "type": "tool_use",
+                        "id": getattr(block, "id", ""),
+                        "name": getattr(block, "name", ""),
+                        "input": getattr(block, "input", {}) or {},
+                    }
+                )
+            elif block_type == "thinking":
+                thinking_block: dict[str, Any] = {
+                    "type": "thinking",
+                    "thinking": getattr(block, "thinking", ""),
+                }
+                signature = getattr(block, "signature", None)
+                if signature is not None:
+                    thinking_block["signature"] = signature
+                blocks.append(thinking_block)
+            elif hasattr(block, "model_dump"):
+                dumped = block.model_dump(exclude_none=True)
+                if dumped.get("type") == "text" and not dumped.get("text", "").strip():
+                    continue
+                blocks.append(dumped)
+            else:
+                text = str(block)
+                if not text.strip():
+                    continue
+                blocks.append({"type": "text", "text": text})
+        return blocks
+
+    def _normalize_conversation_for_api(
+        self,
+        conversation: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Normalize all messages in a conversation before sending to the API.
+
+        Ensures that all text content blocks are non-whitespace and that no
+        messages contain only whitespace-only text blocks.
+
+        Args:
+            conversation: The conversation to normalize.
+
+        Returns:
+            list[dict[str, Any]]: The normalized conversation.
+        """
+        normalized: list[dict[str, Any]] = []
+        for msg in conversation:
+            msg_copy = msg.copy()
+            content = msg_copy.get("content")
+
+            # If content is a string, ensure it's non-whitespace
+            if isinstance(content, str):
+                if content.strip():
+                    normalized.append(msg_copy)
+                # Skip messages with whitespace-only string content
+            # If content is a list of blocks, normalize them
+            elif isinstance(content, list):
+                normalized_blocks = self._normalize_content_blocks(content)
+                if normalized_blocks:
+                    msg_copy["content"] = normalized_blocks
+                    normalized.append(msg_copy)
+                # Skip messages where all blocks were dropped
+
+        return normalized
 
     def _apply_cache_control_for_openrouter_anthropic(self, kwargs: dict[str, Any]) -> None:
         """Add top-level cache_control for OpenRouter Anthropic prompt caching.
@@ -368,10 +537,17 @@ class OpenAICompatibleModel(Model):
         """
         kwargs = self.model_config.copy()
         kwargs.pop("system_instruction", None)
+        normalized_messages = self._normalize_conversation_for_api(self.conversation)
+        if not normalized_messages:
+            raise KISSError(
+                "Cannot generate response: all messages have whitespace-only "
+                "content that was filtered out. At least one message with "
+                "non-whitespace content is required."
+            )
         kwargs.update(
             {
                 "model": self._api_model_name,
-                "messages": self.conversation,
+                "messages": normalized_messages,
             }
         )
         self._apply_cache_control_for_openrouter_anthropic(kwargs)
@@ -499,7 +675,14 @@ class OpenAICompatibleModel(Model):
         """
         tools_prompt = _build_text_based_tools_prompt(function_map)
 
-        modified_conversation = list(self.conversation)
+        normalized_conv = self._normalize_conversation_for_api(self.conversation)
+        if not normalized_conv:
+            raise KISSError(
+                "Cannot generate response: all messages have whitespace-only "
+                "content that was filtered out. At least one message with "
+                "non-whitespace content is required."
+            )
+        modified_conversation = list(normalized_conv)
         if modified_conversation and modified_conversation[0]["role"] == "user":
             modified_conversation[0] = {
                 "role": "user",

@@ -19,6 +19,8 @@ from typing import TYPE_CHECKING, Any
 
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps, repo_lock
 from kiss.agents.sorcar.persistence import _append_chat_event
+from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.diff_merge import (
     _capture_untracked,
     _cleanup_merge_data,
@@ -27,10 +29,9 @@ from kiss.agents.vscode.diff_merge import (
     _prepare_merge_view,
 )
 from kiss.agents.vscode.helpers import generate_commit_message_from_diff
-from kiss.agents.vscode.tab_state import _TabState
 
 if TYPE_CHECKING:
-    from kiss.agents.vscode.printer import VSCodePrinter
+    from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 
 logger = logging.getLogger(__name__)
 
@@ -53,13 +54,31 @@ class _MergeFlowMixin:
     """Merge-view, worktree-action, and autocommit methods."""
 
     if TYPE_CHECKING:
-        printer: VSCodePrinter
+        printer: BaseBrowserPrinter
         work_dir: str
-        _state_lock: threading.Lock
-        _tab_states: dict[str, _TabState]
+        _state_lock: threading.RLock
 
-        def _get_tab(self, tab_id: str) -> _TabState: ...
+        def _get_tab(self, tab_id: str) -> _RunningAgentState: ...
         def _any_non_wt_running(self) -> bool: ...
+        def _dispose_if_closed(self, tab_id: str) -> None: ...
+
+    def _ensure_wt_agent(
+        self, tab: _RunningAgentState,
+    ) -> WorktreeSorcarAgent | None:
+        """Return the worktree-aware agent for *tab*, or ``None``.
+
+        Worktrees are no longer associated with chat sessions: every
+        ``run()`` call mints a fresh branch and there is no
+        cross-process restoration.  This method therefore returns
+        ``tab.agent`` as-is — it is the only authoritative source of
+        worktree state.  When the agent has been disposed (task ended
+        and the tab released its reference) there is no worktree to
+        operate on and ``None`` is returned.
+
+        Returns:
+            The agent stored on ``tab``, or ``None``.
+        """
+        return tab.agent
 
     def _start_merge_session(
         self, merge_json_path: str, tab_id: str = "",
@@ -86,10 +105,10 @@ class _MergeFlowMixin:
             resolved_tab_id = tab_id or getattr(
                 self.printer._thread_local, "tab_id", None,
             )
-            resolved_tab: _TabState | None = None
+            resolved_tab: _RunningAgentState | None = None
             with self._state_lock:
                 if resolved_tab_id is not None:
-                    resolved_tab = self._tab_states.get(resolved_tab_id)
+                    resolved_tab = _RunningAgentState.running_agent_states.get(resolved_tab_id)
                     if resolved_tab is not None:
                         resolved_tab.is_merging = True
             try:
@@ -188,6 +207,9 @@ class _MergeFlowMixin:
 
         if not tab.use_worktree:
             self._broadcast_autocommit_prompt(tab_id)
+        # If the user closed the tab while the merge view was open,
+        # dispose the now-idle _RunningAgentState.  No-op otherwise.
+        self._dispose_if_closed(tab_id)
 
     def _main_dirty_files(self) -> list[str]:
         """List modified, staged and untracked files in the main working tree.
@@ -317,7 +339,19 @@ class _MergeFlowMixin:
                     "message": "Generating commit message…",
                     "tabId": tab_id,
                 })
-                msg = generate_commit_message_from_diff(diff.stdout) or "Auto-commit"
+                with self._state_lock:
+                    prompt_tab = _RunningAgentState.running_agent_states.get(
+                        tab_id,
+                    )
+                user_prompt = (
+                    prompt_tab.last_user_prompt if prompt_tab else ""
+                ) or None
+                msg = (
+                    generate_commit_message_from_diff(
+                        diff.stdout, user_prompt=user_prompt,
+                    )
+                    or "Auto-commit"
+                )
                 self.printer.broadcast({
                     "type": "autocommit_progress",
                     "message": "Committing…",
@@ -333,12 +367,20 @@ class _MergeFlowMixin:
                 )
                 if tab_id:
                     with self._state_lock:
-                        tab = self._tab_states.get(tab_id)
-                    task_id = (
-                        tab.agent._last_task_id
-                        if tab is not None
-                        else None
-                    )
+                        tab = _RunningAgentState.running_agent_states.get(tab_id)
+                    task_id: int | None = None
+                    if tab is not None:
+                        task_id = tab.last_task_id
+                        if task_id is None and tab.agent is not None:
+                            # Fallback for legacy callers that wire
+                            # the task id onto the agent (e.g. tests
+                            # that pre-seed ``tab.agent._last_task_id``
+                            # without populating the new
+                            # :class:`_RunningAgentState.last_task_id`
+                            # field).  Production sets both in
+                            # :meth:`_TaskRunnerMixin._run_task`'s
+                            # outer ``finally``.
+                            task_id = tab.agent._last_task_id
                     if task_id is not None:
                         _append_chat_event(done_event, task_id=task_id)
             else:
@@ -356,9 +398,10 @@ class _MergeFlowMixin:
     def _emit_pending_worktree(self, tab_id: str = "") -> None:
         """Emit merge review or ``worktree_done`` for a pending worktree branch.
 
-        Called after replaying a session.  Restores worktree state
-        from git (for post-restart resume) and delegates to
-        :meth:`_present_pending_worktree`.
+        Worktrees are no longer associated with chat sessions, so
+        there is no cross-process restoration to perform here.  This
+        helper now simply delegates to :meth:`_present_pending_worktree`
+        when the tab's transient agent still holds a pending worktree.
 
         Args:
             tab_id: The tab to check for pending worktree.
@@ -366,11 +409,11 @@ class _MergeFlowMixin:
         tab = self._get_tab(tab_id)
         if not tab.use_worktree:
             return
-        self._ensure_worktree_state(tab_id)
         self._present_pending_worktree(tab_id, try_merge_review=True)
 
     def _present_pending_worktree(
         self, tab_id: str, *, try_merge_review: bool,
+        discard_if_empty: bool = True,
     ) -> None:
         """Auto-discard, start merge review, or emit ``worktree_done``.
 
@@ -384,28 +427,40 @@ class _MergeFlowMixin:
           ``worktree_done``.
         - Worktree has changed files and *try_merge_review* is False
           (merge review already finished): broadcast ``worktree_done``.
-        - Worktree has no changes and no non-wt task is running:
-          auto-discard.
-        - Worktree has no changes but a non-wt task is running:
-          broadcast ``worktree_done`` so the user is aware of the
-          pending branch and can take manual action later
-          (BUG-68 fix — previously silent for the post-task and
-          post-merge-review paths).
+        - Worktree has no changes and *discard_if_empty* is True
+          and no non-wt task is running: auto-discard the empty
+          branch (BUG-66 — clean up stale resumed sessions and
+          finished merge reviews).
+        - Worktree has no changes and *discard_if_empty* is False:
+          preserve the branch and broadcast ``worktree_done``.
+          The post-task path passes ``discard_if_empty=False``
+          when the user opted into the worktree workflow but has
+          not explicitly chosen to merge or discard yet — so the
+          branch must remain visible in ``git branch`` for manual
+          inspection / merge / discard (fixes the user-reported
+          "worktree branch is not getting created" symptom in
+          ``use_worktree=True`` + ``autoCommit=False`` mode).
 
         Args:
             tab_id: The tab with a pending worktree.
             try_merge_review: Whether to attempt starting a merge
                 review before falling back.  Pass False after a
                 merge review has already been completed.
+            discard_if_empty: When True (default), auto-discard the
+                branch if no files changed.  Post-task callers should
+                pass False to preserve the branch for manual action.
         """
         tab = self._get_tab(tab_id)
-        if not tab.use_worktree or not tab.agent._wt_pending:
+        if not tab.use_worktree:
+            return
+        wt_agent = self._ensure_wt_agent(tab)
+        if wt_agent is None or not wt_agent._wt_pending:
             return
         changed = self._get_worktree_changed_files(tab_id)
         if changed and try_merge_review:
-            wt_dir = tab.agent._wt_dir
+            wt_dir = wt_agent._wt_dir
             if wt_dir is not None and wt_dir.exists():
-                base_ref = tab.agent._baseline_commit or "HEAD"
+                base_ref = wt_agent._baseline_commit or "HEAD"
                 try:
                     if self._prepare_and_start_merge(
                         str(wt_dir), base_ref=base_ref, tab_id=tab_id,
@@ -413,46 +468,31 @@ class _MergeFlowMixin:
                         return
                 except BaseException:
                     logger.debug("Worktree merge review error", exc_info=True)
-        if not changed:
+        if not changed and discard_if_empty:
             with self._state_lock:
                 non_wt_busy = self._any_non_wt_running()
             if not non_wt_busy:
-                tab.agent.discard()
+                wt_agent.discard()
                 return
-        wt = tab.agent
+        if not changed:
+            # Branch is preserved (discard_if_empty=False) but the
+            # worktree has no changes — there is nothing to merge,
+            # so suppress the "Auto-commit and merge or Discard?"
+            # prompt that the ``worktree_done`` frontend handler
+            # renders unconditionally.  The branch remains in
+            # ``git branch`` for manual inspection / cleanup, but
+            # the user is not bothered with a meaningless prompt.
+            return
         event: dict[str, Any] = {
             "type": "worktree_done",
-            "branch": wt._wt_branch,
-            "worktreeDir": str(wt._wt_dir),
-            "originalBranch": wt._original_branch,
+            "branch": wt_agent._wt_branch,
+            "worktreeDir": str(wt_agent._wt_dir),
+            "originalBranch": wt_agent._original_branch,
             "changedFiles": changed,
             "hasConflict": self._check_merge_conflict(tab_id) if changed else False,
             "tabId": tab_id,
         }
         self.printer.broadcast(event)
-
-    def _ensure_worktree_state(self, tab_id: str = "") -> None:
-        """Restore agent worktree state from git if not already set.
-
-        Discovers the repo root and calls ``_restore_from_git()`` so
-        that ``merge()``/``discard()`` work even after a server process
-        restart where in-memory state was lost.
-        Only applicable when using the worktree agent.
-
-        Args:
-            tab_id: The tab whose worktree state to restore.
-        """
-        tab = self._get_tab(tab_id)
-        if not tab.use_worktree:
-            return
-        wt = tab.agent
-        repo_root = wt._repo_root
-        if repo_root is None:
-            repo_root = GitWorktreeOps.discover_repo(Path(self.work_dir))
-            if repo_root is None:
-                return
-        wt._restore_from_git(repo_root)
-
 
     def _check_merge_conflict(self, tab_id: str = "") -> bool:
         """Check if merging the worktree branch into original would conflict.
@@ -478,7 +518,10 @@ class _MergeFlowMixin:
         tab = self._get_tab(tab_id)
         if not tab.use_worktree:
             return False
-        wt = tab.agent._wt
+        wt_agent = self._ensure_wt_agent(tab)
+        if wt_agent is None:
+            return False
+        wt = wt_agent._wt
         if wt is None or wt.original_branch is None:
             return False
         wt_dir = wt.wt_dir
@@ -577,13 +620,16 @@ class _MergeFlowMixin:
         tab = self._get_tab(tab_id)
         if not tab.use_worktree:
             return []
-        wt = tab.agent
-        if not wt._original_branch:
+        wt_agent = self._ensure_wt_agent(tab)
+        if wt_agent is None or not wt_agent._original_branch:
             return []
+        wt = wt_agent
+        original_branch = wt._original_branch
+        assert original_branch is not None  # narrowed by the check above
         wt_dir = wt._wt_dir
         if wt_dir and wt_dir.exists():
             base_ref = self._resolve_base_ref(
-                str(wt_dir), wt._baseline_commit, wt._original_branch,
+                str(wt_dir), wt._baseline_commit, original_branch,
             )
             tracked = _git(str(wt_dir), "diff", "--name-only", base_ref)
             if tracked.returncode == 0:
@@ -601,7 +647,7 @@ class _MergeFlowMixin:
             return []
         repo_root = str(wt._repo_root) if wt._repo_root else self.work_dir
         base_ref = self._resolve_base_ref(
-            repo_root, wt._baseline_commit, wt._original_branch,
+            repo_root, wt._baseline_commit, original_branch,
             tip=wt._wt_branch,
         )
         result = _git(repo_root, "diff", "--name-only",
@@ -609,11 +655,18 @@ class _MergeFlowMixin:
                       wt._wt_branch)
         return result.stdout.strip().splitlines() if result.returncode == 0 else []
 
-    def _check_worktree_busy(self, tab: _TabState, verb: str) -> dict[str, Any] | None:
+    def _check_worktree_busy(self, tab: _RunningAgentState, verb: str) -> dict[str, Any] | None:
         """Return an error dict if a worktree action should be refused, else None.
 
         Checks both the tab's own task and any non-worktree task running
         on the main tree (BUG-35, BUG-72 fixes).
+
+        Must be called with ``_state_lock`` already held (RACE-1 fix)
+        so the caller can atomically set ``tab.is_merging = True``
+        before releasing the lock — otherwise a non-wt task on
+        another tab could pass its own ``is_merging`` guard in the
+        TOCTOU window between this check returning ``None`` and the
+        caller acquiring ``_state_lock`` again to set the flag.
 
         Args:
             tab: The per-tab state to check.
@@ -622,26 +675,31 @@ class _MergeFlowMixin:
         Returns:
             Error dict with ``success: False`` when busy, otherwise ``None``.
         """
-        with self._state_lock:
-            if tab.is_task_active:
-                return {
-                    "success": False,
-                    "message": (
-                        f"A worktree task is still running on this tab. "
-                        f"Wait for it to finish (or stop it) before {verb}."
-                    ),
-                }
-            if self._any_non_wt_running():
-                return {
-                    "success": False,
-                    "message": (
-                        "Another tab is running a task on the main working "
-                        f"tree. Wait for it to finish before {verb}."
-                    ),
-                }
+        if tab.is_task_active:
+            return {
+                "success": False,
+                "message": (
+                    f"A worktree task is still running on this tab. "
+                    f"Wait for it to finish (or stop it) before {verb}."
+                ),
+            }
+        if self._any_non_wt_running():
+            return {
+                "success": False,
+                "message": (
+                    "Another tab is running a task on the main working "
+                    f"tree. Wait for it to finish before {verb}."
+                ),
+            }
         return None
 
-    def _handle_worktree_action(self, action: str, tab_id: str = "") -> dict[str, Any]:
+    def _handle_worktree_action(
+        self,
+        action: str,
+        tab_id: str = "",
+        *,
+        internal: bool = False,
+    ) -> dict[str, Any]:
         """Execute a worktree merge/discard/manual action.
 
         Restores agent worktree state from git if needed (e.g. after a
@@ -650,6 +708,12 @@ class _MergeFlowMixin:
         Args:
             action: One of ``"merge"`` or ``"discard"``.
             tab_id: The tab whose worktree to act on.
+            internal: When True, bypass the ``_check_worktree_busy``
+                guard.  Used by ``_run_task_inner``'s post-task
+                auto-merge / auto-discard block (RACE-3 fix), which
+                runs on the same task thread that owns
+                ``tab.is_task_active = True`` and therefore would
+                otherwise be refused by its own guard.
 
         Returns:
             Dict with ``success`` bool and ``message`` string.
@@ -657,27 +721,52 @@ class _MergeFlowMixin:
         tab = self._get_tab(tab_id)
         if not tab.use_worktree:
             return {"success": False, "message": "Worktree mode is not enabled"}
-        wt = tab.agent
-        if not wt._wt_pending:
-            self._ensure_worktree_state(tab_id)
+        wt_agent = self._ensure_wt_agent(tab)
+        if wt_agent is None:
+            return {"success": False, "message": "Not a git repository"}
+        wt = wt_agent
         if action == "merge":
-            busy = self._check_worktree_busy(tab, "merging")
-            if busy:
-                return busy
-            progress_event: dict[str, Any] = {
-                "type": "worktree_progress",
-                "message": "Generating commit message…",
-            }
-            if tab_id:
-                progress_event["tabId"] = tab_id
-            self.printer.broadcast(progress_event)
-            msg = wt.merge()
-            success = "Successfully merged" in msg
-            return {"success": success, "message": msg}
+            verb = "merging"
         elif action == "discard":
-            busy = self._check_worktree_busy(tab, "discarding")
-            if busy:
-                return busy
-            msg = wt.discard()
-            return {"success": True, "message": msg}
-        return {"success": False, "message": f"Unknown action: {action}"}
+            verb = "discarding"
+        else:
+            return {"success": False, "message": f"Unknown action: {action}"}
+        # RACE-1 / RACE-2 fix: atomically (a) verify nothing else is
+        # touching the main tree, (b) claim it for this tab by setting
+        # ``is_merging = True``.  Both happen under ``_state_lock`` so
+        # a concurrent non-wt task-start (whose guard is also under
+        # ``_state_lock``) sees the flag and refuses.  Holding
+        # ``repo_lock`` for the slow body additionally serializes
+        # with ``_try_setup_worktree``'s release phase and with any
+        # concurrent ``_handle_worktree_action`` invocation on a
+        # different tab pointed at the same repo.  ``is_merging`` is
+        # set BEFORE acquiring ``repo_lock`` so the flag is visible
+        # to non-wt task-start guards even when this thread is
+        # currently blocked on the lock.
+        repo_root = wt._repo_root
+        if repo_root is None:
+            return {"success": False, "message": "Not a git repository"}
+        with self._state_lock:
+            if not internal:
+                busy = self._check_worktree_busy(tab, verb)
+                if busy:
+                    return busy
+            tab.is_merging = True
+        try:
+            with repo_lock(repo_root):
+                if action == "merge":
+                    progress_event: dict[str, Any] = {
+                        "type": "worktree_progress",
+                        "message": "Generating commit message…",
+                    }
+                    if tab_id:
+                        progress_event["tabId"] = tab_id
+                    self.printer.broadcast(progress_event)
+                    msg = wt.merge()
+                    success = "Successfully merged" in msg
+                    return {"success": success, "message": msg}
+                msg = wt.discard()
+                return {"success": True, "message": msg}
+        finally:
+            with self._state_lock:
+                tab.is_merging = False

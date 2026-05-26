@@ -51,13 +51,66 @@ and rethink the strategy from scratch.
 SUMMARIZER_PROMPT = """
 # Summarizer
 
-The trajectory of the agent is stored in the file: {trajectory_file}
+The executor's trajectory is saved at: {trajectory_path}
+
+Read relevant portions of the file using your tools:
+- Read the first ~50 lines to understand the task and system instructions.
+- Read the last ~200 lines to see the most recent steps and outcomes.
+- Do NOT read the entire file; it may be very large.
 
 # Instructions
-- Read the trajectory file and analyze it.  The trajectory file could be large.
+- Analyze the trajectory file.
 - Return a precise chronologically-ordered list of things the agent did
-  with the reason for doing that along with relevant code snippets
+  with the reason for doing that along with relevant code snippets.
+- Call finish(success=True, summary="detailed summary of work done so far").
 """
+
+JUDGE_PROMPT = """
+# Task Requirements
+
+{task_description}
+
+# Claimed Result
+
+{executor_result}
+
+# Executor Trajectory
+
+The executor's trajectory is saved at: {trajectory_path}
+
+Read relevant portions of the trajectory file using your tools:
+- Read the first ~50 lines to understand the task and system instructions.
+- Read the last ~200 lines to see the most recent steps and outcomes.
+- Do NOT read the entire file; it may be very large.
+
+# Instructions
+
+You are a judge assessing whether the task was fully completed.
+- Work dir: {work_dir}
+- Use your tools to explore the work dir and verify actual outputs on disk.
+- Do NOT redo any work; only inspect and assess.
+- When done, call finish() with:
+  - success=true if every requirement is met, false otherwise
+  - summary: concise explanation of what is missing or why it passes
+"""
+
+def _user_visible_work_dir(work_dir: str) -> str:
+    """Return the work directory exactly as the agent will see it on disk.
+
+    When the agent runs in worktree mode, its real working directory is
+    inside ``<repo>/.kiss-worktrees/<slug>/``.  That is where ``pwd``,
+    ``os.getcwd()``, and ``Bash`` commands actually execute, so the
+    system prompt must report that exact path — anything else would
+    mislead the agent about its real location.
+
+    Args:
+        work_dir: Absolute work directory path.
+
+    Returns:
+        ``work_dir`` unchanged.
+    """
+    return work_dir
+
 
 def _str_to_bool(value: str | bool) -> bool:
     """Coerce a string or bool to a Python bool.
@@ -122,11 +175,18 @@ class RelentlessAgent(Base):
         self.budget_used: float = 0.0
         self.total_tokens_used: int = 0
         self.total_steps: int = 0
+        self._current_executor: KISSAgent | None = None
         self.docker_image = docker_image
         self.docker_manager: Any = None
         self.task_description: str = ""
         self.system_prompt: str = ""
         self.model_config: dict[str, Any] | None = None
+        # See :attr:`kiss.core.kiss_agent.KISSAgent.pre_step_hook`.
+        # Propagated to every inner per-session executor created in
+        # :meth:`perform_task`, so subclasses (e.g. ``SorcarAgent``)
+        # can hook into model calls without re-implementing the
+        # per-session executor.
+        self.pre_step_hook: Callable[..., None] | None = None
         self.set_printer(printer, verbose=verbose)
 
     def _docker_bash(self, command: str, description: str) -> str:
@@ -160,7 +220,7 @@ class RelentlessAgent(Base):
         current_pid = str(os.getpid())
         important_instructions = IMPORTANT_INSTRUCTIONS.format(
             step_threshold=str(self.max_steps - 2),
-            work_dir=self.work_dir,
+            work_dir=_user_visible_work_dir(self.work_dir),
             current_pid=current_pid,
         )
         system_prompt = self.system_prompt + important_instructions
@@ -176,6 +236,12 @@ class RelentlessAgent(Base):
                 self.printer.budget_offset = self.budget_used  # type: ignore[attr-defined]
                 self.printer.steps_offset = self.total_steps  # type: ignore[attr-defined]
             executor = KISSAgent(f"{self.name} Session-{session}")
+            # Propagate any pre-step hook installed on the relentless
+            # parent (e.g. ``SorcarAgent.run``'s pending-user-messages
+            # drain) to the per-session inner executor — that's the
+            # layer that actually calls the model.
+            executor.pre_step_hook = getattr(self, "pre_step_hook", None)
+            self._current_executor = executor
             try:
                 result = executor.run(
                     model_name=self.model_name,
@@ -200,6 +266,7 @@ class RelentlessAgent(Base):
                     or not isinstance(exc, KISSError)
                     or executor.step_count <= 1
                 ):
+                    self._current_executor = None
                     self.budget_used += executor.budget_used
                     self.total_tokens_used += executor.total_tokens_used
                     self.total_steps += executor.step_count
@@ -263,6 +330,7 @@ class RelentlessAgent(Base):
                     sort_keys=False,
                 )
 
+            self._current_executor = None
             self.budget_used += executor.budget_used
             self.total_tokens_used += executor.total_tokens_used
             self.total_steps += executor.step_count
@@ -280,13 +348,31 @@ class RelentlessAgent(Base):
 
             if not is_continue or success:
                 if summaries:
-                    current_summary = payload.get("summary", "")
-                    if current_summary:
-                        summaries.append(current_summary)
-                    payload["summary"] = "\n\n---\n\n".join(
-                        f"### Session {i + 1}\n{s}" for i, s in enumerate(summaries)
+                    final_summary = payload.get("summary", "")
+                    # ``summaries`` holds every PRIOR session's summary
+                    # (collected from ``is_continue=True`` returns).  Prepend
+                    # them as historical context BEFORE the terminal session's
+                    # summary, which stays the primary payload summary.
+                    prior_section = "\n\n---\n\n".join(
+                        f"### Previous Session {i + 1}\n{s}"
+                        for i, s in enumerate(summaries)
                     )
+                    if final_summary:
+                        payload["summary"] = (
+                            f"{prior_section}\n\n---\n\n### Final Session\n"
+                            f"{final_summary}"
+                        )
+                    else:
+                        payload["summary"] = prior_section
                     result = yaml.dump(payload, sort_keys=False)
+                    # Re-emit a final result event so the front-end's Result
+                    # panel reflects the merged multi-session outcome (and
+                    # shows FAILED for terminal failures after one or more
+                    # continuations).  The inner KISSAgent only emitted the
+                    # last session's per-session result, which on a failure
+                    # would be the last "Continue" status — hiding the
+                    # final failure from the user.
+                    self._broadcast_final_result(payload)
                 return result
 
             summary = payload.get("summary", "")
@@ -301,7 +387,58 @@ class RelentlessAgent(Base):
                     progress_text=all_summaries,
                     continuation_number=session + 1,
                 )
-        raise KISSError(f"Task failed after {self.max_sub_sessions} sub-sessions")
+        # All ``max_sub_sessions`` were exhausted without a terminal
+        # result.  Emit a FAILED Result event carrying the merged
+        # progress so the front-end's Result panel shows the failure
+        # (otherwise the user only sees a stale "Status: Continue"
+        # from the last per-session result).
+        exhaustion_message = (
+            f"Task failed after {self.max_sub_sessions} sub-sessions"
+        )
+        # Exhaustion has no terminal session, so every accumulated summary
+        # is labeled as a previous session and prepended before the
+        # exhaustion message (which becomes the primary final summary).
+        prior_section = "\n\n---\n\n".join(
+            f"### Previous Session {i + 1}\n{s}" for i, s in enumerate(summaries)
+        )
+        if prior_section:
+            merged_summary = f"{prior_section}\n\n---\n\n{exhaustion_message}"
+        else:
+            merged_summary = exhaustion_message
+        self._broadcast_final_result(
+            {
+                "success": False,
+                "is_continue": False,
+                "summary": merged_summary,
+            }
+        )
+        raise KISSError(exhaustion_message)
+
+    def _broadcast_final_result(self, payload: dict[str, Any]) -> None:
+        """Emit a final ``type="result"`` event with aggregated totals.
+
+        Called from :meth:`perform_task` whenever the multi-session loop
+        completes (either with a merged success/failure summary or
+        after exhausting all sub-sessions).  The inner :class:`KISSAgent`
+        only emits per-session results, so without this final broadcast
+        the front-end's Result panel would show the LAST per-session
+        status (e.g. "Continue") instead of the true terminal outcome.
+
+        Args:
+            payload: Dict with ``success``, ``is_continue`` and
+                ``summary`` keys that will be YAML-dumped as the event
+                content.
+        """
+        if self.printer is None:
+            return
+        result_yaml = yaml.dump(payload, sort_keys=False)
+        self.printer.print(
+            result_yaml,
+            type="result",
+            step_count=self.total_steps,
+            total_tokens=self.total_tokens_used,
+            cost=f"${self.budget_used:.4f}",
+        )
 
     def run(
         self,

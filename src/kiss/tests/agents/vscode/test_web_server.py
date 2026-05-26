@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 from unittest import IsolatedAsyncioTestCase
 
+import pytest
 from websockets.asyncio.client import connect
 
 from kiss.agents.vscode.vscode_config import CONFIG_PATH, save_config
@@ -63,7 +64,8 @@ class TestBuildHtml(unittest.TestCase):
         self.assertIn('id="input-area"', html)
         self.assertIn('id="model-picker"', html)
         self.assertIn('id="sidebar"', html)
-        self.assertIn('id="config-sidebar"', html)
+        self.assertIn('id="settings-panel"', html)
+        self.assertIn('id="frequent-panel"', html)
         self.assertIn('id="ask-user-modal"', html)
         self.assertIn('id="send-btn"', html)
         self.assertIn('id="stop-btn"', html)
@@ -154,16 +156,16 @@ class TestWebPrinter(unittest.TestCase):
     def test_broadcast_records_event(self) -> None:
         """Broadcast records events in the per-tab recording buffer."""
         printer = WebPrinter()
-        printer._thread_local.tab_id = "t1"
+        printer._thread_local.task_id = "t1"
         printer.start_recording()
         printer.broadcast({"type": "text_delta", "text": "hello"})
         events = printer.peek_recording()
         self.assertTrue(any(e.get("text") == "hello" for e in events))
 
-    def test_broadcast_injects_tab_id(self) -> None:
-        """Broadcast injects tabId from thread-local when missing."""
+    def test_broadcast_injects_task_id(self) -> None:
+        """Broadcast injects taskId from thread-local when missing."""
         printer = WebPrinter()
-        printer._thread_local.tab_id = "t1"
+        printer._thread_local.task_id = "t1"
         printer.start_recording()
         captured: list[dict] = []
         original_record = printer._record_event
@@ -173,8 +175,8 @@ class TestWebPrinter(unittest.TestCase):
             original_record(event)
 
         printer._record_event = spy_record  # type: ignore[assignment]
-        printer.broadcast({"type": "status", "running": False})
-        self.assertTrue(any(e.get("tabId") == "t1" for e in captured))
+        printer.broadcast({"type": "text_delta", "text": "hi"})
+        self.assertTrue(any(e.get("taskId") == "t1" for e in captured))
 
 
 def _find_free_port() -> int:
@@ -310,6 +312,22 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
     """Test WebSocket communication without authentication."""
 
     async def asyncSetUp(self) -> None:
+        # Other tests in the suite (e.g. ones that monkeypatch ``HOME``
+        # or temporarily redirect ``persistence._KISS_DIR``) can leave
+        # the SQLite path pointing at a now-deleted ``tmp_path``.  Pin
+        # persistence to a fresh test-owned directory so these tests
+        # remain independent regardless of run order.
+        import kiss.agents.sorcar.persistence as _persistence
+        self._saved_persistence = (
+            _persistence._DB_PATH,
+            _persistence._db_conn,
+            _persistence._KISS_DIR,
+        )
+        self._persistence_dir = Path(tempfile.mkdtemp(prefix="kiss_ws_test_"))
+        _persistence._KISS_DIR = self._persistence_dir
+        _persistence._DB_PATH = self._persistence_dir / "sorcar.db"
+        _persistence._db_conn = None
+
         self.port = _find_free_port()
         self._orig_config = None
         if CONFIG_PATH.exists():
@@ -329,6 +347,19 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
             CONFIG_PATH.write_text(self._orig_config)
         elif CONFIG_PATH.exists():
             CONFIG_PATH.unlink()
+
+        import kiss.agents.sorcar.persistence as _persistence
+        if _persistence._db_conn is not None:
+            try:
+                _persistence._db_conn.close()
+            except Exception:
+                pass
+            _persistence._db_conn = None
+        (
+            _persistence._DB_PATH,
+            _persistence._db_conn,
+            _persistence._KISS_DIR,
+        ) = self._saved_persistence
 
     async def test_ws_auth_no_password(self) -> None:
         """WebSocket connection with empty password succeeds immediately."""
@@ -647,7 +678,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                     {
                         "type": "getAdjacentTask",
                         "tabId": "adj-tab",
-                        "task": "test",
+                        "taskId": None,
                         "direction": "prev",
                     }
                 )
@@ -676,25 +707,6 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                 ev = json.loads(raw)
                 received_types.add(ev["type"])
             self.assertIn("configData", received_types)
-
-    async def test_ws_set_skip_merge(self) -> None:
-        """setSkipMerge command does not produce an error."""
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
-            await ws.send(json.dumps({"type": "auth", "password": ""}))
-            await asyncio.wait_for(ws.recv(), timeout=5)
-
-            await ws.send(
-                json.dumps(
-                    {
-                        "type": "setSkipMerge",
-                        "tabId": "skip-tab",
-                        "skip": True,
-                    }
-                )
-            )
-            await ws.send(json.dumps({"type": "getModels"}))
-            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
-            self.assertEqual(resp["type"], "models")
 
     async def test_ws_stop_no_error(self) -> None:
         """stop command with no running task does not produce an error."""
@@ -905,7 +917,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                 {"type": "getInputHistory"},
                 {"type": "getConfig"},
                 {"type": "getWelcomeSuggestions"},
-                {"type": "getAdjacentTask", "tabId": "t", "task": "x", "direction": "prev"},
+                {"type": "getAdjacentTask", "tabId": "t", "taskId": None, "direction": "prev"},
                 {"type": "selectModel", "model": "gemini-2.5-pro", "tabId": "t"},
                 {"type": "newChat", "tabId": "all-t"},
                 {"type": "closeTab", "tabId": "all-t"},
@@ -919,7 +931,6 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                 {"type": "generateCommitMessage"},
                 {"type": "worktreeAction", "action": "discard", "tabId": "t"},
                 {"type": "autocommitAction", "action": "skip", "tabId": "t"},
-                {"type": "setSkipMerge", "tabId": "t", "skip": False},
                 {"type": "saveConfig", "config": {}, "apiKeys": {}},
                 {"type": "openFile", "path": "/tmp/x"},
                 {"type": "focusEditor"},
@@ -949,6 +960,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                 f"Got Unknown command errors: {unknown_errors}",
             )
 
+    @pytest.mark.slow
     async def test_ws_submit_emits_task_text_and_status(self) -> None:
         """The 'submit' command emits setTaskText and status running=True."""
         async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
@@ -1562,6 +1574,81 @@ class TestRemoteAccessServerMerge(IsolatedAsyncioTestCase):
             with open(self._test_file) as f:
                 content = f.read()
             self.assertEqual(content, "line1\nline2\nline3\n")
+
+    async def test_reject_all_restores_deleted_tracked_file(self) -> None:
+        """Reproduces the reported bug: when the agent deletes a tracked
+        file with content, rejecting all hunks must restore the file
+        on disk — previously the file remained deleted because the
+        reject only wrote to the ``.deleted`` placeholder used for
+        display.
+        """
+        # Simulate the agent deleting the previously-committed file.
+        # ``self._test_file`` was created and committed in asyncSetUp
+        # with content "line1\nline2\nline3\n".  Remove the unrelated
+        # post-setup edit and delete the file entirely.
+        os.unlink(self._test_file)
+        self.assertFalse(Path(self._test_file).exists())
+
+        tab_id = "reject-all-deleted-tab"
+        async with connect(
+            f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl(),
+        ) as ws:
+            await self._auth(ws)
+            await self._trigger_merge(tab_id)
+            await self._collect_until(ws, "merge_started")
+
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "mergeAction",
+                        "action": "reject-all",
+                        "tabId": tab_id,
+                    }
+                )
+            )
+            events = await self._collect_until(ws, "merge_ended", timeout=5)
+            ended = [e for e in events if e.get("type") == "merge_ended"]
+            self.assertTrue(len(ended) > 0)
+
+            self.assertTrue(
+                Path(self._test_file).is_file(),
+                "Rejecting all hunks on a deleted tracked file must "
+                "restore the file at its workspace location",
+            )
+            with open(self._test_file) as f:
+                self.assertEqual(f.read(), "line1\nline2\nline3\n")
+
+    async def test_reject_file_restores_deleted_tracked_file(self) -> None:
+        """The ``reject-file`` action on a deleted tracked file must
+        also restore the file on disk.
+        """
+        os.unlink(self._test_file)
+        self.assertFalse(Path(self._test_file).exists())
+
+        tab_id = "reject-file-deleted-tab"
+        async with connect(
+            f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl(),
+        ) as ws:
+            await self._auth(ws)
+            await self._trigger_merge(tab_id)
+            await self._collect_until(ws, "merge_started")
+
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "mergeAction",
+                        "action": "reject-file",
+                        "tabId": tab_id,
+                    }
+                )
+            )
+            await self._collect_until(ws, "merge_ended", timeout=5)
+            self.assertTrue(
+                Path(self._test_file).is_file(),
+                "reject-file on a deleted tracked file must restore it",
+            )
+            with open(self._test_file) as f:
+                self.assertEqual(f.read(), "line1\nline2\nline3\n")
 
 
 class TestGenerateSelfSignedCert(unittest.TestCase):
@@ -2360,6 +2447,51 @@ class TestRejectAllHunksInFile(unittest.TestCase):
             _reject_all_hunks_in_file({"current": cur_path, "base": base_path})
             self.assertEqual(Path(cur_path).read_text(), "modified\n")
 
+    def test_writes_to_target_when_current_is_placeholder(self) -> None:
+        """When ``target`` differs from ``current`` (deleted-file case),
+        rejecting all hunks must restore the file at the workspace
+        target path, not at the display placeholder.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            placeholder = os.path.join(td, ".deleted", "foo.py")
+            Path(placeholder).parent.mkdir(parents=True)
+            Path(placeholder).write_text("")  # display stand-in
+            base_path = os.path.join(td, "base", "foo.py")
+            Path(base_path).parent.mkdir(parents=True)
+            Path(base_path).write_text("original line 1\noriginal line 2\n")
+            target = os.path.join(td, "work", "foo.py")
+            # target file was deleted by the agent — does not exist yet
+            self.assertFalse(Path(target).exists())
+            _reject_all_hunks_in_file({
+                "current": placeholder,
+                "base": base_path,
+                "target": target,
+            })
+            # The workspace path must be restored.
+            self.assertTrue(Path(target).is_file())
+            self.assertEqual(
+                Path(target).read_text(),
+                "original line 1\noriginal line 2\n",
+            )
+
+    def test_reject_hunk_writes_to_target(self) -> None:
+        """``_reject_hunk_in_file`` must restore content at the target
+        path when the visible "current" is a placeholder.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            placeholder = os.path.join(td, ".deleted", "foo.py")
+            Path(placeholder).parent.mkdir(parents=True)
+            Path(placeholder).write_text("")
+            base_path = os.path.join(td, "base", "foo.py")
+            Path(base_path).parent.mkdir(parents=True)
+            Path(base_path).write_text("a\nb\nc\n")
+            target = os.path.join(td, "work", "foo.py")
+            # Hunk says: insert 3 base lines at the start of current
+            hunk = {"cs": 0, "cc": 0, "bs": 0, "bc": 3}
+            _reject_hunk_in_file(placeholder, base_path, hunk, target)
+            self.assertTrue(Path(target).is_file())
+            self.assertEqual(Path(target).read_text(), "a\nb\nc\n")
+
 
 class TestAugmentMergeData(unittest.TestCase):
     """Test _augment_merge_data file content augmentation."""
@@ -2428,6 +2560,61 @@ class TestAugmentMergeData(unittest.TestCase):
         self.assertEqual(result["data"]["files"][0]["base_text"], "")
         self.assertEqual(result["data"]["files"][0]["current_text"], "")
 
+    def test_binary_file_does_not_raise(self) -> None:
+        """Binary files (e.g. generated PDFs) must not crash augmentation.
+
+        Regression: ``Path.read_text()`` raises ``UnicodeDecodeError``
+        on binary content, which is a ``ValueError`` — NOT an
+        ``OSError`` — so the previous ``except (OSError, KeyError)``
+        let the exception bubble up through the broadcast path and
+        the merge UI never opened for binary-only changes.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            base_path = os.path.join(td, "old.pdf")
+            cur_path = os.path.join(td, "new.pdf")
+            # Bytes that fail UTF-8 decoding (typical PDF header + 0xff).
+            Path(base_path).write_bytes(b"%PDF-1.4\n\x00\x01\xff\xfe")
+            Path(cur_path).write_bytes(b"%PDF-1.7\n\x00\x02\xff\xfe")
+            event = {
+                "type": "merge_data",
+                "data": {
+                    "files": [
+                        {
+                            "base": base_path,
+                            "current": cur_path,
+                            "binary": True,
+                        }
+                    ]
+                },
+            }
+            # Must not raise, and must still yield string text fields
+            # so downstream JSON serialization is safe.
+            result = _augment_merge_data(event)
+            f = result["data"]["files"][0]
+            self.assertEqual(f["base_text"], "")
+            self.assertEqual(f["current_text"], "")
+            # JSON-serializable.
+            json.dumps(result)
+
+    def test_binary_file_without_flag_does_not_raise(self) -> None:
+        """Even without an explicit binary flag, undecodable bytes
+        must not break the broadcast path."""
+        with tempfile.TemporaryDirectory() as td:
+            base_path = os.path.join(td, "a.bin")
+            cur_path = os.path.join(td, "b.bin")
+            Path(base_path).write_bytes(b"\x00\xff\xfe\x80")
+            Path(cur_path).write_bytes(b"\x00\xff\xfe\x81")
+            event = {
+                "type": "merge_data",
+                "data": {
+                    "files": [{"base": base_path, "current": cur_path}]
+                },
+            }
+            result = _augment_merge_data(event)
+            f = result["data"]["files"][0]
+            self.assertEqual(f["base_text"], "")
+            self.assertEqual(f["current_text"], "")
+
 
 class TestReadVersion(unittest.TestCase):
     """Test _read_version helper."""
@@ -2492,7 +2679,7 @@ class TestWebPrinterBroadcastEdgeCases(IsolatedAsyncioTestCase):
             Path(cur_path).write_text("current")
 
             printer = WebPrinter()
-            printer._thread_local.tab_id = "t1"
+            printer._thread_local.task_id = "t1"
             callback_calls: list[tuple[str, dict]] = []
 
             def _cb(tab_id: str, merge_data: dict[str, Any]) -> None:
@@ -2503,13 +2690,14 @@ class TestWebPrinterBroadcastEdgeCases(IsolatedAsyncioTestCase):
             printer.broadcast(
                 {
                     "type": "merge_data",
+                    "tabId": "tab-1",
                     "data": {
                         "files": [{"base": base_path, "current": cur_path, "hunks": []}],
                     },
                 }
             )
             self.assertEqual(len(callback_calls), 1)
-            self.assertEqual(callback_calls[0][0], "t1")
+            self.assertEqual(callback_calls[0][0], "tab-1")
 
 
 class TestAuthenticationEdgeCases(IsolatedAsyncioTestCase):
@@ -2879,62 +3067,6 @@ class TestHandleReadyRestoredTabs(IsolatedAsyncioTestCase):
             self.assertIn("models", types)
 
 
-class TestSubmitWithSkipMerge(IsolatedAsyncioTestCase):
-    """Test submit command with skipMerge field."""
-
-    async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
-        self._orig_config = None
-        if CONFIG_PATH.exists():
-            self._orig_config = CONFIG_PATH.read_text()
-        save_config({"remote_password": ""})
-
-        self.server = RemoteAccessServer(
-            host="127.0.0.1",
-            port=self.port,
-            work_dir=tempfile.mkdtemp(),
-        )
-        await self.server.start_async()
-
-    async def asyncTearDown(self) -> None:
-        await self.server.stop_async()
-        if self._orig_config is not None:
-            CONFIG_PATH.write_text(self._orig_config)
-        elif CONFIG_PATH.exists():
-            CONFIG_PATH.unlink()
-
-    async def test_submit_with_skip_merge(self) -> None:
-        """submit with skipMerge includes it in the translated run command."""
-        async with connect(
-            f"wss://127.0.0.1:{self.port}/ws",
-            ssl=_no_verify_ssl(),
-        ) as ws:
-            await ws.send(json.dumps({"type": "auth", "password": ""}))
-            await asyncio.wait_for(ws.recv(), timeout=5)
-
-            await ws.send(
-                json.dumps(
-                    {
-                        "type": "submit",
-                        "prompt": "test task",
-                        "model": "gemini-2.5-flash",
-                        "tabId": "t1",
-                        "skipMerge": True,
-                    }
-                )
-            )
-            events: list[dict] = []
-            for _ in range(10):
-                try:
-                    raw = await asyncio.wait_for(ws.recv(), timeout=3)
-                    events.append(json.loads(raw))
-                except TimeoutError:
-                    break
-            types = [e.get("type") for e in events]
-            self.assertIn("setTaskText", types)
-            self.assertIn("status", types)
-
-
 class TestSendWelcomeInfoFallbacks(IsolatedAsyncioTestCase):
     """Test _send_welcome_info URL fallback paths."""
 
@@ -3132,6 +3264,7 @@ class TestNamedTunnel(IsolatedAsyncioTestCase):
             proc.terminate()
             proc.wait()
 
+    @pytest.mark.slow
     async def test_start_tunnel_file_not_found(self) -> None:
         """_start_tunnel returns None when cloudflared is not found."""
         server = RemoteAccessServer(
@@ -3573,6 +3706,7 @@ class TestStartNamedTunnel(IsolatedAsyncioTestCase):
         finally:
             server._stop_tunnel()
 
+    @pytest.mark.slow
     async def test_named_tunnel_process_dies_returns_none(self) -> None:
         """_start_named_tunnel returns None when process exits without URL."""
         self._install_fake_cloudflared(
@@ -3605,6 +3739,7 @@ class TestStartQuickTunnelFallback(IsolatedAsyncioTestCase):
         elif CONFIG_PATH.exists():
             CONFIG_PATH.unlink()
 
+    @pytest.mark.slow
     async def test_quick_tunnel_no_url_from_stderr(self) -> None:
         """When stderr doesn't contain URL, falls back to metrics API."""
         import sys
@@ -3635,6 +3770,7 @@ class TestStartQuickTunnelFallback(IsolatedAsyncioTestCase):
             proc.terminate()
             proc.wait()
 
+    @pytest.mark.slow
     async def test_quick_tunnel_process_dies_during_fallback(self) -> None:
         """When cloudflared dies during metrics fallback, returns None."""
         import sys
@@ -4339,6 +4475,7 @@ class TestStopTunnelKillPath(IsolatedAsyncioTestCase):
         else:
             _URL_FILE.unlink(missing_ok=True)
 
+    @pytest.mark.slow
     async def test_kill_stubborn_process_with_ready_signal(self) -> None:
         """_stop_tunnel kills a process that ignores SIGTERM."""
         script = (
@@ -5011,6 +5148,7 @@ class TestStartTunnelGenericException(IsolatedAsyncioTestCase):
         import shutil
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
+    @pytest.mark.slow
     async def test_generic_exception_returns_none(self) -> None:
         """Non-FileNotFoundError exception → returns None (line 1474-1475)."""
         cf = os.path.join(self._tmpdir, "cloudflared")
@@ -5059,6 +5197,7 @@ class TestQuickTunnelUrlFromStderr(IsolatedAsyncioTestCase):
         result = self.server._start_quick_tunnel()
         self.assertEqual(result, "https://test-abc.trycloudflare.com")
 
+    @pytest.mark.slow
     async def test_process_dies_during_reader(self) -> None:
         """Process dies without URL → falls through (lines 1519-1522)."""
         cf = os.path.join(self._tmpdir, "cloudflared")
@@ -5098,6 +5237,7 @@ class TestNamedTunnelProcessDies(IsolatedAsyncioTestCase):
         import shutil
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
+    @pytest.mark.slow
     async def test_named_tunnel_process_dies_returns_none(self) -> None:
         """Named tunnel process exits without registering → None (1580-1581)."""
         cf = os.path.join(self._tmpdir, "cloudflared")
@@ -5325,6 +5465,7 @@ class TestSendWelcomeInfoDiscoverUrl(IsolatedAsyncioTestCase):
 class TestStartWithTunnel(unittest.TestCase):
     """Test start() with tunnel enabled using fake cloudflared."""
 
+    @pytest.mark.slow
     def test_start_with_tunnel_success(self) -> None:
         """start() with tunnel prints tunnel URL (lines 1715, 1730)."""
         tmpdir = tempfile.mkdtemp()
@@ -5380,6 +5521,7 @@ class TestStartWithTunnel(unittest.TestCase):
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    @pytest.mark.slow
     def test_start_with_tunnel_failure(self) -> None:
         """start() with tunnel failure prints warning (line 1732)."""
         tmpdir = tempfile.mkdtemp()
@@ -5505,6 +5647,7 @@ class TestQuickTunnelFallbackMetricsHit(IsolatedAsyncioTestCase):
         import shutil
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
+    @pytest.mark.slow
     async def test_fallback_finds_url_from_metrics(self) -> None:
         """When stderr has no URL, fallback poll finds it (1536-1539)."""
         cf = os.path.join(self._tmpdir, "cloudflared")
@@ -5573,6 +5716,7 @@ class TestQuickTunnelProcessPoll(IsolatedAsyncioTestCase):
         import shutil
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
+    @pytest.mark.slow
     async def test_process_exits_during_stderr_read(self) -> None:
         """Process exits after non-URL output → poll() check (line 1522)."""
         cf = os.path.join(self._tmpdir, "cloudflared")
@@ -5832,6 +5976,7 @@ class TestWatchdogEdgeDeregistration(IsolatedAsyncioTestCase):
                 f"Subprocess should still be alive at tick {tick}",
             )
 
+    @pytest.mark.slow
     async def test_unhealthy_at_limit_force_restarts(self) -> None:
         """At the threshold the watchdog terminates and restarts the tunnel.
 

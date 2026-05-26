@@ -136,6 +136,10 @@ class TestMultiPrinter(TestCase):
         from kiss.core.printer import MultiPrinter
         p1 = BaseBrowserPrinter()
         p2 = BaseBrowserPrinter()
+        # Recording is keyed by ``_thread_local.task_id``; without a
+        # task id, ``start_recording``/``stop_recording`` are no-ops.
+        p1._thread_local.task_id = "mp-test"
+        p2._thread_local.task_id = "mp-test"
         mp = MultiPrinter([p1, p2])
         p1.start_recording()
         p2.start_recording()

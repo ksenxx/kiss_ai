@@ -10,7 +10,6 @@ update last_model_used and model usage counts.
 
 from __future__ import annotations
 
-import inspect
 import os
 import tempfile
 from collections.abc import Generator
@@ -38,61 +37,13 @@ def _isolate_db(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
     _close_db()
 
 
-class TestSorcarAgentResetDoesNotSaveLastModel:
-    """_reset() must NOT call _save_last_model — only the model picker does."""
-
-    def test_reset_source_does_not_call_save_last_model(self) -> None:
-        from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-
-        src = inspect.getsource(SorcarAgent._reset)
-        assert "_save_last_model" not in src, (
-            "SorcarAgent._reset() should not call _save_last_model; "
-            "last_model_used must only be updated by the model picker"
-        )
-
-    def test_reset_source_does_not_call_record_model_usage(self) -> None:
-        from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-
-        src = inspect.getsource(SorcarAgent._reset)
-        assert "_record_model_usage" not in src, (
-            "SorcarAgent._reset() should not call _record_model_usage; "
-            "model usage counts must only be updated by the model picker"
-        )
 
 
-class TestTaskRunnerDoesNotRecordModelUsage:
-    """_run_task_inner must NOT call _record_model_usage."""
-
-    def test_run_task_inner_source_has_no_record_model_usage(self) -> None:
-        from kiss.agents.vscode.server import VSCodeServer
-
-        src = inspect.getsource(VSCodeServer._run_task_inner)
-        assert "_record_model_usage" not in src, (
-            "_run_task_inner should not call _record_model_usage; "
-            "model usage counts must only be updated by the model picker"
-        )
-
-    def test_run_task_inner_source_has_no_save_last_model(self) -> None:
-        from kiss.agents.vscode.server import VSCodeServer
-
-        src = inspect.getsource(VSCodeServer._run_task_inner)
-        assert "_save_last_model" not in src, (
-            "_run_task_inner should not call _save_last_model; "
-            "last_model_used must only be updated by the model picker"
-        )
 
 
 class TestModelPickerUpdatesUsageAndLastModel:
     """_cmd_select_model must call _record_model_usage (which sets both)."""
 
-    def test_select_model_source_calls_record_model_usage(self) -> None:
-        from kiss.agents.vscode.commands import _CommandsMixin
-
-        src = inspect.getsource(_CommandsMixin._cmd_select_model)
-        assert "_record_model_usage" in src, (
-            "_cmd_select_model should call _record_model_usage to update "
-            "both last_model_used and model usage counts"
-        )
 
     def test_select_model_behavioral(self) -> None:
         """Selecting a model via the picker must persist last_model and

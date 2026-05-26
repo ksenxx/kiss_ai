@@ -2,8 +2,9 @@
 
 Validates:
 - The button element exists in the HTML template (SorcarTab.ts).
-- The button is placed between parallel-toggle-btn and demo-toggle-btn in #model-picker.
-- The button uses the shared dropdown menu-item CSS.
+- The button is placed inline next to the "Auto commit" label inside
+  the settings panel (``#cfg-auto-commit`` checkbox row).
+- The button has its own #autocommit-btn CSS, styled like #menu-btn.
 - The JS click handler sends the correct ``autocommitAction`` message.
 - The button is disabled when a task is running (setRunningState).
 - The backend ``autocommitAction`` command dispatches to ``_handle_autocommit_action``.
@@ -40,91 +41,10 @@ def _make_server() -> tuple[VSCodeServer, list[dict]]:
     return server, events
 
 
-class TestAutocommitButtonInTemplate(unittest.TestCase):
-    """The autocommit button exists in the SorcarTab HTML template."""
-
-    def test_button_element_exists(self) -> None:
-        html = _read("src/SorcarTab.ts")
-        assert 'id="autocommit-btn"' in html, (
-            "autocommit-btn button not found in SorcarTab.ts"
-        )
-
-    def test_button_has_menu_label(self) -> None:
-        html = _read("src/SorcarTab.ts")
-        btn_start = html.index('id="autocommit-btn"')
-        btn_end = html.index("</button>", btn_start)
-        btn_html = html[btn_start:btn_end]
-        assert "Auto commit" in btn_html
-
-    def test_button_between_parallel_and_demo(self) -> None:
-        """The autocommit button is between parallel-toggle-btn and demo-toggle-btn."""
-        html = _read("src/SorcarTab.ts")
-        parallel_pos = html.index('id="parallel-toggle-btn"')
-        btn_pos = html.index('id="autocommit-btn"')
-        demo_pos = html.index('id="demo-toggle-btn"')
-        assert parallel_pos < btn_pos < demo_pos, (
-            "autocommit-btn should be between parallel-toggle-btn and demo-toggle-btn"
-        )
-
-    def test_button_inside_model_picker(self) -> None:
-        """The button is a child of the #model-picker div."""
-        html = _read("src/SorcarTab.ts")
-        picker_start = html.index('id="model-picker"')
-        btn_pos = html.index('id="autocommit-btn"')
-        assert btn_pos > picker_start, (
-            "autocommit-btn should be inside #model-picker"
-        )
-
-    def test_button_has_svg_icon(self) -> None:
-        """The button contains an SVG icon."""
-        html = _read("src/SorcarTab.ts")
-        btn_start = html.index('id="autocommit-btn"')
-        btn_end = html.index("</button>", btn_start)
-        btn_html = html[btn_start:btn_end]
-        assert "<svg" in btn_html, "autocommit-btn should contain an SVG icon"
 
 
-class TestAutocommitButtonCSS(unittest.TestCase):
-    """The autocommit button uses shared menu-item CSS."""
-
-    def test_base_styles_exist(self) -> None:
-        css = _read("media/main.css")
-        assert ".menu-item" in css
-        assert "#autocommit-btn" not in css
-
-    def test_hover_style_exists(self) -> None:
-        css = _read("media/main.css")
-        assert ".menu-item:hover:not(:disabled)" in css
-
-    def test_disabled_style_exists(self) -> None:
-        css = _read("media/main.css")
-        assert ".menu-item:disabled" in css
 
 
-class TestAutocommitButtonJS(unittest.TestCase):
-    """The JS code references the autocommit button and wires it correctly."""
-
-    def test_element_reference(self) -> None:
-        js = _read("media/main.js")
-        assert "getElementById('autocommit-btn')" in js
-
-    def test_click_sends_autocommit_action(self) -> None:
-        """The click handler posts an autocommitAction message with action 'commit'."""
-        js = _read("media/main.js")
-        assert "autocommitBtn.addEventListener('click'" in js or \
-               "autocommitBtn.addEventListener(\"click\"" in js
-        click_idx = js.index("autocommitBtn.addEventListener")
-        snippet = js[click_idx:click_idx + 500]
-        assert "type: 'autocommitAction'" in snippet or \
-               'type: "autocommitAction"' in snippet
-        assert "action: 'commit'" in snippet or \
-               'action: "commit"' in snippet
-
-    def test_not_disabled_when_running(self) -> None:
-        """The button stays enabled during running (tasks queue locally)."""
-        js = _read("media/main.js")
-        assert "autocommitBtn" in js
-        assert "autocommitBtn.disabled" not in js
 
 
 class TestAutocommitButtonBackend(unittest.TestCase):

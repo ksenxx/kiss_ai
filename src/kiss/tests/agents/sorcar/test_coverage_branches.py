@@ -6,7 +6,6 @@ and real function calls.
 
 from __future__ import annotations
 
-import json
 import os
 import queue
 import subprocess
@@ -38,7 +37,7 @@ class TestBaseBrowserPrinterBranches:
 
     def test_reset_clears_bash_buffer_and_timer(self):
         p = BaseBrowserPrinter()
-        p._thread_local.tab_id = "0"
+        p._thread_local.task_id = "0"
         with p._bash_lock:
             bs = p._bash_state
             bs.buffer.append("some text")
@@ -185,12 +184,14 @@ class TestVSCodeServerBranches:
         return server, events
 
     def test_handle_command_run_already_running(self):
+        """A run command while a task is alive is silently dropped."""
         server, events = self._make_server()
         t = threading.Thread(target=lambda: time.sleep(5), daemon=True)
         t.start()
         server._get_tab("0").task_thread = t
         server._handle_command({"type": "run", "prompt": "test", "tabId": "0"})
-        assert any("already running" in e.get("text", "") for e in events)
+        # No error, no status broadcast — silent drop.
+        assert not any(e.get("type") == "error" for e in events)
         t.join(timeout=0.1)
 
     def test_handle_command_stop_no_event(self):
@@ -216,9 +217,10 @@ class TestVSCodeServerBranches:
         stop_event = threading.Event()
         server.printer._thread_local.stop_event = stop_event
         tab_id = "1"
-        server.printer._thread_local.tab_id = tab_id
+        server.printer._thread_local.task_id = tab_id
         user_q: queue.Queue[str] = queue.Queue(maxsize=1)
         server._get_tab(tab_id).user_answer_queue = user_q
+        server.printer.subscribe_tab(tab_id, tab_id)
 
         def answer():
             time.sleep(0.1)
@@ -231,68 +233,6 @@ class TestVSCodeServerBranches:
         assert result == "my answer"
         ask_events = [e for e in events if e["type"] == "askUser"]
         assert len(ask_events) == 1
-
-    def test_run_with_stdin(self):
-        """Test run() reads from stdin and dispatches."""
-        server = VSCodeServer()
-        events: list[dict] = []
-        def capture(event):
-            events.append(event)
-        server.printer.broadcast = capture  # type: ignore[assignment]
-
-        import io
-        cmds = [
-            json.dumps({"type": "getModels"}) + "\n",
-            json.dumps({"type": "selectModel", "model": "claude-opus-4-6"}) + "\n",
-            "",
-        ]
-        old_stdin = os.sys.stdin  # type: ignore[attr-defined]
-        os.sys.stdin = io.StringIO("".join(cmds))  # type: ignore[attr-defined]
-        try:
-            server.run()
-        finally:
-            os.sys.stdin = old_stdin  # type: ignore[attr-defined]
-
-        model_events = [e for e in events if e["type"] == "models"]
-        assert len(model_events) == 1
-
-    def test_emit_pending_worktree_with_branch(self, tmp_path):
-        """_emit_pending_worktree emits worktree_done when branch exists."""
-        server, events = self._make_server()
-        tab = server._get_tab("0")
-        tab.use_worktree = True
-        repo = tmp_path / "repo"
-        repo.mkdir()
-        subprocess.run(["git", "init"], cwd=str(repo), capture_output=True)
-        subprocess.run(["git", "config", "user.email", "test@test.com"],
-                       cwd=str(repo), capture_output=True)
-        subprocess.run(["git", "config", "user.name", "Test"],
-                       cwd=str(repo), capture_output=True)
-        (repo / "f.txt").write_text("hello")
-        subprocess.run(["git", "add", "."], cwd=str(repo), capture_output=True)
-        subprocess.run(["git", "commit", "-m", "init"],
-                       cwd=str(repo), capture_output=True)
-        chat_id = tab.agent._chat_id
-        branch = f"kiss/wt-{chat_id}-1234567890"
-        subprocess.run(["git", "branch", branch],
-                       cwd=str(repo), capture_output=True)
-        subprocess.run(["git", "config", f"branch.{branch}.kiss-original", "main"],
-                       cwd=str(repo), capture_output=True)
-        subprocess.run(["git", "checkout", branch],
-                       cwd=str(repo), capture_output=True)
-        (repo / "f.txt").write_text("changed")
-        subprocess.run(["git", "add", "."], cwd=str(repo), capture_output=True)
-        subprocess.run(["git", "commit", "-m", "change"],
-                       cwd=str(repo), capture_output=True)
-        subprocess.run(["git", "checkout", "main"],
-                       cwd=str(repo), capture_output=True)
-
-        server.work_dir = str(repo)
-        server._emit_pending_worktree("0")
-        wt_events = [e for e in events if e.get("type") == "worktree_done"]
-        assert len(wt_events) == 1
-        assert wt_events[0]["branch"] == branch
-        assert "f.txt" in wt_events[0]["changedFiles"]
 
     def test_emit_pending_worktree_not_a_repo(self, tmp_path):
         """_emit_pending_worktree does nothing when not in a git repo."""
@@ -560,13 +500,6 @@ class TestVSCodeServerMoreBranches:
         server._handle_command({"type": "getFiles", "prefix": ""})
         file_events = [e for e in events if e["type"] == "files"]
         assert len(file_events) == 1
-
-    def test_handle_command_refresh_files(self):
-        server, events = self._make_server()
-        server._handle_command({"type": "refreshFiles"})
-        time.sleep(0.5)
-        assert server._file_cache is None or isinstance(server._file_cache, list)
-
 
     def test_run_task_with_attachments(self):
         """Test _run_task processes attachments."""

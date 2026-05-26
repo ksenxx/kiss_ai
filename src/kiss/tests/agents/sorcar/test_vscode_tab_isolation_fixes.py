@@ -3,7 +3,7 @@
 Covers the following violations from the earlier audit that the user
 asked to fix:
 
-- A7: ``VSCodePrinter`` usage offsets must be per-tab, not shared.
+- A7: Printer usage offsets must be per-tab, not shared.
 - B4: ``adjacent_task_events`` must always carry a ``tabId`` so a
   missing frontend tab_id cannot reach every tab.
 - B5: ``commitMessage`` events generated in the background thread must
@@ -28,6 +28,7 @@ import threading
 import time
 import unittest
 
+from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.server import VSCodeServer
 
 
@@ -50,17 +51,17 @@ class TestA7PrinterOffsetsAreIsolated(unittest.TestCase):
     def test_offsets_are_per_tab_via_thread_local(self) -> None:
         server, _ = _make_server()
         printer = server.printer
-        printer._thread_local.tab_id = "A"
+        printer._thread_local.task_id = "A"
         printer.tokens_offset = 100
         printer.budget_offset = 1.5
         printer.steps_offset = 5
 
-        printer._thread_local.tab_id = "B"
+        printer._thread_local.task_id = "B"
         assert printer.tokens_offset == 0
         assert printer.budget_offset == 0.0
         assert printer.steps_offset == 0
 
-        printer._thread_local.tab_id = "A"
+        printer._thread_local.task_id = "A"
         assert printer.tokens_offset == 100
         assert printer.budget_offset == 1.5
         assert printer.steps_offset == 5
@@ -72,7 +73,7 @@ class TestA7PrinterOffsetsAreIsolated(unittest.TestCase):
         results: dict[str, tuple[int, float, int]] = {}
 
         def worker(tid: str, vals: tuple[int, float, int]) -> None:
-            printer._thread_local.tab_id = tid
+            printer._thread_local.task_id = tid
             printer.tokens_offset = vals[0]
             printer.budget_offset = vals[1]
             printer.steps_offset = vals[2]
@@ -92,13 +93,13 @@ class TestA7PrinterOffsetsAreIsolated(unittest.TestCase):
         assert results["A"] == (100, 1.5, 5)
         assert results["B"] == (200, 2.5, 7)
 
-    def test_cleanup_tab_drops_offsets(self) -> None:
+    def test_cleanup_task_drops_offsets(self) -> None:
         server, _ = _make_server()
         printer = server.printer
-        printer._thread_local.tab_id = "A"
+        printer._thread_local.task_id = "A"
         printer.tokens_offset = 42
-        printer.cleanup_tab("A")
-        printer._thread_local.tab_id = "A"
+        printer.cleanup_task("A")
+        printer._thread_local.task_id = "A"
         assert printer.tokens_offset == 0
 
 
@@ -111,7 +112,7 @@ class TestB4AdjacentTaskAlwaysTagged(unittest.TestCase):
         server, events = _make_server()
         server._get_adjacent_task(
             chat_id="none",
-            task="",
+            task_id=None,
             direction="prev",
             tab_id="",
         )
@@ -124,37 +125,28 @@ class TestB5CommitMessageCarriesTabId(unittest.TestCase):
     """B5: commitMessage events must carry tabId so only the requester sees them."""
 
     def test_cmd_generate_commit_message_tags_events_with_tab_id(self) -> None:
-        server = VSCodeServer()
-        events: list[dict] = []
+        from kiss.tests.agents.vscode._memory_printer import MemoryPrinter
+
+        printer = MemoryPrinter()
+        server = VSCodeServer(printer=printer)
         done = threading.Event()
         captured_tab_ids: list[object] = []
 
-        def stub() -> None:
-            captured_tab_ids.append(
-                getattr(server.printer._thread_local, "tab_id", None)
-            )
-            server.printer.broadcast({"type": "commitMessage", "message": "x"})
+        def stub(tab_id_arg: str = "") -> None:
+            captured_tab_ids.append(tab_id_arg)
+            server.printer.broadcast({
+                "type": "commitMessage", "message": "x", "tabId": tab_id_arg,
+            })
             done.set()
 
-        import io
-        import sys as _sys
-        buf = io.StringIO()
-        real_stdout = _sys.stdout
-        _sys.stdout = buf
-        try:
-            server._generate_commit_message = stub  # type: ignore[assignment]
-            server._cmd_generate_commit_message({
-                "type": "generateCommitMessage", "tabId": "TAB-1",
-            })
-            assert done.wait(timeout=5)
-        finally:
-            _sys.stdout = real_stdout
-        import json as _json
-        for line in buf.getvalue().splitlines():
-            if line.strip():
-                events.append(_json.loads(line))
+        server._generate_commit_message = stub  # type: ignore[assignment]
+        server._cmd_generate_commit_message({
+            "type": "generateCommitMessage", "tabId": "TAB-1",
+        })
+        assert done.wait(timeout=5)
+
         assert captured_tab_ids == ["TAB-1"]
-        cm = [e for e in events if e.get("type") == "commitMessage"]
+        cm = [e for e in printer.emitted if e.get("type") == "commitMessage"]
         assert len(cm) == 1
         assert cm[0].get("tabId") == "TAB-1"
 
@@ -185,21 +177,22 @@ class TestC1AdjacentTaskNoGlobalFallback(unittest.TestCase):
 
     def test_empty_chat_id_is_passed_through_without_global_fallback(self) -> None:
         server, _ = _make_server()
-        captured: list[tuple[str, str, str, str]] = []
+        captured: list[tuple[str, int | None, str, str]] = []
 
         def stub(
-            chat_id: str, task: str, direction: str, tab_id: str = "",
+            chat_id: str, task_id: int | None, direction: str, tab_id: str = "",
         ) -> None:
-            captured.append((chat_id, task, direction, tab_id))
+            captured.append((chat_id, task_id, direction, tab_id))
 
         server._get_adjacent_task = stub  # type: ignore[assignment]
         tab = server._get_tab("T")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         assert tab.agent.chat_id == ""
         server._cmd_get_adjacent_task({
             "type": "getAdjacentTask", "tabId": "T",
-            "task": "", "direction": "prev",
+            "taskId": None, "direction": "prev",
         })
-        assert captured == [("", "", "prev", "T")]
+        assert captured == [("", None, "prev", "T")]
 
 
 class TestC2C3ReplayRequiresTabId(unittest.TestCase):
@@ -228,16 +221,16 @@ class TestC2C3ReplayRequiresTabId(unittest.TestCase):
     def tearDown(self) -> None:
         self._smod._load_latest_chat_events_by_chat_id = self._orig_loader  # type: ignore[assignment]
 
-    def test_empty_tab_id_does_not_create_tab_keyed_by_chat_id(self) -> None:
+    def test_empty_tab_id_does_not_create_task_keyed_by_chat_id(self) -> None:
         server, _ = _make_server()
         server._replay_session("some-chat-id", tab_id="")
-        assert "some-chat-id" not in server._tab_states
+        assert "some-chat-id" not in server._running_agent_states
 
     def test_empty_tab_id_does_not_flip_use_worktree_on_any_tab(self) -> None:
         server, _ = _make_server()
         server._get_tab("real-tab").use_worktree = False
         server._replay_session("some-chat-id", tab_id="")
-        for tab in server._tab_states.values():
+        for tab in server._running_agent_states.values():
             assert tab.use_worktree is False
 
 

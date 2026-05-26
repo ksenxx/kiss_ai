@@ -8,9 +8,9 @@ is never modified.  After the task the user chooses **merge** or
 from __future__ import annotations
 
 import logging
-import shutil
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -31,19 +31,26 @@ from kiss.agents.sorcar.git_worktree import (
     repo_lock,
 )
 from kiss.agents.sorcar.persistence import _allocate_chat_id
+from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.core.kiss_error import KISSError
 
 logger = logging.getLogger(__name__)
 
 
-def _generate_commit_message(wt_dir: Path) -> str:
+def _generate_commit_message(
+    wt_dir: Path, user_prompt: str | None = None,
+) -> str:
     """Generate a commit message for worktree changes using an LLM.
 
     Gets the staged diff and delegates to
     :func:`~kiss.agents.vscode.helpers.generate_commit_message_from_diff`.
+    When *user_prompt* is provided, it is forwarded so the user's
+    task prompt is incorporated into the commit message.
 
     Args:
         wt_dir: The worktree directory containing staged changes.
+        user_prompt: The user's task prompt that produced these
+            staged changes, or ``None`` when not available.
 
     Returns:
         A commit message string.
@@ -51,7 +58,7 @@ def _generate_commit_message(wt_dir: Path) -> str:
     from kiss.agents.vscode.helpers import generate_commit_message_from_diff
 
     diff_text = GitWorktreeOps.staged_diff(wt_dir)
-    return generate_commit_message_from_diff(diff_text)
+    return generate_commit_message_from_diff(diff_text, user_prompt=user_prompt)
 
 
 def _manual_merge_cmd(wt: GitWorktree) -> str:
@@ -76,9 +83,12 @@ def _manual_merge_cmd(wt: GitWorktree) -> str:
 class WorktreeSorcarAgent(ChatSorcarAgent):
     """SorcarAgent that isolates every task in a git worktree.
 
-    State is stored entirely in git (branches and config) — no sidecar
-    files.  On process restart, ``_restore_from_git()`` reconstructs all
-    instance attributes from git queries.
+    Each ``run()`` call creates a brand-new worktree on a fresh branch.
+    Worktrees are not associated with the agent's ``chat_id``: branch
+    names use a unique time + random suffix, and there is no
+    cross-process state restoration based on chat session.  Any
+    previous worktree owned by this agent instance is auto-merged
+    (or kept on conflict) before the new one is created.
 
     Attributes:
         _wt: The current/pending worktree state, or ``None`` when idle.
@@ -89,6 +99,13 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         self._wt: GitWorktree | None = None
         self._stash_pop_warning: str | None = None
         self._merge_conflict_warning: str | None = None
+        # Frontend tab id, stamped by
+        # :meth:`_TaskRunnerMixin._run_task_inner` immediately after
+        # constructing the agent.  Consumed by
+        # :meth:`SorcarAgent._drain_pending_user_messages` to look up
+        # the owning :class:`_RunningAgentState` and pull queued
+        # follow-up prompts before each model call.
+        self._tab_id: str = ""
 
 
     @property
@@ -122,41 +139,6 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         return self._wt.baseline_commit if self._wt else None
 
 
-    def _restore_from_git(self, repo: Path) -> None:
-        """Restore pending-branch state from git (no sidecar files).
-
-        Queries git for any ``kiss/wt-<chat_id>-*`` branch.  If found,
-        restores state from ``git config``.  If the config entry is
-        missing (crash between worktree creation and config write),
-        falls back to the current HEAD branch of the main worktree.
-
-        Args:
-            repo: Git repo root path.
-        """
-        if self._wt is not None:
-            return
-        prefix = f"kiss/wt-{self._chat_id}-"
-        branch = GitWorktreeOps.find_pending_branch(repo, prefix)
-        if branch is None:
-            return
-
-        original = GitWorktreeOps.load_original_branch(repo, branch)
-        if original is None:
-            original = GitWorktreeOps.current_branch(repo)
-
-        baseline = GitWorktreeOps.load_baseline_commit(repo, branch)
-
-        slug = branch.replace("/", "_")
-        wt_dir = repo / ".kiss-worktrees" / slug
-        self._wt = GitWorktree(
-            repo_root=repo,
-            branch=branch,
-            original_branch=original,
-            wt_dir=wt_dir,
-            baseline_commit=baseline,
-        )
-
-
     def _auto_commit_worktree(self) -> bool:
         """Commit any uncommitted changes in the worktree.
 
@@ -171,20 +153,23 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         if self._wt is None or not self._wt.wt_dir.exists():
             return False
         GitWorktreeOps.stage_all(self._wt.wt_dir)
+        user_prompt = self._last_user_prompt or None
         try:
-            msg = _generate_commit_message(self._wt.wt_dir)
+            msg = _generate_commit_message(
+                self._wt.wt_dir, user_prompt=user_prompt,
+            )
         except Exception:
             logger.debug("LLM commit message generation failed; using fallback", exc_info=True)
             msg = "kiss: auto-commit agent changes"
+            if user_prompt:
+                from kiss.agents.vscode.helpers import _append_user_prompt
+
+                msg = _append_user_prompt(msg, user_prompt)
         return GitWorktreeOps.commit_staged(self._wt.wt_dir, msg)
 
 
     def _finalize_worktree(self) -> bool:
         """Auto-commit, remove worktree, prune.
-
-        Copies ``USER_PREFS.md`` from the worktree back to the repo
-        root before removing the worktree directory, so user preference
-        updates made during the task are preserved.
 
         Returns:
             True if the worktree was cleaned up successfully.  False if
@@ -203,9 +188,6 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                     wt.wt_dir,
                 )
                 return False
-            wt_prefs = wt.wt_dir / "USER_PREFS.md"
-            if wt_prefs.is_file():
-                shutil.copy2(str(wt_prefs), str(wt.repo_root / "USER_PREFS.md"))
             GitWorktreeOps.remove(wt.repo_root, wt.wt_dir)
         GitWorktreeOps.prune(wt.repo_root)
         return True
@@ -425,83 +407,90 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         Returns:
             Worktree work directory path, or ``None`` on failure.
         """
-        released_branch = self._release_worktree()
+        # RACE-2 fix: hold ``repo_lock`` for the entire release +
+        # worktree-create + copy-dirty-state + baseline-commit
+        # sequence.  Previously only the inner ``_release_worktree``
+        # / ``current_branch`` call held the lock; concurrent
+        # ``_handle_worktree_action`` or non-wt task-start handlers
+        # could interleave with ``copy_dirty_state`` and
+        # ``baseline`` commit, snapshotting an inconsistent main
+        # tree.  The lock is re-entrant
+        # (:func:`git_worktree.repo_lock` is an ``RLock``) so the
+        # ``_do_merge`` invoked by ``_release_worktree`` re-acquires
+        # it cleanly on the same thread.
+        with repo_lock(repo):
+            released_branch = self._release_worktree()
 
-        original_branch: str | None
-        if released_branch is not None:
-            original_branch = released_branch
-        else:
-            with repo_lock(repo):
+            original_branch: str | None
+            if released_branch is not None:
+                original_branch = released_branch
+            else:
                 original_branch = GitWorktreeOps.current_branch(repo)
-        if original_branch is None:
-            logger.warning("Detached HEAD, running task directly")
-            return None
-
-        if work_dir_str:
-            try:
-                offset = Path(work_dir_str).resolve().relative_to(repo.resolve())
-            except ValueError:  # pragma: no cover
-                logger.warning("work_dir not inside repo, running directly")
+            if original_branch is None:
+                logger.warning("Detached HEAD, running task directly")
                 return None
-        else:
-            offset = Path(".")
 
-        try:
-            GitWorktreeOps.ensure_excluded(repo)
-        except Exception:  # pragma: no cover — filesystem permission error
-            logger.warning("Failed to update git exclude", exc_info=True)
+            if work_dir_str:
+                try:
+                    offset = Path(work_dir_str).resolve().relative_to(repo.resolve())
+                except ValueError:  # pragma: no cover
+                    logger.warning("work_dir not inside repo, running directly")
+                    return None
+            else:
+                offset = Path(".")
 
-        branch = f"kiss/wt-{self._chat_id}-{int(time.time())}"
-        base_branch = branch
-        suffix = 1
-        while GitWorktreeOps.branch_exists(repo, branch):  # pragma: no branch
-            branch = f"{base_branch}-{suffix}"
-            suffix += 1
+            try:
+                GitWorktreeOps.ensure_excluded(repo)
+            except Exception:  # pragma: no cover — filesystem permission error
+                logger.warning("Failed to update git exclude", exc_info=True)
 
-        slug = branch.replace("/", "_")
-        wt_dir = repo / ".kiss-worktrees" / slug
+            branch = f"kiss/wt-{int(time.time())}-{uuid.uuid4().hex[:8]}"
+            base_branch = branch
+            suffix = 1
+            while GitWorktreeOps.branch_exists(repo, branch):  # pragma: no branch
+                branch = f"{base_branch}-{suffix}"
+                suffix += 1
 
-        if not GitWorktreeOps.create(repo, branch, wt_dir):
-            # pragma: no cover — git worktree add failure
-            GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
-            return None
+            slug = branch.replace("/", "_")
+            wt_dir = repo / ".kiss-worktrees" / slug
 
-        if not GitWorktreeOps.save_original_branch(repo, branch, original_branch):
-            # pragma: no cover — git config failure
-            GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
-            return None
+            if not GitWorktreeOps.create(repo, branch, wt_dir):
+                # pragma: no cover — git worktree add failure
+                GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
+                return None
 
-        baseline_commit: str | None = None
-        if GitWorktreeOps.copy_dirty_state(repo, wt_dir):
-            GitWorktreeOps.stage_all(wt_dir)
-            if GitWorktreeOps.commit_staged(
-                wt_dir,
-                "kiss: baseline from dirty state",
-                no_verify=True,
-            ):
-                baseline_commit = GitWorktreeOps.head_sha(wt_dir)
-                if baseline_commit:
-                    GitWorktreeOps.save_baseline_commit(
-                        repo,
-                        branch,
-                        baseline_commit,
-                    )
+            if not GitWorktreeOps.save_original_branch(repo, branch, original_branch):
+                # pragma: no cover — git config failure
+                GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
+                return None
 
-        self._wt = GitWorktree(
-            repo_root=repo,
-            branch=branch,
-            original_branch=original_branch,
-            wt_dir=wt_dir,
-            baseline_commit=baseline_commit,
-        )
+            baseline_commit: str | None = None
+            if GitWorktreeOps.copy_dirty_state(repo, wt_dir):
+                GitWorktreeOps.stage_all(wt_dir)
+                if GitWorktreeOps.commit_staged(
+                    wt_dir,
+                    "kiss: baseline from dirty state",
+                    no_verify=True,
+                ):
+                    baseline_commit = GitWorktreeOps.head_sha(wt_dir)
+                    if baseline_commit:
+                        GitWorktreeOps.save_baseline_commit(
+                            repo,
+                            branch,
+                            baseline_commit,
+                        )
 
-        user_prefs = repo / "USER_PREFS.md"
-        if user_prefs.is_file():
-            shutil.copy2(str(user_prefs), str(wt_dir / "USER_PREFS.md"))
+            self._wt = GitWorktree(
+                repo_root=repo,
+                branch=branch,
+                original_branch=original_branch,
+                wt_dir=wt_dir,
+                baseline_commit=baseline_commit,
+            )
 
-        wt_work_dir = wt_dir / offset
-        wt_work_dir.mkdir(parents=True, exist_ok=True)
-        return wt_work_dir
+            wt_work_dir = wt_dir / offset
+            wt_work_dir.mkdir(parents=True, exist_ok=True)
+            return wt_work_dir
 
 
     def _flush_warnings(self, printer: Any) -> None:
@@ -528,6 +517,80 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             )
             self._merge_conflict_warning = None
 
+
+    def _register_running_state(self) -> bool:
+        """Publish ``self`` in :attr:`_RunningAgentState.running_agent_states` for this chat.
+
+        Skips registration when an entry whose ``chat_id`` matches
+        ``self._chat_id`` is already present: the VS Code server
+        pre-populates a ``_RunningAgentState`` keyed by the frontend
+        tab id ahead of run-start, with ``chat_id`` set on the state;
+        re-registering here would clobber the server's task-lifecycle
+        flags.  In standalone / CLI runs no such pre-population
+        happens, and the entry is added here keyed by ``self._chat_id``
+        (the only routing key available — there is no separate tab).
+        Sub-agents launched by
+        :meth:`ChatSorcarAgent._run_tasks_parallel` are plain
+        :class:`ChatSorcarAgent` instances and never call this method;
+        they register themselves in the printer's ``_persist_agents``
+        map keyed by their own ``task_id`` (the string form of
+        ``task_history.id``) from inside
+        :meth:`ChatSorcarAgent.run`.
+
+        Returns:
+            ``True`` when a fresh entry was added (and the caller must
+            remove it in its own ``finally``); ``False`` when an entry
+            was already present (the existing owner is responsible
+            for cleanup).
+        """
+        # Acquire the shared ``_registry_lock`` for the whole
+        # scan-then-modify so a concurrent sub-agent thread cannot
+        # resize ``running_agent_states`` while we iterate, and so
+        # the insertion is atomic w.r.t. the VS Code server's
+        # iteration loops (which hold the very same lock under the
+        # ``_state_lock`` alias).
+        with _RunningAgentState._registry_lock:
+            for state in _RunningAgentState.running_agent_states.values():
+                if state.chat_id == self._chat_id:
+                    return False
+            state = _RunningAgentState(
+                self._chat_id,
+                getattr(self, "model_name", "") or "",
+                agent=self,
+            )
+            # Tag the state with the canonical chat id so subsequent
+            # lookups (e.g. multi-viewer subscribe,
+            # ``_unregister_running_state``) can route by chat id
+            # without depending on the dict key.
+            state.chat_id = self._chat_id
+            state.selected_model = (
+                getattr(self, "model_name", "") or state.selected_model
+            )
+            state.is_task_active = True
+            _RunningAgentState.running_agent_states[self._chat_id] = state
+            return True
+
+    def _unregister_running_state(self) -> None:
+        """Remove ``self``'s entry from :attr:`_RunningAgentState.running_agent_states`.
+
+        Only removes the entry we ourselves added.  A different code
+        path (e.g. the VS Code server) may have replaced it mid-run;
+        in that case the new owner is responsible for its own cleanup.
+        """
+        # Scan-then-pop must be atomic w.r.t. concurrent producers
+        # (parallel sub-agents in :meth:`ChatSorcarAgent._run_tasks_parallel`,
+        # the VS Code server's tab lifecycle handlers) so the dict is
+        # never resized between the lookup and the pop.
+        with _RunningAgentState._registry_lock:
+            target_key: str | None = None
+            for key, state in _RunningAgentState.running_agent_states.items():
+                if state.agent is self and state.chat_id == self._chat_id:
+                    target_key = key
+                    break
+            if target_key is not None:
+                current = _RunningAgentState.running_agent_states[target_key]
+                current.is_task_active = False
+                _RunningAgentState.running_agent_states.pop(target_key, None)
 
     def run(  # type: ignore[override]
         self,
@@ -560,55 +623,62 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         Returns:
             YAML string with 'success' and 'summary' keys.
         """
-        if not kwargs.pop("use_worktree", True):
-            self._flush_warnings(kwargs.get("printer"))
-            return super().run(prompt_template=prompt_template, **kwargs)
-
-        work_dir_str = kwargs.get("work_dir")
-        discovery_dir = Path(work_dir_str) if work_dir_str else Path.cwd()
-
-        repo = GitWorktreeOps.discover_repo(discovery_dir)
-        if repo is None:
-            logger.warning("Not a git repo, running task directly")
-            self._flush_warnings(kwargs.get("printer"))
-            return super().run(prompt_template=prompt_template, **kwargs)
-
+        # Establish ``chat_id`` BEFORE registering so the entry is
+        # keyed by the canonical session identifier.  Identical to
+        # the standalone :meth:`ChatSorcarAgent.run` minting (both
+        # use a fresh UUID hex via :func:`_allocate_chat_id`).
         if self._chat_id == "":
             self._chat_id = _allocate_chat_id()
-
-        self._restore_from_git(repo)
-
-        wt_work_dir = self._try_setup_worktree(repo, work_dir_str)
-        if wt_work_dir is None:
-            self._flush_warnings(kwargs.get("printer"))
-            return super().run(prompt_template=prompt_template, **kwargs)
-
-        printer = kwargs.get("printer")
-        self._flush_warnings(printer)
-        if printer and hasattr(printer, "broadcast"):
-            printer.broadcast(
-                {
-                    "type": "worktree_created",
-                    "worktreeDir": str(self._wt_dir),
-                    "branch": self._wt_branch,
-                }
-            )
-
-        kwargs["work_dir"] = str(wt_work_dir)
+        registered_here = self._register_running_state()
 
         try:
-            return super().run(prompt_template=prompt_template, **kwargs)
-        except KISSError:
-            raise
-        except Exception as exc:
-            return str(
-                yaml.dump(
+            if not kwargs.pop("use_worktree", True):
+                self._flush_warnings(kwargs.get("printer"))
+                return super().run(prompt_template=prompt_template, **kwargs)
+
+            work_dir_str = kwargs.get("work_dir")
+            discovery_dir = Path(work_dir_str) if work_dir_str else Path.cwd()
+
+            repo = GitWorktreeOps.discover_repo(discovery_dir)
+            if repo is None:
+                logger.warning("Not a git repo, running task directly")
+                self._flush_warnings(kwargs.get("printer"))
+                return super().run(prompt_template=prompt_template, **kwargs)
+
+            wt_work_dir = self._try_setup_worktree(repo, work_dir_str)
+            if wt_work_dir is None:
+                self._flush_warnings(kwargs.get("printer"))
+                return super().run(prompt_template=prompt_template, **kwargs)
+
+            printer = kwargs.get("printer")
+            self._flush_warnings(printer)
+            if printer and hasattr(printer, "broadcast"):
+                printer.broadcast(
                     {
-                        "success": False,
-                        "summary": f"Task failed with error: {exc}",
+                        "type": "worktree_created",
+                        "worktreeDir": str(self._wt_dir),
+                        "branch": self._wt_branch,
                     }
                 )
-            )
+
+            kwargs["work_dir"] = str(wt_work_dir)
+
+            try:
+                return super().run(prompt_template=prompt_template, **kwargs)
+            except KISSError:
+                raise
+            except Exception as exc:
+                return str(
+                    yaml.dump(
+                        {
+                            "success": False,
+                            "summary": f"Task failed with error: {exc}",
+                        }
+                    )
+                )
+        finally:
+            if registered_here:
+                self._unregister_running_state()
 
 
     def merge(self) -> str:

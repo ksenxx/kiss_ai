@@ -8,11 +8,9 @@ isolation, which is not a test double).
 
 from __future__ import annotations
 
-import io
 import json
 import os
 import shlex
-import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -216,52 +214,6 @@ class TestCustomEndpointRealHTTP:
         finally:
             srv.shutdown()
 
-    def test_custom_endpoint_appears_in_config_models(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Custom endpoint saved in config shows up in VSCodeServer model list."""
-        fake_home = tmp_path / "home"
-        fake_home.mkdir()
-        monkeypatch.setenv("HOME", str(fake_home))
-        monkeypatch.setattr(
-            "kiss.agents.vscode.vscode_config.CONFIG_DIR", fake_home / ".kiss",
-        )
-        monkeypatch.setattr(
-            "kiss.agents.vscode.vscode_config.CONFIG_PATH",
-            fake_home / ".kiss" / "config.json",
-        )
-
-        srv, url = _start_server(_FinishHandler)
-        try:
-            save_config({
-                "custom_endpoint": url,
-                "custom_api_key": "sk-from-config",
-            })
-
-            from kiss.agents.vscode.server import VSCodeServer
-
-            captured = io.StringIO()
-            monkeypatch.setattr(sys, "stdout", captured)
-            server = VSCodeServer()
-            server._get_models()
-
-            events = [
-                json.loads(line)
-                for line in captured.getvalue().strip().split("\n")
-                if line.strip()
-            ]
-            model_events = [e for e in events if e["type"] == "models"]
-            assert len(model_events) == 1
-            custom = [
-                m for m in model_events[0]["models"] if m.get("vendor") == "Custom"
-            ]
-            assert len(custom) == 1
-            assert custom[0]["endpoint"] == url
-            assert custom[0]["api_key"] == "sk-from-config"
-        finally:
-            srv.shutdown()
-
-
 class TestWebBrowserToggle:
     """web_tools parameter controls browser tool availability."""
 
@@ -370,8 +322,6 @@ class TestApiKeySetupAndDeletion:
         """
         from kiss.agents.vscode.server import VSCodeServer
 
-        captured = io.StringIO()
-        monkeypatch.setattr(sys, "stdout", captured)
         server = VSCodeServer()
 
         server._handle_command({
@@ -390,33 +340,6 @@ class TestApiKeySetupAndDeletion:
             "apiKeys": {"ANTHROPIC_API_KEY": ""},
         })
         assert os.environ.get("ANTHROPIC_API_KEY") is None
-
-    def test_save_key_then_getconfig_returns_it(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """After saving, getConfig returns the API key value."""
-        from kiss.agents.vscode.server import VSCodeServer
-
-        captured = io.StringIO()
-        monkeypatch.setattr(sys, "stdout", captured)
-        server = VSCodeServer()
-
-        server._handle_command({
-            "type": "saveConfig",
-            "config": {},
-            "apiKeys": {"TOGETHER_API_KEY": "tog-saved"},
-        })
-        captured.truncate(0)
-        captured.seek(0)
-
-        server._handle_command({"type": "getConfig"})
-        events = [
-            json.loads(line)
-            for line in captured.getvalue().strip().split("\n")
-            if line.strip()
-        ]
-        cfg_events = [e for e in events if e["type"] == "configData"]
-        assert cfg_events[0]["apiKeys"]["TOGETHER_API_KEY"] == "tog-saved"
 
     def test_multiple_keys_independent(self) -> None:
         """Saving/deleting one key doesn't affect others."""

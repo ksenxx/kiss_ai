@@ -193,6 +193,7 @@ class TestAnthropicThinkingCallback:
         outside the thinking panel.
         """
         printer = BaseBrowserPrinter()
+        printer._thread_local.task_id = "test-task"
         printer.start_recording()
 
         m = AnthropicModel(
