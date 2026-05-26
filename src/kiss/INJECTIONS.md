@@ -10,11 +10,10 @@ Reproduce the issue by writing an integration test. Then fix the issue.
 
 git push origin
 
-## Trick 
+## Trick
 
-get rid of all commits after the following commit from both main and origin: 
+get rid of all commits after the following commit from both main and origin:
 
 ## Trick
 
-can you build the paper at 
-
+can you build the paper at
