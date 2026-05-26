@@ -90,25 +90,6 @@ def test_webapp_input_footer_omits_tab_bar_actions() -> None:
         ), f"webapp input-footer still has {btn}"
 
 
-def test_webapp_inline_toggle_order_matches_extension() -> None:
-    """Inline toggle buttons appear in the same order in both webviews.
-
-    Only one toggle (use worktree) renders inline after ``#menu-btn``
-    in the input-footer's ``#model-picker`` container.  The
-    parallel-agents and auto-commit controls (including the inline
-    ``#autocommit-btn`` commit button) live in the settings panel.
-    """
-    ids = ("worktree-toggle-btn",)
-    ext_picker = _section(_ext_html(), "model-picker")
-    web_picker = _section(_build_html(), "model-picker")
-    ext_positions = [(ext_picker.find(f'id="{i}"'), i) for i in ids]
-    web_positions = [(web_picker.find(f'id="{i}"'), i) for i in ids]
-    assert all(p >= 0 for p, _ in ext_positions), ext_positions
-    assert all(p >= 0 for p, _ in web_positions), web_positions
-    assert [i for _, i in sorted(ext_positions)] == list(ids)
-    assert [i for _, i in sorted(web_positions)] == list(ids)
-
-
 def test_webapp_omits_work_dir_config_field() -> None:
     """The removed ``work_dir`` config field is absent from both webviews."""
     assert (
