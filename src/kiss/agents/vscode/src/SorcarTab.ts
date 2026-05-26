@@ -139,9 +139,6 @@ export function buildChatHtml(
             <button id="upload-btn" data-tooltip="Attach files">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
             </button>
-            <button id="worktree-toggle-btn" class="toggle-btn" data-tooltip="Use worktree">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 01-9 9"/></svg>
-            </button>
             <button id="frequent-tasks-btn" class="toggle-btn" data-tooltip="Frequent tasks">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="20" x2="6" y2="14"/><line x1="12" y1="20" x2="12" y2="9"/><line x1="18" y1="20" x2="18" y2="4"/></svg>
             </button>
@@ -243,6 +240,10 @@ export function buildChatHtml(
           <label class="config-label config-checkbox">
             <input type="checkbox" id="cfg-use-parallel" checked>
             Use parallel agents
+          </label>
+          <label class="config-label config-checkbox">
+            <input type="checkbox" id="cfg-use-worktree">
+            Use worktree
           </label>
           <label class="config-label config-checkbox">
             <input type="checkbox" id="cfg-demo-mode">
