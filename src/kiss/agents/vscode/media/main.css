@@ -1251,6 +1251,11 @@ body.remote-chat #welcome > #input-area {
   margin: 0; cursor: pointer;
 }
 
+.history-filter-date-lbl {
+  user-select: none; cursor: pointer;
+  color: color-mix(in srgb, var(--fg) 80%, transparent);
+}
+
 .history-filter-date {
   flex: 0 1 auto; min-width: 0; width: 7.5em;
   background: color-mix(in srgb, var(--fg) 5%, transparent);
