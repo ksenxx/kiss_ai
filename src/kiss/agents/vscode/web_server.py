@@ -1034,24 +1034,89 @@ def _get_ntfy_url() -> str:
     return ""
 
 
-def _post_url_to_message_board(url: str) -> None:
+_NTFY_BASE_URL = "https://ntfy.sh"
+
+
+def _fetch_last_ntfy_message(
+    topic: str, base_url: str = _NTFY_BASE_URL,
+) -> str | None:
+    """Return the most recent message body posted to ``{base_url}/{topic}``.
+
+    Queries ntfy.sh's poll endpoint (``/{topic}/json?poll=1``) which
+    returns cached messages (default retention 12h) as newline-
+    delimited JSON.  Only entries with ``event == "message"`` are
+    considered; the last one wins because the server returns events
+    in chronological order.
+
+    Args:
+        topic: ntfy.sh topic name (without leading slash).
+        base_url: Override the ntfy server URL (used by tests).
+
+    Returns:
+        The body (``message`` field) of the most recent cached
+        message, or ``None`` if the topic has no cached messages or
+        the request fails.
+    """
+    try:
+        req = urllib.request.Request(
+            f"{base_url}/{topic}/json?poll=1",
+            headers={"User-Agent": "kiss-web"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+    except Exception:
+        logger.debug("Failed to fetch last ntfy message", exc_info=True)
+        return None
+    last: str | None = None
+    for line in body.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if obj.get("event") != "message":
+            continue
+        msg = obj.get("message")
+        if isinstance(msg, str):
+            last = msg
+    return last
+
+
+def _post_url_to_message_board(
+    url: str, base_url: str = _NTFY_BASE_URL,
+) -> None:
     """Post the active Cloudflare URL to ntfy.sh as a private message.
 
     Uses the machine-stable topic from :func:`_get_machine_topic` so
     the URL can be retrieved by subscribing to the same topic.  The
     message is posted with a title indicating it is a KISS Sorcar
-    remote URL update.  Failures are logged but never raised.
+    remote URL update.  Before posting, the most recent cached
+    message on the topic is fetched via :func:`_fetch_last_ntfy_message`;
+    if it already matches ``url`` the post is skipped so subscribers
+    are not woken up by duplicate notifications when a watchdog
+    restart or named-tunnel re-registration produces the same public
+    hostname.  Failures are logged but never raised.
 
     Args:
         url: The ``https://`` URL to publish.
+        base_url: Override the ntfy server URL (used by tests).
     """
     if not url or url.startswith("https://localhost"):
         return
     try:
         topic = _get_machine_topic()
+        last = _fetch_last_ntfy_message(topic, base_url=base_url)
+        if last is not None and last.strip() == url.strip():
+            logger.info(
+                "Skipping ntfy.sh post for %s; last message on "
+                "topic %s already has the same URL", url, topic,
+            )
+            return
         data = url.encode("utf-8")
         req = urllib.request.Request(
-            f"https://ntfy.sh/{topic}",
+            f"{base_url}/{topic}",
             data=data,
             method="POST",
             headers={
