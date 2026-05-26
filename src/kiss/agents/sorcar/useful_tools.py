@@ -1,5 +1,6 @@
 """Useful tools for agents: file editing and bash execution."""
 
+import difflib
 import logging
 import mimetypes
 import os
@@ -18,6 +19,72 @@ from kiss.core.models.model import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _expand_pwd_prefix(file_path: str, work_dir: str | None) -> str:
+    """Expand a literal ``PWD/`` prefix to the agent's working directory.
+
+    The system prompt instructs the model to interpret ``PWD`` as the
+    current working directory, but models routinely pass it through as a
+    literal path component (e.g. ``PWD/USER_PREFS.md``).  This helper
+    rewrites such paths so the subsequent Read still works.
+    """
+    if file_path.startswith("PWD/") or file_path == "PWD":
+        base = work_dir or os.getcwd()
+        suffix = file_path[len("PWD/") :] if file_path.startswith("PWD/") else ""
+        return os.path.join(base, suffix) if suffix else base
+    return file_path
+
+
+def _stale_worktree_fallback(resolved: Path) -> Path | None:
+    """If *resolved* lives under a now-deleted ``.kiss-worktrees/kiss_wt-*``
+    directory, return the equivalent path with that worktree segment
+    stripped (i.e. relative to the parent repo).
+
+    Worktrees are torn down on autocommit / success, so a model that
+    remembers a worktree path from earlier in the task ends up with a
+    dangling path.  Returning the equivalent in-repo path lets the
+    subsequent read succeed transparently.
+    """
+    parts = resolved.parts
+    for i, part in enumerate(parts):
+        if (
+            part == ".kiss-worktrees"
+            and i + 1 < len(parts)
+            and parts[i + 1].startswith("kiss_wt-")
+        ):
+            return Path(*parts[:i], *parts[i + 2 :])
+    return None
+
+
+def _suggest_close_path(resolved: Path) -> str:
+    """Return a ``Did you mean: …`` suffix for a missing file, or ``""``.
+
+    Looks in *resolved*'s parent directory for the closest filename
+    (case-insensitive) via :func:`difflib.get_close_matches`.  If the
+    parent itself does not exist, walks upward to the nearest existing
+    ancestor and suggests an entry from it.
+    """
+    parent = resolved.parent
+    while parent != parent.parent and not parent.is_dir():
+        parent = parent.parent
+    if not parent.is_dir():
+        return ""
+    try:
+        names = [p.name for p in parent.iterdir()]
+    except OSError:  # pragma: no cover — permission edge case
+        return ""
+    matches = difflib.get_close_matches(resolved.name, names, n=1, cutoff=0.6)
+    if not matches:
+        lowered = {n.lower(): n for n in names}
+        ci = difflib.get_close_matches(
+            resolved.name.lower(), list(lowered), n=1, cutoff=0.6
+        )
+        if ci:
+            matches = [lowered[ci[0]]]
+    if matches:
+        return f" Did you mean: {parent / matches[0]} ?"
+    return ""
 
 
 def _find_windows_bash() -> str | None:  # pragma: no cover — Windows only
@@ -207,27 +274,33 @@ class UsefulTools:
             max_lines: Maximum number of lines to return.
         """
         try:
-            resolved = Path(file_path).resolve()
+            expanded = _expand_pwd_prefix(file_path, self.work_dir)
+            resolved = Path(expanded).resolve()
+
+            # Stale-worktree fallback: if the caller passed a path inside
+            # a .kiss-worktrees/kiss_wt-* directory that has since been
+            # torn down (autocommit / task finish), try the equivalent
+            # path under the parent repo before giving up.
+            if not resolved.exists():
+                fallback = _stale_worktree_fallback(resolved)
+                if fallback is not None and fallback.exists():
+                    resolved = fallback.resolve()
+
+            if resolved.is_dir():
+                return self._read_directory_listing(file_path, resolved)
+
             try:
                 text = resolved.read_text()
             except UnicodeDecodeError:
                 logger.debug("Binary file detected", exc_info=True)
-                mime_type, _ = mimetypes.guess_type(str(resolved))
-                if mime_type in READ_TOOL_BINARY_MIME_TYPES:
-                    data = resolved.read_bytes()
-                    header = (
-                        f"Read binary file {file_path} as {mime_type} "
-                        f"({len(data)} bytes); content attached below.\n"
-                    )
-                    return header + encode_binary_attachment(mime_type, data)
-                size = resolved.stat().st_size
-                return (
-                    f"Error: Cannot read binary file: {file_path} "
-                    f"(size: {size} bytes, mime={mime_type or 'unknown'}). "
-                    f"The Read tool only embeds binaries with a supported "
-                    f"MIME type (images, PDFs, audio, video); use a "
-                    f"different tool to handle this binary file."
-                )
+                return self._read_binary(file_path, resolved)
+            except FileNotFoundError:
+                suggestion = _suggest_close_path(resolved)
+                return f"Error: File not found: {file_path}.{suggestion}"
+
+            if text == "":
+                return "(file is empty)"
+
             lines = text.splitlines(keepends=True)
             if len(lines) > max_lines:
                 return (
@@ -238,6 +311,46 @@ class UsefulTools:
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)
             return f"Error: {e}"
+
+    def _read_directory_listing(self, file_path: str, resolved: Path) -> str:
+        """Return a helpful directory listing when Read is called on a dir.
+
+        Models occasionally call ``Read`` on a directory path (e.g. when
+        searching for the right module).  Instead of returning the bare
+        ``[Errno 21] Is a directory`` error we surface a one-per-line
+        listing so the model can self-correct on the next turn.
+        """
+        try:
+            entries = sorted(
+                p.name + ("/" if p.is_dir() else "") for p in resolved.iterdir()
+            )
+        except OSError as e:  # pragma: no cover — permission edge case
+            return f"Error: Cannot list directory {file_path}: {e}"
+        listing = "\n".join(entries) if entries else "(empty directory)"
+        return (
+            f"Error: {file_path} is a directory, not a file. "
+            f"Pass a file path inside it, or use Bash('ls -la ...').\n"
+            f"Directory contents:\n{listing}"
+        )
+
+    def _read_binary(self, file_path: str, resolved: Path) -> str:
+        """Encode a binary file as a sentinel attachment or return error."""
+        mime_type, _ = mimetypes.guess_type(str(resolved))
+        if mime_type in READ_TOOL_BINARY_MIME_TYPES:
+            data = resolved.read_bytes()
+            header = (
+                f"Read binary file {file_path} as {mime_type} "
+                f"({len(data)} bytes); content attached below.\n"
+            )
+            return header + encode_binary_attachment(mime_type, data)
+        size = resolved.stat().st_size
+        return (
+            f"Error: Cannot read binary file: {file_path} "
+            f"(size: {size} bytes, mime={mime_type or 'unknown'}). "
+            f"The Read tool only embeds binaries with a supported "
+            f"MIME type (images, PDFs, audio, video); use a "
+            f"different tool to handle this binary file."
+        )
 
     def Write(  # noqa: N802
         self,
