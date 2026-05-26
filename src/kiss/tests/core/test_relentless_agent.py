@@ -286,12 +286,19 @@ class TestMultiSessionSummaryMerge(unittest.TestCase):
             parsed = yaml.safe_load(result)
             assert parsed["success"] is True
             summary = parsed["summary"]
-            assert "### Session 1" in summary
+            # Prior (continued) sessions are PREPENDED as "Previous Session N"
+            # blocks; the terminal (success) session is appended last under
+            # "### Final Session".
+            assert "### Previous Session 1" in summary
             assert "did A" in summary
-            assert "### Session 2" in summary
+            assert "### Previous Session 2" in summary
             assert "did B" in summary
-            assert "### Session 3" in summary
+            assert "### Final Session" in summary
             assert "did C" in summary
+            # Order: previous sessions come first, final session last.
+            assert summary.index("did A") < summary.index("did B") < summary.index(
+                "did C"
+            )
         finally:
             server.shutdown()
 
@@ -321,7 +328,8 @@ class TestMultiSessionSummaryMerge(unittest.TestCase):
             parsed = yaml.safe_load(result)
             assert parsed["success"] is True
             assert parsed["summary"] == "all done"
-            assert "### Session" not in parsed["summary"]
+            assert "### Previous Session" not in parsed["summary"]
+            assert "### Final Session" not in parsed["summary"]
         finally:
             server.shutdown()
 
