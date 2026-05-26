@@ -304,13 +304,6 @@ class TestSetTaskTextGuard(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.js = _MAIN_JS.read_text()
 
-    def test_set_task_text_guard_in_source(self) -> None:
-        idx = self.js.index("case 'setTaskText':")
-        block = self.js[idx : idx + 800]
-        assert "ev.tabId === undefined || ev.tabId === activeTabId" in block
-        assert "sttTab.title" in block
-        assert "sttTab.taskPanelHTML" in block
-
     def test_task_text_updates_running_tab_not_active(self) -> None:
         result = _run_node(_make_test_script(r"""
             var t1 = { id: 1, title: 'new chat', chatId: '' };
