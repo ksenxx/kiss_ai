@@ -427,6 +427,14 @@ body.remote-chat #welcome > #input-area {
 }
 .remote-url-copy:hover { color: var(--fg); }
 
+.welcome-config {
+  display: flex; flex-direction: column; gap: 8px;
+  width: 100%; margin-bottom: 14px;
+}
+.welcome-config #welcome-remote-url { width: 100%; }
+.welcome-config #welcome-remote-url:empty { display: none; }
+.welcome-config-label { text-align: left; }
+
 #suggestions { display: grid; grid-template-columns: 1fr; gap: 5px; width: 100%; }
 
 .suggestion-chip {
