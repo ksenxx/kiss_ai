@@ -1,7 +1,7 @@
 # TRICKS
 
 Common sentences the user has frequently used in tasks (extracted from
-`~/.kiss/sorcar.db` `task_history`).  Each entry below has been observed at
+`~/.kiss/sorcar.db` `task_history`). Each entry below has been observed at
 least four times across the task table.
 
 ## Trick

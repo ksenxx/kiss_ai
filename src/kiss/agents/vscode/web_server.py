@@ -1526,6 +1526,7 @@ def _build_html() -> str:
         The complete HTML string.
     """
     version = _read_version()
+    tricks_json = json.dumps(_read_tricks())
     shim = _WS_SHIM_JS
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -1694,6 +1695,16 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
                 <line x1="18" y1="20" x2="18" y2="4"/>
               </svg>
             </button>
+            <button id="tricks-btn" class="toggle-btn"
+             data-tooltip="Tricks">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2.5" stroke-linecap="round"
+               stroke-linejoin="round">
+                <path d="M9 18h6"/>
+                <path d="M10 22h4"/>
+                <path d="M12 2a7 7 0 00-4 12.7c.7.6 1 1.4 1 2.3h6c0-.9.3-1.7 1-2.3A7 7 0 0012 2z"/>
+              </svg>
+            </button>
             <div id="model-dropdown">
               <div class="search-wrap">
                 <input type="text" id="model-search" placeholder="Search models...">
@@ -1776,6 +1787,17 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
       </div>
     </div>
     <div id="frequent-overlay"></div>
+
+    <div id="tricks-panel">
+      <button id="tricks-panel-close">&times;</button>
+      <div class="sidebar-section sidebar-tab-panel">
+        <div class="sidebar-hdr">Tricks</div>
+        <div id="tricks-list">
+          <div class="sidebar-empty">No tricks available</div>
+        </div>
+      </div>
+    </div>
+    <div id="tricks-overlay"></div>
 
     <div id="settings-panel">
       <button id="settings-panel-close">&times;</button>
@@ -1910,6 +1932,7 @@ a19.7 19.7 0 0 1-3.16 4.19"/>
   <script src="/media/highlight.min.js"></script>
   <script src="/media/marked.min.js"></script>
   <script>{shim}</script>
+  <script>window.__TRICKS__ = {tricks_json};</script>
   <script src="/media/main.js"></script>
   <script src="/media/demo.js"></script>
 </body>
@@ -1926,6 +1949,34 @@ def _read_version() -> str:
     except Exception:
         pass
     return ""
+
+
+def _read_tricks() -> list[str]:
+    """Parse ``src/kiss/TRICKS.md`` and return the trick texts.
+
+    The file contains a series of ``## Trick`` sections, each followed
+    by a blank line and a one-line trick.  Returns an empty list if the
+    file is missing or unparseable, so a deployment without TRICKS.md
+    still renders the button (with an empty list).
+    """
+    try:
+        tfile = Path(__file__).parent.parent.parent / "TRICKS.md"
+        text = tfile.read_text()
+    except Exception:
+        return []
+    tricks: list[str] = []
+    # Split on H2 headings, then keep only sections whose title is
+    # "Trick".  ``re.split`` with a capturing group preserves the
+    # heading so we can identify each section.
+    sections = re.split(r"^##\s+", text, flags=re.MULTILINE)
+    for section in sections[1:]:
+        lines = section.splitlines()
+        if not lines or lines[0].strip() != "Trick":
+            continue
+        body = "\n".join(lines[1:]).strip()
+        if body:
+            tricks.append(body)
+    return tricks
 
 
 _WS_SHIM_JS = r"""
