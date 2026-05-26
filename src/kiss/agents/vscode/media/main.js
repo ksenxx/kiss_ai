@@ -5582,8 +5582,17 @@
           typeof inp.selectionEnd === 'number'
             ? inp.selectionEnd
             : current.length;
-        inp.value = current.slice(0, start) + text + current.slice(end);
-        const caret = start + text.length;
+        const before = current.slice(0, start);
+        const after = current.slice(end);
+        // Pad the injected text with whitespace on either side so it never
+        // visually merges with adjacent input.  Skip the pad when the
+        // neighbouring character is already whitespace or we are at the
+        // boundary of the textarea — that avoids creating "  " runs.
+        const leadPad = before.length === 0 || /\s$/.test(before) ? '' : ' ';
+        const trailPad = after.length === 0 || /^\s/.test(after) ? '' : ' ';
+        const injected = leadPad + text + trailPad;
+        inp.value = before + injected + after;
+        const caret = start + injected.length;
         syncClearBtn();
         inp.style.height = 'auto';
         inp.style.height = inp.scrollHeight + 'px';
