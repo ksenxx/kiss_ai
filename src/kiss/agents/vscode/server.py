@@ -561,8 +561,8 @@ class VSCodeServer(
 
         When the tab is currently running a task or in a merge review,
         the state is **not** removed immediately — the running agent
-        must be allowed to finish (per ``USER_PREFS.md``: "Closing a
-        chat tab does NOT stop a running agent task").  Instead the
+        must be allowed to finish: closing a chat tab does NOT stop a
+        running agent task.  Instead the
         tab is marked ``frontend_closed = True`` so that
         :meth:`_dispose_if_closed` will tear it down later, once the
         last lifecycle flag drops to false.
