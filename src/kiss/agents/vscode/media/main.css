@@ -326,8 +326,6 @@ body {
 #task-panel {
   position: relative;
   flex-shrink: 0;
-  max-height: calc(var(--vscode-editor-font-size) * 1.6 * 3 + 16px);
-  overflow-y: auto;
   margin: 8px 10px 0;
   padding: 8px 8px 8px 28px;
   border: 2px solid rgb(255 200 0 / 50%);
@@ -341,6 +339,8 @@ body {
 #task-panel.visible { display: block; }
 
 #task-panel-text {
+  max-height: calc(var(--vscode-editor-font-size) * 1.6 * 3);
+  overflow-y: auto;
   white-space: pre-wrap;
   word-break: break-word;
 }
