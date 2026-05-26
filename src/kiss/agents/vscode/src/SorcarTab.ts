@@ -213,14 +213,15 @@ export function buildChatHtml(
           <label class="history-filter-chk" title="Show successfully completed tasks">
             <input type="checkbox" id="hf-completed" checked>Succeeded
           </label>
-          <span class="history-filter-date-group">
-            <input type="date" id="hf-from" class="history-filter-date" title="From date" aria-label="From date">
-            <button type="button" id="hf-from-btn" class="history-filter-date-btn" title="Pick From date" aria-label="Pick From date">📅</button>
-          </span>
-          <span class="history-filter-date-group">
-            <input type="date" id="hf-to" class="history-filter-date" title="To date" aria-label="To date">
-            <button type="button" id="hf-to-btn" class="history-filter-date-btn" title="Pick To date" aria-label="Pick To date">📅</button>
-          </span>
+          <label class="history-filter-chk" title="Show only tasks marked as favourite">
+            <input type="checkbox" id="hf-favorite">Favorites
+          </label>
+          <label for="hf-from" class="history-filter-date-lbl">From:</label>
+          <input type="date" id="hf-from" class="history-filter-date" title="From date" aria-label="From date">
+          <button type="button" id="hf-from-btn" class="history-filter-date-btn" title="Pick From date" aria-label="Pick From date">📅</button>
+          <label for="hf-to" class="history-filter-date-lbl">To:</label>
+          <input type="date" id="hf-to" class="history-filter-date" title="To date" aria-label="To date">
+          <button type="button" id="hf-to-btn" class="history-filter-date-btn" title="Pick To date" aria-label="Pick To date">📅</button>
         </div>
         <div id="history-list">
           <div class="sidebar-empty">No conversations yet</div>
