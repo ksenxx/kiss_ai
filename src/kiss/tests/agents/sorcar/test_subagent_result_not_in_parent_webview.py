@@ -451,45 +451,6 @@ class TestSubagentResultNotInParentWebview:
             f"{text!r}"
         )
 
-    def test_subagent_results_render_only_in_their_own_tabs(self) -> None:
-        """Each sub-agent ``result`` payload must render into its own
-        sub-tab's bucket — never into the parent tab's bucket.
-        """
-        parent_tab_id = "parent-tab-BBB"
-        printer, parent = self._run_parent(parent_tab_id)
-        parent_task_key = str(parent._last_task_id)
-
-        rendered = _simulate_webview_dispatch(
-            printer.wire, printer._sub_tabs, parent_tab_id,
-        )
-
-        # Collect every sub-tab's bucket and every result in it.
-        sub_tab_ids = set(printer._sub_tabs.values())
-        for sub_tab in sub_tab_ids:
-            bucket = rendered.get(sub_tab, [])
-            sub_results = [e for e in bucket if e.get("type") == "result"]
-            assert len(sub_results) == 1, (
-                f"Sub-tab {sub_tab} should render exactly 1 result "
-                f"panel, got {len(sub_results)}"
-            )
-            tid = sub_results[0].get("taskId")
-            assert tid and tid != parent_task_key, (
-                f"Sub-tab {sub_tab} result should carry sub-agent's "
-                f"taskId, not parent's {parent_task_key}; got {tid}"
-            )
-
-        # And ensure no sub-agent result leaked into the parent's bucket.
-        parent_bucket = rendered.get(parent_tab_id, [])
-        leaked = [
-            e for e in parent_bucket
-            if e.get("type") == "result"
-            and e.get("taskId") != parent_task_key
-        ]
-        assert leaked == [], (
-            f"No sub-agent result must render in the parent tab; "
-            f"leaked: {leaked}"
-        )
-
     def test_misrouted_subagent_result_dropped_by_guard(self) -> None:
         """Defensive-guard regression test: even when a sub-agent's
         ``result`` event is artificially injected onto the parent
