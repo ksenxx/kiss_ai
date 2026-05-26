@@ -51,7 +51,7 @@ class TestHistoryFilterPanel(unittest.TestCase):
         for did in ("hf-from", "hf-to"):
             self.assertIn(f'id="{did}"', bar)
             self.assertIn('type="date"', bar)
-        for label in ("Running", "Errors", "Completed"):
+        for label in ("Running", "Errors", "Success"):
             self.assertIn(label, bar)
 
     def test_css_styles_filter_bar(self) -> None:
