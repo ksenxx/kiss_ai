@@ -3487,17 +3487,12 @@
   }
 
   // --- Remote URL (dynamic) ---
-  function renderRemoteUrl(url, ntfyUrl) {
-    const container = document.getElementById('remote-url');
-    if (!container) return;
-    container.innerHTML = '';
-    const displayUrl = ntfyUrl || url;
-    if (!displayUrl) return;
+  function _buildRemoteUrlBar(displayUrl, isNtfy) {
     const wrapper = document.createElement('div');
     wrapper.className = 'remote-url-bar';
     const label = document.createElement('div');
     label.className = 'remote-url-label';
-    label.textContent = ntfyUrl
+    label.textContent = isNtfy
       ? 'Webapp: click the link in the first post at URL:'
       : 'Web/mobile app';
     const row = document.createElement('div');
@@ -3529,7 +3524,19 @@
     row.appendChild(copyBtn);
     wrapper.appendChild(label);
     wrapper.appendChild(row);
-    container.appendChild(wrapper);
+    return wrapper;
+  }
+
+  function renderRemoteUrl(url, ntfyUrl) {
+    const displayUrl = ntfyUrl || url;
+    const containerIds = ['remote-url', 'welcome-remote-url'];
+    for (const id of containerIds) {
+      const container = document.getElementById(id);
+      if (!container) continue;
+      container.innerHTML = '';
+      if (!displayUrl) continue;
+      container.appendChild(_buildRemoteUrlBar(displayUrl, !!ntfyUrl));
+    }
   }
 
   // --- Welcome suggestions (dynamic) ---
@@ -4080,6 +4087,10 @@
       tabId: activeTabId,
       restoredTabs: restoredTabs,
     });
+    // Request the current config so the welcome-page remote-password
+    // mirror (welcome-cfg-remote-password) is populated before the user
+    // ever opens the Settings panel.
+    vscode.postMessage({type: 'getConfig'});
   }
 
   function setupEventListeners() {
@@ -4218,27 +4229,24 @@
         worktreeToggleBtn.classList.toggle('active');
       });
     }
-    const remotePwToggleBtn = document.getElementById(
-      'cfg-remote-password-toggle',
+    setupPasswordToggle('cfg-remote-password-toggle', 'cfg-remote-password');
+    setupPasswordToggle(
+      'welcome-cfg-remote-password-toggle',
+      'welcome-cfg-remote-password',
     );
-    if (remotePwToggleBtn) {
-      remotePwToggleBtn.addEventListener('click', () => {
-        const inp = document.getElementById('cfg-remote-password');
-        if (!inp) return;
-        const showing = inp.type === 'text';
-        inp.type = showing ? 'password' : 'text';
-        const eye = remotePwToggleBtn.querySelector('.icon-eye');
-        const eyeOff = remotePwToggleBtn.querySelector('.icon-eye-off');
-        if (eye) eye.style.display = showing ? '' : 'none';
-        if (eyeOff) eyeOff.style.display = showing ? 'none' : '';
-        remotePwToggleBtn.setAttribute(
-          'aria-pressed',
-          showing ? 'false' : 'true',
-        );
-        const lbl = showing ? 'Show password' : 'Hide password';
-        remotePwToggleBtn.setAttribute('aria-label', lbl);
-        remotePwToggleBtn.setAttribute('title', lbl);
+    // The welcome-page remote-password input mirrors the value into the
+    // settings-panel input (cfg-remote-password) so the existing
+    // collectConfigForm + saveConfig flow keeps working without changes.
+    // On blur we flush via saveSettingsIfPopulated so the password is
+    // persisted even if the user never opens the settings panel.
+    const welcomePwInp = document.getElementById('welcome-cfg-remote-password');
+    if (welcomePwInp) {
+      welcomePwInp.addEventListener('input', () => {
+        const settingsPw = document.getElementById('cfg-remote-password');
+        if (settingsPw) settingsPw.value = welcomePwInp.value;
       });
+      welcomePwInp.addEventListener('change', saveSettingsIfPopulated);
+      welcomePwInp.addEventListener('blur', saveSettingsIfPopulated);
     }
 
     if (demoToggleBtn) {
@@ -5532,6 +5540,32 @@
       frequentList.appendChild(div);
     });
   }
+  /**
+   * Wire a show/hide eye-toggle button to a password input.
+   *
+   * Used both for the settings-panel password (cfg-remote-password) and
+   * for the welcome-page mirror (welcome-cfg-remote-password).  The
+   * function is a no-op if either DOM node is missing, so it is safe to
+   * call unconditionally from setupEventListeners().
+   */
+  function setupPasswordToggle(toggleId, inputId) {
+    const btn = document.getElementById(toggleId);
+    const inp = document.getElementById(inputId);
+    if (!btn || !inp) return;
+    btn.addEventListener('click', () => {
+      const showing = inp.type === 'text';
+      inp.type = showing ? 'password' : 'text';
+      const eye = btn.querySelector('.icon-eye');
+      const eyeOff = btn.querySelector('.icon-eye-off');
+      if (eye) eye.style.display = showing ? '' : 'none';
+      if (eyeOff) eyeOff.style.display = showing ? 'none' : '';
+      btn.setAttribute('aria-pressed', showing ? 'false' : 'true');
+      const lbl = showing ? 'Show password' : 'Hide password';
+      btn.setAttribute('aria-label', lbl);
+      btn.setAttribute('title', lbl);
+    });
+  }
+
   let configFormPopulated = false;
   function populateConfigForm(cfg, apiKeys) {
     const el = id => document.getElementById(id);
@@ -5543,6 +5577,10 @@
     el('cfg-demo-mode').checked = !!cfg.demo_mode || demoMode;
     demoMode = el('cfg-demo-mode').checked;
     el('cfg-remote-password').value = cfg.remote_password || '';
+    // Also populate the welcome-page mirror (may not exist on some
+    // alternate views; guarded by ``if (welcomePw)``).
+    const welcomePw = el('welcome-cfg-remote-password');
+    if (welcomePw) welcomePw.value = cfg.remote_password || '';
     configFormPopulated = true;
     // Populate API key fields from current environment values
     const keyIds = [
