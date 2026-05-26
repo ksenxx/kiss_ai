@@ -399,19 +399,19 @@
       el.dataset.tabId = tab.id;
 
       if (tab.isSubagentTab) {
-        // Subagent tab indicator — purple circle in the tab title.
-        // While the sub-agent is running we render ◉ (fisheye, a
-        // ring-with-dot glyph) and pulse its opacity via the default
-        // ``.subagent-indicator`` animation.  Once the sub-agent is
-        // done we swap the glyph to ● (solid black circle, coloured
-        // purple via CSS) and add the ``.done`` modifier class which
-        // kills the pulse animation — giving the user a clear "this
-        // sub-agent finished" signal: a SOLID purple disc instead of
-        // the running ring/pulse.
+        // Subagent tab indicator — purple ◉ (fisheye) glyph in the
+        // tab title.  While the sub-agent is running we pulse its
+        // opacity via the default ``.subagent-indicator`` animation.
+        // Once the sub-agent is done we keep the same ◉ glyph but
+        // add the ``.done`` modifier class, which (via the
+        // corresponding CSS rule) kills the pulse animation and
+        // pins opacity at 1 — giving the user a clear "this
+        // sub-agent finished" signal: a SOLID (non-pulsing) purple
+        // ◉ instead of the pulsing running one.
         const subIndicator = document.createElement('span');
         subIndicator.className =
           'subagent-indicator' + (tab.isDone ? ' done' : '');
-        subIndicator.textContent = tab.isDone ? '\u25CF' : '\u25C9';
+        subIndicator.textContent = '\u25C9';
         subIndicator.title = tab.isDone ? 'Done' : 'Running';
         el.appendChild(subIndicator);
       } else {
