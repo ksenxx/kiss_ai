@@ -46,7 +46,7 @@ DEFAULTS: dict[str, Any] = {
     # ``save_config`` to silently drop them.  Added so that
     # ``update_settings`` changes persist across tasks.
     "is_parallel": True,
-    "is_worktree": False,
+    "is_worktree": True,
     "demo_mode": False,
     "work_dir": "",
 }
