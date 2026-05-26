@@ -828,8 +828,8 @@
   const frequentTasksBtn = document.getElementById('frequent-tasks-btn');
   const frequentList = document.getElementById('frequent-list');
   // Tricks panel — mirrors the Frequent tasks panel structure.  The
-  // trick texts are parsed from src/kiss/TRICKS.md by the HTML builder
-  // and injected as window.__TRICKS__ before main.js loads.
+  // trick texts are parsed from src/kiss/INJECTIONS.md by the HTML
+  // builder and injected as window.__TRICKS__ before main.js loads.
   const tricksPanel = document.getElementById('tricks-panel');
   const tricksOverlay = document.getElementById('tricks-overlay');
   const tricksPanelClose = document.getElementById('tricks-panel-close');
@@ -5481,7 +5481,7 @@
   /**
    * Open the standalone Tricks panel (slides up from the bottom).
    * Trick texts are read from ``window.__TRICKS__`` which is injected
-   * by the HTML builder after parsing ``src/kiss/TRICKS.md``.
+   * by the HTML builder after parsing ``src/kiss/INJECTIONS.md``.
    */
   function openTricksPanel() {
     if (!tricksPanel) return;
