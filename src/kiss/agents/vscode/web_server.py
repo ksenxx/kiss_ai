@@ -2212,6 +2212,12 @@ class RemoteAccessServer:
         # to apply a much longer backoff than the regular exponential
         # one so the per-IP cooldown actually has time to clear.
         self._tunnel_rate_limited = False
+        # Last Cloudflare tunnel URL posted to the ntfy.sh message
+        # board.  Tracked so a watchdog restart that yields the *same*
+        # public hostname (e.g. an adopted cloudflared, or a named
+        # tunnel re-registering) does not re-publish the unchanged URL
+        # to subscribers.
+        self._last_posted_url: str | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ws_server: Any = None
         # Unix-domain socket listener for local clients (the VS Code
@@ -3235,11 +3241,12 @@ class RemoteAccessServer:
         if ntfy_url:
             msg["ntfyUrl"] = ntfy_url
         self._printer.broadcast(msg)
-        if self.use_tunnel:
+        if self.use_tunnel and self._active_url != self._last_posted_url:
             assert self._loop is not None
             await self._loop.run_in_executor(
                 None, _post_url_to_message_board, self._active_url,
             )
+            self._last_posted_url = self._active_url
 
     def _terminate_tunnel_proc(self, kill_adopted: bool = False) -> None:
         """Terminate ``_tunnel_proc`` and reset per-process state.
@@ -3531,10 +3538,11 @@ class RemoteAccessServer:
 
         _save_url_file(self._url_file, self._local_url, tunnel_url)
         self._active_url = tunnel_url or self._local_url
-        if self.use_tunnel:
+        if self.use_tunnel and self._active_url != self._last_posted_url:
             await self._loop.run_in_executor(
                 None, _post_url_to_message_board, self._active_url,
             )
+            self._last_posted_url = self._active_url
 
         self._last_ips = _get_local_ips()
         self._watchdog_task = asyncio.create_task(self._watchdog())
