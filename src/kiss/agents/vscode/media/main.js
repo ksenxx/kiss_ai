@@ -3497,7 +3497,7 @@
     wrapper.className = 'remote-url-bar';
     const label = document.createElement('div');
     label.className = 'remote-url-label';
-    label.textContent = ntfyUrl ? 'Remote URL (ntfy.sh)' : 'Web/mobile app';
+    label.textContent = ntfyUrl ? 'Webapp: click the link in the first post at URL:' : 'Web/mobile app';
     const row = document.createElement('div');
     row.className = 'remote-url-row';
     const link = document.createElement('a');
