@@ -1236,9 +1236,15 @@ body.remote-chat #welcome > #input-area {
    and From / To date pickers.  Lives between the search box and
    the history list inside #sidebar-tab-history-panel. */
 .history-filter-bar {
-  display: flex; align-items: center; gap: 6px; flex-wrap: nowrap;
+  display: flex; align-items: center; gap: 6px 8px; flex-wrap: wrap;
   margin-bottom: 10px; font-size: var(--fs-md);
-  color: var(--fg); white-space: nowrap; overflow-x: auto;
+  color: var(--fg);
+}
+
+/* Keep each date input together with its picker button when the
+   filter bar wraps onto multiple lines. */
+.history-filter-date-group {
+  display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto;
 }
 
 .history-filter-chk {

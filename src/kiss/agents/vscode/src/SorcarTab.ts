@@ -172,10 +172,14 @@ export function buildChatHtml(
           <label class="history-filter-chk" title="Show successfully completed tasks">
             <input type="checkbox" id="hf-completed" checked>Succeeded
           </label>
-          <input type="date" id="hf-from" class="history-filter-date" title="From date" aria-label="From date">
-          <button type="button" id="hf-from-btn" class="history-filter-date-btn" title="Pick From date" aria-label="Pick From date">📅</button>
-          <input type="date" id="hf-to" class="history-filter-date" title="To date" aria-label="To date">
-          <button type="button" id="hf-to-btn" class="history-filter-date-btn" title="Pick To date" aria-label="Pick To date">📅</button>
+          <span class="history-filter-date-group">
+            <input type="date" id="hf-from" class="history-filter-date" title="From date" aria-label="From date">
+            <button type="button" id="hf-from-btn" class="history-filter-date-btn" title="Pick From date" aria-label="Pick From date">📅</button>
+          </span>
+          <span class="history-filter-date-group">
+            <input type="date" id="hf-to" class="history-filter-date" title="To date" aria-label="To date">
+            <button type="button" id="hf-to-btn" class="history-filter-date-btn" title="Pick To date" aria-label="Pick To date">📅</button>
+          </span>
         </div>
         <div id="history-list">
           <div class="sidebar-empty">No conversations yet</div>
