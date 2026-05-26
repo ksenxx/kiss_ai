@@ -5519,11 +5519,26 @@
       textSpan.textContent = text;
       div.appendChild(textSpan);
       div.addEventListener('click', () => {
-        inp.value = text;
+        const current = inp.value;
+        const start =
+          typeof inp.selectionStart === 'number'
+            ? inp.selectionStart
+            : current.length;
+        const end =
+          typeof inp.selectionEnd === 'number'
+            ? inp.selectionEnd
+            : current.length;
+        inp.value = current.slice(0, start) + text + current.slice(end);
+        const caret = start + text.length;
         syncClearBtn();
         inp.style.height = 'auto';
         inp.style.height = inp.scrollHeight + 'px';
         inp.focus();
+        try {
+          inp.setSelectionRange(caret, caret);
+        } catch (_e) {
+          /* ignore selection errors on non-text inputs */
+        }
         closeTricksPanel();
       });
       tricksList.appendChild(div);
