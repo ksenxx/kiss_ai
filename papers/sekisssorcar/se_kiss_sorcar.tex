@@ -541,14 +541,18 @@ have their own section. Self-hosting appears implicitly: the system
 prompt governs the agent that edits the system prompt.
 
 \paragraph{Cross-session learning.}
-The agent reads a \texttt{USER\_PREFS.md} file at the start of every
-task and updates it at the end. When the agent discovers a user
-preference or project invariant, it records it. When a new preference
-contradicts an old one, it removes the old entry. This mechanism
-accumulates project knowledge across sessions without requiring the
-user to repeat themselves---a lightweight form of self-improvement
-that respects the KISS principle by avoiding databases, embedding
-stores, or retrieval-augmented generation.
+We previously experimented with a per-project
+\texttt{USER\_PREFS.md} preferences file that the agent read at the
+start of every task and updated at the end with newly discovered
+user preferences or project invariants. Production audits showed
+0\% compliance with the update step, and the read-only half of the
+protocol added prompt bulk without measurable benefit, so the
+mechanism was removed. Project-specific instructions are now
+expressed through a per-repository \texttt{SORCAR.md} override file
+that the user controls directly, which keeps cross-session
+knowledge in a single human-curated place and avoids the
+databases, embedding stores, or retrieval-augmented generation
+that the KISS principle would have ruled out anyway.
 
 \paragraph{Continuation protocol.}
 When a sub-session exhausts its context window, the Relentless Agent
