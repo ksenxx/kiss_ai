@@ -1656,10 +1656,11 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
             <button id="frequent-tasks-btn" class="toggle-btn"
              data-tooltip="Frequent tasks">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
-               stroke="currentColor" stroke-width="2" stroke-linecap="round"
+               stroke="currentColor" stroke-width="2.5" stroke-linecap="round"
                stroke-linejoin="round">
-                <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 \
-12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+                <line x1="6" y1="20" x2="6" y2="14"/>
+                <line x1="12" y1="20" x2="12" y2="9"/>
+                <line x1="18" y1="20" x2="18" y2="4"/>
               </svg>
             </button>
             <div id="model-dropdown">
