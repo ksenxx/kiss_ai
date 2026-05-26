@@ -56,6 +56,26 @@ if [ -f "$REPO_DIR/.venv/bin/playwright" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# 5a. Disable Workspace Trust globally so the "Do you trust the authors of
+#     the files in this folder?" dialog never blocks the extension from
+#     activating on first launch.  We belt-and-suspenders this with the
+#     `--disable-workspace-trust` CLI flag in the Dockerfile CMD.
+# ---------------------------------------------------------------------------
+SETTINGS_DIR="$HOME/.local/share/code-server/User"
+SETTINGS_FILE="$SETTINGS_DIR/settings.json"
+mkdir -p "$SETTINGS_DIR"
+if [ ! -f "$SETTINGS_FILE" ]; then
+    cat > "$SETTINGS_FILE" <<'JSON'
+{
+    "security.workspace.trust.enabled": false,
+    "security.workspace.trust.startupPrompt": "never",
+    "security.workspace.trust.banner": "never",
+    "security.workspace.trust.emptyWindow": false
+}
+JSON
+fi
+
+# ---------------------------------------------------------------------------
 # 5. Install VSIX into code-server
 # ---------------------------------------------------------------------------
 VSIX="$REPO_DIR/src/kiss/agents/vscode/kiss-sorcar.vsix"
