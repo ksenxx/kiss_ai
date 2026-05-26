@@ -832,7 +832,7 @@
   const ghostOverlay = document.getElementById('ghost-overlay');
   const inputContainer = document.getElementById('input-container');
   const inputClearBtn = document.getElementById('input-clear-btn');
-  const worktreeToggleBtn = document.getElementById('worktree-toggle-btn');
+  const worktreeToggleBtn = document.getElementById('cfg-use-worktree');
   const parallelToggleBtn = document.getElementById('cfg-use-parallel');
   const demoToggleBtn = document.getElementById('cfg-demo-mode');
   const autocommitToggleBtn = document.getElementById('cfg-auto-commit');
@@ -2825,8 +2825,7 @@
               if (wdTab) wdTab.workDir = extra.work_dir;
             }
             if (worktreeToggleBtn) {
-              if (extra.is_worktree) worktreeToggleBtn.classList.add('active');
-              else worktreeToggleBtn.classList.remove('active');
+              worktreeToggleBtn.checked = !!extra.is_worktree;
             }
             if (parallelToggleBtn) {
               parallelToggleBtn.checked = !!extra.is_parallel;
@@ -2925,7 +2924,7 @@
         if (sKey === 'is_parallel' && parallelToggleBtn) {
           parallelToggleBtn.checked = !!sVal;
         } else if (sKey === 'is_worktree' && worktreeToggleBtn) {
-          worktreeToggleBtn.classList.toggle('active', !!sVal);
+          worktreeToggleBtn.checked = !!sVal;
         } else if (sKey === 'model' && typeof sVal === 'string') {
           const modelBtn = document.getElementById('model-btn');
           if (modelBtn) modelBtn.textContent = sVal;
@@ -4225,11 +4224,6 @@
       input.onchange = handleFileSelect;
       input.click();
     });
-    if (worktreeToggleBtn) {
-      worktreeToggleBtn.addEventListener('click', () => {
-        worktreeToggleBtn.classList.toggle('active');
-      });
-    }
     setupPasswordToggle('cfg-remote-password-toggle', 'cfg-remote-password');
     setupPasswordToggle(
       'welcome-cfg-remote-password-toggle',
@@ -4605,9 +4599,7 @@
       attachments: attachments.map(a => {
         return {name: a.name, mimeType: a.type, data: a.data};
       }),
-      useWorktree: !!(
-        worktreeToggleBtn && worktreeToggleBtn.classList.contains('active')
-      ),
+      useWorktree: !!(worktreeToggleBtn && worktreeToggleBtn.checked),
       useParallel: !!(parallelToggleBtn && parallelToggleBtn.checked),
       autoCommit: !!(autocommitToggleBtn && autocommitToggleBtn.checked),
     };
