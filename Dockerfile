@@ -28,8 +28,12 @@ RUN ARCH=$(uname -m) && \
 # Passwordless sudo for coder (needed for playwright install-deps)
 RUN echo "coder ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/coder
 
-# Repo directory owned by coder
-RUN mkdir -p /home/kiss && chown coder:coder /home/kiss
+# Repo directories owned by coder.  /home/kiss is the primary clone target
+# (for the kiss.git repo); /home/kiss_ai is the fallback target (for the
+# kiss_ai.git repo).  docker-startup.sh decides which one to clone into and
+# passes the chosen path to code-server as the workspace root.
+RUN mkdir -p /home/kiss /home/kiss_ai \
+    && chown coder:coder /home/kiss /home/kiss_ai
 
 # Startup script
 COPY --chmod=755 scripts/docker-startup.sh /usr/local/bin/docker-startup.sh
@@ -42,6 +46,10 @@ RUN git config --global init.defaultBranch main \
 
 WORKDIR /home/kiss
 EXPOSE 8080
+
+# The trailing workspace path in CMD is a placeholder — docker-startup.sh
+# rewrites it to whichever directory the repo was actually cloned into
+# (/home/kiss for kiss.git, /home/kiss_ai for kiss_ai.git).
 
 ENTRYPOINT ["/usr/local/bin/docker-startup.sh"]
 # --disable-workspace-trust skips the "Do you trust the authors of the files
