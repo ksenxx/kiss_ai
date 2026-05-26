@@ -242,7 +242,7 @@ export function buildChatHtml(
             Use parallel agents
           </label>
           <label class="config-label config-checkbox">
-            <input type="checkbox" id="cfg-use-worktree">
+            <input type="checkbox" id="cfg-use-worktree" checked>
             Use worktree
           </label>
           <label class="config-label config-checkbox">
