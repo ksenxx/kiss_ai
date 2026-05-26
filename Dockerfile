@@ -3,9 +3,15 @@ FROM codercom/code-server:latest
 USER root
 
 # System dependencies
+#
+# python3 + python-is-python3 are required by
+# src/kiss/agents/vscode/copy-kiss.sh (invoked from the extension's
+# `vscode:prepublish` script) — without them `npm run package` silently
+# fails and the container falls back to a stale committed VSIX.
 RUN apt-get update && apt-get install -y \
     git curl wget build-essential libssl-dev \
     ca-certificates gnupg sudo \
+    python3 python3-venv python-is-python3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv (Python package manager)
@@ -38,4 +44,14 @@ WORKDIR /home/kiss
 EXPOSE 8080
 
 ENTRYPOINT ["/usr/local/bin/docker-startup.sh"]
-CMD ["--bind-addr", "0.0.0.0:8080", "--auth", "none", "/home/kiss"]
+# --disable-workspace-trust skips the "Do you trust the authors of the files
+#   in this folder?" dialog that otherwise blocks the extension from
+#   activating on first launch.
+# --enable-proposed-api ksenxx.kiss-sorcar allows the extension to use the
+#   `contribSourceControlInputBoxMenu` proposed API declared in
+#   src/kiss/agents/vscode/package.json — future-proof against code-server
+#   tightening proposed-API gating.
+CMD ["--bind-addr", "0.0.0.0:8080", "--auth", "none", \
+     "--disable-workspace-trust", \
+     "--enable-proposed-api", "ksenxx.kiss-sorcar", \
+     "/home/kiss"]
