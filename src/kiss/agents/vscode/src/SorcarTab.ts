@@ -243,7 +243,7 @@ export function buildChatHtml(
     <div id="tricks-panel">
       <button id="tricks-panel-close">&times;</button>
       <div class="sidebar-section sidebar-tab-panel">
-        <div class="sidebar-hdr">Tricks</div>
+        <div class="sidebar-hdr">Inject</div>
         <div id="tricks-list">
           <div class="sidebar-empty">No tricks available</div>
         </div>
