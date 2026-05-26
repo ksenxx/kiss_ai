@@ -703,6 +703,20 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         break;
       }
 
+      case 'appendUserMessage': {
+        // Forward the queued user-message append to the backend so
+        // it can drop the text into the running agent's pending
+        // queue.  We do NOT add this tab to ``_runningTabs`` because
+        // the underlying task is already there.
+        const client = this._getClient();
+        client.sendCommand({
+          type: 'appendUserMessage',
+          prompt: message.prompt,
+          tabId: message.tabId,
+        });
+        break;
+      }
+
       case 'stop': {
         const stopTabId = message.tabId;
         const client = this._getClient();
