@@ -519,6 +519,17 @@ class SorcarAgent(RelentlessAgent):
         self.web_use_tool = None
         tl = getattr(printer, "_thread_local", None) if printer else None
         self._stop_event = getattr(tl, "stop_event", None) if tl else None
+        # Wire up the pre-step hook so user prompts queued via the VS
+        # Code frontend's ``appendUserMessage`` command while this
+        # task is running get injected into the model's conversation
+        # as additional ``user`` messages immediately before the next
+        # model call.  Only meaningful when this agent has been bound
+        # to a frontend tab (``_tab_id`` is set by
+        # :meth:`_TaskRunnerMixin._run_task_inner`).
+        if getattr(self, "_tab_id", None):
+            self.pre_step_hook = self._drain_pending_user_messages
+        else:
+            self.pre_step_hook = None
 
         try:
             system_instructions = (
@@ -575,6 +586,39 @@ class SorcarAgent(RelentlessAgent):
                 self.web_use_tool.close()
             self.web_use_tool = None
             self._ask_user_question_callback = None
+            self.pre_step_hook = None
+
+    def _drain_pending_user_messages(self, model: Any) -> None:
+        """Append any queued follow-up prompts to *model*'s conversation.
+
+        Called once at the top of every model step (wired in via
+        :attr:`kiss.core.kiss_agent.KISSAgent.pre_step_hook`).  Drains
+        the owning :class:`_RunningAgentState`'s
+        ``pending_user_messages`` list under
+        :attr:`_RunningAgentState._registry_lock` (to keep the drain
+        atomic against concurrent ``appendUserMessage`` commands from
+        the frontend) and pushes each entry into *model*'s
+        conversation as a ``user`` role message.  The list is emptied
+        on every drain so the same queued message is never injected
+        twice.
+
+        Args:
+            model: The live model whose conversation receives the
+                queued user messages.
+        """
+        from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+
+        tab_id = getattr(self, "_tab_id", "") or ""
+        if not tab_id:
+            return
+        with _RunningAgentState._registry_lock:
+            tab = _RunningAgentState.running_agent_states.get(tab_id)
+            if tab is None or not tab.pending_user_messages:
+                return
+            queued = list(tab.pending_user_messages)
+            tab.pending_user_messages.clear()
+        for msg in queued:
+            model.add_message_to_conversation("user", msg)
 
 
 def _coerce_tasks(tasks: Any) -> list[str]:

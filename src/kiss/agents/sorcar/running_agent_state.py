@@ -138,6 +138,7 @@ class _RunningAgentState:
         "stop_event",
         "task_thread",
         "user_answer_queue",
+        "pending_user_messages",
         "is_merging",
         "is_running_non_wt",
         "is_task_active",
@@ -203,6 +204,18 @@ class _RunningAgentState:
         self.stop_event: threading.Event | None = None
         self.task_thread: threading.Thread | None = None
         self.user_answer_queue: queue.Queue[str] | None = None
+        # Prompts submitted by the user via the task-input textbox
+        # while a task is already running on this tab.  Drained into
+        # the live agent's conversation as additional ``user`` role
+        # messages immediately before each model call (see
+        # :meth:`kiss.agents.sorcar.sorcar_agent.SorcarAgent.run`'s
+        # pre-step hook).  Mutated under
+        # :attr:`_registry_lock` so the drain-then-clear sequence
+        # cannot race a concurrent ``appendUserMessage`` command from
+        # the frontend.  Cleared in :meth:`_TaskRunnerMixin._run_task`
+        # 's outer ``finally`` so pending messages never leak across
+        # successive tasks on the same tab.
+        self.pending_user_messages: list[str] = []
         self.is_merging: bool = False
         self.is_running_non_wt: bool = False
         self.is_task_active: bool = False

@@ -117,6 +117,11 @@ class _TaskRunnerMixin:
                     tab.task_thread = None
                     tab.stop_event = None
                     tab.user_answer_queue = None
+                    # Drop any queued follow-up prompts that the user
+                    # typed during this task — the next task gets a
+                    # fresh, empty queue.  Keeping them would leak
+                    # stale context into the next unrelated task.
+                    tab.pending_user_messages.clear()
                     tab.is_task_active = False
                     tab.is_running_non_wt = False
                     # Dispose the transient agent — a fresh one is
@@ -209,6 +214,11 @@ class _TaskRunnerMixin:
         if tab.agent is None:
             agent = WorktreeSorcarAgent("Sorcar VS Code")
             tab.agent = agent
+        # Stash the frontend tab id on the agent so its
+        # ``pre_step_hook`` (see ``SorcarAgent.run``) can resolve back
+        # to the owning ``_RunningAgentState`` and drain
+        # ``pending_user_messages`` before each model call.
+        tab.agent._tab_id = tab_id
         # Sync the agent's chat id to the tab's chat id BEFORE the run
         # starts.  ``_RunningAgentState._get_tab`` eagerly populates
         # ``tab.agent`` (for merge / discard / worktree state callers

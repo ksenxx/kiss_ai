@@ -181,6 +181,12 @@ class RelentlessAgent(Base):
         self.task_description: str = ""
         self.system_prompt: str = ""
         self.model_config: dict[str, Any] | None = None
+        # See :attr:`kiss.core.kiss_agent.KISSAgent.pre_step_hook`.
+        # Propagated to every inner per-session executor created in
+        # :meth:`perform_task`, so subclasses (e.g. ``SorcarAgent``)
+        # can hook into model calls without re-implementing the
+        # per-session executor.
+        self.pre_step_hook: Callable[..., None] | None = None
         self.set_printer(printer, verbose=verbose)
 
     def _docker_bash(self, command: str, description: str) -> str:
@@ -230,6 +236,11 @@ class RelentlessAgent(Base):
                 self.printer.budget_offset = self.budget_used  # type: ignore[attr-defined]
                 self.printer.steps_offset = self.total_steps  # type: ignore[attr-defined]
             executor = KISSAgent(f"{self.name} Session-{session}")
+            # Propagate any pre-step hook installed on the relentless
+            # parent (e.g. ``SorcarAgent.run``'s pending-user-messages
+            # drain) to the per-session inner executor — that's the
+            # layer that actually calls the model.
+            executor.pre_step_hook = getattr(self, "pre_step_hook", None)
             self._current_executor = executor
             try:
                 result = executor.run(

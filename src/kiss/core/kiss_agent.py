@@ -58,6 +58,15 @@ class KISSAgent(Base):
 
     def __init__(self, name: str) -> None:
         super().__init__(name)
+        # Optional hook invoked at the top of every ``_execute_step``,
+        # immediately before the next model call.  Receives the live
+        # :class:`kiss.core.models.model.Model` so the hook can mutate
+        # its conversation (e.g. ``add_message_to_conversation``) to
+        # inject additional user-role context queued asynchronously by
+        # an external source (e.g. the VS Code frontend's
+        # ``appendUserMessage`` command — see
+        # :meth:`kiss.agents.sorcar.sorcar_agent.SorcarAgent.run`).
+        self.pre_step_hook: Callable[..., None] | None = None
 
     def _reset(
         self,
@@ -299,6 +308,8 @@ class KISSAgent(Base):
         """
         start_timestamp = int(time.time())
 
+        if self.pre_step_hook is not None:
+            self.pre_step_hook(self.model)
         function_calls, response_text, response = self.model.generate_and_process_with_tools(
             self.function_map, tools_schema=self._cached_tools_schema
         )

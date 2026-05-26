@@ -255,6 +255,42 @@ class _CommandsMixin:
             except queue.Full:  # pragma: no cover — drained immediately above
                 pass
 
+    def _cmd_append_user_message(self, cmd: dict[str, Any]) -> None:
+        """Queue a user message to be injected into the running agent's context.
+
+        When the user types into the task-input textbox while a task is
+        still running, the frontend forwards the prompt here instead of
+        silently dropping it.  We append the text to the tab's
+        :attr:`_RunningAgentState.pending_user_messages` list under
+        :attr:`_RunningAgentState._registry_lock` so the live agent's
+        pre-step hook can drain and inject the messages into the model
+        conversation before the next model call.
+
+        The append is silently ignored when the tab has no live task —
+        attempting to queue a follow-up against an idle tab would be a
+        no-op (no pre-step hook to drain it).  We also echo the queued
+        prompt back to every viewer of the tab as a ``prompt`` event so
+        the user sees their queued message in the chat surface.
+        """
+        tab_id = cmd.get("tabId", "")
+        prompt = cmd.get("prompt", "")
+        if not isinstance(prompt, str) or not prompt.strip():
+            return
+        with self._state_lock:
+            tab = _RunningAgentState.running_agent_states.get(tab_id)
+            if tab is None or not tab.is_task_active:
+                logger.debug(
+                    "appendUserMessage dropped: tab %s has no live task",
+                    tab_id,
+                )
+                return
+            tab.pending_user_messages.append(prompt)
+        self.printer.broadcast({
+            "type": "prompt",
+            "text": prompt,
+            "tabId": tab_id,
+        })
+
     def _cmd_resume_session(self, cmd: dict[str, Any]) -> None:
         """Replay a previous chat session.
 
@@ -466,6 +502,7 @@ class _CommandsMixin:
         "getFiles": _cmd_get_files,
         "recordFileUsage": _cmd_record_file_usage,
         "userAnswer": _cmd_user_answer,
+        "appendUserMessage": _cmd_append_user_message,
         "resumeSession": _cmd_resume_session,
         "mergeAction": _cmd_merge_action,
         "closeTab": _cmd_close_tab,
