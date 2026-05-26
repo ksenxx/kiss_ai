@@ -17,7 +17,7 @@ import queue
 import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from kiss.agents.sorcar.running_agent_state import _RunningAgentState
@@ -41,6 +41,12 @@ from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import get_available_models
 
 logger = logging.getLogger(__name__)
+
+# Sentinel pushed onto the user-answer queue by the stop-event watcher
+# in :meth:`_TaskRunnerMixin._await_user_response` so the blocking
+# ``q.get`` wakes immediately when the task is cancelled mid-question.
+# Identity comparison disambiguates it from any string answer.
+_STOP_SENTINEL: object = object()
 
 
 class _TaskRunnerMixin:
@@ -878,13 +884,43 @@ class _TaskRunnerMixin:
             raise KeyboardInterrupt(
                 "User answer queue is missing (tab closed?); aborting wait",
             )
-        while True:
-            try:
-                return q.get(timeout=0.5)
-            except queue.Empty:
-                pass
-            if stop.is_set():
-                raise KeyboardInterrupt("Stopped while waiting for user")
+        # Wake the blocking ``q.get`` immediately when ``stop`` fires
+        # by enqueuing a sentinel from a watcher thread.  Avoids the
+        # previous 0.5 s polling loop (which could delay the answer
+        # delivery to the agent thread by up to half a second after
+        # the user clicked Submit) without sacrificing stop-event
+        # responsiveness.  The watcher exits cleanly via ``cancelled``
+        # once the user's answer arrives.
+        sentinel = _STOP_SENTINEL
+        cancelled = threading.Event()
+
+        def _wake_on_stop() -> None:
+            # Block until either stop fires or the answer arrives
+            # (signalled via ``cancelled``).  Polls ``cancelled`` on a
+            # short interval so the watcher does not outlive the
+            # call after a normal answer.
+            while not cancelled.is_set():
+                if stop.wait(0.1):
+                    if not cancelled.is_set():
+                        try:
+                            # Sentinel is identity-checked below;
+                            # the queue's element type is ``str`` so
+                            # this single non-string put is narrowed
+                            # away by the ``is sentinel`` branch.
+                            q.put_nowait(cast(str, sentinel))
+                        except queue.Full:
+                            pass
+                    return
+
+        watcher = threading.Thread(target=_wake_on_stop, daemon=True)
+        watcher.start()
+        try:
+            item = q.get()
+        finally:
+            cancelled.set()
+        if item is sentinel:
+            raise KeyboardInterrupt("Stopped while waiting for user")
+        return item
 
     def _ask_user_question(self, question: str) -> str:
         """Callback for agent questions."""
