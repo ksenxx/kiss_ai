@@ -129,6 +129,121 @@ class TestAwaitUserResponseImmediacy(unittest.TestCase):
         waiter.join(timeout=1.0)
 
 
+class TestEndToEndAskUserLatency(unittest.TestCase):
+    """End-to-end latency: from ``_handle_command(userAnswer)`` to waiter return.
+
+    The pre-fix combined latency could exceed 0.5 s in the worst case
+    (the polling-loop iteration window plus the queue routing miss).
+    Post-fix it is bounded by lock contention and ``queue.Queue``
+    wake-up overhead — well under 50 ms on a quiet machine.
+    """
+
+    def setUp(self) -> None:
+        self.server = VSCodeServer()
+
+    def tearDown(self) -> None:
+        with _RunningAgentState._registry_lock:
+            _RunningAgentState.running_agent_states.clear()
+
+    def test_handle_command_user_answer_unblocks_await_within_50ms(self) -> None:
+        """The full dispatch path delivers the answer in <50 ms.
+
+        Reproduces the user-visible scenario end-to-end: an agent
+        thread is blocked inside ``_await_user_response``; the
+        websocket layer's ``userAnswer`` command flows through
+        ``VSCodeServer._handle_command`` (the same entry point used
+        by ``RemoteAccessServer._run_cmd`` for both WSS and UDS
+        peers); the waiter must wake immediately.
+        """
+        q: queue.Queue[str] = queue.Queue(maxsize=1)
+        self.server._get_tab("tab-E").user_answer_queue = q
+        self.server.printer.subscribe_tab("task-E", "tab-E")
+        stop = threading.Event()
+
+        delivered = threading.Event()
+        result_holder: dict[str, str] = {}
+        entered = threading.Event()
+
+        def wait_for_answer() -> None:
+            self.server.printer._thread_local.task_id = "task-E"
+            self.server.printer._thread_local.stop_event = stop
+            entered.set()
+            result_holder["answer"] = self.server._await_user_response()
+            delivered.set()
+
+        waiter = threading.Thread(target=wait_for_answer, daemon=True)
+        waiter.start()
+        entered.wait(timeout=1.0)
+        # Let the waiter enter ``q.get``.
+        time.sleep(0.05)
+
+        t0 = time.monotonic()
+        # Go through the public command-dispatch entry point so the
+        # test exercises the same code path the WS / UDS handlers
+        # use when forwarding a ``userAnswer`` from the frontend.
+        self.server._handle_command(
+            {"type": "userAnswer", "tabId": "tab-E", "answer": "hello"},
+        )
+        delivered.wait(timeout=1.0)
+        latency = time.monotonic() - t0
+
+        waiter.join(timeout=1.0)
+        stop.set()
+        self.assertEqual(result_holder.get("answer"), "hello")
+        self.assertLess(
+            latency, 0.05,
+            f"end-to-end userAnswer→waiter took {latency*1000:.1f}ms; "
+            "expected <50ms",
+        )
+
+    def test_handle_command_viewer_user_answer_unblocks_within_50ms(self) -> None:
+        """Viewer-tab answer reaches owner waiter end-to-end in <50 ms.
+
+        Multi-viewer case: the viewer tab carries no
+        ``user_answer_queue``; the owner does.  The full dispatch
+        path must still resolve the queue via the subscriber
+        fallback and wake the waiter immediately.
+        """
+        owner_q: queue.Queue[str] = queue.Queue(maxsize=1)
+        self.server._get_tab("owner-V").user_answer_queue = owner_q
+        self.server._get_tab("viewer-V")  # no queue
+        self.server.printer.subscribe_tab("task-V", "owner-V")
+        self.server.printer.subscribe_tab("task-V", "viewer-V")
+        stop = threading.Event()
+
+        delivered = threading.Event()
+        result_holder: dict[str, str] = {}
+        entered = threading.Event()
+
+        def wait_for_answer() -> None:
+            self.server.printer._thread_local.task_id = "task-V"
+            self.server.printer._thread_local.stop_event = stop
+            entered.set()
+            result_holder["answer"] = self.server._await_user_response()
+            delivered.set()
+
+        waiter = threading.Thread(target=wait_for_answer, daemon=True)
+        waiter.start()
+        entered.wait(timeout=1.0)
+        time.sleep(0.05)
+
+        t0 = time.monotonic()
+        self.server._handle_command(
+            {"type": "userAnswer", "tabId": "viewer-V", "answer": "from-viewer"},
+        )
+        delivered.wait(timeout=1.0)
+        latency = time.monotonic() - t0
+
+        waiter.join(timeout=1.0)
+        stop.set()
+        self.assertEqual(result_holder.get("answer"), "from-viewer")
+        self.assertLess(
+            latency, 0.05,
+            f"viewer-tab end-to-end userAnswer→waiter took "
+            f"{latency*1000:.1f}ms; expected <50ms",
+        )
+
+
 class TestUserAnswerSubscriberFallback(unittest.TestCase):
     """``_cmd_user_answer`` routes to the owner queue via subscriber graph."""
 
