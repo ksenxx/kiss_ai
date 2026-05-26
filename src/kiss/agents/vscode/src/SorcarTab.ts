@@ -171,7 +171,7 @@ export function buildChatHtml(
             <button id="frequent-tasks-btn" class="toggle-btn" data-tooltip="Frequent tasks">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="20" x2="6" y2="14"/><line x1="12" y1="20" x2="12" y2="9"/><line x1="18" y1="20" x2="18" y2="4"/></svg>
             </button>
-            <button id="tricks-btn" class="toggle-btn" data-tooltip="Tricks">
+            <button id="tricks-btn" class="toggle-btn" data-tooltip="Inject instruction">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6"/><path d="M10 22h4"/><path d="M12 2a7 7 0 00-4 12.7c.7.6 1 1.4 1 2.3h6c0-.9.3-1.7 1-2.3A7 7 0 0012 2z"/></svg>
             </button>
             <div id="model-dropdown">
