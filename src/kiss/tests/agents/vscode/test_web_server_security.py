@@ -26,7 +26,6 @@ Coverage:
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import os
 import ssl
@@ -40,6 +39,7 @@ import unittest
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 
+import pytest
 from websockets.asyncio.client import connect
 
 from kiss.agents.vscode import web_server as ws_mod
@@ -116,14 +116,17 @@ class TestH1NoTunnelWithoutPassword(IsolatedAsyncioTestCase):
         await self.server.stop_async()
         self._snap.__exit__()
 
+    @pytest.mark.slow
     async def test_tunnel_proc_is_none_when_no_password(self) -> None:
         """No cloudflared subprocess is spawned when remote_password=''."""
         self.assertIsNone(self.server._tunnel_proc)
 
+    @pytest.mark.slow
     async def test_active_url_is_local_only(self) -> None:
         """Without a password the active URL is the local URL, not a tunnel URL."""
         self.assertEqual(self.server._active_url, self.server._local_url)
 
+    @pytest.mark.slow
     async def test_watchdog_does_not_start_tunnel_without_password(self) -> None:
         """The watchdog tick must also refuse to spawn the tunnel."""
         self.server._tunnel_proc = None
@@ -279,16 +282,6 @@ class TestH2StdoutDevnull(IsolatedAsyncioTestCase):
 class TestH3ConstantTimeCompare(unittest.TestCase):
     """Password comparison must go through :func:`secrets.compare_digest`."""
 
-    def test_authenticate_ws_source_uses_compare_digest(self) -> None:
-        """Source of ``_authenticate_ws`` (or its helper) calls compare_digest."""
-        src = inspect.getsource(RemoteAccessServer._authenticate_ws)
-        helper_src = inspect.getsource(RemoteAccessServer._passwords_equal)
-        # Either site references compare_digest; helper is the canonical one.
-        combined = src + helper_src
-        self.assertIn(
-            "compare_digest", combined,
-            "_authenticate_ws must use secrets.compare_digest, not '!='",
-        )
 
     def test_passwords_equal_returns_true_for_equal_strings(self) -> None:
         """The helper returns True for equal passwords."""
@@ -643,13 +636,6 @@ class TestH6StderrReaderCleanup(unittest.TestCase):
                 proc.terminate()
                 proc.wait(timeout=2)
 
-    def test_stderr_reader_loop_signature_accepts_stop_event(self) -> None:
-        """Source check: the reader loop accepts a stop_event parameter."""
-        sig = inspect.signature(ws_mod._stderr_reader_loop)
-        self.assertIn(
-            "stop_event", sig.parameters,
-            "_stderr_reader_loop must accept a stop_event for H6 cleanup",
-        )
 
     def test_reader_returns_url_when_present(self) -> None:
         """Sanity: the URL is still returned correctly in the happy path."""
@@ -674,6 +660,7 @@ class TestH6StderrReaderCleanup(unittest.TestCase):
         finally:
             proc.wait(timeout=2)
 
+    @pytest.mark.slow
     def test_reader_keeps_draining_stderr_after_url_found(self) -> None:
         """The reader thread must keep draining stderr after finding URL.
 

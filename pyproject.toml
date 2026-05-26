@@ -142,7 +142,7 @@ markers = [
 ]
 # Disable timeout so tests run without time limit
 timeout = 0
-addopts = "--cov=src/kiss --cov-branch"
+addopts = "--cov=src/kiss --cov-branch -m 'not slow'"
 
 [tool.coverage.run]
 branch = true

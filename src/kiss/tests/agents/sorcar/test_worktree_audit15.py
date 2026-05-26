@@ -179,7 +179,14 @@ class TestBug66EmitPendingNoAutoDiscard:
     ) -> None:
         """Auto-discard must be skipped when a non-worktree task is
         running — consistent with ``_run_task_inner`` and
-        ``_finish_merge``."""
+        ``_finish_merge``.
+
+        Although the branch is preserved (auto-discard blocked), no
+        ``worktree_done`` event must be broadcast: there are no
+        changes to merge, so the "Auto-commit and merge or Discard?"
+        prompt would be meaningless and confusing.  The user can
+        find the leftover branch via ``git branch`` if needed.
+        """
         repo = _make_repo(tmp_path / "repo")
 
         server = VSCodeServer()
@@ -212,8 +219,10 @@ class TestBug66EmitPendingNoAutoDiscard:
             "Auto-discard should be skipped when non-wt task is running."
         )
         wt_done = [e for e in printer.events if e.get("type") == "worktree_done"]
-        assert wt_done, (
-            "worktree_done should be broadcast when non-wt blocks discard."
+        assert not wt_done, (
+            "worktree_done must NOT be broadcast for an empty worktree "
+            "even when auto-discard is blocked — the resulting "
+            "merge/discard prompt is meaningless with no changes."
         )
 
         other_tab.is_running_non_wt = False

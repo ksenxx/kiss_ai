@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import io
 import json
 import os
 import shlex
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -393,25 +391,53 @@ class TestSourceShellEnv:
         source_shell_env()
 
 
+class _Recorder:
+    """Lightweight stand-in for ``io.StringIO`` that captures broadcast events.
+
+    Tests historically captured events by redirecting ``sys.stdout``; the
+    server now publishes them via ``self.printer.broadcast``.  We patch
+    ``printer.broadcast`` to append into ``events`` instead.  ``truncate``
+    and ``seek`` are provided so tests can clear the buffer between
+    sub-actions in the same way they did with the old ``StringIO``.
+    """
+
+    def __init__(self) -> None:
+        self.events: list[dict[str, Any]] = []
+
+    def truncate(self, _size: int = 0) -> int:
+        self.events.clear()
+        return 0
+
+    def seek(self, _pos: int) -> int:  # pragma: no cover - trivial
+        return 0
+
+
+def _make_server_with_recorder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Any, _Recorder]:
+    """Construct a ``VSCodeServer`` and intercept ``printer.broadcast``."""
+    from kiss.agents.vscode.server import VSCodeServer
+
+    server = VSCodeServer()
+    recorder = _Recorder()
+    monkeypatch.setattr(
+        server.printer, "broadcast", lambda event: recorder.events.append(event),
+    )
+    return server, recorder
+
+
 class TestCommandHandlerIntegration:
     """Integration tests for getConfig/saveConfig using real VSCodeServer."""
 
     def _capture_broadcasts(
         self, monkeypatch: pytest.MonkeyPatch,
-    ) -> tuple[Any, io.StringIO]:
-        """Create a real VSCodeServer with stdout redirected to StringIO."""
-        from kiss.agents.vscode.server import VSCodeServer
-
-        captured = io.StringIO()
-        monkeypatch.setattr(sys, "stdout", captured)
-        server = VSCodeServer()
-        return server, captured
+    ) -> tuple[Any, _Recorder]:
+        """Create a VSCodeServer with ``printer.broadcast`` recorded."""
+        return _make_server_with_recorder(monkeypatch)
 
     @staticmethod
-    def _parse_events(captured: io.StringIO) -> list[dict]:
-        output = captured.getvalue()
-        lines = [line for line in output.strip().split("\n") if line.strip()]
-        return [json.loads(line) for line in lines]
+    def _parse_events(captured: _Recorder) -> list[dict]:
+        return list(captured.events)
 
     def test_get_config_broadcasts_defaults(
         self, monkeypatch: pytest.MonkeyPatch,
@@ -541,17 +567,10 @@ class TestEndToEndFlows:
             "custom_api_key": "ck-test",
         })
 
-        from kiss.agents.vscode.server import VSCodeServer
-
-        captured = io.StringIO()
-        monkeypatch.setattr(sys, "stdout", captured)
-        server = VSCodeServer()
+        server, recorder = _make_server_with_recorder(monkeypatch)
         server._get_models()
 
-        output = captured.getvalue()
-        lines = [line for line in output.strip().split("\n") if line.strip()]
-        events = [json.loads(line) for line in lines]
-        model_events = [e for e in events if e["type"] == "models"]
+        model_events = [e for e in recorder.events if e["type"] == "models"]
         assert len(model_events) == 1
         custom_models = [
             m for m in model_events[0]["models"] if m["vendor"] == "Custom"
@@ -566,17 +585,10 @@ class TestEndToEndFlows:
         """No custom model in list when endpoint is empty."""
         save_config({"custom_endpoint": ""})
 
-        from kiss.agents.vscode.server import VSCodeServer
-
-        captured = io.StringIO()
-        monkeypatch.setattr(sys, "stdout", captured)
-        server = VSCodeServer()
+        server, recorder = _make_server_with_recorder(monkeypatch)
         server._get_models()
 
-        output = captured.getvalue()
-        lines = [line for line in output.strip().split("\n") if line.strip()]
-        events = [json.loads(line) for line in lines]
-        model_events = [e for e in events if e["type"] == "models"]
+        model_events = [e for e in recorder.events if e["type"] == "models"]
         assert len(model_events) == 1
         custom_models = [
             m for m in model_events[0]["models"] if m.get("vendor") == "Custom"
@@ -624,22 +636,13 @@ class TestGetConfigIncludesApiKeys:
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """getConfig broadcast includes apiKeys with current env values."""
-        from kiss.agents.vscode.server import VSCodeServer
-
         monkeypatch.setenv("GEMINI_API_KEY", "gem-test-val")
         monkeypatch.setenv("OPENAI_API_KEY", "oai-test-val")
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
-        captured = io.StringIO()
-        monkeypatch.setattr(sys, "stdout", captured)
-        server = VSCodeServer()
+        server, recorder = _make_server_with_recorder(monkeypatch)
         server._handle_command({"type": "getConfig"})
-        events = [
-            json.loads(line)
-            for line in captured.getvalue().strip().split("\n")
-            if line.strip()
-        ]
-        cfg_events = [e for e in events if e["type"] == "configData"]
+        cfg_events = [e for e in recorder.events if e["type"] == "configData"]
         assert len(cfg_events) == 1
         assert "apiKeys" in cfg_events[0]
         assert cfg_events[0]["apiKeys"]["GEMINI_API_KEY"] == "gem-test-val"
@@ -650,28 +653,18 @@ class TestGetConfigIncludesApiKeys:
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """After saving an API key, getConfig returns the updated value."""
-        from kiss.agents.vscode.server import VSCodeServer
-
         monkeypatch.setenv("SHELL", "/bin/zsh")
         monkeypatch.delenv("TOGETHER_API_KEY", raising=False)
 
-        captured = io.StringIO()
-        monkeypatch.setattr(sys, "stdout", captured)
-        server = VSCodeServer()
+        server, recorder = _make_server_with_recorder(monkeypatch)
         server._handle_command({
             "type": "saveConfig",
             "config": {"max_budget": 100},
             "apiKeys": {"TOGETHER_API_KEY": "tog-key-saved"},
         })
-        captured.truncate(0)
-        captured.seek(0)
+        recorder.events.clear()
         server._handle_command({"type": "getConfig"})
-        events = [
-            json.loads(line)
-            for line in captured.getvalue().strip().split("\n")
-            if line.strip()
-        ]
-        cfg_events = [e for e in events if e["type"] == "configData"]
+        cfg_events = [e for e in recorder.events if e["type"] == "configData"]
         assert len(cfg_events) == 1
         assert cfg_events[0]["apiKeys"]["TOGETHER_API_KEY"] == "tog-key-saved"
 

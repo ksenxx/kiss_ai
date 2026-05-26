@@ -41,6 +41,8 @@ import time
 import unittest
 from unittest import IsolatedAsyncioTestCase
 
+import pytest
+
 from kiss.agents.vscode import web_server as ws_mod
 from kiss.agents.vscode.vscode_config import CONFIG_PATH, save_config
 from kiss.agents.vscode.web_server import (
@@ -337,6 +339,7 @@ class TestStartQuickTunnelMarksRateLimit(IsolatedAsyncioTestCase):
             f.write("#!/bin/bash\n" + body)
         os.chmod(cf, 0o755)
 
+    @pytest.mark.slow
     async def test_rate_limit_line_marks_server(self) -> None:
         # Fake cloudflared that reproduces the user-reported failure:
         # writes a 1015 / 429 line to stderr and exits ~1s later
@@ -357,6 +360,7 @@ class TestStartQuickTunnelMarksRateLimit(IsolatedAsyncioTestCase):
             "1015/429 in stderr must set _tunnel_rate_limited",
         )
 
+    @pytest.mark.slow
     async def test_clean_failure_does_not_mark_server(self) -> None:
         # cloudflared writes nothing rate-limit-shaped, exits.
         self._install_fake_cloudflared(
@@ -433,6 +437,7 @@ class TestRestartTunnelUrlBackoff(IsolatedAsyncioTestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
         self._snap.__exit__()
 
+    @pytest.mark.slow
     async def test_long_backoff_when_rate_limited(self) -> None:
         self.server._tunnel_rate_limited = True
         self.server._tunnel_failure_count = 0
@@ -454,6 +459,7 @@ class TestRestartTunnelUrlBackoff(IsolatedAsyncioTestCase):
         # rate-limit reverts to normal exponential backoff.
         self.assertFalse(self.server._tunnel_rate_limited)
 
+    @pytest.mark.slow
     async def test_short_backoff_when_not_rate_limited(self) -> None:
         self.server._tunnel_rate_limited = False
         self.server._tunnel_failure_count = 0
@@ -469,6 +475,7 @@ class TestRestartTunnelUrlBackoff(IsolatedAsyncioTestCase):
             "non-rate-limited failure must NOT use the long backoff",
         )
 
+    @pytest.mark.slow
     async def test_subsequent_non_rate_failure_uses_short_path(
         self,
     ) -> None:

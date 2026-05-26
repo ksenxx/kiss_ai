@@ -129,7 +129,9 @@ class TestGetHistoryBranches:
         sessions = hist[0]["sessions"]
         assert len(sessions) == 2
         long_session = [s for s in sessions if len(s["preview"]) > 50][0]
-        assert long_session["title"].endswith("...")
+        # Title is the full task text; CSS handles line-clamp.
+        assert long_session["title"] == "a" * 60
+        assert not long_session["title"].endswith("...")
 
     def test_get_history_with_query(self) -> None:
         """_get_history with search query filters entries."""

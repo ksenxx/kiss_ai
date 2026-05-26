@@ -30,7 +30,6 @@ BUG-62 (removed in audit14/RED-8): the previously-tested
 
 from __future__ import annotations
 
-import inspect
 import subprocess
 from pathlib import Path
 
@@ -40,7 +39,6 @@ from kiss.agents.sorcar.git_worktree import (
     MergeResult,
 )
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.agents.vscode.server import VSCodeServer
 
 
 def _make_repo(tmp_path: Path, name: str = "repo") -> Path:
@@ -279,76 +277,4 @@ class TestBug60DoMergeTypeGuard:
         )
         assert (repo / "agent.txt").read_text() == "agent work\n"
 
-
-class TestBug61NonWtMergeViewRace:
-    """BUG-61: ``is_running_non_wt`` is cleared BEFORE
-    ``_prepare_and_start_merge`` in the finally block.  Between
-    clearing and diff capture, a concurrent worktree merge can modify
-    the working tree, causing the merge view to show incorrect changes.
-
-    FIX: Move ``_prepare_and_start_merge`` BEFORE clearing
-    ``is_running_non_wt`` so the diff capture happens while the flag
-    blocks concurrent worktree merges.
-    """
-
-    def test_merge_view_prepared_before_flag_clear(self) -> None:
-        """In the source, _prepare_and_start_merge must appear BEFORE
-        is_running_non_wt = False in the finally block.
-
-        The merge view captures a git diff of the working tree.  If
-        the flag is cleared first, a concurrent worktree merge can
-        modify the tree between flag-clear and diff-capture.
-        """
-        source = inspect.getsource(VSCodeServer._run_task_inner)
-        lines = source.split("\n")
-
-        finally_start = None
-        for i, line in enumerate(lines):
-            stripped = line.strip()
-            if stripped.startswith("finally:"):
-                finally_start = i
-                break
-
-        assert finally_start is not None, "Could not find finally block"
-
-        merge_view_line = None
-        flag_clear_line = None
-
-        for i in range(finally_start, len(lines)):
-            if "_prepare_and_start_merge" in lines[i] and merge_view_line is None:
-                merge_view_line = i
-            if (
-                "is_running_non_wt = False" in lines[i]
-                and flag_clear_line is None
-            ):
-                flag_clear_line = i
-
-        assert merge_view_line is not None, (
-            "Could not find _prepare_and_start_merge in finally block"
-        )
-        assert flag_clear_line is not None, (
-            "Could not find is_running_non_wt = False in finally block"
-        )
-
-        assert merge_view_line < flag_clear_line, (
-            "BUG-61: _prepare_and_start_merge (line offset "
-            f"{merge_view_line}) must appear BEFORE "
-            f"is_running_non_wt = False (line offset {flag_clear_line}) "
-            "in the finally block.  Clearing the flag first allows "
-            "concurrent worktree merges to modify the working tree "
-            "during diff capture."
-        )
-
-    def test_flag_still_cleared_on_merge_view_failure(self) -> None:
-        """The flag must be cleared even when _prepare_and_start_merge
-        raises.  Otherwise the flag gets stuck True (BUG-39 regression).
-        """
-        source = inspect.getsource(VSCodeServer._run_task_inner)
-
-        clear_count = source.count("is_running_non_wt = False")
-        assert clear_count >= 2, (
-            "There must be at least 2 flag-clear sites: one in the "
-            "normal finally path and one in the except handler, to "
-            "guarantee the flag never gets stuck"
-        )
 

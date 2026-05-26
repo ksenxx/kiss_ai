@@ -1,11 +1,31 @@
 #!/bin/bash
 set -e
 
+# Capture the user's shell PWD *before* any ``cd`` so VS Code can later open
+# this directory as its workspace root.  Agents launched inside VS Code use
+# this as their PWD (see ``kiss.agents.vscode.server``).
+USER_PWD="$PWD"
+
+# Returns 0 only if git is actually runnable. On macOS, /usr/bin/git is a stub
+# that exits non-zero with an xcode-select message when the Command Line Tools
+# are not installed, so `command -v git` is not sufficient.
+have_working_git() {
+  command -v git &> /dev/null || return 1
+  local out
+  out=$(git --version 2>&1) || return 1
+  case "$out" in
+    *"no developer tools were found"*|*"xcode-select"*|*"command line tools"*|*"CommandLineTools"*)
+      return 1
+      ;;
+  esac
+  return 0
+}
+
 install_git() {
-  if command -v git &> /dev/null; then
+  if have_working_git; then
     return 0
   fi
-  echo "git not found in PATH; attempting to install git..."
+  echo "git not found (or not runnable) in PATH; attempting to install git..."
   case "$(uname -s)" in
     Darwin)
       if command -v brew &> /dev/null; then
@@ -50,7 +70,7 @@ install_git() {
       echo "Unsupported OS for automatic git install."
       ;;
   esac
-  command -v git &> /dev/null
+  have_working_git
 }
 
 install_git || true
@@ -62,7 +82,7 @@ if [ -d ~/kiss_ai ]; then
     git pull
   else
     rm -rf ~/kiss_ai
-    if command -v git &> /dev/null; then
+    if have_working_git; then
       git clone https://github.com/ksenxx/kiss_ai.git ~/kiss_ai
     else
       curl -L -o main.zip https://github.com/ksenxx/kiss_ai/archive/refs/heads/main.zip
@@ -72,7 +92,7 @@ if [ -d ~/kiss_ai ]; then
     fi
   fi
 else
-  if command -v git &> /dev/null; then
+  if have_working_git; then
     git clone https://github.com/ksenxx/kiss_ai.git ~/kiss_ai
   else
     curl -L -o main.zip https://github.com/ksenxx/kiss_ai/archive/refs/heads/main.zip
@@ -86,7 +106,7 @@ cd ~/kiss_ai
 export PATH="$HOME/.local/bin:$PATH"
 echo "Make sure that you have one of Claude Code, ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY. OPENROUTER_API_KEY, or TOGETHER_API_KEY"
 if command -v code &>/dev/null; then
-  code
+  code "$USER_PWD"
 else
-  echo "Open a new terminal and run 'code' to launch VS Code."
+  echo "Open a new terminal and run 'code \"$USER_PWD\"' to launch VS Code."
 fi

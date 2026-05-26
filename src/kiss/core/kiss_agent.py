@@ -58,7 +58,15 @@ class KISSAgent(Base):
 
     def __init__(self, name: str) -> None:
         super().__init__(name)
-        self.step_offset = 0
+        # Optional hook invoked at the top of every ``_execute_step``,
+        # immediately before the next model call.  Receives the live
+        # :class:`kiss.core.models.model.Model` so the hook can mutate
+        # its conversation (e.g. ``add_message_to_conversation``) to
+        # inject additional user-role context queued asynchronously by
+        # an external source (e.g. the VS Code frontend's
+        # ``appendUserMessage`` command — see
+        # :meth:`kiss.agents.sorcar.sorcar_agent.SorcarAgent.run`).
+        self.pre_step_hook: Callable[..., None] | None = None
 
     def _reset(
         self,
@@ -300,6 +308,8 @@ class KISSAgent(Base):
         """
         start_timestamp = int(time.time())
 
+        if self.pre_step_hook is not None:
+            self.pre_step_hook(self.model)
         function_calls, response_text, response = self.model.generate_and_process_with_tools(
             self.function_map, tools_schema=self._cached_tools_schema
         )
@@ -404,13 +414,11 @@ class KISSAgent(Base):
         """Check budget and step limits, raise KISSError if exceeded.
 
         Raises:
-            KISSError: If agent budget, global budget, or step limit is exceeded.
+            KISSError: If agent budget or step limit is exceeded.
         """
         if self.budget_used > self.max_budget:
             raise KISSError(f"Agent {self.name} budget exceeded.")
-        if Base.get_global_budget_used() > 2000.0:
-            raise KISSError("Global budget exceeded.")
-        if self.step_count >= self.max_steps:
+        if self.step_count > self.max_steps:
             raise KISSError(f"Agent {self.name} exceeded {self.max_steps} steps.")
 
     def _add_functions(self, tools: list[Callable[..., Any]]) -> None:
@@ -442,8 +450,6 @@ class KISSAgent(Base):
                 self.model.model_name, input_tokens, output_tokens, cache_read, cache_write
             )
             self.budget_used += cost
-            with Base._class_lock:
-                Base.global_budget_used += cost
         except Exception as e:  # pragma: no cover
             logger.debug("Exception caught", exc_info=True)
             logger.error(
@@ -455,13 +461,10 @@ class KISSAgent(Base):
         try:
             max_tokens = get_max_context_length(self.model.model_name)
             capped_tokens = self.total_tokens_used % max_tokens
-            global_max = 2000.0
-            global_budget_used = Base.get_global_budget_used()
             return (
                 f"Steps: {self.step_count}/{self.max_steps}, "
                 f"Tokens: {capped_tokens:,}/{max_tokens:,}, "
                 f"Budget: ${self.budget_used:.4f}/${self.max_budget:.2f}, "
-                f"Global Budget: ${global_budget_used:.4f}/${global_max:.2f}"
             )
         except Exception:  # pragma: no cover
             logger.debug("Exception caught", exc_info=True)

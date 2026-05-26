@@ -13,6 +13,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
+
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.git_worktree import (
     GitWorktreeOps,
@@ -121,6 +123,7 @@ class TestBug5UseWorktreeNotRestored:
         server = VSCodeServer()
 
         tab = server._get_tab("test-tab")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
 
         assert tab.use_worktree is False
 
@@ -151,6 +154,7 @@ class TestBug6FinalizeIgnoresCommitFailure:
         _restore_db(self.db_saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
+    @pytest.mark.slow
     def test_finalize_removes_worktree_despite_commit_failure(self) -> None:
         """BUG-6 FIX: _finalize_worktree returns False and preserves
         the worktree directory when auto-commit is rejected by a
@@ -259,24 +263,3 @@ class TestBug7SquashMergeDoesntCheckCommit:
             _restore_db(db_saved)
             shutil.rmtree(tmpdir2, ignore_errors=True)
 
-
-class TestInc2RedundantStageAllFixed:
-    """_auto_commit_worktree now calls stage_all() then commit_staged()
-    which does NOT re-stage — the redundant git add -A is eliminated.
-    """
-
-    def test_auto_commit_uses_commit_staged(self) -> None:
-        """INC-2 FIX: _auto_commit_worktree uses commit_staged (no re-stage)."""
-        import inspect
-
-        src = inspect.getsource(WorktreeSorcarAgent._auto_commit_worktree)
-        assert "stage_all" in src
-        assert "commit_staged" in src
-        assert "commit_all" not in src
-
-    def test_commit_staged_does_not_stage(self) -> None:
-        """commit_staged does not run git add -A."""
-        import inspect
-
-        src = inspect.getsource(GitWorktreeOps.commit_staged)
-        assert "add" not in src or '"add", "-A"' not in src

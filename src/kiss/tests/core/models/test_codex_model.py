@@ -300,6 +300,7 @@ class TestParseStreamEvents:
 
 class TestGenerateAndProcessWithTools:
 
+    @pytest.mark.slow
     def test_system_prompt_restored_when_originally_empty(self) -> None:
         m = CodexModel("codex/default")
         m.initialize("test")
@@ -382,6 +383,7 @@ class TestModelInfoEntries:
 
 
 @requires_codex_cli
+@pytest.mark.slow
 class TestGenerateIntegration:
     """Integration tests that actually call the codex CLI."""
 

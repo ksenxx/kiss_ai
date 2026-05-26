@@ -78,7 +78,7 @@ class _LifecycleHarness(unittest.TestCase):
         self.server, self.events = _make_server(self.tmpdir)
         self._orig_gen = _merge_flow_module.generate_commit_message_from_diff
 
-        def fake_gen(diff_text: str) -> str:
+        def fake_gen(diff_text: str, user_prompt: str | None = None) -> str:
             return "chore: auto-commit test"
 
         _merge_flow_module.generate_commit_message_from_diff = fake_gen  # type: ignore[assignment]
@@ -429,19 +429,19 @@ class TestAutocommitPromptNotShownForCleanWorkTree(_LifecycleHarness):
 
 class TestFinishMergeTabMissing(_LifecycleHarness):
     """BUG REPRODUCTION: when _finish_merge is called on a process that
-    doesn't have the tab in _tab_states (e.g., merge-action was routed
+    doesn't have the tab in _running_agent_states (e.g., merge-action was routed
     to the service process after the task process was disposed), the
     autocommit_prompt must still be emitted for dirty non-worktree tabs.
 
     This reproduces the bug where merge buttons and autocommit were not
-    shown because the tab was missing from _tab_states.
+    shown because the tab was missing from _running_agent_states.
     """
 
     def test_autocommit_prompt_when_tab_not_in_states(self) -> None:
         """_finish_merge must send autocommit_prompt even when the tab
-        is not pre-existing in _tab_states."""
+        is not pre-existing in _running_agent_states."""
         tab_id = "missing-tab-id"
-        assert tab_id not in self.server._tab_states
+        assert tab_id not in self.server._running_agent_states
 
         Path(self.tmpdir, "README.md").write_text("# Modified\n")
 
@@ -451,13 +451,13 @@ class TestFinishMergeTabMissing(_LifecycleHarness):
         assert "merge_ended" in types, f"merge_ended not found: {types}"
         assert "autocommit_prompt" in types, (
             "autocommit_prompt should be sent even when the tab is missing "
-            f"from _tab_states. Got: {types}"
+            f"from _running_agent_states. Got: {types}"
         )
 
     def test_merge_ended_still_sent_when_tab_missing(self) -> None:
         """merge_ended must always be broadcast, even when tab is missing."""
         tab_id = "missing-tab-2"
-        assert tab_id not in self.server._tab_states
+        assert tab_id not in self.server._running_agent_states
 
         self.server._finish_merge(tab_id)
 
@@ -512,13 +512,14 @@ class TestMergeStartSessionEventContent(_LifecycleHarness):
 
 
 class TestAutocommitPromptForBinaryOnlyChanges(_LifecycleHarness):
-    """Binary-only modifications (e.g. rebuilt PDFs) produce no text hunks,
-    so _prepare_and_start_merge returns False. The autocommit_prompt must
-    still be shown because the repo is dirty."""
+    """Binary-only modifications (e.g. rebuilt PDFs) are now included in
+    the merge view with a dummy hunk so the user can accept/reject them.
+    The merge session starts normally and autocommit_prompt is shown
+    after the merge review completes."""
 
-    def test_binary_only_triggers_autocommit_prompt(self) -> None:
-        """Modifying only a binary file skips merge review but shows
-        'Auto commit' / 'Do nothing' buttons."""
+    def test_binary_only_triggers_merge_session(self) -> None:
+        """Modifying only a binary file starts a merge review session
+        so the user can accept or reject the binary change."""
         tab_id = "test-tab-binary"
         tab = self.server._get_tab(tab_id)
         tab.use_worktree = False
@@ -550,40 +551,22 @@ class TestAutocommitPromptForBinaryOnlyChanges(_LifecycleHarness):
             tab_id=tab_id,
         )
 
-        # No text hunks for binary files → merge session not started
-        assert not started, (
-            "Binary-only changes should not start a merge session "
-            f"(no text hunks). Events: {_event_types(self.events)}"
+        # Binary files are now included in the merge view
+        assert started, (
+            "Binary-only changes should start a merge session "
+            f"(with binary flag). Events: {_event_types(self.events)}"
         )
-
-        # But the repo IS dirty, so the autocommit prompt must be sent
-        # This simulates the task_runner finally block logic:
-        changed = self.server._main_dirty_files()
-        assert "output.pdf" in changed, (
-            f"_main_dirty_files should detect dirty binary file, got: {changed}"
-        )
-
-        # Now test the full task_runner path: when merge not started,
-        # the autocommit_prompt should be broadcast
-        self.events.clear()
-        if not started:
-            dirty = self.server._main_dirty_files()
-            if dirty:
-                self.server.printer.broadcast({
-                    "type": "autocommit_prompt",
-                    "tabId": tab_id,
-                    "changedFiles": dirty,
-                })
 
         types = _event_types(self.events)
-        assert "autocommit_prompt" in types, (
-            "Binary-only changes must trigger autocommit_prompt even "
-            f"without a merge review. Got: {types}"
-        )
+        assert "merge_data" in types
+        assert "merge_started" in types
 
-        ac_event = _find_event(self.events, "autocommit_prompt")
-        assert ac_event["tabId"] == tab_id
-        assert "output.pdf" in ac_event["changedFiles"]
+        # The merge data should contain the binary file with binary flag
+        md_event = _find_event(self.events, "merge_data")
+        files = md_event["data"]["files"]
+        assert len(files) == 1
+        assert files[0]["name"] == "output.pdf"
+        assert files[0].get("binary") is True
 
     def test_binary_plus_text_goes_through_merge(self) -> None:
         """When both binary and text files change, the text changes get

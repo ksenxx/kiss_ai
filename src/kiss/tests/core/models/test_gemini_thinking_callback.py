@@ -108,6 +108,7 @@ class TestGeminiStreamPartsThinkingCallback:
         so thinking tokens are broadcast as text_delta events.
         """
         printer = BaseBrowserPrinter()
+        printer._thread_local.task_id = "gemini-thinking-test"
         printer.start_recording()
 
         m = GeminiModel(

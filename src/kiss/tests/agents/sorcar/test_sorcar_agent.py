@@ -222,6 +222,7 @@ class TestSorcarBashStreaming:
         bash_tool = tools[0]
 
         printer = BaseBrowserPrinter()
+        printer._thread_local.task_id = "0"
         printer.start_recording()
         agent.printer = printer
 

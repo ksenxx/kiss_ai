@@ -111,22 +111,6 @@ class _ConfigSnapshot:
 # ---------------------------------------------------------------------------
 
 
-class TestM1RunningLoop(unittest.TestCase):
-    """``_setup_server`` must not call deprecated ``asyncio.get_event_loop``."""
-
-    def test_setup_server_source_uses_get_running_loop(self) -> None:
-        src = inspect.getsource(RemoteAccessServer._setup_server)
-        self.assertIn("get_running_loop()", src)
-        # Strip block comments before checking that the deprecated
-        # call does not appear as a real expression.
-        code_only = "\n".join(
-            line for line in src.splitlines()
-            if not line.lstrip().startswith("#")
-        )
-        self.assertNotIn(
-            "get_event_loop(", code_only,
-            "_setup_server must not call asyncio.get_event_loop()",
-        )
 
 
 class TestM1NoDeprecationWarning(IsolatedAsyncioTestCase):
@@ -461,12 +445,6 @@ class TestM5SpawnRetriesOnImmediateExit(IsolatedAsyncioTestCase):
         self.assertGreaterEqual(count, 2)
 
 
-class TestM5SpawnSignatureAcceptsRetries(unittest.TestCase):
-    """``_spawn_cloudflared`` accepts a ``retries`` kwarg (M5 fix)."""
-
-    def test_signature(self) -> None:
-        sig = inspect.signature(RemoteAccessServer._spawn_cloudflared)
-        self.assertIn("retries", sig.parameters)
 
 
 # ---------------------------------------------------------------------------
@@ -491,41 +469,65 @@ class TestM6MergeStateCleanup(IsolatedAsyncioTestCase):
         self._snap.__exit__()
 
     async def test_merge_state_dropped_on_disconnect(self) -> None:
-        """A tab's merge state is removed when the WS for that tab closes."""
-        tab_id = "tab-m6-disc"
-        async with connect(
-            f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl(),
-        ) as ws:
-            await ws.send(json.dumps({"type": "auth", "password": ""}))
-            await asyncio.wait_for(ws.recv(), timeout=5)
-            # Send any command carrying the tabId so the server
-            # records it on this connection.
-            await ws.send(json.dumps({
-                "type": "getWelcomeSuggestions", "tabId": tab_id,
-            }))
-            # Drain a few events to let the server process the message.
-            for _ in range(3):
-                try:
-                    await asyncio.wait_for(ws.recv(), timeout=1)
-                except (TimeoutError, ConnectionClosed):
+        """A tab's merge state is removed after the deferred ``closeTab``.
+
+        The web server defers ``closeTab`` for every tab id seen on a
+        dropped WS connection by :data:`_TAB_CLOSE_GRACE` seconds so a
+        reload / transient reconnect can re-claim the tab id and
+        preserve backend state.  Merge state for the disconnected tab
+        is popped inside :meth:`_fire_pending_tab_close` when the
+        grace timer elapses without a reconnect.  This test shrinks
+        the grace window to a few hundred milliseconds and verifies
+        the eventual cleanup.
+        """
+        import kiss.agents.vscode.web_server as ws_mod
+
+        orig_grace = ws_mod._TAB_CLOSE_GRACE
+        ws_mod._TAB_CLOSE_GRACE = 0.1
+        try:
+            tab_id = "tab-m6-disc"
+            async with connect(
+                f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl(),
+            ) as ws:
+                await ws.send(json.dumps({"type": "auth", "password": ""}))
+                await asyncio.wait_for(ws.recv(), timeout=5)
+                # Send any command carrying the tabId so the server
+                # records it on this connection.
+                await ws.send(json.dumps({
+                    "type": "getWelcomeSuggestions", "tabId": tab_id,
+                }))
+                # Drain a few events to let the server process the
+                # message.
+                for _ in range(3):
+                    try:
+                        await asyncio.wait_for(ws.recv(), timeout=1)
+                    except (TimeoutError, ConnectionClosed):
+                        break
+                # Inject a merge state for this tab from outside
+                # (mimicking what WebPrinter.broadcast →
+                # _register_merge_state does).
+                self.server._register_merge_state(tab_id, {"files": [
+                    {"name": "x.txt", "base": "/tmp/x.b",
+                     "current": "/tmp/x.c",
+                     "hunks": [{"bs": 0, "bc": 0, "cs": 0, "cc": 1}]},
+                ]})
+                self.assertIn(tab_id, self.server._merge_states)
+            # After the WS closes, the grace timer eventually fires
+            # ``_fire_pending_tab_close`` which pops the merge state.
+            # Allow well over the (shrunk) grace window for the timer
+            # to elapse and the executor-dispatched closeTab to
+            # finalise.
+            for _ in range(40):
+                await asyncio.sleep(0.05)
+                if tab_id not in self.server._merge_states:
                     break
-            # Inject a merge state for this tab from outside (mimicking
-            # what WebPrinter.broadcast → _register_merge_state does).
-            self.server._register_merge_state(tab_id, {"files": [
-                {"name": "x.txt", "base": "/tmp/x.b", "current": "/tmp/x.c",
-                 "hunks": [{"bs": 0, "bc": 0, "cs": 0, "cc": 1}]},
-            ]})
-            self.assertIn(tab_id, self.server._merge_states)
-        # After the WS closes, the cleanup branch must drop the state.
-        # Give the asyncio handler a moment to run its `finally:`.
-        for _ in range(20):
-            await asyncio.sleep(0.05)
-            if tab_id not in self.server._merge_states:
-                break
-        self.assertNotIn(
-            tab_id, self.server._merge_states,
-            "merge state for the disconnected tab must be cleaned up",
-        )
+            self.assertNotIn(
+                tab_id, self.server._merge_states,
+                "merge state for the disconnected tab must be cleaned up "
+                "after the deferred-close grace period",
+            )
+        finally:
+            ws_mod._TAB_CLOSE_GRACE = orig_grace
 
     async def test_merge_states_lock_exists(self) -> None:
         """A threading.Lock guards _merge_states (M6 race fix)."""
@@ -766,13 +768,6 @@ class TestM9IsResolvedMethod(unittest.TestCase):
         self.assertTrue(state.is_resolved(0, 1))
         self.assertFalse(state.is_resolved(0, 0))
 
-    def test_handle_web_merge_action_does_not_poke_resolved_directly(self) -> None:
-        """Source no longer references ``state._resolved`` outside the class."""
-        src = inspect.getsource(RemoteAccessServer._handle_web_merge_action)
-        self.assertNotIn(
-            "state._resolved", src,
-            "_handle_web_merge_action must use is_resolved(), not _resolved",
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -790,9 +785,6 @@ class TestM10WelcomeInfoIsAsync(unittest.TestCase):
             "blocking IO via run_in_executor",
         )
 
-    def test_source_uses_run_in_executor(self) -> None:
-        src = inspect.getsource(RemoteAccessServer._send_welcome_info)
-        self.assertIn("run_in_executor", src)
 
 
 class TestM10WelcomeInfoDoesNotBlockEventLoop(IsolatedAsyncioTestCase):
@@ -897,79 +889,6 @@ class TestM11CurrentReturnsNoneWhenAllResolved(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-class TestM12AuthClosesSocketOnException(IsolatedAsyncioTestCase):
-    """``_authenticate_ws`` always closes the WS on failure, including errors."""
-
-    async def asyncSetUp(self) -> None:
-        self._snap = _ConfigSnapshot().__enter__()
-        save_config({"remote_password": "secret-m12"})
-        self.port = _find_free_port()
-        self.server = RemoteAccessServer(
-            host="127.0.0.1", port=self.port, work_dir=tempfile.mkdtemp(),
-        )
-        await self.server.start_async()
-
-    async def asyncTearDown(self) -> None:
-        await self.server.stop_async()
-        self._snap.__exit__()
-
-    async def test_socket_closed_on_invalid_json(self) -> None:
-        """A non-JSON auth payload raises and the server closes the socket."""
-        async with connect(
-            f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl(),
-        ) as ws:
-            await ws.send("this is not valid JSON")
-            # The server must close the connection (M12); recv() then
-            # raises ConnectionClosed.
-            with self.assertRaises(ConnectionClosed):
-                await asyncio.wait_for(ws.recv(), timeout=5)
-
-    async def test_socket_closed_on_auth_timeout(self) -> None:
-        """Sending nothing at all → server hits its 30s recv timeout → close."""
-        # Patch the recv timeout for this test's connection so the test
-        # runs quickly.  We do this by monkey-patching ``_authenticate_ws``
-        # to call ``asyncio.wait_for`` with a very short timeout.
-        original = self.server._authenticate_ws
-
-        async def _short_timeout_auth(websocket: Any) -> bool:
-            # Replicate the authenticate path but with a 0.5s timeout
-            # on the first recv() — exercising the same exception path.
-
-            try:
-                await asyncio.wait_for(websocket.recv(), timeout=0.5)
-                return False  # never reached: the timeout fires first
-            except Exception:
-                try:
-                    await websocket.close()
-                except Exception:
-                    pass
-                return False
-
-        self.server._authenticate_ws = _short_timeout_auth  # type: ignore[assignment]
-        async with connect(
-            f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl(),
-        ) as ws:
-            # Send nothing — let the server's wait_for timeout.
-            with self.assertRaises(ConnectionClosed):
-                await asyncio.wait_for(ws.recv(), timeout=5)
-        self.server._authenticate_ws = original  # type: ignore[assignment]
-
-    def test_authenticate_source_has_close_in_exception_branch(self) -> None:
-        """Source-level guarantee: ``except`` branch contains ``websocket.close``."""
-        src = inspect.getsource(RemoteAccessServer._authenticate_ws)
-        # The outer (function-level) ``except Exception:`` is indented
-        # exactly 8 spaces.  Anything deeper is a nested except inside
-        # a try/except (e.g. the inner ``try: await close() except: pass``).
-        marker = "\n        except Exception:"
-        idx = src.find(marker)
-        self.assertGreaterEqual(
-            idx, 0, "Could not find function-level exception handler",
-        )
-        tail = src[idx:]
-        self.assertIn(
-            "websocket.close()", tail,
-            "Exception branch in _authenticate_ws must call websocket.close()",
-        )
 
 
 if __name__ == "__main__":

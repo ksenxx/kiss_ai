@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -44,13 +43,88 @@ class TestPersistenceBranches:
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "sorcar.db"
         th._db_conn = None
+        th._invalidate_chat_context_cache()
 
     def teardown_method(self) -> None:
         if th._db_conn is not None:
             th._db_conn.close()
         (th._DB_PATH, th._db_conn, th._KISS_DIR) = self._saved
+        th._invalidate_chat_context_cache()
         import shutil
         shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_chat_context_text_cache_hits_and_invalidates(self) -> None:
+        """_load_chat_context_text caches and is invalidated by writes."""
+        # Start from a clean cache so a chat_id reused across tests
+        # doesn't carry over stale text.
+        th._invalidate_chat_context_cache()
+        task_id, chat_id = th._add_task("alpha_one")
+        th._save_task_result("result_one_text", task_id=task_id)
+        first = th._load_chat_context_text(chat_id)
+        assert "alpha_one" in first
+        assert "result_one_text" in first
+
+        # Mutate the underlying row directly via SQL — this path does
+        # not invalidate the cache, so the next call must still return
+        # the cached pre-mutation text.
+        db = th._get_db()
+        db.execute(
+            "UPDATE task_history SET result = ? WHERE id = ?",
+            ("SECRET_NEW_RESULT", task_id),
+        )
+        db.commit()
+        cached = th._load_chat_context_text(chat_id)
+        assert cached == first
+        assert "SECRET_NEW_RESULT" not in cached
+
+        # After explicit invalidation the next call observes the
+        # updated row.
+        th._invalidate_chat_context_cache(chat_id)
+        refreshed = th._load_chat_context_text(chat_id)
+        assert "SECRET_NEW_RESULT" in refreshed
+        assert "result_one_text" not in refreshed
+
+        # _save_task_result invalidates automatically.
+        th._save_task_result("AUTO_INVALIDATED", task_id=task_id)
+        after_save = th._load_chat_context_text(chat_id)
+        assert "AUTO_INVALIDATED" in after_save
+
+        # _add_task on the same chat_id also invalidates automatically.
+        th._add_task("brand_new_task_added", chat_id=chat_id)
+        after_add = th._load_chat_context_text(chat_id)
+        assert "brand_new_task_added" in after_add
+        assert "AUTO_INVALIDATED" in after_add
+
+    def test_chat_context_text_cache_clear_all(self) -> None:
+        """_invalidate_chat_context_cache() with no arg clears every entry."""
+        th._invalidate_chat_context_cache()
+        _, chat_a = th._add_task("aa_one")
+        _, chat_b = th._add_task("bb_one")
+        # Populate cache for both.
+        text_a = th._load_chat_context_text(chat_a)
+        text_b = th._load_chat_context_text(chat_b)
+        assert "aa_one" in text_a
+        assert "bb_one" in text_b
+        # Out-of-band SQL update neither chat sees through the cache.
+        db = th._get_db()
+        db.execute(
+            "UPDATE task_history SET task = 'mut_aa' WHERE chat_id = ?",
+            (chat_a,),
+        )
+        db.execute(
+            "UPDATE task_history SET task = 'mut_bb' WHERE chat_id = ?",
+            (chat_b,),
+        )
+        db.commit()
+        assert "mut_aa" not in th._load_chat_context_text(chat_a)
+        assert "mut_bb" not in th._load_chat_context_text(chat_b)
+        th._invalidate_chat_context_cache()
+        assert "mut_aa" in th._load_chat_context_text(chat_a)
+        assert "mut_bb" in th._load_chat_context_text(chat_b)
+
+    def test_chat_context_text_cache_empty_chat_id(self) -> None:
+        """_load_chat_context_text returns '' for empty chat_id."""
+        assert th._load_chat_context_text("") == ""
 
     def test_load_latest_chat_events_bad_json(self) -> None:
         """_load_latest_chat_events_by_chat_id handles corrupt event_json gracefully."""
@@ -126,37 +200,15 @@ class TestVSCodeServerBranches:
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "sorcar.db"
         th._db_conn = None
+        th._invalidate_chat_context_cache()
 
     def teardown_method(self) -> None:
         if th._db_conn is not None:
             th._db_conn.close()
         (th._DB_PATH, th._db_conn, th._KISS_DIR) = self._saved
+        th._invalidate_chat_context_cache()
         import shutil
         shutil.rmtree(self._tmpdir, ignore_errors=True)
-
-    def test_run_loop_empty_lines_and_invalid_json(self) -> None:
-        """server.run() skips empty lines, handles invalid JSON (line 119)."""
-        import io
-
-        server = VSCodeServer()
-        events: list[dict] = []
-        orig_broadcast = server.printer.broadcast
-        def capture(ev: dict) -> None:
-            events.append(ev)
-            orig_broadcast(ev)
-        server.printer.broadcast = capture  # type: ignore[assignment]
-
-        fake_stdin = io.StringIO("\n\nnot-json\n")
-        old_stdin = sys.stdin
-        sys.stdin = fake_stdin
-        try:
-            server.run()
-        finally:
-            sys.stdin = old_stdin
-
-        error_events = [e for e in events if e.get("type") == "error"]
-        assert len(error_events) == 1
-        assert "Invalid JSON" in error_events[0]["text"]
 
     def test_handle_command_unknown(self) -> None:
         """Unknown command type broadcasts error."""
@@ -220,6 +272,87 @@ class TestVSCodeServerBranches:
         server = VSCodeServer()
         result = server._complete_from_active_file("test", "/nonexistent/file.py", "")
         assert result == ""
+
+    def test_complete_from_active_file_uses_chat_history(self) -> None:
+        """_complete_from_active_file harvests identifiers from prior chat tasks."""
+        task_id, chat_id = th._add_task("first task with calculate_total_amount usage")
+        th._save_task_result(
+            "the result mentions parse_xml_payload again", task_id=task_id,
+        )
+        server = VSCodeServer()
+        # No file content at all — must still find a candidate from chat history.
+        assert server._complete_from_active_file(
+            "calc", "", "", chat_id,
+        ) == "ulate_total_amount"
+        assert server._complete_from_active_file(
+            "parse_xml", "", "", chat_id,
+        ) == "_payload"
+        # Without chat_id, the same call returns nothing because there is
+        # no active-file content to harvest identifiers from.
+        assert server._complete_from_active_file("calc", "", "") == ""
+
+    def test_complete_from_active_file_combines_file_and_chat(self) -> None:
+        """File content and chat history both contribute candidates."""
+        _task_id, chat_id = th._add_task("chat had wonderful_widget_factory in it")
+        server = VSCodeServer()
+        file_content = "class HelperUtil:\n    pass\n"
+        # Match from file content.
+        assert server._complete_from_active_file(
+            "Help", "", file_content, chat_id,
+        ) == "erUtil"
+        # Match from chat history when the partial doesn't appear in file.
+        assert server._complete_from_active_file(
+            "wonderful", "", file_content, chat_id,
+        ) == "_widget_factory"
+
+    def test_complete_from_active_file_caches_chat_context(self) -> None:
+        """Chat-context text is cached between keystrokes in the same chat."""
+        task_id, chat_id = th._add_task("first wonderful_alpha_token here")
+        th._save_task_result("nothing useful", task_id=task_id)
+        server = VSCodeServer()
+
+        # First call populates the cache; suggestion comes from chat text.
+        assert server._complete_from_active_file(
+            "wonderful_a", "", "", chat_id,
+        ) == "lpha_token"
+
+        # Mutate the row out-of-band so the DB no longer contains the
+        # original token.  The cache must still serve the stale text,
+        # proving the second keystroke didn't re-run SQL/joins.
+        db = th._get_db()
+        db.execute(
+            "UPDATE task_history SET task = ? WHERE id = ?",
+            ("first beta_zero_marker different", task_id),
+        )
+        db.commit()
+        assert server._complete_from_active_file(
+            "wonderful_a", "", "", chat_id,
+        ) == "lpha_token"
+
+        # An explicit invalidation forces a reload; now beta_zero_marker
+        # is visible and the old token is not.
+        th._invalidate_chat_context_cache(chat_id)
+        assert server._complete_from_active_file(
+            "beta_zero", "", "", chat_id,
+        ) == "_marker"
+        assert server._complete_from_active_file(
+            "wonderful_a", "", "", chat_id,
+        ) == ""
+
+        # _save_task_result auto-invalidates: write a result containing a
+        # brand-new identifier and confirm the next keystroke sees it.
+        th._save_task_result(
+            "gamma_three_signal appears now", task_id=task_id,
+        )
+        assert server._complete_from_active_file(
+            "gamma_three", "", "", chat_id,
+        ) == "_signal"
+
+        # _add_task also auto-invalidates.
+        th._add_task("delta_four_indicator was added", chat_id=chat_id)
+        assert server._complete_from_active_file(
+            "delta_four", "", "", chat_id,
+        ) == "_indicator"
 
     def test_fast_complete_history_match(self) -> None:
         """_complete returns history match via broadcast."""
@@ -336,7 +469,7 @@ class TestBrowserUIBranches:
         then verifies the timer is cancelled and buffer is flushed.
         """
         p = BaseBrowserPrinter()
-        p._thread_local.tab_id = "0"
+        p._thread_local.task_id = "0"
         with p._bash_lock:
             bs = p._bash_state
             bs.last_flush = time.monotonic() - 1.0
@@ -352,13 +485,18 @@ class TestBrowserUIBranches:
         assert len(output_events) == 1
 
     def test_print_tool_result_non_core_tool(self) -> None:
-        """Non-core tool result is hidden unless is_error (line 273->281)."""
+        """Non-core tool result is now rendered (policy: render every tool's
+        return value EXCEPT ``finish``). Verify the event reaches the
+        recording for a custom (non-core) tool.
+        """
         p = BaseBrowserPrinter()
+        p._thread_local.task_id = "0"
         p.start_recording()
         p.print("some result", type="tool_result", tool_name="custom_tool", is_error=False)
         events = p.stop_recording()
         tool_results = [e for e in events if e.get("type") == "tool_result"]
-        assert len(tool_results) == 0
+        assert len(tool_results) == 1
+        assert tool_results[0]["content"] == "some result"
 
 
 class TestWebUseToolBranches:

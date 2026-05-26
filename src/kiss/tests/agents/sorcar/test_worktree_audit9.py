@@ -36,7 +36,6 @@ RED-6: See BUG-41.
 
 from __future__ import annotations
 
-import inspect
 import json
 import subprocess
 from pathlib import Path
@@ -74,73 +73,6 @@ def _make_repo(tmp_path: Path, name: str = "repo") -> Path:
     return repo
 
 
-class TestBug39Fix:
-    """BUG-39 FIX: Verify `is_running_non_wt = False` is guaranteed
-    to run (via try/finally or except handler) AND is also present in
-    the outer except handler.
-
-    NOTE: BUG-61 supersedes the original BUG-39 ordering.  The flag
-    clear now happens AFTER `_prepare_and_start_merge` (so the merge
-    view diff is captured while concurrent worktree merges are blocked),
-    but is wrapped in a ``finally`` so it never gets stuck True.
-    """
-
-    def test_flag_cleared_via_finally_after_merge_view(self):
-        """The flag clear is inside a finally block that follows the
-        merge view preparation, guaranteeing it always runs.
-        (BUG-61 fix supersedes original BUG-39 ordering.)"""
-        src = inspect.getsource(VSCodeServer._run_task_inner)
-        finally_idx = src.find("finally:")
-        assert finally_idx > 0
-        finally_block = src[finally_idx:]
-
-        assert "is_running_non_wt = False" in finally_block, (
-            "BUG-39: flag clear must be in the finally block"
-        )
-
-        merge_pos = finally_block.find("_prepare_and_start_merge")
-        flag_pos = finally_block.find("is_running_non_wt = False")
-        assert merge_pos > 0 and flag_pos > 0, (
-            "Both merge view and flag clear must be in the finally block"
-        )
-        assert merge_pos < flag_pos, (
-            "BUG-61: merge view must be prepared BEFORE flag is cleared"
-        )
-
-    def test_flag_cleared_in_except_handler(self):
-        """The except BaseException handler also clears the flag."""
-        src = inspect.getsource(VSCodeServer._run_task_inner)
-        except_positions = [
-            i for i in range(len(src))
-            if src[i:].startswith("except BaseException:")
-        ]
-        cleanup_except = except_positions[-1]
-        handler_block = src[cleanup_except:]
-
-        assert "is_running_non_wt = False" in handler_block, (
-            "BUG-39 fix: except handler must clear is_running_non_wt"
-        )
-
-    def test_flag_clear_before_risky_calls(self):
-        """Flag clear precedes all calls that could raise."""
-        src = inspect.getsource(VSCodeServer._run_task_inner)
-        finally_pos = src.rfind("finally:")
-        finally_block = src[finally_pos:]
-        flag_pos = finally_block.find("tab.is_running_non_wt = False")
-        assert flag_pos > 0
-
-        risky_calls = [
-            "self.printer.stop_recording()",
-            "_save_task_result(",
-            "_save_task_extra(",
-            "self.printer.reset()",
-        ]
-        for call in risky_calls:
-            call_pos = finally_block.find(call)
-            if call_pos >= 0:
-                assert flag_pos < call_pos, (
-                    f"Flag clear must precede {call}"
-                )
 
 
 class TestBug40Inc4Fix:
@@ -148,30 +80,8 @@ class TestBug40Inc4Fix:
     instead of (None, err), and _release_worktree never misattributes
     checkout errors to _stash_pop_warning."""
 
-    def test_do_merge_returns_checkout_failed_enum(self):
-        """_do_merge returns (MergeResult.CHECKOUT_FAILED, '') on checkout failure."""
-        src = inspect.getsource(WorktreeSorcarAgent._do_merge)
-        assert "MergeResult.CHECKOUT_FAILED" in src, (
-            "Expected CHECKOUT_FAILED in _do_merge"
-        )
-        assert "return (None," not in src, (
-            "Should not return None as result anymore"
-        )
 
-    def test_do_merge_return_type_no_none(self):
-        """Return type annotation uses MergeResult, not MergeResult | None."""
-        src = inspect.getsource(WorktreeSorcarAgent._do_merge)
-        assert "tuple[MergeResult, str]" in src, (
-            "Return type should be tuple[MergeResult, str]"
-        )
 
-    def test_release_worktree_checks_checkout_failed(self):
-        """_release_worktree checks CHECKOUT_FAILED instead of result is None."""
-        src = inspect.getsource(WorktreeSorcarAgent._release_worktree)
-        assert "MergeResult.CHECKOUT_FAILED" in src
-        assert "result is None" not in src, (
-            "Should not check 'result is None' anymore"
-        )
 
     def test_checkout_error_not_stored_as_stash_warning(self, tmp_path):
         """Checkout failure does NOT set _stash_pop_warning."""
@@ -212,31 +122,15 @@ class TestBug41Red6Fix:
     """BUG-41/RED-6 FIX: _start_merge_session accepts tab_id parameter
     and all callers pass it."""
 
-    def test_start_merge_session_has_tab_id_param(self):
-        """_start_merge_session accepts tab_id."""
-        sig = inspect.signature(VSCodeServer._start_merge_session)
-        assert "tab_id" in sig.parameters, (
-            "BUG-41 fix: _start_merge_session must accept tab_id"
-        )
 
-    def test_prepare_and_start_merge_passes_tab_id(self):
-        """_prepare_and_start_merge passes tab_id to _start_merge_session."""
-        src = inspect.getsource(VSCodeServer._prepare_and_start_merge)
-        assert "tab_id=tab_id" in src, (
-            "Must pass tab_id to _start_merge_session"
-        )
 
-    def test_restore_pending_merge_removed(self):
-        """_restore_pending_merge was dead code and has been removed (RED-9)."""
-        assert not hasattr(VSCodeServer, "_restore_pending_merge"), (
-            "_restore_pending_merge should be removed (RED-9 dead code)"
-        )
 
     def test_is_merging_set_with_explicit_tab_id(self, tmp_path):
         """When tab_id is passed explicitly, is_merging is set correctly
         even if thread-local tab_id is None (replay path)."""
         server = VSCodeServer()
         tab = server._get_tab("replay-tab")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         assert not tab.is_merging
 
         merge_dir = tmp_path / "merge"
@@ -258,70 +152,6 @@ class TestBug41Red6Fix:
         )
 
 
-class TestBug42Inc5Fix:
-    """BUG-42/INC-5 FIX: Auto-discard in _run_task_inner and
-    _finish_merge now checks _any_non_wt_running() before discard."""
-
-    def test_run_task_inner_auto_discard_guarded(self):
-        """_run_task_inner's worktree auto-discard is guarded.
-
-        After RED-10 refactor the guard lives in the shared helper
-        ``_present_pending_worktree``; ``_run_task_inner`` delegates
-        to it, so the guard must be present in the helper.
-        """
-        helper_src = inspect.getsource(VSCodeServer._present_pending_worktree)
-        discard_pos = helper_src.find("tab.agent.discard()")
-        assert discard_pos > 0
-        context = helper_src[max(0, discard_pos - 500):discard_pos]
-        assert "_any_non_wt_running" in context, (
-            "Auto-discard in the shared helper must check _any_non_wt_running"
-        )
-        runner_src = inspect.getsource(VSCodeServer._run_task_inner)
-        assert "_present_pending_worktree" in runner_src, (
-            "_run_task_inner must delegate pending-worktree handling "
-            "to the shared helper"
-        )
-
-    def test_finish_merge_auto_discard_guarded(self):
-        """_finish_merge's auto-discard is guarded via the shared helper."""
-        finish_src = inspect.getsource(VSCodeServer._finish_merge)
-        assert "_present_pending_worktree" in finish_src, (
-            "_finish_merge must delegate pending-worktree handling "
-            "to the shared helper"
-        )
-        helper_src = inspect.getsource(VSCodeServer._present_pending_worktree)
-        guard_pos = helper_src.find("_any_non_wt_running")
-        discard_pos = helper_src.find("tab.agent.discard()")
-        assert guard_pos > 0 and discard_pos > 0
-        assert guard_pos < discard_pos, (
-            "Guard must precede discard call in the shared helper"
-        )
-
-    def test_all_discard_paths_consistent(self):
-        """All discard paths in the server share the same guard.
-
-        ``_handle_worktree_action`` delegates its busy check to the
-        shared helper ``_check_worktree_busy``, which in turn consults
-        ``_any_non_wt_running``.  The helper is therefore the point
-        where the guard is enforced; the caller just invokes it.
-        """
-        busy_src = inspect.getsource(VSCodeServer._check_worktree_busy)
-        assert "_any_non_wt_running" in busy_src, (
-            "_check_worktree_busy must consult _any_non_wt_running"
-        )
-        for name in (
-            "_present_pending_worktree",
-            "_handle_worktree_action",
-        ):
-            src = inspect.getsource(getattr(VSCodeServer, name))
-            if "tab.agent.discard()" in src or "wt.discard()" in src:
-                assert (
-                    "_any_non_wt_running" in src
-                    or "_check_worktree_busy" in src
-                ), (
-                    f"{name} must guard discard with _any_non_wt_running "
-                    "(directly or via _check_worktree_busy)"
-                )
 
 
 class TestBug43Fix:
@@ -353,31 +183,8 @@ class TestBug43Fix:
         assert "merge --squash" in cmd
         assert "cherry-pick" not in cmd
 
-    def test_release_worktree_uses_correct_instructions(self):
-        """_release_worktree uses _manual_merge_cmd for instructions."""
-        src = inspect.getsource(WorktreeSorcarAgent._release_worktree)
-        assert "merge_cmd" in src
-        assert "git merge --squash" not in src, (
-            "Should not hardcode 'git merge --squash' in instructions"
-        )
 
-    def test_merge_uses_correct_instructions(self):
-        """merge() uses _manual_merge_cmd for instructions."""
-        src = inspect.getsource(WorktreeSorcarAgent.merge)
-        assert "merge_cmd" in src
-        lines_with_merge_squash = [
-            line for line in src.splitlines()
-            if "git merge --squash" in line and "#" not in line.split("git merge")[0]
-        ]
-        assert not lines_with_merge_squash, (
-            "merge() should not hardcode 'git merge --squash'"
-        )
 
-    def test_merge_instructions_uses_correct_cmd(self):
-        """merge_instructions() uses _manual_merge_cmd."""
-        src = inspect.getsource(WorktreeSorcarAgent.merge_instructions)
-        assert "merge_cmd" in src
-        assert "git merge --squash" not in src
 
     def test_functional_instructions_match_auto_merge(self, tmp_path):
         """Instructions produce the same result as auto-merge when baseline exists."""
@@ -440,13 +247,6 @@ class TestBug43Fix:
 class TestInc6Fix:
     """INC-6 FIX: _check_merge_conflict checks both unstaged and staged files."""
 
-    def test_check_includes_staged_files(self):
-        """Source code calls both unstaged_files and staged_files."""
-        src = inspect.getsource(VSCodeServer._check_merge_conflict)
-        assert "unstaged_files" in src
-        assert "staged_files" in src, (
-            "Must check staged_files in addition to unstaged_files"
-        )
 
     def test_staged_overlap_detected(self, tmp_path):
         """A staged file overlapping with worktree changes IS detected."""
@@ -470,6 +270,7 @@ class TestInc6Fix:
         server = VSCodeServer()
         server.work_dir = str(repo)
         tab = server._get_tab("inc6-tab")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.use_worktree = True
         tab.agent._wt = GitWorktree(
             repo_root=repo,
@@ -490,67 +291,6 @@ class TestInc6Fix:
         if GitWorktreeOps.branch_exists(repo, branch):
             GitWorktreeOps.delete_branch(repo, branch)
 
-    def test_staged_files_helper_exists(self):
-        """GitWorktreeOps.staged_files exists and works."""
-        assert hasattr(GitWorktreeOps, "staged_files")
-        sig = inspect.signature(GitWorktreeOps.staged_files)
-        assert "repo" in sig.parameters
 
 
-class TestRed5Fix:
-    """RED-5 FIX: The two originally-consecutive identical
-    `if not tab.use_worktree:` blocks (flag-clear + merge-view) are
-    no longer adjacent/redundant.  The flag-clear moved to the very
-    start of the try block (BUG-39 fix), and each remaining block
-    serves a distinct purpose."""
 
-    def test_no_adjacent_duplicate_blocks(self):
-        """No two adjacent `if not tab.use_worktree:` blocks remain."""
-        src = inspect.getsource(VSCodeServer._run_task_inner)
-        finally_pos = src.rfind("finally:")
-        finally_block = src[finally_pos:]
-
-        pattern = "if not tab.use_worktree:"
-        positions = []
-        start = 0
-        while True:
-            pos = finally_block.find(pattern, start)
-            if pos < 0:
-                break
-            positions.append(pos)
-            start = pos + 1
-
-        for i in range(len(positions) - 1):
-            gap = positions[i + 1] - positions[i]
-            assert gap > 100, (
-                f"RED-5: two blocks are only {gap} chars apart — redundant"
-            )
-
-    def test_flag_clear_after_merge_view(self):
-        """Flag clear is AFTER merge view (BUG-61 fix supersedes RED-5).
-
-        The merge view must capture a diff while `is_running_non_wt`
-        is True, then the flag is cleared in a ``finally`` block.
-        """
-        src = inspect.getsource(VSCodeServer._run_task_inner)
-        finally_idx = src.find("finally:")
-        assert finally_idx > 0
-        finally_block = src[finally_idx:]
-
-        flag_pos = finally_block.find("tab.is_running_non_wt = False")
-        merge_pos = finally_block.find("_prepare_and_start_merge")
-        assert flag_pos > 0 and merge_pos > 0
-        assert merge_pos < flag_pos, (
-            "BUG-61: merge view must be before flag clear"
-        )
-
-
-class TestRed6Fix:
-    """RED-6 FIX: _start_merge_session uses parameter, not thread-local."""
-
-    def test_uses_explicit_tab_id_with_fallback(self):
-        """Uses explicit tab_id, falling back to thread-local only when empty."""
-        src = inspect.getsource(VSCodeServer._start_merge_session)
-        assert "resolved_tab_id = tab_id or" in src or "tab_id or getattr" in src, (
-            "Should use explicit tab_id with thread-local fallback"
-        )

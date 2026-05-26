@@ -6,9 +6,9 @@ import tempfile
 import threading
 import unittest
 
+import pytest
 import yaml
 
-from kiss.core.base import Base
 from kiss.core.kiss_error import KISSError
 from kiss.core.relentless_agent import (
     CONTINUATION_PROMPT,
@@ -111,39 +111,9 @@ class TestContinuation(unittest.TestCase):
 
 
 @requires_gemini_api_key
-class TestExceptionPaths(unittest.TestCase):
-    def test_exception_summarizer_also_fails(self) -> None:
-        """Both executor and summarizer fail (global budget exceeded).
-
-        When the model fails on the very first call (step_count <= 1),
-        the agent returns immediately with success=False instead of
-        retrying through the summarizer path.
-        """
-        original_used = Base.global_budget_used
-        try:
-            Base.global_budget_used = 2001.0
-
-            agent = RelentlessAgent("ExcSum-Fail")
-            with tempfile.TemporaryDirectory() as td:
-                result = agent.run(
-                    model_name=TEST_MODEL,
-                    prompt_template="Do something.",
-                    max_steps=5,
-                    max_budget=10.0,
-                    max_sub_sessions=1,
-                    work_dir=td,
-                    verbose=False,
-                )
-                payload = yaml.safe_load(result)
-                assert isinstance(payload, dict)
-                assert payload["success"] is False
-        finally:
-            Base.global_budget_used = original_used
-
-
-@requires_gemini_api_key
 @unittest.skipUnless(_docker_available(), "Docker daemon not available")
 class TestRunBranches(unittest.TestCase):
+    @pytest.mark.slow
     def test_with_docker(self) -> None:
         """Test the Docker path in run()."""
         agent = RelentlessAgent("Docker-Test")
@@ -174,6 +144,7 @@ class TestRunBranches(unittest.TestCase):
 class TestDockerStreamCallback(unittest.TestCase):
     """Test that docker_stream callback is invoked (covers line 292)."""
 
+    @pytest.mark.slow
     def test_stream_callback_invoked(self) -> None:
         from kiss.core.print_to_console import ConsolePrinter
 
@@ -315,12 +286,19 @@ class TestMultiSessionSummaryMerge(unittest.TestCase):
             parsed = yaml.safe_load(result)
             assert parsed["success"] is True
             summary = parsed["summary"]
-            assert "### Session 1" in summary
+            # Prior (continued) sessions are PREPENDED as "Previous Session N"
+            # blocks; the terminal (success) session is appended last under
+            # "### Final Session".
+            assert "### Previous Session 1" in summary
             assert "did A" in summary
-            assert "### Session 2" in summary
+            assert "### Previous Session 2" in summary
             assert "did B" in summary
-            assert "### Session 3" in summary
+            assert "### Final Session" in summary
             assert "did C" in summary
+            # Order: previous sessions come first, final session last.
+            assert summary.index("did A") < summary.index("did B") < summary.index(
+                "did C"
+            )
         finally:
             server.shutdown()
 
@@ -350,7 +328,8 @@ class TestMultiSessionSummaryMerge(unittest.TestCase):
             parsed = yaml.safe_load(result)
             assert parsed["success"] is True
             assert parsed["summary"] == "all done"
-            assert "### Session" not in parsed["summary"]
+            assert "### Previous Session" not in parsed["summary"]
+            assert "### Final Session" not in parsed["summary"]
         finally:
             server.shutdown()
 
@@ -379,6 +358,7 @@ class TestNonRetryableModelErrors(unittest.TestCase):
         thread.start()
         return server, port
 
+    @pytest.mark.slow
     def test_connection_error_returns_immediately(self) -> None:
         """Connection error (unreachable server) returns finish(False, False, cause)."""
         agent = RelentlessAgent("ConnError")

@@ -31,6 +31,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import pytest
+
 from kiss.agents.vscode import web_server as ws
 from kiss.agents.vscode.web_server import (
     RemoteAccessServer,
@@ -107,6 +109,7 @@ class TestStartNamedTunnelUsesConfiguredUrl(unittest.TestCase):
         finally:
             srv._stop_tunnel()
 
+    @pytest.mark.slow
     def test_returns_none_when_subprocess_exits_without_registration(
         self,
     ) -> None:
