@@ -140,7 +140,11 @@ class SorcarAgent(RelentlessAgent):
             return "(ask_user_question not available in this environment)"
 
         stop_event = getattr(self, "_stop_event", None)
-        useful_tools = UsefulTools(stream_callback=_stream, stop_event=stop_event)
+        useful_tools = UsefulTools(
+            stream_callback=_stream,
+            stop_event=stop_event,
+            work_dir=getattr(self, "work_dir", None),
+        )
         if self.docker_manager:
             from kiss.docker.docker_tools import DockerTools
 
