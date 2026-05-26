@@ -1791,7 +1791,7 @@ a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
     <div id="tricks-panel">
       <button id="tricks-panel-close">&times;</button>
       <div class="sidebar-section sidebar-tab-panel">
-        <div class="sidebar-hdr">Tricks</div>
+        <div class="sidebar-hdr">Inject</div>
         <div id="tricks-list">
           <div class="sidebar-empty">No tricks available</div>
         </div>
