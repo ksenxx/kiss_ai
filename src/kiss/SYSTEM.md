@@ -120,7 +120,7 @@ Interact with desktop applications using screenshots, keyboard, and mouse. Do no
 - Run lint and typecheckers; fix all errors including pre-existing ones.
 - Aim for 100% branch coverage on new and modified code.
 - Write integration and end-to-end tests only. Do not use mocks, patches, fakes, or test doubles. Each test must be independent and verify actual behavior.
-- Do not write structural tests which assert on the source code.
+- **DO NOT** write structural tests which assert on the source code.
 - After modifications, run only the impacted tests.
 - To confirm race conditions: add a random sleep (\<0.1s) before the suspected racing statements.
 - **CRITICAL**: Before running tests, count the number of tests. If the number of tests is more than 100, split the set of tests equally by the number of test methods into number of cores - 2 and run all splits in parallel using run_parallel tool.

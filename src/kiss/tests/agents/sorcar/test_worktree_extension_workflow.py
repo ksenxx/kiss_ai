@@ -524,8 +524,7 @@ class TestServerWorktreeWorkflow:
             "Pre-existing failure on main: after a fresh VSCodeServer is "
             "constructed and resume_chat_by_id is called, "
             "_emit_pending_worktree does not re-emit the worktree_done event "
-            "(documented in USER_PREFS as a known flake). Fix requires "
-            "production-side rehydration changes."
+            "(known flake). Fix requires production-side rehydration changes."
         ),
         strict=False,
     )

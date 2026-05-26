@@ -276,7 +276,7 @@ class TestMultiClientStopResolvesSubscriber(unittest.TestCase):
             ``_close_tab`` marks ``frontend_closed=True`` but keeps the
             ``_RunningAgentState`` alive so the running agent can finish
             (per the "Closing a chat tab does NOT stop a running agent"
-            invariant in USER_PREFS).
+            invariant).
           - The viewer clicks Stop → the subscriber-resolution path
             finds the still-present source state and stops the task.
           - The task ends; ``_run_task``'s finally block invokes
