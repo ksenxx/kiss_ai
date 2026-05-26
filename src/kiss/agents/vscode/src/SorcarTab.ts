@@ -167,10 +167,10 @@ export function buildChatHtml(
             <input type="checkbox" id="hf-running" checked>Running
           </label>
           <label class="history-filter-chk" title="Show tasks that finished with error">
-            <input type="checkbox" id="hf-errors" checked>Errors
+            <input type="checkbox" id="hf-errors" checked>Errored
           </label>
           <label class="history-filter-chk" title="Show successfully completed tasks">
-            <input type="checkbox" id="hf-completed" checked>Completed
+            <input type="checkbox" id="hf-completed" checked>Succeeded
           </label>
           <input type="date" id="hf-from" class="history-filter-date" title="From date" aria-label="From date">
           <button type="button" id="hf-from-btn" class="history-filter-date-btn" title="Pick From date" aria-label="Pick From date">📅</button>

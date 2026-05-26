@@ -3,18 +3,17 @@
 The History sidebar panel renders a single-line filter bar between
 the search box and the history list with:
 
-* three category checkboxes — ``Running`` / ``Errors`` / ``Completed``
-* three category checkboxes — ``Running`` / ``Errors`` / ``Completed``
+* four category checkboxes — ``Running`` / ``Errored`` / ``Succeeded``
+  / ``Favorites``
 * two date inputs — ``From`` / ``To``
 
 This test asserts the HTML, CSS, and JS surfaces all line up: the
-served page contains the five form controls with the expected IDs in
+served page contains the form controls with the expected IDs in
 the expected position, the stylesheet defines the filter-bar styles,
 and the client-side filter helper plus listener wiring is present in
 ``main.js``.
 """
 
-served page contains the five form controls with the expected IDs in
 from __future__ import annotations
 
 import re
@@ -28,9 +27,8 @@ class TestHistoryFilterPanel(unittest.TestCase):
     """Filter bar shows up under the search box and wires up filters."""
 
     def test_html_contains_filter_controls_below_search(self) -> None:
-        """The history panel HTML embeds the 5 filter controls
-        between ``<div class="search-wrap">`` and
-        ``<div id="history-list">``."""
+        """The history panel HTML embeds the filter controls between
+        ``<div class="search-wrap">`` and ``<div id="history-list">``."""
         html = web_server._build_html()  # type: ignore[attr-defined]
         # Slice from the search wrap closing tag to the history list
         # opening tag — everything in between is the filter bar.
@@ -50,10 +48,11 @@ class TestHistoryFilterPanel(unittest.TestCase):
         for cid in ("hf-running", "hf-errors", "hf-completed"):
             self.assertIn(f'id="{cid}"', bar)
             self.assertIn("checked", bar.split(f'id="{cid}"', 1)[1][:40])
+        self.assertIn('id="hf-favorite"', bar)
         for did in ("hf-from", "hf-to"):
             self.assertIn(f'id="{did}"', bar)
             self.assertIn('type="date"', bar)
-        for label in ("Running", "Errors", "Completed"):
+        for label in ("Running", "Errored", "Succeeded", "Favorites"):
             self.assertIn(label, bar)
 
     def test_css_styles_filter_bar(self) -> None:
@@ -71,7 +70,6 @@ class TestHistoryFilterPanel(unittest.TestCase):
     def test_js_wires_filter_visibility(self) -> None:
         """``main.js`` defines the visibility helper and binds change
         listeners on every filter control."""
-        for label in ("Running", "Errors", "Success"):
         js = (
             Path(web_server.__file__).parent / "media" / "main.js"
         ).read_text(encoding="utf-8")
@@ -81,11 +79,12 @@ class TestHistoryFilterPanel(unittest.TestCase):
         # the network round-trip.
         self.assertIn("dataset.category", js)
         self.assertIn("dataset.timestamp", js)
-        # Listener wiring covers all five controls.
+        # Listener wiring covers all filter controls.
         for cid in (
             "hf-running",
             "hf-errors",
             "hf-completed",
+            "hf-favorite",
             "hf-from",
             "hf-to",
         ):
@@ -94,4 +93,3 @@ class TestHistoryFilterPanel(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-        # Listener wiring covers all five controls.
