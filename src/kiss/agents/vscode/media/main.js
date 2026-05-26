@@ -847,6 +847,7 @@
   const taskPanel = document.getElementById('task-panel');
   const taskPanelText = document.getElementById('task-panel-text');
   const taskPanelChevron = document.getElementById('task-panel-chevron');
+  const taskPanelCopy = document.getElementById('task-panel-copy');
   const statusTokens = document.getElementById('status-tokens');
   const statusBudget = document.getElementById('status-budget');
   const statusSteps = document.getElementById('status-steps');
@@ -977,6 +978,50 @@
       if (tab) tab.panelsExpandedMap[visibleTask] = expanded;
       updateChevronIcon(expanded);
       applyChevronState(expanded, visibleTask);
+    });
+  }
+
+  // Copy-task button: trims the visible task text and copies it to the
+  // system clipboard.  Briefly swaps the clipboard icon for a green
+  // check mark to confirm.
+  if (taskPanelCopy && taskPanelText) {
+    let copyResetTimer = null;
+    taskPanelCopy.addEventListener('click', async e => {
+      e.stopPropagation();
+      const text = (taskPanelText.textContent || '').trim();
+      if (!text) return;
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch {
+        // Fallback for environments without async clipboard API.
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try {
+          document.execCommand('copy');
+        } catch {
+          /* ignore */
+        }
+        document.body.removeChild(ta);
+      }
+      const iconCopy = taskPanelCopy.querySelector('.icon-copy');
+      const iconCheck = taskPanelCopy.querySelector('.icon-check');
+      if (iconCopy && iconCheck) {
+        iconCopy.style.display = 'none';
+        iconCheck.style.display = '';
+      }
+      taskPanelCopy.classList.add('copied');
+      if (copyResetTimer) clearTimeout(copyResetTimer);
+      copyResetTimer = setTimeout(() => {
+        if (iconCopy && iconCheck) {
+          iconCopy.style.display = '';
+          iconCheck.style.display = 'none';
+        }
+        taskPanelCopy.classList.remove('copied');
+      }, 1500);
     });
   }
 
