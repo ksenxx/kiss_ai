@@ -337,12 +337,22 @@ class RelentlessAgent(Base):
 
             if not is_continue or success:
                 if summaries:
-                    current_summary = payload.get("summary", "")
-                    if current_summary:
-                        summaries.append(current_summary)
-                    payload["summary"] = "\n\n---\n\n".join(
-                        f"### Session {i + 1}\n{s}" for i, s in enumerate(summaries)
+                    final_summary = payload.get("summary", "")
+                    # ``summaries`` holds every PRIOR session's summary
+                    # (collected from ``is_continue=True`` returns).  Prepend
+                    # them as historical context BEFORE the terminal session's
+                    # summary, which stays the primary payload summary.
+                    prior_section = "\n\n---\n\n".join(
+                        f"### Previous Session {i + 1}\n{s}"
+                        for i, s in enumerate(summaries)
                     )
+                    if final_summary:
+                        payload["summary"] = (
+                            f"{prior_section}\n\n---\n\n### Final Session\n"
+                            f"{final_summary}"
+                        )
+                    else:
+                        payload["summary"] = prior_section
                     result = yaml.dump(payload, sort_keys=False)
                 return result
 
