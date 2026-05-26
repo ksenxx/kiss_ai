@@ -4978,6 +4978,13 @@
       div.appendChild(textSpan);
 
       if (s.task_id) {
+        // Container that stacks the three per-row action buttons
+        // (favourite / copy / delete) vertically with a 6px gap.
+        // The confirm-delete prompt is appended to the same column
+        // so it visually replaces the delete button when shown.
+        const actions = document.createElement('div');
+        actions.className = 'sidebar-item-actions';
+
         // Favourite (star) button — flips the persisted
         // ``is_favorite`` flag on the task's ``extra`` JSON column.
         // The icon shows a filled star when favourited, outline
@@ -5021,7 +5028,7 @@
             isFavorite: next,
           });
         });
-        div.appendChild(favBtn);
+        actions.appendChild(favBtn);
 
         // Copy-to-clipboard button — sits immediately left of the
         // trash icon so the user can grab the full task text without
@@ -5029,7 +5036,7 @@
         // task text (see server._get_history where ``preview`` is set
         // to the task string verbatim); ``itemText`` is the fallback.
         const copyBtn = makeSidebarCopyButton(s.preview || itemText);
-        div.appendChild(copyBtn);
+        actions.appendChild(copyBtn);
 
         const delBtn = document.createElement('button');
         delBtn.className = 'sidebar-item-delete';
@@ -5071,8 +5078,9 @@
           delBtn.style.display = '';
         });
 
-        div.appendChild(delBtn);
-        div.appendChild(confirmWrap);
+        actions.appendChild(delBtn);
+        actions.appendChild(confirmWrap);
+        div.appendChild(actions);
       }
 
       // Metrics row (steps • tokens • cost) — matches the Running
