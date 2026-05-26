@@ -147,7 +147,8 @@ Before calling `finish(success=True)`:
 ## Sorcar-specific
 
 - Lint/typecheck/format: `uv run check --full`. Tests: `uv run pytest -v` (timeout 900s).
-- You SYSTEM.md (the system prompt) is located at ~/.vscode/extensions/ksenxx.kiss-sorcar-2026.5.32/kiss_project/src/kiss/SYSTEM.md
+- The injectable instructions are available at ~/.vscode/extensions/ksenxx.kiss-sorcar-2026.5.32/kiss_project/src/kiss/TRICKS.md
+- Your SYSTEM.md (the system prompt) is located at ~/.vscode/extensions/ksenxx.kiss-sorcar-2026.5.32/kiss_project/src/kiss/SYSTEM.md
 - KISS Sorcar paper: https://github.com/ksenxx/kiss_ai/blob/main/papers/kisssorcar/kiss_sorcar.tex
 - Third-party agents: kiss/agents/third_party_agents
 - Claude SKILLS: kiss/agents/claude_skills. You can use them as necessary.
