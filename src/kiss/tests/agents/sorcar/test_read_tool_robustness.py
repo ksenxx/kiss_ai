@@ -33,7 +33,7 @@ def temp_dir():
 
 def test_empty_file_returns_sentinel(temp_dir: Path) -> None:
     """Empty files must surface a clear sentinel rather than ``""``."""
-    p = temp_dir / "USER_PREFS.md"
+    p = temp_dir / "CONFIG.md"
     p.write_text("")
 
     out = UsefulTools().Read(str(p))
@@ -75,15 +75,15 @@ def test_empty_directory_listing(temp_dir: Path) -> None:
 
 
 def test_file_not_found_suggests_close_match(temp_dir: Path) -> None:
-    """``USER_DEFS.md`` should suggest the real ``USER_PREFS.md``."""
-    (temp_dir / "USER_PREFS.md").write_text("# prefs\n")
+    """A typo like ``SORCR.md`` should suggest the real ``SORCAR.md``."""
     (temp_dir / "SORCAR.md").write_text("# sorcar\n")
+    (temp_dir / "INJECTIONS.md").write_text("# injections\n")
 
-    out = UsefulTools().Read(str(temp_dir / "USER_DEFS.md"))
+    out = UsefulTools().Read(str(temp_dir / "SORCR.md"))
 
     assert "File not found" in out
     assert "Did you mean" in out
-    assert "USER_PREFS.md" in out
+    assert "SORCAR.md" in out
 
 
 def test_file_not_found_no_suggestion_when_nothing_close(temp_dir: Path) -> None:
@@ -98,23 +98,23 @@ def test_file_not_found_no_suggestion_when_nothing_close(temp_dir: Path) -> None
 
 def test_file_not_found_walks_up_to_existing_parent(temp_dir: Path) -> None:
     """Suggestions still surface when the immediate parent doesn't exist."""
-    (temp_dir / "USER_PREFS.md").write_text("# prefs\n")
+    (temp_dir / "SORCAR.md").write_text("# sorcar\n")
 
-    out = UsefulTools().Read(str(temp_dir / "no_such_dir" / "USER_DEFS.md"))
+    out = UsefulTools().Read(str(temp_dir / "no_such_dir" / "SORCR.md"))
 
     assert "File not found" in out
-    # The suggestion walks up to ``temp_dir`` and finds USER_PREFS.md.
-    assert "USER_PREFS.md" in out
+    # The suggestion walks up to ``temp_dir`` and finds SORCAR.md.
+    assert "SORCAR.md" in out
 
 
 def test_pwd_prefix_expands_to_work_dir(temp_dir: Path) -> None:
     """``PWD/foo`` is rewritten to ``<work_dir>/foo``."""
-    (temp_dir / "USER_PREFS.md").write_text("prefs body\n")
+    (temp_dir / "CONFIG.md").write_text("config body\n")
     tools = UsefulTools(work_dir=str(temp_dir))
 
-    out = tools.Read("PWD/USER_PREFS.md")
+    out = tools.Read("PWD/CONFIG.md")
 
-    assert out == "prefs body\n"
+    assert out == "config body\n"
 
 
 def test_pwd_alone_expands_to_directory_listing(temp_dir: Path) -> None:
