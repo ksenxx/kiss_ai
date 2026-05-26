@@ -26,7 +26,7 @@ def _expand_pwd_prefix(file_path: str, work_dir: str | None) -> str:
 
     The system prompt instructs the model to interpret ``PWD`` as the
     current working directory, but models routinely pass it through as a
-    literal path component (e.g. ``PWD/USER_PREFS.md``).  This helper
+    literal path component (e.g. ``PWD/SORCAR.md``).  This helper
     rewrites such paths so the subsequent Read still works.
     """
     if file_path.startswith("PWD/") or file_path == "PWD":
