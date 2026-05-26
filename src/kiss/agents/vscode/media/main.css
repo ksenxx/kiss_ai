@@ -449,7 +449,7 @@ body.remote-chat #welcome > #input-area {
 
 .welcome-config {
   display: flex; flex-direction: column; gap: 8px;
-  width: 100%; margin-bottom: 14px;
+  width: 100%; max-width: 720px; margin-bottom: 14px;
 }
 .welcome-config #welcome-remote-url { width: 100%; }
 .welcome-config #welcome-remote-url:empty { display: none; }
