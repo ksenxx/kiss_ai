@@ -327,7 +327,7 @@ body {
   position: relative;
   flex-shrink: 0;
   margin: 8px 10px 0;
-  padding: 8px 8px 8px 28px;
+  padding: 8px 32px 8px 28px;
   border: 2px solid rgb(255 200 0 / 50%);
   border-radius: 8px;
   background: color-mix(in srgb, var(--accent) 4%, transparent);
@@ -365,6 +365,26 @@ body {
 #task-panel-chevron:hover { color: var(--fg); }
 #task-panel-chevron svg { transition: transform 0.2s ease; }
 #task-panel-chevron.expanded svg { transform: rotate(90deg); }
+
+#task-panel-copy {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  color: var(--dim);
+  cursor: pointer;
+  padding: 2px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s;
+  user-select: none;
+}
+#task-panel-copy * { user-select: none; }
+#task-panel-copy:hover { color: var(--fg); }
+#task-panel-copy.copied { color: var(--green); }
 
 /* ── Output Area ────────────────────────────────────── */
 #output {
