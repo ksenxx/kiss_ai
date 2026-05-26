@@ -18,6 +18,7 @@ from kiss.agents.sorcar.web_use_tool import WebUseTool
 from kiss.core.base import SYSTEM_PROMPT
 from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import get_default_model
+from kiss.core.models.model_info import model as _model_factory
 from kiss.core.printer import Printer
 from kiss.core.relentless_agent import RelentlessAgent
 
@@ -422,8 +423,92 @@ class SorcarAgent(RelentlessAgent):
                 pass
             return os.cpu_count() or 1
 
+        def change_model(model_name: str) -> str:
+            """Change the agent's LLM model dynamically.
+
+            Swaps in a freshly-built model instance for *model_name* so the
+            very next LLM call from this agent uses it.  Unlike
+            ``update_settings(model_name=...)`` — which records the new
+            name but only takes effect on the next sub-session — this
+            tool replaces ``self.model`` immediately within the current
+            sub-session.
+
+            The current conversation history, ``model_config`` (including
+            any ``base_url`` / ``api_key``), token callback, and thinking
+            callback are carried over onto the new model so the agent
+            continues from exactly the same conversational state.  The
+            cached tools schema is rebuilt against the new model so the
+            tool-calling format stays consistent.
+
+            When invoked before any model has been initialised (no
+            ``self.model`` yet), the call degrades to ``model_name``
+            persistence — the next ``_reset`` will pick up the new name.
+
+            Args:
+                model_name: New LLM model name (for example
+                    ``"gpt-4o"``, ``"claude-sonnet-4-20250514"``,
+                    ``"gemini-2.5-pro"``).
+
+            Returns:
+                A human-readable confirmation string describing the
+                change (or a "no change" message when the requested
+                model is already active).
+            """
+            from kiss.agents.sorcar.persistence import _save_last_model
+
+            old_model = getattr(self, "model", None)
+            if old_model is None:
+                self.model_name = model_name
+                _save_last_model(model_name)
+                return (
+                    f"Model deferred-changed to {model_name} "
+                    "(no live model yet)."
+                )
+            if old_model.model_name == model_name:
+                return f"Model is already {model_name}; no change."
+
+            # Reconstruct ``model_config`` for the factory.  The
+            # ``OpenAICompatibleModel`` factory path strips ``base_url``
+            # and ``api_key`` from ``model_config`` before storing it,
+            # so we restore them from the live model's attributes so the
+            # new model lands on the same endpoint.
+            new_config: dict[str, Any] = dict(old_model.model_config or {})
+            old_base_url = getattr(old_model, "base_url", None)
+            old_api_key = getattr(old_model, "api_key", None)
+            if old_base_url and "base_url" not in new_config:
+                new_config["base_url"] = old_base_url
+                if old_api_key is not None:
+                    new_config["api_key"] = old_api_key
+            new_model = _model_factory(
+                model_name,
+                model_config=new_config or None,
+                token_callback=old_model.token_callback,
+                thinking_callback=old_model.thinking_callback,
+            )
+            # Carry over the live conversation state so the next LLM
+            # call resumes from the same point.  The kiss-agent
+            # conversation list shape is OpenAI-style (``role`` /
+            # ``content`` dicts plus tool_call entries) for every
+            # provider in this codebase, so a direct hand-off is safe.
+            new_model.conversation = old_model.conversation
+            new_model.usage_info_for_messages = old_model.usage_info_for_messages
+
+            previous_name = old_model.model_name
+            self.model = new_model  # type: ignore[attr-defined]
+            self.model_name = model_name
+            # Rebuild the cached tools schema against the new model
+            # (different providers can produce slightly different
+            # schemas — e.g. Anthropic vs OpenAI).
+            if getattr(self, "function_map", None):
+                self._cached_tools_schema = new_model._build_openai_tools_schema(  # type: ignore[attr-defined]
+                    self.function_map,
+                )
+            _save_last_model(model_name)
+            return f"Model changed from {previous_name} to {model_name}."
+
         tools.append(ask_user_question)
         tools.append(update_settings)
+        tools.append(change_model)
         if self._is_parallel:
             tools.append(run_parallel)
             tools.append(number_of_cores)
