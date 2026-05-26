@@ -426,27 +426,9 @@ class SorcarAgent(RelentlessAgent):
         def change_model(model_name: str) -> str:
             """Change the agent's LLM model dynamically.
 
-            Swaps in a freshly-built model instance for *model_name* so the
-            very next LLM call from this agent uses it.  Unlike
-            ``update_settings(model_name=...)`` — which records the new
-            name but only takes effect on the next sub-session — this
-            tool replaces ``self.model`` immediately within the current
-            sub-session.
-
-            The current conversation history, ``model_config`` (including
-            any ``base_url`` / ``api_key``), token callback, and thinking
-            callback are carried over onto the new model so the agent
-            continues from exactly the same conversational state.  The
-            cached tools schema is rebuilt against the new model so the
-            tool-calling format stays consistent.
-
-            When invoked before any model has been initialised (no
-            ``self.model`` yet), the call degrades to ``model_name``
-            persistence — the next ``_reset`` will pick up the new name.
-
             Args:
                 model_name: New LLM model name (for example
-                    ``"gpt-4o"``, ``"claude-sonnet-4-20250514"``,
+                    ``"gpt-4o"``, ``"claude-sonnet-4-6"``,
                     ``"gemini-2.5-pro"``).
 
             Returns:
