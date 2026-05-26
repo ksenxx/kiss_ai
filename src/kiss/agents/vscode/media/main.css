@@ -454,6 +454,10 @@ body.remote-chat #welcome > #input-area {
 }
 .welcome-config #welcome-remote-url { width: 100%; }
 .welcome-config #welcome-remote-url:empty { display: none; }
+
+#welcome-remote-url .remote-url-label { text-align: center; }
+#welcome-remote-url .remote-url-row { justify-content: center; }
+#welcome-remote-url .remote-url-link { flex: 0 1 auto; max-width: 100%; }
 .welcome-config-label { text-align: left; }
 
 #suggestions { display: grid; grid-template-columns: 1fr; gap: 5px; width: 100%; }
