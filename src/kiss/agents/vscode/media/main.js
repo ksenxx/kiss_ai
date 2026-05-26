@@ -827,6 +827,14 @@
   const frequentPanelClose = document.getElementById('frequent-panel-close');
   const frequentTasksBtn = document.getElementById('frequent-tasks-btn');
   const frequentList = document.getElementById('frequent-list');
+  // Tricks panel — mirrors the Frequent tasks panel structure.  The
+  // trick texts are parsed from src/kiss/TRICKS.md by the HTML builder
+  // and injected as window.__TRICKS__ before main.js loads.
+  const tricksPanel = document.getElementById('tricks-panel');
+  const tricksOverlay = document.getElementById('tricks-overlay');
+  const tricksPanelClose = document.getElementById('tricks-panel-close');
+  const tricksBtn = document.getElementById('tricks-btn');
+  const tricksList = document.getElementById('tricks-list');
   const autocommitBtn = document.getElementById('autocommit-btn');
   const waitSpinner = document.getElementById('wait-spinner');
   const ghostOverlay = document.getElementById('ghost-overlay');
@@ -4376,6 +4384,21 @@
     if (frequentOverlay) {
       frequentOverlay.addEventListener('click', closeFrequentPanel);
     }
+    if (tricksBtn) {
+      tricksBtn.addEventListener('click', () => {
+        if (tricksPanel && tricksPanel.classList.contains('open')) {
+          closeTricksPanel();
+        } else {
+          openTricksPanel();
+        }
+      });
+    }
+    if (tricksPanelClose) {
+      tricksPanelClose.addEventListener('click', closeTricksPanel);
+    }
+    if (tricksOverlay) {
+      tricksOverlay.addEventListener('click', closeTricksPanel);
+    }
     if (settingsPanelClose) {
       settingsPanelClose.addEventListener('click', closeSettingsPanel);
     }
@@ -5453,6 +5476,58 @@
   function closeFrequentPanel() {
     if (frequentPanel) frequentPanel.classList.remove('open');
     if (frequentOverlay) frequentOverlay.classList.remove('open');
+  }
+
+  /**
+   * Open the standalone Tricks panel (slides up from the bottom).
+   * Trick texts are read from ``window.__TRICKS__`` which is injected
+   * by the HTML builder after parsing ``src/kiss/TRICKS.md``.
+   */
+  function openTricksPanel() {
+    if (!tricksPanel) return;
+    tricksPanel.classList.add('open');
+    if (tricksOverlay) tricksOverlay.classList.add('open');
+    renderTricks(window.__TRICKS__ || []);
+  }
+
+  /** Close the standalone Tricks panel. */
+  function closeTricksPanel() {
+    if (tricksPanel) tricksPanel.classList.remove('open');
+    if (tricksOverlay) tricksOverlay.classList.remove('open');
+  }
+
+  /**
+   * Render the list of tricks inside the Tricks panel.  Each row is
+   * clickable: clicking copies the trick text into the prompt textarea
+   * and closes the panel — mirroring the click handler used by the
+   * Frequent tasks list.
+   */
+  function renderTricks(tricks) {
+    if (!tricksList) return;
+    if (!tricks || tricks.length === 0) {
+      tricksList.innerHTML =
+        '<div class="sidebar-empty">No tricks available</div>';
+      return;
+    }
+    tricksList.innerHTML = '';
+    tricks.forEach(text => {
+      const div = document.createElement('div');
+      div.className = 'sidebar-item tricks-item';
+      div.dataset.tooltip = text;
+      const textSpan = document.createElement('span');
+      textSpan.className = 'sidebar-item-text';
+      textSpan.textContent = text;
+      div.appendChild(textSpan);
+      div.addEventListener('click', () => {
+        inp.value = text;
+        syncClearBtn();
+        inp.style.height = 'auto';
+        inp.style.height = inp.scrollHeight + 'px';
+        inp.focus();
+        closeTricksPanel();
+      });
+      tricksList.appendChild(div);
+    });
   }
 
   function renderFrequentTasks(tasks) {

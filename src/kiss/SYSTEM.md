@@ -77,8 +77,8 @@ Write simple, clean, readable code with minimal indirection. These rules exist b
 ## Mandatory First Actions for project related tasks — CRITICAL
 
 **Your VERY FIRST tool call** in every task MUST be `Read("PWD/SORCAR.md")` and follow the instructions in SORCAR.md with highest priority.
-**Your SECOND tool call** is `Read("PWD/USER_PREFS.md")`.  After immediately 
-reading USER_PREFS.md, update it based on frequent user bahaviors you have noticed in the current task and previous tasks. Use those behavioral instructions exactly in the rest of the task. 
+**Your SECOND tool call** is `Read("PWD/USER_PREFS.md")`. After immediately
+reading USER_PREFS.md, update it based on frequent user bahaviors you have noticed in the current task and previous tasks. Use those behavioral instructions exactly in the rest of the task.
 
 ## Pre-flight Checks
 
@@ -125,7 +125,7 @@ Interact with desktop applications using screenshots, keyboard, and mouse. Do no
 - Do not write structural tests which assert on the source code.
 - After modifications, run only the impacted tests.
 - To confirm race conditions: add a random sleep (\<0.1s) before the suspected racing statements.
-- **CRITICAL**: Before running tests, count the number of tests.  If the number of tests is more than 100, split the set of tests equally by the number of test methods into number of cores - 2 and run all splits in parallel using run_parallel tool.
+- **CRITICAL**: Before running tests, count the number of tests. If the number of tests is more than 100, split the set of tests equally by the number of test methods into number of cores - 2 and run all splits in parallel using run_parallel tool.
   </testing>
 
 \<pre_finish_verification>
