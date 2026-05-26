@@ -100,6 +100,13 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         self._wt: GitWorktree | None = None
         self._stash_pop_warning: str | None = None
         self._merge_conflict_warning: str | None = None
+        # Frontend tab id, stamped by
+        # :meth:`_TaskRunnerMixin._run_task_inner` immediately after
+        # constructing the agent.  Consumed by
+        # :meth:`SorcarAgent._drain_pending_user_messages` to look up
+        # the owning :class:`_RunningAgentState` and pull queued
+        # follow-up prompts before each model call.
+        self._tab_id: str = ""
 
 
     @property
