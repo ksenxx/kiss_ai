@@ -15,6 +15,7 @@ import ctypes
 import logging
 import queue
 import threading
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -88,9 +89,25 @@ class _TaskRunnerMixin:
         which code-path is taken.
         """
         tab_id = cmd.get("tabId", "")
+        # Capture the agent's true start timestamp (ms since epoch)
+        # ONCE here and propagate it through the status broadcast,
+        # cmd dict (so ``_run_task_inner`` can echo it on task_end
+        # broadcasts), and the persisted ``extra`` JSON.  The
+        # frontend uses this as the anchor for the "Running …" /
+        # "Done (Xm Ys)" label at the top of the chat webview —
+        # anchoring on the client's ``Date.now()`` would mis-report
+        # elapsed time for any tab that joined the chat late (e.g.
+        # opened from history while the agent was already running).
+        start_ms = int(time.time() * 1000)
+        cmd["_start_ms"] = start_ms
         try:
             self.printer.broadcast(
-                {"type": "status", "running": True, "tabId": tab_id},
+                {
+                    "type": "status",
+                    "running": True,
+                    "tabId": tab_id,
+                    "startTs": start_ms,
+                },
             )
             self._run_task_inner(cmd)
         finally:
@@ -548,6 +565,15 @@ class _TaskRunnerMixin:
                 )
                 from kiss._version import __version__
 
+                # Persist agent start / end timestamps (ms since epoch)
+                # so a later history load can flip the "Running …"
+                # label at the top of the chat webview to "Done (Xm Ys)"
+                # as soon as ``Date.now() >= endTs`` — without waiting
+                # for a live ``task_done`` event that may have
+                # already fired (and been missed) before the tab was
+                # opened.
+                start_ms = int(cmd.get("_start_ms") or 0)
+                end_ms = int(time.time() * 1000)
                 _save_task_extra(
                     {
                         "model": model,
@@ -559,6 +585,8 @@ class _TaskRunnerMixin:
                         "is_parallel": tab.use_parallel,
                         "is_worktree": use_worktree,
                         "auto_commit_mode": tab.auto_commit_mode,
+                        "startTs": start_ms,
+                        "endTs": end_ms,
                     },
                     task_id=tab.task_history_id,
                 )
@@ -643,8 +671,16 @@ class _TaskRunnerMixin:
                     # happens to be active — e.g. a sub-agent tab
                     # opened by ``run_parallel``'s ``new_tab`` broadcast
                     # — instead of the parent tab that actually owns
-                    # the task.
-                    self.printer.broadcast({**task_end_event, "tabId": tab_id})
+                    # the task.  ``startTs`` / ``endTs`` echo the
+                    # agent's true wall-clock so the frontend's
+                    # "Running …" / "Done (…)" label uses agent time
+                    # rather than the client's ``Date.now()``.
+                    self.printer.broadcast({
+                        **task_end_event,
+                        "tabId": tab_id,
+                        "startTs": start_ms,
+                        "endTs": end_ms,
+                    })
                 if tab.task_history_id is not None:
                     self._generate_followup_async(
                         prompt,
@@ -675,7 +711,12 @@ class _TaskRunnerMixin:
                         tab.is_running_non_wt = False
                 logger.debug("Cleanup interrupted", exc_info=True)
                 if task_end_event:
-                    self.printer.broadcast({**task_end_event, "tabId": tab_id})
+                    self.printer.broadcast({
+                        **task_end_event,
+                        "tabId": tab_id,
+                        "startTs": int(cmd.get("_start_ms") or 0),
+                        "endTs": int(time.time() * 1000),
+                    })
 
     def _stop_task(self, tab_id: str = "") -> None:
         """Signal the agent to stop.

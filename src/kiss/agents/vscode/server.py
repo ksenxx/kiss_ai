@@ -372,6 +372,22 @@ class VSCodeServer(
                 "cost": 0.0,
                 "steps": 0,
                 "is_favorite": False,
+                # Agent start / end timestamps in ms since epoch.
+                # ``startTs`` comes from the row's own ``timestamp``
+                # column (set on INSERT in ``_add_task``), ``endTs``
+                # is read from the persisted ``extra`` JSON below
+                # (0 means the agent has not yet recorded an end —
+                # i.e. still running, or the task pre-dates the
+                # endTs persistence change).  Surfaced so the
+                # frontend can render the chat webview's
+                # "Running …" / "Done (Xm Ys)" header from
+                # agent wall-clock rather than the local client
+                # wall-clock at history-load time.
+                "startTs": int(
+                    float(entry.get("timestamp", 0) or 0)  # type: ignore[arg-type]
+                    * 1000
+                ),
+                "endTs": 0,
             }
             # Mark sub-agent rows so the history sidebar treats them
             # as a regular task with one rendering difference: the
@@ -414,6 +430,17 @@ class VSCodeServer(
                     session["is_favorite"] = bool(
                         extra_obj.get("is_favorite", False)
                     )
+                    try:
+                        end_ts_raw = extra_obj.get("endTs", 0)
+                        session["endTs"] = int(end_ts_raw or 0)
+                    except (TypeError, ValueError):
+                        session["endTs"] = 0
+                    try:
+                        start_ts_raw = extra_obj.get("startTs", 0)
+                        if start_ts_raw:
+                            session["startTs"] = int(start_ts_raw)
+                    except (TypeError, ValueError):
+                        pass
             # For running tasks, overlay live metrics from the agent
             # so the history panel shows current steps/tokens/cost
             # instead of the stale persisted values (which are only
@@ -830,10 +857,23 @@ class VSCodeServer(
             # resumed-running tab and a fresh-run tab initialise the
             # webview to the same state (chevron visibility, send/stop
             # buttons, timer, etc.).
+            #
+            # Echo the agent's persisted ``startTs`` (ms since epoch,
+            # written into the ``extra`` JSON by ``_run_task_inner``)
+            # so the frontend's "Running …" header at the top of the
+            # chat webview reflects the agent's true elapsed time
+            # rather than the client's ``Date.now()`` at history-load.
+            start_ts_for_resume = 0
+            if isinstance(extra_raw, dict):
+                try:
+                    start_ts_for_resume = int(extra_raw.get("startTs", 0) or 0)
+                except (TypeError, ValueError):
+                    start_ts_for_resume = 0
             self.printer.broadcast({
                 "type": "status",
                 "running": True,
                 "tabId": tab_id,
+                "startTs": start_ts_for_resume,
             })
         self.printer.broadcast({
             "type": "task_events",

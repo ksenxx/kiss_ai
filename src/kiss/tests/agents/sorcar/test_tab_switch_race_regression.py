@@ -892,7 +892,12 @@ class TestSetReadyResetsRunningTabId(unittest.TestCase):
 
     def test_task_done_calls_set_ready(self) -> None:
         idx = self.js.index("case 'task_done':")
-        block = self.js[idx : idx + 500]
+        # Window enlarged from 500 → 900 chars to accommodate the
+        # branch that computes elapsed time from the agent-supplied
+        # ``ev.startTs`` / ``ev.endTs`` (see ``case 'task_done'`` in
+        # main.js — this preserves the structural invariant that
+        # ``setReady`` is called inside the handler).
+        block = self.js[idx : idx + 900]
         assert "setReady(" in block
 
 
