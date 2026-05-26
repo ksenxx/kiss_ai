@@ -2,7 +2,7 @@
   "name": "kiss-sorcar",
   "displayName": "KISS Sorcar",
   "description": "The open-source AI coding agent that beats Cursor and Claude Code on Terminal Bench. Free, local, bring your own API key.",
-  "version": "2026.5.33",
+  "version": "2026.5.34",
   "publisher": "ksenxx",
   "repository": {
     "type": "git",
@@ -24,6 +24,12 @@
     "contribSourceControlInputBoxMenu"
   ],
   "main": "./out/extension.js",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true,
+      "description": "KISS Sorcar runs a local Python backend; opt-in API keys and shell tools require trust."
+    }
+  },
   "contributes": {
     "viewsContainers": {
       "activitybar": [

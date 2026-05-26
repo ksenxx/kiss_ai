@@ -287,11 +287,11 @@ body {
 }
 
 .chat-tab.subagent-tab .subagent-indicator.done {
-  /* Sub-agent finished: kill the pulse animation and keep the purple
-   * colour at full opacity.  The JS swaps the glyph from ◉ (running
-   * ring) to ● (solid disc) so the tab title shows a SOLID purple
-   * circle — the user-visible "this sub-agent is done" signal in
-   * the tab bar. */
+  /* Sub-agent finished: kill the pulse animation and pin the purple
+   * ◉ glyph at full opacity.  The user-visible "this sub-agent is
+   * done" signal is a SOLID (non-pulsing) purple ◉ in the tab
+   * title, vs. the pulsing ◉ shown while the sub-agent is still
+   * running. */
   animation: none;
   opacity: 1;
 }
