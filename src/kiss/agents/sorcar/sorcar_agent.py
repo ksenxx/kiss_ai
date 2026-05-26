@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -16,8 +18,34 @@ from kiss.agents.sorcar.web_use_tool import WebUseTool
 from kiss.core.base import SYSTEM_PROMPT
 from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import get_default_model
+from kiss.core.models.model_info import model as _model_factory
 from kiss.core.printer import Printer
 from kiss.core.relentless_agent import RelentlessAgent
+
+
+def _save_setting_to_config(key: str, value: Any) -> None:
+    """Persist a single setting to ~/.kiss/config.json.
+
+    Loads the existing config, updates the specified key, and saves
+    atomically. Also applies the change to the running environment.
+
+    Args:
+        key: The config key (e.g. "max_budget", "work_dir").
+        value: The new value for the key.
+    """
+    try:
+        from kiss.agents.vscode.vscode_config import (
+            apply_config_to_env,
+            load_config,
+            save_config,
+        )
+
+        cfg = load_config()
+        cfg[key] = value
+        save_config(cfg)
+        apply_config_to_env(cfg)
+    except Exception:
+        pass
 
 
 class SorcarAgent(RelentlessAgent):
@@ -29,6 +57,59 @@ class SorcarAgent(RelentlessAgent):
         self.docker_manager: Any = None
         self._use_web_tools: bool = True
         self._is_parallel: bool = False
+
+    def _run_tasks_parallel(
+        self,
+        tasks: list[str],
+        max_workers: int | None = None,
+    ) -> list[str]:
+        """Execute multiple independent tasks concurrently using parallel agents.
+
+        Each task gets its own ``ChatSorcarAgent`` instance.  Subclasses can
+        override this method to change the agent type or pass extra context
+        (e.g. ``ChatSorcarAgent`` propagates ``chat_id``).
+
+        This method is a pure parallel executor.  It has no knowledge of
+        backend task ids or any frontend concepts (tabs, ``new_tab``
+        broadcasts, etc.).  Any sub-agent-specific frontend behaviour is
+        owned by the sub-agent itself — see
+        :meth:`ChatSorcarAgent.run`, which self-broadcasts a ``new_tab``
+        message whenever it detects ``self._subagent_info`` is set.
+
+        Args:
+            tasks: List of self-contained task description strings.
+            max_workers: Maximum concurrent threads (``None`` = auto).
+
+        Returns:
+            List of YAML result strings in the same order as *tasks*.
+        """
+        totals: dict[str, float] = {}
+        results = run_tasks_parallel(
+            tasks,
+            max_workers=max_workers,
+            model_name=getattr(self, "model_name", None),
+            work_dir=getattr(self, "work_dir", None),
+            printer=self.printer,
+            totals_out=totals,
+        )
+        # Attribute the sub-agents' cost, tokens, and steps to this
+        # (parent) agent so the global accounting and UI reflect the
+        # full work done.  Without this, sub-agent budgets would be
+        # invisible to the parent agent.
+        self.budget_used += float(totals.get("budget_used", 0.0))
+        self.total_tokens_used += int(totals.get("total_tokens_used", 0))
+        self.total_steps += int(totals.get("total_steps", 0))
+        # Update the printer offsets so the live status line in the
+        # current sub-session reflects the additional spend immediately
+        # (the offsets are otherwise snapshotted only at session start).
+        if self.printer is not None:
+            try:
+                self.printer.budget_offset = self.budget_used  # type: ignore[attr-defined]
+                self.printer.tokens_offset = self.total_tokens_used  # type: ignore[attr-defined]
+                self.printer.steps_offset = self.total_steps  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        return results
 
     def _get_tools(self) -> list:
         """Build tool list, using DockerTools when docker_manager is active.
@@ -60,7 +141,11 @@ class SorcarAgent(RelentlessAgent):
             return "(ask_user_question not available in this environment)"
 
         stop_event = getattr(self, "_stop_event", None)
-        useful_tools = UsefulTools(stream_callback=_stream, stop_event=stop_event)
+        useful_tools = UsefulTools(
+            stream_callback=_stream,
+            stop_event=stop_event,
+            work_dir=getattr(self, "work_dir", None),
+        )
         if self.docker_manager:
             from kiss.docker.docker_tools import DockerTools
 
@@ -73,34 +158,39 @@ class SorcarAgent(RelentlessAgent):
         if self._use_web_tools and self.web_use_tool is None:
             self.web_use_tool = WebUseTool()
             tools.extend(self.web_use_tool.get_tools())
-        def run_parallel(tasks: list[str], max_workers: int | None = None) -> str:
+        def run_parallel(tasks: str, max_workers: str = "") -> str:
             """Run multiple independent tasks concurrently using parallel agents.
 
-            Spawns a separate SorcarAgent for each task string and executes
-            them in parallel threads.  Use this tool when you have two or
-            more **independent** sub-tasks that do not depend on each
-            other's results (e.g. summarising several files, researching
-            separate topics, running independent code changes).
+            Spawns a separate ChatSorcarAgent for each task string and executes
+            them in parallel threads.
 
-            Each parallel agent inherits the current model and working
-            directory.  Results are returned in the same order as the
-            input tasks.
+            **When to call run_parallel:**
+            - Multi-source / multi-topic research ("research these 5
+              companies", "summarize each of these N PDFs").
+            - Codebase exploration across unrelated modules ("look at the
+              frontend, backend, db layer, and auth in parallel").
+            - Multi-perspective review of one artifact (correctness
+              reviewer + security reviewer + style reviewer +
+              architecture reviewer, each looking at the same diff with
+              a different lens).
+            - Generating N alternative candidates for the same problem
+              so the orchestrator can pick the best.
+            - Independent test suites or validations on disjoint targets.
+            - Bulk file generation when each file is independent and the
+              API contract between them is already pinned down in a
+              spec.
 
-            **When NOT to use**: Do not use this for tasks that must run
-            sequentially or that depend on each other's output.
 
             Args:
-                tasks: List of task description strings.  Each string is a
-                    complete, self-contained instruction that a fresh
-                    SorcarAgent can execute on its own.  Example::
+                tasks: A JSON-encoded list of task description strings.
+                    Example::
 
-                        [
-                            "Read src/foo.py and summarize its purpose",
-                            "Read src/bar.py and summarize its purpose",
-                            "Find the current weather in San Francisco",
-                        ]
-                max_workers: Maximum number of concurrent threads.
-                    ``None`` (default) lets Python choose automatically.
+                        '["Read src/foo.py and summarize its purpose", '
+                        '"Read src/bar.py and summarize its purpose", '
+                        '"Find the current weather in San Francisco"]'
+                max_workers: Maximum number of concurrent threads, as a
+                    string containing an integer (e.g. ``"4"``).  An empty
+                    string (default) lets Python choose automatically.
                     Set to a lower number to limit concurrency.
 
             Returns:
@@ -108,18 +198,302 @@ class SorcarAgent(RelentlessAgent):
                 objects, one per task, in the same order as the input.
                 Each result object has ``success`` and ``summary`` keys.
             """
-            results = run_tasks_parallel(
-                tasks,
-                max_workers=max_workers,
-                model=getattr(self, "model_name", None),
-                work_dir=getattr(self, "work_dir", None),
-            )
+            task_list = _coerce_tasks(tasks)
+            workers: int | None = int(max_workers) if max_workers else None
+            results = self._run_tasks_parallel(task_list, max_workers=workers)
             result_str: str = yaml.dump(results, sort_keys=False)
             return result_str
 
+        def update_settings(
+            is_parallel: bool | None = None,
+            is_worktree: bool | None = None,
+            model_name: str | None = None,
+            max_budget: float | None = None,
+            working_directory: str | None = None,
+            use_web_browser: bool | None = None,
+            remote_password: str | None = None,
+            demo_mode: bool | None = None,
+            auto_commit: bool | None = None,
+            custom_endpoint: str | None = None,
+            custom_headers: str | None = None,
+        ) -> str:
+            """Update task configuration settings during execution.
+
+            Modifies runtime agent settings, persists config-level changes,
+            and broadcasts UI updates to the frontend. Only provided
+            (non-None) keys are updated; omitted keys are left unchanged.
+
+            API keys (e.g. ``custom_api_key``, ``openai_api_key``,
+            ``anthropic_api_key``) cannot be updated through this tool for
+            security reasons.  Users must set them through the settings UI
+            or environment variables.
+
+            Args:
+                is_parallel: Enable/disable parallel sub-agent spawning.
+                is_worktree: Enable/disable git worktree isolation.
+                model_name: Switch the LLM model for subsequent sub-sessions.
+                max_budget: Set the maximum budget in USD.
+                working_directory: Change the agent working directory.
+                use_web_browser: Enable/disable browser/web tools.
+                remote_password: Set the remote access password.
+                demo_mode: Enable/disable demo replay mode in the UI.
+                auto_commit: When True, trigger auto-commit of pending changes.
+                custom_endpoint: Set a custom LLM endpoint URL (e.g. local model).
+                custom_headers: Set custom HTTP headers (Key:Value, one per line).
+
+            Returns:
+                A summary of which settings were updated.
+            """
+            updated: list[str] = []
+            broadcast = (
+                getattr(self.printer, "broadcast", None)
+                if self.printer
+                else None
+            )
+
+            if is_parallel is not None:
+                self._is_parallel = bool(is_parallel)
+                updated.append(f"is_parallel={self._is_parallel}")
+                _save_setting_to_config("is_parallel", self._is_parallel)
+                if broadcast:
+                    broadcast({
+                        "type": "updateSetting",
+                        "key": "is_parallel",
+                        "value": self._is_parallel,
+                    })
+
+            if is_worktree is not None:
+                updated.append(f"is_worktree={bool(is_worktree)}")
+                _save_setting_to_config("is_worktree", bool(is_worktree))
+                if broadcast:
+                    broadcast({
+                        "type": "updateSetting",
+                        "key": "is_worktree",
+                        "value": bool(is_worktree),
+                    })
+
+            if model_name is not None:
+                self.model_name = model_name
+                updated.append(f"model={model_name}")
+                from kiss.agents.sorcar.persistence import _save_last_model
+                _save_last_model(model_name)
+                if broadcast:
+                    broadcast({
+                        "type": "updateSetting",
+                        "key": "model",
+                        "value": model_name,
+                    })
+
+            if max_budget is not None:
+                self.max_budget = float(max_budget)
+                updated.append(f"max_budget={self.max_budget}")
+                _save_setting_to_config("max_budget", self.max_budget)
+                if broadcast:
+                    broadcast({
+                        "type": "updateSetting",
+                        "key": "max_budget",
+                        "value": self.max_budget,
+                    })
+
+            if working_directory is not None:
+                resolved = str(Path(working_directory).resolve())
+                Path(resolved).mkdir(parents=True, exist_ok=True)
+                self.work_dir = resolved
+                updated.append(f"working_directory={resolved}")
+                _save_setting_to_config("work_dir", resolved)
+                if broadcast:
+                    broadcast({
+                        "type": "updateSetting",
+                        "key": "working_directory",
+                        "value": resolved,
+                    })
+
+            if use_web_browser is not None:
+                self._use_web_tools = bool(use_web_browser)
+                updated.append(f"use_web_browser={self._use_web_tools}")
+                _save_setting_to_config(
+                    "use_web_browser", self._use_web_tools,
+                )
+                if broadcast:
+                    broadcast({
+                        "type": "updateSetting",
+                        "key": "use_web_browser",
+                        "value": self._use_web_tools,
+                    })
+
+            if remote_password is not None:
+                updated.append("remote_password=<updated>")
+                _save_setting_to_config("remote_password", remote_password)
+                if broadcast:
+                    broadcast({
+                        "type": "updateSetting",
+                        "key": "remote_password",
+                        "value": True,
+                    })
+
+            if demo_mode is not None:
+                updated.append(f"demo_mode={bool(demo_mode)}")
+                _save_setting_to_config("demo_mode", bool(demo_mode))
+                if broadcast:
+                    broadcast({
+                        "type": "updateSetting",
+                        "key": "demo_mode",
+                        "value": bool(demo_mode),
+                    })
+
+            if auto_commit is not None and bool(auto_commit):
+                updated.append("auto_commit=triggered")
+                try:
+                    from kiss.agents.sorcar.git_worktree import GitWorktreeOps
+
+                    wd = Path(self.work_dir).resolve()
+                    repo = GitWorktreeOps.discover_repo(wd)
+                    if repo:
+                        commit_dir = wd if wd != repo else repo
+                        GitWorktreeOps.stage_all(commit_dir)
+                        user_prompt = (
+                            getattr(self, "_last_user_prompt", "") or None
+                        )
+                        try:
+                            from kiss.agents.vscode.helpers import (
+                                generate_commit_message_from_diff,
+                            )
+
+                            diff = GitWorktreeOps.staged_diff(commit_dir)
+                            msg = generate_commit_message_from_diff(
+                                diff, user_prompt=user_prompt,
+                            )
+                        except Exception:
+                            msg = "kiss: auto-commit agent changes"
+                            if user_prompt:
+                                from kiss.agents.vscode.helpers import (
+                                    _append_user_prompt,
+                                )
+
+                                msg = _append_user_prompt(msg, user_prompt)
+                        GitWorktreeOps.commit_staged(commit_dir, msg)
+                except Exception:
+                    pass
+                if broadcast:
+                    broadcast({
+                        "type": "updateSetting",
+                        "key": "auto_commit",
+                        "value": True,
+                    })
+
+            if custom_endpoint is not None:
+                updated.append(f"custom_endpoint={custom_endpoint}")
+                _save_setting_to_config("custom_endpoint", custom_endpoint)
+                if broadcast:
+                    broadcast({
+                        "type": "updateSetting",
+                        "key": "custom_endpoint",
+                        "value": custom_endpoint,
+                    })
+
+            if custom_headers is not None:
+                updated.append("custom_headers=<updated>")
+                _save_setting_to_config("custom_headers", custom_headers)
+                if broadcast:
+                    broadcast({
+                        "type": "updateSetting",
+                        "key": "custom_headers",
+                        "value": True,
+                    })
+
+            if not updated:
+                return "No settings were changed (all arguments were None)."
+            return "Updated: " + ", ".join(updated)
+
+        def number_of_cores() -> int:
+            """Return the number of CPU cores available on the current machine.
+
+            Useful for choosing a reasonable ``max_workers`` value when
+            calling :func:`run_parallel`.
+
+            Returns:
+                The number of CPU cores available to the process.  Falls
+                back to the total CPU count if the per-process affinity
+                is unavailable, and to ``1`` as a final fallback.
+            """
+            try:
+                affinity = os.sched_getaffinity(0)  # type: ignore[attr-defined]
+                return len(affinity)
+            except AttributeError:
+                pass
+            return os.cpu_count() or 1
+
+        def change_model(model_name: str) -> str:
+            """Change the agent's LLM model dynamically.
+
+            Args:
+                model_name: New LLM model name (for example
+                    ``"gpt-4o"``, ``"claude-sonnet-4-6"``,
+                    ``"gemini-2.5-pro"``).
+
+            Returns:
+                A human-readable confirmation string describing the
+                change (or a "no change" message when the requested
+                model is already active).
+            """
+            from kiss.agents.sorcar.persistence import _save_last_model
+
+            old_model = getattr(self, "model", None)
+            if old_model is None:
+                self.model_name = model_name
+                _save_last_model(model_name)
+                return (
+                    f"Model deferred-changed to {model_name} "
+                    "(no live model yet)."
+                )
+            if old_model.model_name == model_name:
+                return f"Model is already {model_name}; no change."
+
+            # Reconstruct ``model_config`` for the factory.  The
+            # ``OpenAICompatibleModel`` factory path strips ``base_url``
+            # and ``api_key`` from ``model_config`` before storing it,
+            # so we restore them from the live model's attributes so the
+            # new model lands on the same endpoint.
+            new_config: dict[str, Any] = dict(old_model.model_config or {})
+            old_base_url = getattr(old_model, "base_url", None)
+            old_api_key = getattr(old_model, "api_key", None)
+            if old_base_url and "base_url" not in new_config:
+                new_config["base_url"] = old_base_url
+                if old_api_key is not None:
+                    new_config["api_key"] = old_api_key
+            new_model = _model_factory(
+                model_name,
+                model_config=new_config or None,
+                token_callback=old_model.token_callback,
+                thinking_callback=old_model.thinking_callback,
+            )
+            # Carry over the live conversation state so the next LLM
+            # call resumes from the same point.  The kiss-agent
+            # conversation list shape is OpenAI-style (``role`` /
+            # ``content`` dicts plus tool_call entries) for every
+            # provider in this codebase, so a direct hand-off is safe.
+            new_model.conversation = old_model.conversation
+            new_model.usage_info_for_messages = old_model.usage_info_for_messages
+
+            previous_name = old_model.model_name
+            self.model = new_model  # type: ignore[attr-defined]
+            self.model_name = model_name
+            # Rebuild the cached tools schema against the new model
+            # (different providers can produce slightly different
+            # schemas — e.g. Anthropic vs OpenAI).
+            if getattr(self, "function_map", None):
+                self._cached_tools_schema = new_model._build_openai_tools_schema(  # type: ignore[attr-defined]
+                    self.function_map,
+                )
+            _save_last_model(model_name)
+            return f"Model changed from {previous_name} to {model_name}."
+
         tools.append(ask_user_question)
+        tools.append(update_settings)
+        tools.append(change_model)
         if self._is_parallel:
             tools.append(run_parallel)
+            tools.append(number_of_cores)
         return tools
 
     def perform_task(
@@ -216,6 +590,17 @@ class SorcarAgent(RelentlessAgent):
         self.web_use_tool = None
         tl = getattr(printer, "_thread_local", None) if printer else None
         self._stop_event = getattr(tl, "stop_event", None) if tl else None
+        # Wire up the pre-step hook so user prompts queued via the VS
+        # Code frontend's ``appendUserMessage`` command while this
+        # task is running get injected into the model's conversation
+        # as additional ``user`` messages immediately before the next
+        # model call.  Only meaningful when this agent has been bound
+        # to a frontend tab (``_tab_id`` is set by
+        # :meth:`_TaskRunnerMixin._run_task_inner`).
+        if getattr(self, "_tab_id", None):
+            self.pre_step_hook = self._drain_pending_user_messages
+        else:
+            self.pre_step_hook = None
 
         try:
             system_instructions = (
@@ -272,20 +657,109 @@ class SorcarAgent(RelentlessAgent):
                 self.web_use_tool.close()
             self.web_use_tool = None
             self._ask_user_question_callback = None
+            self.pre_step_hook = None
+
+    def _drain_pending_user_messages(self, model: Any) -> None:
+        """Append any queued follow-up prompts to *model*'s conversation.
+
+        Called once at the top of every model step (wired in via
+        :attr:`kiss.core.kiss_agent.KISSAgent.pre_step_hook`).  Drains
+        the owning :class:`_RunningAgentState`'s
+        ``pending_user_messages`` list under
+        :attr:`_RunningAgentState._registry_lock` (to keep the drain
+        atomic against concurrent ``appendUserMessage`` commands from
+        the frontend) and pushes each entry into *model*'s
+        conversation as a ``user`` role message.  The list is emptied
+        on every drain so the same queued message is never injected
+        twice.
+
+        Args:
+            model: The live model whose conversation receives the
+                queued user messages.
+        """
+        from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+
+        tab_id = getattr(self, "_tab_id", "") or ""
+        if not tab_id:
+            return
+        with _RunningAgentState._registry_lock:
+            tab = _RunningAgentState.running_agent_states.get(tab_id)
+            if tab is None or not tab.pending_user_messages:
+                return
+            queued = list(tab.pending_user_messages)
+            tab.pending_user_messages.clear()
+        for msg in queued:
+            model.add_message_to_conversation("user", msg)
+
+
+def _coerce_tasks(tasks: Any) -> list[str]:
+    """Normalize the ``tasks`` argument to a ``list[str]``.
+
+    LLM tool calls sometimes pass ``tasks`` in two malformed shapes that
+    we recover from here:
+
+    1. A JSON-encoded list string such as ``'["task A", "task B"]'``.
+       Without recovery, the entire JSON string would be treated as one
+       task and dispatched to a single sub-agent.  We parse it back into
+       a proper ``list[str]``.
+    2. A bare task string such as ``"hello"``.  Without this guard,
+       ``enumerate(tasks)`` would iterate the string character-by-
+       character and create one sub-agent (and one ``openSubagentTab``
+       event) per character.  We wrap it into ``["hello"]``.
+
+    Args:
+        tasks: Either a ``list[str]``, a JSON-encoded ``list[str]`` string,
+            or a single task ``str``.
+
+    Returns:
+        A ``list[str]``.  JSON-encoded list strings are parsed; other
+        ``str`` inputs are wrapped in a one-element list.
+
+    Raises:
+        TypeError: If *tasks* is neither a ``str`` nor a ``list[str]``.
+    """
+    if isinstance(tasks, str):
+        stripped = tasks.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            try:
+                parsed = json.loads(stripped)
+            except (ValueError, TypeError):
+                parsed = None
+            if (
+                isinstance(parsed, list)
+                and parsed
+                and all(isinstance(t, str) for t in parsed)
+            ):
+                return parsed
+        return [tasks]
+    if isinstance(tasks, list) and all(isinstance(t, str) for t in tasks):
+        return tasks
+    raise TypeError(
+        f"tasks must be list[str], got {type(tasks).__name__}: {tasks!r}"
+    )
 
 
 def run_tasks_parallel(
     tasks: list[str],
     max_workers: int | None = None,
-    model: str | None = None,
+    model_name: str | None = None,
     work_dir: str | None = None,
+    printer: Printer | None = None,
+    totals_out: dict[str, float] | None = None,
 ) -> list[str]:
     """Execute multiple SorcarAgent tasks concurrently using threads.
 
-    Each task gets its own ``SorcarAgent`` instance and runs in a separate
-    thread via :class:`~concurrent.futures.ThreadPoolExecutor`.  This is
-    ideal for I/O-bound workloads (LLM API calls, network requests) where
-    the GIL is released during I/O waits.
+    Each task gets its own ``ChatSorcarAgent`` instance and runs in a
+    separate thread via :class:`~concurrent.futures.ThreadPoolExecutor`.
+    This is ideal for I/O-bound workloads (LLM API calls, network
+    requests) where the GIL is released during I/O waits.
+
+    This helper is a pure parallel executor: it has no knowledge of
+    backend task ids or any frontend concepts.  It simply marks each
+    spawned agent as a sub-agent (via ``_subagent_info``) and the
+    sub-agent itself owns any sub-agent-specific behaviour (such as
+    broadcasting ``new_tab`` to a browser-based frontend) inside its
+    own ``run()`` method.
 
     Args:
         tasks: List of task description strings.  Each string is passed as
@@ -299,25 +773,61 @@ def run_tasks_parallel(
         max_workers: Maximum number of threads.  ``None`` lets
             :class:`~concurrent.futures.ThreadPoolExecutor` pick a default
             (typically ``min(32, cpu_count + 4)``).
-        model: LLM model name for all parallel agents.  ``None`` uses the
+        model_name: LLM model name for all parallel agents.  ``None`` uses the
             default from persistence (same as :meth:`SorcarAgent.run`).
         work_dir: Working directory for all parallel agents.  ``None`` uses
             the default (``artifact_dir/kiss_workdir``).
+        printer: Optional printer from the parent agent.  Forwarded
+            verbatim to each sub-agent's ``run`` so live events
+            continue to flow through the same channel.  The executor
+            itself does not call any printer methods.
 
     Returns:
         List of YAML result strings in the **same order** as *tasks*.
         Each string contains ``success`` and ``summary`` keys.  If a task
         raises an unhandled exception the corresponding entry is a YAML
         string with ``success: false`` and the traceback in ``summary``.
-    """
 
-    def _run_single(task: str) -> str:
-        agent = SorcarAgent(f"Parallel-{task[:40]}")
+    Raises:
+        TypeError: If *tasks* is not a list of strings.  As a convenience
+            for LLM tool callers that mistakenly pass a bare string,
+            ``str`` is coerced to a one-element list.
+    """
+    tasks = _coerce_tasks(tasks)
+
+    # Local import: ``chat_sorcar_agent`` imports from this module, so a
+    # top-level import would be circular.
+    from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+
+    # Per-sub-agent usage so the caller can aggregate it back into the
+    # parent agent's accounting.  Each entry is a tuple of
+    # ``(budget_used, total_tokens_used, total_steps)``.
+    sub_usage: list[tuple[float, int, int]] = [(0.0, 0, 0)] * len(tasks)
+
+    def _run_single(args: tuple[int, str]) -> str:
+        idx, task = args
+        agent = ChatSorcarAgent(f"Parallel-{task[:40]}")
+        # Mark the spawned agent as a sub-agent.  ``ChatSorcarAgent.run``
+        # reads this marker to drive its own sub-agent-specific
+        # behaviour (e.g. broadcasting ``new_tab`` to a browser-based
+        # frontend, persisting the ``subagent`` extra field).  This
+        # keeps the parallel executor itself free of any task-id or
+        # frontend knowledge.  The base ``SorcarAgent`` path has no
+        # parent ``task_id`` to record, so ``parent_task_id`` is
+        # ``None`` here; the chat-aware override sets the real parent
+        # id.
+        agent._subagent_info = {"parent_task_id": None}
         try:
+            # ``is_parallel=True`` propagates the parallel capability so
+            # sub-agents themselves get the ``run_parallel`` tool and
+            # can invoke nested parallel execution.  Without this, nested
+            # parallel (sub-agent calls run_parallel) is impossible.
             result: str = agent.run(
                 prompt_template=task,
-                model_name=model,
+                model_name=model_name,
                 work_dir=work_dir,
+                printer=printer,
+                is_parallel=True,
             )
             return result
         except Exception as exc:
@@ -326,9 +836,37 @@ def run_tasks_parallel(
                 sort_keys=False,
             )
             return error_result
+        finally:
+            sub_usage[idx] = (
+                float(getattr(agent, "budget_used", 0.0) or 0.0),
+                int(getattr(agent, "total_tokens_used", 0) or 0),
+                int(getattr(agent, "total_steps", 0) or 0),
+            )
+            # Broadcast ``subagentDone`` so the frontend can stop
+            # the running indicator on the sub-agent tab.
+            if printer is not None:
+                broadcast_fn = getattr(printer, "broadcast", None)
+                if broadcast_fn is not None:
+                    tl = getattr(printer, "_thread_local", None)
+                    parent_key = getattr(tl, "task_id", "") if tl else ""
+                    sub_tab = f"{parent_key}__sub_{idx}" if parent_key else ""
+                    if sub_tab:
+                        try:
+                            broadcast_fn({
+                                "type": "subagentDone",
+                                "tab_id": sub_tab,
+                                "tabId": "",
+                            })
+                        except Exception:
+                            pass
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        results = list(pool.map(_run_single, tasks))
+        results = list(pool.map(_run_single, enumerate(tasks)))
+
+    if totals_out is not None:
+        totals_out["budget_used"] = sum(u[0] for u in sub_usage)
+        totals_out["total_tokens_used"] = sum(u[1] for u in sub_usage)
+        totals_out["total_steps"] = sum(u[2] for u in sub_usage)
     return results
 
 

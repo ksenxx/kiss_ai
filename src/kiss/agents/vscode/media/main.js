@@ -111,8 +111,15 @@
   // Adjacent task scroll state (Cursor-style chat thread navigation)
   // Tab.id is a frontend-only UUID string; chat_id is an int assigned by the DB.
   let currentTaskName = ''; // the originally loaded task
-  let oldestLoadedTask = ''; // topmost task in the view (for scrolling up)
-  let newestLoadedTask = ''; // bottommost task in the view (for scrolling down)
+  // DB row ids identifying the topmost / bottommost tasks currently
+  // rendered in #output.  These are the values sent over the wire to
+  // the backend's getAdjacentTask handler — using the row id (rather
+  // than the task description string) ensures that duplicate task
+  // texts within a chat are navigated unambiguously.  ``null`` means
+  // "no id known yet" (e.g. fresh tab before any task ran).
+  let currentTaskId = null; // task_id of the originally loaded task
+  let oldestLoadedTaskId = null; // task_id of the topmost loaded task
+  let newestLoadedTaskId = null; // task_id of the bottommost loaded task
   let adjacentLoading = false;
   let noPrevTask = false; // true when server says no prev exists
   let noNextTask = false; // true when server says no next exists
@@ -139,29 +146,6 @@
 
   let tabs = []; // array of tab objects (see makeTab for fields)
   let activeTabId = '';
-
-  // Hard cap on the number of open chat tabs.  When createNewTab pushes
-  // the count beyond this, trimOldestTabs() drops the oldest entries
-  // (front of the array) and notifies the backend so server-side
-  // _TabState is also released.
-  const MAX_TABS = 5;
-
-  /** Drop the oldest tabs from the front of `tabs` until the count
-   * is <= MAX_TABS.  Posts a `closeTab` message for each dropped tab
-   * so the backend releases its per-tab state.  Skips tabs whose id
-   * matches activeTabId so the freshly created / focused tab is never
-   * collected.
-   */
-  function trimOldestTabs() {
-    while (tabs.length > MAX_TABS) {
-      const idx = tabs.findIndex(t => {
-        return t.id !== activeTabId;
-      });
-      if (idx < 0) return;
-      const removed = tabs.splice(idx, 1)[0];
-      vscode.postMessage({type: 'closeTab', tabId: removed.id});
-    }
-  }
 
   function makeTab(title) {
     const _id = genTabId();
@@ -208,7 +192,6 @@
       askQuestionEl: null,
       askInputEl: null,
       askSubmitEl: null,
-      taskQueue: [],
     };
   }
 
@@ -304,11 +287,19 @@
       tab.outputFragment = null;
     }
     if (taskPanel && taskPanelText) {
-      taskPanelText.textContent = tab.taskPanelHTML;
+      // Trim trailing/leading whitespace so the user-visible task text
+      // — which is also what gets selected and copied to the clipboard
+      // — never carries stray newlines.  Regression: setTaskText() trims
+      // its input, but tab.taskPanelHTML can also be written by
+      // background-tab handlers ('taskExecuted', 'setTaskText',
+      // 'openSubagentTab') from raw event fields, so this restore path
+      // must defensively trim too.  See test_task_panel_no_trailing_newlines.py.
+      taskPanelText.textContent = (tab.taskPanelHTML || '').trim();
       if (tab.taskPanelVisible) taskPanel.classList.add('visible');
       else taskPanel.classList.remove('visible');
     }
-    currentTaskName = tab.taskPanelHTML || '';
+    currentTaskName = (tab.taskPanelHTML || '').trim();
+    currentTaskId = tab.currentTaskId !== undefined ? tab.currentTaskId : null;
     updateChevronIcon(!!tab.panelsExpandedMap[currentTaskName]);
     if (statusText) {
       statusText.textContent = tab.statusTextContent || 'Ready';
@@ -374,12 +365,13 @@
     } else if (isMerging) {
       showMergeToolbar(tab.id);
     }
-    // Set inputContainer visibility based on active bars
-    if (
+    // Set inputContainer visibility based on active bars and subagent tab status
+    const hideInput =
       worktreeBar ||
       autocommitBar ||
-      document.getElementById('merge-toolbar')
-    ) {
+      document.getElementById('merge-toolbar') ||
+      tab.isSubagentTab;
+    if (hideInput) {
       if (inputContainer) inputContainer.style.display = 'none';
     } else {
       if (inputContainer) inputContainer.style.display = '';
@@ -400,20 +392,44 @@
     tabList.innerHTML = '';
     tabs.forEach(tab => {
       const el = document.createElement('div');
-      el.className = 'chat-tab' + (tab.id === activeTabId ? ' active' : '');
+      el.className =
+        'chat-tab' +
+        (tab.id === activeTabId ? ' active' : '') +
+        (tab.isSubagentTab ? ' subagent-tab' : '');
       el.dataset.tabId = tab.id;
 
-      if (tab.isRunning) {
-        const spinner = document.createElement('span');
-        spinner.className = 'chat-tab-spinner';
-        el.appendChild(spinner);
-      } else if (tab.hasRunTask) {
-        const icon = document.createElement('span');
-        icon.className = tab.lastTaskFailed
-          ? 'chat-tab-status chat-tab-fail'
-          : 'chat-tab-status chat-tab-ok';
-        icon.textContent = tab.lastTaskFailed ? '\u2717' : '\u2713';
-        el.appendChild(icon);
+      if (tab.isSubagentTab) {
+        // Subagent tab indicator — purple circle in the tab title.
+        // While the sub-agent is running we render ◉ (fisheye, a
+        // ring-with-dot glyph) and pulse its opacity via the default
+        // ``.subagent-indicator`` animation.  Once the sub-agent is
+        // done we swap the glyph to ● (solid black circle, coloured
+        // purple via CSS) and add the ``.done`` modifier class which
+        // kills the pulse animation — giving the user a clear "this
+        // sub-agent finished" signal: a SOLID purple disc instead of
+        // the running ring/pulse.
+        const subIndicator = document.createElement('span');
+        subIndicator.className =
+          'subagent-indicator' + (tab.isDone ? ' done' : '');
+        subIndicator.textContent = tab.isDone ? '\u25CF' : '\u25C9';
+        subIndicator.title = tab.isDone ? 'Done' : 'Running';
+        el.appendChild(subIndicator);
+      } else {
+        if (tab.isRunning) {
+          const spinner = document.createElement('span');
+          spinner.className = 'chat-tab-spinner';
+          el.appendChild(spinner);
+        } else if (tab.hasRunTask) {
+          const icon = document.createElement('span');
+          icon.className = tab.lastTaskFailed
+            ? 'chat-tab-status chat-tab-fail'
+            : 'chat-tab-status chat-tab-ok';
+          // Show a filled circle (●) coloured green for success or red
+          // for failure via the .chat-tab-ok / .chat-tab-fail classes,
+          // replacing the previous ✓ / ✗ glyphs.
+          icon.textContent = '\u25CF';
+          el.appendChild(icon);
+        }
       }
 
       const label = document.createElement('span');
@@ -421,6 +437,7 @@
       label.textContent = tab.title;
       el.appendChild(label);
 
+      // Show close button for all tabs (regular and subagent)
       const closeBtn = document.createElement('span');
       closeBtn.className = 'chat-tab-close';
       closeBtn.textContent = '\u00d7';
@@ -441,7 +458,8 @@
       tabList.appendChild(el);
     });
 
-    // Add "+" button as a direct child of tab-bar (between tab-list and history-btn)
+    // Add "+" button as a direct child of tab-bar, positioned between
+    // #tab-list and the action buttons (frequent / history / settings).
     const existingAdd = tabBar.querySelector('.chat-tab-add');
     if (!existingAdd) {
       const addBtn = document.createElement('div');
@@ -451,7 +469,23 @@
       addBtn.addEventListener('click', () => {
         createNewTab();
       });
-      tabBar.appendChild(addBtn);
+      const firstActionBtn = tabBar.querySelector('.tab-bar-action-btn');
+      if (firstActionBtn) tabBar.insertBefore(addBtn, firstActionBtn);
+      else tabBar.appendChild(addBtn);
+    }
+
+    // Settings button (gear icon) sits to the right of the "+" button.
+    const existingSettings = tabBar.querySelector('.chat-tab-settings');
+    if (!existingSettings) {
+      const settingsBtn = document.createElement('div');
+      settingsBtn.className = 'chat-tab chat-tab-settings';
+      settingsBtn.title = 'Settings';
+      settingsBtn.innerHTML =
+        '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
+      settingsBtn.addEventListener('click', () => {
+        openSettingsPanel();
+      });
+      tabBar.appendChild(settingsBtn);
     }
 
     // Scroll the active tab into view
@@ -485,21 +519,44 @@
   }
 
   function closeTab(tabId) {
-    const idx = tabs.findIndex(t => {
+    const origIdx = tabs.findIndex(t => {
       return t.id === tabId;
     });
-    if (idx < 0) return;
-    tabs.splice(idx, 1);
-    vscode.postMessage({type: 'closeTab', tabId: tabId});
-    if (activeTabId === tabId) {
+    if (origIdx < 0) return;
+    // Collect *tabId* and every (transitive) descendant via
+    // ``parentTabId`` chains so closing a parent tab also closes the
+    // tabs of its sub-agents — and the sub-agents of those sub-agents,
+    // recursively.  Closure detection runs against a snapshot of the
+    // current ``tabs`` array; mutation happens afterwards.
+    const toClose = new Set([tabId]);
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const t of tabs) {
+        if (t.parentTabId && toClose.has(t.parentTabId) && !toClose.has(t.id)) {
+          toClose.add(t.id);
+          grew = true;
+        }
+      }
+    }
+    const activeWasClosed = toClose.has(activeTabId);
+    // Remove every doomed tab from the ``tabs`` array and notify the
+    // backend.  Iterate over an explicit id list (not over ``tabs``)
+    // because we mutate ``tabs`` inside the loop.
+    for (const id of toClose) {
+      const i = tabs.findIndex(t => t.id === id);
+      if (i >= 0) tabs.splice(i, 1);
+      vscode.postMessage({type: 'closeTab', tabId: id});
+    }
+    if (activeWasClosed) {
       if (tabs.length === 0) {
         // Last tab closed — create a fresh chat instead of closing
         // the secondary sidebar.
         createNewTab();
         return;
       }
-      // Switch to an adjacent tab
-      const newIdx = Math.min(idx, tabs.length - 1);
+      // Switch to an adjacent tab (clamp to the new array length).
+      const newIdx = Math.min(origIdx, tabs.length - 1);
       const newTab = tabs[newIdx];
       restoreTab(newTab);
       // Restore running state for the new tab
@@ -615,6 +672,16 @@
     if (e.key === 'Escape') closeTabContextMenu();
   });
 
+  /**
+   * Create a new chat tab.
+   *
+   * Always allocates a fresh tab with a newly minted uuid.  The
+   * frontend never dedupes by tab id when the user clicks a history
+   * row — the backend is the multi-client source of truth and may
+   * be observed concurrently from several browsers/webviews, so the
+   * "focus the existing tab keyed by this id" shortcut would only
+   * be correct for a single-client setup.
+   */
   function createNewTab() {
     // Preserve any typed text so it carries over to the new tab
     const pendingText = inp.value || '';
@@ -623,10 +690,6 @@
     tab.inputValue = pendingText;
     tabs.push(tab);
     activeTabId = tab.id;
-    // Enforce the open-tab cap: drop oldest tabs (and notify backend)
-    // before any rendering / persistence so renderTabBar reflects the
-    // post-trim state.
-    trimOldestTabs();
     // Reset UI for fresh tab
     // (empty fragment, "Ready" status, welcome visible, no merge,
     // no worktree bar, etc.).  `restoreTab` applies that state to
@@ -674,6 +737,9 @@
         title: t.title,
         chatId: t.id,
         backendChatId: t.backendChatId || '',
+        isSubagentTab: !!t.isSubagentTab,
+        isDone: !!t.isDone,
+        parentTabId: t.parentTabId || '',
       };
     });
     const activeIdx = tabs.findIndex(t => {
@@ -696,6 +762,14 @@
         // Restore tab.id from persisted chatId (frontend tab identifier)
         if (st.chatId) tab.id = st.chatId;
         if (st.backendChatId) tab.backendChatId = st.backendChatId;
+        // Preserve subagent flag so subagent tabs aren't reclassified
+        // as regular tabs on webview reload.
+        if (st.isSubagentTab) {
+          tab.isSubagentTab = true;
+          tab.isDone = !!st.isDone;
+          tab.isRunning = !st.isDone;
+        }
+        if (st.parentTabId) tab.parentTabId = st.parentTabId;
         tabs.push(tab);
       });
       const idx = saved.activeTabIndex || 0;
@@ -730,7 +804,7 @@
   const fileChips = document.getElementById('file-chips');
 
   const statusText = document.getElementById('status-text');
-  const historyBtn = document.getElementById('history-btn');
+  const menuBtn = document.getElementById('menu-btn');
   const sidebar = document.getElementById('sidebar');
   const sidebarOverlay = document.getElementById('sidebar-overlay');
   const sidebarClose = document.getElementById('sidebar-close');
@@ -742,35 +816,39 @@
   const askUserModal = document.getElementById('ask-user-modal');
   const askUserSlot = document.getElementById('ask-user-slot');
 
-  // Config sidebar elements
-  const configBtn = document.getElementById('config-btn');
-  const configSidebar = document.getElementById('config-sidebar');
-  const configSidebarOverlay = document.getElementById(
-    'config-sidebar-overlay',
-  );
-  const configSidebarClose = document.getElementById('config-sidebar-close');
-
-  // Frequent-tasks sidebar elements
-  const frequentBtn = document.getElementById('frequent-btn');
-  const frequentSidebar = document.getElementById('frequent-sidebar');
-  const frequentSidebarOverlay = document.getElementById(
-    'frequent-sidebar-overlay',
-  );
-  const frequentSidebarClose = document.getElementById(
-    'frequent-sidebar-close',
-  );
+  // #sidebar hosts only the History list now.  The Frequent tasks list
+  // lives in its own standalone bottom-anchored panel (#frequent-panel),
+  // and Settings has its own standalone right-anchored panel
+  // (#settings-panel).
+  const settingsPanel = document.getElementById('settings-panel');
+  const settingsOverlay = document.getElementById('settings-overlay');
+  const settingsPanelClose = document.getElementById('settings-panel-close');
+  const frequentPanel = document.getElementById('frequent-panel');
+  const frequentOverlay = document.getElementById('frequent-overlay');
+  const frequentPanelClose = document.getElementById('frequent-panel-close');
+  const frequentTasksBtn = document.getElementById('frequent-tasks-btn');
   const frequentList = document.getElementById('frequent-list');
+  // Tricks panel — mirrors the Frequent tasks panel structure.  The
+  // trick texts are parsed from src/kiss/INJECTIONS.md by the HTML
+  // builder and injected as window.__TRICKS__ before main.js loads.
+  const tricksPanel = document.getElementById('tricks-panel');
+  const tricksOverlay = document.getElementById('tricks-overlay');
+  const tricksPanelClose = document.getElementById('tricks-panel-close');
+  const tricksBtn = document.getElementById('tricks-btn');
+  const tricksList = document.getElementById('tricks-list');
   const autocommitBtn = document.getElementById('autocommit-btn');
   const waitSpinner = document.getElementById('wait-spinner');
   const ghostOverlay = document.getElementById('ghost-overlay');
   const inputContainer = document.getElementById('input-container');
   const inputClearBtn = document.getElementById('input-clear-btn');
-  const worktreeToggleBtn = document.getElementById('worktree-toggle-btn');
-  const parallelToggleBtn = document.getElementById('parallel-toggle-btn');
-  const demoToggleBtn = document.getElementById('demo-toggle-btn');
+  const worktreeToggleBtn = document.getElementById('cfg-use-worktree');
+  const parallelToggleBtn = document.getElementById('cfg-use-parallel');
+  const demoToggleBtn = document.getElementById('cfg-demo-mode');
+  const autocommitToggleBtn = document.getElementById('cfg-auto-commit');
   const taskPanel = document.getElementById('task-panel');
   const taskPanelText = document.getElementById('task-panel-text');
   const taskPanelChevron = document.getElementById('task-panel-chevron');
+  const taskPanelCopy = document.getElementById('task-panel-copy');
   const statusTokens = document.getElementById('status-tokens');
   const statusBudget = document.getElementById('status-budget');
   const statusSteps = document.getElementById('status-steps');
@@ -904,6 +982,50 @@
     });
   }
 
+  // Copy-task button: trims the visible task text and copies it to the
+  // system clipboard.  Briefly swaps the clipboard icon for a green
+  // check mark to confirm.
+  if (taskPanelCopy && taskPanelText) {
+    let copyResetTimer = null;
+    taskPanelCopy.addEventListener('click', async e => {
+      e.stopPropagation();
+      const text = (taskPanelText.textContent || '').trim();
+      if (!text) return;
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch {
+        // Fallback for environments without async clipboard API.
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try {
+          document.execCommand('copy');
+        } catch {
+          /* ignore */
+        }
+        document.body.removeChild(ta);
+      }
+      const iconCopy = taskPanelCopy.querySelector('.icon-copy');
+      const iconCheck = taskPanelCopy.querySelector('.icon-check');
+      if (iconCopy && iconCheck) {
+        iconCopy.style.display = 'none';
+        iconCheck.style.display = '';
+      }
+      taskPanelCopy.classList.add('copied');
+      if (copyResetTimer) clearTimeout(copyResetTimer);
+      copyResetTimer = setTimeout(() => {
+        if (iconCopy && iconCheck) {
+          iconCopy.style.display = '';
+          iconCheck.style.display = 'none';
+        }
+        taskPanelCopy.classList.remove('copied');
+      }, 1500);
+    });
+  }
+
   function syncClearBtn() {
     if (inputClearBtn) inputClearBtn.style.display = inp.value ? '' : 'none';
   }
@@ -956,8 +1078,8 @@
 
   function resetAdjacentState() {
     adjacentLoading = false;
-    oldestLoadedTask = currentTaskName;
-    newestLoadedTask = currentTaskName;
+    oldestLoadedTaskId = currentTaskId;
+    newestLoadedTaskId = currentTaskId;
     noPrevTask = false;
     noNextTask = false;
     overscrollAccum = 0;
@@ -1029,10 +1151,12 @@
       O.insertBefore(container, O.firstChild);
       const newScrollHeight = O.scrollHeight;
       O.scrollTop += newScrollHeight - prevScrollHeight;
-      oldestLoadedTask = task;
+      if (taskId !== undefined && taskId !== null && taskId !== '')
+        oldestLoadedTaskId = taskId;
     } else {
       O.appendChild(container);
-      newestLoadedTask = task;
+      if (taskId !== undefined && taskId !== null && taskId !== '')
+        newestLoadedTaskId = taskId;
     }
     const tab = tabs.find(x => {
       return x.id === activeTabId;
@@ -2054,12 +2178,23 @@
   O.addEventListener('wheel', e => {
     if (isRunning && e.deltaY < 0) _scrollLock = true;
 
-    // Adjacent task loading via overscroll detection
-    if (!adjacentLoading && activeTabId && currentTaskName) {
+    // Adjacent task loading via overscroll detection.  Sub-agent
+    // tabs MUST NOT show siblings from the same chat_id — they
+    // render exactly one task, the sub-agent's own row.
+    const _activeTabForAdj = tabs.find(t => t.id === activeTabId);
+    const _isSubagentActive = !!(
+      _activeTabForAdj && _activeTabForAdj.isSubagentTab
+    );
+    if (
+      !adjacentLoading &&
+      activeTabId &&
+      currentTaskName &&
+      !_isSubagentActive
+    ) {
       const atTop = O.scrollTop <= 0;
       const atBottom = O.scrollTop + O.clientHeight >= O.scrollHeight - 2;
 
-      if (atTop && e.deltaY < 0 && !noPrevTask && oldestLoadedTask) {
+      if (atTop && e.deltaY < 0 && !noPrevTask && oldestLoadedTaskId != null) {
         // Scrolling up at top — load task before the oldest loaded
         if (overscrollDir !== 'prev') {
           overscrollAccum = 0;
@@ -2079,11 +2214,16 @@
           vscode.postMessage({
             type: 'getAdjacentTask',
             tabId: activeTabId,
-            task: oldestLoadedTask,
+            taskId: oldestLoadedTaskId,
             direction: 'prev',
           });
         }
-      } else if (atBottom && e.deltaY > 0 && !noNextTask && newestLoadedTask) {
+      } else if (
+        atBottom &&
+        e.deltaY > 0 &&
+        !noNextTask &&
+        newestLoadedTaskId != null
+      ) {
         // Scrolling down at bottom — load task after the newest loaded
         if (overscrollDir !== 'next') {
           overscrollAccum = 0;
@@ -2103,7 +2243,7 @@
           vscode.postMessage({
             type: 'getAdjacentTask',
             tabId: activeTabId,
-            task: newestLoadedTask,
+            taskId: newestLoadedTaskId,
             direction: 'next',
           });
         }
@@ -2141,11 +2281,20 @@
       _touchOutputLastY = currentY;
 
       if (adjacentLoading || !activeTabId || !currentTaskName) return;
+      // Sub-agent tabs MUST NOT load sibling tasks from the same
+      // chat_id — they render exactly the sub-agent's own row.
+      const _activeTabT = tabs.find(t => t.id === activeTabId);
+      if (_activeTabT && _activeTabT.isSubagentTab) return;
 
       const atTop = O.scrollTop <= 0;
       const atBottom = O.scrollTop + O.clientHeight >= O.scrollHeight - 2;
 
-      if (atTop && touchDelta < 0 && !noPrevTask && oldestLoadedTask) {
+      if (
+        atTop &&
+        touchDelta < 0 &&
+        !noPrevTask &&
+        oldestLoadedTaskId != null
+      ) {
         // Pulling down at top — load previous task
         if (overscrollDir !== 'prev') {
           overscrollAccum = 0;
@@ -2165,7 +2314,7 @@
           vscode.postMessage({
             type: 'getAdjacentTask',
             tabId: activeTabId,
-            task: oldestLoadedTask,
+            taskId: oldestLoadedTaskId,
             direction: 'prev',
           });
         }
@@ -2173,7 +2322,7 @@
         atBottom &&
         touchDelta > 0 &&
         !noNextTask &&
-        newestLoadedTask
+        newestLoadedTaskId != null
       ) {
         // Pushing up at bottom — load next task
         if (overscrollDir !== 'next') {
@@ -2194,7 +2343,7 @@
           vscode.postMessage({
             type: 'getAdjacentTask',
             tabId: activeTabId,
-            task: newestLoadedTask,
+            taskId: newestLoadedTaskId,
             direction: 'next',
           });
         }
@@ -2270,16 +2419,46 @@
   }).observe(O, {childList: true, subtree: true, characterData: true});
 
   // --- Timer ---
+  // ``endTs`` (ms since epoch) is the agent's recorded end timestamp
+  // for the currently-displayed task.  When the agent has already
+  // finished but the frontend joined late (history load) this lets
+  // ``_renderTimerTick`` flip the label from "Running …" to
+  // "Done (Xm Ys)" without waiting for a live ``task_done`` event.
+  // Zero means "no recorded end yet" (still running, or a legacy
+  // row that pre-dates endTs persistence).
+  let endTs = 0;
+  function _renderTimerTick() {
+    // If the agent's persisted end timestamp has already passed,
+    // surface "Done (Xm Ys)" computed from agent wall-clock
+    // (endTs - t0) and shut down the live tick.  Without this
+    // branch a chat loaded from history for a task that finished
+    // while the client was disconnected would render
+    // "Running …" forever.
+    if (endTs > 0 && t0 && Date.now() >= endTs) {
+      const ds = Math.max(0, Math.floor((endTs - t0) / 1000));
+      const dm = Math.floor(ds / 60);
+      statusText.textContent =
+        'Done (' + (dm > 0 ? dm + 'm ' : '') + (ds % 60) + 's)';
+      stopTimer();
+      setRunningState(false);
+      return;
+    }
+    const s = Math.floor((Date.now() - t0) / 1000);
+    const m = Math.floor(s / 60);
+    statusText.textContent =
+      'Running ' + (m > 0 ? m + 'm ' : '') + (s % 60) + 's';
+  }
   function startTimer() {
     if (!t0) t0 = Date.now();
     if (timerIv) clearInterval(timerIv);
     statusText.style.color = 'var(--red)';
-    timerIv = setInterval(() => {
-      const s = Math.floor((Date.now() - t0) / 1000);
-      const m = Math.floor(s / 60);
-      statusText.textContent =
-        'Running ' + (m > 0 ? m + 'm ' : '') + (s % 60) + 's';
-    }, 1000);
+    // Render the first tick immediately so the "Running …" label
+    // appears the instant the running state turns on (e.g. when a
+    // running task is loaded into a new tab from history).  Without
+    // this the statusText stays at "Ready" / blank for up to 1s
+    // until the first ``setInterval`` callback fires.
+    _renderTimerTick();
+    timerIv = setInterval(_renderTimerTick, 1000);
   }
   function stopTimer() {
     if (timerIv) {
@@ -2346,11 +2525,47 @@
         if (evTab) {
           evTab.isRunning = !!ev.running;
         }
+        // Anchor the chat webview's "Running …" timer to the
+        // agent's TRUE start timestamp (ms since epoch) supplied by
+        // the backend — not to the client's Date.now() at the
+        // moment this status event arrives.  Without this anchor a
+        // chat resumed from history would show "Running 0s" no
+        // matter how long the agent has actually been running.
+        if (ev.running && typeof ev.startTs === 'number' && ev.startTs > 0) {
+          t0 = ev.startTs;
+          if (evTab) evTab.t0 = ev.startTs;
+          // A freshly-running task on this tab has no recorded end
+          // yet — clear any stale ``endTs`` captured from a prior
+          // task's ``task_events`` so the timer doesn't immediately
+          // jump to "Done".
+          endTs = 0;
+        }
         // Update UI only when the event targets the active tab (or no tabId)
         if (!evTab || evTab.id === activeTabId) {
           setRunningState(ev.running);
+          // Refresh chevron-driven visibility so panels of the now-running
+          // task become visible even if the chevron is collapsed.  Needed
+          // after resuming a running task from history: the prior
+          // ``task_events`` replay called applyChevronState() while
+          // isRunning was still false, marking every replayed panel
+          // chv-hidden.  Re-applying it here (with isRunning=true) unhides
+          // panels of the running task per applyChevronState's
+          // ``inRunning`` branch, so subsequent live events from the
+          // re-attached agent are visible immediately.
+          if (ev.running) {
+            const aTab = tabs.find(t => {
+              return t.id === activeTabId;
+            });
+            if (aTab) {
+              applyChevronState(
+                !!aTab.panelsExpandedMap[currentTaskName],
+                currentTaskName,
+              );
+            }
+          }
         }
         renderTabBar();
+        refreshHistory();
         break;
       }
       case 'models':
@@ -2363,11 +2578,6 @@
         break;
       case 'configData':
         populateConfigForm(ev.config || {}, ev.apiKeys || {});
-        break;
-      case 'folderPicked':
-        if (ev.path) {
-          document.getElementById('cfg-work-dir').value = ev.path;
-        }
         break;
       case 'history':
         renderHistory(ev.sessions || [], ev.offset || 0, ev.generation || 0);
@@ -2562,8 +2772,13 @@
         // 'taskDeleted' broadcast can decide whether to close this tab.
         if (teTab && ev.task_id !== undefined && ev.task_id !== null)
           teTab.currentTaskId = ev.task_id;
-        // Non-active tab: render into a document fragment without touching the DOM
-        if (teTabId !== activeTabId && teTab) {
+        // Non-active tab: render into a document fragment without touching the DOM.
+        // When teTabId targets a different tab but that tab hasn't been
+        // created yet (teTab is null), silently drop the event so
+        // sub-agent events never fall through to the active (parent) tab.
+        if (teTabId !== activeTabId) {
+          if (!teTab) break;
+
           const taskTitle = (ev.task || '').trim();
           if (taskTitle) {
             teTab.title =
@@ -2619,7 +2834,12 @@
         // Active tab: render directly into the DOM
         if (ev.task) {
           currentTaskName = ev.task;
-          resetAdjacentState(); // sets oldest/newest to currentTaskName
+          // Keep currentTaskId in sync with the active task whose
+          // events are reaching this tab so that adjacent scrolling
+          // queries the right DB row id.
+          if (ev.task_id !== undefined && ev.task_id !== null)
+            currentTaskId = ev.task_id;
+          resetAdjacentState(); // sets oldest/newest to current task
           setTaskText(ev.task);
           if (welcome) {
             welcome.style.display = 'none';
@@ -2630,6 +2850,20 @@
         if (ev.extra) {
           try {
             const extra = JSON.parse(ev.extra);
+            // Capture the agent's persisted start / end timestamps
+            // (ms since epoch) so the chat webview's "Running …" /
+            // "Done (Xm Ys)" header can be computed from agent
+            // wall-clock — see ``_renderTimerTick``.  ``endTs > 0``
+            // means the task has already ended; the timer-tick
+            // branch will flip the label to "Done (…)" as soon as
+            // ``Date.now() >= endTs`` even when no live
+            // ``task_done`` event arrives (history-resume case).
+            if (typeof extra.startTs === 'number' && extra.startTs > 0) {
+              t0 = extra.startTs;
+            }
+            if (typeof extra.endTs === 'number' && extra.endTs > 0) {
+              endTs = extra.endTs;
+            }
             if (extra.model) {
               selectedModel = extra.model;
               if (modelName) modelName.textContent = selectedModel;
@@ -2645,12 +2879,13 @@
               if (wdTab) wdTab.workDir = extra.work_dir;
             }
             if (worktreeToggleBtn) {
-              if (extra.is_worktree) worktreeToggleBtn.classList.add('active');
-              else worktreeToggleBtn.classList.remove('active');
+              worktreeToggleBtn.checked = !!extra.is_worktree;
             }
             if (parallelToggleBtn) {
-              if (extra.is_parallel) parallelToggleBtn.classList.add('active');
-              else parallelToggleBtn.classList.remove('active');
+              parallelToggleBtn.checked = !!extra.is_parallel;
+            }
+            if (autocommitToggleBtn) {
+              autocommitToggleBtn.checked = !!extra.auto_commit_mode;
             }
           } catch (_e) {
             /* ignore malformed extra */
@@ -2672,6 +2907,11 @@
         if (ev.tabId === undefined || ev.tabId === activeTabId) {
           if (stt) {
             currentTaskName = stt;
+            // setTaskText fires before a task_id is assigned (the row
+            // is created later by taskExecuted), so clear the id —
+            // adjacent scrolling stays disabled until taskExecuted
+            // delivers the real row id.
+            currentTaskId = null;
             resetAdjacentState();
             if (welcome) {
               welcome.style.display = 'none';
@@ -2731,6 +2971,57 @@
           /* ignored */
         }
         break;
+
+      case 'updateSetting': {
+        const sKey = ev.key;
+        const sVal = ev.value;
+        if (sKey === 'is_parallel' && parallelToggleBtn) {
+          parallelToggleBtn.checked = !!sVal;
+        } else if (sKey === 'is_worktree' && worktreeToggleBtn) {
+          worktreeToggleBtn.checked = !!sVal;
+        } else if (sKey === 'model' && typeof sVal === 'string') {
+          const modelBtn = document.getElementById('model-btn');
+          if (modelBtn) modelBtn.textContent = sVal;
+        } else if (sKey === 'max_budget') {
+          // Budget updated server-side; UI may show in config panel
+        } else if (sKey === 'working_directory') {
+          // Working directory updated server-side
+        } else if (sKey === 'use_web_browser') {
+          // Web browser setting updated server-side
+        } else if (sKey === 'demo_mode' && demoToggleBtn) {
+          demoMode = !!sVal;
+          demoToggleBtn.checked = demoMode;
+        } else if (sKey === 'auto_commit') {
+          // Auto-commit triggered server-side
+        } else if (sKey === 'auto_commit_mode' && autocommitToggleBtn) {
+          autocommitToggleBtn.checked = !!sVal;
+        } else if (sKey === 'custom_endpoint' && typeof sVal === 'string') {
+          const epEl = document.getElementById('cfg-custom-endpoint');
+          if (epEl) epEl.value = sVal;
+        } else if (sKey === 'custom_api_key' && sVal === true) {
+          // Custom API key updated server-side; mask in UI
+          const akEl = document.getElementById('cfg-custom-api-key');
+          if (akEl && !akEl.value) akEl.value = '••••••••';
+        } else if (sKey === 'custom_headers' && sVal === true) {
+          // Custom headers updated server-side
+        } else if (sKey.endsWith('_api_key') && sVal === true) {
+          // API key updated server-side; map param name to env var
+          const envMap = {
+            gemini_api_key: 'GEMINI_API_KEY',
+            openai_api_key: 'OPENAI_API_KEY',
+            anthropic_api_key: 'ANTHROPIC_API_KEY',
+            together_api_key: 'TOGETHER_API_KEY',
+            openrouter_api_key: 'OPENROUTER_API_KEY',
+            minimax_api_key: 'MINIMAX_API_KEY',
+          };
+          const envVar = envMap[sKey];
+          if (envVar) {
+            const keyEl = document.getElementById('cfg-key-' + envVar);
+            if (keyEl && !keyEl.value) keyEl.value = '••••••••';
+          }
+        }
+        break;
+      }
 
       case 'inputHistory':
         histCache = ev.tasks || [];
@@ -2917,7 +3208,11 @@
           });
           if (rt) doneT0 = rt.t0;
         }
-        const el = doneT0 ? Math.floor((Date.now() - doneT0) / 1000) : 0;
+        const ms =
+          ev.startTs > 0 && ev.endTs > 0
+            ? ev.endTs - ev.startTs
+            : Date.now() - (doneT0 || Date.now());
+        const el = Math.max(0, Math.floor(ms / 1000));
         const em = Math.floor(el / 60);
         markTabDone(ev.tabId, ev.success === false);
         setReady(
@@ -2933,11 +3228,227 @@
         setReady(isErr ? 'Error' : 'Stopped', ev.tabId);
         break;
       }
+      case 'new_tab': {
+        // Backend → frontend request to open a fresh chat tab and
+        // resume an existing task into it.  ``task_id`` is the
+        // backend's identity for the task; the frontend allocates a
+        // tab id via ``createNewTab`` (frontend-only concept) and
+        // then posts ``resumeSession`` back to the backend.  The
+        // server's ``_cmd_resume_session`` handler supports a
+        // task-id-only resume (no ``chatId`` required).
+        //
+        // Sub-agent ``new_tab`` events carry ``parent_tab_id``.  The
+        // backend broadcasts them to ALL connected webviews (no
+        // per-client routing for global system events), so a webview
+        // that doesn't own the parent run_parallel tab must NOT
+        // materialise a phantom sub-agent tab.  Skip when the parent
+        // tab is not present locally.
+        if (ev.parent_tab_id && !tabs.find(t => t.id === ev.parent_tab_id))
+          break;
+        if (ev.task_id === undefined || ev.task_id === null) break;
+        // Remember the parent tab id BEFORE createNewTab changes
+        // activeTabId, so we can switch back after wiring the
+        // sub-agent tab.
+        const parentTabBeforeNew = ev.parent_tab_id || '';
+        createNewTab();
+        // Capture the sub-agent tab id before switching back.
+        const subAgentTabId = activeTabId;
+        vscode.postMessage({
+          type: 'resumeSession',
+          taskId: ev.task_id,
+          tabId: subAgentTabId,
+        });
+        // Switch back to the parent (non-sub-agent) tab so the
+        // user stays focused on the main task.  Sub-agent tabs
+        // are still accessible via the tab bar if the user wants
+        // to inspect them.
+        if (parentTabBeforeNew) {
+          switchToTab(parentTabBeforeNew);
+        }
+        break;
+      }
+      case 'openSubagentTab': {
+        // ``openSubagentTab`` is broadcast verbatim to ALL connected
+        // webviews (no per-client routing).  A webview whose local
+        // ``tabs[]`` does not contain the ``parent_tab_id`` does not
+        // own the parent run_parallel tab and must NOT materialise a
+        // phantom sub-agent tab — otherwise sub-tabs leak across
+        // unrelated chats / chat_ids.
+        if (ev.parent_tab_id && !tabs.find(t => t.id === ev.parent_tab_id))
+          break;
+        // Trim so trailing newlines from the backend description don't
+        // bleed into taskPanelHTML and resurface in the user's clipboard
+        // when they copy-select the task panel.
+        const subDesc = (ev.description || 'Sub-agent').trim();
+        // Include the 1-based task index in the title for live
+        // spawns so tabs whose descriptions share a long common
+        // prefix (e.g. "Research and summarize: ...") stay visually
+        // distinct in the truncated tab bar.  History-reopened
+        // sub-agent rows have no ``taskIndex`` (the persisted
+        // payload is just ``{parent_task_id}``); they fall back to
+        // the bare description — the purple .subagent-tab accent
+        // already makes them unambiguously a sub-agent tab.
+        const subIdx =
+          typeof ev.taskIndex === 'number' ? ev.taskIndex + 1 : null;
+        const titlePrefix = subIdx !== null ? subIdx + '. ' : '';
+        const title = titlePrefix + subDesc.substring(0, 40);
+        // Idempotent: if a tab with the same id already exists, update
+        // it in place rather than pushing a duplicate.  Defends against
+        // accidental duplicate events from the backend.
+        let subTab = tabs.find(t => t.id === ev.tab_id);
+        if (!subTab) {
+          subTab = makeTab(title);
+          subTab.id = ev.tab_id;
+          tabs.push(subTab);
+        } else {
+          subTab.title = title;
+        }
+        subTab.isSubagentTab = true;
+        // Remember the parent → child relationship so closing the parent
+        // tab can recursively close every (nested) sub-agent tab it
+        // spawned.  ``ev.parent_tab_id`` is set by the sorcar/server
+        // emitters; for the chat_sorcar broadcast path the daemon stamps
+        // ``ev.tabId`` with the subscriber's (= parent's) tab id, so we
+        // fall back to that.
+        const parentId = ev.parent_tab_id || ev.tabId || '';
+        if (parentId && parentId !== subTab.id) {
+          subTab.parentTabId = parentId;
+        }
+        // ``isDone`` is set by the backend for history-loaded sub-agent
+        // tabs whose execution already completed — without this flag
+        // the tab would forever pulse the running ◉ indicator (no
+        // ``subagentDone`` event arrives for an already-finished
+        // sub-agent).  Default to "running" for fresh launches.
+        const subDone = !!ev.isDone;
+        subTab.isDone = subDone;
+        subTab.isRunning = !subDone;
+        subTab.taskPanelHTML = subDesc;
+        subTab.taskPanelVisible = true;
+        renderTabBar();
+        // If the backend converted the active tab into a sub-agent tab
+        // (e.g. the user clicked a sub-agent row in the history panel,
+        // which created a fresh chat tab that ``_replay_session`` then
+        // flips via ``openSubagentTab``), hide the input textbox + the
+        // buttons below it.  ``restoreTab`` already enforces this rule
+        // when *switching* tabs, but the tab-switch ran BEFORE
+        // ``isSubagentTab`` was set, so the input bar is still showing
+        // for the active tab at this point.
+        if (subTab.id === activeTabId) {
+          if (inputContainer) inputContainer.style.display = 'none';
+          // History-load case: the new tab was created and switched
+          // to before this handler fired, so ``restoreTab`` initialised
+          // the global running state from the brand-new tab's default
+          // ``isRunning=false``.  Sync the global state to the
+          // sub-agent's actual state now so a still-running sub-agent
+          // tab loaded from history shows the same "Running" status,
+          // timer and chevron-visible panels as the freshly-launched
+          // sub-agent tab the user originally clicked through to.
+          setRunningState(subTab.isRunning);
+          if (subTab.isRunning) {
+            applyChevronState(
+              !!subTab.panelsExpandedMap[currentTaskName],
+              currentTaskName,
+            );
+          }
+        }
+        persistTabState();
+        break;
+      }
+      case 'subagentDone': {
+        const doneTab = tabs.find(t => t.id === ev.tab_id);
+        if (doneTab) {
+          doneTab.isDone = true;
+          doneTab.isRunning = false;
+          renderTabBar();
+          // Mirror the regular task's status:false handling when the
+          // finished sub-agent tab is the one the user is viewing.
+          // Without this the status header stays at "Running …" and
+          // the timer keeps ticking on a tab whose sub-agent has
+          // already completed — diverging from the fresh-launch path
+          // where ``restoreTab(setRunningState(false))`` would
+          // eventually run when the user clicks back to the tab.
+          if (doneTab.id === activeTabId) {
+            setRunningState(false);
+          }
+          persistTabState();
+        }
+        break;
+      }
       default:
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
           const bgTab = findTabByEvt(ev);
           if (bgTab) processOutputEventForBgTab(ev, bgTab);
           break;
+        }
+        // Defensive guard: a misrouted result / usage_info event
+        // whose ``taskId`` does not match the active tab's
+        // ``currentTaskId`` would otherwise stamp a sub-agent's
+        // Result panel (tokens, cost, summary) onto the parent
+        // tab's DOM after the parent's own Result + SUGGESTED NEXT.
+        // The wire-level path is supposed to fan such events out
+        // ONLY to the sub-agent's subscriber tab, but any future
+        // regression (or any third path that broadcasts without
+        // tabId stamping) would surface as duplicate Result panels
+        // in the parent.  Drop the event here so the symptom never
+        // reaches the user.
+        // Keep ``currentTaskId`` in sync with the active task whose
+        // events are reaching this tab.  ``currentTaskId`` is set by
+        // ``task_events`` when the user loads a task from history,
+        // but no ``task_events`` replay fires for a freshly-submitted
+        // task — so without this adoption step a tab that previously
+        // loaded an OLD task would keep its stale ``currentTaskId``
+        // and the misroute guard below would drop the NEW task's
+        // terminal ``result`` / ``usage_info`` events, leaving the
+        // chat frozen at the last ``tool_call(finish)`` panel.  Only
+        // events routed to the active tab reach this branch (the
+        // bg-tab early-return above already peels sub-agent events
+        // off), so updating ``currentTaskId`` here is safe and does
+        // not weaken the cross-tab defense.  Skip ``result`` /
+        // ``usage_info`` themselves so a genuinely misrouted result
+        // can still be dropped by the guard below.
+        if (
+          ev.taskId !== undefined &&
+          ev.taskId !== null &&
+          ev.type !== 'result' &&
+          ev.type !== 'usage_info'
+        ) {
+          const adoptTab = tabs.find(t => t.id === activeTabId);
+          if (
+            adoptTab &&
+            String(adoptTab.currentTaskId) !== String(ev.taskId)
+          ) {
+            adoptTab.currentTaskId = ev.taskId;
+            // Keep the global currentTaskId (used by adjacent
+            // scrolling to identify the boundary task by DB row id)
+            // in sync with the active tab's adopted id.
+            currentTaskId = ev.taskId;
+            // Re-seed oldest/newest boundary ids whenever none has
+            // been loaded yet (no .adjacent-task containers), so a
+            // fresh task immediately becomes the scroll anchor.
+            if (oldestLoadedTaskId === null && newestLoadedTaskId === null) {
+              oldestLoadedTaskId = ev.taskId;
+              newestLoadedTaskId = ev.taskId;
+            }
+          }
+        }
+        if (ev.taskId && (ev.type === 'result' || ev.type === 'usage_info')) {
+          const activeTab = tabs.find(t => t.id === activeTabId);
+          if (
+            activeTab &&
+            activeTab.currentTaskId !== undefined &&
+            activeTab.currentTaskId !== null &&
+            String(activeTab.currentTaskId) !== String(ev.taskId)
+          ) {
+            console.warn(
+              'Dropping mis-routed',
+              ev.type,
+              'event for task',
+              ev.taskId,
+              'in active tab whose currentTaskId is',
+              activeTab.currentTaskId,
+            );
+            break;
+          }
         }
         processOutputEvent(ev);
         if (isActiveTabRunning()) showSpinner();
@@ -2947,7 +3458,10 @@
   }
 
   function updateInputDisabled() {
-    // Only block input during merge — not while running (tasks queue locally)
+    // Only block input during merge.  While a task is running the
+    // user can still type — ``sendMessage`` then forwards the prompt
+    // as an ``appendUserMessage`` so it gets injected into the live
+    // agent's conversation before its next model call.
     const blocked = isMerging;
     inp.disabled = blocked;
     sendBtn.disabled = blocked;
@@ -2959,14 +3473,10 @@
 
   function setRunningState(running) {
     isRunning = running;
-    // Show both send and stop buttons when running so users can queue tasks
     sendBtn.style.display = 'flex';
     stopBtn.style.display = running ? 'flex' : 'none';
 
-    const md = document.getElementById('menu-dropdown');
-    if (running && md) md.classList.remove('open');
     updateInputDisabled();
-    updateQueueIndicator();
     if (running) {
       startTimer();
     } else {
@@ -2996,7 +3506,6 @@
 
   function setReady(label, tabId) {
     // Mark the tab as no longer running
-    const tid = tabId !== undefined ? tabId : activeTabId;
     let doneTab = null;
     if (tabId !== undefined) {
       doneTab = tabs.find(t => {
@@ -3010,6 +3519,11 @@
     // Update UI only if the event targets the active tab (or no tabId)
     if (tabId === undefined || tabId === activeTabId) {
       t0 = null;
+      // Clear the previously-captured endTs so the next task on
+      // the same tab starts with a fresh "still running" tick
+      // (endTs===0 short-circuits the Done-by-clock branch in
+      // ``_renderTimerTick``).
+      endTs = 0;
       setRunningState(false);
       stopTimer();
       removeSpinner();
@@ -3017,14 +3531,6 @@
       inp.focus();
     }
     renderTabBar();
-
-    // Process the next queued task if any
-    if (!doneTab) doneTab = tabs.find(t => t.id === tid);
-    if (doneTab && doneTab.taskQueue && doneTab.taskQueue.length > 0) {
-      setTimeout(() => {
-        submitNextQueuedTask(doneTab);
-      }, 200);
-    }
   }
 
   function addError(text) {
@@ -3035,17 +3541,14 @@
   }
 
   // --- Remote URL (dynamic) ---
-  function renderRemoteUrl(url, ntfyUrl) {
-    const container = document.getElementById('remote-url');
-    if (!container) return;
-    container.innerHTML = '';
-    const displayUrl = ntfyUrl || url;
-    if (!displayUrl) return;
+  function _buildRemoteUrlBar(displayUrl, isNtfy) {
     const wrapper = document.createElement('div');
     wrapper.className = 'remote-url-bar';
     const label = document.createElement('div');
     label.className = 'remote-url-label';
-    label.textContent = ntfyUrl ? 'Remote URL (ntfy.sh)' : 'Web/mobile app';
+    label.textContent = isNtfy
+      ? 'Webapp: click the link in the first post at URL:'
+      : 'Web/mobile app';
     const row = document.createElement('div');
     row.className = 'remote-url-row';
     const link = document.createElement('a');
@@ -3075,7 +3578,19 @@
     row.appendChild(copyBtn);
     wrapper.appendChild(label);
     wrapper.appendChild(row);
-    container.appendChild(wrapper);
+    return wrapper;
+  }
+
+  function renderRemoteUrl(url, ntfyUrl) {
+    const displayUrl = ntfyUrl || url;
+    const containerIds = ['remote-url', 'welcome-remote-url'];
+    for (const id of containerIds) {
+      const container = document.getElementById(id);
+      if (!container) continue;
+      container.innerHTML = '';
+      if (!displayUrl) continue;
+      container.appendChild(_buildRemoteUrlBar(displayUrl, !!ntfyUrl));
+    }
   }
 
   // --- Welcome suggestions (dynamic) ---
@@ -3475,13 +3990,56 @@
     if (hunk) hunk.classList.add('current');
   }
 
-  /** Scroll the hunk identified by ``(fi, hi)`` into view. */
+  /** Scroll the hunk identified by ``(fi, hi)`` into view.
+   *
+   * The remote-web shell sets ``html, body { overflow: hidden }`` (so the
+   * page itself never scrolls) and delegates scrolling to ``#output``.
+   * Native ``Element.scrollIntoView`` is unreliable in that layout —
+   * Chromium/Webkit sometimes try to scroll the (non-scrollable) document
+   * instead of bubbling to the nearest scrollable ancestor, so clicking
+   * Accept/Reject/Prev/Next in the inline merge toolbar would highlight
+   * the new hunk but leave it off-screen.  We walk up to the nearest
+   * scrollable ancestor explicitly and animate ``scrollTop`` to centre
+   * the hunk ourselves.  Falls back to ``scrollIntoView`` if no
+   * scrollable ancestor is found (e.g. when the hunk lives in a detached
+   * background-tab fragment). */
   function scrollHunkIntoView(mergePanel, fi, hi) {
     const hunk = mergePanel.querySelector(
       '.merge-hunk[data-fi="' + fi + '"][data-hi="' + hi + '"]',
     );
-    if (hunk && typeof hunk.scrollIntoView === 'function') {
-      hunk.scrollIntoView({block: 'center', behavior: 'smooth'});
+    if (!hunk) return;
+    let container = hunk.parentElement;
+    while (container && container !== document.body) {
+      const style = window.getComputedStyle(container);
+      const oy = style.overflowY;
+      if (
+        (oy === 'auto' || oy === 'scroll') &&
+        container.scrollHeight > container.clientHeight
+      ) {
+        break;
+      }
+      container = container.parentElement;
+    }
+    if (!container || container === document.body) {
+      if (typeof hunk.scrollIntoView === 'function') {
+        hunk.scrollIntoView({block: 'center', behavior: 'smooth'});
+      }
+      return;
+    }
+    const containerRect = container.getBoundingClientRect();
+    const hunkRect = hunk.getBoundingClientRect();
+    const target =
+      container.scrollTop +
+      (hunkRect.top - containerRect.top) -
+      Math.max(0, (container.clientHeight - hunkRect.height) / 2);
+    const top = Math.max(
+      0,
+      Math.min(target, container.scrollHeight - container.clientHeight),
+    );
+    if (typeof container.scrollTo === 'function') {
+      container.scrollTo({top: top, behavior: 'smooth'});
+    } else {
+      container.scrollTop = top;
     }
   }
 
@@ -3583,6 +4141,10 @@
       tabId: activeTabId,
       restoredTabs: restoredTabs,
     });
+    // Request the current config so the welcome-page remote-password
+    // mirror (welcome-cfg-remote-password) is populated before the user
+    // ever opens the Settings panel.
+    vscode.postMessage({type: 'getConfig'});
   }
 
   function setupEventListeners() {
@@ -3606,14 +4168,6 @@
       if (e.key === 'Escape' && sidebar.classList.contains('open')) {
         e.preventDefault();
         closeSidebar();
-      }
-      if (
-        e.key === 'Escape' &&
-        frequentSidebar &&
-        frequentSidebar.classList.contains('open')
-      ) {
-        e.preventDefault();
-        closeFrequentSidebar();
       }
     });
     inp.addEventListener('keydown', e => {
@@ -3724,55 +4278,47 @@
       input.onchange = handleFileSelect;
       input.click();
     });
-    const menuBtn = document.getElementById('menu-btn');
-    const menuDropdown = document.getElementById('menu-dropdown');
-    if (menuBtn && menuDropdown) {
-      menuBtn.addEventListener('click', e => {
-        e.stopPropagation();
-        closeModelDD();
-        menuDropdown.classList.toggle('open');
+    setupPasswordToggle('cfg-remote-password-toggle', 'cfg-remote-password');
+    setupPasswordToggle(
+      'welcome-cfg-remote-password-toggle',
+      'welcome-cfg-remote-password',
+    );
+    // The welcome-page remote-password input mirrors the value into the
+    // settings-panel input (cfg-remote-password) so the existing
+    // collectConfigForm + saveConfig flow keeps working without changes.
+    // On blur we flush via saveSettingsIfPopulated so the password is
+    // persisted even if the user never opens the settings panel.
+    const welcomePwInp = document.getElementById('welcome-cfg-remote-password');
+    if (welcomePwInp) {
+      welcomePwInp.addEventListener('input', () => {
+        const settingsPw = document.getElementById('cfg-remote-password');
+        if (settingsPw) settingsPw.value = welcomePwInp.value;
       });
-      document.addEventListener('click', e => {
-        if (!menuDropdown.contains(e.target) && e.target !== menuBtn) {
-          menuDropdown.classList.remove('open');
-        }
-      });
-      menuDropdown.addEventListener('click', e => {
-        if (e.target.closest('.menu-item')) {
-          menuDropdown.classList.remove('open');
-        }
-      });
-    }
-
-    if (worktreeToggleBtn) {
-      worktreeToggleBtn.addEventListener('click', () => {
-        worktreeToggleBtn.classList.toggle('active');
-      });
-    }
-    if (parallelToggleBtn) {
-      parallelToggleBtn.addEventListener('click', () => {
-        parallelToggleBtn.classList.toggle('active');
-      });
+      welcomePwInp.addEventListener('change', saveSettingsIfPopulated);
+      welcomePwInp.addEventListener('blur', saveSettingsIfPopulated);
     }
 
     if (demoToggleBtn) {
-      demoToggleBtn.addEventListener('click', () => {
-        if (_demoActive) {
-          // Cancel running demo
+      demoToggleBtn.addEventListener('change', () => {
+        if (_demoActive && !demoToggleBtn.checked) {
+          // Cancel running demo when unchecked mid-replay
           if (typeof window._cancelDemoReplay === 'function')
             window._cancelDemoReplay();
           demoMode = false;
           _demoActive = false;
-          demoToggleBtn.classList.remove('active');
           return;
         }
-        demoMode = !demoMode;
-        demoToggleBtn.classList.toggle('active', demoMode);
+        demoMode = demoToggleBtn.checked;
       });
     }
 
     if (autocommitBtn) {
-      autocommitBtn.addEventListener('click', () => {
+      autocommitBtn.addEventListener('click', e => {
+        // The button now lives inside the cfg-auto-commit <label>; stop
+        // the click from propagating to the label and toggling the
+        // sibling checkbox.
+        e.preventDefault();
+        e.stopPropagation();
         vscode.postMessage({
           type: 'autocommitAction',
           action: 'commit',
@@ -3793,7 +4339,6 @@
     }
     modelBtn.addEventListener('click', e => {
       e.stopPropagation();
-      if (menuDropdown) menuDropdown.classList.remove('open');
       if (modelDropdown.classList.contains('open')) {
         closeModelDD();
         return;
@@ -3851,56 +4396,60 @@
         hideAC();
       }
     });
-    historyBtn.addEventListener('click', () => {
+    function toggleHistorySidebar() {
       if (sidebar.classList.contains('open')) {
         closeSidebar();
       } else {
-        closeConfigSidebar();
-        closeFrequentSidebar();
-        resetHistoryPagination();
         sidebar.classList.add('open');
         sidebarOverlay.classList.add('open');
-        historyBtn.classList.add('active');
+        resetHistoryPagination();
         vscode.postMessage({
           type: 'getHistory',
-          query: historySearch.value,
+          query: historySearch ? historySearch.value : '',
           generation: historyGeneration,
         });
       }
-    });
+    }
+    if (menuBtn) {
+      menuBtn.addEventListener('click', toggleHistorySidebar);
+    }
     sidebarClose.addEventListener('click', closeSidebar);
     sidebarOverlay.addEventListener('click', closeSidebar);
-    configBtn.addEventListener('click', () => {
-      if (configSidebar.classList.contains('open')) {
-        closeConfigSidebar();
-      } else {
-        openConfigSidebar();
-      }
-    });
-    if (frequentBtn) {
-      frequentBtn.addEventListener('click', () => {
-        if (frequentSidebar.classList.contains('open')) {
-          closeFrequentSidebar();
+    if (frequentTasksBtn) {
+      frequentTasksBtn.addEventListener('click', () => {
+        if (frequentPanel && frequentPanel.classList.contains('open')) {
+          closeFrequentPanel();
         } else {
-          openFrequentSidebar();
+          openFrequentPanel();
         }
       });
     }
-    if (frequentSidebarClose) {
-      frequentSidebarClose.addEventListener('click', closeFrequentSidebar);
+    if (frequentPanelClose) {
+      frequentPanelClose.addEventListener('click', closeFrequentPanel);
     }
-    if (frequentSidebarOverlay) {
-      frequentSidebarOverlay.addEventListener('click', closeFrequentSidebar);
+    if (frequentOverlay) {
+      frequentOverlay.addEventListener('click', closeFrequentPanel);
     }
-    configSidebarClose.addEventListener('click', closeConfigSidebar);
-    configSidebarOverlay.addEventListener('click', closeConfigSidebar);
-    const browseBtn = document.getElementById('cfg-work-dir-browse');
-    if (browseBtn) {
-      browseBtn.addEventListener('click', () => {
-        const workDirInput = document.getElementById('cfg-work-dir');
-        const currentPath = workDirInput ? workDirInput.value.trim() : '';
-        vscode.postMessage({type: 'pickFolder', currentPath});
+    if (tricksBtn) {
+      tricksBtn.addEventListener('click', () => {
+        if (tricksPanel && tricksPanel.classList.contains('open')) {
+          closeTricksPanel();
+        } else {
+          openTricksPanel();
+        }
       });
+    }
+    if (tricksPanelClose) {
+      tricksPanelClose.addEventListener('click', closeTricksPanel);
+    }
+    if (tricksOverlay) {
+      tricksOverlay.addEventListener('click', closeTricksPanel);
+    }
+    if (settingsPanelClose) {
+      settingsPanelClose.addEventListener('click', closeSettingsPanel);
+    }
+    if (settingsOverlay) {
+      settingsOverlay.addEventListener('click', closeSettingsPanel);
     }
     historySearch.addEventListener('input', () => {
       resetHistoryPagination();
@@ -3923,6 +4472,42 @@
           generation: historyGeneration,
         });
         historySearch.focus();
+      });
+    }
+    // History filter bar: 3 category checkboxes + From/To date range.
+    // Filtering is purely client-side over rows already in the DOM.
+    // ``applyHistoryFilterVisibility()`` toggles ``display`` on each
+    // row based on the row's ``data-category`` and ``data-timestamp``
+    // attributes set in ``renderHistory``.
+    const hfRunning = document.getElementById('hf-running');
+    const hfErrors = document.getElementById('hf-errors');
+    const hfCompleted = document.getElementById('hf-completed');
+    const hfFavorite = document.getElementById('hf-favorite');
+    const hfFrom = document.getElementById('hf-from');
+    const hfTo = document.getElementById('hf-to');
+    [hfRunning, hfErrors, hfCompleted, hfFavorite, hfFrom, hfTo].forEach(el => {
+      if (el) el.addEventListener('change', applyHistoryFilterVisibility);
+    });
+    // The calendar selector buttons sit next to each date textbox and
+    // open a custom in-webview calendar popup.  The native
+    // <input type=date> picker (showPicker / focus+click) is unreliable
+    // inside VS Code webviews — it often does nothing because the
+    // embedded Chromium build either blocks ``showPicker`` without
+    // recent user activation or shows the picker behind the webview.
+    // A custom popup avoids both issues and gives consistent styling
+    // across the extension and the remote browser chat.
+    const hfFromBtn = document.getElementById('hf-from-btn');
+    const hfToBtn = document.getElementById('hf-to-btn');
+    if (hfFromBtn) {
+      hfFromBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        openCustomDatePicker(hfFrom, hfFromBtn);
+      });
+    }
+    if (hfToBtn) {
+      hfToBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        openCustomDatePicker(hfTo, hfToBtn);
       });
     }
     historyList.addEventListener('scroll', () => {
@@ -4053,41 +4638,25 @@
       return t.id === activeTabId;
     });
 
-    // If a task is running, queue this task locally for later execution
+    // If a task is already running for this tab, forward the prompt
+    // to the backend as an ``appendUserMessage`` so it gets injected
+    // into the live agent's conversation as a follow-up user message
+    // before its next model call.  Clear the input afterwards just
+    // like a normal submit, so the user can keep typing further
+    // messages while the task runs.
     if (isRunning) {
-      if (curTab) {
-        curTab.taskQueue.push({
-          prompt: prompt,
-          model: selectedModel,
-          attachments: attachments.map(a => ({
-            name: a.name,
-            mimeType: a.type,
-            data: a.data,
-          })),
-          useWorktree: !!(
-            worktreeToggleBtn && worktreeToggleBtn.classList.contains('active')
-          ),
-          useParallel: !!(
-            parallelToggleBtn && parallelToggleBtn.classList.contains('active')
-          ),
-          workDir: curTab.workDir || '',
-        });
-        // Tell backend to skip merge/diff for the currently running task
-        // since there are now queued tasks that should run first.
-        vscode.postMessage({
-          type: 'setSkipMerge',
-          tabId: activeTabId,
-          skip: true,
-        });
-        inp.value = '';
-        inp.style.height = 'auto';
-        attachments = [];
-        renderFileChips();
-        clearGhost();
-        histIdx = -1;
-        if (inputClearBtn) inputClearBtn.style.display = 'none';
-        updateQueueIndicator();
-      }
+      vscode.postMessage({
+        type: 'appendUserMessage',
+        prompt: prompt,
+        tabId: activeTabId,
+      });
+      inp.value = '';
+      inp.style.height = 'auto';
+      attachments = [];
+      renderFileChips();
+      clearGhost();
+      histIdx = -1;
+      if (inputClearBtn) inputClearBtn.style.display = 'none';
       return;
     }
 
@@ -4099,12 +4668,9 @@
       attachments: attachments.map(a => {
         return {name: a.name, mimeType: a.type, data: a.data};
       }),
-      useWorktree: !!(
-        worktreeToggleBtn && worktreeToggleBtn.classList.contains('active')
-      ),
-      useParallel: !!(
-        parallelToggleBtn && parallelToggleBtn.classList.contains('active')
-      ),
+      useWorktree: !!(worktreeToggleBtn && worktreeToggleBtn.checked),
+      useParallel: !!(parallelToggleBtn && parallelToggleBtn.checked),
+      autoCommit: !!(autocommitToggleBtn && autocommitToggleBtn.checked),
     };
     if (curTab && curTab.workDir) msg.workDir = curTab.workDir;
     vscode.postMessage(msg);
@@ -4115,54 +4681,6 @@
     clearGhost();
     histIdx = -1;
     if (inputClearBtn) inputClearBtn.style.display = 'none';
-  }
-
-  /** Submit the next queued task for a tab. */
-  function submitNextQueuedTask(tab) {
-    if (!tab || !tab.taskQueue || tab.taskQueue.length === 0) return;
-    const task = tab.taskQueue.shift();
-    updateQueueIndicator();
-    // If there are still more queued tasks, skip merge for this task.
-    // If this is the last task, allow merge to run.
-    const hasMoreQueued = tab.taskQueue.length > 0;
-    const msg = {
-      type: 'submit',
-      prompt: task.prompt,
-      model: task.model,
-      tabId: tab.id,
-      attachments: task.attachments || [],
-      useWorktree: !!task.useWorktree,
-      useParallel: !!task.useParallel,
-      skipMerge: hasMoreQueued,
-      reuseProcess: true,
-    };
-    if (task.workDir) msg.workDir = task.workDir;
-    vscode.postMessage(msg);
-  }
-
-  /** Update the queue count indicator badge near the stop button. */
-  function updateQueueIndicator() {
-    let badge = document.getElementById('queue-badge');
-    const curTab = tabs.find(t => t.id === activeTabId);
-    const count = curTab && curTab.taskQueue ? curTab.taskQueue.length : 0;
-    if (count === 0) {
-      if (badge) badge.style.display = 'none';
-      return;
-    }
-    if (!badge) {
-      badge = document.createElement('span');
-      badge.id = 'queue-badge';
-      badge.style.cssText =
-        'display:inline-flex;align-items:center;justify-content:center;' +
-        'min-width:18px;height:18px;padding:0 5px;border-radius:9px;' +
-        'background:var(--vscode-badge-background, #4d4d4d);' +
-        'color:var(--vscode-badge-foreground, #fff);' +
-        'font-size:11px;font-weight:600;margin-right:4px;';
-      // Insert before stopBtn
-      stopBtn.parentNode.insertBefore(badge, stopBtn);
-    }
-    badge.textContent = count + ' queued';
-    badge.style.display = 'inline-flex';
   }
 
   /**
@@ -4376,6 +4894,62 @@
     if (idx >= 0) items[idx].scrollIntoView({block: 'nearest'});
   }
 
+  /**
+   * Build a sidebar copy-to-clipboard button for a history/frequent task row.
+   *
+   * Clicking the returned button copies the supplied task text to the
+   * system clipboard via ``navigator.clipboard.writeText`` (falling
+   * back to a temporary textarea + ``document.execCommand('copy')``
+   * when the async clipboard API is unavailable, e.g. in older
+   * webview hosts).  After a successful copy the trash-shaped icon
+   * briefly swaps to a check mark for visual confirmation.  Click
+   * propagation is stopped so the surrounding row's click handler
+   * (which would reopen the task / fill the input) does not fire.
+   *
+   * @param {string} text - the full task text to copy.
+   * @returns {HTMLButtonElement}
+   */
+  function makeSidebarCopyButton(text) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'sidebar-item-copy';
+    btn.setAttribute('aria-label', 'Copy task to clipboard');
+    btn.innerHTML = PANEL_COPY_SVG;
+
+    const flash = () => {
+      btn.innerHTML = PANEL_CHECK_SVG;
+      btn.classList.add('copied');
+      setTimeout(() => {
+        btn.innerHTML = PANEL_COPY_SVG;
+        btn.classList.remove('copied');
+      }, 1500);
+    };
+
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      e.preventDefault();
+      const payload = String(text == null ? '' : text);
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(payload).then(flash, () => {});
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = payload;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try {
+          document.execCommand('copy');
+          flash();
+        } finally {
+          document.body.removeChild(ta);
+        }
+      }
+    });
+
+    return btn;
+  }
+
   function chatIdBgColor(chatId) {
     if (!chatId) return 'hsl(0, 0%, 75%)';
     let hash = 5381;
@@ -4408,13 +4982,35 @@
 
     sessions.forEach(s => {
       const div = document.createElement('div');
-      div.className = 'sidebar-item';
+      // Match the Running tab's visual layout: the ``running-item``
+      // class flips the row into a wrap-with-metrics layout
+      // (multi-line text, metrics row on its own line).
+      div.className = 'sidebar-item running-item';
+      // Stamp the row with its filter-bar category and timestamp so
+      // ``applyHistoryFilterVisibility()`` can toggle ``display`` on
+      // each row in O(n) without re-rendering the list.
+      div.dataset.category = s.is_running
+        ? 'running'
+        : s.failed
+          ? 'errors'
+          : 'completed';
+      div.dataset.timestamp = String(Number(s.timestamp || 0));
+      // ``data-favorite`` mirrors the persisted ``is_favorite`` flag
+      // so ``applyHistoryFilterVisibility()`` can include/exclude the
+      // row when the Favorite checkbox in the filter bar is toggled.
+      div.dataset.favorite = s.is_favorite ? '1' : '0';
       const itemText = s.title || s.preview || 'Untitled';
       div.dataset.tooltip = s.preview || itemText;
       div.style.backgroundColor = chatIdBgColor(String(s.id));
       div.style.color = '#1a1a1a';
 
-      if (s.failed) {
+      if (s.is_running) {
+        const runningDot = document.createElement('span');
+        runningDot.className = 'sidebar-item-running';
+        runningDot.dataset.tooltip = 'Task running';
+        runningDot.setAttribute('aria-label', 'Task running');
+        div.appendChild(runningDot);
+      } else if (s.failed) {
         const failedDot = document.createElement('span');
         failedDot.className = 'sidebar-item-failed';
         failedDot.dataset.tooltip = 'Task failed';
@@ -4428,9 +5024,68 @@
       div.appendChild(textSpan);
 
       if (s.task_id) {
+        // Container that stacks the three per-row action buttons
+        // (favourite / copy / delete) vertically with a 6px gap.
+        // The confirm-delete prompt is appended to the same column
+        // so it visually replaces the delete button when shown.
+        const actions = document.createElement('div');
+        actions.className = 'sidebar-item-actions';
+
+        // Favourite (star) button — flips the persisted
+        // ``is_favorite`` flag on the task's ``extra`` JSON column.
+        // The icon shows a filled star when favourited, outline
+        // otherwise.  Click toggles both the UI and the backend
+        // state optimistically.
+        const FAV_FILLED_SVG =
+          '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>';
+        const FAV_OUTLINE_SVG =
+          '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>';
+        const favBtn = document.createElement('button');
+        favBtn.type = 'button';
+        favBtn.className = 'sidebar-item-favorite';
+        const applyFavState = () => {
+          if (s.is_favorite) {
+            favBtn.classList.add('favorited');
+            favBtn.dataset.tooltip = 'Unfavourite';
+            favBtn.setAttribute('aria-label', 'Unfavourite task');
+            favBtn.innerHTML = FAV_FILLED_SVG;
+          } else {
+            favBtn.classList.remove('favorited');
+            favBtn.dataset.tooltip = 'Favourite';
+            favBtn.setAttribute('aria-label', 'Favourite task');
+            favBtn.innerHTML = FAV_OUTLINE_SVG;
+          }
+        };
+        applyFavState();
+        favBtn.addEventListener('click', e => {
+          e.stopPropagation();
+          e.preventDefault();
+          const next = !s.is_favorite;
+          s.is_favorite = next;
+          applyFavState();
+          // Keep ``data-favorite`` in sync with the toggled state so
+          // the Favorite filter checkbox immediately reflects the
+          // change without waiting for a re-render.
+          div.dataset.favorite = next ? '1' : '0';
+          applyHistoryFilterVisibility();
+          vscode.postMessage({
+            type: 'setFavorite',
+            taskId: s.task_id,
+            isFavorite: next,
+          });
+        });
+        actions.appendChild(favBtn);
+
+        // Copy-to-clipboard button — sits immediately left of the
+        // trash icon so the user can grab the full task text without
+        // first reopening the task.  ``s.preview`` carries the full
+        // task text (see server._get_history where ``preview`` is set
+        // to the task string verbatim); ``itemText`` is the fallback.
+        const copyBtn = makeSidebarCopyButton(s.preview || itemText);
+        actions.appendChild(copyBtn);
+
         const delBtn = document.createElement('button');
         delBtn.className = 'sidebar-item-delete';
-        delBtn.dataset.tooltip = 'Delete task';
         delBtn.innerHTML =
           '<svg width="11" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>';
 
@@ -4469,9 +5124,44 @@
           delBtn.style.display = '';
         });
 
-        div.appendChild(delBtn);
-        div.appendChild(confirmWrap);
+        actions.appendChild(delBtn);
+        actions.appendChild(confirmWrap);
+        div.appendChild(actions);
       }
+
+      // Metrics row (steps • tokens • cost) — matches the Running
+      // tab.  ``flex-basis: 100%`` on .running-item-metrics drops
+      // this onto its own line below the running/failed dot, the
+      // task text, and the delete button.
+      const metrics = document.createElement('span');
+      metrics.className = 'running-item-metrics';
+      const tokens = Number(s.tokens || 0);
+      const cost = Number(s.cost || 0);
+      const steps = Number(s.steps || 0);
+      const ts = Number(s.timestamp || 0);
+      let when = '';
+      if (ts > 0) {
+        const d = new Date(ts * 1000);
+        if (!isNaN(d.getTime())) {
+          when =
+            ' • ' +
+            d.toLocaleString(undefined, {
+              year: 'numeric',
+              month: 'short',
+              day: 'numeric',
+              hour: '2-digit',
+              minute: '2-digit',
+            });
+        }
+      }
+      metrics.textContent =
+        steps +
+        ' steps • ' +
+        tokens.toLocaleString() +
+        ' tok • $' +
+        cost.toFixed(4) +
+        when;
+      div.appendChild(metrics);
 
       div.addEventListener('click', () => {
         if (demoMode && typeof window._startDemoReplay === 'function') {
@@ -4480,9 +5170,28 @@
           window._startDemoReplay(allHistSessions);
           return;
         }
-        createNewTab();
+        // Sub-agent history rows reopen as a regular chat tab that
+        // the backend (``_replay_session``) will then flip into a
+        // sub-agent tab via ``openSubagentTab`` (purple accent,
+        // no input bar, no adjacent-task loading).  We do
+        // not look up "is the original sub-agent tab still open?" —
+        // sub-agent rows are persisted with just their parent
+        // task_history.id, so the simplest UX is a fresh tab whose
+        // events are replayed from the row's own events table.
+        // When the clicked history row has a known chat_id (s.id)
+        // and persisted events, allocate a fresh tab id and let the
+        // backend route the chat lookup by chat_id (passed in the
+        // ``resumeSession`` payload).  ``tab_id`` and ``chat_id``
+        // are orthogonal — the same chat may be live-viewed from
+        // multiple tabs, each with its own routing key.
         if (s.has_events && s.id) {
-          setTaskText(s.preview || s.title || '');
+          createNewTab();
+          const taskText = s.preview || s.title || '';
+          setTaskText(taskText);
+          // Also copy the task text into the chat input textbox so the
+          // user can edit and resubmit it without retyping.
+          inp.value = taskText;
+          syncClearBtn();
           vscode.postMessage({
             type: 'resumeSession',
             id: s.id,
@@ -4490,6 +5199,7 @@
             tabId: activeTabId,
           });
         } else {
+          createNewTab();
           inp.value = s.preview || s.title || '';
           syncClearBtn();
           inp.focus();
@@ -4503,48 +5213,390 @@
     if (sessions.length < 50) {
       historyHasMore = false;
     }
+    applyHistoryFilterVisibility();
+  }
+
+  /**
+   * Open a custom in-webview calendar popup anchored next to the
+   * supplied date input.  Picking a day sets ``input.value`` to the
+   * ISO ``YYYY-MM-DD`` string (the same format ``<input type=date>``
+   * produces) and dispatches a ``change`` event so the existing
+   * history filter listener runs.  Closes on outside click or Escape.
+   *
+   * @param {HTMLInputElement} input - the adjacent date text input to
+   *   populate (e.g. ``#hf-from`` or ``#hf-to``).
+   * @param {HTMLElement} anchorBtn - the calendar icon button used
+   *   to anchor the popup position.
+   */
+  function openCustomDatePicker(input, anchorBtn) {
+    if (!input) return;
+    const existing = document.getElementById('kiss-datepicker-pop');
+    if (existing) {
+      const sameInput = existing._kissInput === input;
+      existing.remove();
+      if (sameInput) return; // toggle off when same button clicked twice
+    }
+    const MONTHS = [
+      'January',
+      'February',
+      'March',
+      'April',
+      'May',
+      'June',
+      'July',
+      'August',
+      'September',
+      'October',
+      'November',
+      'December',
+    ];
+    const DAYS = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
+    const pop = document.createElement('div');
+    pop.id = 'kiss-datepicker-pop';
+    pop.className = 'kiss-datepicker';
+    pop._kissInput = input;
+    // Seed viewed month from input value if present, else today
+    let cursor = null;
+    if (input.value) {
+      const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(input.value);
+      if (m) cursor = new Date(+m[1], +m[2] - 1, +m[3]);
+    }
+    if (!cursor || isNaN(cursor.getTime())) cursor = new Date();
+    let viewYear = cursor.getFullYear();
+    let viewMonth = cursor.getMonth();
+
+    function pad2(n) {
+      return n < 10 ? '0' + n : '' + n;
+    }
+    function isoOf(y, m, d) {
+      return y + '-' + pad2(m + 1) + '-' + pad2(d);
+    }
+
+    function render() {
+      const today = new Date();
+      const selVal = input.value;
+      let html = '';
+      html += '<div class="dp-hdr">';
+      html +=
+        '<button type="button" class="dp-nav" data-nav="prev" ' +
+        'aria-label="Previous month">&lsaquo;</button>';
+      html +=
+        '<span class="dp-title">' +
+        esc(MONTHS[viewMonth] + ' ' + viewYear) +
+        '</span>';
+      html +=
+        '<button type="button" class="dp-nav" data-nav="next" ' +
+        'aria-label="Next month">&rsaquo;</button>';
+      html += '</div>';
+      html += '<div class="dp-grid">';
+      for (let i = 0; i < DAYS.length; i++)
+        html += '<div class="dp-dn">' + DAYS[i] + '</div>';
+      const firstDow = new Date(viewYear, viewMonth, 1).getDay();
+      const daysInMonth = new Date(viewYear, viewMonth + 1, 0).getDate();
+      for (let i = 0; i < firstDow; i++)
+        html += '<div class="dp-day dp-empty"></div>';
+      for (let d = 1; d <= daysInMonth; d++) {
+        const iso = isoOf(viewYear, viewMonth, d);
+        const isToday =
+          d === today.getDate() &&
+          viewMonth === today.getMonth() &&
+          viewYear === today.getFullYear();
+        const isSel = iso === selVal;
+        let cls = 'dp-day';
+        if (isToday) cls += ' dp-today';
+        if (isSel) cls += ' dp-sel';
+        html +=
+          '<button type="button" class="' +
+          cls +
+          '" data-date="' +
+          iso +
+          '">' +
+          d +
+          '</button>';
+      }
+      html += '</div>';
+      html += '<div class="dp-foot">';
+      html += '<button type="button" class="dp-clear">Clear</button>';
+      html += '<button type="button" class="dp-today-btn">Today</button>';
+      html += '</div>';
+      pop.innerHTML = html;
+    }
+
+    function position() {
+      const anchor = anchorBtn || input;
+      const rect = anchor.getBoundingClientRect();
+      const popH = pop.offsetHeight || 260;
+      const popW = pop.offsetWidth || 220;
+      let top = rect.bottom + 4;
+      if (top + popH > window.innerHeight - 4)
+        top = Math.max(4, rect.top - popH - 4);
+      let left = rect.left;
+      if (left + popW > window.innerWidth - 4)
+        left = Math.max(4, window.innerWidth - popW - 4);
+      pop.style.top = top + 'px';
+      pop.style.left = left + 'px';
+    }
+
+    function commit(value) {
+      input.value = value;
+      input.dispatchEvent(new Event('change', {bubbles: true}));
+      closePicker();
+    }
+
+    function closePicker() {
+      document.removeEventListener('mousedown', onDocClick, true);
+      document.removeEventListener('keydown', onKey, true);
+      window.removeEventListener('resize', position);
+      if (pop.parentNode) pop.parentNode.removeChild(pop);
+    }
+
+    function onDocClick(e) {
+      if (pop.contains(e.target)) return;
+      if (anchorBtn && anchorBtn.contains(e.target)) return;
+      closePicker();
+    }
+
+    function onKey(e) {
+      if (e.key === 'Escape') closePicker();
+    }
+
+    pop.addEventListener('click', e => {
+      const nav = e.target.closest('[data-nav]');
+      if (nav) {
+        if (nav.dataset.nav === 'prev') {
+          viewMonth--;
+          if (viewMonth < 0) {
+            viewMonth = 11;
+            viewYear--;
+          }
+        } else {
+          viewMonth++;
+          if (viewMonth > 11) {
+            viewMonth = 0;
+            viewYear++;
+          }
+        }
+        render();
+        return;
+      }
+      const day = e.target.closest('[data-date]');
+      if (day) {
+        commit(day.dataset.date);
+        return;
+      }
+      if (e.target.closest('.dp-clear')) {
+        commit('');
+        return;
+      }
+      if (e.target.closest('.dp-today-btn')) {
+        const t = new Date();
+        commit(isoOf(t.getFullYear(), t.getMonth(), t.getDate()));
+        return;
+      }
+    });
+
+    render();
+    document.body.appendChild(pop);
+    position();
+    // Defer outside-click registration so the originating click that
+    // opened the picker does not immediately close it.
+    setTimeout(() => {
+      document.addEventListener('mousedown', onDocClick, true);
+      document.addEventListener('keydown', onKey, true);
+      window.addEventListener('resize', position);
+    }, 0);
+  }
+
+  /**
+   * Show/hide rows in the history sidebar based on the filter bar
+   * state (Running / Errors / Completed / Favorite checkboxes and
+   * From / To date inputs).  Reads ``data-category``,
+   * ``data-timestamp`` and ``data-favorite`` stamped on each row by
+   * ``renderHistory``.  When every row is hidden, replaces the list
+   * with a "No matching tasks" placeholder unless the unfiltered list
+   * was itself empty.
+   */
+  function applyHistoryFilterVisibility() {
+    const hfRunning = document.getElementById('hf-running');
+    const hfErrors = document.getElementById('hf-errors');
+    const hfCompleted = document.getElementById('hf-completed');
+    const hfFavorite = document.getElementById('hf-favorite');
+    const hfFrom = document.getElementById('hf-from');
+    const hfTo = document.getElementById('hf-to');
+    if (!hfRunning || !hfErrors || !hfCompleted) return;
+    const showRunning = hfRunning.checked;
+    const showErrors = hfErrors.checked;
+    const showCompleted = hfCompleted.checked;
+    const onlyFavorite = hfFavorite && hfFavorite.checked;
+    // Date inputs are <input type=date> with value="YYYY-MM-DD".
+    // Convert to local-midnight epoch seconds for inclusive bounds.
+    let fromTs = -Infinity;
+    let toTs = Infinity;
+    if (hfFrom && hfFrom.value) {
+      const d = new Date(hfFrom.value + 'T00:00:00');
+      if (!isNaN(d.getTime())) fromTs = d.getTime() / 1000;
+    }
+    if (hfTo && hfTo.value) {
+      const d = new Date(hfTo.value + 'T23:59:59.999');
+      if (!isNaN(d.getTime())) toTs = d.getTime() / 1000;
+    }
+    const rows = historyList.querySelectorAll('.sidebar-item');
+    let visible = 0;
+    rows.forEach(row => {
+      const cat = row.dataset.category;
+      const ts = Number(row.dataset.timestamp || 0);
+      let catOk = false;
+      if (cat === 'running') catOk = showRunning;
+      else if (cat === 'errors') catOk = showErrors;
+      else if (cat === 'completed') catOk = showCompleted;
+      const dateOk = ts >= fromTs && ts <= toTs;
+      const favOk = !onlyFavorite || row.dataset.favorite === '1';
+      if (catOk && dateOk && favOk) {
+        row.style.display = '';
+        visible++;
+      } else {
+        row.style.display = 'none';
+      }
+    });
+    // Manage the "no matches" placeholder.  Only show it when there
+    // are rows in the list but the filter hides them all — never
+    // when the unfiltered list was already empty (the existing "No
+    // conversations yet" placeholder handles that case).
+    let placeholder = historyList.querySelector('.sidebar-empty-filter');
+    if (rows.length > 0 && visible === 0) {
+      if (!placeholder) {
+        placeholder = document.createElement('div');
+        placeholder.className = 'sidebar-empty sidebar-empty-filter';
+        placeholder.textContent = 'No tasks match the filter';
+        historyList.appendChild(placeholder);
+      }
+    } else if (placeholder) {
+      placeholder.remove();
+    }
+  }
+
+  /**
+   * Save the settings form to the backend if the form is currently
+   * populated.  Used both when switching away from the Settings sub-tab
+   * and when closing the unified sidebar while Settings is active.
+   */
+  function saveSettingsIfPopulated() {
+    if (configFormPopulated) {
+      const data = collectConfigForm();
+      vscode.postMessage({type: 'saveConfig', ...data});
+    }
   }
 
   function closeSidebar() {
     sidebar.classList.remove('open');
     sidebarOverlay.classList.remove('open');
-    historyBtn.classList.remove('active');
   }
 
-  function openConfigSidebar() {
-    closeConfigSidebar();
-    closeSidebar();
-    closeFrequentSidebar();
+  /**
+   * Open the standalone Settings panel (slides in from the right) and
+   * request the current config from the backend so the form is freshly
+   * populated.
+   */
+  function openSettingsPanel() {
+    if (!settingsPanel) return;
+    settingsPanel.classList.add('open');
+    if (settingsOverlay) settingsOverlay.classList.add('open');
     configFormPopulated = false;
     vscode.postMessage({type: 'getConfig'});
-    configSidebar.classList.add('open');
-    configSidebarOverlay.classList.add('open');
-    configBtn.classList.add('active');
-  }
-  function closeConfigSidebar() {
-    if (configSidebar.classList.contains('open') && configFormPopulated) {
-      const data = collectConfigForm();
-      vscode.postMessage({type: 'saveConfig', ...data});
-    }
-    configSidebar.classList.remove('open');
-    configSidebarOverlay.classList.remove('open');
-    configBtn.classList.remove('active');
   }
 
-  function openFrequentSidebar() {
-    if (!frequentSidebar) return;
-    closeSidebar();
-    closeConfigSidebar();
-    vscode.postMessage({type: 'getFrequentTasks', limit: 50});
-    frequentSidebar.classList.add('open');
-    if (frequentSidebarOverlay) frequentSidebarOverlay.classList.add('open');
-    if (frequentBtn) frequentBtn.classList.add('active');
+  /**
+   * Close the standalone Settings panel.  If the config form is
+   * populated, flush it to the backend via ``saveConfig`` first.
+   */
+  function closeSettingsPanel() {
+    saveSettingsIfPopulated();
+    if (settingsPanel) settingsPanel.classList.remove('open');
+    if (settingsOverlay) settingsOverlay.classList.remove('open');
   }
-  function closeFrequentSidebar() {
-    if (!frequentSidebar) return;
-    frequentSidebar.classList.remove('open');
-    if (frequentSidebarOverlay) frequentSidebarOverlay.classList.remove('open');
-    if (frequentBtn) frequentBtn.classList.remove('active');
+
+  /**
+   * Open the standalone Frequent tasks panel (slides up from the
+   * bottom) and request the current frequent tasks from the backend.
+   */
+  function openFrequentPanel() {
+    if (!frequentPanel) return;
+    frequentPanel.classList.add('open');
+    if (frequentOverlay) frequentOverlay.classList.add('open');
+    vscode.postMessage({type: 'getFrequentTasks', limit: 50});
+  }
+
+  /** Close the standalone Frequent tasks panel. */
+  function closeFrequentPanel() {
+    if (frequentPanel) frequentPanel.classList.remove('open');
+    if (frequentOverlay) frequentOverlay.classList.remove('open');
+  }
+
+  /**
+   * Open the standalone Tricks panel (slides up from the bottom).
+   * Trick texts are read from ``window.__TRICKS__`` which is injected
+   * by the HTML builder after parsing ``src/kiss/INJECTIONS.md``.
+   */
+  function openTricksPanel() {
+    if (!tricksPanel) return;
+    tricksPanel.classList.add('open');
+    if (tricksOverlay) tricksOverlay.classList.add('open');
+    renderTricks(window.__TRICKS__ || []);
+  }
+
+  /** Close the standalone Tricks panel. */
+  function closeTricksPanel() {
+    if (tricksPanel) tricksPanel.classList.remove('open');
+    if (tricksOverlay) tricksOverlay.classList.remove('open');
+  }
+
+  /**
+   * Render the list of tricks inside the Tricks panel.  Each row is
+   * clickable: clicking copies the trick text into the prompt textarea
+   * and closes the panel — mirroring the click handler used by the
+   * Frequent tasks list.
+   */
+  function renderTricks(tricks) {
+    if (!tricksList) return;
+    if (!tricks || tricks.length === 0) {
+      tricksList.innerHTML =
+        '<div class="sidebar-empty">No tricks available</div>';
+      return;
+    }
+    tricksList.innerHTML = '';
+    tricks.forEach(text => {
+      const div = document.createElement('div');
+      div.className = 'sidebar-item tricks-item';
+      div.dataset.tooltip = text;
+      const textSpan = document.createElement('span');
+      textSpan.className = 'sidebar-item-text';
+      textSpan.textContent = text;
+      div.appendChild(textSpan);
+      div.addEventListener('click', () => {
+        const current = inp.value;
+        const start =
+          typeof inp.selectionStart === 'number'
+            ? inp.selectionStart
+            : current.length;
+        const end =
+          typeof inp.selectionEnd === 'number'
+            ? inp.selectionEnd
+            : current.length;
+        inp.value = current.slice(0, start) + text + current.slice(end);
+        const caret = start + text.length;
+        syncClearBtn();
+        inp.style.height = 'auto';
+        inp.style.height = inp.scrollHeight + 'px';
+        inp.focus();
+        try {
+          inp.setSelectionRange(caret, caret);
+        } catch (_e) {
+          /* ignore selection errors on non-text inputs */
+        }
+        closeTricksPanel();
+      });
+      tricksList.appendChild(div);
+    });
   }
 
   function renderFrequentTasks(tasks) {
@@ -4564,7 +5616,9 @@
 
       const textSpan = document.createElement('span');
       textSpan.className = 'sidebar-item-text';
-      textSpan.textContent = text.length > 60 ? text.slice(0, 60) + '…' : text;
+      // Show the full text; CSS line-clamp on .frequent-item > .sidebar-item-text
+      // clips it to two lines with an ellipsis.
+      textSpan.textContent = text;
       div.appendChild(textSpan);
 
       const cnt = document.createElement('span');
@@ -4572,26 +5626,117 @@
       cnt.textContent = String(t.count);
       div.appendChild(cnt);
 
+      // Copy-to-clipboard button — placed immediately left of the
+      // trash icon so the user can copy the full task text without
+      // first selecting/reopening the task.  ``text`` is the full
+      // task string straight from the ``frequent_tasks.task`` column.
+      const copyBtn = makeSidebarCopyButton(text);
+      div.appendChild(copyBtn);
+
+      // Delete button + inline confirm/cancel — mirrors the layout used
+      // by the History sidebar rows so the user gets a consistent
+      // "click trash → confirm Delete or Cancel" flow.  On confirm we
+      // optimistically remove the row from the DOM and ask the backend
+      // to delete the row from the ``frequent_tasks`` table.
+      const delBtn = document.createElement('button');
+      delBtn.className = 'sidebar-item-delete';
+      delBtn.dataset.tooltip = 'Delete';
+      delBtn.setAttribute('aria-label', 'Delete frequent task');
+      delBtn.innerHTML =
+        '<svg width="11" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>';
+
+      const confirmWrap = document.createElement('span');
+      confirmWrap.className = 'sidebar-item-confirm';
+      confirmWrap.style.display = 'none';
+
+      const confirmBtn = document.createElement('button');
+      confirmBtn.className = 'sidebar-confirm-yes';
+      confirmBtn.dataset.tooltip = 'Confirm delete';
+      confirmBtn.textContent = 'Delete';
+
+      const cancelBtn = document.createElement('button');
+      cancelBtn.className = 'sidebar-confirm-no';
+      cancelBtn.dataset.tooltip = 'Cancel';
+      cancelBtn.textContent = 'Cancel';
+
+      confirmWrap.appendChild(confirmBtn);
+      confirmWrap.appendChild(cancelBtn);
+
+      delBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        delBtn.style.display = 'none';
+        cnt.style.display = 'none';
+        confirmWrap.style.display = '';
+      });
+
+      confirmBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        vscode.postMessage({type: 'deleteFrequentTask', task: text});
+        div.remove();
+      });
+
+      cancelBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        confirmWrap.style.display = 'none';
+        delBtn.style.display = '';
+        cnt.style.display = '';
+      });
+
+      div.appendChild(delBtn);
+      div.appendChild(confirmWrap);
+
       div.addEventListener('click', () => {
         inp.value = text;
         syncClearBtn();
         inp.style.height = 'auto';
         inp.style.height = inp.scrollHeight + 'px';
         inp.focus();
-        closeFrequentSidebar();
+        closeFrequentPanel();
       });
       frequentList.appendChild(div);
     });
   }
+  /**
+   * Wire a show/hide eye-toggle button to a password input.
+   *
+   * Used both for the settings-panel password (cfg-remote-password) and
+   * for the welcome-page mirror (welcome-cfg-remote-password).  The
+   * function is a no-op if either DOM node is missing, so it is safe to
+   * call unconditionally from setupEventListeners().
+   */
+  function setupPasswordToggle(toggleId, inputId) {
+    const btn = document.getElementById(toggleId);
+    const inp = document.getElementById(inputId);
+    if (!btn || !inp) return;
+    btn.addEventListener('click', () => {
+      const showing = inp.type === 'text';
+      inp.type = showing ? 'password' : 'text';
+      const eye = btn.querySelector('.icon-eye');
+      const eyeOff = btn.querySelector('.icon-eye-off');
+      if (eye) eye.style.display = showing ? '' : 'none';
+      if (eyeOff) eyeOff.style.display = showing ? 'none' : '';
+      btn.setAttribute('aria-pressed', showing ? 'false' : 'true');
+      const lbl = showing ? 'Show password' : 'Hide password';
+      btn.setAttribute('aria-label', lbl);
+      btn.setAttribute('title', lbl);
+    });
+  }
+
   let configFormPopulated = false;
   function populateConfigForm(cfg, apiKeys) {
     const el = id => document.getElementById(id);
     el('cfg-max-budget').value = cfg.max_budget != null ? cfg.max_budget : 100;
     el('cfg-custom-endpoint').value = cfg.custom_endpoint || '';
     el('cfg-custom-api-key').value = cfg.custom_api_key || '';
+    el('cfg-custom-headers').value = cfg.custom_headers || '';
     el('cfg-use-web-browser').checked = cfg.use_web_browser !== false;
+    el('cfg-demo-mode').checked = !!cfg.demo_mode || demoMode;
+    demoMode = el('cfg-demo-mode').checked;
     el('cfg-remote-password').value = cfg.remote_password || '';
-    el('cfg-work-dir').value = cfg.work_dir || '';
+    // Also populate the welcome-page mirror (may not exist on some
+    // alternate views; guarded by ``if (welcomePw)``).
+    const welcomePw = el('welcome-cfg-remote-password');
+    if (welcomePw) welcomePw.value = cfg.remote_password || '';
     configFormPopulated = true;
     // Populate API key fields from current environment values
     const keyIds = [
@@ -4612,9 +5757,10 @@
       max_budget: parseFloat(el('cfg-max-budget').value) || 100,
       custom_endpoint: el('cfg-custom-endpoint').value.trim(),
       custom_api_key: el('cfg-custom-api-key').value.trim(),
+      custom_headers: el('cfg-custom-headers').value.trim(),
       use_web_browser: el('cfg-use-web-browser').checked,
+      demo_mode: el('cfg-demo-mode').checked,
       remote_password: el('cfg-remote-password').value.trim(),
-      work_dir: el('cfg-work-dir').value.trim(),
     };
     const apiKeys = {};
     const keyIds = [

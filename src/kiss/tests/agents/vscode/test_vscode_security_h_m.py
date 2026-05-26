@@ -2,14 +2,13 @@
 in src/kiss/agents/vscode/.  Each Python-side fix has a behavioural test
 that fails when the fix is reverted.
 
-TS-side fixes (DependencyInstaller, SorcarSidebarView, AgentProcess,
+TS-side fixes (DependencyInstaller, SorcarSidebarView, kissPaths,
 SorcarTab) are spot-checked via source-grep tests because the test
 harness has no TypeScript runtime.
 """
 
 from __future__ import annotations
 
-import inspect
 import os
 import re
 import shutil
@@ -21,6 +20,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 # ---------------------------------------------------------------------------
@@ -128,7 +128,7 @@ class TestH9AutocompleteNonBlocking(unittest.TestCase):
             def __init__(self) -> None:
                 self.printer = StubPrinter()  # type: ignore[assignment]
                 self.work_dir = "/"
-                self._state_lock = threading.Lock()
+                self._state_lock = threading.RLock()
                 self._complete_queue = None
                 self._complete_worker = None
                 self._complete_seq_latest = 0
@@ -284,34 +284,6 @@ class TestM5AtomicSaveAndDecodeError(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-class TestM2StopEventOrder(unittest.TestCase):
-    """The stop event must be plumbed through ``_thread_local`` before
-    the long-running ``_capture_pre_snapshot`` runs, so a Stop click can
-    abort a hanging ``repo_lock``."""
-
-    def test_thread_local_stop_event_set_early(self) -> None:
-        """Source-level: stop_event must be installed before snapshot."""
-        from kiss.agents.vscode import task_runner as tr
-
-        src = inspect.getsource(tr._TaskRunnerMixin._run_task_inner)
-        # Find the lines for stop_event assignment and capture_pre_snapshot.
-        lines = src.splitlines()
-        stop_idx = next(
-            (i for i, ln in enumerate(lines)
-             if "_thread_local.stop_event" in ln and "=" in ln),
-            None,
-        )
-        snap_idx = next(
-            (i for i, ln in enumerate(lines)
-             if "_capture_pre_snapshot" in ln),
-            None,
-        )
-        assert stop_idx is not None, "stop_event assignment not found"
-        assert snap_idx is not None, "_capture_pre_snapshot not found"
-        self.assertLess(stop_idx, snap_idx,
-                        f"stop_event installed at line {stop_idx} but "
-                        f"_capture_pre_snapshot runs at line {snap_idx}; "
-                        "swap them so Stop works during snapshot")
 
 
 # ---------------------------------------------------------------------------
@@ -330,14 +302,16 @@ class TestM4AwaitUserResponseEmptyQueue(unittest.TestCase):
             class TL:
                 pass
             _thread_local = TL()
+            _lock = threading.Lock()
+            _subscribers: dict[str, set[str]] = {}
 
         class FakeServer(tr._TaskRunnerMixin):
             def __init__(self) -> None:
                 self.printer = FakePrinter()  # type: ignore[assignment]
                 self.printer._thread_local.stop_event = threading.Event()
-                self.printer._thread_local.tab_id = "ghost-tab"
-                self._state_lock = threading.Lock()
-                self._tab_states = {}  # no entry for "ghost-tab"
+                self.printer._thread_local.task_id = "ghost-tab"
+                self._state_lock = threading.RLock()
+                self._running_agent_states: dict[str, Any] = {}  # no entry for "ghost-tab"
 
         srv = FakeServer()
         t0 = time.time()
@@ -394,7 +368,7 @@ class TestH4OpenFileGuard(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# H5 — workspace-trust gate for env / setting in AgentProcess.findKissProject
+# H5 — workspace-trust gate for env / setting in kissPaths.findKissProject
 # ---------------------------------------------------------------------------
 
 
@@ -403,7 +377,7 @@ class TestH5WorkspaceTrustGate(unittest.TestCase):
     untrusted workspaces."""
 
     def test_findkissproject_consults_workspace_trust(self) -> None:
-        src = _ts_path("AgentProcess.ts").read_text()
+        src = _ts_path("kissPaths.ts").read_text()
         # The function must reference vscode.workspace.isTrusted (or use
         # the trust API equivalent) before returning the env / setting path.
         self.assertRegex(

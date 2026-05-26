@@ -21,6 +21,7 @@ def test_cc_model_streams_thinking_tokens_to_browser_ui() -> None:
     one ``thinking_start`` / ``thinking_end`` pair — never double-collapsed.
     """
     printer = BaseBrowserPrinter()
+    printer._thread_local.task_id = "test-task-1"
     printer.start_recording()
 
     model = ClaudeCodeModel(
@@ -82,6 +83,7 @@ def test_cc_model_no_thinking_end_before_thinking_deltas() -> None:
     a premature end would collapse the panel and hide subsequent tokens.
     """
     printer = BaseBrowserPrinter()
+    printer._thread_local.task_id = "test-task-2"
     printer.start_recording()
 
     model = ClaudeCodeModel(

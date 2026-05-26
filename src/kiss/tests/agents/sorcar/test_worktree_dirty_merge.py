@@ -18,6 +18,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
+
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.git_worktree import (
     GitWorktreeOps,
@@ -101,6 +103,7 @@ class TestDirtyWorkingTreeMerge:
     def _agent(self) -> WorktreeSorcarAgent:
         return WorktreeSorcarAgent("test")
 
+    @pytest.mark.slow
     def test_squash_merge_fails_with_dirty_overlap(self) -> None:
         """BUG REPRODUCTION: squash_merge_branch fails when the main working
         tree has uncommitted changes that overlap with the merge.
@@ -140,6 +143,7 @@ class TestDirtyWorkingTreeMerge:
         msg = agent.merge()
         assert "Successfully merged" in msg
 
+    @pytest.mark.slow
     def test_squash_merge_succeeds_with_non_overlapping_dirty(self) -> None:
         """Dirty files that don't overlap with merge should not block it."""
         agent = self._agent()

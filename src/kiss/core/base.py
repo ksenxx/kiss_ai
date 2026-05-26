@@ -56,20 +56,7 @@ class Base:
     """Base class for all KISS agents with common state management and persistence."""
 
     agent_counter: ClassVar[int] = 1
-    global_budget_used: ClassVar[float] = 0.0
     _class_lock: ClassVar[threading.Lock] = threading.Lock()
-
-    @classmethod
-    def get_global_budget_used(cls) -> float:
-        """Return the global budget total under the shared class lock."""
-        with cls._class_lock:
-            return cls.global_budget_used
-
-    @classmethod
-    def reset_global_budget(cls) -> None:
-        """Reset the shared process-wide budget counter to zero."""
-        with cls._class_lock:
-            cls.global_budget_used = 0.0
 
     model_name: str
     messages: list[dict[str, Any]]
@@ -151,8 +138,6 @@ class Base:
             "model": self.model_name,
             "budget_used": self.budget_used,
             "total_budget": getattr(self, "max_budget", 10.0),
-            "global_budget_used": Base.global_budget_used,
-            "global_max_budget": 2000.0,
             "tokens_used": self.total_tokens_used,
             "max_tokens": max_tokens,
             "step_count": self.step_count,
@@ -179,6 +164,16 @@ class Base:
             str: A JSON-formatted string of all messages in the agent's history.
         """
         return json.dumps(self.messages, indent=2)
+
+    def get_trajectory_path(self) -> Path:
+        """Return the path where this agent's trajectory is/will be saved.
+
+        Returns:
+            Path: The file path for the trajectory YAML file.
+        """
+        folder_path = Path(config_module.artifact_dir) / "trajectories"
+        name_safe = self.name.replace(" ", "_").replace("/", "_")
+        return folder_path / f"trajectory_{name_safe}_{self.id}_{self.run_start_timestamp}.yaml"
 
     def _add_message(self, role: str, content: Any, timestamp: int | None = None) -> None:
         """Add a message to the history.

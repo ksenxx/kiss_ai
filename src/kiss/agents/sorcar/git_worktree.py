@@ -17,27 +17,34 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_repo_locks: dict[str, threading.Lock] = {}
+_repo_locks: dict[str, threading.RLock] = {}
 _repo_locks_guard = threading.Lock()
 
 
-def repo_lock(repo: Path) -> threading.Lock:
-    """Return a per-repo threading lock for multi-step git operations.
+def repo_lock(repo: Path) -> threading.RLock:
+    """Return a per-repo re-entrant lock for multi-step git operations.
 
     Concurrent tabs operating on the same main repository must
     serialize their checkout → stash → merge → pop sequences to
     prevent interleaving that could corrupt the working tree.
 
+    The lock is an :class:`threading.RLock` (re-entrant) so a caller
+    holding the lock for an outer multi-step operation
+    (e.g. ``_try_setup_worktree`` releasing a previous worktree
+    before creating a new one) can safely call inner helpers
+    (``_do_merge``, ``discard``) that re-acquire the same lock on the
+    same thread.  Cross-thread acquisitions still block as expected.
+
     Args:
         repo: Git repo root path.
 
     Returns:
-        A :class:`threading.Lock` specific to the resolved repo path.
+        A :class:`threading.RLock` specific to the resolved repo path.
     """
     key = str(repo.resolve())
     with _repo_locks_guard:
         if key not in _repo_locks:
-            _repo_locks[key] = threading.Lock()
+            _repo_locks[key] = threading.RLock()
         return _repo_locks[key]
 
 
@@ -394,12 +401,43 @@ class GitWorktreeOps:
         return result.returncode == 0
 
     @staticmethod
+    def _merge_commit_message(repo: Path, branch: str) -> str:
+        """Return the commit message to use for a squash-merge commit.
+
+        When the agent has made at least one commit on *branch* (the
+        common case — the agent auto-commits its changes before
+        merging), this returns the full message (subject + body) of
+        the branch's HEAD commit, so the merge into the original
+        branch carries the meaningful per-task description rather
+        than git's generic ``"Squashed commit of the following:"`` or
+        a synthetic ``"kiss: merged from <branch>"`` placeholder.
+
+        Falls back to ``"kiss: merged from <branch>"`` only when the
+        branch's HEAD message cannot be read (corrupt branch, git
+        error).  Never returns an empty string, because ``git commit``
+        rejects empty messages.
+
+        Args:
+            repo: Git repo root path (the working directory that will
+                run ``git log``).
+            branch: The worktree branch whose HEAD message to read.
+
+        Returns:
+            A non-empty commit message string.
+        """
+        result = _git("log", "-1", "--format=%B", branch, cwd=repo)
+        msg = result.stdout.rstrip()
+        if result.returncode != 0 or not msg:
+            return f"kiss: merged from {branch}"
+        return msg
+
+    @staticmethod
     def squash_merge_branch(repo: Path, branch: str) -> MergeResult:
         """Squash-merge a branch and commit the result.
 
         Uses ``git merge --squash`` to apply all changes from *branch*,
-        then commits them.  The commit message is taken from git's
-        auto-generated ``SQUASH_MSG``.
+        then commits the staged result using the HEAD commit message
+        of *branch* (see :meth:`_merge_commit_message`).
 
         On conflict, resets to a clean state with ``git reset --hard``.
 
@@ -420,7 +458,8 @@ class GitWorktreeOps:
             return MergeResult.CONFLICT
         diff = _git("diff", "--cached", "--quiet", cwd=repo)
         if diff.returncode != 0:
-            commit_result = _git("commit", "--no-edit", cwd=repo)
+            msg = GitWorktreeOps._merge_commit_message(repo, branch)
+            commit_result = _git("commit", "-m", msg, cwd=repo)
             if commit_result.returncode != 0:
                 logger.warning(
                     "squash merge commit failed: %s",
@@ -534,28 +573,6 @@ class GitWorktreeOps:
                 return
         with open(exclude_file, "a") as f:
             f.write(f"\n{entry}\n")
-
-    @staticmethod
-    def find_pending_branch(repo: Path, prefix: str) -> str | None:
-        """Find the latest ``kiss/wt-*`` branch matching a prefix.
-
-        Args:
-            repo: Git repo root path.
-            prefix: Branch name prefix (e.g. ``kiss/wt-<chat_id[:12]>-``).
-
-        Returns:
-            The lexicographically last matching branch, or ``None``.
-        """
-        result = _git(
-            "for-each-ref",
-            "--format=%(refname:short)",
-            f"refs/heads/{prefix}*",
-            cwd=repo,
-        )
-        branches = result.stdout.strip().splitlines()
-        if not branches:
-            return None
-        return sorted(branches)[-1]
 
     @staticmethod
     def load_original_branch(repo: Path, branch: str) -> str | None:
@@ -771,16 +788,7 @@ class GitWorktreeOps:
 
         diff_check = _git("diff", "--cached", "--quiet", cwd=repo)
         if diff_check.returncode != 0:
-            log_msgs = _git(
-                "log",
-                "--oneline",
-                f"{baseline}..{branch}",
-                cwd=repo,
-            )
-            body = log_msgs.stdout.strip()
-            msg = f"kiss: merged from {branch}"
-            if body:
-                msg += f"\n\n{body}"
+            msg = GitWorktreeOps._merge_commit_message(repo, branch)
             commit_result = _git("commit", "-m", msg, cwd=repo)
             if commit_result.returncode != 0:
                 logger.warning(

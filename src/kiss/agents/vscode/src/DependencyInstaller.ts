@@ -11,7 +11,7 @@ import * as fs from 'fs';
 import * as https from 'https';
 import * as crypto from 'crypto';
 import {exec, execSync, execFileSync, spawn} from 'child_process';
-import {findKissProject, findUvPath} from './AgentProcess';
+import {findKissProject, findUvPath} from './kissPaths';
 
 const HOME_DIR = process.env.HOME || process.env.USERPROFILE || '';
 const LOG_DIR = path.join(HOME_DIR, '.kiss');
@@ -296,22 +296,61 @@ function findNodeDirWindows(baseDir: string): string {
 }
 
 /**
+ * Pure-TypeScript replica of Python's ``get_default_model()`` priority
+ * order from ``kiss.core.models.model_info``.  Used as a fallback when
+ * the .venv is not yet available (first-time setup) so the model
+ * picker is never rendered blank.
+ *
+ * Priority order (must match Python):
+ *   Anthropic > OpenAI > Gemini > OpenRouter > Together AI >
+ *   Claude Code CLI > Codex CLI > ``"No model"``.
+ *
+ * Keep the strings in sync with ``get_default_model`` in
+ * ``src/kiss/core/models/model_info.py``.
+ */
+export function getFallbackDefaultModel(): string {
+  const env = process.env;
+  if (env.ANTHROPIC_API_KEY) return 'claude-opus-4-7';
+  if (env.OPENAI_API_KEY) return 'gpt-5.5';
+  if (env.GEMINI_API_KEY) return 'gemini-3.1-pro-preview';
+  if (env.OPENROUTER_API_KEY) return 'openrouter/anthropic/claude-opus-4.7';
+  if (env.TOGETHER_API_KEY) return 'Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8';
+  const whichCmd = process.platform === 'win32' ? 'where' : 'which';
+  try {
+    execFileSync(whichCmd, ['claude'], {stdio: 'ignore', timeout: 2_000});
+    return 'cc/opus';
+  } catch {
+    /* not installed */
+  }
+  try {
+    execFileSync(whichCmd, ['codex'], {stdio: 'ignore', timeout: 2_000});
+    return 'codex/default';
+  } catch {
+    /* not installed */
+  }
+  return 'No model';
+}
+
+/**
  * Return the best default model name by calling Python's canonical
  * ``get_default_model()`` from ``kiss.core.models.model_info``.
  *
  * Requires ``uv`` and the KISS project ``.venv`` to be available.
- * Returns an empty string when the Python call fails (e.g. during
- * first-time setup before dependencies are installed).  The backend
- * will send the real model via the ``showWelcome`` event in that case.
+ * When the Python call fails (e.g. during first-time setup before
+ * dependencies are installed), falls back to a pure-TypeScript
+ * replica that checks the same API-key env vars and CLI executables.
+ * This guarantees the model picker never renders blank on a fresh
+ * install — the backend still overrides the value via the ``models``
+ * event once the daemon is up.
  */
 export function getDefaultModel(): string {
   const uvPath = findUvPath();
   const kissProject = findKissProject();
-  if (!uvPath || !kissProject) return '';
+  if (!uvPath || !kissProject) return getFallbackDefaultModel();
   try {
     // H1 — argv-form so quotes / shell metacharacters in either path
     // (both come from user-controlled HOME / settings) cannot inject.
-    return execFileSync(
+    const out = execFileSync(
       uvPath,
       [
         'run',
@@ -324,21 +363,23 @@ export function getDefaultModel(): string {
       ],
       {encoding: 'utf-8', timeout: 15_000, stdio: ['ignore', 'pipe', 'ignore']},
     ).trim();
+    return out || getFallbackDefaultModel();
   } catch {
-    return '';
+    return getFallbackDefaultModel();
   }
 }
 
 /**
  * Run the post-install finalization steps: install the ``sorcar`` CLI
- * wrapper, restart the kiss-web daemon, persist PATH entries to the
- * user's shell rc file, and prompt for any missing API keys.  Returns
- * whether at least one API key (or the Claude CLI) is available.
+ * wrapper, install cloudflared, restart the kiss-web daemon, persist
+ * PATH entries to the user's shell rc file, and prompt for any missing
+ * API keys.  Returns whether at least one API key (or the Claude CLI)
+ * is available.
  *
  * When called with a non-null ``progress`` reporter this function
  * publishes brief sub-step messages so the surrounding "KISS Sorcar:
  * Setting up" notification stays visible continuously from the first
- * install step until the restart prompt is shown.  Passing ``null``
+ * install step until the completion message is shown.  Passing ``null``
  * skips the progress reports (used on the fast path, which has no
  * progress notification to annotate).
  */
@@ -351,6 +392,9 @@ async function runFinalization(
     if (progress) progress.report({message: 'Installing CLI wrapper...'});
     installCliScript(kissProjectPath, uvPath);
   }
+
+  if (progress) progress.report({message: 'Checking cloudflared...'});
+  await installCloudflaredIfNeeded();
 
   if (progress) progress.report({message: 'Restarting kiss-web daemon...'});
   restartKissWebDaemon(kissProjectPath);
@@ -650,9 +694,9 @@ async function ensureDependenciesImpl(): Promise<void> {
         // Finalization runs INSIDE the withProgress callback so the
         // "KISS Sorcar: Setting up" notification stays visible
         // continuously from the first install step until the
-        // "Restart VS Code" prompt is shown.  Previously these steps
-        // ran after the callback returned, leaving a visible gap
-        // between "Installing dependencies..." and "Restart VS Code"
+        // completion message is shown.  Previously these steps ran
+        // after the callback returned, leaving a visible gap between
+        // "Installing dependencies..." and the final notification
         // (often several seconds — much longer when ensureApiKeys
         // had to prompt the user for an API key).
         progress.report({message: 'Finalizing setup...'});
@@ -671,33 +715,105 @@ async function ensureDependenciesImpl(): Promise<void> {
 
   log('=== Dependency check finished ===');
 
-  // Show restart notification only after API key prompting has completed.
+  // Post-install notification.  A VS Code window reload is NOT
+  // required here:
+  //
+  //   * When a new VSIX was installed while VS Code was running, the
+  //     ``fs.watchFile`` watchers in ``extension.ts`` (on ``out/
+  //     extension.js`` and on ``~/.kiss/.extension-updated``) already
+  //     fired ``workbench.action.reloadWindow`` BEFORE this function
+  //     ran in the new activation — the extension code in memory is
+  //     already current.
+  //   * For a from-scratch install (slow path), the current Node host
+  //     already has the updated ``process.env.PATH`` (set by
+  //     ``ensureLocalBinInPath()`` at activation start) and the API
+  //     keys (set by ``ensureApiKeys`` / ``loadApiKeysFromShellRc``),
+  //     the Python venv exists on disk, and the kiss-web daemon was
+  //     just (re)started.  Child processes spawned for chat tasks
+  //     inherit all of this.
+  //
+  // The only thing a reload would refresh is already-open integrated
+  // terminals — and opening a new terminal achieves the same effect
+  // without disrupting an in-flight chat task.  So we now show a
+  // non-prompting info message instead of forcing a reload.
   if (showRestartNotification) {
     if (apiKeysReady) {
-      // Loop until the user explicitly clicks "Restart VS Code".  VS
-      // Code may auto-hide information notifications (depending on
-      // user settings or notification-center state) and the user may
-      // dismiss the toast with the close button — in either case
-      // ``showInformationMessage`` resolves to ``undefined`` and we
-      // re-show, guaranteeing the prompt stays visible until the
-      // restart button is clicked.
-      void (async () => {
-        for (;;) {
-          const choice = await vscode.window.showInformationMessage(
-            'KISS Sorcar: Installation complete! Please restart VS Code and any open terminal for changes to take effect.',
-            'Restart VS Code',
-          );
-          if (choice === 'Restart VS Code') {
-            vscode.commands.executeCommand('workbench.action.reloadWindow');
-            return;
-          }
-        }
-      })();
+      vscode.window.showInformationMessage(
+        'KISS Sorcar: Installation complete! You are ready to go. ' +
+          'Already-open terminals will not see the updated PATH until you open a new one.',
+      );
     } else {
       vscode.window.showWarningMessage(
         'KISS Sorcar: Installation complete, but at least one of Claude Code, ANTHROPIC_API_KEY, or OPENAI_API_KEY is required. ' +
-          'Set an API key in your environment or restart VS Code to be prompted again.',
+          'Set an API key in your environment, then reload the window (Developer: Reload Window) to be prompted again.',
       );
+    }
+  }
+}
+
+/**
+ * Reliably kill every process listening on ``port``.
+ *
+ * Sends SIGTERM first, polls up to 3 s for graceful exit, then SIGKILLs
+ * any stragglers.  Returns silently when nothing is listening.
+ *
+ * Used in place of ``pkill -x kiss-web``: kiss-web is a Python shebang
+ * script, so the kernel's ``comm`` field is the truncated interpreter
+ * path rather than the literal ``kiss-web``, making name-based pkill
+ * unreliable on macOS.  Killing by listening port works on both macOS
+ * and Linux without relying on process-name heuristics.
+ *
+ * @param port - TCP port whose listening processes should be killed.
+ */
+function killProcessOnPort(port: number): void {
+  let pids: string[] = [];
+  try {
+    pids = execFileSync('lsof', ['-ti', `:${port}`], {
+      encoding: 'utf-8',
+      timeout: 3000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+      .trim()
+      .split('\n')
+      .filter(Boolean);
+  } catch {
+    return; // Nothing listening — ok.
+  }
+  for (const pid of pids) {
+    try {
+      process.kill(parseInt(pid, 10), 'SIGTERM');
+    } catch {
+      /* already gone */
+    }
+  }
+  // Wait up to ~3 s for the port to free up.
+  for (let i = 0; i < 6; i++) {
+    try {
+      execSync(`lsof -i :${port} -t`, {stdio: 'ignore', timeout: 2000});
+      execSync('sleep 0.5', {timeout: 2000});
+    } catch {
+      return; // Port is free.
+    }
+  }
+  // Force-kill any survivors.
+  let stragglers: string[] = [];
+  try {
+    stragglers = execFileSync('lsof', ['-ti', `:${port}`], {
+      encoding: 'utf-8',
+      timeout: 3000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+      .trim()
+      .split('\n')
+      .filter(Boolean);
+  } catch {
+    return;
+  }
+  for (const pid of stragglers) {
+    try {
+      process.kill(parseInt(pid, 10), 'SIGKILL');
+    } catch {
+      /* already gone */
     }
   }
 }
@@ -768,12 +884,12 @@ function restartKissWebDaemon(kissProjectPath: string): void {
       `${currentFp.slice(0, 8) || '<none>'}, daemonAlive=${daemonAlive}`,
   );
 
-  // Kill the existing kiss-web process before restarting.  Use
-  // ``pkill -x`` (exact comm match) and pass the name as a separate
-  // argv element via ``execFileSync`` so the shell never interpolates
-  // the value.  We deliberately avoid the substring-match flag, which
-  // would otherwise kill unrelated processes (e.g. a user editing
-  // kiss-web.py in another VS Code window).
+  // Kill the existing kiss-web process before restarting.  ``kiss-web``
+  // is a Python shebang script, so the kernel's ``comm`` field is the
+  // (15-char-truncated) interpreter path — NOT the literal string
+  // ``kiss-web``.  ``pkill -x kiss-web`` is therefore a silent no-op
+  // on macOS; killing by listening port is the only reliable approach
+  // that works across both macOS and Linux.
   //
   // ``cloudflared`` is intentionally NOT killed here: the Python
   // ``web_server`` adopts the existing cloudflared on startup
@@ -782,26 +898,7 @@ function restartKissWebDaemon(kissProjectPath: string): void {
   // restarts.  When the kiss-web binary genuinely changed we still
   // restart kiss-web; the surviving cloudflared keeps forwarding to
   // ``https://localhost:8787``, which the new kiss-web re-binds.
-  try {
-    execFileSync('pkill', ['-x', 'kiss-web'], {
-      stdio: 'ignore',
-      timeout: 5000,
-    });
-  } catch {
-    /* no matching process — ok */
-  }
-
-  // Wait for port 8787 to be free (up to 5 seconds)
-  for (let i = 0; i < 10; i++) {
-    try {
-      execSync('lsof -i :8787 -t', {stdio: 'ignore', timeout: 2000});
-      // Port still in use — wait
-      execSync('sleep 0.5', {timeout: 2000});
-    } catch {
-      // Port is free
-      break;
-    }
-  }
+  killProcessOnPort(8787);
 
   if (process.platform === 'darwin') {
     const plistLabel = 'com.kiss.web-server';
@@ -1444,6 +1541,69 @@ async function installMinGitWindows(): Promise<boolean> {
     );
   }
   return false;
+}
+
+/**
+ * Install cloudflared from the official release asset when it is missing.
+ * This is best-effort: the local web UI still works without a tunnel, so
+ * failures are logged instead of blocking extension setup.
+ */
+async function installCloudflaredIfNeeded(): Promise<boolean> {
+  if (process.platform === 'win32') return false;
+  if (commandExists('cloudflared')) return true;
+
+  const archMap: Record<string, string> = {arm64: 'arm64', x64: 'amd64'};
+  const arch = archMap[process.arch];
+  if (!arch) {
+    log(`Unsupported architecture for cloudflared: ${process.arch}`);
+    return false;
+  }
+
+  const binDir = path.join(HOME_DIR, '.local', 'bin');
+  fs.mkdirSync(binDir, {recursive: true});
+
+  try {
+    if (process.platform === 'darwin') {
+      if (commandExists('brew')) {
+        try {
+          await execPromise('brew install cloudflared');
+          if (commandExists('cloudflared')) return true;
+        } catch (err) {
+          log(
+            `Homebrew cloudflared install failed: ${err instanceof Error ? err.message : err}`,
+          );
+        }
+      }
+
+      const url = `https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-${arch}.tgz`;
+      const tarPath = path.join(binDir, `cloudflared-darwin-${arch}.tgz`);
+      await downloadFile(url, tarPath);
+      await spawnPromise('tar', ['xzf', tarPath, '-C', binDir]);
+      try {
+        fs.unlinkSync(tarPath);
+      } catch {
+        /* ignore */
+      }
+    } else if (process.platform === 'linux') {
+      const url = `https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${arch}`;
+      const dst = path.join(binDir, 'cloudflared');
+      await downloadFile(url, dst);
+    } else {
+      return false;
+    }
+
+    const cloudflaredPath = path.join(binDir, 'cloudflared');
+    if (fs.existsSync(cloudflaredPath)) {
+      fs.chmodSync(cloudflaredPath, 0o755);
+    }
+    log('cloudflared installed successfully');
+    return commandExists('cloudflared') || fs.existsSync(cloudflaredPath);
+  } catch (err) {
+    log(
+      `cloudflared installation failed: ${err instanceof Error ? err.message : err}`,
+    );
+    return false;
+  }
 }
 
 /**

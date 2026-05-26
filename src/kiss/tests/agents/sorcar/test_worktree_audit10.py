@@ -427,6 +427,7 @@ class TestBug51DiffFailureSilentDiscard:
         server = VSCodeServer()
         server.work_dir = str(repo)
         tab = server._get_tab("bug51a-tab")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.use_worktree = True
         tab.agent._wt = GitWorktree(
             repo_root=repo,
@@ -455,6 +456,7 @@ class TestBug51DiffFailureSilentDiscard:
         server = VSCodeServer()
         server.work_dir = str(repo)
         tab = server._get_tab("bug51b-tab")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.use_worktree = True
         tab.agent._wt = GitWorktree(
             repo_root=repo, branch=branch, original_branch="main",
@@ -475,6 +477,7 @@ class TestBug51DiffFailureSilentDiscard:
         server = VSCodeServer()
         server.work_dir = str(repo)
         tab = server._get_tab("bug51c-tab")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.use_worktree = True
         tab.agent._wt = GitWorktree(
             repo_root=repo, branch=branch, original_branch="main",
@@ -508,6 +511,7 @@ class TestBug51DiffFailureSilentDiscard:
         server = VSCodeServer()
         server.work_dir = str(repo)
         tab = server._get_tab("bug51d-tab")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.use_worktree = True
         tab.agent._wt = GitWorktree(
             repo_root=repo, branch=branch, original_branch="main",

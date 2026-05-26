@@ -1,6 +1,8 @@
 """Useful tools for agents: file editing and bash execution."""
 
+import difflib
 import logging
+import mimetypes
 import os
 import shutil
 import signal
@@ -11,7 +13,78 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from kiss.core.models.model import (
+    READ_TOOL_BINARY_MIME_TYPES,
+    encode_binary_attachment,
+)
+
 logger = logging.getLogger(__name__)
+
+
+def _expand_pwd_prefix(file_path: str, work_dir: str | None) -> str:
+    """Expand a literal ``PWD/`` prefix to the agent's working directory.
+
+    The system prompt instructs the model to interpret ``PWD`` as the
+    current working directory, but models routinely pass it through as a
+    literal path component (e.g. ``PWD/SORCAR.md``).  This helper
+    rewrites such paths so the subsequent Read still works.
+    """
+    if file_path.startswith("PWD/") or file_path == "PWD":
+        base = work_dir or os.getcwd()
+        suffix = file_path[len("PWD/") :] if file_path.startswith("PWD/") else ""
+        return os.path.join(base, suffix) if suffix else base
+    return file_path
+
+
+def _stale_worktree_fallback(resolved: Path) -> Path | None:
+    """If *resolved* lives under a now-deleted ``.kiss-worktrees/kiss_wt-*``
+    directory, return the equivalent path with that worktree segment
+    stripped (i.e. relative to the parent repo).
+
+    Worktrees are torn down on autocommit / success, so a model that
+    remembers a worktree path from earlier in the task ends up with a
+    dangling path.  Returning the equivalent in-repo path lets the
+    subsequent read succeed transparently.
+    """
+    parts = resolved.parts
+    for i, part in enumerate(parts):
+        if (
+            part == ".kiss-worktrees"
+            and i + 1 < len(parts)
+            and parts[i + 1].startswith("kiss_wt-")
+        ):
+            return Path(*parts[:i], *parts[i + 2 :])
+    return None
+
+
+def _suggest_close_path(resolved: Path) -> str:
+    """Return a ``Did you mean: …`` suffix for a missing file, or ``""``.
+
+    Looks in *resolved*'s parent directory for the closest filename
+    (case-insensitive) via :func:`difflib.get_close_matches`.  If the
+    parent itself does not exist, walks upward to the nearest existing
+    ancestor and suggests an entry from it.
+    """
+    parent = resolved.parent
+    while parent != parent.parent and not parent.is_dir():
+        parent = parent.parent
+    if not parent.is_dir():
+        return ""
+    try:
+        names = [p.name for p in parent.iterdir()]
+    except OSError:  # pragma: no cover — permission edge case
+        return ""
+    matches = difflib.get_close_matches(resolved.name, names, n=1, cutoff=0.6)
+    if not matches:
+        lowered = {n.lower(): n for n in names}
+        ci = difflib.get_close_matches(
+            resolved.name.lower(), list(lowered), n=1, cutoff=0.6
+        )
+        if ci:
+            matches = [lowered[ci[0]]]
+    if matches:
+        return f" Did you mean: {parent / matches[0]} ?"
+    return ""
 
 
 def _find_windows_bash() -> str | None:  # pragma: no cover — Windows only
@@ -80,7 +153,7 @@ def _truncate_output(output: str, max_chars: int) -> str:
     return output[:head] + msg
 
 
-def _clean_env() -> dict[str, str]:
+def _clean_env(work_dir: str | None = None) -> dict[str, str]:
     """Return a fresh copy of ``os.environ`` without ``VIRTUAL_ENV``.
 
     When the agent process runs inside a virtual-env (e.g. the VS Code
@@ -88,9 +161,23 @@ def _clean_env() -> dict[str, str]:
     child processes and causes ``uv run`` to emit a spurious warning about
     a mismatched environment. Stripping it lets ``uv`` (and other tools)
     discover the correct project ``.venv`` on their own.
+
+    When ``work_dir`` is provided, ``KISS_WORKDIR`` is overridden so that
+    child processes (e.g. project scripts that compute "project root" via
+    that env var) target the agent's working directory — critical when
+    the agent is running inside a git worktree, where the inherited
+    ``KISS_WORKDIR`` would otherwise still point at the original repo
+    checkout and writes would leak out of the worktree.
+
+    Args:
+        work_dir: Agent working directory to expose to child processes
+            via ``KISS_WORKDIR``.  ``None`` leaves the inherited value
+            untouched.
     """
     env = os.environ.copy()
     env.pop("VIRTUAL_ENV", None)
+    if work_dir is not None:
+        env["KISS_WORKDIR"] = work_dir
     return env
 
 
@@ -155,9 +242,25 @@ class UsefulTools:
         self,
         stream_callback: Callable[[str], None] | None = None,
         stop_event: threading.Event | None = None,
+        work_dir: str | None = None,
     ) -> None:
+        """Initialise the tools.
+
+        Args:
+            stream_callback: Optional sink that receives Bash output line
+                by line for live streaming to the UI.
+            stop_event: Optional event signalled by the host agent when
+                the user requests a stop; the Bash tool kills the
+                running command's process group.
+            work_dir: Agent working directory.  When set, ``Bash``
+                subprocesses are launched with ``cwd=work_dir`` and the
+                ``KISS_WORKDIR`` env var is forced to ``work_dir`` so
+                project scripts that derive a "project root" from it
+                stay inside the worktree the agent is operating on.
+        """
         self.stream_callback = stream_callback
         self.stop_event = stop_event
+        self.work_dir = work_dir
 
     def Read(  # noqa: N802
         self,
@@ -171,8 +274,33 @@ class UsefulTools:
             max_lines: Maximum number of lines to return.
         """
         try:
-            resolved = Path(file_path).resolve()
-            text = resolved.read_text()
+            expanded = _expand_pwd_prefix(file_path, self.work_dir)
+            resolved = Path(expanded).resolve()
+
+            # Stale-worktree fallback: if the caller passed a path inside
+            # a .kiss-worktrees/kiss_wt-* directory that has since been
+            # torn down (autocommit / task finish), try the equivalent
+            # path under the parent repo before giving up.
+            if not resolved.exists():
+                fallback = _stale_worktree_fallback(resolved)
+                if fallback is not None and fallback.exists():
+                    resolved = fallback.resolve()
+
+            if resolved.is_dir():
+                return self._read_directory_listing(file_path, resolved)
+
+            try:
+                text = resolved.read_text()
+            except UnicodeDecodeError:
+                logger.debug("Binary file detected", exc_info=True)
+                return self._read_binary(file_path, resolved)
+            except FileNotFoundError:
+                suggestion = _suggest_close_path(resolved)
+                return f"Error: File not found: {file_path}.{suggestion}"
+
+            if text == "":
+                return "(file is empty)"
+
             lines = text.splitlines(keepends=True)
             if len(lines) > max_lines:
                 return (
@@ -183,6 +311,46 @@ class UsefulTools:
         except Exception as e:
             logger.debug("Exception caught", exc_info=True)
             return f"Error: {e}"
+
+    def _read_directory_listing(self, file_path: str, resolved: Path) -> str:
+        """Return a helpful directory listing when Read is called on a dir.
+
+        Models occasionally call ``Read`` on a directory path (e.g. when
+        searching for the right module).  Instead of returning the bare
+        ``[Errno 21] Is a directory`` error we surface a one-per-line
+        listing so the model can self-correct on the next turn.
+        """
+        try:
+            entries = sorted(
+                p.name + ("/" if p.is_dir() else "") for p in resolved.iterdir()
+            )
+        except OSError as e:  # pragma: no cover — permission edge case
+            return f"Error: Cannot list directory {file_path}: {e}"
+        listing = "\n".join(entries) if entries else "(empty directory)"
+        return (
+            f"Error: {file_path} is a directory, not a file. "
+            f"Pass a file path inside it, or use Bash('ls -la ...').\n"
+            f"Directory contents:\n{listing}"
+        )
+
+    def _read_binary(self, file_path: str, resolved: Path) -> str:
+        """Encode a binary file as a sentinel attachment or return error."""
+        mime_type, _ = mimetypes.guess_type(str(resolved))
+        if mime_type in READ_TOOL_BINARY_MIME_TYPES:
+            data = resolved.read_bytes()
+            header = (
+                f"Read binary file {file_path} as {mime_type} "
+                f"({len(data)} bytes); content attached below.\n"
+            )
+            return header + encode_binary_attachment(mime_type, data)
+        size = resolved.stat().st_size
+        return (
+            f"Error: Cannot read binary file: {file_path} "
+            f"(size: {size} bytes, mime={mime_type or 'unknown'}). "
+            f"The Read tool only embeds binaries with a supported "
+            f"MIME type (images, PDFs, audio, video); use a "
+            f"different tool to handle this binary file."
+        )
 
     def Write(  # noqa: N802
         self,
@@ -271,7 +439,7 @@ class UsefulTools:
         if self.stream_callback:
             return self._bash_streaming(command, timeout_seconds, max_output_chars)
 
-        env = _clean_env()
+        env = _clean_env(self.work_dir)
 
         try:
             process = subprocess.Popen(
@@ -280,6 +448,7 @@ class UsefulTools:
                 stderr=subprocess.STDOUT,
                 text=True,
                 env=env,
+                cwd=self.work_dir,
             )
             done = threading.Event()
             monitor = None
@@ -320,7 +489,8 @@ class UsefulTools:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            env=_clean_env(),
+            env=_clean_env(self.work_dir),
+            cwd=self.work_dir,
         )
         timed_out = False
         done = threading.Event()

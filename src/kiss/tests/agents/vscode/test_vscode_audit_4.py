@@ -26,16 +26,12 @@ A6: ``_cmd_run`` now inlines the get-or-create logic inside a single
 
 from __future__ import annotations
 
-import inspect
 import json
 import queue
-import re
 import threading
 import unittest
 
-from kiss.agents.vscode.commands import _CommandsMixin
 from kiss.agents.vscode.server import VSCodeServer
-from kiss.agents.vscode.task_runner import _TaskRunnerMixin
 
 
 def _make_server() -> tuple[VSCodeServer, list[dict]]:
@@ -60,29 +56,7 @@ class TestReplaySessionUseWorktreeFixed(unittest.TestCase):
     non-worktree replay correctly resets the flag to False.
     """
 
-    def test_source_sets_both_true_and_false(self) -> None:
-        """Structural: the source uses ``bool(extra.get(...))``
-        which evaluates to both True and False.
-        """
-        src = inspect.getsource(VSCodeServer._replay_session)
-        assert "bool(extra.get" in src or (
-            re.search(r"use_worktree\s*=\s*bool\(", src)
-        ), (
-            "A1 fix: use_worktree assignment uses bool() for both cases"
-        )
 
-    def test_source_no_conditional_true_only(self) -> None:
-        """Structural: there is no ``if ...: use_worktree = True``
-        without a corresponding False path.
-        """
-        src = inspect.getsource(VSCodeServer._replay_session)
-        old_pattern = re.compile(
-            r'if extra\.get\("is_worktree"\):\s*\n\s*with.*\n\s*tab\.use_worktree\s*=\s*True',
-            re.DOTALL,
-        )
-        assert not old_pattern.search(src), (
-            "A1 fix: old conditional-True-only pattern no longer present"
-        )
 
     def test_behavioral_non_wt_replay_resets_flag(self) -> None:
         """Behavioral: replaying a non-worktree session after a worktree
@@ -133,41 +107,6 @@ class TestRunTaskStatusBroadcastFixed(unittest.TestCase):
     preventing race with a new ``_cmd_run``.
     """
 
-    def test_source_broadcast_inside_lock(self) -> None:
-        """Structural: the ``broadcast(status: running: False)`` is
-        inside the ``with _state_lock:`` block (deeper indent than
-        the ``with`` line itself).
-        """
-        src = inspect.getsource(_TaskRunnerMixin._run_task)
-        lines = src.splitlines()
-
-        finally_idx = None
-        lock_idx = None
-        broadcast_false_idx = None
-        for i, line in enumerate(lines):
-            if "finally:" in line and finally_idx is None:
-                finally_idx = i
-            if finally_idx is not None and "_state_lock" in line and "with" in line:
-                lock_idx = i
-            # The ``broadcast(...)`` call is split across multiple source
-            # lines, so anchor on the unique ``"running": False`` payload
-            # token (always on the dict-literal line) instead of expecting
-            # call + payload on the same line.
-            if finally_idx is not None and '"running": False' in line:
-                broadcast_false_idx = i
-
-        assert lock_idx is not None, "Found _state_lock in finally"
-        assert broadcast_false_idx is not None, "Found broadcast(status: False)"
-        assert broadcast_false_idx > lock_idx, "broadcast is after lock line"
-
-        indent_lock = len(lines[lock_idx]) - len(lines[lock_idx].lstrip())
-        indent_bc = len(lines[broadcast_false_idx]) - len(
-            lines[broadcast_false_idx].lstrip()
-        )
-        assert indent_bc > indent_lock, (
-            f"A2 fix: broadcast indent ({indent_bc}) > lock indent ({indent_lock}), "
-            "confirming it's inside the lock block"
-        )
 
     def test_behavioral_new_cmd_run_status_not_overwritten(self) -> None:
         """Behavioral: when both cleanup and new-start happen under the
@@ -216,34 +155,6 @@ class TestCmdSelectModelConsistentLock(unittest.TestCase):
     same ``_state_lock`` block.
     """
 
-    def test_source_both_inside_lock(self) -> None:
-        """Structural: both assignments are inside the
-        ``with self._state_lock:`` block.
-        """
-        src = inspect.getsource(_CommandsMixin._cmd_select_model)
-        lines = src.splitlines()
-
-        lock_idx = None
-        selected_idx = None
-        default_idx = None
-        for i, line in enumerate(lines):
-            if "_state_lock" in line and "with" in line:
-                lock_idx = i
-            if "tab.selected_model = model" in line and "cmd" not in line:
-                selected_idx = i
-            if "self._default_model = model" in line:
-                default_idx = i
-
-        assert lock_idx is not None
-        assert selected_idx is not None
-        assert default_idx is not None
-
-        assert selected_idx > lock_idx, (
-            "A3 fix: tab.selected_model is set inside _state_lock"
-        )
-        assert default_idx > lock_idx, (
-            "A3 fix: _default_model is set inside _state_lock"
-        )
 
     def test_behavioral_both_updated_atomically(self) -> None:
         """Behavioral: a concurrent reader under the same lock sees
@@ -268,40 +179,7 @@ class TestRunTaskInnerUseWorktreeLocalVar(unittest.TestCase):
     subsequent reads.
     """
 
-    def test_source_captures_local_under_lock(self) -> None:
-        """Structural: a local ``use_worktree = tab.use_worktree`` is
-        assigned inside the ``_state_lock`` block.
-        """
-        src = inspect.getsource(_TaskRunnerMixin._run_task_inner)
-        pattern = re.compile(
-            r"with self\._state_lock:.*?"
-            r"use_worktree\s*=\s*tab\.use_worktree",
-            re.DOTALL,
-        )
-        assert pattern.search(src), (
-            "A5 fix: use_worktree captured in local variable under lock"
-        )
 
-    def test_source_no_tab_use_worktree_reads_after_capture(self) -> None:
-        """Structural: after the local capture, there are no more
-        ``tab.use_worktree`` reads (only the initial write and capture).
-        """
-        src = inspect.getsource(_TaskRunnerMixin._run_task_inner)
-        lines = src.splitlines()
-
-        capture_idx = None
-        for i, line in enumerate(lines):
-            if "use_worktree = tab.use_worktree" in line:
-                capture_idx = i
-                break
-        assert capture_idx is not None
-
-        remaining = "\n".join(lines[capture_idx + 1:])
-        tab_reads = re.findall(r"tab\.use_worktree(?!\s*=)", remaining)
-        assert len(tab_reads) == 0, (
-            f"A5 fix: no tab.use_worktree reads after capture, "
-            f"found {len(tab_reads)}: {tab_reads}"
-        )
 
     def test_behavioral_concurrent_mutation_doesnt_affect_task(self) -> None:
         """Behavioral: mutating ``tab.use_worktree`` after the local
@@ -329,39 +207,8 @@ class TestCmdRunSingleLockFixed(unittest.TestCase):
     a single ``_state_lock`` block, eliminating the TOCTOU gap.
     """
 
-    def test_source_no_get_tab_call(self) -> None:
-        """Structural: ``_cmd_run`` no longer calls ``_get_tab``.
-        The get-or-create logic is inlined.
-        """
-        src = inspect.getsource(_CommandsMixin._cmd_run)
-        assert "_get_tab" not in src, (
-            "A6 fix: _cmd_run no longer calls _get_tab"
-        )
 
-    def test_source_single_lock_block(self) -> None:
-        """Structural: there is exactly one ``with self._state_lock:``
-        block in ``_cmd_run``.
-        """
-        src = inspect.getsource(_CommandsMixin._cmd_run)
-        lock_count = len(re.findall(r"with self\._state_lock:", src))
-        assert lock_count == 1, (
-            f"A6 fix: exactly one _state_lock block, found {lock_count}"
-        )
 
-    def test_source_inline_get_or_create(self) -> None:
-        """Structural: the lock block contains both get-or-create and
-        the alive check.
-        """
-        src = inspect.getsource(_CommandsMixin._cmd_run)
-        pattern = re.compile(
-            r"with self\._state_lock:.*?"
-            r"_tab_states\.get\(tab_id\).*?"
-            r"task_thread.*?is_alive",
-            re.DOTALL,
-        )
-        assert pattern.search(src), (
-            "A6 fix: get-or-create and alive check in single lock block"
-        )
 
     def test_behavioral_no_toctou_gap(self) -> None:
         """Behavioral: a concurrent _close_tab between get-or-create
@@ -371,19 +218,19 @@ class TestCmdRunSingleLockFixed(unittest.TestCase):
         tab_id = "tab-a6"
 
         with server._state_lock:
-            tab = server._tab_states.get(tab_id)
+            tab = server._running_agent_states.get(tab_id)
             if tab is None:
-                from kiss.agents.vscode.tab_state import _TabState
-                tab = _TabState(tab_id, server._default_model)
-                server._tab_states[tab_id] = tab
+                from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+                tab = _RunningAgentState(tab_id, server._default_model)
+                server._running_agent_states[tab_id] = tab
 
-            assert tab_id in server._tab_states, (
+            assert tab_id in server._running_agent_states, (
                 "Tab is tracked throughout the single lock block"
             )
             tab.stop_event = threading.Event()
             tab.task_thread = threading.Thread(target=lambda: None, daemon=True)
 
-        assert tab_id in server._tab_states
+        assert tab_id in server._running_agent_states
         assert tab.task_thread is not None
 
 

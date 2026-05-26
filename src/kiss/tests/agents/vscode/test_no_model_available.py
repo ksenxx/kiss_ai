@@ -15,6 +15,8 @@ import unittest
 from typing import Any
 from unittest import TestCase
 
+from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+
 
 def _make_server() -> Any:
     os.environ.setdefault("KISS_WORKDIR", "/tmp")
@@ -70,6 +72,7 @@ class TestNoModelAvailableResultEvent(TestCase):
 
             tab_id = "no-model-test-1"
             tab = server._get_tab(tab_id)
+            tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
 
             run_called = False
 
@@ -141,6 +144,7 @@ class TestNoModelAvailableResultEvent(TestCase):
 
             tab_id = "model-ok-test-1"
             tab = server._get_tab(tab_id)
+            tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
 
             run_called = False
 

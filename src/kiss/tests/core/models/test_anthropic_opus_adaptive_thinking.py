@@ -274,6 +274,7 @@ class TestOpus47AdaptiveThinking:
         _RESPONSE_EVENTS = _signature_only_thinking_events()
 
         printer = BaseBrowserPrinter()
+        printer._thread_local.task_id = "test-sig-only"
         printer.start_recording()
         m = _build_opus_4_7_model(anthropic_server, printer)
         m._create_message(m._build_create_kwargs())
@@ -310,6 +311,7 @@ class TestOpus47AdaptiveThinking:
         _RESPONSE_EVENTS = _real_thinking_events()
 
         printer = BaseBrowserPrinter()
+        printer._thread_local.task_id = "test-real-thinking"
         printer.start_recording()
         m = _build_opus_4_7_model(anthropic_server, printer)
         m._create_message(m._build_create_kwargs())

@@ -17,6 +17,7 @@ from kiss.core.models.model import (
     Model,
     ThinkingCallback,
     TokenCallback,
+    parse_binary_attachments,
     transcribe_audio,
 )
 
@@ -104,6 +105,10 @@ class AnthropicModel(Model):
     def _normalize_content_blocks(self, content: Any) -> list[dict[str, Any]]:
         """Normalize Anthropic content blocks to JSON-serializable dicts.
 
+        Drops text blocks whose text is empty or whitespace-only, because
+        the Anthropic API rejects them with ``invalid_request_error:
+        messages: text content blocks must contain non-whitespace text``.
+
         Args:
             content: The content blocks from an Anthropic response.
 
@@ -115,11 +120,17 @@ class AnthropicModel(Model):
             return blocks
         for block in content:
             if isinstance(block, dict):
+                # Drop pre-existing whitespace-only text dicts too.
+                if block.get("type") == "text" and not block.get("text", "").strip():
+                    continue
                 blocks.append(block)
                 continue
             block_type = getattr(block, "type", None)
             if block_type == "text":
-                blocks.append({"type": "text", "text": getattr(block, "text", "")})
+                text = getattr(block, "text", "")
+                if not text.strip():
+                    continue
+                blocks.append({"type": "text", "text": text})
             elif block_type == "tool_use":
                 blocks.append(
                     {
@@ -139,9 +150,15 @@ class AnthropicModel(Model):
                     thinking_block["signature"] = signature
                 blocks.append(thinking_block)
             elif hasattr(block, "model_dump"):
-                blocks.append(block.model_dump(exclude_none=True))
+                dumped = block.model_dump(exclude_none=True)
+                if dumped.get("type") == "text" and not dumped.get("text", "").strip():
+                    continue
+                blocks.append(dumped)
             else:
-                blocks.append({"type": "text", "text": str(block)})
+                text = str(block)
+                if not text.strip():
+                    continue
+                blocks.append({"type": "text", "text": text})
         return blocks
 
     def _extract_text_from_blocks(self, blocks: list[dict[str, Any]]) -> str:
@@ -178,6 +195,41 @@ class AnthropicModel(Model):
                 }
             )
         return tools
+
+    def _normalize_conversation_for_api(
+        self,
+        conversation: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Normalize all messages in a conversation before sending to the API.
+
+        Ensures that all text content blocks are non-whitespace and that no
+        messages contain only whitespace-only text blocks.
+
+        Args:
+            conversation: The conversation to normalize.
+
+        Returns:
+            list[dict[str, Any]]: The normalized conversation.
+        """
+        normalized: list[dict[str, Any]] = []
+        for msg in conversation:
+            msg_copy = msg.copy()
+            content = msg_copy.get("content")
+
+            # If content is a string, ensure it's non-whitespace
+            if isinstance(content, str):
+                if content.strip():
+                    normalized.append(msg_copy)
+                # Skip messages with whitespace-only string content
+            # If content is a list of blocks, normalize them
+            elif isinstance(content, list):
+                normalized_blocks = self._normalize_content_blocks(content)
+                if normalized_blocks:
+                    msg_copy["content"] = normalized_blocks
+                    normalized.append(msg_copy)
+                # Skip messages where all blocks were dropped
+
+        return normalized
 
     def _build_create_kwargs(self, tools: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         """Build keyword arguments for the Anthropic API create call.
@@ -234,10 +286,16 @@ class AnthropicModel(Model):
                     "anthropic-beta": merged_beta,
                 }
 
+        normalized_messages = self._normalize_conversation_for_api(self.conversation)
+        if not normalized_messages:
+            raise KISSError(
+                "Cannot build API request: all messages are whitespace-only. "
+                "At least one message with non-whitespace text content is required."
+            )
         kwargs.update(
             {
                 "model": self.model_name,
-                "messages": self.conversation,
+                "messages": normalized_messages,
                 "max_tokens": max_tokens,
             }
         )
@@ -301,7 +359,11 @@ class AnthropicModel(Model):
 
         blocks = self._normalize_content_blocks(getattr(response, "content", None))
         content = self._extract_text_from_blocks(blocks)
-        self.conversation.append({"role": "assistant", "content": blocks or content})
+        # Prefer blocks (which have been normalized) over content string
+        msg_content = blocks if blocks else content
+        # Only append non-empty messages
+        if msg_content:
+            self.conversation.append({"role": "assistant", "content": msg_content})
         return content, response
 
     def generate_and_process_with_tools(  # pragma: no cover – API call
@@ -343,7 +405,11 @@ class AnthropicModel(Model):
                     }
                 )
 
-        self.conversation.append({"role": "assistant", "content": blocks or content})
+        # Prefer blocks (which have been normalized) over content string
+        msg_content = blocks if blocks else content
+        # Only append non-empty messages
+        if msg_content:
+            self.conversation.append({"role": "assistant", "content": msg_content})
         return function_calls, content, response
 
     def add_function_results_to_conversation_and_return(
@@ -371,13 +437,66 @@ class AnthropicModel(Model):
             if tool_use_id is None:
                 tool_use_id = f"toolu_{func_name}_{i}"
 
-            tool_results_blocks.append(
-                {
-                    "type": "tool_result",
-                    "tool_use_id": tool_use_id,
-                    "content": result_content,
-                }
-            )
+            plain_text, attachments = parse_binary_attachments(result_content)
+            if attachments:
+                content_blocks: list[dict[str, Any]] = []
+                if plain_text.strip():
+                    content_blocks.append({"type": "text", "text": plain_text})
+                for att in attachments:
+                    source = {
+                        "type": "base64",
+                        "media_type": att.mime_type,
+                        "data": att.to_base64(),
+                    }
+                    if att.mime_type.startswith("image/"):
+                        content_blocks.append({"type": "image", "source": source})
+                    elif att.mime_type == "application/pdf":
+                        content_blocks.append({"type": "document", "source": source})
+                    elif att.mime_type.startswith("audio/"):
+                        # Anthropic Messages API does not accept audio content
+                        # blocks.  Transcribe via Whisper when possible so the
+                        # model still sees the spoken content; otherwise drop
+                        # the bytes with a warning.
+                        try:
+                            text = transcribe_audio(att.data, att.mime_type)
+                            content_blocks.append(
+                                {
+                                    "type": "text",
+                                    "text": f"[Audio transcription]\n{text}",
+                                }
+                            )
+                        except Exception:
+                            logger.warning(
+                                "Anthropic does not support %s tool-result "
+                                "attachments and automatic transcription "
+                                "failed; dropping.",
+                                att.mime_type,
+                            )
+                    elif att.mime_type.startswith("video/"):
+                        logger.warning(
+                            "Anthropic does not support %s tool-result "
+                            "attachments; dropping.",
+                            att.mime_type,
+                        )
+                if not content_blocks:
+                    content_blocks.append(
+                        {"type": "text", "text": plain_text or result_content}
+                    )
+                tool_results_blocks.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": content_blocks,
+                    }
+                )
+            else:
+                tool_results_blocks.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": result_content,
+                    }
+                )
 
         self.conversation.append({"role": "user", "content": tool_results_blocks})
 

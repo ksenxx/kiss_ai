@@ -17,10 +17,13 @@ import threading
 import time
 import unittest
 
+import pytest
+
 
 class TestVSCodeServerStop(unittest.TestCase):
     """Integration test: stop command interrupts a running task."""
 
+    @pytest.mark.slow
     def test_stop_command_interrupts_running_task(self) -> None:
         """Send a run command, then a stop command, and verify the task stops."""
         home = os.path.expanduser("~")

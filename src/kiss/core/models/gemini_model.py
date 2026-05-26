@@ -14,7 +14,13 @@ from google import genai
 from google.genai import types
 
 from kiss.core.kiss_error import KISSError
-from kiss.core.models.model import Attachment, Model, ThinkingCallback, TokenCallback
+from kiss.core.models.model import (
+    Attachment,
+    Model,
+    ThinkingCallback,
+    TokenCallback,
+    parse_binary_attachments,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +73,54 @@ class GeminiModel(Model):
             msg["attachments"] = attachments
         self.conversation = [msg]
         self._thought_signatures = {}
+
+    def add_function_results_to_conversation_and_return(
+        self, function_results: list[tuple[str, dict[str, Any]]]
+    ) -> None:
+        """Add tool results to the conversation, lifting binary attachments.
+
+        Gemini's ``FunctionResponse.response`` is a JSON dict and cannot
+        carry raw bytes, so binary attachments produced by the ``Read``
+        tool (e.g. a screenshot, audio, or video clip) are stripped from
+        the tool message and re-attached as a follow-up ``user`` message
+        whose ``attachments`` field is rendered via
+        :meth:`_convert_conversation_to_gemini_contents` into
+        :class:`google.genai.types.Part` instances using
+        ``Part.from_bytes`` — which accepts any Gemini-supported MIME
+        type (images, PDFs, audio, video).
+
+        Args:
+            function_results: List of ``(function_name, result_dict)`` tuples.
+        """
+        tool_calls = self._find_tool_call_ids_from_last_assistant()
+        pending_attachments: list[Attachment] = []
+
+        for i, (func_name, result_dict) in enumerate(function_results):
+            result_content = result_dict.get("result", str(result_dict))
+            result_content, attachments = parse_binary_attachments(result_content)
+            if self.usage_info_for_messages:
+                result_content = f"{result_content}\n\n{self.usage_info_for_messages}"
+
+            tool_call_id = (
+                tool_calls[i][1] if i < len(tool_calls) else f"call_{func_name}_{i}"
+            )
+            self.conversation.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": result_content,
+                }
+            )
+            pending_attachments.extend(attachments)
+
+        if pending_attachments:
+            self.conversation.append(
+                {
+                    "role": "user",
+                    "content": "[attachments from previous tool result(s)]",
+                    "attachments": pending_attachments,
+                }
+            )
 
     def _convert_conversation_to_gemini_contents(self) -> list[types.Content]:
         """Converts the internal conversation format to Gemini contents.

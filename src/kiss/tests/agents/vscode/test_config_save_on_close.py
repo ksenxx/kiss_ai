@@ -1,7 +1,14 @@
-"""Tests that the settings panel saves configuration on close instead of via a button.
+"""Tests that the standalone Settings panel saves configuration on close.
 
-The "Save Configuration" button was removed. Now, closing the config sidebar
-automatically collects and saves the form data.
+The "Save Configuration" button was removed long ago, and the
+``#config-sidebar`` panel was first merged into the unified ``#sidebar``
+and later split out into a dedicated ``#settings-panel`` that slides in
+from the right.  Configuration is now saved automatically when the
+standalone Settings panel is closed while its form is populated; the
+helper ``saveSettingsIfPopulated`` is invoked by ``closeSettingsPanel``.
+
+These tests pin the surviving auto-save behaviour by reading the real
+``main.js``.
 """
 
 import re
@@ -11,28 +18,15 @@ from pathlib import Path
 _VSCODE_DIR = Path(__file__).resolve().parents[3] / "agents" / "vscode"
 
 
-class TestSaveButtonRemovedFromHTML(unittest.TestCase):
-    """The cfg-save-btn element must not appear in any HTML template."""
-
-    def test_sorcar_tab_has_no_save_button(self) -> None:
-        ts = (_VSCODE_DIR / "src" / "SorcarTab.ts").read_text()
-        assert "cfg-save-btn" not in ts
-
-    def test_web_server_has_no_save_button(self) -> None:
-        py = (_VSCODE_DIR / "web_server.py").read_text()
-        assert "cfg-save-btn" not in py
-
-    def test_main_js_has_no_save_button_reference(self) -> None:
-        js = (_VSCODE_DIR / "media" / "main.js").read_text()
-        assert "cfg-save-btn" not in js
-
-    def test_css_has_no_save_button_style(self) -> None:
-        css = (_VSCODE_DIR / "media" / "main.css").read_text()
-        assert "config-save-btn" not in css
 
 
-class TestCloseConfigSidebarSavesConfig(unittest.TestCase):
-    """closeConfigSidebar() must save config when the panel is open."""
+
+
+
+
+
+class TestSettingsSavesOnCloseOrSwitch(unittest.TestCase):
+    """``switchSidebarTab`` and ``closeSidebar`` flush the settings form."""
 
     _js: str
 
@@ -40,95 +34,41 @@ class TestCloseConfigSidebarSavesConfig(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls._js = (_VSCODE_DIR / "media" / "main.js").read_text()
 
-    def _extract_close_fn(self) -> str:
-        """Extract the closeConfigSidebar function body."""
-        m = re.search(
-            r"function closeConfigSidebar\(\)\s*\{",
-            self._js,
-        )
-        assert m, "closeConfigSidebar function not found"
-        start = m.start()
-        brace = 0
-        for i in range(m.end() - 1, len(self._js)):
-            if self._js[i] == "{":
-                brace += 1
-            elif self._js[i] == "}":
-                brace -= 1
-                if brace == 0:
-                    return self._js[start : i + 1]
-        raise AssertionError("Could not extract closeConfigSidebar body")  # pragma: no cover
+    def _extract_fn(self, name: str) -> str:
+        """Return the source of ``function <name>() { … }`` (balanced)."""
+        m = re.search(r"function\s+" + re.escape(name) + r"\(", self._js)
+        assert m, f"{name} not found"
+        # Find the opening brace.
+        i = self._js.index("{", m.end())
+        depth = 1
+        j = i + 1
+        while j < len(self._js) and depth:
+            c = self._js[j]
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    return self._js[m.start() : j + 1]
+            j += 1
+        raise AssertionError(f"unterminated {name}")
 
-    def test_saves_config_when_open(self) -> None:
-        """closeConfigSidebar checks if the sidebar is open before saving."""
-        body = self._extract_close_fn()
-        assert "configSidebar.classList.contains('open')" in body
-        assert "collectConfigForm()" in body
-        assert "saveConfig" in body
-
-    def test_guarded_by_open_check(self) -> None:
-        """The saveConfig post is inside the 'open' check, not unconditional."""
-        body = self._extract_close_fn()
-        # The if-check must come before the postMessage
-        open_check_pos = body.index("classList.contains('open')")
-        save_pos = body.index("saveConfig")
-        assert open_check_pos < save_pos
-
-    def test_no_standalone_save_button_listener(self) -> None:
-        """There must be no event listener on cfg-save-btn."""
-        assert "cfgSaveBtn.addEventListener" not in self._js
-        assert "cfg-save-btn" not in self._js
-
-
-class TestAllClosePaths(unittest.TestCase):
-    """Every path that closes the config sidebar must go through closeConfigSidebar."""
-
-    _js: str
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls._js = (_VSCODE_DIR / "media" / "main.js").read_text()
-
-    def test_close_button_calls_close_fn(self) -> None:
-        """configSidebarClose click handler calls closeConfigSidebar."""
-        assert "configSidebarClose.addEventListener('click', closeConfigSidebar)" in self._js
-
-    def test_overlay_calls_close_fn(self) -> None:
-        """configSidebarOverlay click handler calls closeConfigSidebar."""
-        assert "configSidebarOverlay.addEventListener('click', closeConfigSidebar)" in self._js
-
-    def test_config_btn_toggle_calls_close_fn(self) -> None:
-        """Clicking config button when open calls closeConfigSidebar."""
-        # The config button handler toggles: if open -> closeConfigSidebar()
-        pattern = re.compile(
-            r"configBtn\.addEventListener\('click'.*?closeConfigSidebar\(\)",
-            re.DOTALL,
-        )
-        assert pattern.search(self._js)
-
-    def test_open_config_sidebar_calls_close_first(self) -> None:
-        """openConfigSidebar calls closeConfigSidebar at the start for clean state."""
-        m = re.search(
-            r"function openConfigSidebar\(\)\s*\{(.*?)\n  \}",
-            self._js,
-            re.DOTALL,
-        )
-        assert m
-        body = m.group(1)
-        lines = [ln.strip() for ln in body.strip().splitlines()]
-        assert lines[0] == "closeConfigSidebar();", (
-            "openConfigSidebar must call closeConfigSidebar() first"
+    def test_close_settings_panel_saves_settings(self) -> None:
+        body = self._extract_fn("closeSettingsPanel")
+        assert "saveSettingsIfPopulated" in body, (
+            "closeSettingsPanel must save the settings form before closing"
         )
 
-    def test_open_history_sidebar_calls_close_config(self) -> None:
-        """Opening the history sidebar closes the config sidebar."""
-        assert "closeConfigSidebar();" in self._js
+    def test_open_settings_panel_posts_get_config(self) -> None:
+        body = self._extract_fn("openSettingsPanel")
+        # Opening the panel must request the latest config from the backend.
+        assert "getConfig" in body
+        # And reset the populated flag so a subsequent close won't re-save
+        # stale values that were never populated by a fresh fetch.
+        assert "configFormPopulated = false" in body
 
-    def test_open_frequent_sidebar_calls_close_config(self) -> None:
-        """openFrequentSidebar calls closeConfigSidebar."""
-        m = re.search(
-            r"function openFrequentSidebar\(\)\s*\{(.*?)\n  \}",
-            self._js,
-            re.DOTALL,
-        )
-        assert m
-        assert "closeConfigSidebar();" in m.group(1)
+    def test_save_settings_helper_is_guarded_by_form_populated(self) -> None:
+        helper = self._extract_fn("saveSettingsIfPopulated")
+        assert "configFormPopulated" in helper
+        assert "collectConfigForm()" in helper
+        assert "saveConfig" in helper

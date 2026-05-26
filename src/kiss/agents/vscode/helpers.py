@@ -14,11 +14,78 @@ def clean_llm_output(text: str) -> str:
     return text.strip('"').strip("'")
 
 
+def _run_oneshot_llm(
+    agent_name: str,
+    prompt_template: str,
+    arguments: dict[str, str],
+    model: str,
+    fallback: str,
+    failure_log: str,
+) -> str:
+    """Run a single non-agentic LLM call and return the cleaned text.
+
+    Wraps the boilerplate shared by *every* short LLM helper in this
+    module: construct a :class:`KISSAgent`, call ``run`` with
+    ``is_agentic=False`` and ``verbose=False``, clean the response,
+    and fall back to *fallback* on any exception or empty response.
+
+    Args:
+        agent_name: Display name for the underlying ``KISSAgent``
+            instance.
+        prompt_template: The prompt template passed to ``KISSAgent.run``.
+        arguments: Template-arguments dict passed to ``KISSAgent.run``.
+        model: The model name to use for generation.
+        fallback: Returned verbatim on any exception or empty
+            response.
+        failure_log: Message used for the ``logger.debug`` call on
+            exception (with ``exc_info=True``).
+
+    Returns:
+        Cleaned LLM output text, or *fallback* on failure.
+    """
+    from kiss.core.kiss_agent import KISSAgent
+
+    try:
+        agent = KISSAgent(agent_name)
+        raw = agent.run(
+            model_name=model,
+            prompt_template=prompt_template,
+            arguments=arguments,
+            is_agentic=False,
+            verbose=False,
+        )
+        return clean_llm_output(raw) or fallback
+    except Exception:
+        logger.debug(failure_log, exc_info=True)
+        return fallback
+
+
 def clip_autocomplete_suggestion(query: str, suggestion: str) -> str:
     """Return the autocomplete continuation, stripped of the query prefix.
 
     Removes the query prefix if the LLM echoed it, strips surrounding
     whitespace, and stops at newlines.
+
+    Normalises the cursor-to-ghost gap so the overlay (which uses
+    ``white-space: pre-wrap``) never renders visible extra spaces
+    between the user's cursor and the start of the ghost text:
+
+    - When the user's query is empty or already ends in whitespace, the
+      user's cursor (or empty input) already provides the gap, so any
+      leading whitespace on the suggestion would render as visible
+      *extra* spaces.  All leading whitespace is stripped.
+
+    - When the query ends in a non-whitespace character, exactly one
+      space is allowed as the legitimate cursor-to-ghost separator
+      (e.g. query ``"fix"`` + suggestion ``" the bug"`` reads as
+      ``"fix the bug"``).  Any *additional* leading whitespace is the
+      same visible-padding bug — it happens when the prefix-matched
+      history task contains consecutive spaces (e.g. user types
+      ``"parse"`` and history holds ``"parse  arguments"`` with two
+      spaces) — and is collapsed away, leaving exactly one separator
+      space.  A suggestion that starts with non-whitespace gets no
+      separator prepended (e.g. identifier completion ``"os.pa"`` →
+      ``"th"``).
     """
     s = clean_llm_output(suggestion)
     if not s:
@@ -26,6 +93,12 @@ def clip_autocomplete_suggestion(query: str, suggestion: str) -> str:
     if s.lower().startswith(query.lower()):
         s = s[len(query) :]
     s = s.split("\n")[0]
+    if not query or (query[-1:].isspace()):
+        s = s.lstrip()
+    else:
+        stripped = s.lstrip()
+        if len(stripped) != len(s):
+            s = " " + stripped
     return s
 
 
@@ -51,45 +124,89 @@ def model_vendor(name: str) -> tuple[str, int]:
     return "Together AI", 5
 
 
-def generate_commit_message_from_diff(diff_text: str) -> str:
+def generate_commit_message_from_diff(
+    diff_text: str, user_prompt: str | None = None,
+) -> str:
     """Generate a git commit message from a diff via LLM.
 
     Uses a fast/cheap model to produce a conventional-commit-style
-    message.  Returns a fallback string on any failure.
+    message.  When *user_prompt* is provided, the user's original
+    task prompt is included in the LLM context so the generated
+    subject/body reflect the *intent* of the change (not just the
+    mechanical diff) and the full prompt is appended at the end of
+    the commit message body for traceability.  Returns a fallback
+    string on any failure.
 
     Args:
         diff_text: Output of ``git diff --cached`` or similar.
+        user_prompt: The user's task prompt that produced the diff,
+            or ``None`` when not available (e.g. user-invoked manual
+            commit-message generation from the UI).
 
     Returns:
         The cleaned commit-message string, or ``"kiss: auto-commit agent work"``
         on failure.
     """
-    from kiss.core.kiss_agent import KISSAgent
-
     fallback = "kiss: auto-commit agent work"
     if not diff_text:
-        return fallback
-    try:
-        agent = KISSAgent("Commit Message Generator")
-        raw = agent.run(
-            model_name=get_fast_model(),
-            prompt_template=(
-                "Generate a concise git commit message for these "
-                "changes. Use conventional commit format with a "
-                "clear subject line (type: description) and "
-                "optionally a body with bullet points for multiple "
-                "changes. Return ONLY the commit message text, no "
-                "quotes or markdown fences.\n\n{context}"
-            ),
-            arguments={"context": f"Diff:\n{diff_text}"},
-            is_agentic=False,
-            verbose=False,
+        return (
+            _append_user_prompt(fallback, user_prompt)
+            if user_prompt
+            else fallback
         )
-        msg = clean_llm_output(raw)
-        return msg if msg else fallback
-    except Exception:
-        logger.debug("Commit message generation failed", exc_info=True)
-        return fallback
+    if user_prompt:
+        context = f"User task prompt:\n{user_prompt}\n\nDiff:\n{diff_text}"
+        template = (
+            "Generate a concise git commit message for these "
+            "changes. The user's task prompt is provided for "
+            "context — use it to phrase the subject line in "
+            "terms of the user's INTENT, not just the mechanical "
+            "diff. Use conventional commit format with a clear "
+            "subject line (type: description) and optionally a "
+            "body with bullet points for multiple changes. Do "
+            "NOT quote or repeat the user prompt — it will be "
+            "appended separately. Return ONLY the commit message "
+            "text, no quotes or markdown fences.\n\n{context}"
+        )
+    else:
+        context = f"Diff:\n{diff_text}"
+        template = (
+            "Generate a concise git commit message for these "
+            "changes. Use conventional commit format with a "
+            "clear subject line (type: description) and "
+            "optionally a body with bullet points for multiple "
+            "changes. Return ONLY the commit message text, no "
+            "quotes or markdown fences.\n\n{context}"
+        )
+    msg = _run_oneshot_llm(
+        agent_name="Commit Message Generator",
+        prompt_template=template,
+        arguments={"context": context},
+        model=get_fast_model(),
+        fallback=fallback,
+        failure_log="Commit message generation failed",
+    )
+    return _append_user_prompt(msg, user_prompt) if user_prompt else msg
+
+
+def _append_user_prompt(message: str, user_prompt: str) -> str:
+    """Append the user's task prompt to a commit message body.
+
+    Trims whitespace from *user_prompt* and appends it under a
+    ``User prompt:`` heading separated by a blank line.  If the
+    prompt is empty after trimming, *message* is returned unchanged.
+
+    Args:
+        message: The base commit message (subject + optional body).
+        user_prompt: The user's original task prompt string.
+
+    Returns:
+        The combined commit message with the user prompt appended.
+    """
+    trimmed = user_prompt.strip()
+    if not trimmed:
+        return message
+    return f"{message.rstrip()}\n\nUser prompt:\n{trimmed}"
 
 
 def generate_followup_text(task: str, result: str, model: str) -> str:
@@ -103,28 +220,21 @@ def generate_followup_text(task: str, result: str, model: str) -> str:
     Returns:
         Suggestion text, or empty string on failure.
     """
-    from kiss.core.kiss_agent import KISSAgent
-
-    try:
-        agent = KISSAgent("Followup Proposer")
-        raw = agent.run(
-            model_name=model,
-            prompt_template=(
-                "A developer just completed this task:\n"
-                "Task: {task}\n"
-                "Result summary: {result}\n\n"
-                "Suggest ONE short, concrete follow-up task they "
-                "might want to do next. Return ONLY the task "
-                "description as a single plain-text sentence."
-            ),
-            arguments={"task": task, "result": result},
-            is_agentic=False,
-            verbose=False,
-        )
-        return clean_llm_output(raw)
-    except Exception:
-        logger.debug("Followup generation failed", exc_info=True)
-        return ""
+    return _run_oneshot_llm(
+        agent_name="Followup Proposer",
+        prompt_template=(
+            "A developer just completed this task:\n"
+            "Task: {task}\n"
+            "Result summary: {result}\n\n"
+            "Suggest ONE short, concrete follow-up task they "
+            "might want to do next. Return ONLY the task "
+            "description as a single plain-text sentence."
+        ),
+        arguments={"task": task, "result": result},
+        model=model,
+        fallback="",
+        failure_log="Followup generation failed",
+    )
 
 
 def rank_file_suggestions(

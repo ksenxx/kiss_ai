@@ -33,6 +33,8 @@ import time
 import unittest
 from pathlib import Path
 
+import pytest
+
 from kiss.agents.vscode.vscode_config import CONFIG_PATH, save_config
 from kiss.agents.vscode.web_server import (
     _TUNNEL_BACKOFF_INITIAL,
@@ -187,6 +189,7 @@ class TestRestartBackoff(unittest.IsolatedAsyncioTestCase):
         srv._tunnel_started_at = time.monotonic() - 600
         return srv
 
+    @pytest.mark.slow
     async def test_failed_restart_sets_backoff_window(self) -> None:
         """When _start_tunnel returns None, _tunnel_next_retry is set."""
         _write_fake_cloudflared(
@@ -200,6 +203,7 @@ class TestRestartBackoff(unittest.IsolatedAsyncioTestCase):
             srv._tunnel_next_retry, before + _TUNNEL_BACKOFF_INITIAL - 0.5,
         )
 
+    @pytest.mark.slow
     async def test_consecutive_failures_grow_backoff(self) -> None:
         """Repeated failures double the delay each time."""
         _write_fake_cloudflared(

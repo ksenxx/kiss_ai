@@ -85,7 +85,8 @@ class TestAwaitUserResponse(unittest.TestCase):
         """_await_user_response reads from the tab-specific queue."""
         q: queue.Queue[str] = queue.Queue(maxsize=1)
         self.server._get_tab("5").user_answer_queue = q
-        self.server.printer._thread_local.tab_id = "5"
+        self.server.printer._thread_local.task_id = "5"
+        self.server.printer.subscribe_tab("5", "5")
         stop = threading.Event()
         self.server.printer._thread_local.stop_event = stop
 
@@ -101,7 +102,8 @@ class TestAwaitUserResponse(unittest.TestCase):
         """_await_user_response raises KeyboardInterrupt when stop is set."""
         q: queue.Queue[str] = queue.Queue(maxsize=1)
         self.server._get_tab("6").user_answer_queue = q
-        self.server.printer._thread_local.tab_id = "6"
+        self.server.printer._thread_local.task_id = "6"
+        self.server.printer.subscribe_tab("6", "6")
         stop = threading.Event()
         self.server.printer._thread_local.stop_event = stop
 
@@ -115,7 +117,7 @@ class TestAwaitUserResponse(unittest.TestCase):
 
     def test_no_tab_id_waits_until_stop(self) -> None:
         """Without tab_id, _await_user_response waits until stop is set."""
-        self.server.printer._thread_local.tab_id = None
+        self.server.printer._thread_local.task_id = None
         stop = threading.Event()
         self.server.printer._thread_local.stop_event = stop
 
@@ -133,48 +135,29 @@ class TestTabIdInjection(unittest.TestCase):
 
     def test_broadcast_injects_tabid_from_thread_local(self) -> None:
         """When thread-local tab_id is set, broadcast adds tabId to events."""
-        import io
-        import json
-        import sys
+        from kiss.tests.agents.vscode._memory_printer import MemoryPrinter
 
-        from kiss.agents.vscode.server import VSCodePrinter
+        printer = MemoryPrinter()
+        printer._thread_local.task_id = "7"
+        printer.subscribe_tab("7", "7")
 
-        printer = VSCodePrinter()
-        printer._thread_local.tab_id = "7"
+        printer.broadcast({"type": "askUser", "question": "What?"})
 
-        buf = io.StringIO()
-        old_stdout = sys.stdout
-        sys.stdout = buf
-        try:
-            printer.broadcast({"type": "askUser", "question": "What?"})
-        finally:
-            sys.stdout = old_stdout
-
-        event = json.loads(buf.getvalue().strip())
-        assert event["tabId"] == "7"
-        assert event["type"] == "askUser"
+        assert len(printer.emitted) == 1
+        assert printer.emitted[0]["tabId"] == "7"
+        assert printer.emitted[0]["type"] == "askUser"
 
     def test_broadcast_does_not_overwrite_explicit_tabid(self) -> None:
         """If event already has tabId, broadcast does not overwrite it."""
-        import io
-        import json
-        import sys
+        from kiss.tests.agents.vscode._memory_printer import MemoryPrinter
 
-        from kiss.agents.vscode.server import VSCodePrinter
+        printer = MemoryPrinter()
+        printer._thread_local.task_id = "7"
 
-        printer = VSCodePrinter()
-        printer._thread_local.tab_id = "7"
+        printer.broadcast({"type": "error", "text": "oops", "tabId": "3"})
 
-        buf = io.StringIO()
-        old_stdout = sys.stdout
-        sys.stdout = buf
-        try:
-            printer.broadcast({"type": "error", "text": "oops", "tabId": "3"})
-        finally:
-            sys.stdout = old_stdout
-
-        event = json.loads(buf.getvalue().strip())
-        assert event["tabId"] == "3"
+        assert len(printer.emitted) == 1
+        assert printer.emitted[0]["tabId"] == "3"
 
 
 class TestStopRouting(unittest.TestCase):
@@ -257,7 +240,7 @@ class TestConcurrentTabs(unittest.TestCase):
 
         time.sleep(2)
         threads = [
-            t.task_thread for t in self.server._tab_states.values()
+            t.task_thread for t in self.server._running_agent_states.values()
             if t.task_thread is not None
         ]
         for t in threads:
@@ -265,12 +248,18 @@ class TestConcurrentTabs(unittest.TestCase):
 
         assert done[0] and done[1], f"Both tasks should have run: {done}"
 
-    def test_duplicate_run_on_same_tab_rejected(self) -> None:
-        """A second run on the same tab is rejected while first is running."""
+    def test_duplicate_run_on_same_tab_dropped_silently(self) -> None:
+        """A second run on the same tab is silently dropped while first is running.
+
+        The user-visible behaviour is that nothing happens: no error
+        broadcast, no new task thread, no status flap.
+        """
         started = threading.Event()
         release = threading.Event()
+        call_count = [0]
 
         def slow_run(cmd: dict) -> None:
+            call_count[0] += 1
             started.set()
             release.wait(timeout=5)
 
@@ -281,12 +270,15 @@ class TestConcurrentTabs(unittest.TestCase):
         })
         started.wait(timeout=3)
 
+        events_before = len(self.events)
         self.server._handle_command({
             "type": "run", "prompt": "task2", "model": "m", "tabId": "1",
         })
 
-        errors = [e for e in self.events if e["type"] == "error"]
-        assert any("already running" in e.get("text", "").lower() for e in errors)
+        # No error broadcast, no status broadcast, no new run.
+        new_events = self.events[events_before:]
+        assert all(e.get("type") != "error" for e in new_events)
+        assert call_count[0] == 1
 
         release.set()
         time.sleep(0.5)
@@ -400,7 +392,8 @@ class TestAskUserQuestion(unittest.TestCase):
         q: queue.Queue[str] = queue.Queue(maxsize=1)
         q.put("yes")
         self.server._get_tab("8").user_answer_queue = q
-        self.server.printer._thread_local.tab_id = "8"
+        self.server.printer._thread_local.task_id = "8"
+        self.server.printer.subscribe_tab("8", "8")
         self.server.printer._thread_local.stop_event = threading.Event()
 
         result = self.server._ask_user_question("Continue?")
@@ -411,85 +404,8 @@ class TestAskUserQuestion(unittest.TestCase):
         assert result == "yes"
 
 
-class TestMainJsTabIdRouting(unittest.TestCase):
-    """Verify that main.js event handlers check tabId for routing."""
-
-    js_src: str = ""
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        from pathlib import Path
-
-        js_path = Path(__file__).resolve().parents[3] / "agents" / "vscode" / "media" / "main.js"
-        cls.js_src = js_path.read_text()
-
-    def test_error_handler_checks_tabid(self) -> None:
-        """The error event handler filters by tabId."""
-        assert "case 'error':" in self.js_src
-        idx = self.js_src.index("case 'error':")
-        block = self.js_src[idx:idx + 200]
-        assert "ev.tabId" in block
-        assert "activeTabId" in block
-
-    def test_status_handler_checks_tabid(self) -> None:
-        """The status event handler routes by tabId."""
-        idx = self.js_src.index("case 'status':")
-        block = self.js_src[idx:idx + 300]
-        assert "tabId" in block or "ev.tabId" in block
-
-    def test_clear_handler_checks_tabid(self) -> None:
-        """The clear event handler routes by tabId."""
-        idx = self.js_src.index("case 'clear':")
-        block = self.js_src[idx:idx + 300]
-        assert "tabId" in block or "evTabId" in block
-
-    def test_task_done_handler_checks_tabid(self) -> None:
-        """The task_done event handler routes by tabId."""
-        idx = self.js_src.index("case 'task_done':")
-        block = self.js_src[idx:idx + 300]
-        assert "tabId" in block or "ev.tabId" in block
 
 
-class TestFollowupAsyncTabId(unittest.TestCase):
-    """_generate_followup_async propagates tab_id to the background thread."""
-
-    def test_followup_thread_sets_tab_id(self) -> None:
-        """The background thread created by _generate_followup_async
-        sets the printer's thread-local tab_id so that broadcasts get
-        the correct tabId."""
-        import io
-        import sys
-
-        from kiss.agents.vscode.server import VSCodePrinter
-
-        printer = VSCodePrinter()
-        captured_tab_ids: list[int | None] = []
-        original_broadcast = printer.broadcast
-
-        def capture_broadcast(event: dict) -> None:  # type: ignore[type-arg]
-            captured_tab_ids.append(event.get("tabId"))
-            original_broadcast(event)
-
-        printer.broadcast = capture_broadcast  # type: ignore[assignment]
-
-        server = VSCodeServer()
-        server.printer = printer
-
-        printer._thread_local.tab_id = "42"
-
-        buf = io.StringIO()
-        old_stdout = sys.stdout
-        sys.stdout = buf
-        try:
-            server._generate_followup_async("task", "result", None)
-            time.sleep(2)
-        finally:
-            sys.stdout = old_stdout
-
-        import inspect
-        src = inspect.getsource(server._generate_followup_async)
-        assert "owner_tab" in src
-        assert "_thread_local.tab_id = owner_tab" in src or "tab_id" in src
 
 
 class TestBashFlushTimerTabId(unittest.TestCase):
@@ -497,35 +413,21 @@ class TestBashFlushTimerTabId(unittest.TestCase):
 
     def test_timer_flush_injects_tab_id(self) -> None:
         """Bash output flushed by the timer includes the correct tabId."""
-        import io
-        import json
-        import sys
+        from kiss.tests.agents.vscode._memory_printer import MemoryPrinter
 
-        from kiss.agents.vscode.server import VSCodePrinter
+        printer = MemoryPrinter()
+        printer._thread_local.task_id = "99"
 
-        printer = VSCodePrinter()
-        printer._thread_local.tab_id = "99"
+        with printer._bash_lock:
+            printer._bash_state.last_flush = time.monotonic()
+        printer.print("line1\n", type="bash_stream")
+        time.sleep(0.5)
 
-        buf = io.StringIO()
-        old_stdout = sys.stdout
-        sys.stdout = buf
-        try:
-            with printer._bash_lock:
-                printer._bash_state.last_flush = time.monotonic()
-            printer.print("line1\n", type="bash_stream")
-            time.sleep(0.5)
-        finally:
-            sys.stdout = old_stdout
-
-        output = buf.getvalue().strip()
-        if output:
-            lines = output.split("\n")
-            for line in lines:
-                event = json.loads(line)
-                if event.get("type") == "system_output":
-                    assert event.get("tabId") == "99", (
-                        f"Expected tabId='99', got {event.get('tabId')}"
-                    )
+        for event in printer.emitted:
+            if event.get("type") == "system_output":
+                assert event.get("tabId") == "99", (
+                    f"Expected tabId='99', got {event.get('tabId')}"
+                )
 
 
 class TestRecordingIsolation(unittest.TestCase):
@@ -534,25 +436,16 @@ class TestRecordingIsolation(unittest.TestCase):
 
     def test_recording_captures_own_tab_events(self) -> None:
         """Recording captures events for the current tab (per-tab isolation)."""
-        import io
-        import sys
+        from kiss.tests.agents.vscode._memory_printer import MemoryPrinter
 
-        from kiss.agents.vscode.server import VSCodePrinter
-
-        printer = VSCodePrinter()
-        printer._thread_local.tab_id = "1"
+        printer = MemoryPrinter()
+        printer._thread_local.task_id = "1"
 
         printer.start_recording()
 
-        buf = io.StringIO()
-        old_stdout = sys.stdout
-        sys.stdout = buf
-        try:
-            printer.broadcast({"type": "tool_call", "name": "Read"})
-            printer.broadcast({"type": "tool_result", "content": "ok"})
-            printer.broadcast({"type": "prompt", "text": "global event"})
-        finally:
-            sys.stdout = old_stdout
+        printer.broadcast({"type": "tool_call", "name": "Read"})
+        printer.broadcast({"type": "tool_result", "content": "ok"})
+        printer.broadcast({"type": "prompt", "text": "global event"})
 
         events = printer.stop_recording()
 
@@ -564,8 +457,9 @@ class TestRecordingIsolation(unittest.TestCase):
         from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 
         printer = BaseBrowserPrinter()
+        printer._thread_local.task_id = "rec-1"
         printer.start_recording()
-        key = printer._tab_key()
+        key = printer._task_key()
         assert key in printer._recordings
         printer.stop_recording()
         assert key not in printer._recordings
@@ -578,23 +472,23 @@ if __name__ == "__main__":
 class TestPerTabAgentIsolation(unittest.TestCase):
     """Each tab gets its own agent instances — no cross-tab state leakage."""
 
-    def test_different_tabs_have_independent_agents(self) -> None:
-        """Tab agents are distinct objects (chat_id assigned on first task)."""
+    def test_different_tabs_have_independent_chat_ids(self) -> None:
+        """Tabs hold their own chat_id (no shared per-tab agent)."""
         server, _ = _make_server()
         tab1 = server._get_tab("1")
         tab2 = server._get_tab("2")
-        assert tab1.agent is not tab2.agent
-        assert tab1.agent.chat_id == ""
-        assert tab2.agent.chat_id == ""
+        assert tab1 is not tab2
+        assert tab1.chat_id == ""
+        assert tab2.chat_id == ""
 
     def test_new_chat_on_one_tab_does_not_affect_other(self) -> None:
-        """Calling new_chat on tab 1 does not change tab 2's chat_id."""
+        """Resetting tab 1's chat_id does not change tab 2's chat_id."""
         server, _ = _make_server()
         tab1 = server._get_tab("1")
         tab2 = server._get_tab("2")
-        tab2.agent._chat_id = "42"
-        tab1.agent.new_chat()
-        assert tab2.agent.chat_id == "42"
+        tab2.chat_id = "42"
+        tab1.chat_id = ""
+        assert tab2.chat_id == "42"
 
     def test_use_worktree_is_per_tab(self) -> None:
         """Setting use_worktree on one tab does not affect others."""
@@ -609,8 +503,8 @@ class TestPerTabAgentIsolation(unittest.TestCase):
         server, _ = _make_server()
         tab1 = server._get_tab("1")
         tab2 = server._get_tab("2")
-        tab1.use_parallel = True
-        assert tab2.use_parallel is False
+        tab1.use_parallel = False
+        assert tab2.use_parallel is True
 
     def test_task_history_id_is_per_tab(self) -> None:
         """task_history_id is independent per tab."""
@@ -621,23 +515,31 @@ class TestPerTabAgentIsolation(unittest.TestCase):
         assert tab2.task_history_id is None
 
     def test_get_tab_creates_on_demand(self) -> None:
-        """_get_tab creates a new _TabState if one doesn't exist."""
+        """_get_tab creates a new _RunningAgentState if one doesn't exist."""
         server, _ = _make_server()
-        assert "99" not in server._tab_states
+        assert "99" not in server._running_agent_states
         tab = server._get_tab("99")
-        assert "99" in server._tab_states
+        assert "99" in server._running_agent_states
         assert tab is server._get_tab("99")
 
-    def test_agent_is_always_worktree_sorcar_agent(self) -> None:
-        """_TabState.agent is a single WorktreeSorcarAgent regardless of toggle."""
-        from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-
+    def test_agent_is_transient_per_task(self) -> None:
+        """tab.agent is replaced fresh per task — no state persists across tasks."""
         server, _ = _make_server()
         tab = server._get_tab("1")
-        original = tab.agent
-        assert isinstance(original, WorktreeSorcarAgent)
-        tab.use_worktree = True
-        assert tab.agent is original
+        # ``_get_tab`` lazily allocates a slot agent so tests and
+        # out-of-task callers (worktree merge / discard, conflict
+        # check, history click) can read agent state directly.  The
+        # slot is wiped to ``None`` at the end of every ``_run_task``
+        # so no agent state survives a task boundary; a fresh agent
+        # is built in ``_cmd_run`` immediately before each worker
+        # thread starts.
+        first = tab.agent
+        assert first is not None
+        tab.agent = None
+        again = tab  # same _RunningAgentState
+        again = server._get_tab("1")  # _get_tab repopulates the slot
+        assert again.agent is not None
+        assert again.agent is not first  # fresh per allocation
 
 
 class TestSelectedModelIsolation(unittest.TestCase):
@@ -669,15 +571,6 @@ class TestSelectedModelIsolation(unittest.TestCase):
         tab99 = server._get_tab("99")
         assert tab99.selected_model == "gpt-4o"
 
-    def test_run_task_uses_per_tab_model(self) -> None:
-        """_run_task_inner reads model from the tab's selected_model."""
-        import inspect
-
-        from kiss.agents.vscode.server import VSCodeServer
-
-        source = inspect.getsource(VSCodeServer._run_task_inner)
-        assert "tab.selected_model" in source
-        assert "self._selected_model" not in source
 
 
 class TestBashBufferIsolation(unittest.TestCase):

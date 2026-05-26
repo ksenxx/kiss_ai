@@ -1,2 +1,0 @@
-- use PWD/src/kiss/agents/third_party_agents/cron_manager_daemon.py to run a command periodically
-- use PWD/src/kiss/agents/third_party_agents/govee.py to control lights

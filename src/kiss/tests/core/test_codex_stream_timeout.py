@@ -32,6 +32,7 @@ from kiss.core.models.codex_model import CodexModel
 class TestCodexStreamTimeout:
     """CodexModel.generate() must time out when the codex agent hangs."""
 
+    @pytest.mark.slow
     def test_generate_times_out_when_codex_agent_hangs(self, tmp_path: Path) -> None:
         """A codex CLI that emits events forever must be killed by the timeout.
 

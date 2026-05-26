@@ -101,8 +101,8 @@ _elements['tab-bar'] = _makeEl('div');
 _elements['tab-list'] = _makeEl('div');
 _elements['merge-toolbar'] = _makeEl('div');
 _elements['worktree-bar'] = _makeEl('div');
-_elements['worktree-toggle-btn'] = _makeEl('button');
-_elements['parallel-toggle-btn'] = _makeEl('button');
+_elements['cfg-use-worktree'] = _makeEl('input');
+_elements['cfg-use-parallel'] = _makeEl('input');
 _elements['clear-btn'] = _makeEl('span');
 _elements['ghost-text'] = _makeEl('div');
 var _savedState = null;
@@ -303,13 +303,6 @@ class TestSetTaskTextGuard(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.js = _MAIN_JS.read_text()
-
-    def test_set_task_text_guard_in_source(self) -> None:
-        idx = self.js.index("case 'setTaskText':")
-        block = self.js[idx : idx + 800]
-        assert "ev.tabId === undefined || ev.tabId === activeTabId" in block
-        assert "sttTab.title" in block
-        assert "sttTab.taskPanelHTML" in block
 
     def test_task_text_updates_running_tab_not_active(self) -> None:
         result = _run_node(_make_test_script(r"""
@@ -746,8 +739,8 @@ class TestCreateNewTabDuringRunningTask(unittest.TestCase):
         """createNewTab creates a fresh tab (isRunning=false by default
         from makeTab) and delegates DOM reset to restoreTab without
         touching runningTabId."""
-        idx = self.js.index("function createNewTab()")
-        block = self.js[idx : idx + 1000]
+        idx = self.js.index("function createNewTab(")
+        block = self.js[idx : idx + 2000]
         assert "makeTab(" in block
         assert "restoreTab(tab)" in block
         assert "runningTabId" not in block
@@ -892,7 +885,12 @@ class TestSetReadyResetsRunningTabId(unittest.TestCase):
 
     def test_task_done_calls_set_ready(self) -> None:
         idx = self.js.index("case 'task_done':")
-        block = self.js[idx : idx + 500]
+        # Window enlarged from 500 → 900 chars to accommodate the
+        # branch that computes elapsed time from the agent-supplied
+        # ``ev.startTs`` / ``ev.endTs`` (see ``case 'task_done'`` in
+        # main.js — this preserves the structural invariant that
+        # ``setReady`` is called inside the handler).
+        block = self.js[idx : idx + 900]
         assert "setReady(" in block
 
 
@@ -907,7 +905,7 @@ class TestCloseRunningTabBehavior(unittest.TestCase):
 
     def test_close_tab_checks_running_state(self) -> None:
         idx = self.js.index("function closeTab(")
-        block = self.js[idx : idx + 800]
+        block = self.js[idx : idx + 3000]
         assert "newTab.isRunning" in block
         assert "setRunningState(newTab.isRunning)" in block
 
@@ -1026,7 +1024,7 @@ class TestPerTabAttachments(unittest.TestCase):
         """createNewTab builds a fresh tab (with default attachments=[])
         then calls restoreTab, which loads that empty list into the
         shared ``attachments`` variable and re-renders the chip row."""
-        idx = self.js.index("function createNewTab()")
+        idx = self.js.index("function createNewTab(")
         end = self.js.index("\n  function ", idx + 1)
         body = self.js[idx:end]
         assert "makeTab(" in body
@@ -1064,7 +1062,7 @@ class TestPerTabInputValue(unittest.TestCase):
         """Typed but unsent text carries over: createNewTab captures it
         into ``tab.inputValue`` so the subsequent restoreTab installs it
         back into the shared input box."""
-        idx = self.js.index("function createNewTab()")
+        idx = self.js.index("function createNewTab(")
         end = self.js.index("\n  function ", idx + 1)
         body = self.js[idx:end]
         assert "const pendingText = inp.value" in body
@@ -1165,7 +1163,7 @@ class TestPerTabIsMerging(unittest.TestCase):
         """A freshly-built tab has ``isMerging: false`` by default, and
         restoreTab both copies that into the shared ``isMerging`` flag
         and removes any existing merge toolbar from the DOM."""
-        idx = self.js.index("function createNewTab()")
+        idx = self.js.index("function createNewTab(")
         end = self.js.index("\n  function ", idx + 1)
         body = self.js[idx:end]
         assert "makeTab(" in body

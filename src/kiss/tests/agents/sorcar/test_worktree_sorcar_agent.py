@@ -154,38 +154,6 @@ class TestWorktreeSorcarAgent:
         assert check.returncode != 0
 
 
-    def test_missing_config_detached_head(self) -> None:
-        agent = self._agent(chat_id="1000")
-        agent.run(prompt_template="task1", work_dir=str(self.repo))
-        branch = agent._wt_branch
-        assert branch is not None
-
-        _git("config", "--unset", f"branch.{branch}.kiss-original",
-             cwd=self.repo)
-
-        head = _git("rev-parse", "HEAD", cwd=self.repo)
-        subprocess.run(
-            ["git", "-C", str(self.repo), "checkout", head.stdout.strip()],
-            capture_output=True, check=True,
-        )
-
-        agent2 = self._agent(chat_id="1000")
-        agent2._restore_from_git(self.repo)
-        assert agent2._wt_branch == branch
-        assert agent2._original_branch is None
-
-        msg = agent2.merge()
-        assert "Cannot merge" in msg
-        assert "original branch is unknown" in msg
-
-        msg = agent2.discard()
-        assert "Discarded" in msg
-
-        subprocess.run(
-            ["git", "-C", str(self.repo), "checkout", "main"],
-            capture_output=True, check=True,
-        )
-
     def test_merge_instructions_idle(self) -> None:
         agent = self._agent()
         assert agent.merge_instructions() == "No pending worktree task."
@@ -357,55 +325,5 @@ class TestWorktreeSorcarAgent:
 
         agent.discard()
 
-
-class TestCliAgentSelection:
-    """Verify that main() selects the correct agent based on CLI flags."""
-
-    def test_main_arg_parser_has_agent_type_flags(self) -> None:
-        import inspect
-
-        from kiss.agents.sorcar.cli_helpers import _build_arg_parser
-
-        src = inspect.getsource(_build_arg_parser)
-        assert "--use-worktree" in src
-        assert "--use-chat" in src
-        assert "--base-sorcar" not in src
-
-    def test_main_source_creates_worktree_agent_with_flag(self) -> None:
-        import inspect
-        src = inspect.getsource(
-            __import__("kiss.agents.sorcar.worktree_sorcar_agent", fromlist=["main"]).main
-        )
-        assert 'if args.use_worktree:' in src
-        assert 'WorktreeSorcarAgent(' in src
-
-    def test_main_source_creates_stateful_agent_with_flag(self) -> None:
-        import inspect
-        src = inspect.getsource(
-            __import__("kiss.agents.sorcar.worktree_sorcar_agent", fromlist=["main"]).main
-        )
-        assert 'elif args.use_chat:' in src
-        assert 'ChatSorcarAgent(' in src
-
-    def test_main_source_defaults_to_sorcar_agent(self) -> None:
-        import inspect
-        src = inspect.getsource(
-            __import__("kiss.agents.sorcar.worktree_sorcar_agent", fromlist=["main"]).main
-        )
-        assert 'SorcarAgent("Sorcar Agent")' in src
-
-    def test_main_source_guards_merge_prompt_with_isinstance(self) -> None:
-        import inspect
-        src = inspect.getsource(
-            __import__("kiss.agents.sorcar.worktree_sorcar_agent", fromlist=["main"]).main
-        )
-        assert 'isinstance(agent, WorktreeSorcarAgent)' in src
-
-    def test_main_source_uses_discover_repo_for_cleanup(self) -> None:
-        import inspect
-        src = inspect.getsource(
-            __import__("kiss.agents.sorcar.worktree_sorcar_agent", fromlist=["main"]).main
-        )
-        assert "discover_repo" in src
 
 

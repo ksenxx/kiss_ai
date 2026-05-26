@@ -3,8 +3,8 @@
 
 Bugs
 ----
-B1: ``_cmd_run`` now broadcasts ``status: running: True`` (not False)
-    when a task is already running.
+B1: ``_cmd_run`` silently drops a duplicate ``run`` while a task is
+    already running — no error, no status broadcast.
 B2: ``_close_tab`` now also checks ``task_thread.is_alive()`` and
     refuses to remove a tab with a live thread.
 B3: ``_hunk_to_dict`` now treats ``bs`` and ``cs`` symmetrically:
@@ -22,11 +22,10 @@ I1: ``_replay_session`` now sets ``tab.use_worktree`` under
 
 from __future__ import annotations
 
-import inspect
-import re
 import threading
 import unittest
 
+from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.diff_merge import _diff_files, _hunk_to_dict
 from kiss.agents.vscode.server import VSCodeServer
 
@@ -45,34 +44,32 @@ def _make_server() -> tuple[VSCodeServer, list[dict]]:
     return server, events
 
 
-class TestCmdRunSpuriousStatusFalse(unittest.TestCase):
-    """B1 fix: When a second ``run`` command is sent while a task is
-    already running, ``_cmd_run`` now broadcasts ``running: True``
-    so the frontend correctly reflects the alive task.
+class TestCmdRunDuplicateSilentDrop(unittest.TestCase):
+    """When a second ``run`` command is sent while a task is already
+    running, ``_cmd_run`` silently drops it: no error, no status
+    broadcast, no new thread.  Adding a task while one is running
+    must do nothing.
     """
 
     def setUp(self) -> None:
         self.server, self.events = _make_server()
 
-    def test_duplicate_run_broadcasts_running_true_while_task_is_alive(self) -> None:
+    def test_duplicate_run_emits_no_events_while_task_is_alive(self) -> None:
         tab = self.server._get_tab("t1")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         blocker = threading.Event()
         thread = threading.Thread(target=blocker.wait, daemon=True)
         thread.start()
         tab.task_thread = thread
 
+        events_before = len(self.events)
         self.server._handle_command({"type": "run", "tabId": "t1", "prompt": "x"})
 
         assert thread.is_alive()
-
-        status_events = [
-            e for e in self.events
-            if e.get("type") == "status" and e.get("tabId") == "t1"
-        ]
-        assert len(status_events) == 1
-        assert status_events[0]["running"] is True, (
-            "B1 fix: status should say running=True while task is alive"
-        )
+        # The duplicate run must produce zero broadcasts.
+        assert len(self.events) == events_before
+        # And task_thread is still the original blocker thread (no new run).
+        assert tab.task_thread is thread
 
         blocker.set()
         thread.join(timeout=2)
@@ -89,6 +86,7 @@ class TestCloseTabRaceWithTaskStartup(unittest.TestCase):
 
     def test_close_tab_refuses_when_task_thread_alive(self) -> None:
         tab = self.server._get_tab("t1")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         blocker = threading.Event()
         thread = threading.Thread(target=blocker.wait, daemon=True)
         thread.start()
@@ -97,19 +95,13 @@ class TestCloseTabRaceWithTaskStartup(unittest.TestCase):
 
         self.server._close_tab("t1")
 
-        assert "t1" in self.server._tab_states, (
+        assert "t1" in self.server._running_agent_states, (
             "B2 fix: tab should NOT be removed while task_thread is alive"
         )
 
         blocker.set()
         thread.join(timeout=2)
 
-    def test_source_confirms_task_thread_check(self) -> None:
-        """Structural: ``_close_tab`` now mentions ``task_thread``."""
-        src = inspect.getsource(VSCodeServer._close_tab)
-        assert "task_thread" in src, (
-            "B2 fix: _close_tab should check task_thread"
-        )
 
 
 class TestHunkToDictAsymmetry(unittest.TestCase):
@@ -162,20 +154,13 @@ class TestHunkToDictAsymmetry(unittest.TestCase):
 class TestFinishMergeRedundantLookup(unittest.TestCase):
     """R1 fix: ``_finish_merge`` now performs a single tab lookup."""
 
-    def test_source_has_one_tab_lookup(self) -> None:
-        """Structural: only one tab lookup in ``_finish_merge``."""
-        from kiss.agents.vscode.merge_flow import _MergeFlowMixin
-        src = inspect.getsource(_MergeFlowMixin._finish_merge)
-        matches = re.findall(r"self\._get_tab\(tab_id\)", src)
-        assert len(matches) == 1, (
-            f"R1 fix: expected 1 lookup, found {len(matches)}"
-        )
 
     def test_autocommit_prompt_not_lost_after_tab_removal(self) -> None:
         """Behavioral: the autocommit check uses the tab ref from the
         first lookup, so removing the tab mid-flow doesn't lose it."""
         server, events = _make_server()
         tab = server._get_tab("t1")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.is_merging = True
         tab.use_worktree = False
 
@@ -183,7 +168,7 @@ class TestFinishMergeRedundantLookup(unittest.TestCase):
 
         def intercept_present(tid: str, **kw: object) -> None:
             with server._state_lock:
-                server._tab_states.pop(tid, None)
+                server._running_agent_states.pop(tid, None)
             removed.set()
 
         server._present_pending_worktree = intercept_present  # type: ignore[assignment,method-assign]
@@ -193,75 +178,30 @@ class TestFinishMergeRedundantLookup(unittest.TestCase):
         assert removed.is_set(), "Intercept ran"
 
 
-class TestReplaySessionUseWorktreeNoLock(unittest.TestCase):
-    """I1 fix: ``_replay_session`` now sets ``tab.use_worktree`` under
-    ``_state_lock``, consistent with ``_run_task_inner``.
-    """
-
-    def test_source_confirms_lock_around_use_worktree(self) -> None:
-        """Structural: ``tab.use_worktree = bool(...)`` is now inside a
-        ``with self._state_lock`` block."""
-        src = inspect.getsource(VSCodeServer._replay_session)
-        lines = src.splitlines()
-        wt_line_idx = None
-        for i, line in enumerate(lines):
-            if "tab.use_worktree" in line and "bool(" in line:
-                wt_line_idx = i
-                break
-        assert wt_line_idx is not None, (
-            "Could not find tab.use_worktree = bool(...) in _replay_session"
-        )
-        preceding = "\n".join(lines[max(0, wt_line_idx - 8): wt_line_idx])
-        assert "_state_lock" in preceding, (
-            "I1 fix: _state_lock should guard use_worktree assignment"
-        )
-
-    def test_run_task_inner_sets_use_worktree_under_lock(self) -> None:
-        """Contrast: ``_run_task_inner`` also sets ``use_worktree``
-        inside a ``with self._state_lock`` block (consistency check)."""
-        from kiss.agents.vscode.task_runner import _TaskRunnerMixin
-        src = inspect.getsource(_TaskRunnerMixin._run_task_inner)
-        assert "tab.use_worktree" in src
-        lock_pattern = re.compile(
-            r"with self\._state_lock:.*?tab\.use_worktree\s*=",
-            re.DOTALL,
-        )
-        assert lock_pattern.search(src), (
-            "_run_task_inner sets use_worktree under _state_lock"
-        )
 
 
-class TestCmdRunAlreadyRunningErrorContent(unittest.TestCase):
-    """When a duplicate run arrives, the error and status events carry
-    the correct tabId and the status says running=True (B1 fix).
+class TestCmdRunDuplicateSilentDropNoErrorBroadcast(unittest.TestCase):
+    """A duplicate ``run`` while a task is alive emits zero broadcasts —
+    no error, no status, nothing on any tab id.
     """
 
     def setUp(self) -> None:
         self.server, self.events = _make_server()
 
-    def test_error_and_status_both_carry_tab_id(self) -> None:
+    def test_no_error_or_status_for_alive_task(self) -> None:
         tab = self.server._get_tab("t1")
+        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         blocker = threading.Event()
         thread = threading.Thread(target=blocker.wait, daemon=True)
         thread.start()
         tab.task_thread = thread
 
+        events_before = len(self.events)
         self.server._handle_command({"type": "run", "tabId": "t1", "prompt": "x"})
 
-        error_events = [
-            e for e in self.events
-            if e.get("type") == "error" and e.get("tabId") == "t1"
-        ]
-        status_events = [
-            e for e in self.events
-            if e.get("type") == "status" and e.get("tabId") == "t1"
-        ]
-        assert len(error_events) == 1, "Expected one error event"
-        assert "already running" in error_events[0]["text"].lower()
-        assert len(status_events) == 1, "Expected one status event"
-        assert status_events[0]["running"] is True, (
-            "B1 fix: status says running=True while task is alive"
-        )
+        new_events = self.events[events_before:]
+        assert not any(e.get("type") == "error" for e in new_events)
+        assert not any(e.get("type") == "status" for e in new_events)
 
         blocker.set()
         thread.join(timeout=2)

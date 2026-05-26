@@ -25,6 +25,7 @@ class TestEmptyThinkingBlockSuppressed:
         thinking_start/thinking_delta/thinking_end events.
         """
         printer = BaseBrowserPrinter()
+        printer._thread_local.task_id = "test"
         printer.start_recording()
 
         model = ClaudeCodeModel(
@@ -140,6 +141,7 @@ class TestRealThinkingBlockStillWorks:
     def test_thinking_block_with_content_still_streams(self) -> None:
         """A thinking block with thinking_delta events must stream normally."""
         printer = BaseBrowserPrinter()
+        printer._thread_local.task_id = "test"
         printer.start_recording()
 
         model = ClaudeCodeModel(
