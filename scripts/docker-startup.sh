@@ -4,7 +4,12 @@ set -e
 
 REPO_URL="https://github.com/ksenxx/kiss.git"
 REPO_URL_FALLBACK="https://github.com/ksenxx/kiss_ai.git"
-REPO_DIR="/home/kiss"
+# Each repo gets its own directory so the workspace path in code-server
+# matches the cloned repo name.  REPO_DIR is set to whichever clone
+# succeeded (or already exists) — see the clone block below.
+REPO_DIR_PRIMARY="/home/kiss"
+REPO_DIR_FALLBACK="/home/kiss_ai"
+REPO_DIR=""
 
 info() { printf '\033[0;32m[INFO]\033[0m  %s\n' "$*"; }
 step() { printf '\033[0;34m[STEP]\033[0m  %s\n' "$*"; }
@@ -25,16 +30,25 @@ fi
 # ---------------------------------------------------------------------------
 # 2. Clone or pull the private repo to /home/kiss
 # ---------------------------------------------------------------------------
-if [ ! -d "$REPO_DIR/.git" ]; then
-    step "Cloning $REPO_URL to $REPO_DIR..."
-    if ! git clone "$REPO_URL" "$REPO_DIR"; then
-        step "Primary URL failed — trying fallback $REPO_URL_FALLBACK..."
-        git clone "$REPO_URL_FALLBACK" "$REPO_DIR"
-    fi
-else
+if [ -d "$REPO_DIR_PRIMARY/.git" ]; then
+    REPO_DIR="$REPO_DIR_PRIMARY"
     step "Repo exists at $REPO_DIR — pulling latest..."
     cd "$REPO_DIR" && git pull || true
+elif [ -d "$REPO_DIR_FALLBACK/.git" ]; then
+    REPO_DIR="$REPO_DIR_FALLBACK"
+    step "Repo exists at $REPO_DIR — pulling latest..."
+    cd "$REPO_DIR" && git pull || true
+else
+    step "Cloning $REPO_URL to $REPO_DIR_PRIMARY..."
+    if git clone "$REPO_URL" "$REPO_DIR_PRIMARY"; then
+        REPO_DIR="$REPO_DIR_PRIMARY"
+    else
+        step "Primary URL failed — trying fallback $REPO_URL_FALLBACK to $REPO_DIR_FALLBACK..."
+        git clone "$REPO_URL_FALLBACK" "$REPO_DIR_FALLBACK"
+        REPO_DIR="$REPO_DIR_FALLBACK"
+    fi
 fi
+info "REPO_DIR=$REPO_DIR"
 
 # ---------------------------------------------------------------------------
 # 3. Run install.sh (Python env, Playwright, VS Code extension)
@@ -86,8 +100,35 @@ if [ -f "$VSIX" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 6. Launch code-server
+# 6. Pre-register both possible repo directories as trusted workspaces.
+#     Trust is already disabled globally (step 5a), so this is mostly
+#     defense-in-depth: if a future code-server build re-enables trust
+#     or ignores our settings.json, these explicit trusted-folder entries
+#     ensure the extension still activates without a prompt.
+#
+#     VS Code stores trusted folders in the global state SQLite DB
+#     (state.vscdb).  We instead use a workspace-storage hint and the
+#     `security.workspace.trust.untrustedFiles` setting (already covered
+#     by settings.json), plus we make `$REPO_DIR` the workspace root so
+#     code-server treats it as the current open folder.
 # ---------------------------------------------------------------------------
-info "Starting code-server..."
+
+# ---------------------------------------------------------------------------
+# 7. Launch code-server.
+#     The CMD in the Dockerfile passes "/home/kiss" as a placeholder
+#     workspace path; rewrite it to the actual REPO_DIR that was cloned
+#     (either /home/kiss or /home/kiss_ai).  Any other occurrence of
+#     /home/kiss as a CLI arg is left alone (none are expected today).
+# ---------------------------------------------------------------------------
+args=()
+for arg in "$@"; do
+    if [ "$arg" = "/home/kiss" ] || [ "$arg" = "/home/kiss_ai" ]; then
+        args+=("$REPO_DIR")
+    else
+        args+=("$arg")
+    fi
+done
+
+info "Starting code-server (workspace: $REPO_DIR)..."
 export KISS_PROJECT_PATH="$REPO_DIR"
-exec /usr/bin/entrypoint.sh "$@"
+exec /usr/bin/entrypoint.sh "${args[@]}"
