@@ -18,7 +18,7 @@ class TestAPIKeyEnvVarsType:
     """API_KEY_ENV_VARS must be a frozenset of key names, not a dict."""
 
     def test_api_key_env_vars_is_frozenset(self) -> None:
-        """Verify API_KEY_ENV_VARS is a frozenset, per USER_PREFS invariant."""
+        """Verify API_KEY_ENV_VARS is a frozenset, not a dict."""
         from kiss.agents.vscode.vscode_config import API_KEY_ENV_VARS
 
         assert isinstance(API_KEY_ENV_VARS, frozenset), (
