@@ -86,7 +86,7 @@ def _truncate_output(output: str, max_chars: int) -> str:
     return output[:head] + msg
 
 
-def _clean_env() -> dict[str, str]:
+def _clean_env(work_dir: str | None = None) -> dict[str, str]:
     """Return a fresh copy of ``os.environ`` without ``VIRTUAL_ENV``.
 
     When the agent process runs inside a virtual-env (e.g. the VS Code
@@ -94,9 +94,23 @@ def _clean_env() -> dict[str, str]:
     child processes and causes ``uv run`` to emit a spurious warning about
     a mismatched environment. Stripping it lets ``uv`` (and other tools)
     discover the correct project ``.venv`` on their own.
+
+    When ``work_dir`` is provided, ``KISS_WORKDIR`` is overridden so that
+    child processes (e.g. project scripts that compute "project root" via
+    that env var) target the agent's working directory — critical when
+    the agent is running inside a git worktree, where the inherited
+    ``KISS_WORKDIR`` would otherwise still point at the original repo
+    checkout and writes would leak out of the worktree.
+
+    Args:
+        work_dir: Agent working directory to expose to child processes
+            via ``KISS_WORKDIR``.  ``None`` leaves the inherited value
+            untouched.
     """
     env = os.environ.copy()
     env.pop("VIRTUAL_ENV", None)
+    if work_dir is not None:
+        env["KISS_WORKDIR"] = work_dir
     return env
 
 
@@ -161,9 +175,25 @@ class UsefulTools:
         self,
         stream_callback: Callable[[str], None] | None = None,
         stop_event: threading.Event | None = None,
+        work_dir: str | None = None,
     ) -> None:
+        """Initialise the tools.
+
+        Args:
+            stream_callback: Optional sink that receives Bash output line
+                by line for live streaming to the UI.
+            stop_event: Optional event signalled by the host agent when
+                the user requests a stop; the Bash tool kills the
+                running command's process group.
+            work_dir: Agent working directory.  When set, ``Bash``
+                subprocesses are launched with ``cwd=work_dir`` and the
+                ``KISS_WORKDIR`` env var is forced to ``work_dir`` so
+                project scripts that derive a "project root" from it
+                stay inside the worktree the agent is operating on.
+        """
         self.stream_callback = stream_callback
         self.stop_event = stop_event
+        self.work_dir = work_dir
 
     def Read(  # noqa: N802
         self,
@@ -296,7 +326,7 @@ class UsefulTools:
         if self.stream_callback:
             return self._bash_streaming(command, timeout_seconds, max_output_chars)
 
-        env = _clean_env()
+        env = _clean_env(self.work_dir)
 
         try:
             process = subprocess.Popen(
@@ -305,6 +335,7 @@ class UsefulTools:
                 stderr=subprocess.STDOUT,
                 text=True,
                 env=env,
+                cwd=self.work_dir,
             )
             done = threading.Event()
             monitor = None
@@ -345,7 +376,8 @@ class UsefulTools:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            env=_clean_env(),
+            env=_clean_env(self.work_dir),
+            cwd=self.work_dir,
         )
         timed_out = False
         done = threading.Event()
