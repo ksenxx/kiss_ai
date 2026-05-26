@@ -3406,8 +3406,9 @@
 
   function updateInputDisabled() {
     // Only block input during merge.  While a task is running the
-    // user can still type but ``sendMessage`` silently drops any
-    // submit — no queueing.
+    // user can still type — ``sendMessage`` then forwards the prompt
+    // as an ``appendUserMessage`` so it gets injected into the live
+    // agent's conversation before its next model call.
     const blocked = isMerging;
     inp.disabled = blocked;
     sendBtn.disabled = blocked;
@@ -4574,8 +4575,27 @@
       return t.id === activeTabId;
     });
 
-    // If a task is already running for this tab, do nothing.
-    if (isRunning) return;
+    // If a task is already running for this tab, forward the prompt
+    // to the backend as an ``appendUserMessage`` so it gets injected
+    // into the live agent's conversation as a follow-up user message
+    // before its next model call.  Clear the input afterwards just
+    // like a normal submit, so the user can keep typing further
+    // messages while the task runs.
+    if (isRunning) {
+      vscode.postMessage({
+        type: 'appendUserMessage',
+        prompt: prompt,
+        tabId: activeTabId,
+      });
+      inp.value = '';
+      inp.style.height = 'auto';
+      attachments = [];
+      renderFileChips();
+      clearGhost();
+      histIdx = -1;
+      if (inputClearBtn) inputClearBtn.style.display = 'none';
+      return;
+    }
 
     const msg = {
       type: 'submit',

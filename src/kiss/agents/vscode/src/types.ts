@@ -35,6 +35,7 @@ export type FromWebviewMessage =
       workDir?: string;
     }
   | {type: 'stop'; tabId?: string}
+  | {type: 'appendUserMessage'; prompt: string; tabId?: string}
   | {type: 'selectModel'; model: string; tabId?: string}
   | {type: 'getModels'}
   | {type: 'getHistory'; query?: string; offset?: number; generation?: number}
@@ -231,6 +232,7 @@ export interface AgentCommand {
   type:
     | 'run'
     | 'stop'
+    | 'appendUserMessage'
     | 'getModels'
     | 'selectModel'
     | 'getHistory'
