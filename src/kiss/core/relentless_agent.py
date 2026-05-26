@@ -337,12 +337,22 @@ class RelentlessAgent(Base):
 
             if not is_continue or success:
                 if summaries:
-                    current_summary = payload.get("summary", "")
-                    if current_summary:
-                        summaries.append(current_summary)
-                    payload["summary"] = "\n\n---\n\n".join(
-                        f"### Session {i + 1}\n{s}" for i, s in enumerate(summaries)
+                    final_summary = payload.get("summary", "")
+                    # ``summaries`` holds every PRIOR session's summary
+                    # (collected from ``is_continue=True`` returns).  Prepend
+                    # them as historical context BEFORE the terminal session's
+                    # summary, which stays the primary payload summary.
+                    prior_section = "\n\n---\n\n".join(
+                        f"### Previous Session {i + 1}\n{s}"
+                        for i, s in enumerate(summaries)
                     )
+                    if final_summary:
+                        payload["summary"] = (
+                            f"{prior_section}\n\n---\n\n### Final Session\n"
+                            f"{final_summary}"
+                        )
+                    else:
+                        payload["summary"] = prior_section
                     result = yaml.dump(payload, sort_keys=False)
                     # Re-emit a final result event so the front-end's Result
                     # panel reflects the merged multi-session outcome (and
@@ -374,11 +384,14 @@ class RelentlessAgent(Base):
         exhaustion_message = (
             f"Task failed after {self.max_sub_sessions} sub-sessions"
         )
-        merged_summary = "\n\n---\n\n".join(
-            f"### Session {i + 1}\n{s}" for i, s in enumerate(summaries)
+        # Exhaustion has no terminal session, so every accumulated summary
+        # is labeled as a previous session and prepended before the
+        # exhaustion message (which becomes the primary final summary).
+        prior_section = "\n\n---\n\n".join(
+            f"### Previous Session {i + 1}\n{s}" for i, s in enumerate(summaries)
         )
-        if merged_summary:
-            merged_summary = f"{exhaustion_message}\n\n{merged_summary}"
+        if prior_section:
+            merged_summary = f"{prior_section}\n\n---\n\n{exhaustion_message}"
         else:
             merged_summary = exhaustion_message
         self._broadcast_final_result(
