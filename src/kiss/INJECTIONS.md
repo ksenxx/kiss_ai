@@ -1,4 +1,4 @@
-# TRICKS
+## Trick
 
 Use internet search extensively.
 
