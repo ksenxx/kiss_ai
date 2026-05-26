@@ -1514,6 +1514,19 @@ body.remote-chat #welcome > #input-area {
   50% { opacity: 0.4; box-shadow: 0 0 6px 2px rgb(46 125 50 / 50%); }
 }
 
+/* Per-row action column for history items: stacks the favourite,
+   copy, and delete buttons (and the inline delete-confirm prompt)
+   vertically with a 6px gap.  ``align-self: stretch`` lets the row
+   set the column height; the buttons remain top-aligned. */
+.sidebar-item-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex-shrink: 0;
+  margin-left: 6px;
+  align-items: center;
+}
+
 .sidebar-item-delete,
 .sidebar-item-copy,
 .sidebar-item-favorite {
@@ -1522,6 +1535,13 @@ body.remote-chat #welcome > #input-area {
   color: #000; opacity: 0.45;
   background: none;
   transition: opacity 0.15s, background 0.15s, color 0.15s;
+}
+
+.sidebar-item-actions > .sidebar-item-delete,
+.sidebar-item-actions > .sidebar-item-copy,
+.sidebar-item-actions > .sidebar-item-favorite,
+.sidebar-item-actions > .sidebar-item-confirm {
+  margin-left: 0;
 }
 
 .sidebar-item-delete:hover,
