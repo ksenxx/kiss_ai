@@ -2365,7 +2365,30 @@
   }).observe(O, {childList: true, subtree: true, characterData: true});
 
   // --- Timer ---
+  // ``endTs`` (ms since epoch) is the agent's recorded end timestamp
+  // for the currently-displayed task.  When the agent has already
+  // finished but the frontend joined late (history load) this lets
+  // ``_renderTimerTick`` flip the label from "Running …" to
+  // "Done (Xm Ys)" without waiting for a live ``task_done`` event.
+  // Zero means "no recorded end yet" (still running, or a legacy
+  // row that pre-dates endTs persistence).
+  let endTs = 0;
   function _renderTimerTick() {
+    // If the agent's persisted end timestamp has already passed,
+    // surface "Done (Xm Ys)" computed from agent wall-clock
+    // (endTs - t0) and shut down the live tick.  Without this
+    // branch a chat loaded from history for a task that finished
+    // while the client was disconnected would render
+    // "Running …" forever.
+    if (endTs > 0 && t0 && Date.now() >= endTs) {
+      const ds = Math.max(0, Math.floor((endTs - t0) / 1000));
+      const dm = Math.floor(ds / 60);
+      statusText.textContent =
+        'Done (' + (dm > 0 ? dm + 'm ' : '') + (ds % 60) + 's)';
+      stopTimer();
+      setRunningState(false);
+      return;
+    }
     const s = Math.floor((Date.now() - t0) / 1000);
     const m = Math.floor(s / 60);
     statusText.textContent =
@@ -2447,6 +2470,21 @@
         const evTab = findTabByEvt(ev);
         if (evTab) {
           evTab.isRunning = !!ev.running;
+        }
+        // Anchor the chat webview's "Running …" timer to the
+        // agent's TRUE start timestamp (ms since epoch) supplied by
+        // the backend — not to the client's Date.now() at the
+        // moment this status event arrives.  Without this anchor a
+        // chat resumed from history would show "Running 0s" no
+        // matter how long the agent has actually been running.
+        if (ev.running && typeof ev.startTs === 'number' && ev.startTs > 0) {
+          t0 = ev.startTs;
+          if (evTab) evTab.t0 = ev.startTs;
+          // A freshly-running task on this tab has no recorded end
+          // yet — clear any stale ``endTs`` captured from a prior
+          // task's ``task_events`` so the timer doesn't immediately
+          // jump to "Done".
+          endTs = 0;
         }
         // Update UI only when the event targets the active tab (or no tabId)
         if (!evTab || evTab.id === activeTabId) {
@@ -2758,6 +2796,20 @@
         if (ev.extra) {
           try {
             const extra = JSON.parse(ev.extra);
+            // Capture the agent's persisted start / end timestamps
+            // (ms since epoch) so the chat webview's "Running …" /
+            // "Done (Xm Ys)" header can be computed from agent
+            // wall-clock — see ``_renderTimerTick``.  ``endTs > 0``
+            // means the task has already ended; the timer-tick
+            // branch will flip the label to "Done (…)" as soon as
+            // ``Date.now() >= endTs`` even when no live
+            // ``task_done`` event arrives (history-resume case).
+            if (typeof extra.startTs === 'number' && extra.startTs > 0) {
+              t0 = extra.startTs;
+            }
+            if (typeof extra.endTs === 'number' && extra.endTs > 0) {
+              endTs = extra.endTs;
+            }
             if (extra.model) {
               selectedModel = extra.model;
               if (modelName) modelName.textContent = selectedModel;
@@ -3103,7 +3155,11 @@
           });
           if (rt) doneT0 = rt.t0;
         }
-        const el = doneT0 ? Math.floor((Date.now() - doneT0) / 1000) : 0;
+        const ms =
+          ev.startTs > 0 && ev.endTs > 0
+            ? ev.endTs - ev.startTs
+            : Date.now() - (doneT0 || Date.now());
+        const el = Math.max(0, Math.floor(ms / 1000));
         const em = Math.floor(el / 60);
         markTabDone(ev.tabId, ev.success === false);
         setReady(
@@ -3409,6 +3465,11 @@
     // Update UI only if the event targets the active tab (or no tabId)
     if (tabId === undefined || tabId === activeTabId) {
       t0 = null;
+      // Clear the previously-captured endTs so the next task on
+      // the same tab starts with a fresh "still running" tick
+      // (endTs===0 short-circuits the Done-by-clock branch in
+      // ``_renderTimerTick``).
+      endTs = 0;
       setRunningState(false);
       stopTimer();
       removeSpinner();
