@@ -24,6 +24,12 @@
     "contribSourceControlInputBoxMenu"
   ],
   "main": "./out/extension.js",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true,
+      "description": "KISS Sorcar runs a local Python backend; opt-in API keys and shell tools require trust."
+    }
+  },
   "contributes": {
     "viewsContainers": {
       "activitybar": [

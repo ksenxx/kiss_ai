@@ -8,7 +8,13 @@
 # the VSIX directly.
 #
 # Log saved to ~/.kiss/install.log
-set -e
+#
+# `pipefail` is required so the trailing `{ ... } 2>&1 | tee "$LOG_FILE"`
+# pipeline propagates a non-zero exit from the body (e.g. a failed
+# `npm run package`) instead of returning `tee`'s always-zero status.
+# Without it, a broken VSIX build was silently masked and the container
+# ended up shipping the stale committed VSIX.
+set -eo pipefail
 
 # Capture the user's working directory *before* any `cd` so that VS Code can
 # later be launched with this directory as the workspace root.  The agents
