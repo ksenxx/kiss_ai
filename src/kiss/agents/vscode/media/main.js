@@ -3161,7 +3161,7 @@
           const bgWrTab = tabs.find(t => t.id === ev.tabId);
           if (bgWrTab) {
             bgWrTab.worktreeBarEl = null;
-            if (bgWrTab.outputFragment) {
+            if (bgWrTab.outputFragment && !isSilentDiscardMessage(ev)) {
               const cls = ev.success ? 'wt-result-ok' : 'wt-result-err';
               const div = mkEl('div', 'ev ' + cls);
               div.textContent = ev.message || '';
@@ -3805,8 +3805,25 @@
     });
   }
 
+  // Suppress the trivial "Discarded branch '<name>'." confirmation that
+  // would otherwise be appended to the chat output every time a
+  // worktree is discarded.  Any discard message that also carries a
+  // warning (e.g. ``"… ⚠️  Could not checkout '<orig>': …"``) still
+  // gets shown so the user sees the warning.  Merge results and
+  // partial-discard results (which always include a warning) are also
+  // unaffected.
+  function isSilentDiscardMessage(ev) {
+    if (!ev || !ev.success) return false;
+    const msg = ev.message || '';
+    return /^Discarded branch '[^']+'\.$/.test(msg);
+  }
+
   function handleWorktreeResult(ev) {
     clearWorktreeBar();
+    if (isSilentDiscardMessage(ev)) {
+      sb();
+      return;
+    }
     const cls = ev.success ? 'wt-result-ok' : 'wt-result-err';
     const div = mkEl('div', 'ev ' + cls);
     const msg = ev.message || '';
