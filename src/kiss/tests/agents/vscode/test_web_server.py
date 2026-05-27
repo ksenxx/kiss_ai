@@ -3126,8 +3126,12 @@ class TestSendWelcomeInfoFallbacks(IsolatedAsyncioTestCase):
             self.assertTrue(len(url_events) > 0)
             self.assertEqual(url_events[0]["url"], "https://test.trycloudflare.com")
 
-    async def test_welcome_info_no_url_available(self) -> None:
-        """When no URL is available anywhere, no remote_url is broadcast."""
+    async def test_welcome_info_no_url_broadcasts_inactive(self) -> None:
+        """No tunnel URL → remote_url is still broadcast as inactive.
+
+        The frontend uses ``tunnelActive: False`` to hide the
+        welcome-page remote-password panel when there is no tunnel.
+        """
         self.server._active_url = None
         _URL_FILE.unlink(missing_ok=True)
 
@@ -3148,6 +3152,63 @@ class TestSendWelcomeInfoFallbacks(IsolatedAsyncioTestCase):
                     break
             types = [e.get("type") for e in events]
             self.assertIn("welcome_suggestions", types)
+            url_events = [e for e in events if e.get("type") == "remote_url"]
+            self.assertEqual(len(url_events), 1)
+            self.assertEqual(url_events[0].get("url"), "")
+            self.assertFalse(url_events[0].get("tunnelActive"))
+
+    async def test_welcome_info_tunnel_active_flag(self) -> None:
+        """When the active URL is a tunnel URL, tunnelActive is True."""
+        self.server.use_tunnel = True
+        self.server._active_url = "https://abc.trycloudflare.com"
+        _URL_FILE.unlink(missing_ok=True)
+
+        async with connect(
+            f"wss://127.0.0.1:{self.port}/ws",
+            ssl=_no_verify_ssl(),
+        ) as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+
+            await ws.send(json.dumps({"type": "getWelcomeSuggestions"}))
+            events: list[dict] = []
+            for _ in range(10):
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=2)
+                    events.append(json.loads(raw))
+                except TimeoutError:
+                    break
+            url_events = [e for e in events if e.get("type") == "remote_url"]
+            self.assertTrue(len(url_events) >= 1)
+            self.assertTrue(url_events[0].get("tunnelActive"))
+            self.assertEqual(
+                url_events[0].get("url"), "https://abc.trycloudflare.com",
+            )
+
+    async def test_welcome_info_local_url_inactive(self) -> None:
+        """When the active URL equals the local URL, tunnelActive is False."""
+        self.server.use_tunnel = True
+        self.server._active_url = self.server._local_url
+        _URL_FILE.unlink(missing_ok=True)
+
+        async with connect(
+            f"wss://127.0.0.1:{self.port}/ws",
+            ssl=_no_verify_ssl(),
+        ) as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+
+            await ws.send(json.dumps({"type": "getWelcomeSuggestions"}))
+            events: list[dict] = []
+            for _ in range(10):
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=2)
+                    events.append(json.loads(raw))
+                except TimeoutError:
+                    break
+            url_events = [e for e in events if e.get("type") == "remote_url"]
+            self.assertTrue(len(url_events) >= 1)
+            self.assertFalse(url_events[0].get("tunnelActive"))
 
 
 class TestNamedTunnel(IsolatedAsyncioTestCase):
