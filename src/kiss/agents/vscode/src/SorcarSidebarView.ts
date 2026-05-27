@@ -512,24 +512,36 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
   /**
    * Try to read the URL file and post to the webview.
-   * Only sends if the URL differs from the last one sent.
+   *
+   * Always sends a ``remote_url`` message (even on a missing/empty
+   * file) so the webview can hide the welcome-page remote-password
+   * panel when no Cloudflare tunnel is active.  ``tunnelActive`` is
+   * True only when ``data.tunnel`` is present (a real tunnel URL).
+   * Dedups against ``_lastSentUrl`` using a key that combines the
+   * URL and the active flag so transitions between "no tunnel" and
+   * "tunnel established" always reach the webview.
    */
   private _tryReadAndSendUrl(urlFile: string): void {
+    let tunnel = '';
+    let local = '';
     try {
       const data = JSON.parse(fs.readFileSync(urlFile, 'utf-8'));
-      const url = data.tunnel || data.local || '';
-      if (url && url !== this._lastSentUrl) {
-        this._lastSentUrl = url;
-        const msg: ToWebviewMessage = {type: 'remote_url', url};
-        const ntfyUrl = this._getNtfyUrl();
-        if (ntfyUrl) {
-          msg.ntfyUrl = ntfyUrl;
-        }
-        this._sendToWebview(msg);
-      }
+      tunnel = data.tunnel || '';
+      local = data.local || '';
     } catch {
-      /* file missing or malformed */
+      /* file missing or malformed — fall through with empty values */
     }
+    const tunnelActive = !!tunnel;
+    const url = tunnel || local || '';
+    const key = `${tunnelActive ? '1' : '0'}|${url}`;
+    if (key === this._lastSentUrl) return;
+    this._lastSentUrl = key;
+    const msg: ToWebviewMessage = {type: 'remote_url', url, tunnelActive};
+    const ntfyUrl = this._getNtfyUrl();
+    if (ntfyUrl) {
+      msg.ntfyUrl = ntfyUrl;
+    }
+    this._sendToWebview(msg);
   }
 
   /**

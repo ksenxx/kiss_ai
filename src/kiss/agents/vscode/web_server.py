@@ -1382,9 +1382,8 @@ class WebPrinter(BaseBrowserPrinter):
           no copy is sent over the wire.
         * Events with neither ``tabId`` nor a resolvable ``taskId``
           are global system events (``configData``, ``models``,
-          ``history``, ``inputHistory``, ``welcome_suggestions``,
-          ``error``, etc.) and are broadcast verbatim to every
-          connected client.
+          ``history``, ``inputHistory``, ``error``, etc.) and are
+          broadcast verbatim to every connected client.
 
         Args:
             event: The event dictionary to emit.
@@ -1665,7 +1664,7 @@ width=device-width,initial-scale=1,maximum-scale=1">
       <div id="welcome">
         <h2>Welcome to KISS Sorcar</h2>
         <p>Your AI assistant. Ask me anything!</p>
-        <div id="welcome-config" class="welcome-config">
+        <div id="welcome-config" class="welcome-config" style="display:none;">
           <div id="welcome-remote-url"></div>
           <label class="config-label welcome-config-label">Remote password
             <div class="config-password-wrap">
@@ -2759,14 +2758,25 @@ class RemoteAccessServer:
 
 
     async def _send_welcome_info(self) -> None:
-        """Broadcast welcome suggestions and the active remote URL.
+        """Broadcast the active remote URL to all connected clients.
 
-        Broadcasts a ``welcome_suggestions`` event with an empty list
-        because the remote chat webview deliberately suppresses sample
-        task suggestions on the welcome page (the centered input
-        textbox is the only welcome-page UI).  Then broadcasts the
-        ``remote_url`` event using the in-memory URL, the URL file, or
-        the ``cloudflared`` metrics API as successive fallbacks.
+        Broadcasts the ``remote_url`` event using the in-memory URL,
+        the URL file, or the ``cloudflared`` metrics API as successive
+        fallbacks.
+
+        Historically this method also broadcast a
+        ``welcome_suggestions`` event with an empty list because the
+        remote-chat webview hides the sample-task suggestions panel
+        via CSS (``body.remote-chat #welcome > #suggestions { display:
+        none }``).  That broadcast was redundant for the webapp and
+        actively harmful for the VS Code extension: the extension is
+        a *second* client of the same broadcaster (over its UDS
+        connection), and it populates its own ``#suggestions``
+        container locally from ``SAMPLE_TASKS.json``.  The empty-list
+        broadcast was forwarded to the extension's webview and
+        cleared every chip on the welcome page whenever any webapp
+        client opened a new chat tab — see
+        ``test_welcome_suggestions_not_broadcast.py``.
 
         M10: the URL-file read and the ``_discover_tunnel_url_from_metrics``
         call (which spawns ``pgrep`` and does HTTP requests) are
@@ -2774,10 +2784,6 @@ class RemoteAccessServer:
         so a slow ``pgrep`` or unreachable cloudflared metrics
         endpoint cannot stall the asyncio event loop.
         """
-        self._printer.broadcast({
-            "type": "welcome_suggestions", "suggestions": [],
-        })
-
         url: str | None = self._active_url
         loop = self._loop
         assert loop is not None
@@ -2796,12 +2802,23 @@ class RemoteAccessServer:
                 )
                 self._active_url = discovered
                 url = discovered
-        if url:
-            ntfy_url = _get_ntfy_url()
-            msg: dict[str, object] = {"type": "remote_url", "url": url}
-            if ntfy_url:
-                msg["ntfyUrl"] = ntfy_url
-            self._printer.broadcast(msg)
+        # ``tunnelActive`` is True only when a real Cloudflare tunnel
+        # URL is in effect (not the local fallback).  The frontend hides
+        # the welcome-page remote-password panel when this is False so
+        # users are not shown a password field for a tunnel that does
+        # not exist.
+        tunnel_active = bool(
+            self.use_tunnel and url and url != self._local_url
+        )
+        ntfy_url = _get_ntfy_url() if url else ""
+        msg: dict[str, object] = {
+            "type": "remote_url",
+            "url": url or "",
+            "tunnelActive": tunnel_active,
+        }
+        if ntfy_url:
+            msg["ntfyUrl"] = ntfy_url
+        self._printer.broadcast(msg)
 
     @staticmethod
     async def _endpoint_send(endpoint: Any, data: str) -> None:
@@ -3369,8 +3386,11 @@ class RemoteAccessServer:
         _save_url_file(self._url_file, self._local_url, tunnel_url)
         self._active_url = tunnel_url or self._local_url
         ntfy_url = _get_ntfy_url()
+        tunnel_active = bool(tunnel_url)
         msg: dict[str, object] = {
-            "type": "remote_url", "url": self._active_url,
+            "type": "remote_url",
+            "url": self._active_url,
+            "tunnelActive": tunnel_active,
         }
         if ntfy_url:
             msg["ntfyUrl"] = ntfy_url
