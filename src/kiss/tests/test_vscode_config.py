@@ -14,6 +14,7 @@ from kiss.agents.vscode.vscode_config import (
     API_KEY_ENV_VARS,
     DEFAULTS,
     _get_user_shell,
+    _resolve_shell_path,
     _shell_rc_path,
     apply_config_to_env,
     get_custom_model_entry,
@@ -324,6 +325,39 @@ class TestGetUserShell:
         assert _get_user_shell() == "bash"
 
 
+class TestResolveShellPath:
+    """Test absolute shell binary resolution."""
+
+    def test_resolve_via_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When ``PATH`` is populated, returns the ``shutil.which`` result."""
+        # sh exists on every POSIX system that runs the test suite.
+        monkeypatch.setenv("PATH", "/usr/bin:/bin")
+        resolved = _resolve_shell_path("sh") or _resolve_shell_path("bash")
+        assert resolved is not None
+        assert os.path.isabs(resolved)
+
+    def test_resolve_falls_back_when_path_empty(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """With empty ``PATH``, falls back to known absolute locations."""
+        monkeypatch.setenv("PATH", "")
+        # bash is in /bin on both macOS and Linux runners; zsh on macOS.
+        resolved = _resolve_shell_path("bash")
+        # Either bash is present in a fallback path or the system truly
+        # has no bash (very unlikely); accept None to keep the test
+        # portable but verify the absolute-path invariant when found.
+        if resolved is not None:
+            assert os.path.isabs(resolved)
+            assert Path(resolved).is_file()
+
+    def test_resolve_missing_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    ) -> None:
+        """Unknown shell name with no fallback yields None."""
+        monkeypatch.setenv("PATH", str(tmp_path))
+        assert _resolve_shell_path("no-such-shell-binary") is None
+
+
 class TestShellRcPath:
     """Test RC file path resolution."""
 
@@ -371,13 +405,47 @@ class TestSourceShellEnv:
         source_shell_env()
         assert os.environ.get("GEMINI_API_KEY") == "from-source"
 
-    def test_source_handles_os_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """OSError (e.g. shell binary not found) is caught gracefully."""
+    def test_source_works_with_empty_path(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Sourcing succeeds even when ``PATH`` is empty (e.g. cron env).
+
+        Regression: previously ``subprocess.run(["zsh", ...])`` raised
+        ``FileNotFoundError`` because the shell binary could not be
+        located via the bare name lookup.  The fix resolves an absolute
+        path via :func:`_resolve_shell_path` and augments the inner
+        ``PATH`` with standard system locations.
+        """
         rc = Path.home() / ".zshrc"
-        rc.write_text('export GEMINI_API_KEY="key"\n')
+        rc.write_text('export GEMINI_API_KEY="empty-path-key"\n')
         monkeypatch.setenv("SHELL", "/bin/zsh")
         monkeypatch.setenv("PATH", "")
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        # Skip when the system has no zsh in any standard location
+        # (very unusual; macOS and modern Linux distros ship it).
+        if _resolve_shell_path("zsh") is None:
+            pytest.skip("zsh binary not available on this system")
+        source_shell_env()
+        assert os.environ.get("GEMINI_API_KEY") == "empty-path-key"
+
+    def test_source_handles_missing_shell_binary(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    ) -> None:
+        """When neither ``PATH`` nor fallback paths contain the shell,
+        ``source_shell_env`` logs a warning and returns without raising.
+        """
+        rc = Path.home() / ".zshrc"
+        rc.write_text('export GEMINI_API_KEY="never-set"\n')
+        monkeypatch.setenv("SHELL", "/bin/zsh")
+        monkeypatch.setenv("PATH", str(tmp_path))  # empty dir
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        # Force ``_resolve_shell_path`` to return None by stubbing the
+        # fallback list to a path that does not exist.
+        from kiss.agents.vscode import vscode_config as vc
+        monkeypatch.setattr(
+            vc, "_SHELL_FALLBACK_PATHS",
+            {"zsh": (str(tmp_path / "no-such-zsh"),)},
+        )
         source_shell_env()
         assert os.environ.get("GEMINI_API_KEY") is None
 

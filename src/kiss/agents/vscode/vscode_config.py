@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import shlex
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -141,6 +142,40 @@ def _get_user_shell() -> str:
     if "zsh" in shell:
         return "zsh"
     return "bash"
+
+
+# Fallback absolute locations searched when the shell binary cannot
+# be found on ``PATH`` (e.g. when ``source_shell_env`` is invoked from
+# a cron job started with a stripped environment).
+_SHELL_FALLBACK_PATHS: dict[str, tuple[str, ...]] = {
+    "zsh": ("/bin/zsh", "/usr/bin/zsh", "/usr/local/bin/zsh", "/opt/homebrew/bin/zsh"),
+    "bash": ("/bin/bash", "/usr/bin/bash", "/usr/local/bin/bash", "/opt/homebrew/bin/bash"),
+    "fish": ("/usr/local/bin/fish", "/opt/homebrew/bin/fish", "/usr/bin/fish"),
+}
+
+
+def _resolve_shell_path(shell: str) -> str | None:
+    """Return an absolute path to the requested shell binary.
+
+    First consults ``PATH`` via :func:`shutil.which`; when the calling
+    process has a minimal or empty ``PATH`` (typical for cron and
+    launchd jobs), falls back to well-known absolute installation
+    locations.
+
+    Args:
+        shell: Short shell name (``'zsh'``, ``'bash'``, or ``'fish'``).
+
+    Returns:
+        Absolute path to the shell binary, or ``None`` if no candidate
+        exists on disk.
+    """
+    found = shutil.which(shell)
+    if found:
+        return found
+    for candidate in _SHELL_FALLBACK_PATHS.get(shell, ()):
+        if Path(candidate).is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    return None
 
 
 def _shell_rc_path(shell: str) -> Path:
@@ -341,6 +376,30 @@ def source_shell_env() -> None:
     rc = _shell_rc_path(shell)
     if not rc.exists():
         return
+    shell_path = _resolve_shell_path(shell)
+    if shell_path is None:
+        logger.warning(
+            "Failed to source shell env: %s binary not found on PATH or fallback locations",
+            shell,
+        )
+        _refresh_config()
+        return
+    # ``source_shell_env`` may run from a cron / launchd context with a
+    # stripped ``PATH``.  Augment it with standard system locations so
+    # the inner shell can locate ``env`` (and any RC-referenced
+    # utilities such as ``brew shellenv``).
+    augmented_path = os.pathsep.join(
+        p for p in (
+            os.environ.get("PATH", ""),
+            "/usr/local/bin",
+            "/opt/homebrew/bin",
+            "/usr/bin",
+            "/bin",
+            "/usr/sbin",
+            "/sbin",
+        ) if p
+    )
+    sub_env = {**os.environ, "PATH": augmented_path}
     try:
         # H1 — shell-quote ``rc`` so a HOME containing single-quotes,
         # spaces, or other metacharacters cannot inject extra shell
@@ -353,10 +412,11 @@ def source_shell_env() -> None:
         else:
             cmd = f"source {rc_q} 2>/dev/null && env"
         result = subprocess.run(
-            [shell, "-c", cmd] if shell != "fish" else ["fish", "-c", cmd],
+            [shell_path, "-c", cmd],
             capture_output=True,
             text=True,
             timeout=5,
+            env=sub_env,
         )
         for line in result.stdout.splitlines():
             if "=" in line:
@@ -364,5 +424,5 @@ def source_shell_env() -> None:
                 if k in API_KEY_ENV_VARS:
                     os.environ[k] = v
     except (subprocess.TimeoutExpired, OSError):
-        logger.debug("Failed to source shell env", exc_info=True)
+        logger.warning("Failed to source shell env", exc_info=True)
     _refresh_config()
