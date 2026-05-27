@@ -463,7 +463,15 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
             self.assertEqual(resp["selected"], "gemini-2.5-pro")
 
     async def test_ws_ready_command(self) -> None:
-        """The 'ready' command returns models, inputHistory, configData, welcome, focusInput."""
+        """The 'ready' command returns models, inputHistory, configData, focusInput.
+
+        Note: ``welcome_suggestions`` is intentionally NOT emitted by
+        the webapp ``ready`` handshake — the remote-chat webview hides
+        the suggestions panel via CSS and the VS Code extension
+        populates its own ``#suggestions`` container locally.  See
+        :class:`TestWelcomeSuggestionsNotBroadcast` for the regression
+        test that pins this behaviour.
+        """
         async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
@@ -486,8 +494,8 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
             self.assertIn("models", received_types)
             self.assertIn("inputHistory", received_types)
             self.assertIn("configData", received_types)
-            self.assertIn("welcome_suggestions", received_types)
             self.assertIn("focusInput", received_types)
+            self.assertNotIn("welcome_suggestions", received_types)
 
     async def test_ws_ready_does_not_produce_unknown_error(self) -> None:
         """The 'ready' command must NOT produce an 'Unknown command' error."""
@@ -595,16 +603,31 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                     )
 
     async def test_ws_get_welcome_suggestions(self) -> None:
-        """getWelcomeSuggestions returns a welcome_suggestions event."""
+        """getWelcomeSuggestions broadcasts the remote_url info.
+
+        ``getWelcomeSuggestions`` no longer produces a
+        ``welcome_suggestions`` event (the remote-chat webview hides
+        the suggestions panel via CSS, and the VS Code extension
+        populates its own suggestions locally — broadcasting an empty
+        list used to clobber the extension's welcome page when the
+        webapp opened a new chat).  It still broadcasts the
+        ``remote_url`` event so the webapp can render the remote
+        password/share-link panel.
+        """
         async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
             await ws.send(json.dumps({"type": "getWelcomeSuggestions"}))
-            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
-            self.assertEqual(resp["type"], "welcome_suggestions")
-            self.assertIn("suggestions", resp)
-            self.assertIsInstance(resp["suggestions"], list)
+            received_types: list[str] = []
+            for _ in range(5):
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=2)
+                    received_types.append(json.loads(raw)["type"])
+                except TimeoutError:
+                    break
+            self.assertIn("remote_url", received_types)
+            self.assertNotIn("welcome_suggestions", received_types)
 
     async def test_ws_remote_url_from_active_url(self) -> None:
         """remote_url event uses in-memory _active_url even when URL file is missing."""
@@ -3151,7 +3174,7 @@ class TestSendWelcomeInfoFallbacks(IsolatedAsyncioTestCase):
                 except TimeoutError:
                     break
             types = [e.get("type") for e in events]
-            self.assertIn("welcome_suggestions", types)
+            self.assertNotIn("welcome_suggestions", types)
             url_events = [e for e in events if e.get("type") == "remote_url"]
             self.assertEqual(len(url_events), 1)
             self.assertEqual(url_events[0].get("url"), "")
@@ -4593,13 +4616,16 @@ class TestRemoteWelcomeSuggestionsEmpty(IsolatedAsyncioTestCase):
         else:
             _URL_FILE.unlink(missing_ok=True)
 
-    async def test_remote_welcome_suggestions_always_empty(self) -> None:
-        """Remote welcome_suggestions event always carries an empty list.
+    async def test_remote_welcome_suggestions_not_broadcast(self) -> None:
+        """Remote-chat ready handshake does NOT broadcast welcome_suggestions.
 
-        The remote chat webview deliberately suppresses the
-        SAMPLE_TASKS.json suggestions and centers the input textbox on
-        the welcome page instead, so the backend must broadcast an
-        empty list regardless of whether SAMPLE_TASKS.json exists.
+        The remote chat webview suppresses the SAMPLE_TASKS.json
+        suggestions via CSS and centers the input textbox on the
+        welcome page instead, so the backend never needs to broadcast
+        a ``welcome_suggestions`` event.  Broadcasting one (even an
+        empty list) used to clobber the VS Code extension's locally
+        populated suggestions panel whenever a webapp client opened a
+        new chat — see ``test_welcome_suggestions_not_broadcast.py``.
         """
         async with connect(
             f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl(),
@@ -4616,8 +4642,7 @@ class TestRemoteWelcomeSuggestionsEmpty(IsolatedAsyncioTestCase):
                 except TimeoutError:
                     break
             welcome = [m for m in msgs if m["type"] == "welcome_suggestions"]
-            self.assertTrue(len(welcome) > 0)
-            self.assertEqual(welcome[0]["suggestions"], [])
+            self.assertEqual(welcome, [])
 
 
 class TestStartMethodLifecycle(unittest.TestCase):
