@@ -1665,7 +1665,7 @@ width=device-width,initial-scale=1,maximum-scale=1">
       <div id="welcome">
         <h2>Welcome to KISS Sorcar</h2>
         <p>Your AI assistant. Ask me anything!</p>
-        <div id="welcome-config" class="welcome-config">
+        <div id="welcome-config" class="welcome-config" style="display:none;">
           <div id="welcome-remote-url"></div>
           <label class="config-label welcome-config-label">Remote password
             <div class="config-password-wrap">
@@ -2796,12 +2796,23 @@ class RemoteAccessServer:
                 )
                 self._active_url = discovered
                 url = discovered
-        if url:
-            ntfy_url = _get_ntfy_url()
-            msg: dict[str, object] = {"type": "remote_url", "url": url}
-            if ntfy_url:
-                msg["ntfyUrl"] = ntfy_url
-            self._printer.broadcast(msg)
+        # ``tunnelActive`` is True only when a real Cloudflare tunnel
+        # URL is in effect (not the local fallback).  The frontend hides
+        # the welcome-page remote-password panel when this is False so
+        # users are not shown a password field for a tunnel that does
+        # not exist.
+        tunnel_active = bool(
+            self.use_tunnel and url and url != self._local_url
+        )
+        ntfy_url = _get_ntfy_url() if url else ""
+        msg: dict[str, object] = {
+            "type": "remote_url",
+            "url": url or "",
+            "tunnelActive": tunnel_active,
+        }
+        if ntfy_url:
+            msg["ntfyUrl"] = ntfy_url
+        self._printer.broadcast(msg)
 
     @staticmethod
     async def _endpoint_send(endpoint: Any, data: str) -> None:
@@ -3369,8 +3380,11 @@ class RemoteAccessServer:
         _save_url_file(self._url_file, self._local_url, tunnel_url)
         self._active_url = tunnel_url or self._local_url
         ntfy_url = _get_ntfy_url()
+        tunnel_active = bool(tunnel_url)
         msg: dict[str, object] = {
-            "type": "remote_url", "url": self._active_url,
+            "type": "remote_url",
+            "url": self._active_url,
+            "tunnelActive": tunnel_active,
         }
         if ntfy_url:
             msg["ntfyUrl"] = ntfy_url
