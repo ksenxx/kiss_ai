@@ -129,7 +129,7 @@ export function buildChatHtml(
       <div id="welcome">
         <h2>Welcome to KISS Sorcar</h2>
         <p>Your AI assistant. Ask me anything!</p>
-        <div id="welcome-config" class="welcome-config">
+        <div id="welcome-config" class="welcome-config" style="display:none;">
           <div id="welcome-remote-url"></div>
           <label class="config-label welcome-config-label">Remote password
             <div class="config-password-wrap">

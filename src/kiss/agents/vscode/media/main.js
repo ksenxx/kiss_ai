@@ -2687,7 +2687,7 @@
         renderWelcomeSuggestions(ev.suggestions);
         break;
       case 'remote_url':
-        renderRemoteUrl(ev.url, ev.ntfyUrl);
+        renderRemoteUrl(ev.url, ev.ntfyUrl, ev.tunnelActive);
         break;
       case 'followup_suggestion': {
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) break;
@@ -3161,7 +3161,7 @@
           const bgWrTab = tabs.find(t => t.id === ev.tabId);
           if (bgWrTab) {
             bgWrTab.worktreeBarEl = null;
-            if (bgWrTab.outputFragment) {
+            if (bgWrTab.outputFragment && !isSilentDiscardMessage(ev)) {
               const cls = ev.success ? 'wt-result-ok' : 'wt-result-err';
               const div = mkEl('div', 'ev ' + cls);
               div.textContent = ev.message || '';
@@ -3581,7 +3581,7 @@
     return wrapper;
   }
 
-  function renderRemoteUrl(url, ntfyUrl) {
+  function renderRemoteUrl(url, ntfyUrl, tunnelActive) {
     const displayUrl = ntfyUrl || url;
     const containerIds = ['remote-url', 'welcome-remote-url'];
     for (const id of containerIds) {
@@ -3590,6 +3590,17 @@
       container.innerHTML = '';
       if (!displayUrl) continue;
       container.appendChild(_buildRemoteUrlBar(displayUrl, !!ntfyUrl));
+    }
+    // Hide the welcome-page remote-password panel when the Cloudflare
+    // tunnel is not active — there is no point exposing the password
+    // field for a tunnel that does not exist.  When tunnelActive is
+    // undefined (older backend) fall back to "show when we have a URL"
+    // so existing deployments keep working.
+    const welcomeCfg = document.getElementById('welcome-config');
+    if (welcomeCfg) {
+      const visible =
+        tunnelActive === undefined ? !!displayUrl : !!tunnelActive;
+      welcomeCfg.style.display = visible ? '' : 'none';
     }
   }
 
@@ -3794,8 +3805,25 @@
     });
   }
 
+  // Suppress the trivial "Discarded branch '<name>'." confirmation that
+  // would otherwise be appended to the chat output every time a
+  // worktree is discarded.  Any discard message that also carries a
+  // warning (e.g. ``"… ⚠️  Could not checkout '<orig>': …"``) still
+  // gets shown so the user sees the warning.  Merge results and
+  // partial-discard results (which always include a warning) are also
+  // unaffected.
+  function isSilentDiscardMessage(ev) {
+    if (!ev || !ev.success) return false;
+    const msg = ev.message || '';
+    return /^Discarded branch '[^']+'\.$/.test(msg);
+  }
+
   function handleWorktreeResult(ev) {
     clearWorktreeBar();
+    if (isSilentDiscardMessage(ev)) {
+      sb();
+      return;
+    }
     const cls = ev.success ? 'wt-result-ok' : 'wt-result-err';
     const div = mkEl('div', 'ev ' + cls);
     const msg = ev.message || '';
@@ -4283,19 +4311,49 @@
       'welcome-cfg-remote-password-toggle',
       'welcome-cfg-remote-password',
     );
-    // The welcome-page remote-password input mirrors the value into the
-    // settings-panel input (cfg-remote-password) so the existing
-    // collectConfigForm + saveConfig flow keeps working without changes.
-    // On blur we flush via saveSettingsIfPopulated so the password is
-    // persisted even if the user never opens the settings panel.
+    // The welcome-page remote-password input and the settings-panel
+    // input mirror each other so the existing collectConfigForm +
+    // saveConfig flow keeps working without changes.  On Enter, blur,
+    // or change we flush via saveSettingsIfPopulated so the password
+    // is persisted promptly.  The Enter handler also blurs the input
+    // so the on-screen keyboard collapses on mobile.
     const welcomePwInp = document.getElementById('welcome-cfg-remote-password');
-    if (welcomePwInp) {
+    const settingsPwInp = document.getElementById('cfg-remote-password');
+    function _flushPw() {
+      // Only save if the settings form has already been populated by
+      // configData; otherwise collectConfigForm would post stale empty
+      // fields and clobber the user's real config.  When the welcome
+      // panel is the only thing shown (before settings is ever opened)
+      // configData has already populated both inputs, so this is true.
+      saveSettingsIfPopulated();
+    }
+    if (welcomePwInp && settingsPwInp) {
       welcomePwInp.addEventListener('input', () => {
-        const settingsPw = document.getElementById('cfg-remote-password');
-        if (settingsPw) settingsPw.value = welcomePwInp.value;
+        settingsPwInp.value = welcomePwInp.value;
       });
-      welcomePwInp.addEventListener('change', saveSettingsIfPopulated);
-      welcomePwInp.addEventListener('blur', saveSettingsIfPopulated);
+      settingsPwInp.addEventListener('input', () => {
+        welcomePwInp.value = settingsPwInp.value;
+      });
+    }
+    if (welcomePwInp) {
+      welcomePwInp.addEventListener('change', _flushPw);
+      welcomePwInp.addEventListener('blur', _flushPw);
+      welcomePwInp.addEventListener('keydown', e => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          _flushPw();
+          welcomePwInp.blur();
+        }
+      });
+    }
+    if (settingsPwInp) {
+      settingsPwInp.addEventListener('keydown', e => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          _flushPw();
+          settingsPwInp.blur();
+        }
+      });
     }
 
     if (demoToggleBtn) {
