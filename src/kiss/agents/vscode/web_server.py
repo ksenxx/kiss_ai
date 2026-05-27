@@ -1382,9 +1382,8 @@ class WebPrinter(BaseBrowserPrinter):
           no copy is sent over the wire.
         * Events with neither ``tabId`` nor a resolvable ``taskId``
           are global system events (``configData``, ``models``,
-          ``history``, ``inputHistory``, ``welcome_suggestions``,
-          ``error``, etc.) and are broadcast verbatim to every
-          connected client.
+          ``history``, ``inputHistory``, ``error``, etc.) and are
+          broadcast verbatim to every connected client.
 
         Args:
             event: The event dictionary to emit.
@@ -2759,14 +2758,25 @@ class RemoteAccessServer:
 
 
     async def _send_welcome_info(self) -> None:
-        """Broadcast welcome suggestions and the active remote URL.
+        """Broadcast the active remote URL to all connected clients.
 
-        Broadcasts a ``welcome_suggestions`` event with an empty list
-        because the remote chat webview deliberately suppresses sample
-        task suggestions on the welcome page (the centered input
-        textbox is the only welcome-page UI).  Then broadcasts the
-        ``remote_url`` event using the in-memory URL, the URL file, or
-        the ``cloudflared`` metrics API as successive fallbacks.
+        Broadcasts the ``remote_url`` event using the in-memory URL,
+        the URL file, or the ``cloudflared`` metrics API as successive
+        fallbacks.
+
+        Historically this method also broadcast a
+        ``welcome_suggestions`` event with an empty list because the
+        remote-chat webview hides the sample-task suggestions panel
+        via CSS (``body.remote-chat #welcome > #suggestions { display:
+        none }``).  That broadcast was redundant for the webapp and
+        actively harmful for the VS Code extension: the extension is
+        a *second* client of the same broadcaster (over its UDS
+        connection), and it populates its own ``#suggestions``
+        container locally from ``SAMPLE_TASKS.json``.  The empty-list
+        broadcast was forwarded to the extension's webview and
+        cleared every chip on the welcome page whenever any webapp
+        client opened a new chat tab — see
+        ``test_welcome_suggestions_not_broadcast.py``.
 
         M10: the URL-file read and the ``_discover_tunnel_url_from_metrics``
         call (which spawns ``pgrep`` and does HTTP requests) are
@@ -2774,10 +2784,6 @@ class RemoteAccessServer:
         so a slow ``pgrep`` or unreachable cloudflared metrics
         endpoint cannot stall the asyncio event loop.
         """
-        self._printer.broadcast({
-            "type": "welcome_suggestions", "suggestions": [],
-        })
-
         url: str | None = self._active_url
         loop = self._loop
         assert loop is not None
