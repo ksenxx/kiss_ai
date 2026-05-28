@@ -142,6 +142,13 @@ markers = [
 ]
 # Disable timeout so tests run without time limit
 timeout = 0
+# Coverage is enabled by default via --cov/--cov-branch below. These flags are owned
+# by the pytest-cov plugin, so disabling it with `-p no:cov` would normally abort the
+# run with "unrecognized arguments: --cov=src/kiss --cov-branch". To keep
+# `uv run pytest ... -p no:cov` (and other plugin-less invocations) working, the root
+# conftest.py registers inert fallback --cov/--cov-branch options whenever pytest-cov
+# is not loaded, so these addopts always parse cleanly. Prefer `--no-cov` to turn off
+# coverage while keeping the plugin loaded.
 addopts = "--cov=src/kiss --cov-branch -m 'not slow'"
 
 [tool.coverage.run]

@@ -191,21 +191,41 @@ class ChatSorcarAgent(SorcarAgent):
                     int(getattr(agent, "total_steps", 0) or 0),
                 )
                 # Broadcast ``subagentDone`` so the frontend can stop
-                # the running indicator on the sub-agent tab.  The
-                # event is a targeted "system" event (explicit
-                # ``tabId``) so the printer sends it verbatim to
-                # every connected client; the frontend's ``case
-                # 'subagentDone':`` handler finds the sub-tab by
-                # ``tab_id`` and flips ``isDone=true``.
+                # the running indicator on the sub-agent tab.
+                #
+                # The frontend tab that displays this sub-agent was
+                # created by ``new_tab`` → ``createNewTab()`` with a
+                # randomly-generated frontend tab id, NOT the
+                # backend's ``sub_tab_id``.  The printer's subscriber
+                # map (``_subscribers[task_id]``) records that
+                # frontend tab id when ``_reattach_running_chat``
+                # subscribes it to this sub-agent's event stream.
+                # Resolve the actual viewer tab ids from the
+                # subscriber map so ``subagentDone`` reaches the
+                # correct frontend tab; fall back to ``sub_tab_id``
+                # for the ``_open_persisted_subagent_tabs`` path
+                # where the tab id is deterministic.
                 if printer is not None:
                     broadcast = getattr(printer, "broadcast", None)
                     if broadcast is not None:
                         try:
-                            broadcast({
-                                "type": "subagentDone",
-                                "tab_id": sub_tab_id,
-                                "tabId": "",
-                            })
+                            sub_task_id = getattr(
+                                agent, "_last_task_id", None,
+                            )
+                            fanout = getattr(
+                                printer, "_fanout_targets", None,
+                            )
+                            viewer_ids: list[str] = []
+                            if fanout and sub_task_id is not None:
+                                viewer_ids = fanout(sub_task_id)
+                            if sub_tab_id not in viewer_ids:
+                                viewer_ids.append(sub_tab_id)
+                            for vid in viewer_ids:
+                                broadcast({
+                                    "type": "subagentDone",
+                                    "tab_id": vid,
+                                    "tabId": "",
+                                })
                         except Exception:
                             pass
                 _RunningAgentState.unregister(sub_tab_id)
