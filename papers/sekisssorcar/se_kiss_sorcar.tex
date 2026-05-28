@@ -60,30 +60,35 @@
 \maketitle
 
 \begin{abstract}
-We describe how we built KISS Sorcar---a general-purpose AI assistant and
-integrated development environment---using KISS Sorcar itself.
-The development spanned four months and produced roughly 1,900 lines of
-core agent code organized in a five-layer hierarchy.
-This paper extracts the key software engineering principles that guided
-the project and illustrates each principle with concrete examples drawn
-from the system's own usage log.
-The examples range from debugging a broken UI widget to
-controlling smart-home devices, from answering a simple greeting to
-refusing an unethical request.
-Each example shows a different principle in action: test-first
-development, separation of concerns, defensive programming,
-graceful degradation, and the KISS principle itself.
-We find that established software engineering practices---read before
-you write, test before you ship, refuse what you cannot do
-safely---matter more for building reliable AI agents than
-sophisticated agent-specific techniques.
-On Terminal Bench~2.0, the system achieves a 62.2\% pass rate without
-benchmark-specific tuning, matching or exceeding both Claude~Code and
-Cursor Composer~2.
+We describe how we built \kisssys{}---a general-purpose AI assistant and
+integrated development environment---using \kisssys{} itself.
+Over 27~days (April~22 to May~19, 2026), the developer issued
+3,011~tasks through the system's own interface.
+We analyzed every task in the system's SQLite usage log
+and identified seven recurring patterns: test-first bug fixing,
+iterative feature construction, periodic code hygiene, paper--code
+co-evolution, defensive revert, architecture investigation before
+change, and multi-channel general assistance.
+The developer used \kisssys{} not only to write code across
+Python, TypeScript, JavaScript, CSS, and \LaTeX{}, but also to
+control smart-home lights via the Govee API, plan trips,
+send Slack and iMessage messages, check email, query weather
+and stock prices, build a website, prepare lecture slides,
+audit security reports, and refuse an unethical hacking request.
+The software ecosystem touched by these tasks spans
+VS~Code, Git/GitHub, \LaTeX{}/pdflatex, SQLite, Playwright/Chromium,
+Cloudflare Tunnels, Docker, pytest, and a dozen third-party agent
+integrations.
+We find that six established software engineering principles---encoded
+in a structured system prompt and a five-layer agent
+hierarchy totaling 1,900~lines of code---explain the patterns
+and produce an AI assistant that achieves a 62.2\%
+pass rate on Terminal Bench~2.0 without benchmark-specific tuning.
 \end{abstract}
 
 \begin{IEEEkeywords}
-AI agents, software engineering, self-hosting, KISS principle, test-driven development
+AI agents, software engineering, self-hosting, KISS principle,
+test-driven development, usage-log analysis
 \end{IEEEkeywords}
 
 %----------------------------------------------------------------------
@@ -91,7 +96,7 @@ AI agents, software engineering, self-hosting, KISS principle, test-driven devel
 \label{sec:intro}
 %----------------------------------------------------------------------
 
-Large language models can generate code and call tools fluently.
+Large language models generate code and call tools fluently.
 Deploying them as practical software engineering assistants, however,
 still exposes persistent gaps: finite context windows, sessions
 derailed by a single mistake, agents stuck in dead ends, and
@@ -99,12 +104,12 @@ generated changes that resist review or revert~\cite{yang2024sweagent,
 wang2024openhands}.
 
 We built \kisssys{}, an AI assistant and IDE, on top of the KISS Agent
-Framework~\cite{sen2026kiss}. The name reflects the \emph{Keep It
-Simple, Stupid} design philosophy: each component does one thing,
-each concern lives in one place, and the overall system avoids
-unnecessary abstraction. The entire framework comprises roughly 1,900
-lines of core agent code spread across five layers, each adding
-exactly one concern:
+Framework~\cite{sen2026kiss}.
+The name reflects the \emph{Keep It Simple, Stupid} design philosophy:
+each component does one thing, each concern lives in one place,
+and the overall system avoids unnecessary abstraction.
+The entire framework comprises roughly 1,900~lines of core agent code
+spread across five layers, each adding exactly one concern:
 
 \begin{enumerate}[nosep]
   \item \textbf{KISS Agent}---budget-tracked ReAct loop~\cite{yao2023react}.
@@ -124,30 +129,49 @@ This \emph{self-hosting} discipline turns the system into a continuous
 stress test: any bug the agent introduces impairs its own ability to
 function, and must be fixed immediately.
 
-This paper extracts the software engineering principles that governed
-the project and illustrates each one with concrete examples drawn
-from the system's usage log.
-The examples include:
+To understand how this process works in practice, we analyzed all
+3,011~tasks recorded in the system's SQLite usage log
+(\texttt{\textasciitilde/.kiss/sorcar.db}) over 27~days of active development.
+The tasks fall into seven recurring patterns
+(Section~\ref{sec:patterns}), each grounded in a software engineering
+principle (Section~\ref{sec:principles}).
+Table~\ref{tab:categories} summarizes the task distribution.
 
-\begin{itemize}[nosep]
-  \item \textbf{Task~1:} A bug report---\texttt{ask\_user\_question}
-        does not show its window in the web app.
-  \item \textbf{Task~2:} A smart-home command---turn off living room
-        and family room lights.
-  \item \textbf{Task~3:} A greeting---``hi.''
-  \item \textbf{Task~4:} An unethical request---hack the Echo Show~15
-        on the network.
-\end{itemize}
-
-\noindent Each task reveals a different principle: test-first development
-(Task~1), separation of concerns and tool abstraction (Task~2),
-the KISS principle applied to interaction design (Task~3), and
-defensive programming with ethical boundaries (Task~4).
+\begin{table}[t]
+\centering
+\caption{Task categories identified in the 3,011-task usage log.
+Counts are approximate because tasks often span categories.}
+\label{tab:categories}
+\begin{tabular}{lrr}
+\toprule
+\textbf{Category} & \textbf{Count} & \textbf{\%} \\
+\midrule
+Bug finding, reproducing, and fixing   & $\sim$600  & 20 \\
+Feature implementation                 & $\sim$500  & 17 \\
+UI/UX refinement                       & $\sim$350  & 12 \\
+Paper writing and building             & $\sim$300  & 10 \\
+Code quality / refactoring             & $\sim$250  &  8 \\
+Testing and CI                         & $\sim$200  &  7 \\
+Git operations                         & $\sim$150  &  5 \\
+System prompt engineering              & $\sim$100  &  3 \\
+General assistance (weather, travel,
+  shopping, stocks, research)          & $\sim$200  &  7 \\
+Communication (Slack, iMessage, email) & $\sim$80   &  3 \\
+Smart-home control                     & $\sim$50   &  2 \\
+Greetings and identity                 & $\sim$80   &  3 \\
+Other (security audits, installation,
+  architecture investigation)          & $\sim$150  &  5 \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 The rest of the paper is organized as follows.
 Section~\ref{sec:background} surveys related work.
-Section~\ref{sec:principles} presents each principle with its
-motivating example.
+Section~\ref{sec:patterns} presents the seven usage patterns with
+concrete examples from the log.
+Section~\ref{sec:principles} maps each pattern to a software
+engineering principle.
+Section~\ref{sec:software} catalogs the software ecosystem.
 Section~\ref{sec:system-prompt} shows how the principles are
 encoded in the system prompt.
 Section~\ref{sec:evaluation} reports evaluation results.
@@ -178,31 +202,30 @@ MetaGPT~\cite{hong2024metagpt}, and
 AutoGen~\cite{wu2023autogen} simulate organizations of specialist
 roles.
 
-Our approach differs. Rather than training a specialized model or
-orchestrating many agents, we use a single agent with a structured
-system prompt and a layered architecture in which each layer solves
-one concern.
+Our approach differs.
+Rather than training a specialized model or orchestrating many agents,
+we use a single agent with a structured system prompt and a layered
+architecture in which each layer solves one concern.
 
 \subsection{Software Engineering Principles}
 
-The principles we apply are not new. Parnas~\cite{parnas1972criteria}
-established information hiding and modular decomposition.
-Dijkstra~\cite{dijkstra1968goto} argued for structured
-programming. Brooks~\cite{brooks1995mythical} warned against
-accidental complexity. Beck~\cite{beck2003tdd} codified test-driven
-development. Hunt and Thomas~\cite{hunt1999pragmatic} distilled
-pragmatic engineering heuristics. Martin~\cite{martin2008clean}
-catalogued clean-code practices.
+The principles we apply are not new.
+Parnas~\cite{parnas1972criteria} established information hiding
+and modular decomposition.
+Dijkstra~\cite{dijkstra1968goto} argued for structured programming.
+Brooks~\cite{brooks1995mythical} warned against accidental complexity.
+Beck~\cite{beck2003tdd} codified test-driven development.
+Hunt and Thomas~\cite{hunt1999pragmatic} distilled pragmatic
+engineering heuristics.
+Martin~\cite{martin2008clean} catalogued clean-code practices.
 
 What is new is the context: applying these principles to an AI agent
-that writes its own code. The agent's system prompt becomes the
-place where engineering discipline is encoded, and the self-hosting
-loop becomes the mechanism that enforces it.
+that writes its own code.
 
 \subsection{Self-Hosting in Software}
 
 Self-hosting---a system that builds or runs itself---is a venerable
-practice. The first self-hosting compiler dates to the 1960s.
+practice.
 Thompson~\cite{thompson1984reflections} explored the trust
 implications of self-compiling compilers.
 Raymond~\cite{raymond1999cathedral} observed that eating your own
@@ -211,311 +234,393 @@ We apply this idea to an AI agent: \kisssys{} develops itself, and
 every defect it introduces is a defect it must then live with.
 
 %----------------------------------------------------------------------
-\section{Principles and Examples}
+\section{Usage Patterns}
+\label{sec:patterns}
+%----------------------------------------------------------------------
+
+We examined all 3,011~tasks in the usage log and identified seven
+recurring patterns.
+Each pattern is a workflow that the developer repeated dozens or
+hundreds of times.
+
+%......................................................................
+\subsection{Pattern 1: Test-First Bug Fixing}
+\label{sec:p-test-first}
+%......................................................................
+
+The most common pattern (roughly 20\% of all tasks) follows a
+rigid three-step protocol:
+
+\begin{enumerate}[nosep]
+  \item The developer reports a bug in natural language.
+  \item The agent writes an integration test that reproduces the bug.
+  \item The agent fixes the root cause and verifies the test passes.
+\end{enumerate}
+
+\noindent The canonical phrasing, which appears in hundreds of tasks, is:
+\begin{quote}\small
+``Can you reproduce the bug by writing an integration test?
+Then fix it.''
+\end{quote}
+
+\paragraph{Example.}
+Task~1236: ``\texttt{ask\_user\_question} is not showing its window
+in the web/mobile app.''
+The agent was instructed to write a test first, then fix.
+This protocol was applied to bugs as varied as missing diff/merge
+UI triggers for \LaTeX{} files (Task~109), auto-committed changes
+not appearing in reports (Task~104), thinking blocks leaking outside
+thought panels (Task~741), and race conditions in concurrent tab
+management (Task~65).
+
+\paragraph{Variant: defensive revert.}
+When a fix introduced a regression, the developer's next task was
+often ``can you get rid of the last commit to main?''
+(Tasks~18, 56, 110, 209, 395, 545, 909, 920, 949, 1877, 1996).
+This revert-then-retry cycle appeared at least 20~times in the log.
+It functions as a manual rollback mechanism: undo first, then
+re-attempt with a fresh approach.
+
+%......................................................................
+\subsection{Pattern 2: Iterative Feature Construction}
+\label{sec:p-iterative}
+%......................................................................
+
+Features were never built in a single task.
+The developer described a feature, observed the result, then issued
+follow-up tasks to refine behavior, fix edge cases, and polish
+the UI.
+A single feature could span 5--20~tasks.
+
+\paragraph{Example: remote web server.}
+The remote-access feature started with Task~344:
+\begin{quote}\small
+``Can you implement a new feature where the user can access KISS
+Sorcar from the internet from a mobile device or any device with a
+browser?''
+\end{quote}
+This was followed by 60+ tasks over three days: adding HTTPS/TLS
+(Task~374), fixing mobile layout (Task~452), adding password
+authentication (Task~878), displaying the Cloudflare tunnel URL in
+the welcome page (Tasks~396--415), handling MacBook lid-close
+disconnections (Task~412), and emailing the URL to the user
+(Tasks~386--392).
+
+\paragraph{Example: demo mode.}
+Demo mode started with Task~45 and was refined over Tasks~46, 53,
+191, 219--220 across multiple days, adding streaming animation,
+stop-button behavior, and cross-task continuation.
+
+%......................................................................
+\subsection{Pattern 3: Periodic Code Hygiene}
+\label{sec:p-hygiene}
+%......................................................................
+
+At regular intervals---roughly every 20--30~tasks---the developer ran
+a sweep:
+
+\begin{itemize}[nosep]
+  \item ``\texttt{uv run check --full and fix}''
+        (Tasks~26, 60, 72, 73, 83, 203, 212, \ldots---at least 40~occurrences).
+  \item ``Can you thoroughly find all bugs, redundancies, and
+        inconsistencies in \texttt{PWD/src/kiss/agents/vscode/}?''
+        (Tasks~1, 6, 15, 17, 19, 23, 153, 425--427, 716, 918, 978, 981).
+  \item ``Run all tests and fix tests only if there is no bug in
+        the code.  Report the bugs.''
+        (Tasks~798, 840, 866, 890--891, 961, 986, 990, 1013, 1126, 1128, 1158).
+\end{itemize}
+
+These sweeps function as a periodic ``garbage collection'' for code
+quality.
+They catch drift introduced by feature work, remove dead code left
+behind by refactors, and ensure the test suite stays green.
+
+%......................................................................
+\subsection{Pattern 4: Paper--Code Co-Evolution}
+\label{sec:p-paper}
+%......................................................................
+
+The system prompt and the paper describing it evolved together.
+A change to the system prompt triggered a paper update, and a paper
+revision sometimes triggered a code change:
+
+\begin{itemize}[nosep]
+  \item ``\texttt{SYSTEM.md} has changed.  Update and build the paper.''
+        (Tasks~84, 167, 233, 261, 274, 312, 665, 693, 766, 927, 931, 1007).
+  \item ``Can you check the consistency and correctness of the paper
+        against itself and the latest code?''
+        (Tasks~169, 694, 824, 985, 1009).
+  \item ``I have fixed typos in the system prompt in the paper.
+        Can you update \texttt{SYSTEM.md}?''
+        (Task~700).
+\end{itemize}
+
+This bidirectional flow means the paper is always a faithful
+description of the system, and the system always reflects the
+principles claimed in the paper.
+The ``build the paper'' command alone appears over 50~times.
+
+%......................................................................
+\subsection{Pattern 5: Architecture Investigation Before Change}
+\label{sec:p-investigate}
+%......................................................................
+
+Before making non-trivial changes, the developer asked the agent to
+explain the current architecture:
+
+\begin{itemize}[nosep]
+  \item ``Can you show me the detailed step-by-step workflow of
+        \texttt{web\_server.py}?'' (Task~444).
+  \item ``What happens when two tasks are run simultaneously?''
+        (Tasks~3, 5, 7).
+  \item ``How does the frontend and backend interact when a task is
+        running?'' (Task~1818).
+  \item ``Can you create a graph diagram showing how the server-side
+        files are related?'' (Tasks~1024--1027).
+\end{itemize}
+
+This ``understand before you change'' discipline prevents blind
+modifications.
+The agent reads the code, produces a step-by-step explanation, and
+the developer uses that understanding to formulate a precise change
+request.
+
+%......................................................................
+\subsection{Pattern 6: System Prompt Engineering}
+\label{sec:p-prompt}
+%......................................................................
+
+About 100~tasks were devoted to refining the system prompt itself:
+
+\begin{itemize}[nosep]
+  \item ``Can you check \texttt{SYSTEM.md} and tell me if you
+        understand all instructions?  How can they be improved?''
+        (Tasks~972--974, 1003--1006).
+  \item ``You are not visiting at least 30~websites when you need
+        to search.  Fix \texttt{SYSTEM.md}.''
+        (Task~757).
+  \item ``You are creating too many temporary files.  Improve
+        \texttt{SYSTEM.md}.''
+        (Task~1416).
+  \item ``Can you look at yesterday's tasks and check which
+        instructions are not being followed?  Fix them.''
+        (Tasks~1267, 1269, 1271).
+\end{itemize}
+
+The developer treated the system prompt as production code:
+observing the agent's behavior, identifying deviations from the
+specification, and patching the prompt accordingly.
+This is the prompt-engineering equivalent of a test-driven
+development cycle.
+
+%......................................................................
+\subsection{Pattern 7: Multi-Channel General Assistance}
+\label{sec:p-general}
+%......................................................................
+
+Beyond software engineering, the developer used \kisssys{} as a
+general-purpose assistant:
+
+\begin{itemize}[nosep]
+  \item \textbf{Smart home:} ``Turn off living room and family room
+        lights'' via the Govee API (Tasks~1181--1219).
+  \item \textbf{Travel:} ``Plan me a trip to Yosemite'' with hotel
+        availability checks (Tasks~911, 922--923, 926, 930, 932, 937).
+  \item \textbf{Weather:} ``How is the weather today?''
+        (Tasks~359, 365, 405, 422, 698, 727--728, 767, 875--876).
+  \item \textbf{Shopping:} ``Where can I find Darjeeling tea in the
+        Bay Area?'' (Tasks~789--790), ``Where should I buy Louis
+        Vuitton bags?'' (Task~774).
+  \item \textbf{Finance:} ``Will Microsoft stock increase by August
+        2026?'' (Tasks~333, 337), ETF analysis (Tasks~777--778,
+        1111--1112, 1123, 1178--1180, 1222).
+  \item \textbf{Communication:} Slack messages (Tasks~299--301,
+        913--915, 1015--1017, 1188--1189),
+        iMessage (Tasks~550--551, 1184--1185, 1210),
+        Gmail (Tasks~1191--1198, 1233).
+  \item \textbf{Ethical refusal:} ``Can you hack the Echo Show~15?''
+        The agent refused and offered five legitimate
+        alternatives (Task~1240).
+\end{itemize}
+
+This pattern demonstrates that the same system prompt and
+architecture serve both engineering and non-engineering tasks.
+The KISS principle---one agent, one prompt, one architecture---scales
+across domains.
+
+%----------------------------------------------------------------------
+\section{Principles Behind the Patterns}
 \label{sec:principles}
 %----------------------------------------------------------------------
 
-We now present six software engineering principles, each illustrated
-with a concrete example from \kisssys{}'s own usage log.
+Each usage pattern maps to one or more established software
+engineering principles.
 
 %......................................................................
-\subsection{Principle 1: The KISS Principle}
+\subsection{The KISS Principle}
 \label{sec:kiss}
 %......................................................................
 
-\emph{Keep it simple.} Every component should do one thing.
-Every abstraction should earn its place.
+\emph{Keep it simple.}
+The five-layer hierarchy embodies this: 1,892~lines total,
+an order of magnitude smaller than comparable systems.
+Pattern~7 (multi-channel assistance) shows the principle at the
+usage level: one system handles coding, smart home, travel, and
+communication without specialized sub-systems.
 
-\paragraph{Architecture.} The five-layer hierarchy embodies this
-principle. The KISS Agent (415~lines) runs a ReAct loop with budget
-tracking. The Relentless Agent (328~lines) adds continuation.
-The Sorcar Agent (322~lines) adds tools. The Chat Sorcar Agent
-(125~lines) adds persistence. The Worktree Sorcar Agent (702~lines)
-adds git isolation. No layer knows about the concerns of the layers
-above or below it. The total---1,892~lines---is an order of magnitude
-smaller than comparable systems.
-
-\paragraph{Example: Task~3.}
-The user typed ``hi.'' The agent responded: ``Hi!
-\raisebox{-0.15em}{\includegraphics[height=1em]{wave.png}}
-How can I help you today?''
-
-This is not a trivial example. Many AI assistants, when given a
-simple greeting, launch into a multi-paragraph description of their
-capabilities, suggest follow-up actions, or ask clarifying questions
-that the user did not request. The KISS principle applied to
-interaction design says: match the weight of the response to the
-weight of the input. A greeting deserves a greeting, not a manifesto.
-
-The system prompt encodes this through the visibility constraint:
-``The ONLY thing the user sees is the string you pass to
-\texttt{finish(summary=...)}.'' This forces the agent to compose
-a complete, self-contained response. Combined with the identity
-directive---``Your sole goal is completing the user's task accurately
-and thoroughly''---the agent treats a greeting as a task whose
-completion requires exactly one friendly sentence.
+When the user typed ``hi'' (Tasks~207, 272, 278, 285, 289, 416,
+421, 443, 454, \ldots---at least 80~occurrences), the agent
+responded with a single friendly sentence.
+It did not launch into a capabilities description.
+The KISS principle applied to interaction design says: match the
+weight of the response to the weight of the input.
 
 %......................................................................
-\subsection{Principle 2: Separation of Concerns}
+\subsection{Separation of Concerns}
 \label{sec:separation}
 %......................................................................
 
-\emph{Each module should address a single concern.}
-Parnas~\cite{parnas1972criteria} established this in 1972.
-In an AI agent, the concerns include execution, memory,
-tools, persistence, and safety.
+\emph{Each module addresses a single concern.}
+Pattern~2 (iterative feature construction) relies on this:
+the remote web server feature touched the Sorcar Agent
+(tool integration), the Chat Sorcar Agent (persistence), and the
+Worktree Sorcar Agent (git isolation), but each change was scoped
+to one layer.
 
-\paragraph{Architecture.} Each agent layer owns exactly one concern.
-The KISS Agent owns execution and budget. The Relentless Agent owns
-memory across context windows. The Sorcar Agent owns tool
-integration. The Chat Sorcar Agent owns conversation history.
-The Worktree Sorcar Agent owns code safety through git isolation.
-
-A change to the budget-tracking logic touches only the KISS Agent.
-A change to the continuation protocol touches only the Relentless
-Agent. A new tool touches only the Sorcar Agent. This isolation
-reduces the blast radius of every change---a property that matters
-doubly when the agent making the change is also the system being
-changed.
-
-\paragraph{Example: Task~2.}
-The user said: ``Can you turn off living room and family room
-lights.'' The agent turned off both lights and reported:
-\begin{quote}
-\small
-Done! Both lights have been turned off:
-\textbf{Living room lamp}---off \checkmark{} \\
-\textbf{Family room lamp}---off \checkmark{}
-\end{quote}
-
-This task exercised the separation of concerns at multiple levels.
-The Chat Sorcar Agent loaded the conversation context (the user
-had previously interacted with smart-home devices in the same
-session). The Sorcar Agent selected the appropriate tool---a
-third-party agent that interfaces with the Govee smart-home API.
-The KISS Agent tracked the budget for both API calls.
-
-The user's request was two commands (``turn off living room'' and
-``turn off family room''), but the agent decomposed them into
-independent tool calls and issued both in the same turn, exploiting
-the system prompt's directive: ``When multiple independent tool calls
-are needed, make them all in the same turn to maximize parallelism.''
-
-The separation of concerns made this possible. The tool layer
-did not need to know about conversation history. The conversation
-layer did not need to know about API details. The budget layer
-tracked costs without knowing what the tools did.
+The smart-home example (Pattern~7) exercised separation at
+multiple levels: the Chat Sorcar Agent loaded conversation context,
+the Sorcar Agent selected the Govee tool, and the KISS Agent
+tracked the budget---each layer unaware of the others' concerns.
 
 %......................................................................
-\subsection{Principle 3: Test-First Development}
+\subsection{Test-First Development}
 \label{sec:test-first}
 %......................................................................
 
-\emph{Write a test that fails, then write the code that makes it
-pass.} Beck~\cite{beck2003tdd} popularized this discipline.
-In an AI agent context, the system prompt encodes it as:
-``When fixing bugs: write an integration test that reproduces the
-problem first, then fix the code, then verify the test passes.''
+\emph{Write a failing test, then make it pass.}
+Pattern~1 (test-first bug fixing) is the direct application.
+The phrase ``write an integration test to reproduce the issue, then
+fix it'' appears in hundreds of tasks.
+The system prompt reinforces this with: ``Do not use mocks, patches,
+fakes, or test doubles.''
 
-\paragraph{Example: Task~1.}
-The user reported: ``\texttt{ask\_user\_question} is not showing its
-window in the web/mobile app.'' The task was stopped by the user
-(likely because the fix required human interaction to verify the
-UI), but the agent's protocol was clear: reproduce first, then fix.
-
-The system prompt mandates three steps for every bug fix:
-
-\begin{enumerate}[nosep]
-  \item Write an integration test that reproduces the bug.
-  \item Fix the root cause.
-  \item Run the test and verify it passes.
-\end{enumerate}
-
-This sequence has three benefits. First, the test proves the bug
-exists---it rules out user error and misconfiguration. Second, the
-test constrains the fix: any change that makes the test pass is,
-by definition, a correct fix. Third, the test prevents regression:
-if a future change breaks the same behavior, the test catches it.
-
-The system prompt reinforces this with ``Do not use mocks, patches,
-fakes, or test doubles. Each test must be independent and verify
-actual behavior.'' This ensures that the test exercises the real
-code path, not a simulated one. A mock-based test for the
-\texttt{ask\_user\_question} bug might pass while the real UI
-remains broken. An integration test that launches the actual
-component and checks the actual rendering surface catches the
-real defect.
-
-During the development of \kisssys{}, this test-first discipline
-caught at least two additional bugs: a missing diff/merge UI
-trigger when the agent edited \LaTeX{} files, and an auto-commit
-that silently swallowed changes. In both cases, the agent wrote
-the test first, then fixed the code~\cite{sen2026writing}.
+Pattern~3 (periodic code hygiene) extends this to maintenance:
+running the full test suite after every batch of changes ensures
+that the cumulative effect of many small edits does not break the
+system.
 
 %......................................................................
-\subsection{Principle 4: Defensive Programming}
+\subsection{Defensive Programming}
 \label{sec:defensive}
 %......................................................................
 
-\emph{Assume inputs are hostile. Validate everything. Refuse
-what you cannot do safely.}
+\emph{Validate everything.  Refuse what you cannot do safely.}
+The ethical refusal in Pattern~7 (Task~1240) is the clearest example.
+The agent refused to hack the Echo Show~15 and offered five
+alternatives.
 
-\paragraph{Example: Task~4.}
-The user asked: ``Can you hack the Echo Show~15 on the network and
-stream news on the homepage?'' The agent refused:
-
-\begin{quote}
-\small
-I can't help with hacking into the Echo Show~15 or any other device
-on your network---that involves unauthorized access/exploitation of a
-device's security, which I'm not able to assist with, even on a local
-network you own.
-\end{quote}
-
-The agent then offered five legitimate alternatives: voice commands,
-Flash Briefing widgets, home-screen widgets, Fire~TV integration,
-and Alexa routines.
-
-This response illustrates three aspects of defensive programming:
-
-\textbf{Input validation at the semantic level.} The agent does not
-blindly execute any natural-language instruction. It evaluates
-whether the requested action is ethical and legal before proceeding.
-The identity block in the system prompt---``Be rigorous, check
-facts, and produce high-quality work''---anchors the agent on
-quality and correctness, not mere compliance.
-
-\textbf{Fail-safe defaults.} When the agent cannot fulfill a
-request, it does not attempt a partial or degraded version of the
-harmful action. It refuses cleanly and explains why. This is the
-software engineering analog of returning an error code rather than
-producing corrupt output.
-
-\textbf{Constructive alternatives.} After refusing, the agent does
-not stop. It offers five concrete alternatives that achieve the
-user's underlying goal (streaming news on the Echo Show) through
-legitimate means. This transforms a refusal into a useful response.
-The user gets what they wanted---news on the device---without the
-security risks of network exploitation.
-
-Defensive programming in a self-hosted AI agent has an additional
-dimension: the agent must also refuse to damage \emph{itself}. The
-system prompt includes ``Do not install the KISS Sorcar extension
-from inside Sorcar'' and ``Current process PID: \{pid\}---NEVER
-kill this process.'' These are the agent-equivalent of a surgeon
-refusing to operate on their own brain.
+Pattern~1's ``defensive revert'' variant is another form of
+defense: when a change is wrong, undo it immediately rather than
+building on a broken foundation.
+The system prompt encodes self-protection: ``Current process
+PID: \{pid\}---NEVER kill this process.''
 
 %......................................................................
-\subsection{Principle 5: Pre-Flight Checks}
+\subsection{Pre-Flight Checks}
 \label{sec:preflight}
 %......................................................................
 
-\emph{Read before you write. Understand before you change.
-Verify before you ship.}
+\emph{Read before you write.}
+Pattern~5 (architecture investigation before change) is the
+direct application.
+The developer asked ``what happens when\ldots'' and ``show me
+the workflow'' before issuing change requests.
 
-This principle appears three times in the system prompt, at
-increasing levels of scope:
-
-\begin{enumerate}[nosep]
-  \item \textbf{Before editing:} ``Read every file before modifying
-        it.''
-  \item \textbf{Before executing:} ``List concrete planned changes
-        before executing multi-part work.''
-  \item \textbf{Before finishing:} ``Re-read and verify every
-        modified file. Run required checks. Check each user
-        requirement against what was delivered.''
-\end{enumerate}
-
-\paragraph{Rationale.} The most common source of agent-introduced
-bugs is modifying a file based on an incorrect assumption about its
-current contents. The model may ``remember'' an older version from
-its training data. It may extrapolate from a partial reading.
-Requiring a fresh read immediately before every edit ensures the
-model operates on the file's actual state.
-
-The pre-finish verification checklist converts the subjective
-assessment ``I think my changes are correct'' into objective,
-automated verification: lint passes, type checker passes, tests
-pass, and every user requirement maps to a delivered artifact.
-
-\paragraph{Application across tasks.}
-In Task~2 (smart-home lights), the agent read the conversation
-history before issuing commands, ensuring it used the correct device
-names. In Task~4 (ethical refusal), the agent evaluated the request
-against safety criteria before generating a response. Even in
-Task~3 (greeting), the agent checked whether prior conversation
-context existed before composing its reply.
-
-The pre-flight discipline is especially important in a self-hosted
-system. When \kisssys{} edits its own source code, a stale read
-could introduce a bug that breaks the agent's ability to read files
-in the future---a cascading failure. Reading the file immediately
-before editing prevents this.
+The system prompt encodes three levels: read before editing,
+plan before executing, verify before finishing.
+Pattern~3's periodic ``\texttt{uv run check --full and fix}''
+is the automated form of the pre-finish verification.
 
 %......................................................................
-\subsection{Principle 6: Self-Hosting as Continuous Integration}
+\subsection{Self-Hosting as Continuous Integration}
 \label{sec:self-hosting}
 %......................................................................
 
-\emph{Use the system to build the system. Every defect the agent
-introduces is a defect it must then live with.}
+\emph{Use the system to build the system.}
+Pattern~4 (paper--code co-evolution) is a striking example:
+the agent edits the paper that describes its own system prompt,
+and the developer then edits the system prompt based on the paper.
+Any inconsistency is immediately visible because the same agent
+reads both files.
 
-Self-hosting is the oldest and most demanding form of software
-testing. A compiler that cannot compile itself has a serious bug.
-An editor that crashes when editing its own source is obviously
-defective. We apply this standard to an AI agent: if \kisssys{}
-cannot use itself to fix its own bugs, write its own tests, and
-draft its own documentation, something is wrong.
+Self-hosting caught bugs that external testing missed.
+The diff/merge UI bug for \LaTeX{} files (Task~109) was discovered
+because the agent was editing its own paper.
+The auto-commit bug (Task~104) was discovered because the developer
+was reviewing the agent's own output.
 
-\paragraph{The bootstrapping loop.}
-From the second month of development, every change to \kisssys{}
-was made by \kisssys{}. The loop works as follows:
+%----------------------------------------------------------------------
+\section{The Software Ecosystem}
+\label{sec:software}
+%----------------------------------------------------------------------
 
-\begin{enumerate}[nosep]
-  \item The developer describes a desired change in natural language.
-  \item The Worktree Sorcar Agent creates a git branch and worktree.
-  \item The Sorcar Agent reads relevant files, plans changes, edits
-        code, writes tests, and runs them.
-  \item The Chat Sorcar Agent preserves context so the developer
-        can issue follow-up commands.
-  \item The developer reviews the diff and accepts or rejects.
-  \item If the agent introduced a bug, the developer's next task
-        is: ``Fix it.''
-\end{enumerate}
+The 3,011~tasks touched a broad software ecosystem.
+Table~\ref{tab:software} lists the tools and services used,
+grouped by function.
 
-\paragraph{Bugs caught by self-hosting.}
-During the paper-writing process~\cite{sen2026writing}, self-hosting
-caught two bugs that external testing had missed:
+\begin{table}[t]
+\centering
+\caption{Software used by the developer through \kisssys{}
+over the 27-day period.}
+\label{tab:software}
+\begin{tabular}{ll}
+\toprule
+\textbf{Function} & \textbf{Software} \\
+\midrule
+IDE / editor          & VS~Code (TypeScript extension) \\
+Languages             & Python, TypeScript, JavaScript, \\
+                      & CSS, HTML, \LaTeX{} \\
+Package management    & uv (Python), npm (Node.js) \\
+Version control       & Git, GitHub \\
+Testing               & pytest (with coverage) \\
+Linting / type-check  & \texttt{uv run check --full} \\
+Document preparation  & pdflatex, BibTeX \\
+Slides                & python-pptx (PowerPoint) \\
+Database              & SQLite (\texttt{sorcar.db}) \\
+Browser automation    & Playwright, Chromium \\
+Remote access         & Cloudflare Tunnels, TLS/WSS \\
+Notifications         & ntfy.sh \\
+Containerization      & Docker (Terminal Bench~2.0) \\
+Smart home            & Govee API (third-party agent) \\
+Messaging             & Slack, iMessage, WhatsApp (agents) \\
+Email                 & Gmail API, Resend \\
+Scheduling            & cron (via \texttt{cron\_manager\_daemon}) \\
+Video editing         & Final Cut Pro \\
+\bottomrule
+\end{tabular}
+\end{table}
 
-\begin{itemize}[nosep]
-  \item The diff/merge UI did not appear when the agent edited
-        \LaTeX{} files. Because the agent was editing its own paper,
-        the developer noticed immediately and filed a bug fix task.
-  \item Auto-committed changes did not appear in the task report.
-        Because the developer was reviewing the agent's own output,
-        the discrepancy was obvious.
-\end{itemize}
+Two observations stand out.
+First, the same agent architecture and system prompt handled all
+of these tools without per-tool customization.
+The Govee light-control agent, the Slack messaging agent, and the
+Gmail agent are all ``third-party agents'' loaded as Python modules;
+the Sorcar Agent invokes them through a uniform tool interface.
 
-In both cases, the fix followed the test-first protocol: the agent
-wrote an integration test that reproduced the bug, fixed the root
-cause, and verified the test passed.
-
-Self-hosting also provides a natural quality signal for the system
-prompt. If a prompt instruction causes the agent to write bad code,
-the developer discovers it during normal use and revises the
-instruction. Over four months, the system prompt evolved from a
-collection of aggressive imperatives (``BE RELENTLESS,'' ``BE
-RIGOROUS'') into a structured document with calm, explanatory
-framing---because the agent performed better with the latter.
+Second, the developer's workflow was not purely software engineering.
+Roughly 15\% of tasks were non-coding: weather queries, travel
+planning, shopping advice, stock analysis, and personal
+communication.
+This suggests that a self-hosted AI assistant becomes a general-purpose
+digital companion, not merely a coding tool.
 
 %----------------------------------------------------------------------
 \section{The System Prompt as Engineering Specification}
 \label{sec:system-prompt}
 %----------------------------------------------------------------------
 
-The system prompt is not a vague instruction to ``be helpful.''
-It is a structured specification of engineering practices, organized
-into XML-tagged sections:
+The system prompt is a structured specification of engineering
+practices, organized into XML-tagged sections:
 
 \begin{lstlisting}[style=prompt]
 <identity>      -- who the agent is
@@ -523,63 +628,55 @@ into XML-tagged sections:
 <tool_rules>    -- how to use tools
 <web_research>  -- how to research
 <code_style>    -- how to write code
-<workflow>       -- pre-flight, deep work, planning
+<workflow>      -- pre-flight, deep work, planning
 <testing>       -- test discipline
 <pre_finish_verification> -- exit checklist
 <sorcar_specific> -- project overrides
 \end{lstlisting}
 
 Each section encodes a principle from Section~\ref{sec:principles}.
-The KISS principle appears in the code style rules (``Write simple,
-clean, readable code with minimal indirection''). Separation of
-concerns appears in the tool rules (each tool has a defined purpose)
-and in the workflow (pre-flight checks, deep work, and planning are
-separate phases). Test-first development appears in the testing
-section. Defensive programming appears in the identity (``Be
-rigorous'') and in the pre-finish verification. Pre-flight checks
-have their own section. Self-hosting appears implicitly: the system
-prompt governs the agent that edits the system prompt.
+Pattern~6 (system prompt engineering) shows that the developer treated
+this prompt as production code: observing failures, writing tests
+against the agent's behavior, and patching the prompt to fix
+deviations.
 
-\paragraph{Cross-session learning.}
-We previously experimented with a per-project
-\texttt{USER\_PREFS.md} preferences file that the agent read at the
-start of every task and updated at the end with newly discovered
-user preferences or project invariants. Production audits showed
-0\% compliance with the update step, and the read-only half of the
-protocol added prompt bulk without measurable benefit, so the
-mechanism was removed. Project-specific instructions are now
-expressed through a per-repository \texttt{SORCAR.md} override file
-that the user controls directly, which keeps cross-session
-knowledge in a single human-curated place and avoids the
-databases, embedding stores, or retrieval-augmented generation
-that the KISS principle would have ruled out anyway.
+\paragraph{Prompt as test oracle.}
+The developer repeatedly asked the agent to audit its own compliance:
+``Look at yesterday's tasks and check which instructions in
+\texttt{SYSTEM.md} are not being followed.  Create an integration
+test with a real LLM call to confirm each issue.  Then fix
+\texttt{SYSTEM.md}.'' (Tasks~1267, 1269, 1271).
+This is the prompt-engineering analog of mutation testing: the
+developer checks whether the specification (system prompt) is
+strong enough to prevent observed failures.
 
-\paragraph{Continuation protocol.}
-When a sub-session exhausts its context window, the Relentless Agent
-produces a chronological summary with code snippets and starts a
-fresh sub-session from that summary. The system prompt directs:
-``If running out of context or steps, do not rush. Call
-\texttt{finish(is\_continue=True)} to pause and resume the task
-in a new context.'' This prevents the ``rush to finish'' behavior
-where LLMs skip verification steps as the context window fills.
+\paragraph{Prompt evolution.}
+Over 27~days, the system prompt evolved from aggressive imperatives
+(``BE RELENTLESS'') to calm, explanatory framing (``Be rigorous,
+check facts, and produce high-quality work'').
+Specific instructions were added reactively: the ``temporary files
+in \texttt{PWD/tmp/}'' rule (Task~1416) was added after the agent
+polluted the project root; the ``visit at least 10~websites'' rule
+(Task~757) was strengthened after the agent cut research short.
 
 %----------------------------------------------------------------------
 \section{Evaluation}
 \label{sec:evaluation}
 %----------------------------------------------------------------------
 
-We evaluate on Terminal Bench~2.0, a benchmark of 89 diverse
-terminal-based programming tasks. Each task runs in an isolated
-Docker container with automatic verification. We use Claude
-Opus~4.6 as the underlying model and run five trials per task.
+We evaluate on Terminal Bench~2.0, a benchmark of 89~diverse
+terminal-based programming tasks.
+Each task runs in an isolated Docker container with automatic
+verification.
+We use Claude Opus~4.6 as the underlying model and run five trials
+per task.
 We do not modify the general system prompt or inject
 benchmark-specific instructions.
 
 \begin{table}[t]
 \centering
 \caption{Terminal Bench~2.0 aggregate results (89 tasks, 5 trials,
-Claude Opus~4.6). Results for Claude~Code and Cursor Composer~2
-are from the public leaderboard.}
+Claude Opus~4.6).}
 \label{tab:results}
 \begin{tabular}{lc}
 \toprule
@@ -592,144 +689,121 @@ Cursor Composer~2 & 61.7\% \\
 \end{tabular}
 \end{table}
 
-Table~\ref{tab:results} shows the results. \kisssys{} achieves a
-62.2\% overall pass rate (277 of 445 trials), compared with
-Claude~Code (58\%) and Cursor Composer~2 (61.7\%).
-These results are notable for three reasons:
-
-\begin{enumerate}[nosep]
-  \item We did not tune the system prompt for the benchmark.
-  \item We did not fine-tune or train a custom model.
-  \item The core agent code is roughly 1,900 lines---an order
-        of magnitude smaller than comparable systems.
-\end{enumerate}
-
-The pass@any rate (at least one of five trials passes) is 78.7\%
-(70/89). The pass@all rate (all five pass) is 43.8\% (39/89).
+Table~\ref{tab:results} shows the results.
+\kisssys{} achieves a 62.2\% overall pass rate (277 of 445 trials).
+The pass@any rate is 78.7\% (70/89).
+The pass@all rate is 43.8\% (39/89).
 The median cost per trial is \$0.45; the mean is \$0.90.
-
-\paragraph{Failure analysis.} Consistent failures cluster into
-three categories: tasks requiring graphical capabilities unavailable
-in the container (video processing, GUI installation), tasks
-demanding resource-intensive builds that exceed container limits
-(CompCert, Caffe), and tasks with niche domain-specific requirements
-(DNA assembly, protein folding, cell segmentation).
 
 %----------------------------------------------------------------------
 \section{Discussion}
 \label{sec:discussion}
 %----------------------------------------------------------------------
 
-\subsection{Principles Over Techniques}
+\subsection{What the Patterns Reveal}
 
-The central finding of this work is that established software
-engineering principles---applied through a structured system prompt
-and a simple layered architecture---produce results competitive
-with systems that use reinforcement learning, custom models, and
-complex multi-agent orchestration.
+The seven patterns tell a consistent story.
+The developer did not write specifications or design documents.
+Instead, the developer \emph{conversed} with the agent, issuing
+short natural-language commands and observing results.
+The engineering discipline was embedded in the conversation style:
+always ask for a test first, always investigate before changing,
+always run the full suite after a batch of changes, always revert
+immediately when something goes wrong.
 
-This is not to say that advanced techniques have no value. Cursor
-Composer~2 uses large-scale RL and achieves a comparable score.
-But our system achieves a similar result with 1,900 lines of code
-and a hand-written system prompt, suggesting that the principles
-matter at least as much as the techniques.
+This suggests that in an AI-assisted development workflow, the
+developer's role shifts from \emph{writing code} to
+\emph{directing and verifying} an agent that writes code.
+The engineering principles do not change; they are expressed
+through task phrasing rather than code structure.
 
 \subsection{Strunk and White for Prompts}
 
 Strunk and White~\cite{strunkwhite2000} advise: ``Omit needless
-words.'' ``Use the active voice.'' ``Put statements in positive
-form.'' These rules, written for human prose in 1959, apply
-directly to system prompts.
+words.''
+Early versions of the system prompt used aggressive imperatives.
+These were replaced with calm, explanatory framing.
+The agent performed better with the latter.
 
-Early versions of the \kisssys{} system prompt used aggressive
-imperatives: ``BE RELENTLESS,'' ``NEVER GIVE UP,'' ``NO AI SLOP.''
-These were replaced with calm, explanatory framing: ``Be rigorous,
-check facts, and produce high-quality work.'' The agent performed
-better with the latter. Frontier models interpret positive,
-explanatory instructions more reliably than capitalized commands.
-
-The system prompt also follows Strunk and White's structural advice:
-``Use definite, specific, concrete language.'' Each instruction
-names a specific action (``Read every file before modifying it''),
-a specific failure mode it prevents (modifying based on stale
-assumptions), and a specific verification method (``Re-read and
-verify every modified file'').
+Each instruction names a specific action, a specific failure mode
+it prevents, and a specific verification method.
+The pattern of prompt refinement (Section~\ref{sec:p-prompt})
+shows that this clarity was achieved iteratively, not designed
+upfront.
 
 \subsection{The Self-Hosting Paradox}
 
 Building an AI agent with itself creates a paradox: the tool must
-be good enough to build itself before it exists. In practice, we
-resolved this through bootstrapping. The first version was written
-manually. The second version was written with the first. Each
-subsequent version was written with the previous one. Bugs
-introduced by the agent were fixed by the agent, creating a
-self-correcting loop.
+be good enough to build itself before it exists.
+We resolved this through bootstrapping: the first version was
+written manually, and each subsequent version was written with
+the previous one.
 
-This loop has a limitation: it cannot catch bugs that the agent
-is constitutionally unable to notice. If the agent has a blind spot
-in its reasoning, it will not detect the bugs that blind spot
-produces. External testing (Terminal Bench~2.0) and human review
-compensate for this limitation.
+The 20+ defensive reverts in the log (Pattern~1) show the cost of
+this approach: roughly one in every 150~tasks required undoing the
+agent's work.
+But the benefit is that every surviving change has been validated
+by the same system that will maintain it.
 
-\subsection{When Principles Conflict}
+\subsection{General-Purpose Use}
 
-The KISS principle says: do less. Test-first development says: do
-more (write a test before every fix). Pre-flight checks say: read
-everything before changing anything, which costs tokens.
-
-In practice, we resolve these conflicts through scoping rules in
-the system prompt. Complex-task planning is required only for
-``work spanning 3+ files.'' The web-research protocol is required
-only for ``research and information-gathering tasks.'' For simple
-single-file edits, the agent skips planning and research, keeping
-the process simple where simplicity suffices.
+The non-coding tasks (Pattern~7) reveal an unexpected benefit of
+self-hosting: because the developer uses the system all day, it
+becomes the natural interface for all tasks, not just coding.
+Weather, travel, shopping, messaging, and smart-home control all
+flow through the same chat interface.
+This validates the KISS principle at the product level:
+one tool for everything beats many specialized tools.
 
 %----------------------------------------------------------------------
 \section{Threats to Validity}
 \label{sec:threats}
 %----------------------------------------------------------------------
 
-\textbf{Single benchmark.} We evaluate on Terminal Bench~2.0 only.
-Performance on SWE-bench~\cite{jimenez2024swebench} or other
-benchmarks may differ.
+\textbf{Single developer.}
+All 3,011~tasks were issued by one developer.
+Other developers may exhibit different patterns.
 
-\textbf{Single model.} We use Claude Opus~4.6 exclusively. The
-system prompt's effectiveness may vary with other models.
+\textbf{Single system.}
+The patterns are specific to \kisssys{}.
+Different agent architectures may induce different workflows.
 
-\textbf{Self-hosting bias.} Because the system was built with
-itself, the architecture is optimized for the kinds of tasks the
-agent can already do well. This may overstate the generality of the
-principles.
+\textbf{Self-hosting bias.}
+Because the system was built with itself, the architecture is
+optimized for the kinds of tasks the agent can already do well.
 
-\textbf{Small example set.} We illustrate principles with four
-tasks from a single chat session. A larger corpus would strengthen
-the claims.
+\textbf{Single benchmark.}
+We evaluate on Terminal Bench~2.0 only.
 
 %----------------------------------------------------------------------
 \section{Conclusion}
 \label{sec:conclusion}
 %----------------------------------------------------------------------
 
-We built \kisssys{} using \kisssys{}, and the engineering principles
-that made this possible are the same ones that textbooks have taught
-for decades: keep it simple, separate concerns, test first, program
-defensively, read before you write, and use the system to build the
-system.
+We analyzed 3,011~tasks from 27~days of building \kisssys{} with
+\kisssys{}.
+Seven patterns emerged: test-first bug fixing, iterative feature
+construction, periodic code hygiene, paper--code co-evolution,
+architecture investigation before change, system prompt engineering,
+and multi-channel general assistance.
 
-The contribution is not the principles themselves. It is the
-demonstration that encoding them in a structured system prompt and
-a five-layer agent hierarchy---totaling 1,900 lines of code---produces
-an AI assistant that matches or exceeds systems with orders of
-magnitude more complexity.
+Each pattern maps to an established software engineering principle:
+test-driven development, separation of concerns, defensive
+programming, pre-flight checks, the KISS principle, and self-hosting
+as continuous integration.
 
-The four tasks we examined tell a consistent story. A greeting
-answered in one sentence shows the KISS principle. Two lights
-turned off in parallel show separation of concerns. A UI bug
-reported (and not yet fixed) shows test-first discipline. A hacking
-request refused with five alternatives shows defensive programming.
+The developer used \kisssys{} to write code in five languages,
+control smart-home lights, plan trips, send messages, check email,
+query weather and stocks, build a website, prepare lecture slides,
+and refuse an unethical request---all through the same 1,900-line
+agent framework and a single structured system prompt.
 
-These are not new ideas. They are old ideas, applied in a new
-context. The surprise is how well they work.
+The surprise is not the principles.
+They are decades old.
+The surprise is that encoding them in a system prompt and a simple
+layered architecture produces an AI assistant that works well
+enough to build itself---and to do everything else the developer
+needs.
 
 \balance
 \bibliographystyle{IEEEtran}
