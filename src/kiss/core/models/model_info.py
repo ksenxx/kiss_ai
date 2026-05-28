@@ -178,7 +178,9 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "gemini-2.5-flash-lite": _mi(1048576, 0.10, 0.40, fc=False),
     "gemini-2.5-pro": _mi(1048576, 1.25, 10.00),
     "gemini-3-flash-preview": _mi(1048576, 0.50, 3.00),
+    "gemini-3-pro-image": _mi(131072, 0.00, 0.00),  # NEW: needs pricing
     "gemini-3-pro-preview": _mi(1048576, 2.00, 12.00),
+    "gemini-3.1-flash-image": _mi(65536, 0.00, 0.00),  # NEW: needs pricing
     "gemini-3.1-flash-lite": _mi(1048576, 0.25, 1.50),  # NEW
     "gemini-3.1-flash-lite-preview": _mi(1048576, 0.25, 1.50),
     "gemini-3.1-flash-tts-preview": _mi(8192, 0.00, 0.00),
@@ -331,6 +333,8 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/anthropic/claude-opus-4.6-fast": _mi(1000000, 30.00, 150.00),
     "openrouter/anthropic/claude-opus-4.7": _mi(1000000, 5.00, 25.00),
     "openrouter/anthropic/claude-opus-4.7-fast": _mi(1000000, 30.00, 150.00),  # NEW
+    "openrouter/anthropic/claude-opus-4.8": _mi(1000000, 5.00, 25.00),  # NEW
+    "openrouter/anthropic/claude-opus-4.8-fast": _mi(1000000, 10.00, 50.00),  # NEW
     "openrouter/anthropic/claude-sonnet-4": _mi(1000000, 3.00, 15.00),
     "openrouter/anthropic/claude-sonnet-4.5": _mi(1000000, 3.00, 15.00),
     "openrouter/anthropic/claude-sonnet-4.6": _mi(1000000, 3.00, 15.00),
@@ -345,7 +349,6 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/baidu/ernie-4.5-300b-a47b": _mi(131072, 0.28, 1.10, fc=False),
     "openrouter/baidu/ernie-4.5-vl-28b-a3b": _mi(131072, 0.14, 0.56),
     "openrouter/baidu/ernie-4.5-vl-424b-a47b": _mi(131072, 0.42, 1.25, fc=False),
-    "openrouter/baidu/qianfan-ocr-fast": _mi(65536, 0.68, 2.81, fc=False),  # NEW
     "openrouter/bytedance-seed/seed-1.6": _mi(262144, 0.25, 2.00),
     "openrouter/bytedance-seed/seed-1.6-flash": _mi(262144, 0.075, 0.30),
     "openrouter/bytedance-seed/seed-2.0-lite": _mi(262144, 0.25, 2.00),
@@ -582,12 +585,12 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/qwen/qwen3.5-flash-02-23": _mi(1000000, 0.065, 0.26),
     "openrouter/qwen/qwen3.5-plus-02-15": _mi(1000000, 0.26, 1.56),
     "openrouter/qwen/qwen3.5-plus-20260420": _mi(1000000, 0.30, 1.80),
-    "openrouter/qwen/qwen3.6-27b": _mi(262144, 0.30, 3.20),
-    "openrouter/qwen/qwen3.6-35b-a3b": _mi(262144, 0.15, 1.00, fc=False),
+    "openrouter/qwen/qwen3.6-27b": _mi(262144, 0.29, 3.20),
+    "openrouter/qwen/qwen3.6-35b-a3b": _mi(262144, 0.14, 1.00, fc=False),
     "openrouter/qwen/qwen3.6-flash": _mi(1000000, 0.188, 1.125),
     "openrouter/qwen/qwen3.6-max-preview": _mi(262144, 1.04, 6.24),
     "openrouter/qwen/qwen3.6-plus": _mi(1000000, 0.325, 1.95),
-    "openrouter/qwen/qwen3.7-max": _mi(1000000, 2.50, 7.50),  # NEW
+    "openrouter/qwen/qwen3.7-max": _mi(1000000, 1.25, 3.75),  # NEW
     "openrouter/rekaai/reka-edge": _mi(16384, 0.10, 0.10),
     "openrouter/rekaai/reka-flash-3": _mi(65536, 0.10, 0.20),
     "openrouter/relace/relace-apply-3": _mi(256000, 0.85, 1.25, fc=False),
@@ -600,7 +603,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/stepfun/step-3.5-flash": _mi(262144, 0.09, 0.30),
     "openrouter/switchpoint/router": _mi(131072, 0.85, 3.40, fc=False),
     "openrouter/tencent/hunyuan-a13b-instruct": _mi(131072, 0.14, 0.57, fc=False),
-    "openrouter/tencent/hy3-preview": _mi(262144, 0.066, 0.26),  # NEW
+    "openrouter/tencent/hy3-preview": _mi(262144, 0.066, 0.21),  # NEW
     "openrouter/thedrummer/cydonia-24b-v4.1": _mi(131072, 0.30, 0.50, fc=False),
     "openrouter/thedrummer/rocinante-12b": _mi(32768, 0.17, 0.43),
     "openrouter/thedrummer/skyfall-36b-v2": _mi(32768, 0.55, 0.80, fc=False),
@@ -615,11 +618,11 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/xiaomi/mimo-v2-flash": _mi(262144, 0.10, 0.30, fc=False),
     "openrouter/xiaomi/mimo-v2-omni": _mi(262144, 0.40, 2.00),
     "openrouter/xiaomi/mimo-v2-pro": _mi(1048576, 1.00, 3.00),
-    "openrouter/xiaomi/mimo-v2.5": _mi(1048576, 0.40, 2.00),
-    "openrouter/xiaomi/mimo-v2.5-pro": _mi(1048576, 1.00, 3.00),
+    "openrouter/xiaomi/mimo-v2.5": _mi(1048576, 0.14, 0.28),
+    "openrouter/xiaomi/mimo-v2.5-pro": _mi(1048576, 0.435, 0.87),
     "openrouter/z-ai/glm-4-32b": _mi(128000, 0.10, 0.10),
     "openrouter/z-ai/glm-4.5": _mi(131072, 0.60, 2.20),
-    "openrouter/z-ai/glm-4.5-air": _mi(131072, 0.13, 0.85),
+    "openrouter/z-ai/glm-4.5-air": _mi(131072, 0.125, 0.85),
     "openrouter/z-ai/glm-4.5v": _mi(65536, 0.60, 1.80, fc=False),
     "openrouter/z-ai/glm-4.6": _mi(202752, 0.43, 1.74, fc=False),
     "openrouter/z-ai/glm-4.6v": _mi(131072, 0.30, 0.90),
