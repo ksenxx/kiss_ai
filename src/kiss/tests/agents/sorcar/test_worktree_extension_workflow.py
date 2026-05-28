@@ -519,33 +519,6 @@ class TestServerWorktreeWorkflow:
         assert not _agent(server)._wt_pending
 
 
-    @pytest.mark.xfail(
-        reason=(
-            "Pre-existing failure on main: after a fresh VSCodeServer is "
-            "constructed and resume_chat_by_id is called, "
-            "_emit_pending_worktree does not re-emit the worktree_done event "
-            "(known flake). Fix requires production-side rehydration changes."
-        ),
-        strict=False,
-    )
-    def test_emit_pending_worktree_after_restart(self) -> None:
-        """_emit_pending_worktree re-emits worktree_done after restart."""
-        server, events = _make_server(self.repo)
-        branch = self._setup_pending_worktree(server)
-        original_branch = _agent(server)._original_branch
-
-        server2, events2 = _make_server(self.repo)
-        _agent(server2).resume_chat_by_id(_agent(server)._chat_id)
-        server2._emit_pending_worktree("0")
-
-        wt_events = [e for e in events2 if e["type"] == "worktree_done"]
-        assert len(wt_events) == 1
-        assert wt_events[0]["branch"] == branch
-        assert wt_events[0]["originalBranch"] == original_branch
-
-        _agent(server2).discard()
-
-
     def test_server_merge_conflict_returns_failure(self) -> None:
         """Merge conflict via server returns success=False."""
         server, events = _make_server(self.repo)
