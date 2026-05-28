@@ -24,6 +24,26 @@ from kiss.core.models.model import (
 logger = logging.getLogger(__name__)
 
 
+def _uses_adaptive_thinking(model_name: str) -> bool:
+    """Return True if the Claude model requires ``thinking.type=adaptive``.
+
+    Newer Claude Opus models (4.6 and later) no longer support
+    ``thinking.type=enabled`` and must use ``adaptive`` instead. Older
+    Opus 4.x models (4, 4.1, 4.5) still use ``enabled``. Sonnet/Haiku 4
+    models continue to use ``enabled`` as before.
+    """
+    prefix = "claude-opus-4-"
+    if not model_name.startswith(prefix):
+        return False
+    suffix = model_name[len(prefix):]
+    minor_str = suffix.split("-", 1)[0]
+    try:
+        minor = int(minor_str)
+    except ValueError:
+        return False
+    return minor >= 6
+
+
 class AnthropicModel(Model):
     """A model that uses Anthropic's Messages API (Claude)."""
 
@@ -263,7 +283,7 @@ class AnthropicModel(Model):
         ):
             if not user_set_max_tokens:
                 max_tokens = 65536 if self.model_name.startswith("claude-opus-4") else 64000
-            if self.model_name in ["claude-opus-4-6", "claude-opus-4-7"]:
+            if _uses_adaptive_thinking(self.model_name):
                 kwargs["thinking"] = {"type": "adaptive"}
             else:
                 kwargs["thinking"] = {"type": "enabled", "budget_tokens": 10000}
