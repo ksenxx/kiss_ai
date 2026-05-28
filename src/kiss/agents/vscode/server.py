@@ -264,6 +264,19 @@ class VSCodeServer(
         if custom:
             models_list.insert(0, custom)
 
+        # On a fresh installation the server is constructed before any
+        # API key is configured, so ``self._default_model`` is the
+        # ``"No model"`` sentinel.  Once a key becomes available (env var
+        # or settings panel), ``get_available_models()`` returns real
+        # models, but the cached sentinel would keep the picker stuck on
+        # "No model".  Re-resolve the default whenever the cached
+        # selection is no longer a valid choice so the picker recovers.
+        available_names = {m["name"] for m in models_list}
+        if self._default_model not in available_names:
+            refreshed = get_default_model()
+            if refreshed in available_names:
+                self._default_model = refreshed
+
         self.printer.broadcast({
             "type": "models",
             "models": models_list,
