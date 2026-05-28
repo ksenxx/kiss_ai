@@ -237,6 +237,46 @@ recurring patterns.
 Each pattern is a workflow that the developer repeated dozens or
 hundreds of times.
 
+\paragraph{Methodology.}
+The data source is the system's own SQLite database,
+\texttt{\textasciitilde/.kiss/sorcar.db}, which the Chat Sorcar Agent
+(layer~4 of the hierarchy in Section~\ref{sec:intro}) populates
+automatically after every task.
+The schema is intentionally small: a \texttt{task\_history} table
+stores one row per task (timestamp, the verbatim task description,
+the result summary, a 32-character \texttt{chat\_id}, and a JSON
+\texttt{extra} field of metadata such as model name, token count, and
+dollar cost); an \texttt{events} table stores the full per-step
+trajectory; a \texttt{frequent\_tasks} table maintains a frequency
+count per distinct task string; and \texttt{model\_usage} and
+\texttt{file\_usage} tables track which models and files were
+touched.
+Because every task the developer issued---whether a coding request, a
+weather query, or a smart-home command---flows through the same Chat
+Sorcar Agent, the log is a complete, unfiltered record of how the
+system was actually used.
+The 3,011~tasks span 27~days and group into 856~distinct chat
+sessions, an average of roughly 3.5~tasks per session, confirming the
+iterative, multi-turn nature of the interaction
+(Section~\ref{sec:p-iterative}).
+We extracted patterns by three complementary methods:
+(i)~clustering tasks by the \texttt{frequent\_tasks} frequency table,
+which surfaces verbatim repeated commands such as
+``\texttt{uv run check -{}-full and fix}'' (41~occurrences) and
+``\texttt{git push origin}'' (13~occurrences);
+(ii)~full-text \texttt{LIKE} queries over the task descriptions to
+count phrasings (\eg{} 82~tasks contain ``build the paper,''
+97~contain ``\texttt{uv run check}''); and
+(iii)~manual reading of representative tasks within each cluster to
+recover the underlying workflow.
+The category counts in Table~\ref{tab:categories} are approximate
+because a single task often serves more than one purpose---``fix the
+race condition and run the full suite'' is simultaneously a bug fix
+and a testing task.
+Task numbers cited below (\eg{} Task~344) refer to the
+\texttt{task\_history} row identifiers, which increase monotonically
+with time and therefore double as a rough chronological index.
+
 %......................................................................
 \subsection{Pattern 1: Test-First Bug Fixing}
 \label{sec:p-test-first}
@@ -257,23 +297,83 @@ rigid three-step protocol:
 Then fix it.''
 \end{quote}
 
+This phrasing is not a coincidence; it is the conversational echo of
+an instruction baked into the system prompt itself
+(Section~\ref{sec:system-prompt}): ``When fixing bugs, issues, or
+race conditions: write an integration test that reproduces the
+problem first, then fix the code, then verify the test passes.''
+The developer internalized the agent's own protocol and began phrasing
+bug reports in the form the agent handles best.
+The discipline serves two purposes that the developer relied on
+repeatedly.
+First, a test that fails before the fix and passes after it is
+\emph{evidence} that the reported bug was real and that the change
+addressed it, rather than a plausible-looking edit that touches the
+wrong code path.
+Second, writing the test forces the agent to localize the defect
+precisely---to identify the exact module, function, and input that
+triggers the failure---before it is allowed to modify anything,
+which curbs the model's tendency to patch symptoms.
+
 \paragraph{Example.}
 Task~1236: ``\texttt{ask\_user\_question} is not showing its window
 in the web/mobile app.''
 The agent was instructed to write a test first, then fix.
+The bug reports in the log are strikingly specific, which is what
+makes the test-first protocol tractable.
+Representative verbatim examples include:
+``In the last task, the merge/diff interface was not launched and
+Auto-commit and merge buttons were not shown.  Reproduce the issue
+\ldots then fix it'';
+``In the last task, you made changes, but they were not reflected
+in the actual file system.  Can you find and reproduce that\ldots'';
+and ``the settings are not persisted across tasks.  Repro the issue
+by writing an integration test.''
 This protocol was applied to bugs as varied as missing diff/merge
 UI triggers for \LaTeX{} files (Task~109), auto-committed changes
 not appearing in reports (Task~104), thinking blocks leaking outside
 thought panels (Task~741), and race conditions in concurrent tab
 management (Task~65).
 
+\paragraph{Concurrency bugs.}
+A distinctive sub-class of test-first tasks targets race conditions
+that only the self-hosting setting exposes, because the developer runs
+multiple IDE tabs and a remote web server against the same repository
+at once.
+Examples from the log include
+``Fix the persistence module's SQLite connection handling with a
+read-write lock on \texttt{\_load\_chat\_context} to eliminate
+concurrent-access errors,''
+``Add integration tests for nested parallel execution where
+sub-agents themselves invoke \texttt{run\_parallel}, to verify budget
+\ldots is correct,''
+and a report of errors ``when multiple tasks from local extension and
+from remote web server are using'' the database simultaneously.
+For these, the system prompt prescribes a specific technique the
+developer invoked by name: ``To confirm race conditions: add a random
+sleep (\textless0.1s) before the suspected racing statements,''
+which widens the race window so the bug manifests deterministically
+in a test before the lock or thread-local fix is applied.
+
 \paragraph{Variant: defensive revert.}
 When a fix introduced a regression, the developer's next task was
 often ``can you get rid of the last commit to main?''
 (Tasks~18, 56, 110, 209, 395, 545, 909, 920, 949, 1877, 1996).
-This revert-then-retry cycle appeared at least 20~times in the log.
-It functions as a manual rollback mechanism: undo first, then
-re-attempt with a fresh approach.
+The exact string ``get rid of the last commit'' (with minor
+variations such as ``\ldots to main,'' ``\ldots from main,''
+``\ldots from main and origin,'' and ``\ldots in main?'') recurs more
+than 20~times in the log, making it one of the most frequent
+recovery commands.
+It functions as a manual rollback mechanism that complements the
+Worktree Sorcar Agent's branch-per-task isolation: even though each
+task runs on its own branch and the user reviews the diff before
+merging, a regression can still slip through review and land on
+\texttt{main}.
+When that happens, the developer's reflex is to undo first and
+re-attempt with a fresh approach, rather than to pile a corrective
+patch on top of a broken commit---a manual application of the
+defensive-programming principle discussed in
+Section~\ref{sec:defensive}.
 
 %......................................................................
 \subsection{Pattern 2: Iterative Feature Construction}
@@ -285,6 +385,21 @@ The developer described a feature, observed the result, then issued
 follow-up tasks to refine behavior, fix edge cases, and polish
 the UI.
 A single feature could span 5--20~tasks.
+This pattern is the dominant explanation for the 856~chat
+sessions in the log: a feature is typically developed within one chat
+session, and the Chat Sorcar Agent's persistence
+lets each follow-up task reference the
+prior tasks and results in the same session without the developer
+re-stating context.
+The workflow is therefore a tight loop of
+\emph{describe~$\rightarrow$~observe~$\rightarrow$~refine}: the
+developer issues a short natural-language request, watches the agent's
+result in the IDE, and immediately issues the next task to correct
+whatever fell short.
+Crucially, the refinement is interleaved with Pattern~1: roughly half
+the follow-up tasks in a feature session are themselves bug reports
+(``the button does not appear on mobile''), so a feature session is
+usually a chain of small features punctuated by test-first fixes.
 
 \paragraph{Example: remote web server.}
 The remote-access feature started with Task~344:
@@ -299,11 +414,30 @@ authentication (Task~878), displaying the Cloudflare tunnel URL in
 the welcome page (Tasks~396--415), handling MacBook lid-close
 disconnections (Task~412), and emailing the URL to the user
 (Tasks~386--392).
+The trajectory of this single feature is a microcosm of the whole
+pattern: the first task delivered a minimal working server, and every
+subsequent task hardened one concrete dimension---security (TLS, then
+password auth), reach (mobile layout), discoverability (URL on the
+welcome page, URL by email), and robustness (surviving a lid-close
+disconnection).
+None of these refinements was specified up front; each was prompted by
+the developer actually using the feature on a phone and hitting its
+limits.
+This is iterative construction in the literal sense: the specification
+emerged from use, not from a design document.
 
 \paragraph{Example: demo mode.}
 Demo mode started with Task~45 and was refined over Tasks~46, 53,
 191, 219--220 across multiple days, adding streaming animation,
 stop-button behavior, and cross-task continuation.
+A representative refinement task reads: ``In the demo mode, I see the
+welcome page when the demo switches from one task to another.  The
+next task animation MUST'' begin without the intervening welcome
+screen---a single-sentence bug report that triggered a targeted fix
+to the demo state machine.
+The multi-day span (Tasks~45 through~220) shows that a feature is not
+``done'' when it first works; it is revisited whenever the developer
+notices a rough edge during ordinary use.
 
 %......................................................................
 \subsection{Pattern 3: Periodic Code Hygiene}
@@ -315,19 +449,47 @@ a sweep:
 
 \begin{itemize}[nosep]
   \item ``\texttt{uv run check --full and fix}''
-        (Tasks~26, 60, 72, 73, 83, 203, 212, \ldots---at least 40~occurrences).
+        (Tasks~26, 60, 72, 73, 83, 203, 212, \ldots).
+        The exact string ``\texttt{uv run check -{}-full and fix}''
+        is the second most frequent command in the entire log
+        (41~occurrences in the \texttt{frequent\_tasks} table), and
+        97~tasks in total mention ``\texttt{uv run check}.''
   \item ``Can you thoroughly find all bugs, redundancies, and
         inconsistencies in \texttt{PWD/src/kiss/agents/vscode/}?''
         (Tasks~1, 6, 15, 17, 19, 23, 153, 425--427, 716, 918, 978, 981).
   \item ``Run all tests and fix tests only if there is no bug in
         the code.  Report the bugs.''
         (Tasks~798, 840, 866, 890--891, 961, 986, 990, 1013, 1126, 1128, 1158).
+        A closely related verbatim phrasing---``can you run all tests
+        and report the cause of failing tests?  Do not modify any''
+        code---appears 15~times.
 \end{itemize}
 
 These sweeps function as a periodic ``garbage collection'' for code
 quality.
 They catch drift introduced by feature work, remove dead code left
 behind by refactors, and ensure the test suite stays green.
+Three observations are worth drawing out.
+First, the sweeps are deliberately \emph{decoupled} from feature work:
+rather than demanding a green lint and a passing suite after every
+edit (which would slow the describe--observe--refine loop of
+Pattern~2), the developer lets small inconsistencies accumulate and
+then clears them in a dedicated pass.
+This mirrors the system prompt's own division of labor, which asks the
+agent to run impacted tests after a change but reserves the full
+\texttt{uv run check -{}-full} sweep for the pre-finish verification
+stage.
+Second, the ``find all bugs, redundancies, and inconsistencies''
+phrasing invokes the File Browsing protocol: the agent surveys an
+entire directory, writes a structured inventory of issues, and only
+then proposes fixes---an explicit collect-then-act discipline that
+prevents premature, locally-scoped patches.
+Third, the qualifier ``fix tests only if there is no bug in the
+code---report the bugs'' is a guardrail against a well-known
+failure mode in which an agent makes a failing test pass by weakening
+its assertions rather than by fixing the underlying defect.
+By instructing the agent to \emph{report} rather than silently
+``fix'' a test, the developer keeps the test suite an honest oracle.
 
 %......................................................................
 \subsection{Pattern 4: Paper--Code Co-Evolution}
@@ -352,7 +514,31 @@ revision sometimes triggered a code change:
 This bidirectional flow means the paper is always a faithful
 description of the system, and the system always reflects the
 principles claimed in the paper.
-The ``build the paper'' command alone appears over 50~times.
+The phrase ``build the paper'' appears in 82~tasks, making
+paper~maintenance one of the highest-volume non-coding activities in
+the log; the \LaTeX{} toolchain (\texttt{pdflatex}, BibTeX) is
+consequently one of the most-exercised pieces of the software
+ecosystem catalogued in Section~\ref{sec:software}.
+
+The co-evolution is genuinely bidirectional, and the log shows both
+directions.
+In the code-to-paper direction, a change to \texttt{SYSTEM.md} (the
+system prompt) triggers a task of the form ``\texttt{SYSTEM.md} has
+changed---update and build the paper,'' so that the paper's system-prompt
+section never drifts from the deployed prompt.
+In the paper-to-code direction, Task~700---``I have fixed typos in the
+system prompt in the paper.  Can you update \texttt{SYSTEM.md}?''---uses
+the paper as the source of truth and propagates an edit back into the
+running system.
+The consistency-audit tasks (``check the consistency and correctness
+of the paper against itself and the latest code'') close the loop:
+because the same agent can read both the \LaTeX{} source and the code
+it describes, a divergence between claim and implementation is
+mechanically detectable rather than relying on the author's memory.
+This is the self-hosting principle (Section~\ref{sec:self-hosting})
+applied to documentation: the artifact that describes the system is
+maintained by the system, so it stays accurate as a side effect of
+ordinary development.
 
 %......................................................................
 \subsection{Pattern 5: Architecture Investigation Before Change}
@@ -378,6 +564,30 @@ modifications.
 The agent reads the code, produces a step-by-step explanation, and
 the developer uses that understanding to formulate a precise change
 request.
+The pattern is so habitual that several investigation prompts recur
+verbatim: ``can you explain step-by-step in details of the worktree
+workflow?'' and ``can you tell me in very details what happens when a
+task with sub agents is load''ed both appear multiple times in the
+\texttt{frequent\_tasks} table.
+
+The investigation step pays off precisely because the agent's
+explanation and the agent's subsequent edits are produced by the same
+reader of the same code.
+When the developer asks ``what happens, step by step, with git in
+\texttt{worktree\_sorcar\_agent.py} when a task finishes?'' and then,
+in the next task, asks for a redesign of that lifecycle, the redesign
+is grounded in the explanation the agent just generated---there is no
+translation loss between a human's understanding of a design document
+and the code that implements it.
+This is the conversational form of the system prompt's pre-flight
+``read before you write'' rule (Section~\ref{sec:preflight}):
+the developer front-loads comprehension into an explicit
+question-and-answer turn, so the change request that follows can be
+stated as a precise, local edit rather than a vague aspiration.
+The graph-diagram requests (Tasks~1024--1027) are a visual variant of
+the same impulse: before reorganizing the server-side modules, the
+developer asks the agent to render their dependency structure, turning
+an implicit mental model into an inspectable artifact.
 
 %......................................................................
 \subsection{Pattern 6: System Prompt Engineering}
@@ -406,6 +616,32 @@ observing the agent's behavior, identifying deviations from the
 specification, and patching the prompt accordingly.
 This is the prompt-engineering equivalent of a test-driven
 development cycle.
+
+What makes this pattern distinctive is that the test data is the
+usage log itself.
+Because every task and its full trajectory are persisted in
+\texttt{sorcar.db}, the developer could ask the agent to mine its own
+recent history for compliance failures: ``Look at yesterday's tasks
+and check which instructions in \texttt{SYSTEM.md} are not being
+followed.''
+The agent reads the \texttt{events} table for the relevant tasks,
+detects deviations (\eg{} a research task that fetched pages with
+\texttt{curl} instead of \texttt{go\_to\_url}, or a code change that
+skipped \texttt{uv run check}), writes an integration test with a
+real LLM call to confirm the deviation reproduces, and only then
+patches the prompt.
+This is mutation testing applied to a specification: the developer
+checks whether the prompt is strong enough to prevent an
+\emph{observed} failure, not merely a hypothetical one.
+The verbatim audit prompt---``can you check \texttt{PWD/src/kiss/
+SYSTEM.md} and tell me if you understand all the instructions''---recurs
+as a periodic self-review.
+The fixes that resulted are visible in the deployed prompt today: the
+``temporary files in \texttt{PWD/tmp/}'' rule, the explicit
+\texttt{curl}/\texttt{wget} prohibition in the web-research section,
+and the enumerated file extensions that trigger the mandatory
+\texttt{uv run check} were all added reactively after the log revealed
+the corresponding evasions.
 
 %......................................................................
 \subsection{Pattern 7: Multi-Channel General Assistance}
@@ -441,6 +677,47 @@ This pattern demonstrates that the same system prompt and
 architecture serve both engineering and non-engineering tasks.
 The KISS principle---one agent, one prompt, one architecture---scales
 across domains.
+
+The mechanism that makes this possible is the third-party agent
+interface (Section~\ref{sec:software}): smart-home control, Slack,
+iMessage, and Gmail are all Python modules in
+\texttt{kiss/agents/third\_party\_agents}, and the Sorcar Agent
+invokes them through the same uniform tool interface it uses for
+\texttt{Bash}, \texttt{Edit}, and \texttt{go\_to\_url}.
+No special routing, planner, or domain classifier sits in front of
+them; the model selects the right tool from the task description
+alone.
+The log even records the bootstrapping of these integrations as
+ordinary tasks---``can you authenticate with govee.com so that you
+can control the lights?'' and ``do whatever is necessary to control
+the lights of govee.com''---after which day-to-day commands such as
+``use \texttt{govee.py} to turn off family room lights'' (which
+appears repeatedly in the \texttt{frequent\_tasks} table) just work.
+The system prompt's own override section anticipates this:
+``Authenticate unauthenticated third-party agents; ask the user only
+when a page requires human authentication,'' so the agent provisions
+its own credentials and only interrupts the developer for a genuine
+human-in-the-loop login.
+
+\paragraph{The same rigor applies off-task.}
+Notably, the non-coding tasks inherit the engineering discipline.
+A weather or stock query triggers the Web Research protocol---the
+agent visits multiple sources, records them in a
+\texttt{tmp/information-\{id\}.md} file, and is forbidden from
+answering current-events questions from stale training data.
+A research request such as ``Research these three topics and
+summarize each\ldots'' (a recurring multi-topic prompt in the log) is
+handled with the same collect-then-synthesize rigor as a code
+investigation.
+Even the ethical refusal in Task~1240 is an application of the
+defensive-programming clause (Section~\ref{sec:defensive}): the agent
+declined to hack the Echo Show~15 and offered five legitimate
+alternatives, treating ``refuse what you cannot do safely'' as a
+first-class behavior rather than an exception.
+The lesson of Pattern~7 is therefore not merely that one agent can do
+many things, but that the \emph{same} engineering safeguards---verify
+sources, isolate changes, refuse unsafe requests, never fabricate---apply
+uniformly whether the task is a code fix or a dinner reservation.
 
 %----------------------------------------------------------------------
 \section{Principles Behind the Patterns}
