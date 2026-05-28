@@ -367,3 +367,31 @@ class TestOpus47AdaptiveThinking:
         m.conversation = [{"role": "user", "content": "hi"}]
         kwargs = m._build_create_kwargs()
         assert kwargs.get("thinking") == {"type": "adaptive"}, kwargs.get("thinking")
+
+    def test_opus_4_8_uses_adaptive_thinking_config(self) -> None:
+        """``_build_create_kwargs`` must request adaptive thinking for opus-4-8.
+
+        The Anthropic API rejects ``thinking={"type": "enabled"}`` for
+        claude-opus-4-8 with:
+
+            "thinking.type.enabled is not supported for this model. Use
+             thinking.type.adaptive and output_config.effort to control
+             thinking behavior."
+
+        so opus-4-8 (and later) must use adaptive thinking.
+        """
+        m = AnthropicModel("claude-opus-4-8", api_key="test-key")
+        m.conversation = [{"role": "user", "content": "hi"}]
+        kwargs = m._build_create_kwargs()
+        assert kwargs.get("thinking") == {"type": "adaptive"}, kwargs.get("thinking")
+
+    def test_opus_4_uses_enabled_thinking_config(self) -> None:
+        """Older opus-4 / opus-4-1 still use ``thinking.type=enabled``."""
+        for name in ("claude-opus-4", "claude-opus-4-1"):
+            m = AnthropicModel(name, api_key="test-key")
+            m.conversation = [{"role": "user", "content": "hi"}]
+            kwargs = m._build_create_kwargs()
+            assert kwargs.get("thinking") == {
+                "type": "enabled",
+                "budget_tokens": 10000,
+            }, (name, kwargs.get("thinking"))
