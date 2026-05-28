@@ -1,4 +1,6 @@
-\documentclass[10pt,conference]{IEEEtran}
+\documentclass{article}
+
+\usepackage[preprint]{neurips_2026}
 
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
@@ -6,30 +8,13 @@
 \usepackage{url}
 \usepackage{booktabs}
 \usepackage{graphicx}
+\usepackage{amsfonts}
+\usepackage{nicefrac}
 \usepackage{microtype}
 \usepackage{xcolor}
 \usepackage{enumitem}
+\usepackage{fancyvrb}
 \usepackage{listings}
-\usepackage{balance}
-
-\lstset{
-  basicstyle=\ttfamily\scriptsize,
-  frame=single,
-  framesep=2mm,
-  breaklines=true,
-  columns=fullflexible,
-  showstringspaces=false,
-  captionpos=b,
-}
-
-\lstdefinestyle{prompt}{
-  language={},
-  basicstyle=\ttfamily\scriptsize,
-  frame=single,
-  framesep=2mm,
-  breaklines=true,
-  columns=fullflexible,
-}
 
 \lstdefinestyle{kisspy}{
   language=Python,
@@ -40,24 +25,38 @@
   showstringspaces=false,
   frame=single,
   framesep=2mm,
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  numbersep=5pt,
   breaklines=true,
   tabsize=4,
   captionpos=b,
+}
+\lstdefinestyle{prompt}{
+  language={},
+  basicstyle=\ttfamily\scriptsize,
+  frame=single,
+  framesep=2mm,
+  breaklines=true,
+  columns=fullflexible,
 }
 
 \newcommand{\kisssys}{\textsc{KISS Sorcar}}
 \newcommand{\ie}{\textit{i.e.}}
 \newcommand{\eg}{\textit{e.g.}}
 
-\begin{document}
-
 \title{Software Engineering KISS Sorcar with KISS Sorcar}
 
-\author{
-\IEEEauthorblockN{Anonymous Author(s)}
-}
+\author{%
+Koushik Sen \\ EECS Department, UC Berkeley\\ \texttt{ksen@berkeley.edu} \\ }
+
+\begin{document}
 
 \maketitle
+
+\begin{center}
+\textit{"Everything should be made as simple as possible, but not simpler." — Albert Einstein}
+\end{center}
 
 \begin{abstract}
 We describe how we built \kisssys{}---a general-purpose AI assistant and
@@ -85,11 +84,6 @@ hierarchy totaling 1,900~lines of code---explain the patterns
 and produce an AI assistant that achieves a 62.2\%
 pass rate on Terminal Bench~2.0 without benchmark-specific tuning.
 \end{abstract}
-
-\begin{IEEEkeywords}
-AI agents, software engineering, self-hosting, KISS principle,
-test-driven development, usage-log analysis
-\end{IEEEkeywords}
 
 %----------------------------------------------------------------------
 \section{Introduction}
@@ -805,8 +799,14 @@ layered architecture produces an AI assistant that works well
 enough to build itself---and to do everything else the developer
 needs.
 
-\balance
-\bibliographystyle{IEEEtran}
+%----------------------------------------------------------------------
+% References
+%----------------------------------------------------------------------
+
+{ \small
+
+\bibliographystyle{plainnat}
 \bibliography{se_kiss_sorcar}
+}
 
 \end{document}
