@@ -375,6 +375,12 @@ def source_shell_env() -> None:
     shell = _get_user_shell()
     rc = _shell_rc_path(shell)
     if not rc.exists():
+        # On a fresh installation there may be no shell RC file yet, but
+        # an API key can still be present in the inherited environment.
+        # Refresh ``DEFAULT_CONFIG`` so it reflects ``os.environ`` even
+        # when there is nothing to source (mirrors the other early-return
+        # path below, which also refreshes).
+        _refresh_config()
         return
     shell_path = _resolve_shell_path(shell)
     if shell_path is None:
