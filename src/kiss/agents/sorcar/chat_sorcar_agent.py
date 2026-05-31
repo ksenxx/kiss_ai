@@ -389,7 +389,8 @@ class ChatSorcarAgent(SorcarAgent):
             start_rec = getattr(printer, "start_recording", None)
             if start_rec is not None:
                 start_rec()
-        _record_frequent_task(prompt_template)
+        if self._subagent_info is None:
+            _record_frequent_task(prompt_template)
 
         result_summary = ""
         try:
