@@ -862,14 +862,18 @@
   // webview this helper is a no-op so the VS Code extension layout is
   // unchanged.
   function refreshWelcomeLayout() {
+    // In remote-chat mode the input area stays pinned at the bottom of
+    // #app in both the welcome and running states so its width is
+    // always consistent.  The welcome content is displayed in the
+    // output area above it.
     if (!document.body.classList.contains('remote-chat')) return;
     const ia = document.getElementById('input-area');
     const app = document.getElementById('app');
     if (!ia || !app || !welcome) return;
-    const visible = welcome.style.display !== 'none' && O.contains(welcome);
-    if (visible) {
-      if (ia.parentNode !== welcome) welcome.appendChild(ia);
-    } else if (ia.parentNode === welcome) {
+    // If the input-area was previously moved into #welcome (e.g. by an
+    // older code path), move it back to #app so it always sits at the
+    // bottom with full width.
+    if (ia.parentNode === welcome) {
       const sbar = document.getElementById('sidebar');
       if (sbar) app.insertBefore(ia, sbar);
       else app.appendChild(ia);
@@ -3596,10 +3600,16 @@
     // field for a tunnel that does not exist.  When tunnelActive is
     // undefined (older backend) fall back to "show when we have a URL"
     // so existing deployments keep working.
+    // In the remote webapp (body.remote-chat) never show the welcome-config
+    // panel — the webapp URL and remote password are irrelevant there.
     const welcomeCfg = document.getElementById('welcome-config');
     if (welcomeCfg) {
-      const visible =
-        tunnelActive === undefined ? !!displayUrl : !!tunnelActive;
+      const isRemoteChat = document.body.classList.contains('remote-chat');
+      const visible = isRemoteChat
+        ? false
+        : tunnelActive === undefined
+          ? !!displayUrl
+          : !!tunnelActive;
       welcomeCfg.style.display = visible ? '' : 'none';
     }
   }
