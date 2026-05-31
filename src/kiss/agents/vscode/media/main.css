@@ -409,6 +409,7 @@ body {
  */
 body.remote-chat #welcome { min-height: 100%; box-sizing: border-box; }
 body.remote-chat #welcome > #suggestions { display: none; }
+body.remote-chat #welcome-config { display: none !important; }
 
 /* In remote-chat mode #input-area stays in #app (never moved into
    #welcome) so its width matches the running-task layout exactly. */
