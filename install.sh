@@ -31,6 +31,17 @@ LOG_DIR="$HOME/.kiss"
 LOG_FILE="$LOG_DIR/install.log"
 NODE_VERSION="v22.16.0"
 
+# Required versions — extracted from the repo's source of truth so that
+# install.sh stays in sync with DependencyInstaller.ts and package.json
+# without hard-coding duplicates.
+DEP_INSTALLER_TS="$PROJECT_DIR/src/kiss/agents/vscode/src/DependencyInstaller.ts"
+VSCODE_PACKAGE_JSON="$PROJECT_DIR/src/kiss/agents/vscode/package.json"
+
+REQUIRED_GIT_VERSION=$(grep "const GIT_VERSION" "$DEP_INSTALLER_TS" 2>/dev/null | head -1 | sed "s/.*= '//;s/'.*//")
+REQUIRED_UV_VERSION=$(grep "const UV_VERSION" "$DEP_INSTALLER_TS" 2>/dev/null | head -1 | sed "s/.*= '//;s/'.*//")
+REQUIRED_VSCODE_VERSION=$(grep '"vscode"' "$VSCODE_PACKAGE_JSON" 2>/dev/null | head -1 | sed 's/[^0-9.]//g')
+REQUIRED_NODE_VERSION="${NODE_VERSION#v}"
+
 mkdir -p "$BIN_DIR" "$LOG_DIR"
 export PATH="$BIN_DIR:$PATH"
 
@@ -319,6 +330,144 @@ launch_vscode() {
     return 1
 }
 
+# ---------------------------------------------------------------------------
+# Version helpers
+# ---------------------------------------------------------------------------
+
+# Compare two dotted version strings.  Returns 0 (true) when $1 >= $2.
+version_gte() {
+    local IFS=.
+    # shellcheck disable=SC2206
+    local i a=($1) b=($2)
+    for ((i = 0; i < ${#b[@]}; i++)); do
+        local va=${a[i]:-0}
+        local vb=${b[i]:-0}
+        if ((va > vb)); then return 0; fi
+        if ((va < vb)); then return 1; fi
+    done
+    return 0
+}
+
+# Ask the user whether to upgrade; abort if they decline.
+#   $1 – tool display name
+#   $2 – installed version
+#   $3 – required version
+prompt_upgrade_or_abort() {
+    local name="$1" current="$2" required="$3"
+    echo ""
+    echo "   $name $current is older than the required version $required."
+    local reply=""
+    if [ -r /dev/tty ]; then
+        read -r -p "   Upgrade $name to $required or later? [Y/n] " reply </dev/tty
+    else
+        read -r -p "   Upgrade $name to $required or later? [Y/n] " reply
+    fi
+    case "$reply" in
+        ""|y|Y|yes|YES|Yes) return 0 ;;
+        *)
+            echo ""
+            echo "   ERROR: $name >= $required is required by this repository."
+            echo "   Please upgrade $name manually and re-run this script."
+            exit 1
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Upgrade helpers — invoked only when the user accepts the upgrade prompt
+# ---------------------------------------------------------------------------
+
+upgrade_git() {
+    echo "   Upgrading git..."
+    case "$OS" in
+        Darwin)
+            if command -v brew &>/dev/null; then
+                brew install git 2>/dev/null || brew upgrade git
+            else
+                echo "   ERROR: Cannot upgrade git without Homebrew."
+                exit 1
+            fi
+            ;;
+        Linux)
+            if command -v apt-get &>/dev/null; then
+                sudo apt-get update -y && sudo apt-get install -y --only-upgrade git
+            elif command -v dnf &>/dev/null; then
+                sudo dnf upgrade -y git
+            elif command -v yum &>/dev/null; then
+                sudo yum update -y git
+            elif command -v pacman &>/dev/null; then
+                sudo pacman -Syu --noconfirm git
+            elif command -v apk &>/dev/null; then
+                sudo apk upgrade git
+            else
+                echo "   ERROR: No supported package manager found to upgrade git."
+                exit 1
+            fi
+            ;;
+    esac
+}
+
+upgrade_uv() {
+    echo "   Upgrading uv to $REQUIRED_UV_VERSION..."
+    curl -LsSf "https://astral.sh/uv/${REQUIRED_UV_VERSION}/install.sh" | sh
+    export PATH="$HOME/.local/bin:$PATH"
+}
+
+upgrade_node() {
+    echo "   Upgrading Node.js to $NODE_VERSION..."
+    install_node
+}
+
+upgrade_vscode() {
+    echo "   Upgrading VS Code..."
+    case "$OS" in
+        Darwin)
+            local ARCH_VS
+            case "$ARCH" in
+                aarch64|arm64) ARCH_VS="darwin-arm64" ;;
+                x86_64)        ARCH_VS="darwin" ;;
+            esac
+            local TMP_ZIP
+            TMP_ZIP="$(mktemp /tmp/vscode-XXXXXX.zip)"
+            osascript -e 'quit app "Visual Studio Code"' 2>/dev/null || true
+            sleep 2
+            if curl -fsSL "https://update.code.visualstudio.com/latest/${ARCH_VS}/stable" -o "$TMP_ZIP"; then
+                rm -rf "/Applications/Visual Studio Code.app"
+                unzip -q "$TMP_ZIP" -d /Applications/
+                rm -f "$TMP_ZIP"
+                echo "   VS Code upgraded in /Applications/"
+                local CODE_BIN="/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"
+                if [ -x "$CODE_BIN" ]; then
+                    ln -sf "$CODE_BIN" "$BIN_DIR/code"
+                fi
+            else
+                rm -f "$TMP_ZIP"
+                echo "   ERROR: Failed to download VS Code."
+                exit 1
+            fi
+            ;;
+        Linux)
+            if command -v snap &>/dev/null; then
+                sudo snap refresh code 2>&1
+            elif command -v apt-get &>/dev/null; then
+                sudo apt-get update -y && sudo apt-get install -y --only-upgrade code 2>&1
+            elif command -v dnf &>/dev/null; then
+                sudo dnf upgrade -y code 2>&1
+            else
+                echo "   ERROR: Cannot upgrade VS Code automatically."
+                echo "   Please upgrade from https://code.visualstudio.com and re-run."
+                exit 1
+            fi
+            ;;
+    esac
+    find_code_cli || true
+}
+
+upgrade_brew() {
+    echo "   Updating Homebrew..."
+    brew update
+}
+
 {
     echo "=== KISS Sorcar Source Install ==="
     echo "Date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
@@ -340,7 +489,27 @@ launch_vscode() {
     if ! command -v git &>/dev/null; then
         install_git
     fi
-    echo "   $(git --version) ready"
+    INSTALLED_GIT=$(git --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    if [ -n "$REQUIRED_GIT_VERSION" ] && [ -n "$INSTALLED_GIT" ] && ! version_gte "$INSTALLED_GIT" "$REQUIRED_GIT_VERSION"; then
+        prompt_upgrade_or_abort "git" "$INSTALLED_GIT" "$REQUIRED_GIT_VERSION"
+        upgrade_git
+        INSTALLED_GIT=$(git --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    fi
+    echo "   git $INSTALLED_GIT ready"
+    echo ""
+
+    echo ">>> Checking uv..."
+    if command -v uv &>/dev/null; then
+        INSTALLED_UV=$(uv --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+        if [ -n "$REQUIRED_UV_VERSION" ] && [ -n "$INSTALLED_UV" ] && ! version_gte "$INSTALLED_UV" "$REQUIRED_UV_VERSION"; then
+            prompt_upgrade_or_abort "uv" "$INSTALLED_UV" "$REQUIRED_UV_VERSION"
+            upgrade_uv
+            INSTALLED_UV=$(uv --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+        fi
+        echo "   uv $INSTALLED_UV ready"
+    else
+        echo "   uv not found — will be installed by the VS Code extension"
+    fi
     echo ""
 
     echo ">>> [2/6] Checking Node.js..."
@@ -348,7 +517,13 @@ launch_vscode() {
         install_node || true
     fi
     if command -v node &>/dev/null && command -v npm &>/dev/null && command -v npx &>/dev/null; then
-        echo "   node $(node --version) ready"
+        INSTALLED_NODE=$(node --version | sed 's/^v//')
+        if [ -n "$REQUIRED_NODE_VERSION" ] && [ -n "$INSTALLED_NODE" ] && ! version_gte "$INSTALLED_NODE" "$REQUIRED_NODE_VERSION"; then
+            prompt_upgrade_or_abort "Node.js" "$INSTALLED_NODE" "$REQUIRED_NODE_VERSION"
+            upgrade_node
+            INSTALLED_NODE=$(node --version | sed 's/^v//')
+        fi
+        echo "   node v$INSTALLED_NODE ready"
         echo "   npm $(npm --version) ready"
     else
         echo "   ERROR: Node.js, npm, and npx are required to build the extension."
@@ -363,7 +538,13 @@ launch_vscode() {
         find_code_cli || true
     fi
     if [ -n "$CODE_CLI" ]; then
-        echo "   code CLI ready: $CODE_CLI"
+        INSTALLED_VSCODE=$("$CODE_CLI" --version 2>/dev/null | head -1)
+        if [ -n "$REQUIRED_VSCODE_VERSION" ] && [ -n "$INSTALLED_VSCODE" ] && ! version_gte "$INSTALLED_VSCODE" "$REQUIRED_VSCODE_VERSION"; then
+            prompt_upgrade_or_abort "VS Code" "$INSTALLED_VSCODE" "$REQUIRED_VSCODE_VERSION"
+            upgrade_vscode
+            INSTALLED_VSCODE=$("$CODE_CLI" --version 2>/dev/null | head -1)
+        fi
+        echo "   code CLI ready: $CODE_CLI (v$INSTALLED_VSCODE)"
     else
         echo "   ERROR: VS Code CLI not found — cannot install the extension."
         echo "   Install VS Code from https://code.visualstudio.com and re-run this script."
