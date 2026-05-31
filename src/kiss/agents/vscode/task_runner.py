@@ -737,12 +737,19 @@ class _TaskRunnerMixin:
     def _stop_task(self, tab_id: str = "") -> None:
         """Signal the agent to stop.
 
-        Sets the cooperative stop event and, if the task thread doesn't
-        exit promptly, forces a ``KeyboardInterrupt`` in the task thread
-        using ``ctypes.pythonapi.PyThreadState_SetAsyncExc``.  This
-        handles the case where the agent is blocked in an LLM API call
-        or other I/O and never reaches a cooperative ``_check_stop()``
-        call.
+        Sets the cooperative stop event, cancels any in-flight model API
+        request by closing the HTTP client, and if the task thread
+        doesn't exit promptly, forces a ``KeyboardInterrupt`` in the
+        task thread using ``ctypes.pythonapi.PyThreadState_SetAsyncExc``.
+
+        Cancelling the model's HTTP client is critical: when the agent
+        thread is blocked inside a C-extension network call (e.g. httpx
+        waiting for a streaming response from Anthropic/OpenAI/Gemini),
+        ``PyThreadState_SetAsyncExc`` cannot deliver the exception until
+        the C code returns to Python bytecode.  Closing the client's
+        connection pool causes the in-flight request to fail immediately
+        with a connection error, unblocking the thread so the async
+        exception can be delivered.
 
         When *tab_id* is a subscriber (multi-viewer) tab that has no
         ``stop_event`` of its own, the method resolves through the
@@ -763,6 +770,7 @@ class _TaskRunnerMixin:
             tab = _RunningAgentState.running_agent_states.get(tab_id)
             stop_event = tab.stop_event if tab is not None else None
             task_thread = tab.task_thread if tab is not None else None
+            agent = tab.agent if tab is not None else None
 
         # When the tab has no stop_event (e.g. a subscriber/viewer tab
         # created by _replay_session → subscribe_tab), look up which
@@ -777,15 +785,55 @@ class _TaskRunnerMixin:
                     if source is not None:
                         stop_event = source.stop_event
                         task_thread = source.task_thread
+                        agent = source.agent
 
         if stop_event:
             stop_event.set()
+        # Cancel the in-flight model API request asynchronously.
+        # This closes the HTTP client's connection pool, causing
+        # any blocking network I/O to fail immediately so the
+        # agent thread unblocks without waiting for the model to
+        # finish its response.
+        self._cancel_model_async(agent)
         if task_thread is not None and task_thread.is_alive():
             threading.Thread(
                 target=self._force_stop_thread,
                 args=(task_thread,),
                 daemon=True,
             ).start()
+
+    @staticmethod
+    def _cancel_model_async(agent: WorktreeSorcarAgent | None) -> None:
+        """Cancel the in-flight model API call for the given agent.
+
+        Walks the agent hierarchy (``WorktreeSorcarAgent`` →
+        ``RelentlessAgent._current_executor`` → ``KISSAgent.model``)
+        to reach the live :class:`Model` instance and calls its
+        :meth:`Model.cancel` method, which closes the underlying
+        HTTP client.  This causes any blocking network I/O to fail
+        immediately, unblocking the agent thread.
+
+        Runs synchronously but is designed to be called from the
+        stop-handler thread.  Errors are suppressed — the fallback
+        ``_force_stop_thread`` mechanism will still deliver a
+        ``KeyboardInterrupt``.
+
+        Args:
+            agent: The running agent, or ``None`` when the tab has no
+                live agent.
+        """
+        if agent is None:
+            return
+        try:
+            executor = getattr(agent, "_current_executor", None)
+            if executor is None:
+                return
+            mdl = getattr(executor, "model", None)
+            if mdl is None:
+                return
+            mdl.cancel()
+        except Exception:
+            logger.debug("Error cancelling model API call", exc_info=True)
 
     def _find_source_tab_for_viewer(self, viewer_tab_id: str) -> str | None:
         """Find a peer tab id sharing the same task as *viewer_tab_id*.
