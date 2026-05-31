@@ -476,6 +476,28 @@ class Model(ABC):
         """
         pass  # pragma: no cover
 
+    def cancel(self) -> None:
+        """Cancel any in-flight API request by closing the HTTP client.
+
+        Called from a different thread (the stop-task handler) when the
+        user clicks the Stop button.  Closing the underlying HTTP
+        transport causes any blocking network I/O to fail immediately
+        with a connection error, unblocking the agent thread so
+        ``KeyboardInterrupt`` can be delivered.
+
+        The default implementation closes ``self.client`` when it
+        exposes a ``close()`` method.  Subclasses may override for
+        provider-specific teardown (e.g. killing a subprocess).  The
+        method is idempotent and safe to call when no request is
+        in-flight.
+        """
+        client = getattr(self, "client", None)
+        if client is not None and hasattr(client, "close"):
+            try:
+                client.close()
+            except Exception:
+                logger.debug("Error closing model client", exc_info=True)
+
     def set_usage_info_for_messages(self, usage_info: str) -> None:
         """Sets token information to append to messages sent to the LLM.
 
