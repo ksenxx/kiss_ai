@@ -3600,10 +3600,16 @@
     // field for a tunnel that does not exist.  When tunnelActive is
     // undefined (older backend) fall back to "show when we have a URL"
     // so existing deployments keep working.
+    // In the remote webapp (body.remote-chat) never show the welcome-config
+    // panel — the webapp URL and remote password are irrelevant there.
     const welcomeCfg = document.getElementById('welcome-config');
     if (welcomeCfg) {
-      const visible =
-        tunnelActive === undefined ? !!displayUrl : !!tunnelActive;
+      const isRemoteChat = document.body.classList.contains('remote-chat');
+      const visible = isRemoteChat
+        ? false
+        : tunnelActive === undefined
+          ? !!displayUrl
+          : !!tunnelActive;
       welcomeCfg.style.display = visible ? '' : 'none';
     }
   }
