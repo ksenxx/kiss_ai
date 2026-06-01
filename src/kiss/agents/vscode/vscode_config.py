@@ -50,6 +50,12 @@ DEFAULTS: dict[str, Any] = {
     "is_worktree": True,
     "demo_mode": False,
     "work_dir": "",
+    # ``last_model`` is the most recently selected model name.  It is a
+    # persistent user preference (like the toggles above) and is stored
+    # here in ``config.json`` rather than the SQLite ``model_usage``
+    # table — the database now tracks only per-model usage *counts*, not
+    # which model was last selected.
+    "last_model": "",
 }
 
 API_KEY_ENV_VARS: frozenset[str] = frozenset({

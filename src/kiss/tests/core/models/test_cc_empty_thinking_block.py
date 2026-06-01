@@ -13,7 +13,7 @@ If the block ends with only signature deltas, suppress both boundaries.
 
 import json
 
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.core.models.claude_code_model import ClaudeCodeModel
 
 
@@ -24,7 +24,7 @@ class TestEmptyThinkingBlockSuppressed:
         """A thinking block with only signature_delta must NOT produce
         thinking_start/thinking_delta/thinking_end events.
         """
-        printer = BaseBrowserPrinter()
+        printer = JsonPrinter()
         printer._thread_local.task_id = "test"
         printer.start_recording()
 
@@ -140,7 +140,7 @@ class TestRealThinkingBlockStillWorks:
 
     def test_thinking_block_with_content_still_streams(self) -> None:
         """A thinking block with thinking_delta events must stream normally."""
-        printer = BaseBrowserPrinter()
+        printer = JsonPrinter()
         printer._thread_local.task_id = "test"
         printer.start_recording()
 

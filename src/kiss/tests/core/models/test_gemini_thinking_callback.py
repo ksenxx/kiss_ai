@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from google.genai import types
 
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.core.models.gemini_model import GeminiModel
 
 
@@ -104,10 +104,10 @@ class TestGeminiStreamPartsThinkingCallback:
         """Thinking tokens must be broadcast as thinking_delta, not text_delta.
 
         This is the core bug reproduction: without thinking_callback, the
-        BaseBrowserPrinter never sets _current_block_type to 'thinking',
+        JsonPrinter never sets _current_block_type to 'thinking',
         so thinking tokens are broadcast as text_delta events.
         """
-        printer = BaseBrowserPrinter()
+        printer = JsonPrinter()
         printer._thread_local.task_id = "gemini-thinking-test"
         printer.start_recording()
 

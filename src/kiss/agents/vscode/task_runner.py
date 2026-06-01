@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-    from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+    from kiss.agents.vscode.json_printer import JsonPrinter
 
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps, repo_lock
 from kiss.agents.sorcar.persistence import (
@@ -53,7 +53,7 @@ class _TaskRunnerMixin:
     """Task-lifecycle methods (run, stop, user-question callback)."""
 
     if TYPE_CHECKING:
-        printer: BaseBrowserPrinter
+        printer: JsonPrinter
         work_dir: str
         _state_lock: threading.RLock
 
@@ -544,7 +544,7 @@ class _TaskRunnerMixin:
                 # ``_persist_agents``, usage offsets) is dropped at
                 # the very end of this block — AFTER all post-task
                 # broadcasts have happened — by
-                # :meth:`BaseBrowserPrinter.cleanup_task`.
+                # :meth:`JsonPrinter.cleanup_task`.
                 if not use_worktree:
                     try:
                         if effective_auto_commit:

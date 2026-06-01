@@ -5,7 +5,7 @@ Before this fix, ``ChatSorcarAgent._run_tasks_parallel`` set
 ``printer._thread_local.task_id = sub_tab_id`` so each sub-agent's
 broadcast events were tagged with the ``sub_tab_id``, but it never
 registered the sub-agent in ``printer._persist_agents[sub_tab_id]``.
-``BaseBrowserPrinter._persist_event`` looks up the agent in
+``JsonPrinter._persist_event`` looks up the agent in
 ``_persist_agents`` by the event's ``tabId`` to find the task_id under
 which to persist — when the lookup misses, the event is silently
 dropped.  Result: every sub-agent's ``task_history`` row had
@@ -17,7 +17,7 @@ all the events from the sub task".
 
 This test runs the real ``_run_tasks_parallel`` path with a stub
 underlying agent (so no LLM is needed), against a real
-``BaseBrowserPrinter`` and a temp-dir SQLite DB, and asserts that
+``JsonPrinter`` and a temp-dir SQLite DB, and asserts that
 every sub-agent's row has ``has_events=1`` AND that the persisted
 events are retrievable via ``_load_chat_events_by_task_id``.
 """
@@ -36,7 +36,7 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import (
     _load_chat_events_by_task_id,
 )
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.json_printer import JsonPrinter
 
 
 def _redirect(tmpdir: str) -> tuple:
@@ -122,8 +122,8 @@ class _StubAgent(ChatSorcarAgent):
         return result
 
 
-class _RecordingPrinter(BaseBrowserPrinter):
-    """BaseBrowserPrinter whose ``broadcast`` runs the SAME side effects
+class _RecordingPrinter(JsonPrinter):
+    """JsonPrinter whose ``broadcast`` runs the SAME side effects
     as a real browser printer (inject tabId, record, persist) so the
     ``_persist_event`` plumbing is exercised end-to-end.
     """

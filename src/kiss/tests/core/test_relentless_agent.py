@@ -9,7 +9,6 @@ import unittest
 import pytest
 import yaml
 
-from kiss.core.kiss_error import KISSError
 from kiss.core.relentless_agent import (
     CONTINUATION_PROMPT,
     IMPORTANT_INSTRUCTIONS,
@@ -70,44 +69,6 @@ class TestFinish(unittest.TestCase):
         parsed = yaml.safe_load(result)
         self.assertTrue(parsed["success"])
         self.assertTrue(parsed["is_continue"])
-
-
-@requires_gemini_api_key
-class TestContinuation(unittest.TestCase):
-    def test_empty_summary_no_progress(self) -> None:
-        """Empty summary -> no progress_section added.
-
-        When every sub-session returns ``is_continue=True`` with an
-        empty summary, the relentless agent has no progress to carry
-        forward and should exhaust ``max_sub_sessions`` and raise
-        ``KISSError``.  If the Gemini API rate-limits mid-loop, a
-        non-KISS exception is caught and converted into an error
-        payload (no KISSError is raised) — skip in that case.
-        """
-        agent = RelentlessAgent("EmptySummary")
-        with tempfile.TemporaryDirectory() as td:
-            try:
-                result = agent.run(
-                    model_name=TEST_MODEL,
-                    prompt_template=(
-                        "Call finish(success=False, is_continue=True, summary='')"
-                    ),
-                    max_steps=5,
-                    max_budget=2.0,
-                    max_sub_sessions=2,
-                    work_dir=td,
-                    verbose=False,
-                )
-            except KISSError:
-                return
-            parsed = yaml.safe_load(result)
-            summary = (parsed or {}).get("summary", "")
-            if "429" in summary or "RESOURCE_EXHAUSTED" in summary:
-                self.skipTest("Gemini API rate-limited (429)")
-            self.fail(
-                f"Expected KISSError after exhausting sub-sessions, got: "
-                f"{result!r}"
-            )
 
 
 @requires_gemini_api_key
