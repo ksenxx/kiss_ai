@@ -1,6 +1,6 @@
-"""Integration tests for the ``change_model`` tool on ``SorcarAgent``.
+"""Integration tests for the ``set_model`` tool on ``SorcarAgent``.
 
-``change_model(model_name)`` swaps the agent's live LLM model instance in
+``set_model(model_name)`` swaps the agent's live LLM model instance in
 place so the very next LLM call goes to the changed model.  These tests
 verify:
 
@@ -105,19 +105,19 @@ def _isolate_sorcar_db(tmp_path: Path) -> Any:
 # ---------------------------------------------------------------------------
 
 class TestChangeModelToolPresence:
-    """``change_model`` appears in the agent's tool list."""
+    """``set_model`` appears in the agent's tool list."""
 
     def test_in_tools(self) -> None:
         _agent, tools = _make_agent()
         names = [t.__name__ for t in tools if callable(t)]
-        assert "change_model" in names
+        assert "set_model" in names
 
     def test_signature_takes_model_name_string(self) -> None:
         import inspect
 
         _agent, tools = _make_agent()
-        change_model = _find_tool(tools, "change_model")
-        sig = inspect.signature(change_model)
+        set_model = _find_tool(tools, "set_model")
+        sig = inspect.signature(set_model)
         params = list(sig.parameters.values())
         assert len(params) == 1
         assert params[0].name == "model_name"
@@ -137,9 +137,9 @@ class TestChangeModelNoLiveModel:
     def test_updates_model_name(self) -> None:
         agent, tools = _make_agent()
         assert getattr(agent, "model", None) is None
-        change_model = _find_tool(tools, "change_model")
+        set_model = _find_tool(tools, "set_model")
 
-        result = change_model("gpt-4o-mini")
+        result = set_model("gpt-4o-mini")
         assert "gpt-4o-mini" in result
         assert agent.model_name == "gpt-4o-mini"
 
@@ -147,9 +147,9 @@ class TestChangeModelNoLiveModel:
         from kiss.agents.sorcar.persistence import _load_last_model
 
         agent, tools = _make_agent()
-        change_model = _find_tool(tools, "change_model")
+        set_model = _find_tool(tools, "set_model")
 
-        change_model("gemini-2.5-pro")
+        set_model("gemini-2.5-pro")
         assert _load_last_model() == "gemini-2.5-pro"
 
 
@@ -163,10 +163,10 @@ class TestChangeModelLiveSwap:
     def test_swaps_to_new_instance(self) -> None:
         agent, tools = _make_agent()
         _bootstrap_live_model(agent, "model-a")
-        change_model = _find_tool(tools, "change_model")
+        set_model = _find_tool(tools, "set_model")
 
         old_model_obj = agent.model
-        result = change_model("model-b")
+        result = set_model("model-b")
 
         assert "model-b" in result
         assert agent.model is not old_model_obj
@@ -181,9 +181,9 @@ class TestChangeModelLiveSwap:
             {"role": "assistant", "content": "reply"},
         ]
         agent.model.usage_info_for_messages = "tokens=42"
-        change_model = _find_tool(tools, "change_model")
+        set_model = _find_tool(tools, "set_model")
 
-        change_model("model-b")
+        set_model("model-b")
 
         assert agent.model.conversation == [
             {"role": "user", "content": "first"},
@@ -196,9 +196,9 @@ class TestChangeModelLiveSwap:
         _bootstrap_live_model(agent, "model-a")
         original_base_url = getattr(agent.model, "base_url", None)
         original_api_key = getattr(agent.model, "api_key", None)
-        change_model = _find_tool(tools, "change_model")
+        set_model = _find_tool(tools, "set_model")
 
-        change_model("model-b")
+        set_model("model-b")
 
         # New model is also OpenAICompatibleModel built from the same
         # base_url and api_key carried over via model_config.
@@ -214,18 +214,18 @@ class TestChangeModelLiveSwap:
             tokens.append(t)
 
         agent.model.token_callback = token_cb
-        change_model = _find_tool(tools, "change_model")
+        set_model = _find_tool(tools, "set_model")
 
-        change_model("model-b")
+        set_model("model-b")
         assert agent.model.token_callback is token_cb
 
     def test_same_name_is_noop(self) -> None:
         agent, tools = _make_agent()
         _bootstrap_live_model(agent, "model-a")
-        change_model = _find_tool(tools, "change_model")
+        set_model = _find_tool(tools, "set_model")
         original = agent.model
 
-        result = change_model("model-a")
+        result = set_model("model-a")
         assert "already" in result.lower() or "no change" in result.lower()
         assert agent.model is original
 
@@ -234,9 +234,9 @@ class TestChangeModelLiveSwap:
 
         agent, tools = _make_agent()
         _bootstrap_live_model(agent, "model-a")
-        change_model = _find_tool(tools, "change_model")
+        set_model = _find_tool(tools, "set_model")
 
-        change_model("model-b")
+        set_model("model-b")
         assert _load_last_model() == "model-b"
 
 
@@ -263,8 +263,8 @@ class TestChangeModelToolSchemaCache:
         )
         original_schema = agent._cached_tools_schema
 
-        change_model = _find_tool(tools, "change_model")
-        change_model("model-b")
+        set_model = _find_tool(tools, "set_model")
+        set_model("model-b")
 
         # The cache is rebuilt to a freshly-constructed (but equal) schema
         # against the new model instance.  Verify both that it's a fresh
@@ -281,15 +281,15 @@ class TestChangeModelToolSchemaCache:
         assert agent._cached_tools_schema is not original_schema
 
     def test_no_function_map_no_crash(self) -> None:
-        """Calling change_model before tools are wired up must not crash."""
+        """Calling set_model before tools are wired up must not crash."""
         agent, tools = _make_agent()
         _bootstrap_live_model(agent, "model-a")
         # function_map intentionally not set / empty.
         agent.function_map = {}
         agent._cached_tools_schema = None  # type: ignore[assignment]
-        change_model = _find_tool(tools, "change_model")
+        set_model = _find_tool(tools, "set_model")
 
-        change_model("model-b")
+        set_model("model-b")
         # Cache should remain None when function_map is empty.
         assert agent._cached_tools_schema is None
 
@@ -299,7 +299,7 @@ class TestChangeModelToolSchemaCache:
 # ---------------------------------------------------------------------------
 
 class TestNextCallTargetsNewModel:
-    """After change_model, ``self.model`` (which generate() targets) is the new one."""
+    """After set_model, ``self.model`` (which generate() targets) is the new one."""
 
     def test_model_instance_targets_new_name(self) -> None:
         """The instance the agent will call ``generate()`` on uses the new name.
@@ -310,9 +310,9 @@ class TestNextCallTargetsNewModel:
         """
         agent, tools = _make_agent()
         _bootstrap_live_model(agent, "model-a")
-        change_model = _find_tool(tools, "change_model")
+        set_model = _find_tool(tools, "set_model")
 
-        change_model("model-c")
+        set_model("model-c")
 
         # The very next generate() will use this Model instance...
         assert agent.model.model_name == "model-c"
