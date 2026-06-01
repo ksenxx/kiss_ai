@@ -212,8 +212,6 @@ _HISTORY_SELECT = (
 
 _HISTORY_NOT_SUBAGENT = 'COALESCE(extra, \'\') NOT LIKE \'%"subagent"%\''
 
-_CLEAR_LAST_MODEL = "UPDATE model_usage SET is_last = 0 WHERE is_last = 1"
-
 
 def _is_failed_result(result: str) -> bool:
     """Return True when the ``task_history.result`` text represents a
@@ -264,8 +262,7 @@ def _init_tables(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS model_usage (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             model TEXT NOT NULL UNIQUE,
-            count INTEGER DEFAULT 0,
-            is_last INTEGER DEFAULT 0
+            count INTEGER DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS file_usage (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1509,60 +1506,50 @@ def _load_model_usage() -> dict[str, int]:
 
 
 def _load_last_model() -> str:
-    """Return the name of the most recently selected model, or ``""``."""
-    with _rw_lock.read_lock():
-        db = _get_db()
-        row = db.execute(
-            "SELECT model FROM model_usage WHERE is_last = 1 LIMIT 1"
-        ).fetchone()
-        return row["model"] if row else ""
+    """Return the name of the most recently selected model, or ``""``.
 
-
-def _upsert_model_last_used(model: str, increment: bool) -> None:
-    """Mark *model* as last-used, optionally incrementing its counter.
-
-    Clears the ``is_last`` flag on every other row and either inserts
-    a fresh row for *model* (count=0 or count=1 depending on
-    *increment*) or updates the existing row to set ``is_last=1`` and
-    optionally bump ``count``.  The two statements run inside one
-    ``write_lock`` so the table never holds more than one row with
-    ``is_last = 1``.
-
-    Args:
-        model: The model name to mark as last-used.
-        increment: When ``True``, also increment the model's
-            ``count`` (semantics of ``_record_model_usage``).  When
-            ``False``, leave ``count`` unchanged on update and
-            initialise to 0 on insert (semantics of
-            ``_save_last_model``).
+    The last-selected model is a persistent **user preference** stored
+    in ``~/.kiss/config.json`` (under the ``last_model`` key) — *not*
+    in the SQLite ``model_usage`` table, which now tracks only per-model
+    usage counts.
     """
-    initial_count = 1 if increment else 0
-    update_clause = (
-        "count = count + 1, is_last = 1" if increment else "is_last = 1"
-    )
-    sql = (
-        f"INSERT INTO model_usage (model, count, is_last) VALUES (?, {initial_count}, 1) "
-        f"ON CONFLICT(model) DO UPDATE SET {update_clause}"
-    )
-    db = _get_db()
-    with _rw_lock.write_lock():
-        db.execute(_CLEAR_LAST_MODEL)
-        db.execute(sql, (model,))
-        db.commit()
+    from kiss.agents.vscode.vscode_config import load_config
+
+    return str(load_config().get("last_model", "") or "")
 
 
 def _save_last_model(model: str) -> None:
-    """Persist the selected model name without incrementing usage count.
+    """Persist the selected model name as a user preference.
+
+    Writes the ``last_model`` key to ``~/.kiss/config.json`` (atomic).
+    Does **not** touch the SQLite usage counters.
 
     Args:
         model: The model name to save as the last-selected model.
     """
-    _upsert_model_last_used(model, increment=False)
+    from kiss.agents.vscode.vscode_config import load_config, save_config
+
+    cfg = load_config()
+    cfg["last_model"] = model
+    save_config(cfg)
 
 
 def _record_model_usage(model: str) -> None:
-    """Increment a model's usage counter and mark it as last-used."""
-    _upsert_model_last_used(model, increment=True)
+    """Increment a model's usage counter and mark it as last-used.
+
+    The usage ``count`` lives in the SQLite ``model_usage`` table; the
+    "last selected" pointer is persisted separately to
+    ``config.json`` via :func:`_save_last_model`.
+    """
+    db = _get_db()
+    with _rw_lock.write_lock():
+        db.execute(
+            "INSERT INTO model_usage (model, count) VALUES (?, 1) "
+            "ON CONFLICT(model) DO UPDATE SET count = count + 1",
+            (model,),
+        )
+        db.commit()
+    _save_last_model(model)
 
 
 def _load_file_usage() -> dict[str, int]:

@@ -672,9 +672,10 @@ class VSCodeServer(
         task, no in-progress merge, no pending worktree, no carried-over
         warnings) to guard against here.
 
-        Re-reads the last user-picked model from the database so the new
-        tab uses the correct model even when the in-memory default has
-        drifted (e.g. after switching between tabs with different models).
+        Re-reads the last user-picked model from ``config.json`` so the
+        new tab uses the correct model even when the in-memory default
+        has drifted (e.g. after switching between tabs with different
+        models).
 
         Args:
             tab_id: The frontend tab identifier (a freshly-minted uuid).
