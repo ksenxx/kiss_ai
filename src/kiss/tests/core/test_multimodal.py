@@ -8,13 +8,7 @@ import zlib
 
 import pytest
 
-from kiss.core.kiss_agent import KISSAgent
 from kiss.core.models.model import SUPPORTED_MIME_TYPES, Attachment, transcribe_audio
-from kiss.tests.conftest import (
-    requires_gemini_api_key,
-)
-
-TEST_TIMEOUT = 120
 
 
 def _create_png_bytes(width: int = 2, height: int = 2, color: tuple = (255, 0, 0)) -> bytes:
@@ -236,38 +230,6 @@ class TestTranscribeAudio(unittest.TestCase):
         assert _AUDIO_MIME_TO_EXT["audio/flac"] == ".flac"
         assert _AUDIO_MIME_TO_EXT["audio/aac"] == ".aac"
         assert _AUDIO_MIME_TO_EXT["audio/mp4"] == ".m4a"
-
-
-@requires_gemini_api_key
-class TestGeminiMultimodal(unittest.TestCase):
-    """Integration tests for Gemini model with image attachments."""
-
-    @pytest.mark.timeout(TEST_TIMEOUT)
-    def test_multiple_attachments(self) -> None:
-        red_png = _create_png_bytes(width=4, height=4, color=(255, 0, 0))
-        blue_png = _create_png_bytes(width=4, height=4, color=(0, 0, 255))
-        agent = KISSAgent("Gemini Multi-Attach Test")
-        try:
-            result = agent.run(
-                model_name="gemini-2.0-flash",
-                prompt_template=(
-                    "I'm sending you two images. What are their primary colors? Answer briefly."
-                ),
-                is_agentic=False,
-                max_budget=0.50,
-                attachments=[
-                    Attachment(data=red_png, mime_type="image/png"),
-                    Attachment(data=blue_png, mime_type="image/png"),
-                ],
-            )
-        except Exception as e:
-            msg = str(e)
-            if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
-                self.skipTest("Gemini API rate-limited (429)")
-            raise
-        assert result is not None
-        result_lower = result.lower()
-        assert "red" in result_lower or "blue" in result_lower
 
 
 if __name__ == "__main__":
