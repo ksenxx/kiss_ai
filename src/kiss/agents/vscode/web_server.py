@@ -71,7 +71,7 @@ from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 from kiss.agents.vscode.server import VSCodeServer
 from kiss.agents.vscode.vscode_config import load_config, source_shell_env
 from kiss.core.config import get_jobs_root
-from kiss.viz_trajectory.server import list_jobs, load_job_trajectories
+from kiss.viz_trajectory.server import find_job_dir, list_jobs, load_job_trajectories
 
 __all__ = ["RemoteAccessServer", "WebPrinter"]
 
@@ -2209,7 +2209,7 @@ def _trajectory_job_response(path: str) -> Response:
             400, "application/json", b'{"error": "Invalid job name"}'
         )
     jobs_root = get_jobs_root()
-    if not (jobs_root / job_name).exists():
+    if find_job_dir(jobs_root, job_name) is None:
         body = json.dumps({"error": f"Job '{job_name}' not found"}).encode("utf-8")
         return _http_response(404, "application/json", body)
     body = json.dumps(load_job_trajectories(jobs_root, job_name)).encode("utf-8")
