@@ -671,18 +671,131 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "zai-org/GLM-5.1": _mi(202752, 1.40, 4.40),
 }
 
-for _name, _info in MODEL_INFO.items():
-    if _info.cache_read_price_per_1M is not None:  # pragma: no cover – no models set explicit cr
-        continue
-    if _name.startswith(("claude-", "openrouter/anthropic/")):
-        _info.cache_read_price_per_1M = _info.input_price_per_1M * 0.1
-        _info.cache_write_price_per_1M = _info.input_price_per_1M * 1.25
-    elif (
-        _name.startswith(_OPENAI_PREFIXES)
-        and not _name.startswith(("text-embedding", "openai/"))
-        and _info.is_generation_supported
+_ANTHROPIC_CACHE_PREFIXES = (
+    "claude-",
+    "openrouter/anthropic/",
+    "openrouter/~anthropic/",
+)
+_OPENAI_OPENROUTER_PREFIXES = ("openrouter/openai/", "openrouter/~openai/")
+_GOOGLE_OPENROUTER_PREFIXES = ("openrouter/google/", "openrouter/~google/")
+_QUARTER_CACHE_OPENROUTER_PREFIXES = (
+    "openrouter/moonshotai/",
+    "openrouter/~moonshotai/",
+    "openrouter/x-ai/",
+)
+
+
+def _openai_cache_read_multiplier(bare: str) -> float:
+    """Return the cached-input price multiplier for an OpenAI model.
+
+    OpenAI bills prompt-cache reads at a per-model fraction of the base input
+    price (and never charges for cache writes). The multipliers below match
+    OpenAI's published pricing (verified against the OpenAI and Azure OpenAI
+    pricing pages): GPT-5.x is 0.10x, GPT-4.1 and o3/o4-mini are 0.25x, while
+    GPT-4o, GPT-4, GPT-3.5, o1 and o3-mini are 0.50x.
+
+    Args:
+        bare: An OpenAI model name without any provider prefix (e.g.
+            ``gpt-5.4``, ``o3-mini``, ``gpt-4o``).
+
+    Returns:
+        The fraction of the base input price charged for cached read tokens.
+    """
+    if bare in ("gpt-latest", "gpt-mini-latest"):
+        return 0.10  # OpenRouter aliases for the current GPT-5.x models
+    if bare.startswith("gpt-5") or "chat-latest" in bare:
+        return 0.10
+    if bare.startswith("gpt-image-1-mini"):
+        return 0.10
+    if bare.startswith("gpt-image"):
+        return 0.25
+    if bare.startswith("gpt-4.1"):
+        return 0.25
+    if bare.startswith(("o1", "o3-mini")):
+        return 0.50
+    if bare.startswith(("o3", "o4")):
+        return 0.25
+    return 0.50  # gpt-4o, gpt-4, gpt-3.5-turbo, computer-use, ...
+
+
+def _openai_bare_name(name: str) -> str | None:
+    """Return the bare OpenAI model name for cache pricing, or ``None``.
+
+    Recognizes both directly-routed OpenAI models (``gpt-*``, ``o1``/``o3``/
+    ``o4``, ``computer-use``) and OpenRouter passthrough OpenAI models
+    (``openrouter/openai/*`` and ``openrouter/~openai/*``). Embeddings, the
+    open-weight ``gpt-oss`` models, and subscription ``codex/`` models are
+    excluded (they have no per-token cache discount in this table).
+
+    Args:
+        name: The MODEL_INFO key.
+
+    Returns:
+        The OpenAI model name without provider prefix, or ``None`` if ``name``
+        is not an OpenAI cache-eligible model.
+    """
+    if name.startswith(_OPENAI_OPENROUTER_PREFIXES):
+        bare = name.split("/", 2)[2]
+        return None if bare.startswith("gpt-oss") else bare
+    if name.startswith(_OPENAI_PREFIXES) and not name.startswith(
+        ("text-embedding", "openai/", "codex/")
     ):
-        _info.cache_read_price_per_1M = _info.input_price_per_1M * 0.5
+        return name
+    return None
+
+
+def _apply_cache_pricing(name: str, info: ModelInfo) -> None:
+    """Populate ``info``'s cache read/write prices from provider pricing rules.
+
+    Cache-read tokens are billed at a fraction of the base input price and
+    cache-write tokens at a (possibly different) multiple, matching each
+    provider's published prompt-caching pricing. Providers without a
+    documented cache discount are left as ``None`` so ``calculate_cost`` falls
+    back to the full input price (a conservative over-estimate).
+
+    Args:
+        name: The MODEL_INFO key.
+        info: The ModelInfo to mutate in place.
+    """
+    if info.cache_read_price_per_1M is not None:
+        return
+    if not info.is_generation_supported:
+        return
+    inp = info.input_price_per_1M
+    if name.startswith(_ANTHROPIC_CACHE_PREFIXES):
+        info.cache_read_price_per_1M = inp * 0.1
+        info.cache_write_price_per_1M = inp * 1.25
+        return
+    bare = _openai_bare_name(name)
+    if bare is not None:
+        info.cache_read_price_per_1M = inp * _openai_cache_read_multiplier(bare)
+        info.cache_write_price_per_1M = 0.0  # OpenAI does not charge for cache writes
+        return
+    if name.startswith("gemini-"):
+        info.cache_read_price_per_1M = inp * 0.1  # Gemini context cache read
+        info.cache_write_price_per_1M = 0.0
+        return
+    if name.startswith(_GOOGLE_OPENROUTER_PREFIXES):
+        info.cache_read_price_per_1M = inp * 0.25  # OpenRouter Gemini implicit cache
+        info.cache_write_price_per_1M = 0.0
+        return
+    if name.startswith("openrouter/deepseek/"):
+        info.cache_read_price_per_1M = inp * 0.1
+        info.cache_write_price_per_1M = inp  # DeepSeek cache write = input price
+        return
+    if name.startswith("openrouter/qwen/"):
+        info.cache_read_price_per_1M = inp * 0.1
+        info.cache_write_price_per_1M = inp * 1.25
+        return
+    if name.startswith(_QUARTER_CACHE_OPENROUTER_PREFIXES):
+        info.cache_read_price_per_1M = inp * 0.25  # Moonshot / Grok cache read
+        info.cache_write_price_per_1M = 0.0
+        return
+    # No documented cache discount: leave None (full input price fallback).
+
+
+for _name, _info in MODEL_INFO.items():
+    _apply_cache_pricing(_name, _info)
 
 FLAKY_MODELS: dict[str, str] = {
     "openrouter/baidu/ernie-4.5-21b-a3b": "Ignores function calling tools",
@@ -1027,7 +1140,6 @@ def calculate_cost(
     Returns:
         float: Cost in USD, or 0.0 if pricing is not available for the model.
     """
-    info = MODEL_INFO.get(model_name)
     info = MODEL_INFO.get(model_name) or MODEL_INFO.get(_strip_provider_prefix(model_name))
     if info is None:
         return 0.0
