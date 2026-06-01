@@ -29,7 +29,7 @@ from kiss.agents.sorcar.persistence import (
     _load_latest_chat_events_by_chat_id,
 )
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.agents.vscode.browser_ui import _DISPLAY_EVENT_TYPES
+from kiss.agents.vscode.json_printer import _DISPLAY_EVENT_TYPES
 from kiss.agents.vscode.server import VSCodeServer
 
 

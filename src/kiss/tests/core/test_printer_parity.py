@@ -1,4 +1,4 @@
-"""Regression test: ConsolePrinter and BaseBrowserPrinter produce the same content.
+"""Regression test: ConsolePrinter and JsonPrinter produce the same content.
 
 Feeds identical print() calls to both printers and verifies:
 - Return values are identical for every call
@@ -9,20 +9,20 @@ Feeds identical print() calls to both printers and verifies:
 import io
 from types import SimpleNamespace
 
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.core.print_to_console import ConsolePrinter
 
 
 def _make_printers():
     buf = io.StringIO()
     console = ConsolePrinter(file=buf)
-    browser = BaseBrowserPrinter()
+    browser = JsonPrinter()
     browser._thread_local.task_id = "test-task"
     browser.start_recording()
     return console, buf, browser
 
 
-def _drain(browser: BaseBrowserPrinter) -> list[dict]:
+def _drain(browser: JsonPrinter) -> list[dict]:
     """Stop recording and return all recorded events."""
     return browser.stop_recording()
 

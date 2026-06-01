@@ -32,7 +32,7 @@ import threading
 import unittest
 from typing import Any
 
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.json_printer import JsonPrinter
 
 
 class TestStreamStateIsolation(unittest.TestCase):
@@ -45,7 +45,7 @@ class TestStreamStateIsolation(unittest.TestCase):
         Task A finishes and calls reset().  After that, task B's
         _current_block_type must still be "thinking", not "".
         """
-        printer = BaseBrowserPrinter()
+        printer = JsonPrinter()
         barrier = threading.Barrier(2, timeout=5)
         barrier2 = threading.Barrier(2, timeout=5)
         results: dict[str, str] = {}
@@ -88,7 +88,7 @@ class TestRecordingIsolation(unittest.TestCase):
         Scenario: both tasks start recording. Task A stops (stop_recording).
         Task B continues and later stops. Both should get their own events.
         """
-        printer = BaseBrowserPrinter()
+        printer = JsonPrinter()
         barrier = threading.Barrier(2, timeout=5)
         barrier2 = threading.Barrier(2, timeout=5)
         results: dict[str, list[dict]] = {}
@@ -129,7 +129,7 @@ class TestRecordingIsolation(unittest.TestCase):
     def test_start_recording_does_not_overwrite_concurrent_recording(self) -> None:
         """When task B calls start_recording(), task A's in-progress recording
         is not reset."""
-        printer = BaseBrowserPrinter()
+        printer = JsonPrinter()
         barrier = threading.Barrier(2, timeout=5)
         results: dict[str, list[dict]] = {}
 
@@ -165,7 +165,7 @@ class TestRecordingIsolation(unittest.TestCase):
 
     def test_peek_recording_returns_per_tab_events(self) -> None:
         """peek_recording returns only the calling tab's events."""
-        printer = BaseBrowserPrinter()
+        printer = JsonPrinter()
         printer._thread_local.task_id = "A"
         printer.start_recording()
         with printer._lock:
@@ -191,7 +191,7 @@ class TestConcurrentStopScenario(unittest.TestCase):
         2. Non-wt task is stopped (reset + stop_recording called)
         3. Wt task continues streaming — its events must use correct types
         """
-        printer = BaseBrowserPrinter()
+        printer = JsonPrinter()
         barrier = threading.Barrier(2, timeout=5)
         barrier2 = threading.Barrier(2, timeout=5)
         wt_events: list[dict] = []
@@ -248,7 +248,7 @@ class TestStopWtPreservesNonWtStreamState(unittest.TestCase):
         Wt task finishes and calls reset().  After that, non-wt task's
         _current_block_type must still be "thinking", not "".
         """
-        printer = BaseBrowserPrinter()
+        printer = JsonPrinter()
         barrier = threading.Barrier(2, timeout=5)
         barrier2 = threading.Barrier(2, timeout=5)
         results: dict[str, str] = {}
@@ -290,7 +290,7 @@ class TestStopWtPreservesNonWtRecording(unittest.TestCase):
     def test_stop_wt_recording_does_not_destroy_non_wt_recording(self) -> None:
         """When the wt task calls stop_recording(), the non-wt task's
         recording is preserved and can be stopped later with its full events."""
-        printer = BaseBrowserPrinter()
+        printer = JsonPrinter()
         barrier = threading.Barrier(2, timeout=5)
         barrier2 = threading.Barrier(2, timeout=5)
         results: dict[str, list[dict]] = {}
@@ -339,7 +339,7 @@ class TestStopWtPreservesNonWtRecording(unittest.TestCase):
     def test_start_wt_recording_does_not_overwrite_non_wt_recording(self) -> None:
         """When the wt task calls start_recording() after the non-wt task has
         already started recording, the non-wt task's events are not lost."""
-        printer = BaseBrowserPrinter()
+        printer = JsonPrinter()
         barrier = threading.Barrier(2, timeout=5)
         results: dict[str, list[dict]] = {}
 
@@ -388,7 +388,7 @@ class TestStopWtConcurrentScenario(unittest.TestCase):
         2. Wt task is stopped (reset + stop_recording called)
         3. Non-wt task continues streaming — its events must use correct types
         """
-        printer = BaseBrowserPrinter()
+        printer = JsonPrinter()
         barrier = threading.Barrier(2, timeout=5)
         barrier2 = threading.Barrier(2, timeout=5)
         nwt_events: list[dict] = []
@@ -444,7 +444,7 @@ class TestBashStreamedCrossContamination(unittest.TestCase):
 
     def test_streamed_flag_isolated_between_tabs(self) -> None:
         """Task A streaming bash does not set task B's streamed flag."""
-        printer = BaseBrowserPrinter()
+        printer = JsonPrinter()
         barrier = threading.Barrier(2, timeout=5)
         barrier2 = threading.Barrier(2, timeout=5)
         results: dict[str, bool] = {}
@@ -490,7 +490,7 @@ class TestBashBufferCrossContamination(unittest.TestCase):
 
     def test_buffers_isolated_between_tabs(self) -> None:
         """Task A's bash buffer content does not appear in task B's buffer."""
-        printer = BaseBrowserPrinter()
+        printer = JsonPrinter()
         barrier = threading.Barrier(2, timeout=5)
         results: dict[str, list[str]] = {}
 
@@ -535,7 +535,7 @@ class TestBashGenerationInterference(unittest.TestCase):
 
     def test_reset_on_tab_b_does_not_kill_tab_a_flush(self) -> None:
         """Task B's reset() does not increment task A's generation counter."""
-        printer = BaseBrowserPrinter()
+        printer = JsonPrinter()
         barrier = threading.Barrier(2, timeout=5)
         barrier2 = threading.Barrier(2, timeout=5)
         results: dict[str, int] = {}
@@ -578,7 +578,7 @@ class TestBashTimerInterference(unittest.TestCase):
 
     def test_reset_on_tab_b_does_not_cancel_tab_a_timer(self) -> None:
         """Task B's reset() does not cancel task A's pending timer."""
-        printer = BaseBrowserPrinter()
+        printer = JsonPrinter()
         barrier = threading.Barrier(2, timeout=5)
         barrier2 = threading.Barrier(2, timeout=5)
         results: dict[str, bool] = {}
@@ -636,7 +636,7 @@ class TestFlushBashTOCTOU(unittest.TestCase):
         4. (Without fix: timer releases lock, reset+start_recording, broadcast leaks)
         5. (With fix: broadcast inside lock, no window for reset)
         """
-        printer = BaseBrowserPrinter()
+        printer = JsonPrinter()
         printer._thread_local.task_id = "tab1"
 
         with printer._bash_lock:
@@ -685,7 +685,7 @@ class TestCleanupTab(unittest.TestCase):
 
     def test_cleanup_removes_bash_state(self) -> None:
         """After cleanup_task, the task's _BashState is removed from _bash_states."""
-        printer = BaseBrowserPrinter()
+        printer = JsonPrinter()
         printer._thread_local.task_id = "tab1"
         with printer._bash_lock:
             printer._bash_state.buffer.append("data")
@@ -695,7 +695,7 @@ class TestCleanupTab(unittest.TestCase):
 
     def test_cleanup_cancels_pending_timer(self) -> None:
         """cleanup_task cancels any pending bash flush timer for the task."""
-        printer = BaseBrowserPrinter()
+        printer = JsonPrinter()
         printer._thread_local.task_id = "tab1"
         t = threading.Timer(999, lambda: None)
         t.start()
@@ -708,7 +708,7 @@ class TestCleanupTab(unittest.TestCase):
 
     def test_cleanup_removes_recording(self) -> None:
         """After cleanup_task, the task's recording is removed from _recordings."""
-        printer = BaseBrowserPrinter()
+        printer = JsonPrinter()
         printer._thread_local.task_id = "tab1"
         printer.start_recording()
         assert "tab1" in printer._recordings
@@ -717,7 +717,7 @@ class TestCleanupTab(unittest.TestCase):
 
     def test_cleanup_does_not_affect_other_tabs(self) -> None:
         """cleanup_task for one task leaves other tasks' state intact."""
-        printer = BaseBrowserPrinter()
+        printer = JsonPrinter()
 
         def setup_tab(task_id: str) -> None:
             printer._thread_local.task_id = task_id
@@ -756,7 +756,7 @@ class TestCleanupTab(unittest.TestCase):
 
     def test_cleanup_nonexistent_tab_is_noop(self) -> None:
         """cleanup_task for a task that doesn't exist does not raise."""
-        printer = BaseBrowserPrinter()
+        printer = JsonPrinter()
         printer.cleanup_task("nonexistent")
         assert "nonexistent" not in printer._bash_states
         assert "nonexistent" not in printer._recordings
@@ -766,7 +766,7 @@ class TestCleanupTab(unittest.TestCase):
 
         After cleanup, no per-task entries remain in _bash_states or _recordings.
         """
-        printer = BaseBrowserPrinter()
+        printer = JsonPrinter()
         printer._thread_local.task_id = "tab1"
 
         printer.start_recording()

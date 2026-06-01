@@ -1,4 +1,4 @@
-"""Tests for BaseBrowserPrinter.
+"""Tests for JsonPrinter.
 
 Tests verify correctness and accuracy of all browser streaming logic.
 Uses real objects with duck-typed attributes (SimpleNamespace) as
@@ -8,18 +8,18 @@ message inputs and real queue subscribers.
 import unittest
 from types import SimpleNamespace
 
-from kiss.agents.vscode.browser_ui import (
+from kiss.agents.vscode.json_printer import (
     _DISPLAY_EVENT_TYPES,
-    BaseBrowserPrinter,
+    JsonPrinter,
     _coalesce_events,
 )
 
 
-def _start(printer: BaseBrowserPrinter) -> None:
+def _start(printer: JsonPrinter) -> None:
     printer.start_recording()
 
 
-def _drain(printer: BaseBrowserPrinter) -> list[dict]:
+def _drain(printer: JsonPrinter) -> list[dict]:
     return printer.stop_recording()
 
 
@@ -35,14 +35,14 @@ class TestCoalesceEvents(unittest.TestCase):
 
 class TestHandleMessage(unittest.TestCase):
     def test_subtype_not_tool_output(self):
-        p = BaseBrowserPrinter()
+        p = JsonPrinter()
         _start(p)
         msg = SimpleNamespace(subtype="other", data={"content": "x"})
         p.print(msg, type="message")
         assert _drain(p) == []
 
     def test_unknown_message_type_no_crash(self):
-        p = BaseBrowserPrinter()
+        p = JsonPrinter()
         _start(p)
         msg = SimpleNamespace(unknown_attr="value")
         p.print(msg, type="message")
