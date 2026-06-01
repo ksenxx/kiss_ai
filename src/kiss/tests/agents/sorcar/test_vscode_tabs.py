@@ -454,9 +454,9 @@ class TestRecordingIsolation(unittest.TestCase):
 
     def test_stop_recording_clears_state(self) -> None:
         """stop_recording removes the tab's recording entry."""
-        from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+        from kiss.agents.vscode.json_printer import JsonPrinter
 
-        printer = BaseBrowserPrinter()
+        printer = JsonPrinter()
         printer._thread_local.task_id = "rec-1"
         printer.start_recording()
         key = printer._task_key()

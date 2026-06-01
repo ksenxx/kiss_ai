@@ -132,10 +132,10 @@ class TestUsefulTools(TestCase):
 class TestMultiPrinter(TestCase):
 
     def test_multi_printer_token_callback(self) -> None:
-        from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+        from kiss.agents.vscode.json_printer import JsonPrinter
         from kiss.core.printer import MultiPrinter
-        p1 = BaseBrowserPrinter()
-        p2 = BaseBrowserPrinter()
+        p1 = JsonPrinter()
+        p2 = JsonPrinter()
         # Recording is keyed by ``_thread_local.task_id``; without a
         # task id, ``start_recording``/``stop_recording`` are no-ops.
         p1._thread_local.task_id = "mp-test"
@@ -150,9 +150,9 @@ class TestMultiPrinter(TestCase):
         assert len(events2) > 0
 
     def test_multi_printer_reset(self) -> None:
-        from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+        from kiss.agents.vscode.json_printer import JsonPrinter
         from kiss.core.printer import MultiPrinter
-        p1 = BaseBrowserPrinter()
+        p1 = JsonPrinter()
         mp = MultiPrinter([p1])
         with p1._bash_lock:
             p1._bash_state.buffer.append("x")

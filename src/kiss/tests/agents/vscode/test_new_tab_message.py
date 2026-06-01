@@ -29,11 +29,11 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.agents.vscode.server import VSCodeServer
 
 
-class _CapturingPrinter(BaseBrowserPrinter):
+class _CapturingPrinter(JsonPrinter):
     """Records every ``broadcast`` call verbatim."""
 
     def __init__(self) -> None:

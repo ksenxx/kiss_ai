@@ -58,6 +58,24 @@ def _generate_artifact_dir(base_dir: str | Path | None = None) -> str:
     return str(artifact_path)
 
 
+def get_jobs_root(base_dir: str | Path | None = None) -> Path:
+    """Return the directory that contains all per-job artifact subdirectories.
+
+    Job artifacts (including saved trajectories) live under
+    ``<base>/.kiss.artifacts/jobs/job_*``.  This returns the parent
+    ``jobs`` directory, which is what the trajectory visualizer treats as
+    its artifact directory.
+
+    Args:
+        base_dir: Optional base directory for the ``.kiss.artifacts`` root.
+            Defaults to the project root when ``None``.
+
+    Returns:
+        The absolute path to the ``jobs`` directory.
+    """
+    return _artifact_root(base_dir) / "jobs"
+
+
 def get_artifact_dir() -> str:
     """Return the active artifact directory, creating it lazily if needed."""
     global _artifact_dir

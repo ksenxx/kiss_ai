@@ -20,7 +20,7 @@ Spec
    b. Detect that an agent is still running for ``chat_id`` under
       some *other* tab id and subscribe the new tab id to that
       agent's event stream via
-      :meth:`BaseBrowserPrinter.subscribe_tab` so every subsequent
+      :meth:`JsonPrinter.subscribe_tab` so every subsequent
       broadcast is duplicated with ``tabId=new_id``.  The source
       ``_RunningAgentState`` is NOT moved — both the original tab id and the
       new tab id receive the stream, supporting multiple concurrent
@@ -42,7 +42,7 @@ from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.agents.vscode.server import VSCodeServer
 
 
@@ -67,7 +67,7 @@ def _make_server() -> tuple[VSCodeServer, list[dict]]:
     events: list[dict] = []
     lock = threading.Lock()
 
-    real_broadcast = BaseBrowserPrinter.broadcast
+    real_broadcast = JsonPrinter.broadcast
 
     def capture(event: dict) -> None:
         # Mirror :meth:`WebPrinter.broadcast` exactly:

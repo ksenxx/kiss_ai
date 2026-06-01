@@ -12,7 +12,7 @@ because the agentic loop renders it again as a dedicated ``result`` panel.
 
 import io
 
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.core.print_to_console import ConsolePrinter
 
 _TASK_COUNTER = 0
@@ -23,13 +23,13 @@ def _new_printers():
     _TASK_COUNTER += 1
     buf = io.StringIO()
     console = ConsolePrinter(file=buf)
-    browser = BaseBrowserPrinter()
+    browser = JsonPrinter()
     browser._thread_local.task_id = f"test-tool-result-{_TASK_COUNTER}"
     browser.start_recording()
     return console, buf, browser
 
 
-def _tool_results(browser: BaseBrowserPrinter) -> list[dict]:
+def _tool_results(browser: JsonPrinter) -> list[dict]:
     return [e for e in browser.stop_recording() if e["type"] == "tool_result"]
 
 

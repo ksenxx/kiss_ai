@@ -36,7 +36,7 @@ from typing import Any
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.agents.vscode.server import VSCodeServer
 
 
@@ -90,7 +90,7 @@ class TestSubagentRegistersRunningState:
         parent = ChatSorcarAgent("parent")
         parent._chat_id = parent_chat_id
         parent._last_task_id = parent_task_id
-        printer = BaseBrowserPrinter()
+        printer = JsonPrinter()
         printer._thread_local.task_id = "tab-parent"
         parent.printer = printer  # type: ignore[assignment]
 

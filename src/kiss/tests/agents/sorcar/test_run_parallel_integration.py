@@ -17,7 +17,7 @@ import pytest
 import yaml
 
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent, run_tasks_parallel
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.json_printer import JsonPrinter
 
 FAST_MODEL = "claude-haiku-4-5"
 TINY_BUDGET = 0.50  # $0.50 per test — enough for simple tasks
@@ -521,8 +521,8 @@ class TestParallelFileIO:
 # ---------------------------------------------------------------------------
 
 
-class _CapturePrinter(BaseBrowserPrinter):
-    """Real BaseBrowserPrinter subclass that captures all broadcast events."""
+class _CapturePrinter(JsonPrinter):
+    """Real JsonPrinter subclass that captures all broadcast events."""
 
     def __init__(self) -> None:
         super().__init__()

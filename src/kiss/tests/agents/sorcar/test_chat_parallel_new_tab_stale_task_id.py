@@ -7,7 +7,7 @@ whose worker threads are reused across multiple sub-agents (e.g.
 — BEFORE it sets ``printer._thread_local.task_id`` to the new
 sub-agent's task key.  On a reused worker thread, that thread-local
 still carries the PREVIOUS sub-agent's task key, so
-``BaseBrowserPrinter._inject_task_id`` stamps the new_tab event with
+``JsonPrinter._inject_task_id`` stamps the new_tab event with
 the WRONG ``taskId`` (and ``WebPrinter.broadcast`` would then route
 it through the previous tab's stream, recording / persisting it under
 the previous task).  In the user-visible behaviour the freshly
@@ -40,7 +40,7 @@ import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import _add_task
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.json_printer import JsonPrinter
 
 
 def _finish_response(model: str = "gpt-4o-mini") -> dict:
@@ -116,7 +116,7 @@ def _restore(saved: tuple) -> None:
     (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
 
 
-class _RecordingPrinter(BaseBrowserPrinter):
+class _RecordingPrinter(JsonPrinter):
     """Captures every broadcast event AFTER ``_inject_task_id`` runs.
 
     Records each event in the order it was emitted so tests can
