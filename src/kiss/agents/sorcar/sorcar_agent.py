@@ -423,13 +423,13 @@ class SorcarAgent(RelentlessAgent):
                 pass
             return os.cpu_count() or 1
 
-        def change_model(model_name: str) -> str:
+        def set_model(model_name: str) -> str:
             """Change the agent's LLM model dynamically.
 
             Args:
                 model_name: New LLM model name (for example
-                    ``"gpt-4o"``, ``"claude-sonnet-4-6"``,
-                    ``"gemini-2.5-pro"``).
+                    ``"gpt-5.5"``, ``"claude-sonnet-4-8"``,
+                    ``"gemini-3.5-flash"``).
 
             Returns:
                 A human-readable confirmation string describing the
@@ -490,7 +490,7 @@ class SorcarAgent(RelentlessAgent):
 
         tools.append(ask_user_question)
         tools.append(update_settings)
-        tools.append(change_model)
+        tools.append(set_model)
         if self._is_parallel:
             tools.append(run_parallel)
             tools.append(number_of_cores)
