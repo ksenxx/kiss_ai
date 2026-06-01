@@ -60,6 +60,7 @@ from concurrent.futures import Future as ConcurrentFuture
 from functools import partial
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 import websockets
 from websockets.asyncio.server import ServerConnection, serve
@@ -69,12 +70,22 @@ from websockets.http11 import Request, Response
 from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
 from kiss.agents.vscode.server import VSCodeServer
 from kiss.agents.vscode.vscode_config import load_config, source_shell_env
+from kiss.core.config import get_jobs_root
+from kiss.viz_trajectory.server import list_jobs, load_job_trajectories
 
 __all__ = ["RemoteAccessServer", "WebPrinter"]
 
 logger = logging.getLogger(__name__)
 
 MEDIA_DIR = Path(__file__).parent / "media"
+
+# HTML page for the agent-trajectory visualizer, served at ``/trajectories/``.
+TRAJECTORY_TEMPLATE = (
+    Path(__file__).resolve().parents[2]
+    / "viz_trajectory"
+    / "templates"
+    / "index.html"
+)
 
 TUNNEL_CHECK_INTERVAL = 30
 
@@ -2165,6 +2176,46 @@ def _http_response(status: int, content_type: str, body: bytes) -> Response:
     )
 
 
+def _trajectory_jobs_response() -> Response:
+    """Return a JSON HTTP response listing all trajectory jobs.
+
+    Mirrors the ``/api/jobs`` endpoint of the standalone trajectory
+    visualizer (:mod:`kiss.viz_trajectory.server`).
+
+    Returns:
+        A 200 ``application/json`` response with the job list.
+    """
+    body = json.dumps(list_jobs(get_jobs_root())).encode("utf-8")
+    return _http_response(200, "application/json", body)
+
+
+def _trajectory_job_response(path: str) -> Response:
+    """Return a JSON HTTP response with the trajectories for one job.
+
+    Mirrors the ``/api/jobs/<job_name>/trajectories`` endpoint of the
+    standalone trajectory visualizer.
+
+    Args:
+        path: Request path of the form ``/api/jobs/<job_name>/trajectories``.
+
+    Returns:
+        A 200 ``application/json`` response with the trajectory list, a 400
+        response for an invalid job name, or a 404 response when the job
+        directory does not exist.
+    """
+    job_name = unquote(path[len("/api/jobs/") : -len("/trajectories")])
+    if "/" in job_name or "\\" in job_name or ".." in job_name:
+        return _http_response(
+            400, "application/json", b'{"error": "Invalid job name"}'
+        )
+    jobs_root = get_jobs_root()
+    if not (jobs_root / job_name).exists():
+        body = json.dumps({"error": f"Job '{job_name}' not found"}).encode("utf-8")
+        return _http_response(404, "application/json", body)
+    body = json.dumps(load_job_trajectories(jobs_root, job_name)).encode("utf-8")
+    return _http_response(200, "application/json", body)
+
+
 def _augment_merge_data(event: dict[str, Any]) -> dict[str, Any]:
     """Add ``base_text`` and ``current_text`` to each file in a ``merge_data`` event.
 
@@ -2415,6 +2466,16 @@ class RemoteAccessServer:
             return _http_response(200, "text/html; charset=utf-8", self._html_bytes)
         if path == "/ws":
             return None
+        if path == "/trajectories" or path == "/trajectories/":
+            return _http_response(
+                200,
+                "text/html; charset=utf-8",
+                TRAJECTORY_TEMPLATE.read_bytes(),
+            )
+        if path == "/api/jobs":
+            return _trajectory_jobs_response()
+        if path.startswith("/api/jobs/") and path.endswith("/trajectories"):
+            return _trajectory_job_response(path)
         if path.startswith("/media/"):
             filepath = MEDIA_DIR / path[7:]
             if (
