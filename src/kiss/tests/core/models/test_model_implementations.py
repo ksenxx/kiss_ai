@@ -11,7 +11,9 @@ from kiss.core.kiss_error import KISSError
 from kiss.core.models.anthropic_model import AnthropicModel
 from kiss.core.models.model_info import (
     MODEL_INFO,
+    _apply_cache_pricing,
     _mi,
+    _openai_cache_read_multiplier,
     calculate_cost,
     get_flaky_reason,
     is_model_flaky,
@@ -156,19 +158,89 @@ class TestCachePricing:
             assert info.cache_write_price_per_1M == pytest.approx(info.input_price_per_1M * 1.25)
 
     def test_openai_model_has_cache_read_pricing(self):
+        # gpt-4.1 family caches at 0.25x input; OpenAI never charges for writes.
         info = MODEL_INFO["gpt-4.1-mini"]
-        assert info.cache_read_price_per_1M == pytest.approx(0.20)
+        assert info.cache_read_price_per_1M == pytest.approx(0.10)  # 0.25 * 0.40
+        assert info.cache_write_price_per_1M == 0.0
+
+    def test_openai_gpt5_cache_read_is_tenth(self):
+        for name in ("gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5", "gpt-5-codex"):
+            info = MODEL_INFO[name]
+            assert info.cache_read_price_per_1M == pytest.approx(info.input_price_per_1M * 0.1)
+            assert info.cache_write_price_per_1M == 0.0
+
+    def test_openai_gpt41_and_o3_cache_read_is_quarter(self):
+        for name in ("gpt-4.1", "gpt-4.1-mini", "o3", "o4-mini", "o3-deep-research"):
+            info = MODEL_INFO[name]
+            assert info.cache_read_price_per_1M == pytest.approx(info.input_price_per_1M * 0.25)
+
+    def test_openai_gpt4o_and_o1_cache_read_is_half(self):
+        for name in ("gpt-4o", "gpt-4o-mini", "gpt-4", "gpt-3.5-turbo", "o1", "o3-mini"):
+            info = MODEL_INFO[name]
+            assert info.cache_read_price_per_1M == pytest.approx(info.input_price_per_1M * 0.5)
+
+    def test_openai_cache_read_multiplier_classification(self):
+        assert _openai_cache_read_multiplier("gpt-5.4") == 0.10
+        assert _openai_cache_read_multiplier("gpt-chat-latest") == 0.10
+        assert _openai_cache_read_multiplier("gpt-latest") == 0.10
+        assert _openai_cache_read_multiplier("gpt-mini-latest") == 0.10
+        assert _openai_cache_read_multiplier("gpt-image-1-mini") == 0.10
+        assert _openai_cache_read_multiplier("gpt-image-2") == 0.25
+        assert _openai_cache_read_multiplier("gpt-4.1") == 0.25
+        assert _openai_cache_read_multiplier("o3") == 0.25
+        assert _openai_cache_read_multiplier("o4-mini") == 0.25
+        assert _openai_cache_read_multiplier("o1") == 0.50
+        assert _openai_cache_read_multiplier("o3-mini") == 0.50
+        assert _openai_cache_read_multiplier("gpt-4o") == 0.50
+
+    def test_gemini_cache_pricing(self):
+        # Direct Gemini context cache read = 0.1x input; no separate write cost.
+        for name in ("gemini-2.5-pro", "gemini-2.5-flash", "gemini-3.1-pro-preview"):
+            info = MODEL_INFO[name]
+            assert info.cache_read_price_per_1M == pytest.approx(info.input_price_per_1M * 0.1)
+            assert info.cache_write_price_per_1M == 0.0
+
+    def test_openrouter_provider_cache_pricing(self):
+        # OpenRouter Gemini implicit caching reads at 0.25x.
+        g = MODEL_INFO["openrouter/google/gemini-2.5-pro"]
+        assert g.cache_read_price_per_1M == pytest.approx(g.input_price_per_1M * 0.25)
+        # OpenRouter passthrough OpenAI mirrors OpenAI per-model rates.
+        assert MODEL_INFO["openrouter/openai/gpt-5.5"].cache_read_price_per_1M == pytest.approx(
+            MODEL_INFO["openrouter/openai/gpt-5.5"].input_price_per_1M * 0.1
+        )
+        assert MODEL_INFO["openrouter/openai/gpt-4o"].cache_read_price_per_1M == pytest.approx(
+            MODEL_INFO["openrouter/openai/gpt-4o"].input_price_per_1M * 0.5
+        )
+        # DeepSeek: read 0.1x, write = input price.
+        d = MODEL_INFO["openrouter/deepseek/deepseek-v3.2"]
+        assert d.cache_read_price_per_1M == pytest.approx(d.input_price_per_1M * 0.1)
+        assert d.cache_write_price_per_1M == pytest.approx(d.input_price_per_1M)
+        # Qwen explicit cache: read 0.1x, write 1.25x.
+        q = MODEL_INFO["openrouter/qwen/qwen3-max"]
+        assert q.cache_read_price_per_1M == pytest.approx(q.input_price_per_1M * 0.1)
+        assert q.cache_write_price_per_1M == pytest.approx(q.input_price_per_1M * 1.25)
+        # Moonshot / Grok: read 0.25x, no write cost.
+        for name in ("openrouter/moonshotai/kimi-k2.5", "openrouter/x-ai/grok-4.3"):
+            info = MODEL_INFO[name]
+            assert info.cache_read_price_per_1M == pytest.approx(info.input_price_per_1M * 0.25)
+            assert info.cache_write_price_per_1M == 0.0
+
+    def test_openrouter_anthropic_cache_pricing(self):
+        info = MODEL_INFO["openrouter/anthropic/claude-opus-4.8"]
+        assert info.cache_read_price_per_1M == pytest.approx(info.input_price_per_1M * 0.1)
+        assert info.cache_write_price_per_1M == pytest.approx(info.input_price_per_1M * 1.25)
+
+    def test_gpt_oss_openrouter_has_no_cache_pricing(self):
+        info = MODEL_INFO["openrouter/openai/gpt-oss-120b"]
+        assert info.cache_read_price_per_1M is None
         assert info.cache_write_price_per_1M is None
 
-    def test_openai_cache_read_pricing_formula(self):
-        for name, info in MODEL_INFO.items():
-            if not name.startswith(("gpt-", "o1", "o3", "o4", "codex-", "computer-use")):
-                continue
-            if name.startswith(("text-embedding", "openai/")):
-                continue
-            if not info.is_generation_supported:
-                continue
-            assert info.cache_read_price_per_1M == pytest.approx(info.input_price_per_1M * 0.5)
+    def test_undocumented_providers_have_no_cache_pricing(self):
+        # Providers without a documented cache discount fall back to full input price.
+        for name in ("minimax-m2.5", "deepseek-ai/DeepSeek-V3-0324", "Qwen/Qwen3.6-Plus"):
+            info = MODEL_INFO[name]
+            assert info.cache_read_price_per_1M is None, f"{name} should not have cache pricing"
+            assert info.cache_write_price_per_1M is None
 
     def test_embedding_models_no_cache_pricing(self):
         for name in ("text-embedding-3-small", "text-embedding-3-large", "text-embedding-ada-002"):
@@ -176,18 +248,31 @@ class TestCachePricing:
             assert info.cache_read_price_per_1M is None
             assert info.cache_write_price_per_1M is None
 
-    def test_openrouter_models_no_cache_pricing(self):
-        for name, info in MODEL_INFO.items():
-            if name.startswith("openrouter/") and not name.startswith(
-                "openrouter/anthropic/"
-            ):
-                assert info.cache_read_price_per_1M is None, f"{name} should not have cache pricing"
-                assert info.cache_write_price_per_1M is None, (
-                    f"{name} should not have cache pricing"
-                )
-
     def test_calculate_cost_unknown_model_with_cache_tokens(self):
         assert calculate_cost("unknown-model-xyz", 1000, 1000, 500, 500) == 0.0
+
+    def test_calculate_cost_numeric_per_family(self):
+        # 1M cache-read tokens -> price equals the per-1M cache-read rate in USD.
+        assert calculate_cost("gpt-5.5", 0, 0, 1_000_000, 0) == pytest.approx(0.50)
+        assert calculate_cost("gpt-4o", 0, 0, 1_000_000, 0) == pytest.approx(1.25)
+        assert calculate_cost("o3", 0, 0, 1_000_000, 0) == pytest.approx(0.50)
+        assert calculate_cost("gemini-2.5-pro", 0, 0, 1_000_000, 0) == pytest.approx(0.125)
+        # Anthropic cache write billed at 1.25x input ($5 -> $6.25 per 1M).
+        assert calculate_cost("claude-opus-4-8", 0, 0, 0, 1_000_000) == pytest.approx(6.25)
+        # Combined: input + output + cache read for gpt-5.4 ($2.50 in / $15 out / $0.25 cr).
+        assert calculate_cost("gpt-5.4", 1_000_000, 1_000_000, 1_000_000, 0) == pytest.approx(
+            2.50 + 15.0 + 0.25
+        )
+
+    def test_calculate_cost_strips_provider_prefix(self):
+        # Harbor-style provider prefix resolves to the same pricing.
+        assert calculate_cost("openai/gpt-5.5", 0, 0, 1_000_000, 0) == pytest.approx(0.50)
+
+    def test_apply_cache_pricing_respects_existing_prices(self):
+        info = _mi(1000, 10.0, 20.0, cr=1.0, cw=2.0)
+        _apply_cache_pricing("gpt-4o", info)
+        assert info.cache_read_price_per_1M == 1.0
+        assert info.cache_write_price_per_1M == 2.0
 
     def test_model_info_explicit_cache_prices_override_loop(self):
         info = _mi(1000, 10.0, 20.0, cr=1.0, cw=2.0)
