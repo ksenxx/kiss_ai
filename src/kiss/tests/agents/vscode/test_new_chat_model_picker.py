@@ -44,11 +44,17 @@ MAIN_JS = (
 def _isolate_db(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
     """Point persistence at a temp dir so tests don't touch real data."""
     import kiss.agents.sorcar.persistence as pm
+    import kiss.agents.vscode.vscode_config as vc
 
     _close_db()
     tmpdir = tempfile.mkdtemp()
     monkeypatch.setattr(pm, "_KISS_DIR", type(pm._KISS_DIR)(tmpdir))
     monkeypatch.setattr(pm, "_DB_PATH", type(pm._DB_PATH)(os.path.join(tmpdir, "sorcar.db")))
+    # ``last_model`` now lives in ``config.json`` (not the DB), so the
+    # config path must be redirected into the same temp dir.
+    cfg_path = os.path.join(tmpdir, "config.json")
+    monkeypatch.setattr(vc, "CONFIG_DIR", type(vc.CONFIG_DIR)(tmpdir))
+    monkeypatch.setattr(vc, "CONFIG_PATH", type(vc.CONFIG_PATH)(cfg_path))
     yield
     _close_db()
 
