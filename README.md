@@ -163,7 +163,7 @@ These agents are in `src/kiss/agents/third_party_agents/`.
 
 ## 🤖 Models Supported
 
-**542 models** across 8 provider categories (OpenAI, Anthropic, Gemini, Together AI, MiniMax, OpenRouter, Claude Code CLI, Codex CLI) with built-in pricing, context lengths, and capability flags.
+**546 models** across 8 provider categories (OpenAI, Anthropic, Gemini, Together AI, MiniMax, OpenRouter, Claude Code CLI, Codex CLI) with built-in pricing, context lengths, and capability flags.
 
 **Generation Models** (text generation with function calling support):
 
@@ -173,11 +173,12 @@ These agents are in `src/kiss/agents/third_party_agents/`.
 - **OpenAI (Image)**: gpt-image-1, gpt-image-1-mini, gpt-image-1.5, gpt-image-2
 - **OpenAI (Search)**: gpt-4o-search-preview, gpt-4o-mini-search-preview
 - **OpenAI (Other)**: computer-use-preview, openai/gpt-oss-20b, openai/gpt-oss-120b
-- **Anthropic**: claude-opus-4-7, claude-opus-4-6, claude-opus-4-5, claude-opus-4-1, claude-opus-4, claude-sonnet-4-6, claude-sonnet-4-5, claude-sonnet-4, claude-haiku-4-5 (+ dated variants)
+- **Anthropic**: claude-opus-4-8, claude-opus-4-7, claude-opus-4-6, claude-opus-4-5, claude-opus-4-1, claude-opus-4, claude-sonnet-4-6, claude-sonnet-4-5, claude-sonnet-4, claude-haiku-4-5 (+ dated variants)
 - **Claude Code CLI**: cc/haiku, cc/opus, cc/sonnet
 - **Codex CLI**: codex/default, codex/codex-auto-review, codex/gpt-5.2, codex/gpt-5.3-codex, codex/gpt-5.4, codex/gpt-5.4-mini, codex/gpt-5.5
-- **Gemini**: gemini-2.5-pro, gemini-2.5-flash, gemini-2.5-flash-image, gemini-2.5-flash-lite, gemini-2.0-flash, gemini-2.0-flash-lite, gemini-3.1-flash-lite
+- **Gemini**: gemini-2.5-pro, gemini-2.5-flash, gemini-2.5-flash-image, gemini-2.5-flash-lite, gemini-2.0-flash, gemini-2.0-flash-lite, gemini-3.5-flash, gemini-3.1-flash-lite
 - **Gemini (Preview)**: gemini-3-pro-preview, gemini-3-flash-preview, gemini-3.1-pro-preview, gemini-3.1-flash-lite-preview, gemini-3.1-flash-tts-preview
+- **Gemini (Image)**: gemini-3-pro-image, gemini-3.1-flash-image
 - **Gemini (Open Models)**: google/gemma-4-31B-it, google/gemma-3n-E4B-it, google/gemma-2-27b-it
 - **Together AI (Llama)**: Llama-4-Scout, Llama-4-Maverick (with function calling), Llama-3.x series (generation only)
 - **Together AI (Qwen)**: Qwen2-1.5B-Instruct, Qwen2-VL-72B-Instruct, Qwen2.5-72B/14B/7B-Instruct, Qwen2.5-VL-72B, Qwen2.5-Coder-32B, Qwen3-235B series, Qwen3-Coder-480B, Qwen3-Coder-Next, Qwen3-Next-80B, Qwen3-VL-32B/8B, Qwen3.5-397B/9B, Qwen3.6-Plus, QwQ-32B
@@ -190,7 +191,7 @@ These agents are in `src/kiss/agents/third_party_agents/`.
 - **Together AI (DeepCogito)**: cogito-v1-preview (llama-70B/8B/70B-Turbo, qwen-14B/32B), cogito-v2-1-671b
 - **Together AI (NVIDIA)**: Llama-3.1-Nemotron-70B, Nemotron-Nano-9B-v2
 - **Together AI (Other)**: arcee-ai/trinity-mini, essentialai/rnj-1-instruct
-- **OpenRouter**: Access to 330 models from 51 providers via unified API, including OpenAI, Anthropic, Google, Meta Llama, DeepSeek, Qwen, Amazon Nova, Cohere, X.AI Grok, MiniMax, ByteDance Seed, MoonshotAI, Mistral, NVIDIA, Z.AI/GLM, AllenAI, Perplexity, NousResearch, Baidu ERNIE, Xiaomi, Reka AI, Arcee AI, Perceptron, and others
+- **OpenRouter**: Access to 333 models from 55 providers via unified API, including OpenAI, Anthropic, Google, Meta Llama, DeepSeek, Qwen, Amazon Nova, Cohere, X.AI Grok, MiniMax, ByteDance Seed, MoonshotAI, Mistral, NVIDIA, Z.AI/GLM, AllenAI, Perplexity, NousResearch, Baidu ERNIE, Xiaomi, Reka AI, Arcee AI, Perceptron, and others
 
 **Embedding Models** (for RAG and semantic search):
 
