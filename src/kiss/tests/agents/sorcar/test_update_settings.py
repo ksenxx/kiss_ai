@@ -170,7 +170,7 @@ class TestIsWorktree:
 class TestModel:
     """model_name sets agent.model_name and broadcasts."""
 
-    def test_change_model(self) -> None:
+    def test_set_model(self) -> None:
         agent, printer, tools = _make_agent_and_printer()
         update = _find_tool(tools, "update_settings")
 
