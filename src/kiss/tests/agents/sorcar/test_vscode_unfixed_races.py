@@ -17,7 +17,7 @@ import threading
 import time
 import unittest
 
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.agents.vscode.server import VSCodeServer
 
 
@@ -32,7 +32,7 @@ class TestStaleBashBroadcastAfterReset(unittest.TestCase):
         re-checks: if reset() ran in between (incrementing generation),
         the text is stale and the broadcast is skipped.
         """
-        printer = BaseBrowserPrinter()
+        printer = JsonPrinter()
 
         with printer._bash_lock:
             printer._bash_state.buffer.append("stale output")

@@ -1,5 +1,5 @@
 /* KISS Sorcar VS Code Extension Styles
-   Ported from browser_ui.py OUTPUT_CSS + chatbot_ui.py assistant-panel styles
+   Ported from json_printer.py OUTPUT_CSS + chatbot_ui.py assistant-panel styles
    to produce identical rendering in the VS Code webview sidebar. */
 
 :root {

@@ -22,14 +22,14 @@ from kiss.agents.vscode.helpers import (
 )
 
 if TYPE_CHECKING:
-    from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+    from kiss.agents.vscode.json_printer import JsonPrinter
 
 
 class _AutocompleteMixin:
     """Ghost-text + file-path autocomplete methods."""
 
     if TYPE_CHECKING:
-        printer: BaseBrowserPrinter
+        printer: JsonPrinter
         work_dir: str
         _state_lock: threading.RLock
         _complete_queue: queue.Queue[tuple[str, int, str, str, str]] | None

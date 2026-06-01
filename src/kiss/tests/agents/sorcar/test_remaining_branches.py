@@ -20,7 +20,7 @@ from kiss.agents.sorcar.useful_tools import (
     _truncate_output,
 )
 from kiss.agents.sorcar.web_use_tool import WebUseTool
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.agents.vscode.helpers import (
     clip_autocomplete_suggestion,
 )
@@ -460,7 +460,7 @@ class TestChatSorcarAgentBranches:
 
 
 class TestBrowserUIBranches:
-    """Cover remaining branches in browser_ui.py."""
+    """Cover remaining branches in json_printer.py."""
 
     def test_bash_stream_cancel_existing_timer(self) -> None:
         """Bash stream cancels existing timer when flush interval reached.
@@ -468,7 +468,7 @@ class TestBrowserUIBranches:
         Sets up per-tab bash state with a pending timer and old last_flush,
         then verifies the timer is cancelled and buffer is flushed.
         """
-        p = BaseBrowserPrinter()
+        p = JsonPrinter()
         p._thread_local.task_id = "0"
         with p._bash_lock:
             bs = p._bash_state
@@ -489,7 +489,7 @@ class TestBrowserUIBranches:
         return value EXCEPT ``finish``). Verify the event reaches the
         recording for a custom (non-core) tool.
         """
-        p = BaseBrowserPrinter()
+        p = JsonPrinter()
         p._thread_local.task_id = "0"
         p.start_recording()
         p.print("some result", type="tool_result", tool_name="custom_tool", is_error=False)

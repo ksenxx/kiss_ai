@@ -13,7 +13,7 @@ from kiss.agents.sorcar.sorcar_agent import (
     cli_ask_user_question,
 )
 from kiss.agents.sorcar.web_use_tool import WebUseTool
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.core.models.model import Attachment
 
 
@@ -221,7 +221,7 @@ class TestSorcarBashStreaming:
         tools = agent._get_tools()
         bash_tool = tools[0]
 
-        printer = BaseBrowserPrinter()
+        printer = JsonPrinter()
         printer._thread_local.task_id = "0"
         printer.start_recording()
         agent.printer = printer

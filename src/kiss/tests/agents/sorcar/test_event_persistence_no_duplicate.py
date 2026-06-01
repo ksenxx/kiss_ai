@@ -1,6 +1,6 @@
 """Regression test: each broadcast event is persisted EXACTLY ONCE.
 
-Before this fix, ``BaseBrowserPrinter._persist_event`` called BOTH
+Before this fix, ``JsonPrinter._persist_event`` called BOTH
 ``_append_chat_event`` (synchronous) AND ``_queue_chat_event`` (async)
 for every display event, so every event was stored twice in the
 ``events`` table.  In the UI this manifested as every panel — most
@@ -23,7 +23,7 @@ from kiss.agents.sorcar.persistence import (
     _flush_chat_events,
     _load_chat_events_by_task_id,
 )
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.json_printer import JsonPrinter
 
 
 def _redirect(tmpdir: str) -> tuple:
@@ -55,7 +55,7 @@ class TestEventPersistenceNoDuplicate:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_broadcast_persists_each_event_exactly_once(self) -> None:
-        printer = BaseBrowserPrinter()
+        printer = JsonPrinter()
         printer._thread_local.task_id = "tab-1"
 
         agent = ChatSorcarAgent("agent")

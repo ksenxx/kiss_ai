@@ -3,7 +3,7 @@ to its parallel sub-agents and from those to their own (nested)
 sub-sub-agents.
 
 The VS Code task runner sets ``printer._thread_local.stop_event`` on the
-parent's task thread.  ``BaseBrowserPrinter._check_stop`` reads that
+parent's task thread.  ``JsonPrinter._check_stop`` reads that
 thread-local and raises ``KeyboardInterrupt`` when the event is set —
 that is the cooperative-stop signal.  Because every parallel sub-agent
 runs in its own worker thread, the parent thread's
@@ -27,11 +27,11 @@ from typing import Any
 import pytest
 
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.json_printer import JsonPrinter
 
 
-class _RecordingPrinter(BaseBrowserPrinter):
-    """``BaseBrowserPrinter`` that records every broadcast event.
+class _RecordingPrinter(JsonPrinter):
+    """``JsonPrinter`` that records every broadcast event.
 
     Only broadcasts are recorded — no persistence path runs (we do
     not call into ``sorcar.db``).

@@ -7,7 +7,7 @@ on top of the executor's own usage when the final ``result`` panel is
 broadcast — otherwise the reported total cost is lower than the sum of
 sub-agent costs, which is what the user reported.
 
-This test exercises ``BaseBrowserPrinter.print`` with ``type="result"``
+This test exercises ``JsonPrinter.print`` with ``type="result"``
 directly (no LLM calls, no mocks): it sets the offsets, fires a result
 print, and inspects the broadcast event.
 """
@@ -16,10 +16,10 @@ from __future__ import annotations
 
 import threading
 
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.json_printer import JsonPrinter
 
 
-class _CapturePrinter(BaseBrowserPrinter):
+class _CapturePrinter(JsonPrinter):
     """Browser printer that records all broadcast events."""
 
     def __init__(self) -> None:

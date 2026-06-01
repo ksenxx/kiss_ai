@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.json_printer import JsonPrinter
 
 FAST_MODEL = "claude-haiku-4-5"
 
@@ -35,7 +35,7 @@ skip_no_key = pytest.mark.skipif(
 )
 
 
-class _CapturePrinter(BaseBrowserPrinter):
+class _CapturePrinter(JsonPrinter):
     """Printer that records all broadcast events for inspection."""
 
     def __init__(self) -> None:

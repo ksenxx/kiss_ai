@@ -5,7 +5,7 @@ sub-session that ran out of steps but is asking the outer loop to retry),
 the result panel must show ``Status: Continue`` instead of ``Status: FAILED``.
 
 This is verified end-to-end:
-  * The Python side (``BaseBrowserPrinter._broadcast_result``) must include
+  * The Python side (``JsonPrinter._broadcast_result``) must include
     the parsed ``is_continue`` flag in the broadcast event so the webview
     can distinguish it from a hard failure.
   * The JavaScript renderer (``media/main.js``) must render
@@ -16,10 +16,10 @@ from __future__ import annotations
 
 import yaml
 
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.json_printer import JsonPrinter
 
 
-class _CapturePrinter(BaseBrowserPrinter):
+class _CapturePrinter(JsonPrinter):
     """Printer that captures every broadcast event in-memory."""
 
     def __init__(self) -> None:

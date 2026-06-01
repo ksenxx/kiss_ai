@@ -90,7 +90,7 @@ def truncate_result(content: str) -> str:
             halves joined by a truncation marker.
     """
     # Lazy import keeps printer.py free of model-layer dependencies for
-    # consumers (e.g. browser_ui) that may not have models loaded.
+    # consumers (e.g. json_printer) that may not have models loaded.
     from kiss.core.models.model import parse_binary_attachments
 
     content, _ = parse_binary_attachments(content)

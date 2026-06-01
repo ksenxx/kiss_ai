@@ -29,10 +29,10 @@ from typing import Any
 
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.json_printer import JsonPrinter
 
 
-class _CapturePrinter(BaseBrowserPrinter):
+class _CapturePrinter(JsonPrinter):
     """Printer that captures broadcast events."""
 
     def __init__(self) -> None:

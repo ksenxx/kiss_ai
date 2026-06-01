@@ -46,7 +46,7 @@ from kiss.agents.sorcar.persistence import (
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState, parse_task_tags
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.autocomplete import _AutocompleteMixin
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.agents.vscode.commands import _CommandsMixin
 from kiss.agents.vscode.diff_merge import (
     _cleanup_merge_data,
@@ -84,14 +84,14 @@ class VSCodeServer(
 ):
     """Backend server for VS Code extension."""
 
-    def __init__(self, printer: BaseBrowserPrinter | None = None) -> None:
+    def __init__(self, printer: JsonPrinter | None = None) -> None:
         # The transport-specific printer is owned by the caller
         # (typically :class:`RemoteAccessServer`, which passes a
         # :class:`WebPrinter`).  Defaulting to a plain
-        # :class:`BaseBrowserPrinter` keeps the unit tests that
+        # :class:`JsonPrinter` keeps the unit tests that
         # construct a bare ``VSCodeServer()`` working — they patch
         # ``server.printer.broadcast`` themselves to capture events.
-        self.printer: BaseBrowserPrinter = printer or BaseBrowserPrinter()
+        self.printer: JsonPrinter = printer or JsonPrinter()
         # ``running_agent_states`` is now a class attribute on
         # :class:`_RunningAgentState` (shared across every instance).
         # Reset on init so each ``VSCodeServer`` starts with a clean
@@ -1101,7 +1101,7 @@ class VSCodeServer(
         original ``_RunningAgentState`` keeps owning the running task
         and the agent thread keeps tagging events with the original
         (source) tab id, while
-        :meth:`BaseBrowserPrinter.subscribe_tab` registers
+        :meth:`JsonPrinter.subscribe_tab` registers
         *new_tab_id* as an additional viewer so every broadcast is
         duplicated with ``tabId=new_tab_id``.  This means BOTH the
         original client (if still connected) AND the freshly-opened
