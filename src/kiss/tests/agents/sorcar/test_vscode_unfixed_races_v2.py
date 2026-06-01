@@ -27,7 +27,7 @@ import threading
 import unittest
 
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.agents.vscode.server import VSCodeServer
 
 
@@ -152,7 +152,7 @@ class TestPersistEventLookupRace(unittest.TestCase):
         the fix, ``_persist_event`` reads ``_persist_agents.get(key)``
         without ``_lock`` and returns immediately, racing the pop.
         """
-        printer = BaseBrowserPrinter()
+        printer = JsonPrinter()
         task_key = "42"
 
         class _StubAgent:

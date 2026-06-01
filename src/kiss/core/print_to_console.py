@@ -71,7 +71,7 @@ class ConsolePrinter(Printer):
             str: Always the empty string.
         """
         if type == "text":
-            # Match BaseBrowserPrinter: silently drop empty / whitespace-only
+            # Match JsonPrinter: silently drop empty / whitespace-only
             # text so a blank line never appears in the terminal when nothing
             # would have been shown in the browser.
             if not str(content).strip():
@@ -118,7 +118,7 @@ class ConsolePrinter(Printer):
             self._format_tool_call(str(content), kwargs.get("tool_input", {}))
             return ""
         if type == "tool_result":
-            # Match BaseBrowserPrinter: show every tool's return value
+            # Match JsonPrinter: show every tool's return value
             # so the console mirrors the webview.  Suppress only the
             # ``finish`` tool result -- the agentic loop renders that as
             # a dedicated "result" panel immediately after, so emitting
@@ -130,7 +130,7 @@ class ConsolePrinter(Printer):
                 self._print_tool_result(str(content), is_error=is_error)
             return ""
         if type == "usage_info":
-            # Match BaseBrowserPrinter: surface per-step usage info so the
+            # Match JsonPrinter: surface per-step usage info so the
             # terminal user sees the same token / cost / step updates as
             # the webview status bar.  The ``content`` string is already
             # a human-readable summary built by KISSAgent.

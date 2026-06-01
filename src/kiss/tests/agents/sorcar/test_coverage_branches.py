@@ -25,18 +25,18 @@ from kiss.agents.sorcar.useful_tools import (
 from kiss.agents.sorcar.web_use_tool import (
     WebUseTool,
 )
-from kiss.agents.vscode.browser_ui import (
-    BaseBrowserPrinter,
+from kiss.agents.vscode.json_printer import (
+    JsonPrinter,
     _coalesce_events,
 )
 from kiss.agents.vscode.server import VSCodeServer
 
 
-class TestBaseBrowserPrinterBranches:
-    """Cover uncovered branches in BaseBrowserPrinter."""
+class TestJsonPrinterBranches:
+    """Cover uncovered branches in JsonPrinter."""
 
     def test_reset_clears_bash_buffer_and_timer(self):
-        p = BaseBrowserPrinter()
+        p = JsonPrinter()
         p._thread_local.task_id = "0"
         with p._bash_lock:
             bs = p._bash_state
@@ -51,7 +51,7 @@ class TestBaseBrowserPrinterBranches:
 
     def test_check_stop_thread_local(self):
         """_check_stop uses thread_local stop_event."""
-        p = BaseBrowserPrinter()
+        p = JsonPrinter()
         p._thread_local.stop_event = threading.Event()
         p._check_stop()
         p._thread_local.stop_event.set()
@@ -60,14 +60,14 @@ class TestBaseBrowserPrinterBranches:
 
     def test_print_text_blank_no_broadcast(self):
         """Text that is only whitespace should not be broadcast."""
-        p = BaseBrowserPrinter()
+        p = JsonPrinter()
         p.start_recording()
         p.print("   ", type="text")
         events = p.stop_recording()
         assert len(events) == 0
 
     def test_token_callback_stop(self):
-        p = BaseBrowserPrinter()
+        p = JsonPrinter()
         p._thread_local.stop_event = threading.Event()
         p._thread_local.stop_event.set()
         with pytest.raises(KeyboardInterrupt):
@@ -461,7 +461,7 @@ class TestHandleMessageContentBlockNoIsError:
     """Cover the case where content block lacks is_error/content attributes."""
 
     def test_block_without_is_error(self):
-        p = BaseBrowserPrinter()
+        p = JsonPrinter()
         p.start_recording()
         block = SimpleNamespace(some_other_attr="value")
         msg = SimpleNamespace(content=[block])
