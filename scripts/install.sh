@@ -103,10 +103,3 @@ else
 fi
 cd ~/kiss_ai
 ./install.sh
-export PATH="$HOME/.local/bin:$PATH"
-echo "Make sure that you have one of Claude Code, ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY. OPENROUTER_API_KEY, or TOGETHER_API_KEY"
-if command -v code &>/dev/null; then
-  code "$USER_PWD"
-else
-  echo "Open a new terminal and run 'code \"$USER_PWD\"' to launch VS Code."
-fi
