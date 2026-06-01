@@ -13,7 +13,7 @@ import shutil
 
 import pytest
 
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.core.models.claude_code_model import ClaudeCodeModel
 
 
@@ -33,7 +33,7 @@ class TestCCOpusLiveThinking:
         old code emitted thinking_start/thinking_end for these, producing
         an empty collapsible "Thinking" bar in the UI.
         """
-        printer = BaseBrowserPrinter()
+        printer = JsonPrinter()
         printer.start_recording()
 
         model = ClaudeCodeModel(

@@ -2,7 +2,7 @@
 
 When more than one client is viewing the same running task, every
 broadcast emitted by the agent must reach all of them.  The mechanism
-is :meth:`BaseBrowserPrinter.subscribe_tab`, which adds a frontend
+is :meth:`JsonPrinter.subscribe_tab`, which adds a frontend
 ``tab_id`` to the set of subscribers for a ``task_id``.  ``broadcast()``
 tags the event with the agent thread's ``taskId`` and emits one stamped
 copy per subscriber tab.  System events that already carry an explicit

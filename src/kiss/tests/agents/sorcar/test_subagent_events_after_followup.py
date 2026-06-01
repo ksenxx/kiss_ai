@@ -7,7 +7,7 @@ event copy stamped with the parent tab's ``tabId`` during fan-out and
 asserts that no sub-agent result event reaches the parent tab.
 
 The test exercises the full event pipeline:
-  ChatSorcarAgent → BaseBrowserPrinter.broadcast → _inject_task_id
+  ChatSorcarAgent → JsonPrinter.broadcast → _inject_task_id
   → _record_event → _persist_event → _fanout_targets → per-tab copies.
 """
 
@@ -22,7 +22,7 @@ from typing import Any
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.json_printer import JsonPrinter
 
 # ---------------------------------------------------------------------------
 # Fake OpenAI chat server
@@ -185,7 +185,7 @@ def _start_server() -> tuple[ThreadingHTTPServer, str]:
 # ---------------------------------------------------------------------------
 
 
-class _FanoutCapturePrinter(BaseBrowserPrinter):
+class _FanoutCapturePrinter(JsonPrinter):
     """Captures every event stamped with a specific tab id during fan-out.
 
     Simulates the WebPrinter fan-out: after recording and persistence,

@@ -41,7 +41,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import anthropic
 import pytest
 
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.core.models.anthropic_model import AnthropicModel
 
 
@@ -243,7 +243,7 @@ def anthropic_server() -> Generator[str]:
     server.shutdown()
 
 
-def _build_opus_4_7_model(server_url: str, printer: BaseBrowserPrinter) -> AnthropicModel:
+def _build_opus_4_7_model(server_url: str, printer: JsonPrinter) -> AnthropicModel:
     """Return an AnthropicModel for claude-opus-4-7 wired to the fake server."""
     m = AnthropicModel(
         "claude-opus-4-7",
@@ -273,7 +273,7 @@ class TestOpus47AdaptiveThinking:
         global _RESPONSE_EVENTS
         _RESPONSE_EVENTS = _signature_only_thinking_events()
 
-        printer = BaseBrowserPrinter()
+        printer = JsonPrinter()
         printer._thread_local.task_id = "test-sig-only"
         printer.start_recording()
         m = _build_opus_4_7_model(anthropic_server, printer)
@@ -310,7 +310,7 @@ class TestOpus47AdaptiveThinking:
         global _RESPONSE_EVENTS
         _RESPONSE_EVENTS = _real_thinking_events()
 
-        printer = BaseBrowserPrinter()
+        printer = JsonPrinter()
         printer._thread_local.task_id = "test-real-thinking"
         printer.start_recording()
         m = _build_opus_4_7_model(anthropic_server, printer)

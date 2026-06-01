@@ -1,6 +1,6 @@
 """In-memory browser printer for tests.
 
-A minimal :class:`BaseBrowserPrinter` subclass that captures every
+A minimal :class:`JsonPrinter` subclass that captures every
 broadcast (one stamped copy per subscribed tab) into a list so tests
 can assert on emitted events without standing up sockets or capturing
 stdout.  The broadcast contract mirrors the production
@@ -18,10 +18,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.json_printer import JsonPrinter
 
 
-class MemoryPrinter(BaseBrowserPrinter):
+class MemoryPrinter(JsonPrinter):
     """Records every emitted event into ``self.emitted``."""
 
     def __init__(self) -> None:

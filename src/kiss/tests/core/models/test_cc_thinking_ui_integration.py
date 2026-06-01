@@ -1,4 +1,4 @@
-"""Integration test: cc/* model + BaseBrowserPrinter must emit streaming
+"""Integration test: cc/* model + JsonPrinter must emit streaming
 thinking events (``thinking_start`` → ``thinking_delta`` → ``thinking_end``)
 exactly once — no duplicate collapse from redundant ``assistant`` snapshots.
 
@@ -12,15 +12,15 @@ tokens to be hidden.
 
 import json
 
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.core.models.claude_code_model import ClaudeCodeModel
 
 
-def test_cc_model_streams_thinking_tokens_to_browser_ui() -> None:
+def test_cc_model_streams_thinking_tokens_to_json_printer() -> None:
     """Thinking tokens must stream as ``thinking_delta`` events with exactly
     one ``thinking_start`` / ``thinking_end`` pair — never double-collapsed.
     """
-    printer = BaseBrowserPrinter()
+    printer = JsonPrinter()
     printer._thread_local.task_id = "test-task-1"
     printer.start_recording()
 
@@ -82,7 +82,7 @@ def test_cc_model_no_thinking_end_before_thinking_deltas() -> None:
     """No ``thinking_end`` may appear before all ``thinking_delta`` events —
     a premature end would collapse the panel and hide subsequent tokens.
     """
-    printer = BaseBrowserPrinter()
+    printer = JsonPrinter()
     printer._thread_local.task_id = "test-task-2"
     printer.start_recording()
 

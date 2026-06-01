@@ -67,7 +67,7 @@ from websockets.asyncio.server import ServerConnection, serve
 from websockets.datastructures import Headers
 from websockets.http11 import Request, Response
 
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.agents.vscode.server import VSCodeServer
 from kiss.agents.vscode.vscode_config import load_config, source_shell_env
 from kiss.core.config import get_jobs_root
@@ -1342,7 +1342,7 @@ def _self_signed_cert_needs_renewal(
     )
 
 
-class WebPrinter(BaseBrowserPrinter):
+class WebPrinter(JsonPrinter):
     """Printer that broadcasts JSON events to connected WebSocket clients.
 
     Thread-safe: ``broadcast()`` is called from agent task-runner threads
