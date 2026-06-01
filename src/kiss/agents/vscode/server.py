@@ -46,7 +46,6 @@ from kiss.agents.sorcar.persistence import (
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState, parse_task_tags
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.vscode.autocomplete import _AutocompleteMixin
-from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.agents.vscode.commands import _CommandsMixin
 from kiss.agents.vscode.diff_merge import (
     _cleanup_merge_data,
@@ -58,6 +57,7 @@ from kiss.agents.vscode.helpers import (
     generate_followup_text,
     model_vendor,
 )
+from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.agents.vscode.merge_flow import _MergeFlowMixin
 from kiss.agents.vscode.task_runner import _TaskRunnerMixin
 from kiss.core.models.model_info import (

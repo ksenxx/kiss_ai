@@ -20,10 +20,10 @@ from kiss.agents.sorcar.useful_tools import (
     _truncate_output,
 )
 from kiss.agents.sorcar.web_use_tool import WebUseTool
-from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.agents.vscode.helpers import (
     clip_autocomplete_suggestion,
 )
+from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.agents.vscode.server import VSCodeServer
 
 
