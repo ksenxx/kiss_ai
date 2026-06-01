@@ -40,7 +40,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import anthropic
 import pytest
 
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.core.models.anthropic_model import AnthropicModel
 
 
@@ -158,7 +158,7 @@ def anthropic_server() -> Generator[str]:
 
 
 def _build_model(
-    model_name: str, server_url: str, printer: BaseBrowserPrinter
+    model_name: str, server_url: str, printer: JsonPrinter
 ) -> AnthropicModel:
     m = AnthropicModel(
         model_name,
@@ -230,7 +230,7 @@ class TestInterleavedThinkingEnabled:
         with _HEADERS_LOCK:
             _CAPTURED_HEADERS.clear()
 
-        printer = BaseBrowserPrinter()
+        printer = JsonPrinter()
         printer._thread_local.task_id = "interleaved-thinking-test"
         printer.start_recording()
         m = _build_model("claude-opus-4-7", anthropic_server, printer)

@@ -7,7 +7,7 @@ Targets remaining uncovered branches in:
   chat_sorcar_agent.py: lines 130->134, 132-133
   useful_tools.py: lines 184, 204
   worktree_sorcar_agent.py: lines 187, 209-211, 313-314, 351
-  browser_ui.py: lines 205-215, 248, 254, 259-260, 281-285, 294, 302-310,
+  json_printer.py: lines 205-215, 248, 254, 259-260, 281-285, 294, 302-310,
                  319-323, 329-330, 332, 333->335, 336, 340, 342, 344->346,
                  349, 352, 355, 358, 363-365, 367-368, 376
   server.py: lines 315->341, 319, 361->369, 416, 733-740
@@ -36,7 +36,7 @@ from kiss.agents.sorcar.cli_helpers import (
 )
 from kiss.agents.sorcar.git_worktree import GitWorktree
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent, _generate_commit_message
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.agents.vscode.server import VSCodeServer
 
 _SavedState = tuple[Path, "sqlite3.Connection | None", Path]
@@ -160,10 +160,10 @@ class TestWorktreeCommitMessageBranches:
 
 
 class TestBrowserPrinterPrintBranches:
-    """Cover all print() type branches in browser_ui.py."""
+    """Cover all print() type branches in json_printer.py."""
 
-    def _make_printer(self) -> BaseBrowserPrinter:
-        p = BaseBrowserPrinter()
+    def _make_printer(self) -> JsonPrinter:
+        p = JsonPrinter()
         p.start_recording()
         return p
 
@@ -173,7 +173,7 @@ class TestFormatToolCallBranches:
 
     def test_format_tool_call_with_all_fields(self) -> None:
         """All optional fields present in tool_input."""
-        p = BaseBrowserPrinter()
+        p = JsonPrinter()
         p._thread_local.task_id = "t1"
         p.start_recording()
         p._format_tool_call("Edit", {
@@ -300,7 +300,7 @@ class TestBrowserPrinterPeekRecording:
 
     def test_peek_active_recording(self) -> None:
         """peek_recording returns current events without stopping."""
-        p = BaseBrowserPrinter()
+        p = JsonPrinter()
         p._thread_local.task_id = "t1"
         p.start_recording()
         p.broadcast({"type": "text_delta", "text": "hello"})

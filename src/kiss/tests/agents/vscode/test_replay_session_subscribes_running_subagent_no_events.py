@@ -30,7 +30,7 @@ the page (history replay) or never visible at all when the sub-agent
 completed before any flush hit the DB.
 
 This test exercises the production code path with a real
-:class:`VSCodeServer` and a real :class:`BaseBrowserPrinter`, no
+:class:`VSCodeServer` and a real :class:`JsonPrinter`, no
 mocks/patches/fakes.  It asserts that the new tab is subscribed to
 the sub-agent's ``task_history_id`` regardless of whether any events
 have been persisted yet.
@@ -46,7 +46,7 @@ from typing import Any
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.agents.vscode.server import VSCodeServer
 
 
@@ -64,7 +64,7 @@ def _restore(saved: tuple[Path, object, Path]) -> None:
     th._DB_PATH, th._db_conn, th._KISS_DIR = saved  # type: ignore[assignment]
 
 
-class _SubscribeCapturingPrinter(BaseBrowserPrinter):
+class _SubscribeCapturingPrinter(JsonPrinter):
     """Records ``broadcast`` events and ``subscribe_tab`` calls.
 
     Uses the real ``subscribe_tab`` so the printer's internal

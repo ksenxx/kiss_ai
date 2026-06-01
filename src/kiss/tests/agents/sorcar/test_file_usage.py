@@ -95,7 +95,7 @@ class TestSuggestionsFrequencySort(unittest.TestCase):
         """Paths with query matching closer to end should rank higher."""
         result = _sort_suggestions(
             [
-                "src/kiss/agents/sorcar/browser_ui.py",
+                "src/kiss/agents/sorcar/json_printer.py",
                 "src/kiss/agents/sorcar/sorcar.py",
                 "src/kiss/agents/sorcar/",
             ],
@@ -104,7 +104,7 @@ class TestSuggestionsFrequencySort(unittest.TestCase):
         )
         assert result[0]["text"] == "src/kiss/agents/sorcar/"
         assert result[1]["text"] == "src/kiss/agents/sorcar/sorcar.py"
-        assert result[2]["text"] == "src/kiss/agents/sorcar/browser_ui.py"
+        assert result[2]["text"] == "src/kiss/agents/sorcar/json_printer.py"
 
     def test_end_match_priority_in_frequent(self) -> None:
         """Frequent paths also sorted by end-match distance, then recency."""

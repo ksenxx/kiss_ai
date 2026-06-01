@@ -24,7 +24,7 @@ from kiss.agents.sorcar.persistence import (
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 
 if TYPE_CHECKING:
-    from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+    from kiss.agents.vscode.json_printer import JsonPrinter
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +65,7 @@ class _CommandsMixin:
     """Methods that implement frontend command handlers."""
 
     if TYPE_CHECKING:
-        printer: BaseBrowserPrinter
+        printer: JsonPrinter
         work_dir: str
         _state_lock: threading.RLock
         _default_model: str
