@@ -6,7 +6,7 @@ start of a thinking block and ``False`` at the end so that the browser UI
 routes thinking tokens to the thinking panel rather than the main text area.
 
 Bug reproduction: without the fix, thinking tokens arrive at the
-``BaseBrowserPrinter.token_callback`` while ``_current_block_type`` is
+``JsonPrinter.token_callback`` while ``_current_block_type`` is
 still ``""`` (not ``"thinking"``), causing them to be broadcast as
 ``text_delta`` events — thoughts appear outside the thinking panel.
 
@@ -23,7 +23,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.core.models.anthropic_model import AnthropicModel
 
 
@@ -188,11 +188,11 @@ class TestAnthropicThinkingCallback:
         """Thinking tokens must be broadcast as thinking_delta, not text_delta.
 
         This is the core bug reproduction: without thinking_callback, the
-        BaseBrowserPrinter never sets _current_block_type to 'thinking', so
+        JsonPrinter never sets _current_block_type to 'thinking', so
         thinking tokens are broadcast as text_delta events — thoughts appear
         outside the thinking panel.
         """
-        printer = BaseBrowserPrinter()
+        printer = JsonPrinter()
         printer._thread_local.task_id = "test-task"
         printer.start_recording()
 

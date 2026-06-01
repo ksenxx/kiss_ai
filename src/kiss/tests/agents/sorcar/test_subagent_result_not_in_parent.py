@@ -42,7 +42,7 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import (
     _load_chat_events_by_task_id,
 )
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.json_printer import JsonPrinter
 
 # ---------------------------------------------------------------------------
 # Fake OpenAI server that returns run_parallel → finish
@@ -251,7 +251,7 @@ def _start_server() -> tuple[ThreadingHTTPServer, str]:
 # ---------------------------------------------------------------------------
 
 
-class _CapturePrinter(BaseBrowserPrinter):
+class _CapturePrinter(JsonPrinter):
     """Records every broadcast event with its injected taskId."""
 
     def __init__(self) -> None:

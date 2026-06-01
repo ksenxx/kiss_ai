@@ -84,7 +84,7 @@ def _make_server() -> tuple[VSCodeServer, list[dict[str, Any]], threading.Lock]:
     printer = server.printer
 
     def capture(event: dict[str, Any]) -> None:
-        # Mirror the real ``BaseBrowserPrinter.broadcast`` side effects
+        # Mirror the real ``JsonPrinter.broadcast`` side effects
         # so ``peek_recording`` (used by ``_extract_result_summary``)
         # and persistence see the event, just without the WSS transport.
         ev = printer._inject_task_id(event)

@@ -1,4 +1,4 @@
-"""Integration test: ``ConsolePrinter`` and ``BaseBrowserPrinter`` must
+"""Integration test: ``ConsolePrinter`` and ``JsonPrinter`` must
 produce equivalent user-visible content for the same scripted print
 calls.
 
@@ -12,7 +12,7 @@ should be user-visible appears in both sinks.
 The test is intentionally type-by-type so that any future regression
 points directly at the ``print()`` ``type`` that diverged.
 
-These tests use real ``ConsolePrinter`` and ``BaseBrowserPrinter``
+These tests use real ``ConsolePrinter`` and ``JsonPrinter``
 instances with no mocks/patches — per project policy ``broadcast()``
 is overridden via subclassing so events are captured without going to
 stdout or the DB.
@@ -28,7 +28,7 @@ from typing import Any
 
 from rich.console import Console
 
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.core.print_to_console import ConsolePrinter
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -61,8 +61,8 @@ def _normalise_console(raw: str) -> str:
     return re.sub(r"\s+", " ", stripped).strip()
 
 
-class _RecordingBrowserPrinter(BaseBrowserPrinter):
-    """``BaseBrowserPrinter`` subclass that captures broadcast events
+class _RecordingBrowserPrinter(JsonPrinter):
+    """``JsonPrinter`` subclass that captures broadcast events
     in a list and skips transport / DB persistence.
 
     Used in tests so we can inspect the exact sequence of events the
@@ -82,7 +82,7 @@ class _RecordingBrowserPrinter(BaseBrowserPrinter):
 
 @dataclass
 class _Pair:
-    """Helper: a paired ConsolePrinter + recording BaseBrowserPrinter,
+    """Helper: a paired ConsolePrinter + recording JsonPrinter,
     both driven by the same ``print()`` / ``token_callback`` calls.
     """
 
@@ -131,7 +131,7 @@ class _Pair:
 
 
 def _make_pair() -> _Pair:
-    """Construct a fresh ConsolePrinter + recording BaseBrowserPrinter pair.
+    """Construct a fresh ConsolePrinter + recording JsonPrinter pair.
 
     The console printer is forced to a wide, plain (no-colour) width so
     Rich panels do not wrap fragments across lines in a way that would
@@ -246,7 +246,7 @@ class PrinterEquivalenceTest(unittest.TestCase):
         """``tool_result`` with ``is_error=True`` must surface to both sinks.
 
         (The non-error path is intentionally not asserted here because
-        ``ConsolePrinter`` and ``BaseBrowserPrinter`` diverge on it —
+        ``ConsolePrinter`` and ``JsonPrinter`` diverge on it —
         see ``test_known_divergences_non_error_tool_result`` for the
         pinned current behaviour.)
         """
@@ -372,7 +372,7 @@ class PrinterEquivalenceTest(unittest.TestCase):
     def test_empty_text_is_dropped_in_both(self) -> None:
         """Whitespace-only ``type="text"`` must not produce output in
         either sink.  Previously the ConsolePrinter wrote a blank line
-        while the BaseBrowserPrinter dropped the event silently.
+        while the JsonPrinter dropped the event silently.
         """
         pair = _make_pair()
         pair.both_print("   ", type="text")

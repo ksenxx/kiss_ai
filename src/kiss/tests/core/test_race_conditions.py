@@ -1,4 +1,4 @@
-"""Tests for race condition fixes in Base, browser_ui, and model.
+"""Tests for race condition fixes in Base, json_printer, and model.
 
 Verifies thread-safety of shared mutable state: agent_counter,
 _bash_buffer, and _callback_helper_loop.

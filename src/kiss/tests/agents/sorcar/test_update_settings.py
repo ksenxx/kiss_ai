@@ -16,13 +16,13 @@ import pytest
 
 import kiss.agents.vscode.vscode_config as vscode_config
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.json_printer import JsonPrinter
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-class RecordingPrinter(BaseBrowserPrinter):
+class RecordingPrinter(JsonPrinter):
     """Subclass that captures every broadcast event (unfiltered)."""
 
     def __init__(self) -> None:

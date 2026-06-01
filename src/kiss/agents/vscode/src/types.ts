@@ -85,7 +85,7 @@ export type FromWebviewMessage =
 export type ToWebviewMessage = ToWebviewMessageBody & {tabId?: string};
 
 type ToWebviewMessageBody =
-  // Streaming events (same as browser BaseBrowserPrinter)
+  // Streaming events (same as browser JsonPrinter)
   | {type: 'thinking_start'}
   | {type: 'thinking_delta'; text: string}
   | {type: 'thinking_end'}
