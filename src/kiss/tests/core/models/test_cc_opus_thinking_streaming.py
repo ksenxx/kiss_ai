@@ -14,7 +14,7 @@ import json
 import subprocess
 from typing import Any
 
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.core.models.claude_code_model import ClaudeCodeModel
 
 
@@ -259,7 +259,7 @@ class TestCCOpusTextStreamingInToolMode:
         We check the raw recording (before coalescing) because stop_recording
         merges consecutive text_delta events for storage efficiency.
         """
-        printer = BaseBrowserPrinter()
+        printer = JsonPrinter()
         printer._thread_local.task_id = "test-task-1"
         printer.start_recording()
 
@@ -302,7 +302,7 @@ class TestCCOpusTextStreamingInToolMode:
 
     def test_thinking_tokens_still_stream_in_tool_mode(self) -> None:
         """Thinking tokens must stream incrementally during tool generation."""
-        printer = BaseBrowserPrinter()
+        printer = JsonPrinter()
         printer._thread_local.task_id = "test-task-2"
         printer.start_recording()
 
@@ -357,7 +357,7 @@ class TestCCOpusTextStreamingInToolMode:
 
     def test_text_tokens_stream_when_tool_calls_present(self) -> None:
         """Text tokens must stream even when the response contains tool calls."""
-        printer = BaseBrowserPrinter()
+        printer = JsonPrinter()
         printer._thread_local.task_id = "test-task-3"
         printer.start_recording()
 

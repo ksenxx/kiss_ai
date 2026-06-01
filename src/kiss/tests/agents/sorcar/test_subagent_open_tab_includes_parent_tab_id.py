@@ -28,7 +28,7 @@ from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+from kiss.agents.vscode.json_printer import JsonPrinter
 from kiss.agents.vscode.server import VSCodeServer
 
 
@@ -50,7 +50,7 @@ def _make_server() -> tuple[VSCodeServer, list[dict]]:
     server = VSCodeServer()
     events: list[dict] = []
     lock = threading.Lock()
-    real = BaseBrowserPrinter.broadcast
+    real = JsonPrinter.broadcast
 
     def capture(event: dict) -> None:
         ev = server.printer._inject_task_id(event)

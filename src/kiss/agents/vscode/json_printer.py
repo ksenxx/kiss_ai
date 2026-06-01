@@ -87,7 +87,7 @@ class _BashState:
         self.streamed: bool = False
 
 
-class BaseBrowserPrinter(Printer):
+class JsonPrinter(Printer):
     """Base printer for browser-based UIs (task-id keyed).
 
     The current block type (``_current_block_type``) is stored in

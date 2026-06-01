@@ -64,21 +64,21 @@ class TestTimerFlushNoClosure:
     """_timer_flush must not be a closure; it should be a method."""
 
     def test_timer_flush_is_method_not_closure(self) -> None:
-        """Verify _timer_flush is a proper method on BaseBrowserPrinter."""
-        from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+        """Verify _timer_flush is a proper method on JsonPrinter."""
+        from kiss.agents.vscode.json_printer import JsonPrinter
 
-        assert hasattr(BaseBrowserPrinter, "_timer_flush_for_task"), (
-            "BaseBrowserPrinter should have _timer_flush_for_task method"
+        assert hasattr(JsonPrinter, "_timer_flush_for_task"), (
+            "JsonPrinter should have _timer_flush_for_task method"
         )
-        method = getattr(BaseBrowserPrinter, "_timer_flush_for_task")
+        method = getattr(JsonPrinter, "_timer_flush_for_task")
         assert callable(method)
 
 
     def test_timer_flush_for_task_type_annotation(self) -> None:
         """Verify _timer_flush_for_task accepts str | None tab_id."""
-        from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+        from kiss.agents.vscode.json_printer import JsonPrinter
 
-        hints = BaseBrowserPrinter._timer_flush_for_task.__annotations__
+        hints = JsonPrinter._timer_flush_for_task.__annotations__
         # The task_id parameter should accept str | None
         assert "task_id" in hints
 
@@ -87,9 +87,9 @@ class TestTimerFlushNoClosure:
         _timer_flush_for_task (via functools.partial) instead of a closure."""
         from functools import partial as functools_partial
 
-        from kiss.agents.vscode.browser_ui import BaseBrowserPrinter
+        from kiss.agents.vscode.json_printer import JsonPrinter
 
-        printer = BaseBrowserPrinter()
+        printer = JsonPrinter()
         events: list[dict] = []
         original_broadcast = printer.broadcast
 
