@@ -78,7 +78,16 @@ regEl('remote-url');
 regEl('welcome-remote-url');
 regEl('welcome-config');
 
+const bodyEl = new MiniEl('body');
+bodyEl.classList = {
+  _set: new Set(),
+  add(c) { this._set.add(c); },
+  remove(c) { this._set.delete(c); },
+  contains(c) { return this._set.has(c); },
+};
+
 global.document = {
+  body: bodyEl,
   getElementById: id => elements[id] || null,
   createElement: tag => new MiniEl(tag),
 };
