@@ -85,3 +85,20 @@ def test_build_script_force_kills_survivors() -> None:
         "build-extension.sh should force-kill (kill -9) survivors after "
         "the graceful-shutdown poll loop."
     )
+
+
+def test_dependency_installer_kickstarts_macos_launchagent() -> None:
+    """Loading the plist is not enough; activation must force-start it."""
+    src = DEP_INSTALLER.read_text(encoding="utf-8")
+    assert "'kickstart', '-k'" in src, (
+        "DependencyInstaller.ts must kickstart the macOS LaunchAgent after "
+        "bootstrap/load so kiss-web actually starts."
+    )
+
+
+def test_dependency_installer_health_requires_uds_socket() -> None:
+    """The VS Code extension uses ~/.kiss/sorcar.sock, not only port 8787."""
+    src = DEP_INSTALLER.read_text(encoding="utf-8")
+    assert "path.join(LOG_DIR, 'sorcar.sock')" in src, (
+        "Daemon health must require the UDS socket used by AgentClient."
+    )

@@ -864,14 +864,7 @@ function restartKissWebDaemon(kissProjectPath: string): void {
   } catch {
     /* missing or unreadable — treat as mismatch */
   }
-  const daemonAlive = (() => {
-    try {
-      execSync('lsof -i :8787 -t', {stdio: 'ignore', timeout: 2000});
-      return true;
-    } catch {
-      return false;
-    }
-  })();
+  const daemonAlive = isDaemonRunning();
   if (currentFp && currentFp === savedFp && daemonAlive) {
     log(
       `kiss-web fingerprint unchanged (${currentFp.slice(0, 8)}) and ` +
@@ -975,6 +968,20 @@ function restartKissWebDaemon(kissProjectPath: string): void {
           stdio: 'ignore',
           timeout: 5000,
         });
+      }
+      try {
+        execFileSync(
+          'launchctl',
+          ['kickstart', '-k', `gui/${uid}/${plistLabel}`],
+          {
+            stdio: 'ignore',
+            timeout: 5000,
+          },
+        );
+      } catch (err) {
+        log(
+          `Failed to kickstart kiss-web daemon (macOS): ${err instanceof Error ? err.message : err}`,
+        );
       }
       log(`kiss-web macOS LaunchAgent restarted: ${plistFile}`);
     } catch (err) {
@@ -1323,8 +1330,9 @@ function playwrightBrowsersPath(): string {
 }
 
 /**
- * Check if the kiss-web daemon is running by probing port 8787.
- * Returns true if port 8787 has a listener (macOS/Linux only).
+ * Check if the kiss-web daemon is running by probing its TCP listener
+ * and the local Unix-domain socket used by the VS Code extension.
+ * Returns true only when both are present (macOS/Linux only).
  * On Windows the daemon is not supported, so always returns false.
  *
  * The probe is retried up to 3 times with 300 ms gaps before
@@ -1339,7 +1347,9 @@ function isDaemonRunning(): boolean {
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       execSync('lsof -i :8787 -t', {stdio: 'ignore', timeout: 3000});
-      return true;
+      if (fs.existsSync(path.join(LOG_DIR, 'sorcar.sock'))) {
+        return true;
+      }
     } catch {
       // not listening yet; fall through to retry
     }
