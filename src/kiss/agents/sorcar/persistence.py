@@ -262,7 +262,14 @@ def _init_tables(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS model_usage (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             model TEXT NOT NULL UNIQUE,
-            count INTEGER DEFAULT 0
+            count INTEGER DEFAULT 0,
+            -- ``is_last`` is retained in the schema for backward
+            -- compatibility with existing databases, but is no longer
+            -- read or written: the last-selected model is now a user
+            -- preference stored in ``config.json`` (see _load_last_model
+            -- / _save_last_model).  Keeping the column here ensures the
+            -- table schema does not change for new or existing databases.
+            is_last INTEGER DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS file_usage (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
