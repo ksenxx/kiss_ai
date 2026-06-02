@@ -2424,6 +2424,19 @@ class RemoteAccessServer:
         # dict ops atomic, but a sequence like ``del[k]`` racing a
         # concurrent ``[k] = v`` can still drop a registration.
         self._merge_states_lock = threading.Lock()
+        # Per-tab asyncio lock serialising :meth:`_handle_web_merge_action`.
+        # Both the local UDS handler (VS Code extension) and the remote
+        # WebSocket handler dispatch ``mergeAction`` commands on the SAME
+        # event loop.  When two clients act on the *same* tab's merge
+        # review concurrently, the two coroutines would otherwise
+        # interleave at the ``run_in_executor`` await inside the reject
+        # branches — both reading the same ``current()`` hunk, both
+        # rejecting it, and leaving a later hunk permanently unresolved
+        # (a lost update).  Holding this per-tab lock for the whole
+        # action body makes the read-modify-write atomic per tab.
+        # Lazily created in :meth:`_merge_action_lock`; the dict itself
+        # is guarded by ``self._merge_states_lock`` above.
+        self._merge_action_locks: dict[str, asyncio.Lock] = {}
         # M6: per-WebSocket set of tab IDs ever seen on this
         # connection.  When the WS closes we delete merge states
         # belonging to those tabs so the dict does not grow unbounded
@@ -2680,6 +2693,7 @@ class RemoteAccessServer:
             self._pending_tab_closes.pop(tab_id, None)
         with self._merge_states_lock:
             self._merge_states.pop(tab_id, None)
+            self._merge_action_locks.pop(tab_id, None)
         if self._loop is None or not self._loop.is_running():
             return
         task = asyncio.ensure_future(
@@ -3019,6 +3033,27 @@ class RemoteAccessServer:
             self._merge_states[tab_id] = _WebMergeState(merge_data)
 
 
+    def _merge_action_lock(self, tab_id: str) -> asyncio.Lock:
+        """Return the per-tab :class:`asyncio.Lock` serialising merge actions.
+
+        Lazily creates a lock for *tab_id* on first use.  Creation is
+        guarded by :attr:`_merge_states_lock` (a threading lock) so two
+        coroutines that request the lock for the same tab in the same
+        event-loop tick still share one lock instance.
+
+        Args:
+            tab_id: The frontend tab id whose merge review is acted on.
+
+        Returns:
+            The shared :class:`asyncio.Lock` for *tab_id*.
+        """
+        with self._merge_states_lock:
+            lock = self._merge_action_locks.get(tab_id)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._merge_action_locks[tab_id] = lock
+            return lock
+
     async def _handle_web_merge_action(self, cmd: dict[str, Any]) -> None:
         """Handle merge toolbar actions (accept/reject/navigate) server-side.
 
@@ -3027,9 +3062,32 @@ class RemoteAccessServer:
         equivalent functionality by tracking hunk state and modifying
         files on disk.
 
+        Serialised per tab via :meth:`_merge_action_lock` so two clients
+        (the local UDS VS Code extension and a remote WebSocket browser)
+        acting on the *same* tab's merge review cannot interleave at the
+        ``run_in_executor`` await inside the reject branches and drop a
+        hunk resolution.
+
         Args:
             cmd: The ``mergeAction`` command from the browser, with
                 ``action`` and ``tabId`` fields.
+        """
+        tab_id = cmd.get("tabId", "")
+        async with self._merge_action_lock(tab_id):
+            await self._apply_web_merge_action(cmd)
+
+    async def _apply_web_merge_action(self, cmd: dict[str, Any]) -> None:
+        """Apply a single merge action while holding the per-tab lock.
+
+        Performs the read-modify-write on the per-tab
+        :class:`_WebMergeState`.  Must be called by
+        :meth:`_handle_web_merge_action` with the tab's
+        :meth:`_merge_action_lock` held so the whole sequence (including
+        the ``run_in_executor`` file rewrites) is atomic per tab.
+
+        Args:
+            cmd: The ``mergeAction`` command, with ``action`` and
+                ``tabId`` fields.
         """
         action = cmd.get("action", "")
         tab_id = cmd.get("tabId", "")
