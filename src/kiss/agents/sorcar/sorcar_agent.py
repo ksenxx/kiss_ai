@@ -496,6 +496,21 @@ class SorcarAgent(RelentlessAgent):
             YAML string with 'success' and 'summary' keys.
         """
         all_tools = self._get_tools() + tools
+        # Wire up the pre-step hook so user prompts queued via the VS
+        # Code frontend's ``appendUserMessage`` command while this task
+        # is running get injected into the live model's conversation as
+        # additional ``user`` messages immediately before the next model
+        # call.  This MUST happen here (after ``RelentlessAgent.run`` has
+        # already called ``_reset``, which clears ``pre_step_hook``) and
+        # before ``super().perform_task`` runs the per-session executor
+        # loop — that loop copies ``self.pre_step_hook`` onto each inner
+        # executor.  Only meaningful when this agent has been bound to a
+        # frontend tab (``_tab_id`` is set by
+        # :meth:`_TaskRunnerMixin._run_task_inner`).
+        if getattr(self, "_tab_id", None):
+            self.pre_step_hook = self._drain_pending_user_messages
+        else:
+            self.pre_step_hook = None
         return super().perform_task(all_tools, attachments=attachments)
 
     def _reset(
@@ -575,18 +590,12 @@ class SorcarAgent(RelentlessAgent):
         self.web_use_tool = None
         tl = getattr(printer, "_thread_local", None) if printer else None
         self._stop_event = getattr(tl, "stop_event", None) if tl else None
-        # Wire up the pre-step hook so user prompts queued via the VS
-        # Code frontend's ``appendUserMessage`` command while this
-        # task is running get injected into the model's conversation
-        # as additional ``user`` messages immediately before the next
-        # model call.  Only meaningful when this agent has been bound
-        # to a frontend tab (``_tab_id`` is set by
-        # :meth:`_TaskRunnerMixin._run_task_inner`).
-        if getattr(self, "_tab_id", None):
-            self.pre_step_hook = self._drain_pending_user_messages
-        else:
-            self.pre_step_hook = None
-
+        # NOTE: the pending-user-messages pre-step hook is wired up in
+        # :meth:`perform_task` (which runs *after* ``RelentlessAgent.run``
+        # calls ``_reset``).  Installing it here would be useless because
+        # ``RelentlessAgent._reset`` — invoked by ``super().run`` below —
+        # resets ``self.pre_step_hook`` back to ``None`` before the
+        # per-session executor loop reads it.
         try:
             system_instructions = (
                 SYSTEM_PROMPT
