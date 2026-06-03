@@ -294,7 +294,7 @@ class _MergeFlowMixin:
         return event
 
     def _handle_autocommit_action(
-        self, action: str, tab_id: str = "",
+        self, action: str, tab_id: str = "", *, work_dir: str = "",
     ) -> None:
         """Process the user's reply to an ``autocommit_prompt``.
 
@@ -303,7 +303,14 @@ class _MergeFlowMixin:
                 ``"skip"`` to leave the working tree untouched.
             tab_id: The tab that owns the prompt (echoed in the
                 ``autocommit_done`` event).
+            work_dir: The tab's working directory.  Preferred over the
+                daemon-wide ``self.work_dir`` because the shared
+                ``kiss-web`` daemon may have been launched from (or
+                synced to) a different — possibly non-git — folder than
+                the window that owns this tab.  Falls back to
+                ``self.work_dir`` when empty.
         """
+        work_dir = work_dir or self.work_dir
         if action == "skip":
             self._broadcast_autocommit_done(
                 tab_id, success=True, committed=False,
@@ -317,7 +324,7 @@ class _MergeFlowMixin:
             )
             return
         try:
-            repo = GitWorktreeOps.discover_repo(Path(self.work_dir))
+            repo = GitWorktreeOps.discover_repo(Path(work_dir))
             if repo is None:
                 self._broadcast_autocommit_done(
                     tab_id, success=False, committed=False,
@@ -330,8 +337,8 @@ class _MergeFlowMixin:
                     "message": "Staging changes…",
                     "tabId": tab_id,
                 })
-                _git(self.work_dir, "add", "-A")
-                diff = _git(self.work_dir, "diff", "--cached")
+                _git(work_dir, "add", "-A")
+                diff = _git(work_dir, "diff", "--cached")
                 if not diff.stdout.strip():
                     self._broadcast_autocommit_done(
                         tab_id, success=True, committed=False,
