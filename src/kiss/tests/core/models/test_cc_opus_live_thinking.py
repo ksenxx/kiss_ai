@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Live integration test: cc/opus model must not show empty "Thinking" bar.
 
 This test invokes the real ``claude`` CLI with ``cc/opus`` and verifies that:

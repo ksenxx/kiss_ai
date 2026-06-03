@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests for ChatSorcarAgent: chat context, prompt augmentation, persistence."""
 
 from __future__ import annotations

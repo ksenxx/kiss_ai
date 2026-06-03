@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Adjacent-task navigation in the chat webview MUST skip sub-agent rows.
 
 Sub-agent rows are an internal implementation detail of the parent's

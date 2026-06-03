@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Webview-level integration test: sub-agent result panels MUST NOT render
 in the parent agent's chat tab.
 

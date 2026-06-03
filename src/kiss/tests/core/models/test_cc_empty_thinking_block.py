@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration test: cc/* model must NOT emit thinking UI events when the
 thinking block contains no actual thinking text (only signature deltas).
 

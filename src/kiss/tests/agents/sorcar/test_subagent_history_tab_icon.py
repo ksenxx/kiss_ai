@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Regression tests: a sub-agent task reopened from the history panel
 must render with the **same indicator color and icon** as the tab the
 backend originally created when the sub-task was launched.

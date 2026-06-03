@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Browser automation tool for LLM agents using Playwright.
 
 Uses non-headless Playwright Chromium for page analysis and automation

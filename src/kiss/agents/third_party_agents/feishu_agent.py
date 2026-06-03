@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Feishu/Lark Agent — ChatSorcarAgent extension with Feishu Open Platform tools.
 
 Provides authenticated access to Feishu/Lark via app_id and app_secret.

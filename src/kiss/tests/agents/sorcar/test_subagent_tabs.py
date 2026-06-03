@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """End-to-end tests for subagent tabs created by run_parallel.
 
 When the agent invokes run_parallel, each sub-agent should broadcast

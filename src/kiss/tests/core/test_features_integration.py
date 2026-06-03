@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests for: budget limit, custom endpoint+key, web browser toggle,
 and API key setup/deletion in the configuration panel.
 

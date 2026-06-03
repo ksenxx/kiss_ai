@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests for refactoring tasks: ChannelConfig, _find_tool_call_ids,
 _build_openai_tools_schema, _resolve_openai_tools_schema,
 _build_text_based_tools_prompt, _parse_text_based_tool_calls,

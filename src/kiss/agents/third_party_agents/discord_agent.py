@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Discord Agent — ChatSorcarAgent extension with Discord REST API tools.
 
 Provides authenticated access to Discord via a bot token. Uses the Discord

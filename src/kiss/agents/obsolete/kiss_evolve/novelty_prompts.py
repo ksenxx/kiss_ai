@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 INNOVATION_INSTRUCTIONS = [
     {
         "category": "Structural Constraints",

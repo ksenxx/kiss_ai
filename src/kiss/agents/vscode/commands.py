@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Command handlers for the VS Code server.
 
 Split out of ``server.py`` for organisation.  ``_CommandsMixin``

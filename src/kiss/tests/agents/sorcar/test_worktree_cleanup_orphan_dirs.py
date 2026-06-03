@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests: ``cleanup_orphans`` must remove orphan directories
 under ``.kiss-worktrees/``.
 

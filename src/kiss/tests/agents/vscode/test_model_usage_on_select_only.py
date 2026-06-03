@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration test: last_model_used and model usage counts update ONLY on model picker selection.
 
 Reproduces the bug where running a task (via _run_task_inner / _reset) would

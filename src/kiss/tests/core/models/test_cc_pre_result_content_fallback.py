@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Regression test: tool calls must be extracted from pre-result content.
 
 The ``result`` event from the Claude CLI can replace accumulated text

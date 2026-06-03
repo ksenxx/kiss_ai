@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests for redundancy_analyzer that verify branch coverage preservation.
 
 Creates real coverage databases with dynamic contexts and verifies the

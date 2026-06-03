@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration test: PWD reported by the agent must be the real working dir.
 
 In worktree mode the agent's real ``cwd`` is
