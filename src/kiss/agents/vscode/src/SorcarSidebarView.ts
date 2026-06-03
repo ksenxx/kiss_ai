@@ -1115,6 +1115,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       type: 'mergeAction',
       action: 'all-done',
       tabId,
+      workDir: this._getWorkDir(),
     });
   }
 
