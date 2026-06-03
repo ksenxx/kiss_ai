@@ -73,10 +73,12 @@ class _TaskRunnerMixin:
             base_ref: str = "HEAD",
             tab_id: str = "",
         ) -> bool: ...
-        def _main_dirty_files(self) -> list[str]: ...
-        def _broadcast_autocommit_prompt(self, tab_id: str) -> None: ...
+        def _main_dirty_files(self, work_dir: str = "") -> list[str]: ...
+        def _broadcast_autocommit_prompt(
+            self, tab_id: str, work_dir: str = "",
+        ) -> None: ...
         def _handle_autocommit_action(
-            self, action: str, tab_id: str = "",
+            self, action: str, tab_id: str = "", *, work_dir: str = "",
         ) -> None: ...
         def _handle_worktree_action(
             self, action: str, tab_id: str = "", *, internal: bool = False,
@@ -593,7 +595,9 @@ class _TaskRunnerMixin:
                             # directly.  Mirrors the user clicking
                             # "Auto commit" on the autocommit prompt
                             # without ever opening the merge view.
-                            self._handle_autocommit_action("commit", tab_id)
+                            self._handle_autocommit_action(
+                                "commit", tab_id, work_dir=work_dir,
+                            )
                         else:
                             merge_started = self._prepare_and_start_merge(
                                 work_dir, pre_hunks, pre_untracked, pre_file_hashes,
@@ -601,7 +605,9 @@ class _TaskRunnerMixin:
                                 tab_id=tab_id,
                             )
                             if not merge_started:
-                                self._broadcast_autocommit_prompt(tab_id)
+                                self._broadcast_autocommit_prompt(
+                                    tab_id, work_dir,
+                                )
                     except BaseException:  # pragma: no cover — merge view error handler
                         logger.debug("Merge view error", exc_info=True)
                     finally:

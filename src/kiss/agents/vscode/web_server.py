@@ -323,6 +323,12 @@ class _WebMergeState:
 
     def __init__(self, merge_data: dict[str, Any]) -> None:
         self.files: list[dict[str, Any]] = merge_data.get("files", [])
+        # The tab's repository (or worktree) directory, stamped by the
+        # backend ``_start_merge_session``.  Echoed back on the
+        # ``all-done`` ``mergeAction`` so the post-merge autocommit scan
+        # runs against the tab's own repo rather than the daemon-wide
+        # ``self.work_dir`` (which may be a different, non-git folder).
+        self.work_dir: str = merge_data.get("work_dir", "")
         self._all_hunks: list[tuple[int, int]] = [
             (fi, hi)
             for fi, f in enumerate(self.files)
@@ -2418,6 +2424,14 @@ class RemoteAccessServer:
         )
         self._uds_server: asyncio.Server | None = None
         self._watchdog_task: asyncio.Task[None] | None = None
+        # Set True by :meth:`_handle_shutdown_signal` the first time a
+        # SIGTERM is caught.  Guards against a *second* SIGTERM (e.g.
+        # an impatient ``pkill`` loop) re-raising ``KeyboardInterrupt``
+        # while :meth:`start` is already in its ``finally`` cleanup —
+        # which would escape the cleanup uncaught, abort
+        # ``subprocess.wait`` mid-sleep, and crash the process with an
+        # unhandled traceback (killing any running agent task).
+        self._shutdown_initiated = False
         self._local_url = f"https://localhost:{self.port}"
         self._merge_states: dict[str, _WebMergeState] = {}
         # M6: a small lock guards _merge_states so the agent
@@ -3173,7 +3187,12 @@ class RemoteAccessServer:
             with self._merge_states_lock:
                 self._merge_states.pop(tab_id, None)
             await self._run_cmd(
-                {"type": "mergeAction", "action": "all-done", "tabId": tab_id},
+                {
+                    "type": "mergeAction",
+                    "action": "all-done",
+                    "tabId": tab_id,
+                    "workDir": state.work_dir,
+                },
             )
 
 
@@ -3834,6 +3853,172 @@ class RemoteAccessServer:
             print("Warning: cloudflared tunnel failed to start", file=sys.stderr)
         await self._ws_server.serve_forever()  # type: ignore[union-attr]
 
+    def _handle_shutdown_signal(self, signum: int) -> None:
+        """React to a catchable termination signal (SIGTERM / SIGHUP).
+
+        Logs the signal alongside a snapshot of in-flight agent tasks
+        and current memory.  For ``SIGTERM`` the *first* invocation
+        raises :class:`KeyboardInterrupt` so the ``asyncio.run`` loop in
+        :meth:`start` unwinds through its existing
+        ``except KeyboardInterrupt`` handler and runs its cleanup.
+
+        A subsequent SIGTERM that arrives *while shutdown is already in
+        progress* must NOT raise again.  During the ``finally`` cleanup,
+        :meth:`_stop_tunnel` blocks in ``subprocess.wait`` (a
+        ``time.sleep`` loop).  A second SIGTERM delivered then — e.g. by
+        an impatient ``pkill``/supervisor restart loop — would otherwise
+        re-raise ``KeyboardInterrupt`` inside that sleep, escape the
+        ``finally`` block uncaught, and crash the process with an
+        unhandled traceback (abruptly killing any running agent task).
+        Once :attr:`_shutdown_initiated` is set we therefore only log
+        and return so the cleanup runs to completion.
+
+        Args:
+            signum: The signal number delivered by the OS.
+        """
+        import resource
+
+        sig_name = signal.Signals(signum).name
+        from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+
+        active_tabs = []
+        for tab_id, tab in _RunningAgentState.running_agent_states.items():
+            if tab.is_task_active:
+                task_id = tab.task_history_id or tab.last_task_id
+                active_tabs.append(f"{tab_id}(task={task_id})")
+        try:
+            rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            rss_mb = (
+                rss / (1024 * 1024) if sys.platform == "darwin" else rss / 1024
+            )
+        except Exception:
+            rss_mb = -1
+        logger.warning(
+            "Signal %s received: pid=%d active_tasks=[%s] rss=%.1fMB",
+            sig_name,
+            os.getpid(),
+            ", ".join(active_tabs) if active_tabs else "none",
+            rss_mb,
+        )
+        # For SIGTERM: raise KeyboardInterrupt so the asyncio loop can
+        # unwind cleanly through the existing try/except — but only on
+        # the first signal.  Re-raising during the cleanup phase would
+        # crash the process (see docstring).
+        if signum == signal.SIGTERM:
+            if self._shutdown_initiated:
+                logger.info(
+                    "SIGTERM during shutdown ignored: pid=%d "
+                    "(cleanup already in progress)",
+                    os.getpid(),
+                )
+                return
+            self._shutdown_initiated = True
+            raise KeyboardInterrupt(f"Received {sig_name}")
+
+    def _signal_handler_entry(self, signum: int, _frame: Any) -> None:
+        """``signal.signal`` callback adapter for :meth:`_handle_shutdown_signal`.
+
+        Discards the unused stack-frame argument required by the
+        ``signal`` module and forwards the signal number.
+
+        Args:
+            signum: The signal number delivered by the OS.
+            _frame: The interrupted stack frame (unused).
+        """
+        self._handle_shutdown_signal(signum)
+
+    def _stop_active_agent_tasks(self, timeout: float = 12.0) -> None:
+        """Stop in-flight agent worker threads so they unwind cleanly.
+
+        Each task runs in a daemon worker thread spawned by
+        :meth:`VSCodeServer._run_task`.  On process exit those daemon
+        threads are killed abruptly, skipping the cleanup ``finally``
+        that persists a meaningful ``task_history.result`` and
+        broadcasts the outcome.  The row is then left at the
+        ``"Agent Failed Abruptly"`` sentinel and the next startup's
+        orphan sweep rewrites it to ``"Task terminated unexpectedly
+        (process killed)"`` — a *silent* failure the user never sees in
+        real time.
+
+        This method reproduces what the user-facing "stop" button does
+        (set the cooperative stop event, then inject a
+        ``KeyboardInterrupt`` into the worker thread via
+        ``PyThreadState_SetAsyncExc``) but, crucially, **joins** each
+        worker synchronously so its cleanup ``finally`` runs to
+        completion (persisting ``"Task stopped by user"`` and
+        broadcasting a final result) before the process exits.
+
+        The total time spent is bounded by *timeout* seconds across all
+        workers so a thread wedged in uninterruptible C code cannot hang
+        shutdown indefinitely.
+
+        Args:
+            timeout: Maximum wall-clock seconds to wait, in aggregate,
+                for all active worker threads to unwind.
+        """
+        import ctypes
+
+        from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+
+        active: list[tuple[str, threading.Event | None, threading.Thread]] = []
+        with _RunningAgentState._registry_lock:
+            for tab_id, tab in _RunningAgentState.running_agent_states.items():
+                thread = tab.task_thread
+                if tab.is_task_active and thread is not None and thread.is_alive():
+                    active.append((tab_id, tab.stop_event, thread))
+
+        if not active:
+            return
+
+        logger.warning(
+            "Shutdown: stopping %d in-flight agent task(s) before exit: %s",
+            len(active),
+            ", ".join(tab_id for tab_id, _, _ in active),
+        )
+
+        # Phase 1: cooperative stop signal for every worker first.
+        for _tab_id, stop_event, _thread in active:
+            if stop_event is not None:
+                stop_event.set()
+
+        # Phase 2: force a KeyboardInterrupt in any worker that did not
+        # exit on its own, then join (bounded by the shared deadline) so
+        # the worker's cleanup finally runs before we return.
+        deadline = time.monotonic() + timeout
+        for tab_id, _stop_event, thread in active:
+            remaining = max(0.0, deadline - time.monotonic())
+            thread.join(timeout=min(1.0, remaining))
+            if thread.is_alive():
+                tid = thread.ident
+                if tid is not None:
+                    ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                        ctypes.c_ulong(tid),
+                        ctypes.py_object(KeyboardInterrupt),
+                    )
+                thread.join(timeout=max(0.0, deadline - time.monotonic()))
+            if thread.is_alive():
+                logger.warning(
+                    "Shutdown: agent task %s did not stop within timeout; "
+                    "it may be persisted as a process-killed task",
+                    tab_id,
+                )
+
+    def _install_signal_handlers(self) -> None:
+        """Register handlers for catchable termination signals.
+
+        SIGKILL cannot be caught, but SIGTERM (``pkill``, ``systemd
+        stop``) and SIGHUP (terminal closed) can — and are the most
+        common non-OOM kill causes.  Both are routed through
+        :meth:`_handle_shutdown_signal`.  Registration is best-effort:
+        it silently no-ops when not on the main thread or when the
+        signal is unsupported on the current platform.
+        """
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            try:
+                signal.signal(sig, self._signal_handler_entry)
+            except (OSError, ValueError):
+                pass  # e.g. not main thread, or unsupported on this OS
+
     def start(self) -> None:
         """Start the server (blocks until interrupted).
 
@@ -3864,53 +4049,23 @@ class RemoteAccessServer:
         except Exception:
             pass
 
-        def _signal_handler(signum: int, frame: Any) -> None:
-            sig_name = signal.Signals(signum).name
-            # Snapshot in-flight tasks for the log
-            from kiss.agents.sorcar.running_agent_state import (
-                _RunningAgentState,
-            )
-            active_tabs = []
-            for tab_id, tab in _RunningAgentState.running_agent_states.items():
-                if tab.is_task_active:
-                    task_id = tab.task_history_id or tab.last_task_id
-                    active_tabs.append(f"{tab_id}(task={task_id})")
-            try:
-                rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-                rss_mb = (
-                    rss / (1024 * 1024)
-                    if sys.platform == "darwin"
-                    else rss / 1024
-                )
-            except Exception:
-                rss_mb = -1
-            logger.warning(
-                "Signal %s received: pid=%d active_tasks=[%s] rss=%.1fMB",
-                sig_name,
-                pid,
-                ", ".join(active_tabs) if active_tabs else "none",
-                rss_mb,
-            )
-            # For SIGTERM: raise KeyboardInterrupt so the asyncio loop
-            # can unwind cleanly through the existing try/except.
-            if signum == signal.SIGTERM:
-                raise KeyboardInterrupt(f"Received {sig_name}")
-
-        # Register handlers for catchable termination signals so we
-        # get a log entry before exit.  SIGKILL cannot be caught, but
-        # SIGTERM (pkill, systemd stop) and SIGHUP (terminal closed)
-        # can — and are the most common non-OOM kill causes.
-        for sig in (signal.SIGTERM, signal.SIGHUP):
-            try:
-                signal.signal(sig, _signal_handler)
-            except (OSError, ValueError):
-                pass  # e.g. not main thread, or unsupported on this OS
+        self._install_signal_handlers()
 
         try:
             asyncio.run(self._serve_async())
         except KeyboardInterrupt:
             logger.info("Server shutting down: pid=%d (KeyboardInterrupt)", pid)
         finally:
+            # Gracefully stop any in-flight agent worker thread BEFORE
+            # the process exits.  Without this the daemon worker thread
+            # is killed abruptly when ``start()`` returns, its cleanup
+            # ``finally`` (which persists a real result + broadcasts the
+            # outcome) never runs, and the task_history row is left at
+            # the ``"Agent Failed Abruptly"`` sentinel — later rewritten
+            # by the orphan sweep to "Task terminated unexpectedly
+            # (process killed)".  That is the silent-failure mode this
+            # fix eliminates (see tasks 2968 in the bundled sorcar.db).
+            self._stop_active_agent_tasks()
             logger.info("Server stopped: pid=%d", pid)
             self._stop_tunnel()
 

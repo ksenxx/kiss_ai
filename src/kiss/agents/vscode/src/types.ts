@@ -60,14 +60,19 @@ export type FromWebviewMessage =
   | {type: 'resumeSession'; id: string; taskId?: number; tabId?: string}
   | {type: 'getWelcomeSuggestions'}
   | {type: 'complete'; query: string; tabId?: string}
-  | {type: 'mergeAction'; action: string; tabId?: string}
+  | {type: 'mergeAction'; action: string; tabId?: string; workDir?: string}
   | {type: 'newChat'; tabId?: string}
-  | {type: 'generateCommitMessage'}
+  | {type: 'generateCommitMessage'; tabId?: string; workDir?: string}
   | {type: 'focusEditor'}
   | {type: 'closeTab'; tabId: string}
   | {type: 'getInputHistory'}
   | {type: 'worktreeAction'; action: 'merge' | 'discard'; tabId?: string}
-  | {type: 'autocommitAction'; action: 'commit' | 'skip'; tabId?: string}
+  | {
+      type: 'autocommitAction';
+      action: 'commit' | 'skip';
+      tabId?: string;
+      workDir?: string;
+    }
   | {type: 'resolveDroppedPaths'; uris: string[]}
   | {type: 'webviewFocusChanged'; focused: boolean}
   | {type: 'pickFolder'; currentPath?: string}
