@@ -54,21 +54,23 @@ def repo_lock(repo: Path) -> threading.RLock:
 
 def _git(
     *args: str,
-    cwd: str | Path | None = None,
+    cwd: str | Path,
 ) -> subprocess.CompletedProcess[str]:
     """Run a git command, returning the CompletedProcess result.
 
+    ``cwd`` is a required keyword-only argument so the type checker
+    enforces that every git invocation specifies a working directory
+    (passed via ``git -C <cwd>``).  This prevents accidental git
+    operations against the process's current working directory.
+
     Args:
         *args: Git sub-command and arguments (without the leading ``git``).
-        cwd: Working directory for the git command.
+        cwd: Working directory for the git command (required).
 
     Returns:
         The completed process with stdout/stderr captured as text.
     """
-    cmd = ["git"]
-    if cwd is not None:
-        cmd += ["-C", str(cwd)]
-    cmd += list(args)
+    cmd = ["git", "-C", str(cwd), *args]
     return subprocess.run(cmd, capture_output=True, text=True)
 
 
