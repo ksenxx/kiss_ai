@@ -10,7 +10,30 @@ logger = logging.getLogger(__name__)
 
 
 def clean_llm_output(text: str) -> str:
-    """Strip whitespace and surrounding quotes from LLM output."""
+    """Strip whitespace and surrounding quotes from LLM output.
+
+    LLM responses routinely carry surrounding whitespace (a trailing
+    newline is near-universal) *and* wrap the answer in quotes, e.g.
+    ``"feat: add widget"\\n``.  The quote characters and the whitespace
+    must both be removed regardless of their order: stripping quotes
+    alone would leave the stray newline (and, when the newline sits
+    *outside* the closing quote, would fail to reach the quote pair at
+    all, leaving a dangling quote in the result).  Whitespace is
+    therefore stripped first, then surrounding quotes, then any
+    whitespace the quotes were hiding.
+    """
+    return text.strip().strip('"').strip("'").strip()
+
+
+def _strip_surrounding_quotes(text: str) -> str:
+    """Strip only surrounding quote characters, preserving whitespace.
+
+    Used by :func:`clip_autocomplete_suggestion`, whose inputs are
+    history-/identifier-derived continuations (never raw LLM output) and
+    whose leading whitespace is a *meaningful* cursor-to-ghost separator
+    that must survive cleaning — so it must not be whitespace-stripped
+    the way :func:`clean_llm_output` is.
+    """
     return text.strip('"').strip("'")
 
 
@@ -87,7 +110,7 @@ def clip_autocomplete_suggestion(query: str, suggestion: str) -> str:
       separator prepended (e.g. identifier completion ``"os.pa"`` →
       ``"th"``).
     """
-    s = clean_llm_output(suggestion)
+    s = _strip_surrounding_quotes(suggestion)
     if not s:
         return ""
     if s.lower().startswith(query.lower()):
