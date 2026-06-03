@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Audit 15: Integration tests for bugs/redundancies found in audit round 15.
 
 BUG-66: ``_emit_pending_worktree`` broadcasts ``worktree_done`` for

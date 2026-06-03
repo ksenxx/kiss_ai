@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Test: the task runner persists the per-task ``result`` row from the
 YAML returned by ``ChatSorcarAgent.run`` even though the printer
 recording has already been torn down by the time control returns to

@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Reproduces sub-agent ``new_tab`` mis-routing under worker-thread reuse.
 
 When ``ChatSorcarAgent._run_tasks_parallel`` uses a ``ThreadPoolExecutor``

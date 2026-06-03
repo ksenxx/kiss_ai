@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration test: new chat model picker shows last user-picked model.
 
 Bug: When a new chat tab is opened, the model picker shows the model from the

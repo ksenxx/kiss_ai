@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration test: cc/* model + JsonPrinter must emit streaming
 thinking events (``thinking_start`` → ``thinking_delta`` → ``thinking_end``)
 exactly once — no duplicate collapse from redundant ``assistant`` snapshots.

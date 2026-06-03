@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Test suite for model implementation coverage.
 
 These tests verify the actual model implementations (AnthropicModel, GeminiModel,

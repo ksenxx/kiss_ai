@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration test: cc/ models calling finish() via text-based tool calling.
 
 Regression test for the bug where cc/opus omitted the ``is_continue``

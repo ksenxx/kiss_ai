@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests that the standalone Settings panel saves configuration on close.
 
 The "Save Configuration" button was removed long ago, and the

@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Audit 18: Race-condition integration tests for worktree mode.
 
 The VS Code server coordinates three concurrent actors:

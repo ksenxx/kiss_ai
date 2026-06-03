@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """IRC Agent — ChatSorcarAgent extension with IRC tools.
 
 Connects to IRC servers via the irc library. Stores config in

@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests for the squash-merge commit message used by worktree merges.
 
 When the worktree agent finishes a task, it auto-commits its changes

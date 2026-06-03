@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Phone Control Agent — ChatSorcarAgent extension with Android phone control tools.
 
 Provides access to Android SMS, calls, and notifications via a companion

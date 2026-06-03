@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Regression tests for a subset of tab-routing fixes in VSCode server.
 
 Targets only the five bug sites fixed in this change:

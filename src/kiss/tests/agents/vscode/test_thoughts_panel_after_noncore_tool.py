@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests: thinking/text after a tool_call must go into Thoughts panels.
 
 Originally a non-core ``tool_result`` (screenshot, go_to_url, scroll,

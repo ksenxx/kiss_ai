@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Regression: every tool's return value reaches the console & webview.
 
 Before this fix, only ``Bash``/``Read``/``Edit``/``Write`` (and errors) were

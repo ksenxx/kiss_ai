@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests for race conditions in sorcar/ and vscode/.
 
 These tests deliberately interleave concurrent threads to reproduce

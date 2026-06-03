@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests that demonstrate unfixed race conditions in ``kiss.agents.vscode``.
 
 Each test deterministically forces an interleaving that exposes a real

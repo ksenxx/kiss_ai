@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration test: stop button from a subscriber (multi-viewer) tab.
 
 When a second browser/client opens a running task from history,

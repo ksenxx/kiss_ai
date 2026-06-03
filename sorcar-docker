@@ -1,4 +1,8 @@
 #!/bin/bash
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 # Launch KISS Sorcar in a Docker container (code-server in the browser).
 #
 # Usage:  ./sorcar-docker [PORT]

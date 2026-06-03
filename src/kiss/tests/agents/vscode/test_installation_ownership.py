@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Static integration tests for installation ownership.
 
 KISS Sorcar can be installed either from a cloned repository via the top-level

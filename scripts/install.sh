@@ -1,4 +1,8 @@
 #!/bin/bash
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 set -e
 
 # Capture the user's shell PWD *before* any ``cd`` so VS Code can later open

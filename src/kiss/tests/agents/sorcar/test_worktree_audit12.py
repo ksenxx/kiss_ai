@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Audit 12: Integration tests for bugs in worktree and non-worktree workflows.
 
 BUG-59: ``squash_merge_from_baseline`` doesn't check ``rev-list --count``

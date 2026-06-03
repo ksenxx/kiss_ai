@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests confirming bugs in the non-worktree workflow that make worktree mode unsafe.
 
 Each test CONFIRMS the bug exists (assertions pass when buggy behaviour

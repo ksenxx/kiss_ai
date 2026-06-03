@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Regression test: the post-install notification must NOT include a
 "Restart VS Code" action button, and must NOT trigger
 ``workbench.action.reloadWindow`` from the post-install flow.
