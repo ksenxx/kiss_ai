@@ -468,6 +468,47 @@ upgrade_brew() {
     brew update
 }
 
+# ---------------------------------------------------------------------------
+# Repo update helpers — stash local changes, pull latest, then restore them.
+# ---------------------------------------------------------------------------
+
+# Set to 1 once ``update_repo`` has stashed the working tree so that
+# ``restore_stashed_changes`` knows whether there is anything to pop.
+STASHED_CHANGES=0
+
+restore_stashed_changes() {
+    # Pop the stash created by ``update_repo`` so the working tree is left
+    # exactly as we found it.  Wired to the EXIT trap so the unstash runs
+    # "finally" — even if the install aborts midway under ``set -e``.
+    if [ "$STASHED_CHANGES" = "1" ]; then
+        echo ">>> Restoring stashed local changes..."
+        git -C "$PROJECT_DIR" stash pop || true
+        STASHED_CHANGES=0
+    fi
+}
+
+update_repo() {
+    # Pull the latest kiss_ai sources before building.  If the working tree is
+    # dirty, stash the changes first (so ``git pull`` applies cleanly), then
+    # pop them back via the EXIT trap once the install finishes.
+    if ! git -C "$PROJECT_DIR" rev-parse --is-inside-work-tree &>/dev/null; then
+        echo "   Not a git checkout — skipping pull."
+        return 0
+    fi
+    if [ -n "$(git -C "$PROJECT_DIR" status --porcelain)" ]; then
+        echo "   Repository is dirty — stashing local changes..."
+        if git -C "$PROJECT_DIR" stash push --include-untracked -m "install.sh auto-stash"; then
+            STASHED_CHANGES=1
+            trap restore_stashed_changes EXIT
+        else
+            echo "   WARNING: git stash failed; continuing without pulling."
+            return 0
+        fi
+    fi
+    echo "   Pulling latest changes..."
+    git -C "$PROJECT_DIR" pull --ff-only || git -C "$PROJECT_DIR" pull
+}
+
 {
     echo "=== KISS Sorcar Source Install ==="
     echo "Date: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
@@ -496,6 +537,10 @@ upgrade_brew() {
         INSTALLED_GIT=$(git --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
     fi
     echo "   git $INSTALLED_GIT ready"
+    echo ""
+
+    echo ">>> Updating kiss_ai repository..."
+    update_repo
     echo ""
 
     echo ">>> Checking uv..."
