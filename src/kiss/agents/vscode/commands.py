@@ -109,7 +109,7 @@ class _CommandsMixin:
             self, action: str, tab_id: str = "", *, internal: bool = False,
         ) -> dict[str, Any]: ...
         def _handle_autocommit_action(
-            self, action: str, tab_id: str = "",
+            self, action: str, tab_id: str = "", *, work_dir: str = "",
         ) -> None: ...
         def _handle_delete_task(self, task_id: int) -> None: ...
         def _handle_delete_frequent_task(self, task: str) -> None: ...
@@ -475,6 +475,7 @@ class _CommandsMixin:
         """Process the user's reply to an autocommit prompt."""
         self._handle_autocommit_action(
             cmd.get("action", ""), cmd.get("tabId", ""),
+            work_dir=cmd.get("workDir", ""),
         )
 
     def _cmd_get_config(self, cmd: dict[str, Any]) -> None:

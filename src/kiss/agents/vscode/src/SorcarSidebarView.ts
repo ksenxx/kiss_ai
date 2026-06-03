@@ -1004,6 +1004,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           type: 'autocommitAction',
           action: acAction,
           tabId: acTabId,
+          workDir: message.workDir,
         });
         break;
       }

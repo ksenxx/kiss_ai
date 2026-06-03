@@ -219,6 +219,21 @@
     return null;
   }
 
+  /**
+   * Resolve the working directory for a given tab id.  Returns the
+   * tab's own ``workDir`` (set from background-task events) when known,
+   * else an empty string so the backend falls back to its global
+   * ``work_dir``.  Used to stamp ``workDir`` on commands (e.g.
+   * ``autocommitAction``) so they act on the tab's actual repo rather
+   * than a possibly-stale daemon-wide directory.
+   */
+  function workDirForTab(tabId) {
+    const tab = tabs.find(t => {
+      return t.id === tabId;
+    });
+    return tab && tab.workDir ? tab.workDir : '';
+  }
+
   function saveCurrentTab() {
     const tab = tabs.find(t => {
       return t.id === activeTabId;
@@ -3882,6 +3897,7 @@
         type: 'autocommitAction',
         action: 'commit',
         tabId: ownerTabId,
+        workDir: workDirForTab(ownerTabId),
       });
     });
 
@@ -3893,6 +3909,7 @@
         type: 'autocommitAction',
         action: 'skip',
         tabId: ownerTabId,
+        workDir: workDirForTab(ownerTabId),
       });
     });
 
@@ -4393,6 +4410,7 @@
           type: 'autocommitAction',
           action: 'commit',
           tabId: activeTabId,
+          workDir: workDirForTab(activeTabId),
         });
       });
     }

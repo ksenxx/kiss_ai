@@ -67,7 +67,12 @@ export type FromWebviewMessage =
   | {type: 'closeTab'; tabId: string}
   | {type: 'getInputHistory'}
   | {type: 'worktreeAction'; action: 'merge' | 'discard'; tabId?: string}
-  | {type: 'autocommitAction'; action: 'commit' | 'skip'; tabId?: string}
+  | {
+      type: 'autocommitAction';
+      action: 'commit' | 'skip';
+      tabId?: string;
+      workDir?: string;
+    }
   | {type: 'resolveDroppedPaths'; uris: string[]}
   | {type: 'webviewFocusChanged'; focused: boolean}
   | {type: 'pickFolder'; currentPath?: string}
