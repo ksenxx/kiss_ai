@@ -85,7 +85,7 @@ class _MergeFlowMixin:
         return tab.agent
 
     def _start_merge_session(
-        self, merge_json_path: str, tab_id: str = "",
+        self, merge_json_path: str, tab_id: str = "", work_dir: str = "",
     ) -> bool:
         """Load merge data from disk and broadcast merge_data + merge_started events.
 
@@ -93,6 +93,13 @@ class _MergeFlowMixin:
             merge_json_path: Path to the pending-merge.json file.
             tab_id: Frontend tab identifier.  Used to set ``is_merging``
                 on the correct tab.
+            work_dir: The repository (or worktree) directory this merge
+                review operates on.  Stamped into the ``merge_data``
+                payload as ``work_dir`` so the shared ``kiss-web`` daemon
+                can echo it back on the ``all-done`` ``mergeAction`` and
+                run the post-merge dirty-file scan against the tab's own
+                repository rather than the daemon-wide ``self.work_dir``.
+                Falls back to ``self.work_dir`` when empty.
 
         Returns:
             True if a merge session was started, False otherwise.
@@ -100,6 +107,7 @@ class _MergeFlowMixin:
         try:
             with open(merge_json_path) as f:
                 merge_data = json.load(f)
+            merge_data["work_dir"] = work_dir or self.work_dir
             files = merge_data.get("files", [])
             if not files:
                 return False
@@ -177,9 +185,11 @@ class _MergeFlowMixin:
         if merge_result.get("status") != "opened":
             return False
         merge_json = os.path.join(merge_dir, "pending-merge.json")
-        return self._start_merge_session(merge_json, tab_id=tab_id)
+        return self._start_merge_session(
+            merge_json, tab_id=tab_id, work_dir=work_dir,
+        )
 
-    def _finish_merge(self, tab_id: str = "") -> None:
+    def _finish_merge(self, tab_id: str = "", *, work_dir: str = "") -> None:
         """End the merge session for a specific tab.
 
         When a worktree task is pending, emits ``worktree_done`` so the
@@ -197,6 +207,11 @@ class _MergeFlowMixin:
                 missing ``tabId`` at this layer indicates a frontend bug
                 that should not silently tear down every tab's merge
                 state.
+            work_dir: The tab's working directory.  Forwarded to
+                :meth:`_broadcast_autocommit_prompt` so the post-merge
+                dirty-file scan runs against the tab's own repository
+                rather than the daemon-wide ``self.work_dir``.  Falls
+                back to ``self.work_dir`` when empty.
         """
         if not tab_id:
             logger.debug("_finish_merge called without tab_id; ignoring")
@@ -210,25 +225,34 @@ class _MergeFlowMixin:
         self._present_pending_worktree(tab_id, try_merge_review=False)
 
         if not tab.use_worktree:
-            self._broadcast_autocommit_prompt(tab_id)
+            self._broadcast_autocommit_prompt(tab_id, work_dir)
         # If the user closed the tab while the merge view was open,
         # dispose the now-idle _RunningAgentState.  No-op otherwise.
         self._dispose_if_closed(tab_id)
 
-    def _main_dirty_files(self) -> list[str]:
+    def _main_dirty_files(self, work_dir: str = "") -> list[str]:
         """List modified, staged and untracked files in the main working tree.
 
         Uses ``git status --porcelain -uall`` so untracked files inside
         new directories are also reported.  Returns an empty list when
         the working tree is clean or ``work_dir`` is not a git repo.
 
+        Args:
+            work_dir: The tab's working directory.  Preferred over the
+                daemon-wide ``self.work_dir`` because the shared
+                ``kiss-web`` daemon may have been launched from (or
+                synced to) a different — possibly non-git — folder than
+                the window that owns this tab.  Falls back to
+                ``self.work_dir`` when empty.
+
         Returns:
             De-duplicated list of file paths (relative to ``work_dir``).
         """
-        repo = GitWorktreeOps.discover_repo(Path(self.work_dir))
+        work_dir = work_dir or self.work_dir
+        repo = GitWorktreeOps.discover_repo(Path(work_dir))
         if repo is None:
             return []
-        result = _git(self.work_dir, "status", "--porcelain", "-uall")
+        result = _git(work_dir, "status", "--porcelain", "-uall")
         if result.returncode != 0:
             return []
         files: list[str] = []
@@ -243,7 +267,9 @@ class _MergeFlowMixin:
                 files.append(path)
         return files
 
-    def _broadcast_autocommit_prompt(self, tab_id: str) -> None:
+    def _broadcast_autocommit_prompt(
+        self, tab_id: str, work_dir: str = "",
+    ) -> None:
         """Broadcast an ``autocommit_prompt`` if the main tree has dirty files.
 
         Shared by ``_finish_merge`` (after merge review ends) and
@@ -251,8 +277,13 @@ class _MergeFlowMixin:
 
         Args:
             tab_id: Frontend tab identifier to include in the event.
+            work_dir: The tab's working directory.  Forwarded to
+                :meth:`_main_dirty_files` so the dirty-file scan runs
+                against the tab's own repository rather than the
+                daemon-wide ``self.work_dir``.  Falls back to
+                ``self.work_dir`` when empty.
         """
-        changed = self._main_dirty_files()
+        changed = self._main_dirty_files(work_dir)
         if changed:
             self.printer.broadcast({
                 "type": "autocommit_prompt",

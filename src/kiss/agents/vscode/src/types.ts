@@ -60,7 +60,7 @@ export type FromWebviewMessage =
   | {type: 'resumeSession'; id: string; taskId?: number; tabId?: string}
   | {type: 'getWelcomeSuggestions'}
   | {type: 'complete'; query: string; tabId?: string}
-  | {type: 'mergeAction'; action: string; tabId?: string}
+  | {type: 'mergeAction'; action: string; tabId?: string; workDir?: string}
   | {type: 'newChat'; tabId?: string}
   | {type: 'generateCommitMessage'; tabId?: string; workDir?: string}
   | {type: 'focusEditor'}
