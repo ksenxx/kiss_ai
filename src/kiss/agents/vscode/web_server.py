@@ -3835,6 +3835,10 @@ class RemoteAccessServer:
 
         Call this from the main thread.  Press Ctrl-C to stop.
         """
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        )
         import resource
 
         pid = os.getpid()
