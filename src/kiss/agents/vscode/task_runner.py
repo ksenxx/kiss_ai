@@ -72,7 +72,7 @@ class _TaskRunnerMixin:
         def _main_dirty_files(self) -> list[str]: ...
         def _broadcast_autocommit_prompt(self, tab_id: str) -> None: ...
         def _handle_autocommit_action(
-            self, action: str, tab_id: str = "", *, auto: bool = False,
+            self, action: str, tab_id: str = "",
         ) -> None: ...
         def _handle_worktree_action(
             self, action: str, tab_id: str = "", *, internal: bool = False,
@@ -561,12 +561,7 @@ class _TaskRunnerMixin:
                             # directly.  Mirrors the user clicking
                             # "Auto commit" on the autocommit prompt
                             # without ever opening the merge view.
-                            # ``auto=True`` keeps the post-task path
-                            # silent when the agent changed no files
-                            # (no "Nothing to commit." notification).
-                            self._handle_autocommit_action(
-                                "commit", tab_id, auto=True,
-                            )
+                            self._handle_autocommit_action("commit", tab_id)
                         else:
                             merge_started = self._prepare_and_start_merge(
                                 work_dir, pre_hunks, pre_untracked, pre_file_hashes,
@@ -641,10 +636,10 @@ class _TaskRunnerMixin:
                             # interactive "Merge" button (or the
                             # worktree-remove → branch-delete →
                             # checkout-original sequence for discard).
-                            wt_changed = self._get_worktree_changed_files(
-                                tab_id,
-                            )
-                            action = "merge" if wt_changed else "discard"
+                            if self._get_worktree_changed_files(tab_id):
+                                action = "merge"
+                            else:
+                                action = "discard"
                             # ``internal=True`` bypasses the
                             # ``is_task_active`` guard — the auto-
                             # merge runs on the same task thread
@@ -656,19 +651,11 @@ class _TaskRunnerMixin:
                             result = self._handle_worktree_action(
                                 action, tab_id, internal=True,
                             )
-                            # In auto-commit mode a no-op task (the
-                            # agent changed no files) discards the
-                            # empty branch SILENTLY — no
-                            # ``worktree_result`` is broadcast, so the
-                            # user is not notified about a turn that
-                            # produced nothing.  Only a real merge
-                            # (there were changes) reports its result.
-                            if wt_changed:
-                                self.printer.broadcast({
-                                    "type": "worktree_result",
-                                    "tabId": tab_id,
-                                    **result,
-                                })
+                            self.printer.broadcast({
+                                "type": "worktree_result",
+                                "tabId": tab_id,
+                                **result,
+                            })
                         else:
                             # ``discard_if_empty=False``: the user
                             # opted into the worktree workflow with
