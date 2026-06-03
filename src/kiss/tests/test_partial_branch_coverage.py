@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Targeted integration tests to cover partial branches across the codebase.
 
 No mocks, test doubles, or fakes.

@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Regression tests for ``_coerce_tasks`` (str-vs-list[str] handling).
 
 ``run_tasks_parallel(tasks, ...)`` originally iterated *tasks* with

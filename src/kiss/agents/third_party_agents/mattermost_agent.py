@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Mattermost Agent — ChatSorcarAgent extension with Mattermost REST API tools.
 
 Provides authenticated access to Mattermost via a personal access token.

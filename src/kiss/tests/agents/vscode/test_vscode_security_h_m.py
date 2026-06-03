@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests for HIGH (H1-H10) and MEDIUM (M1-M5) severity fixes
 in src/kiss/agents/vscode/.  Each Python-side fix has a behavioural test
 that fails when the fix is reverted.

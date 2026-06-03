@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Regression test: on first activation after extension install, the
 secondary side bar must be resized to approximately one-third of the
 VS Code window width.

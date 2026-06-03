@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Race condition tests for ``kiss.agents.vscode``.
 
 Each test first demonstrates a real data-race between two or more

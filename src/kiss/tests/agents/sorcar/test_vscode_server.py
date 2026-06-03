@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests for the VS Code extension backend server.
 
 Tests cover: model picker (vendor ordering, sorting, grouping, pricing),

@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """History sidebar items must carry the full task text so the
 ``.running-item > .sidebar-item-text`` line-clamp (4 lines) in ``main.css``
 can actually wrap multiple lines.

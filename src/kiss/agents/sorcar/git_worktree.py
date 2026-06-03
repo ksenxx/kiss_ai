@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Git worktree operations and state.
 
 Provides :class:`GitWorktree` (frozen dataclass for worktree state),

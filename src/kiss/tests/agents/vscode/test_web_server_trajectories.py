@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests for the trajectory-visualizer routes on the web server.
 
 Verify that ``/trajectories/`` serves the visualizer HTML page and that the

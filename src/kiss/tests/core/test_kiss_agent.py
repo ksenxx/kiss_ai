@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests for KISSAgent: agentic mode, non-agentic mode, retry behavior, error handling.
 
 Merged from: test_kiss_agent_agentic, test_kiss_agent_non_agentic,

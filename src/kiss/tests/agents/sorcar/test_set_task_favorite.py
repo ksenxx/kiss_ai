@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests for the ``is_favorite`` flag on ``task_history.extra``.
 
 Covers :func:`kiss.agents.sorcar.persistence._set_task_favorite`:

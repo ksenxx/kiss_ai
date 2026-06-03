@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Shared fixtures for model tests.
 
 The Claude Code and Codex tests mock subprocess so they never actually

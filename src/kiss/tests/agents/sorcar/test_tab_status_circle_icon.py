@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Regression test: for any regular tab that has run a task (whether
 freshly created or loaded from history), the tab title shows a green
 filled circle (●) on success and a red filled circle on failure

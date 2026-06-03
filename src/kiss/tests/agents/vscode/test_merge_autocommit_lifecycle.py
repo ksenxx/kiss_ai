@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests for the full non-worktree task lifecycle.
 
 Reproduces the bug where the merge/diff interface was not launched and

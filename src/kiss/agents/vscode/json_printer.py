@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Shared browser UI components for KISS agent viewers.
 
 The printer is **task-centric**: every piece of per-stream state

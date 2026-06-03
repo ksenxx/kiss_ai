@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Audit 9: Tests verifying fixes for bugs, inconsistencies, and
 redundancies in both non-worktree and worktree workflows.
 

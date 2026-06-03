@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Regression test: sub-agent events are persisted to the sub-agent's
 OWN ``task_history`` row (``has_events=1``), not silently dropped.
 

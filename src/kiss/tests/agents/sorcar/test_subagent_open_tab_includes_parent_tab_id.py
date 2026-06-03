@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Live sub-agent ``openSubagentTab`` broadcasts must include the parent's
 frontend tab id so that closing the parent tab cascade-closes every
 sub-agent tab it spawned.

@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests for ntfy.sh duplicate-URL suppression.
 
 The web server posts the active Cloudflare tunnel URL to ntfy.sh so

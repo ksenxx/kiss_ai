@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Per-tab state and small text helpers for the VS Code server.
 
 Originally split out of ``server.py`` for organisation; moved into

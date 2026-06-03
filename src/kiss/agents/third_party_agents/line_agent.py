@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """LINE Agent — ChatSorcarAgent extension with LINE Messaging API tools.
 
 Provides authenticated access to LINE via channel access token. Uses webhook

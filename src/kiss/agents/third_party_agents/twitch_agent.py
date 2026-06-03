@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Twitch Agent — ChatSorcarAgent extension with Twitch Helix API + Chat tools.
 
 Provides authenticated access to Twitch via OAuth2 tokens. Uses requests
