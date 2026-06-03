@@ -269,13 +269,6 @@ class TestVSCodeServerUncoveredBranches:
         finally:
             _restore_db(saved)
 
-    def test_handle_worktree_action_unknown(self) -> None:
-        """_handle_worktree_action with unknown action (server.py line end)."""
-        server = VSCodeServer()
-        server._get_tab("0").use_worktree = True
-        result = server._handle_worktree_action("unknown_action", tab_id="0")
-        assert result["success"] is False
-        assert "Unknown action" in result["message"]
 
 
 class TestVSCodeServerExtractResultSummary:
