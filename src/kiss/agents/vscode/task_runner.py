@@ -132,14 +132,21 @@ class _TaskRunnerMixin:
                     tab.is_running_non_wt = False
                     # Dispose the transient agent — a fresh one is
                     # built per task in ``_CommandsMixin._cmd_run``.
-                    # Each worktree task creates a brand-new worktree
-                    # and branch (independent of chat id), so there is
-                    # no cross-task restoration of worktree state.
+                    # Preserve the agent when a worktree branch with
+                    # changes is still pending user action (merge or
+                    # discard).  Disposing it would destroy the
+                    # in-memory worktree state that
+                    # ``_handle_worktree_action`` needs, causing a
+                    # misleading "Not a git repository" error.
                     if tab.agent is not None:
                         tab.last_task_id = (
                             tab.agent._last_task_id or tab.last_task_id
                         )
-                        tab.agent = None
+                        if tab.use_worktree and tab.agent._wt_pending:
+                            pass  # keep agent alive for merge/discard
+                        else:
+                            tab.agent = None
+                            tab.use_worktree = False
                 self.printer.broadcast(
                     {"type": "status", "running": False, "tabId": tab_id},
                 )
