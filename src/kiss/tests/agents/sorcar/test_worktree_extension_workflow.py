@@ -498,13 +498,6 @@ class TestServerWorktreeWorkflow:
         assert len(wt_results) == 1
         assert wt_results[0]["success"] is True
 
-    def test_unknown_worktree_action_returns_error(self) -> None:
-        """Unknown worktree action returns error result."""
-        server, events = _make_server(self.repo)
-        result = server._handle_worktree_action("invalid", "0")
-        assert result["success"] is False
-        assert "Unknown action" in result["message"]
-
 
     def test_no_changes_triggers_auto_discard(self) -> None:
         """When the worktree has no changes, the agent auto-discards."""

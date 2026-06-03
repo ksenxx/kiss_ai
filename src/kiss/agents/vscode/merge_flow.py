@@ -722,8 +722,11 @@ class _MergeFlowMixin:
         if not tab.use_worktree:
             return {"success": False, "message": "Worktree mode is not enabled"}
         wt_agent = self._ensure_wt_agent(tab)
-        if wt_agent is None:
-            return {"success": False, "message": "Not a git repository"}
+        if wt_agent is None or not wt_agent._wt_pending:
+            return {
+                "success": False,
+                "message": "No pending worktree changes to act on",
+            }
         wt = wt_agent
         if action == "merge":
             verb = "merging"
@@ -745,7 +748,10 @@ class _MergeFlowMixin:
         # currently blocked on the lock.
         repo_root = wt._repo_root
         if repo_root is None:
-            return {"success": False, "message": "Not a git repository"}
+            return {
+                "success": False,
+                "message": "No pending worktree changes to act on",
+            }
         with self._state_lock:
             if not internal:
                 busy = self._check_worktree_busy(tab, verb)

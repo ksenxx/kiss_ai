@@ -671,6 +671,62 @@ def _recover_orphaned_tasks(active_task_ids: set[int]) -> int:
         "UPDATE task_history SET result = ? WHERE result = ? " + not_in_clause
     )
     with _rw_lock.write_lock():
+        # Before updating, collect diagnostic info for each orphaned row
+        # so the startup log captures exactly which tasks were interrupted
+        # and their last recorded state.  This is the primary forensic
+        # evidence when a kill (SIGKILL / OOM / VS Code reload) prevents
+        # the normal ``_save_task_result`` → ``_append_chat_event``
+        # finally block from running.
+        diag_rows = db.execute(
+            "SELECT id, task, chat_id, extra FROM task_history "
+            "WHERE result = ? " + not_in_clause,
+            ("Agent Failed Abruptly",),
+        ).fetchall()
+        for row in diag_rows:
+            task_id_val = row["id"]
+            # Fetch the last few events to show where the agent was
+            last_events = db.execute(
+                "SELECT seq, event_json, timestamp FROM events "
+                "WHERE task_id = ? ORDER BY seq DESC LIMIT 3",
+                (task_id_val,),
+            ).fetchall()
+            last_event_summaries = []
+            for ev in last_events:
+                try:
+                    ev_data = json.loads(ev["event_json"])
+                    ev_type = ev_data.get("type", "unknown")
+                    ev_ts = ev["timestamp"]
+                except Exception:
+                    ev_type = "parse_error"
+                    ev_ts = 0
+                last_event_summaries.append(
+                    f"seq={ev['seq']} type={ev_type} ts={ev_ts:.1f}"
+                )
+            extra_str = row["extra"] or "{}"
+            try:
+                extra = json.loads(extra_str)
+                model_name = extra.get("model", "unknown")
+                start_ts = extra.get("startTs", 0)
+                steps = extra.get("steps", "?")
+                cost = extra.get("cost", "?")
+            except Exception:
+                model_name = "unknown"
+                start_ts = 0
+                steps = "?"
+                cost = "?"
+            task_preview = (row["task"] or "")[:120]
+            logger.warning(
+                "Orphaned task recovered: id=%s chat_id=%s model=%s "
+                "startTs=%s steps=%s cost=%s task=%r last_events=[%s]",
+                task_id_val,
+                row["chat_id"] or "",
+                model_name,
+                start_ts,
+                steps,
+                cost,
+                task_preview,
+                "; ".join(last_event_summaries),
+            )
         cursor = db.execute(
             sql,
             (
@@ -681,6 +737,10 @@ def _recover_orphaned_tasks(active_task_ids: set[int]) -> int:
         rowcount = cursor.rowcount or 0
         db.commit()
     if rowcount:
+        logger.warning(
+            "Recovered %d orphaned task(s) from prior process kill",
+            rowcount,
+        )
         # Updated rows could belong to any chat — clear the entire
         # autocomplete chat-context cache so stale entries don't
         # surface a stale "Agent Failed Abruptly" line.

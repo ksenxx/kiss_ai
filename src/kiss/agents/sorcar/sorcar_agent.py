@@ -209,7 +209,6 @@ class SorcarAgent(RelentlessAgent):
             is_worktree: bool | None = None,
             model_name: str | None = None,
             max_budget: float | None = None,
-            working_directory: str | None = None,
             use_web_browser: bool | None = None,
             remote_password: str | None = None,
             demo_mode: bool | None = None,
@@ -233,7 +232,6 @@ class SorcarAgent(RelentlessAgent):
                 is_worktree: Enable/disable git worktree isolation.
                 model_name: Switch the LLM model for subsequent sub-sessions.
                 max_budget: Set the maximum budget in USD.
-                working_directory: Change the agent working directory.
                 use_web_browser: Enable/disable browser/web tools.
                 remote_password: Set the remote access password.
                 demo_mode: Enable/disable demo replay mode in the UI.
@@ -293,19 +291,6 @@ class SorcarAgent(RelentlessAgent):
                         "type": "updateSetting",
                         "key": "max_budget",
                         "value": self.max_budget,
-                    })
-
-            if working_directory is not None:
-                resolved = str(Path(working_directory).resolve())
-                Path(resolved).mkdir(parents=True, exist_ok=True)
-                self.work_dir = resolved
-                updated.append(f"working_directory={resolved}")
-                _save_setting_to_config("work_dir", resolved)
-                if broadcast:
-                    broadcast({
-                        "type": "updateSetting",
-                        "key": "working_directory",
-                        "value": resolved,
                     })
 
             if use_web_browser is not None:
@@ -511,6 +496,21 @@ class SorcarAgent(RelentlessAgent):
             YAML string with 'success' and 'summary' keys.
         """
         all_tools = self._get_tools() + tools
+        # Wire up the pre-step hook so user prompts queued via the VS
+        # Code frontend's ``appendUserMessage`` command while this task
+        # is running get injected into the live model's conversation as
+        # additional ``user`` messages immediately before the next model
+        # call.  This MUST happen here (after ``RelentlessAgent.run`` has
+        # already called ``_reset``, which clears ``pre_step_hook``) and
+        # before ``super().perform_task`` runs the per-session executor
+        # loop — that loop copies ``self.pre_step_hook`` onto each inner
+        # executor.  Only meaningful when this agent has been bound to a
+        # frontend tab (``_tab_id`` is set by
+        # :meth:`_TaskRunnerMixin._run_task_inner`).
+        if getattr(self, "_tab_id", None):
+            self.pre_step_hook = self._drain_pending_user_messages
+        else:
+            self.pre_step_hook = None
         return super().perform_task(all_tools, attachments=attachments)
 
     def _reset(
@@ -590,18 +590,12 @@ class SorcarAgent(RelentlessAgent):
         self.web_use_tool = None
         tl = getattr(printer, "_thread_local", None) if printer else None
         self._stop_event = getattr(tl, "stop_event", None) if tl else None
-        # Wire up the pre-step hook so user prompts queued via the VS
-        # Code frontend's ``appendUserMessage`` command while this
-        # task is running get injected into the model's conversation
-        # as additional ``user`` messages immediately before the next
-        # model call.  Only meaningful when this agent has been bound
-        # to a frontend tab (``_tab_id`` is set by
-        # :meth:`_TaskRunnerMixin._run_task_inner`).
-        if getattr(self, "_tab_id", None):
-            self.pre_step_hook = self._drain_pending_user_messages
-        else:
-            self.pre_step_hook = None
-
+        # NOTE: the pending-user-messages pre-step hook is wired up in
+        # :meth:`perform_task` (which runs *after* ``RelentlessAgent.run``
+        # calls ``_reset``).  Installing it here would be useless because
+        # ``RelentlessAgent._reset`` — invoked by ``super().run`` below —
+        # resets ``self.pre_step_hook`` back to ``None`` before the
+        # per-session executor loop reads it.
         try:
             system_instructions = (
                 SYSTEM_PROMPT
