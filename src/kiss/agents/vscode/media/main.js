@@ -1,3 +1,7 @@
+// Author: Koushik Sen (ksen@berkeley.edu)
+// Contributors:
+// Koushik Sen (ksen@berkeley.edu)
+// add your name here
 /**
  * KISS Sorcar Webview JavaScript
  * Uses the same event protocol and rendering as the browser-based Sorcar.
