@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """iMessage Agent — ChatSorcarAgent extension with iMessage tools via AppleScript.
 
 macOS only. Uses osascript to send/receive iMessages via the Messages app.

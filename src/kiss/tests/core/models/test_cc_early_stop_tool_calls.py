@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Test: cc/opus early-stop when tool_calls detected in streaming text.
 
 When reasoning models (cc/opus) generate a tool_calls JSON block followed

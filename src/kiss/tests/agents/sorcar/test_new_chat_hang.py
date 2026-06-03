@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Test: running a task after newChat should not hang.
 
 Root cause: task_done was broadcast from inside the try block of _run_task,

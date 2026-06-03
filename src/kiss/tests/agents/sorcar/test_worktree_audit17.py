@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Audit 17: Integration tests for race conditions in worktree mode.
 
 BUG-71: ``VSCodeServer._new_chat`` does not check whether a worktree

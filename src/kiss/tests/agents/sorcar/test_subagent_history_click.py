@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests: a sub-agent ``task_history`` row reopened from
 the history sidebar is treated like a regular task except that the
 resulting tab is styled as a sub-agent tab (``isSubagentTab=True``,

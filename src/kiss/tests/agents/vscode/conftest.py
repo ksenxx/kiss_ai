@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Shared pytest fixtures for VS Code / kiss-web web_server tests.
 
 These tests instantiate the real :class:`RemoteAccessServer` and call

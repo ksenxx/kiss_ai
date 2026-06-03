@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Autocomplete mixin for the VS Code server.
 
 Implements the ghost-text autocomplete pipeline and the file-path

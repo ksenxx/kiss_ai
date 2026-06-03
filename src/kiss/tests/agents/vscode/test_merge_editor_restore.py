@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Test that the merge flow snapshots open editors before merge and
 restores them (closing extra tabs) after all merges are resolved.
 

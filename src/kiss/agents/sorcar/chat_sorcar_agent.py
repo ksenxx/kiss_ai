@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Stateful Sorcar agent with chat-session persistence.
 
 Subclasses :class:`SorcarAgent` to add multi-turn chat-session state

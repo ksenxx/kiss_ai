@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests for the six HIGH-severity security fixes in web_server.py.
 
 Each test exercises real network sockets, real subprocesses, and the

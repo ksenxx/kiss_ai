@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration test: AnthropicModel must NOT emit thinking UI events when
 the streamed thinking block contains no thinking text (only signature deltas).
 

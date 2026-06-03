@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Microsoft Teams Agent — ChatSorcarAgent extension with MS Teams Graph API tools.
 
 Provides authenticated access to Microsoft Teams via Azure AD client credentials.

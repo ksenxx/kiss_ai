@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Google Chat Agent — ChatSorcarAgent extension with Google Chat API tools.
 
 Provides authenticated access to Google Chat via Service Account or OAuth2.

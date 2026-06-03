@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests: every VS Code extension command works in a
 non-git working directory without raising and without emitting
 spurious ``error`` events.

@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Matrix Agent — ChatSorcarAgent extension with Matrix protocol tools.
 
 Provides authenticated access to Matrix via matrix-nio. Stores credentials

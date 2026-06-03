@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration test for the concurrent ``mergeAction`` race.
 
 ``RemoteAccessServer`` serves two transports on the *same* asyncio event

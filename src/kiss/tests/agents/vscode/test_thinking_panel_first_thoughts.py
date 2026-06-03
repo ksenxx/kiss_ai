@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests: first thinking events must always create a Thoughts panel.
 
 Bug: When a new sub-session starts in RelentlessAgent (after a summarizer

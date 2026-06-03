@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Nextcloud Talk Agent — ChatSorcarAgent extension with Nextcloud Talk API tools.
 
 Provides authenticated access to Nextcloud Talk via username/password.

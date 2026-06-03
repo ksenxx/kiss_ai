@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Regression tests for WorktreeSorcarAgent refactoring.
 
 These tests capture current PUBLIC API behavior that must be preserved

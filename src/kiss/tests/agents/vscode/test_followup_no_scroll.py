@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Regression test: ``Suggested next`` MUST NOT scroll the chat to the bottom.
 
 The bug (reported by the user): rendering a ``followup_suggestion`` event in

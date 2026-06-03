@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Regression test: creating a new tab while a task is running in the
 current tab must NOT leave the new tab's input textbox and send button
 disabled.

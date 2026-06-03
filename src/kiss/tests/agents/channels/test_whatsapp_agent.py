@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests for whatsapp_agent — no mocks or test doubles.
 
 Tests config persistence, tool creation, WhatsAppAgent construction,

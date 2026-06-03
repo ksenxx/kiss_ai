@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Regression test: clicking a sub-agent task in the history sidebar
 must hide the input textbox and the buttons below it (model picker,
 upload, menu, send/stop) in BOTH the VS Code extension and the web app.

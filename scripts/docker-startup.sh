@@ -1,4 +1,8 @@
 #!/bin/bash
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 # Docker entrypoint: clone the private repo, run install.sh, launch code-server.
 set -e
 

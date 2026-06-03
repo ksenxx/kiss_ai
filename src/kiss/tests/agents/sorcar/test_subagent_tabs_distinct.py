@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Regression tests: 3 parallel sub-agents must produce 3 distinct
 ``new_tab`` broadcasts so the frontend can allocate 3 distinct tabs.
 

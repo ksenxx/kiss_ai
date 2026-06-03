@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests that custom HTTP headers can be configured via the settings panel.
 
 The settings panel has a textarea (after the custom endpoint field) where

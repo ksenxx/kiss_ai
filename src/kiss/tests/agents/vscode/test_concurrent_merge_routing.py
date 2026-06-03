@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests for concurrent merge routing in SorcarSidebarView.
 
 When two tasks in separate tabs finish simultaneously, each tab's merge

@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests that tokens/cost/steps are updated when scrolling to adjacent tasks.
 
 Bug: after a tab is replayed, scrolling to an adjacent task via the
