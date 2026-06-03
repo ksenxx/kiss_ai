@@ -864,10 +864,11 @@ function restartKissWebDaemon(kissProjectPath: string): void {
   } catch {
     /* missing or unreadable — treat as mismatch */
   }
+  const sockPath = path.join(HOME_DIR, '.kiss', 'sorcar.sock');
   const daemonAlive = (() => {
     try {
       execSync('lsof -i :8787 -t', {stdio: 'ignore', timeout: 2000});
-      return true;
+      return fs.existsSync(sockPath);
     } catch {
       return false;
     }
@@ -875,7 +876,7 @@ function restartKissWebDaemon(kissProjectPath: string): void {
   if (currentFp && currentFp === savedFp && daemonAlive) {
     log(
       `kiss-web fingerprint unchanged (${currentFp.slice(0, 8)}) and ` +
-        'daemon healthy on :8787 — skipping restart to preserve tunnel URL',
+        'daemon healthy on :8787 + sorcar.sock — skipping restart to preserve tunnel URL',
     );
     return;
   }
@@ -975,6 +976,21 @@ function restartKissWebDaemon(kissProjectPath: string): void {
           stdio: 'ignore',
           timeout: 5000,
         });
+      }
+      // ``bootstrap`` (and ``load``) register the unit but do not
+      // guarantee the process is running — on a fresh install or
+      // after ``bootout`` the agent may sit in "loaded but not
+      // started" state.  ``kickstart -k`` forces an immediate
+      // (re)start so the daemon is actually alive when the
+      // extension continues to query models via the UDS.
+      try {
+        execFileSync(
+          'launchctl',
+          ['kickstart', '-k', `gui/${uid}/${plistLabel}`],
+          {stdio: 'ignore', timeout: 5000},
+        );
+      } catch {
+        /* best-effort — KeepAlive will start it eventually */
       }
       log(`kiss-web macOS LaunchAgent restarted: ${plistFile}`);
     } catch (err) {
@@ -1323,11 +1339,18 @@ function playwrightBrowsersPath(): string {
 }
 
 /**
- * Check if the kiss-web daemon is running by probing port 8787.
- * Returns true if port 8787 has a listener (macOS/Linux only).
+ * Check if the kiss-web daemon is fully running by probing **both**
+ * the TCP listener on port 8787 and the Unix-domain socket at
+ * ``~/.kiss/sorcar.sock``.  Requiring both endpoints ensures the
+ * extension never treats a half-started daemon (e.g. TCP bound but
+ * UDS not yet created, or vice-versa) as healthy — the model-list
+ * and agent RPCs need the UDS, while the remote-access / tunnel path
+ * needs the TCP port.
+ *
+ * Returns true only when both are present (macOS/Linux).
  * On Windows the daemon is not supported, so always returns false.
  *
- * The probe is retried up to 3 times with 300 ms gaps before
+ * The TCP probe is retried up to 3 times with 300 ms gaps before
  * returning false.  A single ``lsof`` call races with the
  * LaunchAgent's ~1-3 s respawn window after a previous kiss-web
  * restart; without the retry the extension would nuke a healthy
@@ -1336,10 +1359,12 @@ function playwrightBrowsersPath(): string {
  */
 function isDaemonRunning(): boolean {
   if (process.platform === 'win32') return false;
+  const sockPath = path.join(HOME_DIR, '.kiss', 'sorcar.sock');
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       execSync('lsof -i :8787 -t', {stdio: 'ignore', timeout: 3000});
-      return true;
+      if (fs.existsSync(sockPath)) return true;
+      // TCP up but UDS missing — daemon still initialising; retry.
     } catch {
       // not listening yet; fall through to retry
     }
