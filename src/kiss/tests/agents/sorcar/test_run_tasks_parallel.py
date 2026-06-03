@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests for run_tasks_parallel() in sorcar_agent.py.
 
 No mocks, patches, fakes, or test doubles.  All tests exercise the real

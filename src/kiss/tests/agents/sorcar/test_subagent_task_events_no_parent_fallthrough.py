@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration test: ``task_events`` for a sub-agent tab must NOT fall
 through to the parent (active) tab's replay path in the frontend.
 

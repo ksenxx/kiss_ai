@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Test suite for verifying command line options work correctly.
 
 These tests verify that CLI arguments defined in various config.py files

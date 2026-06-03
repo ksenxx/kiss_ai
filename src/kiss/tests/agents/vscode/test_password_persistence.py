@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests for client-side remote password persistence.
 
 The remote web server embeds a small JavaScript shim (`_WS_SHIM_JS`) in

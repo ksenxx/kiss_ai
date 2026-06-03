@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Regression tests for the thinking panel UI behaviour in ``main.js``.
 
 The bug (as reported by the user): when the ``cc/*`` model is used the

@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Reproduction + fix for "Agent Failed Abruptly" sentinel sticking.
 
 Symptom: occasional task_history rows survive with

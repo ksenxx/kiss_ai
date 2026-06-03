@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """The welcome page must be identical between the VS Code extension
 webview (``SorcarTab.ts``) and the standalone webapp
 (``web_server._build_html``).

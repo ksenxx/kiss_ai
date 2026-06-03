@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests for sorcar_agent.py: prompt construction, arg parsing, task resolution,
 CLI callbacks, callback wiring, bash streaming, and autocomplete clipping."""
 

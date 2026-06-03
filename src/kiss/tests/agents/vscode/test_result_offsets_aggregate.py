@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration test: result panel must include subagent cost offsets.
 
 When the parent agent invokes ``run_parallel``, sub-agent budget/tokens/

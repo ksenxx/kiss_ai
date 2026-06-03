@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests verifying fixes for bugs found in worktree audit round 4.
 
 Each test verifies that the bug has been fixed:

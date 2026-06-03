@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Regression test: clicking the same task in the task-history panel
 multiple times must allocate a fresh chat tab on every click, instead
 of focusing an existing tab keyed by the same id.

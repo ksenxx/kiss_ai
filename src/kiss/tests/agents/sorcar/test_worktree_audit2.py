@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests confirming bugs found in worktree audit round 2.
 
 Each test confirms a specific bug exists in the current code, labeled

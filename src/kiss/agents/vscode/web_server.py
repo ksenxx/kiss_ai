@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Standalone web server for remote KISS Sorcar access.
 
 Provides HTTPS + WSS access to the Sorcar chat interface from any

@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests targeting uncovered branches in core/, core/models/, agents/sorcar/.
 
 No mocks, patches, fakes, or test doubles.

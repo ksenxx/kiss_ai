@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Performance stress tests for _scan_files with 5000+ files.
 
 Verifies that the file picker completes quickly and respects the 5000

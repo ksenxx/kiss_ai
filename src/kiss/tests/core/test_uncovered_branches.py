@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests targeting uncovered branches. No mocks, patches, or test doubles."""
 
 from __future__ import annotations

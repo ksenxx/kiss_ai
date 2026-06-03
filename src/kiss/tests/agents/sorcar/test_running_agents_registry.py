@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Regression: ``ChatSorcarAgent.run()`` publishes itself in
 ``ChatSorcarAgent.running_agents`` keyed by ``task_history.id``.
 

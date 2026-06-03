@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests for embedding the user's task prompt in auto-commit messages.
 
 When the agent auto-commits changes — either inside a worktree at

@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Task-runner mixin for the VS Code server.
 
 Implements the background-thread task lifecycle: ``_run_task`` (status

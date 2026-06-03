@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests: stopping one task while another runs concurrently.
 
 Reproduces the bug where stopping a task corrupts the concurrent task's

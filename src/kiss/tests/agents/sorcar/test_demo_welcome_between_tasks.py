@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration test for demo mode welcome page bug between tasks.
 
 Bug: When the demo replay switches from one task to another, the welcome

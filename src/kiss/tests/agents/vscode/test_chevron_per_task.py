@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests: chevron expand/collapse must be per-task, not global.
 
 Bug: clicking the chevron in the fixed panel collapses/expands panels

@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests confirming fixes for bugs and inconsistencies in
 ``kiss.agents.vscode`` — audit round 5.
 

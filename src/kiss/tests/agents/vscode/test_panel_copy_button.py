@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests: every chat panel must expose a copy-to-clipboard button.
 
 Feature: each panel rendered in the chat webview (tool calls, tool result

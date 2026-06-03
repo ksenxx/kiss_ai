@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests for cc/* model streaming and multiple-assistant-message handling.
 
 Reproduces and verifies fixes for:
