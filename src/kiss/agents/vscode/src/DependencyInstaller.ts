@@ -1,3 +1,7 @@
+// Author: Koushik Sen (ksen@berkeley.edu)
+// Contributors:
+// Koushik Sen (ksen@berkeley.edu)
+// add your name here
 /**
  * Auto-installation of binary dependencies for the KISS Sorcar extension.
  * Ensures uv, git, Node.js, VS Code CLI, Python environment, and Playwright
