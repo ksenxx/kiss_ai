@@ -963,7 +963,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       }
 
       case 'generateCommitMessage':
-        void this.generateCommitMessage();
+        void this.generateCommitMessage(undefined, message.tabId ?? '');
         break;
 
       case 'worktreeAction': {
@@ -1271,6 +1271,8 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     this._getClient().sendCommand({
       type: 'generateCommitMessage',
       model: this._selectedModel,
+      tabId,
+      workDir: this._getWorkDir(),
     });
 
     return new Promise<void>(resolve => {
