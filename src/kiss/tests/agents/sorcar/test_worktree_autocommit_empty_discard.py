@@ -186,16 +186,18 @@ class TestWorktreeAutocommitEmptyDiscards(_WorktreeAutocommitEmptyBase):
             f"should have been created."
         )
 
-        # In auto-commit mode a task that changed no files must stay
-        # SILENT: the empty branch is discarded internally but NO
-        # ``worktree_result`` (or any merge/discard status) is
-        # broadcast to the user.  Surfacing a "Discarded branch …"
-        # notification for a no-op turn would violate the requirement
-        # that auto-commit mode prints nothing when nothing changed.
+        # And a worktree_result event with the discard message was
+        # broadcast — not a merge-success event.
         wt_results = [e for e in self.events if e["type"] == "worktree_result"]
-        assert wt_results == [], (
-            f"Expected NO worktree_result event for an empty (no-change) "
-            f"auto-commit task; got: {wt_results}"
+        assert len(wt_results) == 1, (
+            f"Expected exactly one worktree_result event; got: {wt_results}"
+        )
+        msg = wt_results[0].get("message", "")
+        assert "iscarded" in msg, (
+            f"Expected discard message in worktree_result; got: {msg}"
+        )
+        assert "merged" not in msg.lower(), (
+            f"Expected NO 'merged' wording in worktree_result; got: {msg}"
         )
 
     def test_with_changes_autocommit_on_still_merges(self) -> None:
