@@ -211,7 +211,16 @@ class RelentlessAgent(Base):
         Raises:
             KISSError: If the task fails after exhausting all sub-sessions.
         """
-        logger.info("Executing task: %s", self.task_description)
+        logger.info(
+            "Executing task: agent=%s model=%s max_steps=%d "
+            "max_budget=$%.2f pid=%d task=%r",
+            self.name,
+            self.model_name,
+            self.max_steps,
+            self.max_budget,
+            os.getpid(),
+            self.task_description[:200],
+        )
         all_tools: list[Callable[..., Any]] = [finish, *tools]
 
         progress_section = ""
@@ -235,6 +244,15 @@ class RelentlessAgent(Base):
                 self.printer.tokens_offset = self.total_tokens_used  # type: ignore[attr-defined]
                 self.printer.budget_offset = self.budget_used  # type: ignore[attr-defined]
                 self.printer.steps_offset = self.total_steps  # type: ignore[attr-defined]
+            logger.info(
+                "Session %d start: agent=%s budget_remaining=$%.4f "
+                "total_tokens=%d total_steps=%d",
+                session,
+                self.name,
+                remaining_budget,
+                self.total_tokens_used,
+                self.total_steps,
+            )
             executor = KISSAgent(f"{self.name} Session-{session}")
             # Propagate any pre-step hook installed on the relentless
             # parent (e.g. ``SorcarAgent.run``'s pending-user-messages
