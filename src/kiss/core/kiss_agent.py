@@ -307,6 +307,15 @@ class KISSAgent(Base):
             str | None: The result string if the task is finished, None otherwise.
         """
         start_timestamp = int(time.time())
+        logger.info(
+            "Step %d/%d start: agent=%s budget=$%.4f/%s tokens=%d",
+            self.step_count,
+            self.max_steps,
+            self.name,
+            self.budget_used,
+            f"${self.max_budget:.2f}",
+            self.total_tokens_used,
+        )
 
         if self.pre_step_hook is not None:
             self.pre_step_hook(self.model)
@@ -367,6 +376,15 @@ class KISSAgent(Base):
         )
 
         if finish_result is not None:
+            logger.info(
+                "finish() called: agent=%s step=%d budget=$%.4f "
+                "tokens=%d result=%r",
+                self.name,
+                self.step_count,
+                self.budget_used,
+                self.total_tokens_used,
+                finish_result[:200] if len(finish_result) > 200 else finish_result,
+            )
             return finish_result
 
         self.model.add_function_results_to_conversation_and_return(function_results)
