@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests confirming bugs found in worktree audit round 5 are FIXED.
 
 BUG-19: discard() now acquires repo_lock — checkout serialized with

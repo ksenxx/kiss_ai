@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration test: KISSAgent must not loop forever when the model never calls tools.
 
 Bug: when a model (especially text-based tool-calling models like CodexModel)

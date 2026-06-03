@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Regression test: thought panels must not show extra newlines after Markdown→HTML conversion.
 
 Bug: The ``.txt`` element has ``white-space: pre-wrap`` for streaming raw

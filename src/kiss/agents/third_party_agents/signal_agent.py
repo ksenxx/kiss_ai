@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Signal Agent — ChatSorcarAgent extension with Signal CLI tools.
 
 Uses signal-cli subprocess to send/receive Signal messages. Stores

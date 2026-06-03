@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests for ChannelRunner.run_once() — no mocks or test doubles.
 
 Tests the one-shot poll mode: run_once(), _has_bot_reply(), and the CLI

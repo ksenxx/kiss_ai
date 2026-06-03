@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests for welcome-page remote-password panel visibility.
 
 Verifies that ``renderRemoteUrl`` in ``main.js`` hides the

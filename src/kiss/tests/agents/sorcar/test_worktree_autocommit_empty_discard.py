@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Regression tests for worktree-empty + autoCommit=True post-task path.
 
 User requirement: when ``use_worktree=True``, ``autoCommit=True``, the

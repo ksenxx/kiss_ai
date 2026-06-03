@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Test that the history event marks failed tasks with ``failed: True``
 and successful tasks with ``failed: False``.
 

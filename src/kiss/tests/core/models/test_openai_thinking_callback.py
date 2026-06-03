@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration test: OpenAI-compatible models must invoke thinking_callback.
 
 gpt-5.5 (and other OpenAI reasoning models) send ``reasoning_content``

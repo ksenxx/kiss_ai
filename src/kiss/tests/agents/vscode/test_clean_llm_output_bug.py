@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests reproducing the ``clean_llm_output`` quote/whitespace bug.
 
 Bug repro: ``clean_llm_output`` is documented to "Strip whitespace and

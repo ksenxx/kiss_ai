@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests verifying fixes for bugs found in worktree audit round 7.
 
 BUG-30 FIX: _try_setup_worktree now reads current_branch(repo) inside

@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests confirming bugs found in worktree audit round 6.
 
 Each test CONFIRMS the bug exists (assertions pass when buggy behaviour

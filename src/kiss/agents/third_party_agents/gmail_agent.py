@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Gmail Agent — ChatSorcarAgent extension with Gmail API tools.
 
 Provides authenticated access to a Gmail account via OAuth2.

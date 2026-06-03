@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Audit 11: Integration tests for bugs in worktree and non-worktree workflows.
 
 BUG-55: ``is_running_non_wt`` flag is set AFTER ``_capture_pre_snapshot``

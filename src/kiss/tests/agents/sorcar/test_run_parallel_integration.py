@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests for run_parallel / run_tasks_parallel with real LLM calls.
 
 These tests make actual API calls to verify the parallel execution pipeline
