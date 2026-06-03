@@ -209,7 +209,6 @@ class SorcarAgent(RelentlessAgent):
             is_worktree: bool | None = None,
             model_name: str | None = None,
             max_budget: float | None = None,
-            working_directory: str | None = None,
             use_web_browser: bool | None = None,
             remote_password: str | None = None,
             demo_mode: bool | None = None,
@@ -233,7 +232,6 @@ class SorcarAgent(RelentlessAgent):
                 is_worktree: Enable/disable git worktree isolation.
                 model_name: Switch the LLM model for subsequent sub-sessions.
                 max_budget: Set the maximum budget in USD.
-                working_directory: Change the agent working directory.
                 use_web_browser: Enable/disable browser/web tools.
                 remote_password: Set the remote access password.
                 demo_mode: Enable/disable demo replay mode in the UI.
@@ -293,19 +291,6 @@ class SorcarAgent(RelentlessAgent):
                         "type": "updateSetting",
                         "key": "max_budget",
                         "value": self.max_budget,
-                    })
-
-            if working_directory is not None:
-                resolved = str(Path(working_directory).resolve())
-                Path(resolved).mkdir(parents=True, exist_ok=True)
-                self.work_dir = resolved
-                updated.append(f"working_directory={resolved}")
-                _save_setting_to_config("work_dir", resolved)
-                if broadcast:
-                    broadcast({
-                        "type": "updateSetting",
-                        "key": "working_directory",
-                        "value": resolved,
                     })
 
             if use_web_browser is not None:
