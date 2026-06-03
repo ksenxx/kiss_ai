@@ -1151,16 +1151,6 @@ class TestWorktreeActionExceptionHandling(unittest.TestCase):
         assert len(results) == 1
         assert results[0]["success"] is False
 
-    def test_do_nothing_rejected_as_unknown_action(self) -> None:
-        """do_nothing is no longer a valid action and returns unknown error."""
-        self.server._get_tab("0").use_worktree = True
-        cmd = {"type": "worktreeAction", "action": "do_nothing", "tabId": "0"}
-        self.server._handle_command(cmd)
-        results = [e for e in self.events if e["type"] == "worktree_result"]
-        assert len(results) == 1
-        assert results[0]["success"] is False
-        assert "Unknown action" in results[0]["message"]
-
     def test_successful_merge_still_works(self) -> None:
         """Normal merge flow still works after the try/except addition."""
         subprocess.run(

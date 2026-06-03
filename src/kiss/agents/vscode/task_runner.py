@@ -132,14 +132,21 @@ class _TaskRunnerMixin:
                     tab.is_running_non_wt = False
                     # Dispose the transient agent — a fresh one is
                     # built per task in ``_CommandsMixin._cmd_run``.
-                    # Each worktree task creates a brand-new worktree
-                    # and branch (independent of chat id), so there is
-                    # no cross-task restoration of worktree state.
+                    # Preserve the agent when a worktree branch with
+                    # changes is still pending user action (merge or
+                    # discard).  Disposing it would destroy the
+                    # in-memory worktree state that
+                    # ``_handle_worktree_action`` needs, causing a
+                    # misleading "Not a git repository" error.
                     if tab.agent is not None:
                         tab.last_task_id = (
                             tab.agent._last_task_id or tab.last_task_id
                         )
-                        tab.agent = None
+                        if tab.use_worktree and tab.agent._wt_pending:
+                            pass  # keep agent alive for merge/discard
+                        else:
+                            tab.agent = None
+                            tab.use_worktree = False
                 self.printer.broadcast(
                     {"type": "status", "running": False, "tabId": tab_id},
                 )
@@ -349,6 +356,15 @@ class _TaskRunnerMixin:
                     )
                     tab.agent._wt = None
 
+        logger.info(
+            "Task started: tab_id=%s model=%s use_worktree=%s "
+            "auto_commit=%s prompt=%r",
+            tab_id,
+            model,
+            use_worktree,
+            tab.auto_commit_mode,
+            prompt[:200],
+        )
         result_summary = "Agent Failed Abruptly"
         task_end_event: dict[str, Any] | None = None
         # ``agent_returned`` captures the YAML string returned by
@@ -432,12 +448,31 @@ class _TaskRunnerMixin:
                             or "No summary available"
                         )
                     task_end_event = {"type": "task_done"}
+                    logger.info(
+                        "Agent returned: tab_id=%s task_id=%s "
+                        "summary=%r",
+                        tab_id,
+                        tab.task_history_id,
+                        result_summary[:200],
+                    )
                 except KeyboardInterrupt:
                     result_summary = "Task stopped by user"
                     task_end_event = {"type": "task_stopped"}
+                    logger.info(
+                        "Task stopped by user: tab_id=%s task_id=%s",
+                        tab_id,
+                        tab.task_history_id,
+                    )
                 except Exception as e:
                     result_summary = f"Task failed: {e}"
                     task_end_event = {"type": "task_error", "text": str(e)}
+                    logger.warning(
+                        "Task failed: tab_id=%s task_id=%s error=%s",
+                        tab_id,
+                        tab.task_history_id,
+                        e,
+                        exc_info=True,
+                    )
                 else:
                     continue
                 finally:
@@ -579,6 +614,11 @@ class _TaskRunnerMixin:
                     task_id=tab.task_history_id,
                     task=prompt,
                 )
+                logger.info(
+                    "Task result persisted: task_id=%s result=%r",
+                    tab.task_history_id,
+                    result_summary[:200],
+                )
                 from kiss._version import __version__
 
                 # Persist agent start / end timestamps (ms since epoch)
@@ -697,6 +737,14 @@ class _TaskRunnerMixin:
                         "startTs": start_ms,
                         "endTs": end_ms,
                     })
+                logger.info(
+                    "Task lifecycle complete: tab_id=%s task_id=%s "
+                    "elapsed_ms=%d event_type=%s",
+                    tab_id,
+                    tab.task_history_id,
+                    end_ms - start_ms,
+                    (task_end_event or {}).get("type", "none"),
+                )
                 if tab.task_history_id is not None:
                     self._generate_followup_async(
                         prompt,
