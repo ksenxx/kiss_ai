@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Regression: ``merge_data`` events from the daemon must NOT be
 forwarded to the chat webview by ``SorcarSidebarView``.
 

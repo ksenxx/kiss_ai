@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Regression tests for ``scrollHunkIntoView`` in ``media/main.js``.
 
 The remote-web shell sets ``html, body { overflow: hidden }`` (so the page

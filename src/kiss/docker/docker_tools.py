@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """File tools (Read, Write, Edit) that execute inside a Docker container via bash."""
 
 import base64

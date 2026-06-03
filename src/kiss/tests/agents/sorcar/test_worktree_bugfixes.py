@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests for worktree bugs 1–5 fixes.
 
 BUG 1: _check_merge_conflict false positives with baseline

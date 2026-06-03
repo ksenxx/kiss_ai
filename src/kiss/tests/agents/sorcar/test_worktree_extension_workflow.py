@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests for WorktreeSorcarAgent ↔ VSCode extension workflow.
 
 Validates the full commit-and-merge / discard workflow as exercised by

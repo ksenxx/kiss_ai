@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Regression test: no "Not a git repository" error on empty worktree.
 
 Bug: when a task runs in worktree mode in a git repo and does not modify

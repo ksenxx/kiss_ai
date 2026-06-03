@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests for: when a task is deleted from the history panel, the
 corresponding task and its chat are removed from open tabs that show it.
 

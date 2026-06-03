@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests for kiss-web daemon lifecycle.
 
 Verifies that the kiss-web remote server starts correctly and writes

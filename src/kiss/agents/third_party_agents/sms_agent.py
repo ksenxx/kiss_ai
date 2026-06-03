@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """SMS Agent — ChatSorcarAgent extension with Twilio SMS tools.
 
 Provides SMS sending/receiving via Twilio. Stores config in

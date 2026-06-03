@@ -1,4 +1,8 @@
 #!/bin/bash
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 
 # Script to release to public GitHub repository and publish to PyPI.
 # Repository: https://github.com/ksenxx/kiss_ai

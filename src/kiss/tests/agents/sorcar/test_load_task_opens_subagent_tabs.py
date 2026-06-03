@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests: loading a parent task from the history sidebar
 also reopens every persisted sub-agent fanned out by the parent's
 ``run_parallel`` call, each in its own sub-agent tab.

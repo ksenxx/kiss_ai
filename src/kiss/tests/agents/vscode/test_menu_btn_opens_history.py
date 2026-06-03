@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests for ``#menu-btn`` ("Advanced options") placement and behaviour.
 
 After the move, ``#menu-btn`` sits at the leftmost position inside

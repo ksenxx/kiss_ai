@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Regression tests: no merge/discard prompt when the worktree is empty.
 
 Bug report: "in worktree mode, why are you asking for Auto-commit and

@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests confirming the fixes for cross-tab state-isolation violations.
 
 Covers the following violations from the earlier audit that the user

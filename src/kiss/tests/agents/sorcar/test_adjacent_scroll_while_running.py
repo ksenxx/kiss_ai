@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests that adjacent task scrolling works while a task is running.
 
 Bug: the wheel-event handler in main.js gates the entire adjacent-scroll

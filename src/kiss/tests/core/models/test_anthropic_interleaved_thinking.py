@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration test: AnthropicModel must enable interleaved thinking so
 between-tool-call reasoning is streamed as ``thinking`` blocks (routed to
 the Thoughts panel) rather than as plain ``text`` blocks (which would

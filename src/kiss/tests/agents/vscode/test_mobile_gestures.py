@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration test: mobile touch gestures for history cycling and ghost text accept.
 
 On mobile phones, virtual keyboards lack ArrowUp/ArrowDown and Tab keys.

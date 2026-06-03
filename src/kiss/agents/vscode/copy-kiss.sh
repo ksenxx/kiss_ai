@@ -1,4 +1,8 @@
 #!/bin/bash
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 # Copy KISS project files into kiss_project/ for standalone extension packaging.
 # This makes the extension self-contained so it doesn't need the source tree.
 set -e

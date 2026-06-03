@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration test: the Running / Done label at the top of a chat
 webview must be computed from the agent's real start / end
 timestamps — not from the client's wall clock at the moment the tab

@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Test that resumeSession with a taskId loads the specific task, not the latest.
 
 When a user clicks a specific task in the history panel, the backend should

@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests for the KISS Sorcar remote web access server.
 
 Tests cover HTTPS serving, WSS communication, password authentication,

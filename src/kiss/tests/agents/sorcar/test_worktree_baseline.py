@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests for baseline commit functionality in worktree mode.
 
 When the user has uncommitted/staged/untracked files, the worktree

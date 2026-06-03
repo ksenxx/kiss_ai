@@ -1,3 +1,7 @@
+// Author: Koushik Sen (ksen@berkeley.edu)
+// Contributors:
+// Koushik Sen (ksen@berkeley.edu)
+// add your name here
 /**
  * Sidebar chat view for Sorcar.
  * Provides a WebviewViewProvider that renders the chat UI in the

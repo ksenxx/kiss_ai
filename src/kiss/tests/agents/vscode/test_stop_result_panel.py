@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests: stopped/killed agent emits a result-panel event.
 
 When a user stops an agent (KeyboardInterrupt) or the agent crashes

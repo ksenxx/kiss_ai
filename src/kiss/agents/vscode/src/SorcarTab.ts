@@ -1,3 +1,7 @@
+// Author: Koushik Sen (ksen@berkeley.edu)
+// Contributors:
+// Koushik Sen (ksen@berkeley.edu)
+// add your name here
 /**
  * Shared utilities for Sorcar webview HTML rendering.
  * Used by SorcarSidebarView.

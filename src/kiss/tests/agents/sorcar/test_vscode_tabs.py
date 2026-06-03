@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests for multi-tab tabId routing in the VS Code backend.
 
 Verifies that userAnswer, error, stop, askUser, and merge events are

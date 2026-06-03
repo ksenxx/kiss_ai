@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests for deferred ``_RunningAgentState`` disposal.
 
 When the frontend issues ``closeTab`` for a tab whose backend agent

@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Regression test: each broadcast event is persisted EXACTLY ONCE.
 
 Before this fix, ``JsonPrinter._persist_event`` called BOTH

@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests verifying RelentlessAgent emits a final FAILED Result event.
 
 These tests reproduce a bug where, in multi-session tasks, the Result tab

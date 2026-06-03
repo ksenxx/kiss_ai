@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Audit 10: Integration tests for bugs in worktree and non-worktree workflows.
 
 BUG-49: `_do_merge` pops stash on CONFLICT/MERGE_FAILED, making manual

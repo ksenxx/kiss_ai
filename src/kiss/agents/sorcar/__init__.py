@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Sorcar agent with coding tools and browser automation."""
 
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent

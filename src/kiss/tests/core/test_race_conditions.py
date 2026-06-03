@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests for race condition fixes in Base, json_printer, and model.
 
 Verifies thread-safety of shared mutable state: agent_counter,

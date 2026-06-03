@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Regression tests for worktree branch creation when autoCommit=False.
 
 Bug report: "when use_worktree is set true, but autocommit is false, it

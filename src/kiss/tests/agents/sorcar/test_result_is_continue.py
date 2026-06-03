@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration test: result events for is_continue=True must not be FAILED.
 
 When the agent's ``finish()`` returns ``is_continue=True`` (RelentlessAgent

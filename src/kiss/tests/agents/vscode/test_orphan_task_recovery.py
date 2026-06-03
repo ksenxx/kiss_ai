@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Startup-time recovery of orphan ``Agent Failed Abruptly`` rows.
 
 Production failure signature (rows 2143, 2140, 2139, 2136 in the

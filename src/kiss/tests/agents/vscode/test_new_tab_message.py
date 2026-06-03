@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Backend-broadcast ``new_tab`` opens a fresh tab and posts ``resumeSession``.
 
 The Python server can ask the frontend to open a fresh chat tab and

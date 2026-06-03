@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Regression test: the "KISS Sorcar: Setting up" progress notification
 must stay visible from the start of the dependency install until the
 final "Installation complete" notification is shown.

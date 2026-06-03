@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests for cloudflared cross-restart adoption.
 
 Exercises the helpers added for the "stable quick-tunnel URL" feature

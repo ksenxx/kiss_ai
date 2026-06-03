@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests for the Unix-domain socket listener on RemoteAccessServer.
 
 ``RemoteAccessServer`` exposes a localhost UDS at ``~/.kiss/sorcar.sock``

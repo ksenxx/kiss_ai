@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Audit 16: Integration tests for bugs/inconsistencies found in audit 16.
 
 BUG-68: ``_finish_merge`` and ``_run_task_inner``'s post-task cleanup

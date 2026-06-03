@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests for the ``set_model`` tool on ``SorcarAgent``.
 
 ``set_model(model_name)`` swaps the agent's live LLM model instance in

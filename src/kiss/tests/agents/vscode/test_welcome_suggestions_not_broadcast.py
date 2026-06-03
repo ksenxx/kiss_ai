@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Regression test: a webapp client requesting welcome suggestions must
 NOT cause a ``welcome_suggestions`` event to reach other already-connected
 clients (notably the VS Code extension over its UDS connection).

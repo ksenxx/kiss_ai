@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Nostr Agent — ChatSorcarAgent extension with Nostr protocol tools.
 
 Provides access to the Nostr decentralized protocol via pynostr.

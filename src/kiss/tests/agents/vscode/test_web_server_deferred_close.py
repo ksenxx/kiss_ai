@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests for deferred ``closeTab`` dispatch in the web server.
 
 Browsers cannot reliably send a ``closeTab`` over the WebSocket

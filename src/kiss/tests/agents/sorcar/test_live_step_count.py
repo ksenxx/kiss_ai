@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration test: the history panel shows the live step count.
 
 Verifies that ``_get_history()`` includes the in-progress executor's

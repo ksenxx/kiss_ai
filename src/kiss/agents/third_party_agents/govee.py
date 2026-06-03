@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tiny Govee Developer-API CLI.
 
 Reads the key from $GOVEE_API_KEY (already exported in ~/.zshrc).

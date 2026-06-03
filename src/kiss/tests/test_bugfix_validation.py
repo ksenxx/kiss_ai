@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests validating that bugs.md fixes are correct.
 
 Each test verifies the fix for a specific bug by exercising real code paths —

@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """VS Code extension backend server for Sorcar agent.
 
 The per-command handlers, task-runner, merge / worktree flow and

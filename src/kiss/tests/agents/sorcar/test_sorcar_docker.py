@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests for findKissProject() search order.
 
 Verifies that findKissProject() — now in kissPaths.ts after the

@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration test: sub-agent task rows must not appear in parent chat context.
 
 Reproduces the bug where ``run_parallel`` sub-agent tasks (which share

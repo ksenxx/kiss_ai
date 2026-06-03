@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Slack Agent — ChatSorcarAgent extension with Slack API tools.
 
 Provides authenticated access to a Slack workspace via a bot token

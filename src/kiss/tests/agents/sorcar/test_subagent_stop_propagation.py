@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Verify the cooperative ``stop_event`` propagates from a parent task
 to its parallel sub-agents and from those to their own (nested)
 sub-sub-agents.

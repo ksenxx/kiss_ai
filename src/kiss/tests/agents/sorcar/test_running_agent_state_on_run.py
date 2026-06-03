@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Regression: ``WorktreeSorcarAgent.run()`` publishes itself in
 ``_RunningAgentState.running_agent_states`` while running.
 

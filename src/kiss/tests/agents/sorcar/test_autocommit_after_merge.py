@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests for the non-worktree auto-commit prompt feature.
 
 After the user resolves all merge-diff hunks in the non-worktree mode,

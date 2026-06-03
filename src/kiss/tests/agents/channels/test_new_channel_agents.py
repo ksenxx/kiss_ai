@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests for all new channel agents — no mocks or test doubles.
 
 Tests agent instantiation, auth trio presence, config persistence,

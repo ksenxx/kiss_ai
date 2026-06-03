@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Regression: ``scripts/build-extension.sh`` and ``DependencyInstaller.ts``
 must kill the running kiss-web daemon by **port**, not by process name.
 

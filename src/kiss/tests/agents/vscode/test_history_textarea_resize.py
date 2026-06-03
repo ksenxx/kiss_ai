@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration test: textarea must resize when cycling history with ArrowUp/ArrowDown.
 
 When a long task text is recalled from history via ArrowUp/ArrowDown, the textarea

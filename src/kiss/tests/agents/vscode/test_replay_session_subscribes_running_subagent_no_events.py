@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Regression test: ``_replay_session`` must subscribe the new tab to
 a running sub-agent's live event stream EVEN WHEN the sub-agent has
 not persisted any events yet.

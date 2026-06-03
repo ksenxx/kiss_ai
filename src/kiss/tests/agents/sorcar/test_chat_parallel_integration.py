@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests for parallel ChatSorcarAgent sub-agents with shared chat_id.
 
 Verifies that sub-agents sharing a parent's chat_id correctly

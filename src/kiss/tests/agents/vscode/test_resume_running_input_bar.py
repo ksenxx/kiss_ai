@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Regression: when a still-running task is loaded into a freshly-
 created tab from the history sidebar, the buttons and labels below
 the input textbox MUST be in the same state they are during a fresh
