@@ -201,8 +201,8 @@ class TestWorktreeSorcarAgent:
         assert "No orphans found" in result
 
 
-    def test_git_no_cwd(self) -> None:
-        result = _git("--version")
+    def test_git_with_cwd(self) -> None:
+        result = _git("--version", cwd=self.repo)
         assert result.returncode == 0
         assert "git version" in result.stdout
 
