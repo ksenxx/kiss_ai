@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Audit 13: Integration tests for further bugs and redundancies.
 
 BUG-63: ``discard()`` lies about success when the main repo cannot

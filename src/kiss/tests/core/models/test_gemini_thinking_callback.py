@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration test: GeminiModel must invoke thinking_callback.
 
 Gemini models with thinking enabled return parts where ``part.thought``

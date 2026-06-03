@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration test: a finished sub-agent tab's purple ◉ indicator
 must render SOLID (no pulse animation), not be removed.
 

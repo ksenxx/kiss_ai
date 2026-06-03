@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Operator registry built from static imports.
 
 To add a new operator, create a module with `symbol`, `precedence`, and

@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Audit 14: Integration tests for bugs/redundancies found in audit round 14.
 
 BUG-64: ``WorktreeSorcarAgent.run()`` silently drops

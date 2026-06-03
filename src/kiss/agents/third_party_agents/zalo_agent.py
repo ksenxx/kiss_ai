@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Zalo Agent — ChatSorcarAgent extension with Zalo Official Account API tools.
 
 Provides authenticated access to Zalo OA via access token. Covers both

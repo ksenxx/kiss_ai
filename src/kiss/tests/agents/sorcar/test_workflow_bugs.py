@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests for workflow bugs in worktree and non-worktree modes.
 
 Confirms four bugs, each demonstrated by a test that fails before the fix

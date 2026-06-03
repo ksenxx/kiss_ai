@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Configuration management for the VS Code Sorcar extension.
 
 Persists user preferences to ``~/.kiss/config.json`` and manages

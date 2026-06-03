@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Parity between the VS Code chat webview and the remote webapp HTML.
 
 The VS Code extension renders its chat panel from

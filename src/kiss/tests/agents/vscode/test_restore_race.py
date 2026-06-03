@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests for the race condition in _restorePreMergeEditors.
 
 Race: The allDone handler calls ``_restorePreMergeEditors`` with ``void``

@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests for SlackChannelBackend — no mocks or test doubles.
 
 Tests the SlackChannelBackend class with invalid tokens to verify error

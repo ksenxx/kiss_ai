@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests for demo mode stop button and spinner.
 
 Bug: During demo replay, setRunningState(true) is never called, so the

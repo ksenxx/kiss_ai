@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration test: first-step model errors must produce a visible result event.
 
 Root cause: when a model fails on the very first call (e.g. codex CLI error,

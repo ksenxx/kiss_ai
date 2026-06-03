@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """WhatsApp Agent — ChatSorcarAgent extension with WhatsApp Business Cloud API tools.
 
 Provides authenticated access to WhatsApp via the Meta Graph API.

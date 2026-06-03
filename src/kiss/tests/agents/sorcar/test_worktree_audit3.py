@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests verifying fixes for worktree bugs BUG-8 through BUG-11.
 
 Each test verifies the CORRECT behavior after the fix was applied.

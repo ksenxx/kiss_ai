@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Test: loading a finished task from history and then running a new
 task in the same chat tab must carry the prior chat context into the
 augmented prompt the underlying agent receives.

@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests for DependencyInstaller.ts behavior.
 
 Validates that the dependency installer handles Playwright failures

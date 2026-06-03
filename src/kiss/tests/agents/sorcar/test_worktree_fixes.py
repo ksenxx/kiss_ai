@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests confirming that BUG-34 through BUG-38 are fixed.
 
 Each test verifies the fix is in place — assertions fail if the

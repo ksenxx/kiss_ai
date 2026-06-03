@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Property-based / fuzzing tests for every subprocess and shell
 command path in ``src/kiss/agents/vscode/``.
 

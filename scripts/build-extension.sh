@@ -1,4 +1,8 @@
 #!/bin/bash
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 # Build and install the KISS Sorcar VS Code extension.
 # Usage: scripts/build-extension.sh
 set -e

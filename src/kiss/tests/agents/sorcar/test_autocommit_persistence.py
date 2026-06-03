@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Test that autocommit events are persisted to the task history database.
 
 BUG: After a non-worktree task completes and the user auto-commits via

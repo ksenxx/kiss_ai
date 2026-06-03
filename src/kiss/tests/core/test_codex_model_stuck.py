@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration test: codex/gpt-5.5 must not get stuck in an infinite retry loop.
 
 Root cause: when a ``codex/*`` model fails on the first model call (e.g.

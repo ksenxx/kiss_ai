@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 from kiss.core.kiss_agent import KISSAgent
 
 agent = KISSAgent("test_agent")

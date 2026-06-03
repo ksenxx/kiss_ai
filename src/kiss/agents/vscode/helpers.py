@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Helper utilities for Sorcar agent backends (autocomplete, model info, file ranking)."""
 
 from __future__ import annotations
