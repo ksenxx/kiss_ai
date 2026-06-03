@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests for races on ``_RunningAgentState.running_agent_states``.
 
 The process-global registry mapping frontend tab id →

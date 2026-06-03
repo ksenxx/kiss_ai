@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Concurrency tests for the background event-writer queue.
 
 These tests verify that ``_queue_chat_event`` + ``_flush_chat_events``

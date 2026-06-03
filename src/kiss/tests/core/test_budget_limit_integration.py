@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration test: budget limit enforcement via real HTTP calls.
 
 Starts a real ThreadingHTTPServer that speaks the OpenAI chat-completions

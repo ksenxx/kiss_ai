@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Regression test: ConsolePrinter and JsonPrinter produce the same content.
 
 Feeds identical print() calls to both printers and verifies:

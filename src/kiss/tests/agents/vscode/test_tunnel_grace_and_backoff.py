@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests for the tunnel watchdog startup-grace period and restart backoff.
 
 Two failure modes burned through trycloudflare.com quick-tunnels and

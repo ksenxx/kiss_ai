@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Unit tests for get_fast_model() API-key-based fast model selection."""
 
 from __future__ import annotations

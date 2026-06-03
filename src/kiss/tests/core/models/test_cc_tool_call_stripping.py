@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests for cc/* model tool-call stripping from Thoughts panel.
 
 Verifies that ``_strip_text_based_tool_calls`` correctly removes

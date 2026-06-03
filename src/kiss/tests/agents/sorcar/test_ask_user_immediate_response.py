@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests guarding the immediacy of ``ask_user_question``.
 
 Two complementary bugs delayed (or dropped) the user's answer reaching

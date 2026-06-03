@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Regression: a tab that loads a still-running task from history
 must reach the same frontend state as a tab that runs a task fresh —
 in both the VS Code extension and the web server.

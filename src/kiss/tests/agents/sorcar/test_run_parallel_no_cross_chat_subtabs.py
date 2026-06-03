@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Regression test: ``run_parallel`` must NOT cause phantom sub-agent
 tabs to appear in webviews bound to a different chat.
 

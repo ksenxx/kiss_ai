@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Worktree-based agent that runs each task on an isolated git branch.
 
 Creates a ``git worktree`` for every task so the user's main working tree

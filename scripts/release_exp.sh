@@ -1,4 +1,8 @@
 #!/bin/bash
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 
 # Build, publish, and install the VS Code extension only.
 # Skips version bumps, git operations, and PyPI publishing.

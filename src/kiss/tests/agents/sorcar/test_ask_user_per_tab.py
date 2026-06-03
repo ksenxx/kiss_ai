@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests for per-tab ask-user modal localisation.
 
 Verifies the refactor that makes ``#ask-user-question``, ``#ask-user-input``,

@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tlon/Urbit Agent — ChatSorcarAgent extension with Tlon/Urbit Eyre HTTP tools.
 
 Provides access to Urbit/Tlon via the Eyre HTTP server. Stores config

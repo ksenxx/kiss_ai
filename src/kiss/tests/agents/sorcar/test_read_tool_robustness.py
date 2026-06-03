@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests for the ``Read`` tool's robustness fallbacks.
 
 These tests were added in response to a recurring class of model

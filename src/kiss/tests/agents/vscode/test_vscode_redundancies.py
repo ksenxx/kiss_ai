@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests for redundancy fixes in kiss/agents/vscode/.
 
 Redundancy 1 — ``_cmd_run`` and ``_get_tab`` both implemented the
