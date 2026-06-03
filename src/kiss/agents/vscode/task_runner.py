@@ -356,6 +356,15 @@ class _TaskRunnerMixin:
                     )
                     tab.agent._wt = None
 
+        logger.info(
+            "Task started: tab_id=%s model=%s use_worktree=%s "
+            "auto_commit=%s prompt=%r",
+            tab_id,
+            model,
+            use_worktree,
+            tab.auto_commit_mode,
+            prompt[:200],
+        )
         result_summary = "Agent Failed Abruptly"
         task_end_event: dict[str, Any] | None = None
         # ``agent_returned`` captures the YAML string returned by
@@ -439,12 +448,31 @@ class _TaskRunnerMixin:
                             or "No summary available"
                         )
                     task_end_event = {"type": "task_done"}
+                    logger.info(
+                        "Agent returned: tab_id=%s task_id=%s "
+                        "summary=%r",
+                        tab_id,
+                        tab.task_history_id,
+                        result_summary[:200],
+                    )
                 except KeyboardInterrupt:
                     result_summary = "Task stopped by user"
                     task_end_event = {"type": "task_stopped"}
+                    logger.info(
+                        "Task stopped by user: tab_id=%s task_id=%s",
+                        tab_id,
+                        tab.task_history_id,
+                    )
                 except Exception as e:
                     result_summary = f"Task failed: {e}"
                     task_end_event = {"type": "task_error", "text": str(e)}
+                    logger.warning(
+                        "Task failed: tab_id=%s task_id=%s error=%s",
+                        tab_id,
+                        tab.task_history_id,
+                        e,
+                        exc_info=True,
+                    )
                 else:
                     continue
                 finally:
@@ -586,6 +614,11 @@ class _TaskRunnerMixin:
                     task_id=tab.task_history_id,
                     task=prompt,
                 )
+                logger.info(
+                    "Task result persisted: task_id=%s result=%r",
+                    tab.task_history_id,
+                    result_summary[:200],
+                )
                 from kiss._version import __version__
 
                 # Persist agent start / end timestamps (ms since epoch)
@@ -704,6 +737,14 @@ class _TaskRunnerMixin:
                         "startTs": start_ms,
                         "endTs": end_ms,
                     })
+                logger.info(
+                    "Task lifecycle complete: tab_id=%s task_id=%s "
+                    "elapsed_ms=%d event_type=%s",
+                    tab_id,
+                    tab.task_history_id,
+                    end_ms - start_ms,
+                    (task_end_event or {}).get("type", "none"),
+                )
                 if tab.task_history_id is not None:
                     self._generate_followup_async(
                         prompt,
