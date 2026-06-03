@@ -62,7 +62,7 @@ export type FromWebviewMessage =
   | {type: 'complete'; query: string; tabId?: string}
   | {type: 'mergeAction'; action: string; tabId?: string}
   | {type: 'newChat'; tabId?: string}
-  | {type: 'generateCommitMessage'}
+  | {type: 'generateCommitMessage'; tabId?: string; workDir?: string}
   | {type: 'focusEditor'}
   | {type: 'closeTab'; tabId: string}
   | {type: 'getInputHistory'}
