@@ -547,6 +547,13 @@ class _CommandsMixin:
             self._file_cache = None
             self._last_active_file = ""
             self._last_active_content = ""
+        # Keep the printer's work_dir in sync so global ``configData``
+        # events report the active folder (the ``WebPrinter`` used by
+        # the remote server fills ``cfg["work_dir"]`` from its own
+        # ``work_dir`` attribute; without this it would keep reporting
+        # the folder the daemon was launched with).
+        if hasattr(self.printer, "work_dir"):
+            setattr(self.printer, "work_dir", new_dir)
 
     _HANDLERS: dict[str, Any] = {
         "run": _cmd_run,
