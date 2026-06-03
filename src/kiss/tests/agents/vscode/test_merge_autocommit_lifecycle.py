@@ -623,5 +623,72 @@ class TestAutocommitPromptForBinaryOnlyChanges(_LifecycleHarness):
         assert "output.pdf" in ac_event["changedFiles"]
 
 
+class TestAutocommitUsesCommandWorkDir(unittest.TestCase):
+    """The autocommit button must act on the work_dir carried by the
+    command (the tab's own folder), not the daemon-wide ``self.work_dir``.
+
+    Reproduces the reported bug: the shared ``kiss-web`` daemon was
+    launched from (or synced to) a non-git folder, so clicking the
+    auto-commit button reported ``"Not a git repository."`` even though
+    the tab's workspace was a real git repository.  The frontend now
+    stamps the tab's ``workDir`` on the ``autocommitAction`` message and
+    the backend prefers it over ``self.work_dir``.
+    """
+
+    def setUp(self) -> None:
+        self.repo = tempfile.mkdtemp()
+        _init_repo(self.repo)
+        # The daemon-wide work_dir points at a *non-git* folder.
+        self.nongit = tempfile.mkdtemp()
+        if _git(self.nongit, "rev-parse", "--is-inside-work-tree").returncode == 0:
+            self.skipTest(f"{self.nongit} is inside a git repo")
+        self.server, self.events = _make_server(self.nongit)
+        self._orig_gen = _merge_flow_module.generate_commit_message_from_diff
+
+        def fake_gen(diff_text: str, user_prompt: str | None = None) -> str:
+            return "chore: auto-commit test"
+
+        _merge_flow_module.generate_commit_message_from_diff = fake_gen  # type: ignore[assignment]
+
+    def tearDown(self) -> None:
+        _merge_flow_module.generate_commit_message_from_diff = self._orig_gen
+        shutil.rmtree(self.repo, ignore_errors=True)
+        shutil.rmtree(self.nongit, ignore_errors=True)
+
+    def test_commit_uses_command_work_dir(self) -> None:
+        """A dirty git repo passed via ``workDir`` commits successfully
+        even though ``self.work_dir`` is a non-git folder."""
+        tab_id = "t-wd"
+        self.server._get_tab(tab_id)
+        Path(self.repo, "new.txt").write_text("hello\n")
+
+        self.server._handle_command({
+            "type": "autocommitAction",
+            "action": "commit",
+            "tabId": tab_id,
+            "workDir": self.repo,
+        })
+
+        done = _find_event(self.events, "autocommit_done")
+        assert done["success"] is True, done
+        assert done["committed"] is True, done
+        status = _git(self.repo, "status", "--porcelain").stdout.strip()
+        assert status == "", f"Expected clean tree, got: {status}"
+
+    def test_commit_without_work_dir_still_fails_on_nongit(self) -> None:
+        """Without a ``workDir`` the handler falls back to the non-git
+        ``self.work_dir`` and reports the original failure."""
+        tab_id = "t-nowd"
+        self.server._get_tab(tab_id)
+        self.server._handle_command({
+            "type": "autocommitAction",
+            "action": "commit",
+            "tabId": tab_id,
+        })
+        done = _find_event(self.events, "autocommit_done")
+        assert done["success"] is False, done
+        assert done["message"] == "Not a git repository.", done
+
+
 if __name__ == "__main__":
     unittest.main()
