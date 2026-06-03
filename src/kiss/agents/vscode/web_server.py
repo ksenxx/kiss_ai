@@ -3927,6 +3927,82 @@ class RemoteAccessServer:
         """
         self._handle_shutdown_signal(signum)
 
+    def _stop_active_agent_tasks(self, timeout: float = 12.0) -> None:
+        """Stop in-flight agent worker threads so they unwind cleanly.
+
+        Each task runs in a daemon worker thread spawned by
+        :meth:`VSCodeServer._run_task`.  On process exit those daemon
+        threads are killed abruptly, skipping the cleanup ``finally``
+        that persists a meaningful ``task_history.result`` and
+        broadcasts the outcome.  The row is then left at the
+        ``"Agent Failed Abruptly"`` sentinel and the next startup's
+        orphan sweep rewrites it to ``"Task terminated unexpectedly
+        (process killed)"`` — a *silent* failure the user never sees in
+        real time.
+
+        This method reproduces what the user-facing "stop" button does
+        (set the cooperative stop event, then inject a
+        ``KeyboardInterrupt`` into the worker thread via
+        ``PyThreadState_SetAsyncExc``) but, crucially, **joins** each
+        worker synchronously so its cleanup ``finally`` runs to
+        completion (persisting ``"Task stopped by user"`` and
+        broadcasting a final result) before the process exits.
+
+        The total time spent is bounded by *timeout* seconds across all
+        workers so a thread wedged in uninterruptible C code cannot hang
+        shutdown indefinitely.
+
+        Args:
+            timeout: Maximum wall-clock seconds to wait, in aggregate,
+                for all active worker threads to unwind.
+        """
+        import ctypes
+
+        from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+
+        active: list[tuple[str, threading.Event | None, threading.Thread]] = []
+        with _RunningAgentState._registry_lock:
+            for tab_id, tab in _RunningAgentState.running_agent_states.items():
+                thread = tab.task_thread
+                if tab.is_task_active and thread is not None and thread.is_alive():
+                    active.append((tab_id, tab.stop_event, thread))
+
+        if not active:
+            return
+
+        logger.warning(
+            "Shutdown: stopping %d in-flight agent task(s) before exit: %s",
+            len(active),
+            ", ".join(tab_id for tab_id, _, _ in active),
+        )
+
+        # Phase 1: cooperative stop signal for every worker first.
+        for _tab_id, stop_event, _thread in active:
+            if stop_event is not None:
+                stop_event.set()
+
+        # Phase 2: force a KeyboardInterrupt in any worker that did not
+        # exit on its own, then join (bounded by the shared deadline) so
+        # the worker's cleanup finally runs before we return.
+        deadline = time.monotonic() + timeout
+        for tab_id, _stop_event, thread in active:
+            remaining = max(0.0, deadline - time.monotonic())
+            thread.join(timeout=min(1.0, remaining))
+            if thread.is_alive():
+                tid = thread.ident
+                if tid is not None:
+                    ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                        ctypes.c_ulong(tid),
+                        ctypes.py_object(KeyboardInterrupt),
+                    )
+                thread.join(timeout=max(0.0, deadline - time.monotonic()))
+            if thread.is_alive():
+                logger.warning(
+                    "Shutdown: agent task %s did not stop within timeout; "
+                    "it may be persisted as a process-killed task",
+                    tab_id,
+                )
+
     def _install_signal_handlers(self) -> None:
         """Register handlers for catchable termination signals.
 
@@ -3980,6 +4056,16 @@ class RemoteAccessServer:
         except KeyboardInterrupt:
             logger.info("Server shutting down: pid=%d (KeyboardInterrupt)", pid)
         finally:
+            # Gracefully stop any in-flight agent worker thread BEFORE
+            # the process exits.  Without this the daemon worker thread
+            # is killed abruptly when ``start()`` returns, its cleanup
+            # ``finally`` (which persists a real result + broadcasts the
+            # outcome) never runs, and the task_history row is left at
+            # the ``"Agent Failed Abruptly"`` sentinel — later rewritten
+            # by the orphan sweep to "Task terminated unexpectedly
+            # (process killed)".  That is the silent-failure mode this
+            # fix eliminates (see tasks 2968 in the bundled sorcar.db).
+            self._stop_active_agent_tasks()
             logger.info("Server stopped: pid=%d", pid)
             self._stop_tunnel()
 
