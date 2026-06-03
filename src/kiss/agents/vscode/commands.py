@@ -104,7 +104,9 @@ class _CommandsMixin:
             self, chat_id: str, task_id: int | None, direction: str,
             tab_id: str = "",
         ) -> None: ...
-        def _generate_commit_message(self) -> None: ...
+        def _generate_commit_message(
+            self, tab_id: str = "", *, work_dir: str = "",
+        ) -> None: ...
         def _handle_worktree_action(
             self, action: str, tab_id: str = "", *, internal: bool = False,
         ) -> dict[str, Any]: ...
@@ -454,10 +456,20 @@ class _CommandsMixin:
         ``tabId`` to :meth:`_generate_commit_message` which stamps it
         on every emitted ``commitMessage`` event so the result reaches
         only the originating tab (B5 fix).
+
+        The command's ``workDir`` (the tab's own folder) is forwarded so
+        the generator operates on the tab's repository rather than the
+        daemon-wide ``self.work_dir``, which may point at a different —
+        possibly non-git — folder and produce a misleading "Not a git
+        repository." error.
         """
         tab_id = cmd.get("tabId", "")
+        work_dir = cmd.get("workDir", "")
         threading.Thread(
-            target=self._generate_commit_message, args=(tab_id,), daemon=True,
+            target=self._generate_commit_message,
+            args=(tab_id,),
+            kwargs={"work_dir": work_dir},
+            daemon=True,
         ).start()
 
     def _cmd_worktree_action(self, cmd: dict[str, Any]) -> None:

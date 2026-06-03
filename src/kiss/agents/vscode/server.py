@@ -1264,7 +1264,9 @@ class VSCodeServer(
         }
         self.printer.broadcast(event)
 
-    def _generate_commit_message(self, tab_id: str = "") -> None:
+    def _generate_commit_message(
+        self, tab_id: str = "", *, work_dir: str = "",
+    ) -> None:
         """Generate a git commit message from current changes.
 
         Args:
@@ -1272,13 +1274,21 @@ class VSCodeServer(
                 on every emitted ``commitMessage`` event so the
                 printer's "system event" routing forwards the message
                 only to the originating tab.
+            work_dir: The tab's working directory.  Preferred over the
+                daemon-wide ``self.work_dir`` because the shared
+                ``kiss-web`` daemon may have been launched from (or
+                synced to) a different — possibly non-git — folder than
+                the window that owns this tab, which would otherwise
+                yield a misleading "Not a git repository." error.  Falls
+                back to ``self.work_dir`` when empty.
         """
+        work_dir = work_dir or self.work_dir
         try:
             from pathlib import Path
 
             from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 
-            if GitWorktreeOps.discover_repo(Path(self.work_dir)) is None:
+            if GitWorktreeOps.discover_repo(Path(work_dir)) is None:
                 self.printer.broadcast({
                     "type": "commitMessage",
                     "message": "",
@@ -1286,7 +1296,7 @@ class VSCodeServer(
                     "tabId": tab_id,
                 })
                 return
-            cached_result = _git(self.work_dir, "diff", "--cached")
+            cached_result = _git(work_dir, "diff", "--cached")
             diff_text = cached_result.stdout.strip()
             if not diff_text:  # pragma: no branch — LLM API required for else
                 self.printer.broadcast({
