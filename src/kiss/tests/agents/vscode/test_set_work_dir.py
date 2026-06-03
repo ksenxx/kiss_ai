@@ -205,6 +205,45 @@ def test_get_files_returns_new_workspace_after_set_work_dir(
     )
 
 
+def test_set_work_dir_syncs_web_printer_work_dir(
+    two_workspaces: tuple[str, str],
+) -> None:
+    """``setWorkDir`` must propagate to the ``WebPrinter.work_dir``.
+
+    The remote server's ``WebPrinter`` fills ``cfg["work_dir"]`` in
+    global ``configData`` events from its own ``work_dir`` attribute.
+    The handler only updated ``VSCodeServer.work_dir`` before, so a
+    browser client kept seeing the folder the daemon was launched with
+    after the user opened a new folder in VS Code.  After the fix the
+    printer's ``work_dir`` tracks the active folder and the next
+    ``configData`` reports folder B.
+    """
+    from kiss.agents.vscode.web_server import WebPrinter
+
+    a, b = two_workspaces
+    printer = WebPrinter()
+    printer.work_dir = a
+    server = VSCodeServer(printer=printer)
+    server.work_dir = a
+
+    server._handle_command({"type": "setWorkDir", "workDir": b})
+
+    assert printer.work_dir == b, (
+        "setWorkDir must sync WebPrinter.work_dir to the new folder"
+    )
+
+    # A configData event with an empty work_dir is filled in place by
+    # the printer from its own ``work_dir`` attribute, so it must now
+    # report folder B (no WebSocket/UDS clients are attached, so the
+    # broadcast is otherwise a no-op).
+    cfg: dict[str, Any] = {"work_dir": ""}
+    event: dict[str, Any] = {"type": "configData", "config": cfg}
+    printer.broadcast(event)
+    assert cfg["work_dir"] == b, (
+        f"configData must report folder B after setWorkDir; got {event}"
+    )
+
+
 def test_set_work_dir_registered_in_handlers() -> None:
     """The dispatch table must include ``setWorkDir``.
 

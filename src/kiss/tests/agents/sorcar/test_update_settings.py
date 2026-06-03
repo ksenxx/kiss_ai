@@ -213,40 +213,6 @@ class TestMaxBudget:
         assert agent.max_budget == 3.0
 
 
-class TestWorkingDirectory:
-    """working_directory resolves, creates, sets agent.work_dir, persists."""
-
-    def test_set_directory(self, tmp_path: Path) -> None:
-        agent, printer, tools = _make_agent_and_printer()
-        update = _find_tool(tools, "update_settings")
-
-        target = tmp_path / "new_workdir"
-        assert not target.exists()
-
-        result = update(working_directory=str(target))
-        resolved = str(target.resolve())
-        assert f"working_directory={resolved}" in result
-        assert agent.work_dir == resolved
-        assert target.exists()
-
-        cfg = json.loads(vscode_config.CONFIG_PATH.read_text())
-        assert cfg["work_dir"] == resolved
-
-        evts = _setting_events(printer)
-        assert len(evts) == 1
-        assert evts[0]["key"] == "working_directory"
-        assert evts[0]["value"] == resolved
-
-    def test_existing_directory_ok(self, tmp_path: Path) -> None:
-        agent, _printer, tools = _make_agent_and_printer()
-        update = _find_tool(tools, "update_settings")
-
-        target = tmp_path / "existing"
-        target.mkdir()
-        update(working_directory=str(target))
-        assert agent.work_dir == str(target.resolve())
-
-
 class TestUseWebBrowser:
     """use_web_browser sets agent._use_web_tools and persists."""
 
@@ -357,17 +323,15 @@ class TestMultipleSettings:
         keys = {e["key"] for e in evts}
         assert keys == {"is_parallel", "model"}
 
-    def test_all_settings_at_once(self, tmp_path: Path) -> None:
+    def test_all_settings_at_once(self) -> None:
         agent, printer, tools = _make_agent_and_printer()
         update = _find_tool(tools, "update_settings")
 
-        wd = tmp_path / "all_at_once"
         result = update(
             is_parallel=True,
             is_worktree=True,
             model_name="o3",
             max_budget=10.0,
-            working_directory=str(wd),
             use_web_browser=False,
             remote_password="pw",
             demo_mode=True,
@@ -380,7 +344,6 @@ class TestMultipleSettings:
         assert "is_worktree=True" in result
         assert "model=o3" in result
         assert "max_budget=10.0" in result
-        assert f"working_directory={wd.resolve()}" in result
         assert "use_web_browser=False" in result
         assert "remote_password=<updated>" in result
         assert "demo_mode=True" in result
@@ -388,9 +351,9 @@ class TestMultipleSettings:
         assert "custom_endpoint=http://localhost:8080/v1" in result
         assert "custom_headers=<updated>" in result
 
-        # 11 settings → 11 broadcast events
+        # 10 settings → 10 broadcast events
         evts = _setting_events(printer)
-        assert len(evts) == 11
+        assert len(evts) == 10
 
 
 class TestCustomEndpoint:
@@ -528,7 +491,7 @@ class TestWorktreeSorcarAgentNoPrinter:
         names = [t.__name__ for t in tools if callable(t)]
         assert "update_settings" in names
 
-    def test_config_persists_without_printer(self, tmp_path: Path) -> None:
+    def test_config_persists_without_printer(self) -> None:
         """Config-level settings persist to disk even without a printer."""
         from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
@@ -538,13 +501,11 @@ class TestWorktreeSorcarAgentNoPrinter:
         tools = agent._get_tools()
         update = _find_tool(tools, "update_settings")
 
-        wd = tmp_path / "slack_workdir"
         result = update(
             is_parallel=True,
             is_worktree=True,
             model_name="gemini-2.5-pro",
             max_budget=5.0,
-            working_directory=str(wd),
             use_web_browser=False,
             custom_endpoint="http://localhost:11434/v1",
             custom_headers="X-Slack:true",
@@ -554,7 +515,6 @@ class TestWorktreeSorcarAgentNoPrinter:
         assert agent._is_parallel is True
         assert agent.model_name == "gemini-2.5-pro"
         assert agent.max_budget == 5.0
-        assert agent.work_dir == str(wd.resolve())
         assert agent._use_web_tools is False
 
         # Verify result message
@@ -568,7 +528,6 @@ class TestWorktreeSorcarAgentNoPrinter:
 
         cfg = json.loads(vscode_config.CONFIG_PATH.read_text())
         assert cfg["max_budget"] == 5.0
-        assert cfg["work_dir"] == str(wd.resolve())
         assert cfg["is_worktree"] is True
         assert cfg["is_parallel"] is True
         assert cfg["use_web_browser"] is False
@@ -660,7 +619,7 @@ class TestWebPrinterBroadcast:
         keys = {e["key"] for e in setting_evts}
         assert keys == {"is_parallel", "model"}
 
-    def test_all_settings_recorded(self, tmp_path: Path) -> None:
+    def test_all_settings_recorded(self) -> None:
         """All 11 setting types are recorded by WebPrinter."""
         from kiss.agents.vscode.web_server import WebPrinter
 
@@ -674,13 +633,11 @@ class TestWebPrinterBroadcast:
         tools = agent._get_tools()
         update = _find_tool(tools, "update_settings")
 
-        wd = tmp_path / "web_workdir"
         update(
             is_parallel=True,
             is_worktree=True,
             model_name="o3",
             max_budget=10.0,
-            working_directory=str(wd),
             use_web_browser=False,
             remote_password="pw",
             demo_mode=True,
@@ -694,11 +651,11 @@ class TestWebPrinterBroadcast:
             raw = list(printer._recordings.get(key, []))
 
         setting_evts = [e for e in raw if e.get("type") == "updateSetting"]
-        assert len(setting_evts) == 11
+        assert len(setting_evts) == 10
 
         expected_keys = {
             "is_parallel", "is_worktree", "model", "max_budget",
-            "working_directory", "use_web_browser", "remote_password",
+            "use_web_browser", "remote_password",
             "demo_mode", "auto_commit", "custom_endpoint",
             "custom_headers",
         }
@@ -845,16 +802,6 @@ class TestSettingsPersistAcrossTasks:
         cfg = vscode_config.load_config()
         assert cfg.get("demo_mode") is True
 
-    def test_working_directory_persists(self, tmp_path: Path) -> None:
-        """working_directory must be saved to config and reloaded."""
-        _agent, _printer, tools = _make_agent_and_printer()
-        update = _find_tool(tools, "update_settings")
-        target = tmp_path / "persist_wd"
-        update(working_directory=str(target))
-
-        cfg = vscode_config.load_config()
-        assert cfg.get("work_dir") == str(target.resolve())
-
     def test_model_name_persists(self) -> None:
         """model_name must be persisted via _save_last_model."""
         from kiss.agents.sorcar.persistence import _load_last_model
@@ -865,17 +812,15 @@ class TestSettingsPersistAcrossTasks:
 
         assert _load_last_model() == "gemini-2.5-pro"
 
-    def test_all_settings_survive_roundtrip(self, tmp_path: Path) -> None:
+    def test_all_settings_survive_roundtrip(self) -> None:
         """Every config-persisted setting survives save → load."""
         _agent, _printer, tools = _make_agent_and_printer()
         update = _find_tool(tools, "update_settings")
 
-        wd = tmp_path / "roundtrip_wd"
         update(
             is_parallel=True,
             is_worktree=True,
             max_budget=42.0,
-            working_directory=str(wd),
             use_web_browser=False,
             demo_mode=True,
             remote_password="secret",
@@ -887,7 +832,6 @@ class TestSettingsPersistAcrossTasks:
         assert cfg["is_parallel"] is True
         assert cfg["is_worktree"] is True
         assert cfg["max_budget"] == 42.0
-        assert cfg["work_dir"] == str(wd.resolve())
         assert cfg["use_web_browser"] is False
         assert cfg["demo_mode"] is True
         assert cfg["remote_password"] == "secret"
