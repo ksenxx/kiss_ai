@@ -143,5 +143,60 @@ class TestAutocommitModeSkipsMergeReview(_AutocommitTaskHarness):
         assert status.stdout.strip() == ""
 
 
+class TestAutocommitSilentWhenNoChanges(_AutocommitTaskHarness):
+    """Auto-commit mode emits NOTHING for a no-op (no files changed) task."""
+
+    def test_auto_no_changes_is_silent(self) -> None:
+        tab_id = "test-tab-ac-noop"
+        tab = self.server._get_tab(tab_id)
+        tab.use_worktree = False
+        tab.auto_commit_mode = True
+
+        # Agent changed no files — working tree is clean.
+        assert _git(self.tmpdir, "status", "--porcelain").stdout.strip() == ""
+
+        # The post-task auto-commit path (``auto=True``) must produce
+        # zero output when there is nothing to commit.
+        self.server._handle_autocommit_action("commit", tab_id, auto=True)
+
+        assert self.events == []
+
+    def test_interactive_no_changes_reports_nothing_to_commit(self) -> None:
+        # The explicit "Auto commit" button (``auto`` defaults to
+        # False) still surfaces a "Nothing to commit." status so the
+        # user who clicked gets feedback.
+        tab_id = "test-tab-ac-interactive"
+        tab = self.server._get_tab(tab_id)
+        tab.use_worktree = False
+
+        assert _git(self.tmpdir, "status", "--porcelain").stdout.strip() == ""
+
+        self.server._handle_autocommit_action("commit", tab_id)
+
+        done = [e for e in self.events if e["type"] == "autocommit_done"]
+        assert len(done) == 1
+        assert done[0]["committed"] is False
+        assert done[0]["message"] == "Nothing to commit."
+
+    def test_auto_with_changes_still_commits_and_reports(self) -> None:
+        # Sanity: a real change in auto mode still commits and emits
+        # the ``autocommit_done`` event.
+        tab_id = "test-tab-ac-changed"
+        tab = self.server._get_tab(tab_id)
+        tab.use_worktree = False
+        tab.auto_commit_mode = True
+
+        Path(self.tmpdir, "README.md").write_text(
+            "# Hello\n\nAgent-edited content\n",
+        )
+
+        self.server._handle_autocommit_action("commit", tab_id, auto=True)
+
+        done = [e for e in self.events if e["type"] == "autocommit_done"]
+        assert len(done) == 1
+        assert done[0]["committed"] is True
+        assert _git(self.tmpdir, "status", "--porcelain").stdout.strip() == ""
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
