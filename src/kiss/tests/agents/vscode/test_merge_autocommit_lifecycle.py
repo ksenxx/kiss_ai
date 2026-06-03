@@ -690,5 +690,71 @@ class TestAutocommitUsesCommandWorkDir(unittest.TestCase):
         assert done["message"] == "Not a git repository.", done
 
 
+class TestCommitMessageUsesCommandWorkDir(unittest.TestCase):
+    """``generateCommitMessage`` must act on the work_dir carried by the
+    command (the tab's own folder), not the daemon-wide ``self.work_dir``.
+
+    Reproduces the reported bug: the shared ``kiss-web`` daemon was
+    launched from (or synced to) a non-git folder, so requesting a
+    commit message reported ``"Not a git repository."`` even though the
+    tab's workspace was a real git repository.  The frontend now stamps
+    the tab's ``workDir`` on the ``generateCommitMessage`` command and
+    the backend prefers it over ``self.work_dir``.
+    """
+
+    def setUp(self) -> None:
+        self.repo = tempfile.mkdtemp()
+        _init_repo(self.repo)
+        # The daemon-wide work_dir points at a *non-git* folder.
+        self.nongit = tempfile.mkdtemp()
+        if _git(self.nongit, "rev-parse", "--is-inside-work-tree").returncode == 0:
+            self.skipTest(f"{self.nongit} is inside a git repo")
+        self.server, self.events = _make_server(self.nongit)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.repo, ignore_errors=True)
+        shutil.rmtree(self.nongit, ignore_errors=True)
+
+    def test_no_git_error_with_command_work_dir(self) -> None:
+        """A git repo passed via ``workDir`` is recognised even though
+        ``self.work_dir`` is a non-git folder.
+
+        With no staged changes the handler proceeds past the repo check
+        and reports the (non-misleading) "no staged changes" error
+        instead of "Not a git repository.".
+        """
+        tab_id = "t-cm"
+        self.server._generate_commit_message(tab_id, work_dir=self.repo)
+        msg = _find_event(self.events, "commitMessage")
+        assert msg.get("error") != "Not a git repository.", msg
+        assert "No staged changes" in msg.get("error", ""), msg
+
+    def test_git_error_without_work_dir_on_nongit(self) -> None:
+        """Without a ``workDir`` the handler falls back to the non-git
+        ``self.work_dir`` and reports "Not a git repository."."""
+        tab_id = "t-cm2"
+        self.server._generate_commit_message(tab_id)
+        msg = _find_event(self.events, "commitMessage")
+        assert msg.get("error") == "Not a git repository.", msg
+
+    def test_command_dispatch_forwards_work_dir(self) -> None:
+        """``generateCommitMessage`` command forwards ``workDir`` so the
+        repo check runs against the tab's folder, not ``self.work_dir``."""
+        import time
+
+        self.server._handle_command({
+            "type": "generateCommitMessage",
+            "tabId": "t-cm3",
+            "workDir": self.repo,
+        })
+        # The handler runs in a daemon thread; wait briefly for the event.
+        for _ in range(50):
+            if any(e["type"] == "commitMessage" for e in self.events):
+                break
+            time.sleep(0.05)
+        msg = _find_event(self.events, "commitMessage")
+        assert msg.get("error") != "Not a git repository.", msg
+
+
 if __name__ == "__main__":
     unittest.main()
