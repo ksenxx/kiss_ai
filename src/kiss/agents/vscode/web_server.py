@@ -2418,6 +2418,14 @@ class RemoteAccessServer:
         )
         self._uds_server: asyncio.Server | None = None
         self._watchdog_task: asyncio.Task[None] | None = None
+        # Set True by :meth:`_handle_shutdown_signal` the first time a
+        # SIGTERM is caught.  Guards against a *second* SIGTERM (e.g.
+        # an impatient ``pkill`` loop) re-raising ``KeyboardInterrupt``
+        # while :meth:`start` is already in its ``finally`` cleanup —
+        # which would escape the cleanup uncaught, abort
+        # ``subprocess.wait`` mid-sleep, and crash the process with an
+        # unhandled traceback (killing any running agent task).
+        self._shutdown_initiated = False
         self._local_url = f"https://localhost:{self.port}"
         self._merge_states: dict[str, _WebMergeState] = {}
         # M6: a small lock guards _merge_states so the agent
@@ -3834,6 +3842,96 @@ class RemoteAccessServer:
             print("Warning: cloudflared tunnel failed to start", file=sys.stderr)
         await self._ws_server.serve_forever()  # type: ignore[union-attr]
 
+    def _handle_shutdown_signal(self, signum: int) -> None:
+        """React to a catchable termination signal (SIGTERM / SIGHUP).
+
+        Logs the signal alongside a snapshot of in-flight agent tasks
+        and current memory.  For ``SIGTERM`` the *first* invocation
+        raises :class:`KeyboardInterrupt` so the ``asyncio.run`` loop in
+        :meth:`start` unwinds through its existing
+        ``except KeyboardInterrupt`` handler and runs its cleanup.
+
+        A subsequent SIGTERM that arrives *while shutdown is already in
+        progress* must NOT raise again.  During the ``finally`` cleanup,
+        :meth:`_stop_tunnel` blocks in ``subprocess.wait`` (a
+        ``time.sleep`` loop).  A second SIGTERM delivered then — e.g. by
+        an impatient ``pkill``/supervisor restart loop — would otherwise
+        re-raise ``KeyboardInterrupt`` inside that sleep, escape the
+        ``finally`` block uncaught, and crash the process with an
+        unhandled traceback (abruptly killing any running agent task).
+        Once :attr:`_shutdown_initiated` is set we therefore only log
+        and return so the cleanup runs to completion.
+
+        Args:
+            signum: The signal number delivered by the OS.
+        """
+        import resource
+
+        sig_name = signal.Signals(signum).name
+        from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+
+        active_tabs = []
+        for tab_id, tab in _RunningAgentState.running_agent_states.items():
+            if tab.is_task_active:
+                task_id = tab.task_history_id or tab.last_task_id
+                active_tabs.append(f"{tab_id}(task={task_id})")
+        try:
+            rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            rss_mb = (
+                rss / (1024 * 1024) if sys.platform == "darwin" else rss / 1024
+            )
+        except Exception:
+            rss_mb = -1
+        logger.warning(
+            "Signal %s received: pid=%d active_tasks=[%s] rss=%.1fMB",
+            sig_name,
+            os.getpid(),
+            ", ".join(active_tabs) if active_tabs else "none",
+            rss_mb,
+        )
+        # For SIGTERM: raise KeyboardInterrupt so the asyncio loop can
+        # unwind cleanly through the existing try/except — but only on
+        # the first signal.  Re-raising during the cleanup phase would
+        # crash the process (see docstring).
+        if signum == signal.SIGTERM:
+            if self._shutdown_initiated:
+                logger.info(
+                    "SIGTERM during shutdown ignored: pid=%d "
+                    "(cleanup already in progress)",
+                    os.getpid(),
+                )
+                return
+            self._shutdown_initiated = True
+            raise KeyboardInterrupt(f"Received {sig_name}")
+
+    def _signal_handler_entry(self, signum: int, _frame: Any) -> None:
+        """``signal.signal`` callback adapter for :meth:`_handle_shutdown_signal`.
+
+        Discards the unused stack-frame argument required by the
+        ``signal`` module and forwards the signal number.
+
+        Args:
+            signum: The signal number delivered by the OS.
+            _frame: The interrupted stack frame (unused).
+        """
+        self._handle_shutdown_signal(signum)
+
+    def _install_signal_handlers(self) -> None:
+        """Register handlers for catchable termination signals.
+
+        SIGKILL cannot be caught, but SIGTERM (``pkill``, ``systemd
+        stop``) and SIGHUP (terminal closed) can — and are the most
+        common non-OOM kill causes.  Both are routed through
+        :meth:`_handle_shutdown_signal`.  Registration is best-effort:
+        it silently no-ops when not on the main thread or when the
+        signal is unsupported on the current platform.
+        """
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            try:
+                signal.signal(sig, self._signal_handler_entry)
+            except (OSError, ValueError):
+                pass  # e.g. not main thread, or unsupported on this OS
+
     def start(self) -> None:
         """Start the server (blocks until interrupted).
 
@@ -3864,47 +3962,7 @@ class RemoteAccessServer:
         except Exception:
             pass
 
-        def _signal_handler(signum: int, frame: Any) -> None:
-            sig_name = signal.Signals(signum).name
-            # Snapshot in-flight tasks for the log
-            from kiss.agents.sorcar.running_agent_state import (
-                _RunningAgentState,
-            )
-            active_tabs = []
-            for tab_id, tab in _RunningAgentState.running_agent_states.items():
-                if tab.is_task_active:
-                    task_id = tab.task_history_id or tab.last_task_id
-                    active_tabs.append(f"{tab_id}(task={task_id})")
-            try:
-                rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-                rss_mb = (
-                    rss / (1024 * 1024)
-                    if sys.platform == "darwin"
-                    else rss / 1024
-                )
-            except Exception:
-                rss_mb = -1
-            logger.warning(
-                "Signal %s received: pid=%d active_tasks=[%s] rss=%.1fMB",
-                sig_name,
-                pid,
-                ", ".join(active_tabs) if active_tabs else "none",
-                rss_mb,
-            )
-            # For SIGTERM: raise KeyboardInterrupt so the asyncio loop
-            # can unwind cleanly through the existing try/except.
-            if signum == signal.SIGTERM:
-                raise KeyboardInterrupt(f"Received {sig_name}")
-
-        # Register handlers for catchable termination signals so we
-        # get a log entry before exit.  SIGKILL cannot be caught, but
-        # SIGTERM (pkill, systemd stop) and SIGHUP (terminal closed)
-        # can — and are the most common non-OOM kill causes.
-        for sig in (signal.SIGTERM, signal.SIGHUP):
-            try:
-                signal.signal(sig, _signal_handler)
-            except (OSError, ValueError):
-                pass  # e.g. not main thread, or unsupported on this OS
+        self._install_signal_handlers()
 
         try:
             asyncio.run(self._serve_async())
