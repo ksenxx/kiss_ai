@@ -2988,8 +2988,6 @@
           if (modelBtn) modelBtn.textContent = sVal;
         } else if (sKey === 'max_budget') {
           // Budget updated server-side; UI may show in config panel
-        } else if (sKey === 'working_directory') {
-          // Working directory updated server-side
         } else if (sKey === 'use_web_browser') {
           // Web browser setting updated server-side
         } else if (sKey === 'demo_mode' && demoToggleBtn) {
