@@ -95,7 +95,9 @@ class _CommandsMixin:
         def _replay_session(
             self, chat_id: str, tab_id: str = "", task_id: int | None = None,
         ) -> None: ...
-        def _finish_merge(self, tab_id: str = "") -> None: ...
+        def _finish_merge(
+            self, tab_id: str = "", *, work_dir: str = "",
+        ) -> None: ...
         def _new_chat(self, tab_id: str) -> None: ...
         def _close_tab(self, tab_id: str) -> None: ...
         def _ensure_complete_worker(self) -> None: ...
@@ -379,7 +381,9 @@ class _CommandsMixin:
         only needs to know when the entire merge session is finished.
         """
         if cmd.get("action", "") == "all-done":
-            self._finish_merge(cmd.get("tabId", ""))
+            self._finish_merge(
+                cmd.get("tabId", ""), work_dir=cmd.get("workDir", ""),
+            )
 
     def _cmd_close_tab(self, cmd: dict[str, Any]) -> None:
         """Clean up backend state for a closed frontend tab."""

@@ -756,5 +756,175 @@ class TestCommitMessageUsesCommandWorkDir(unittest.TestCase):
         assert msg.get("error") != "Not a git repository.", msg
 
 
+class TestMainDirtyFilesUsesCommandWorkDir(unittest.TestCase):
+    """``_main_dirty_files`` must scan the work_dir passed by the caller
+    (the tab's own folder), not the daemon-wide ``self.work_dir``.
+
+    Mirrors the autocommit / commit-message fixes: the shared
+    ``kiss-web`` daemon may run from a non-git folder, so the post-merge
+    dirty-file scan must use the tab's repository to detect changes.
+    """
+
+    def setUp(self) -> None:
+        self.repo = tempfile.mkdtemp()
+        _init_repo(self.repo)
+        self.nongit = tempfile.mkdtemp()
+        if _git(self.nongit, "rev-parse", "--is-inside-work-tree").returncode == 0:
+            self.skipTest(f"{self.nongit} is inside a git repo")
+        self.server, self.events = _make_server(self.nongit)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.repo, ignore_errors=True)
+        shutil.rmtree(self.nongit, ignore_errors=True)
+
+    def test_scan_uses_command_work_dir(self) -> None:
+        """A dirty file in the command repo is reported even though
+        ``self.work_dir`` is a non-git folder."""
+        Path(self.repo, "new.txt").write_text("hello\n")
+        changed = self.server._main_dirty_files(self.repo)
+        assert "new.txt" in changed, changed
+
+    def test_scan_without_work_dir_returns_empty_on_nongit(self) -> None:
+        """Without a work_dir the scan falls back to the non-git
+        ``self.work_dir`` and reports no changes."""
+        Path(self.repo, "new.txt").write_text("hello\n")
+        changed = self.server._main_dirty_files()
+        assert changed == [], changed
+
+
+class TestFinishMergeUsesCommandWorkDir(unittest.TestCase):
+    """``_finish_merge`` / ``_broadcast_autocommit_prompt`` must run the
+    post-merge dirty-file scan against the work_dir carried by the
+    command (the tab's own folder), not the daemon-wide ``self.work_dir``.
+    """
+
+    def setUp(self) -> None:
+        self.repo = tempfile.mkdtemp()
+        _init_repo(self.repo)
+        self.nongit = tempfile.mkdtemp()
+        if _git(self.nongit, "rev-parse", "--is-inside-work-tree").returncode == 0:
+            self.skipTest(f"{self.nongit} is inside a git repo")
+        self.server, self.events = _make_server(self.nongit)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.repo, ignore_errors=True)
+        shutil.rmtree(self.nongit, ignore_errors=True)
+
+    def test_broadcast_prompt_uses_command_work_dir(self) -> None:
+        """A dirty command repo yields an ``autocommit_prompt`` even
+        though ``self.work_dir`` is a non-git folder."""
+        tab_id = "t-fm"
+        self.server._get_tab(tab_id)
+        Path(self.repo, "new.txt").write_text("hello\n")
+        self.server._broadcast_autocommit_prompt(tab_id, self.repo)
+        prompt = _find_event(self.events, "autocommit_prompt")
+        assert "new.txt" in prompt["changedFiles"], prompt
+
+    def test_broadcast_prompt_without_work_dir_no_event_on_nongit(self) -> None:
+        """Without a work_dir the scan falls back to the non-git
+        ``self.work_dir`` and no prompt is emitted."""
+        tab_id = "t-fm2"
+        self.server._get_tab(tab_id)
+        Path(self.repo, "new.txt").write_text("hello\n")
+        self.server._broadcast_autocommit_prompt(tab_id)
+        assert not any(
+            e["type"] == "autocommit_prompt" for e in self.events
+        ), _event_types(self.events)
+
+    def test_finish_merge_forwards_work_dir(self) -> None:
+        """``_finish_merge`` forwards ``work_dir`` so the dirty-file scan
+        runs against the tab's repo, emitting an ``autocommit_prompt``."""
+        tab_id = "t-fm3"
+        tab = self.server._get_tab(tab_id)
+        tab.use_worktree = False
+        Path(self.repo, "new.txt").write_text("hello\n")
+        self.server._finish_merge(tab_id, work_dir=self.repo)
+        _find_event(self.events, "merge_ended")
+        prompt = _find_event(self.events, "autocommit_prompt")
+        assert "new.txt" in prompt["changedFiles"], prompt
+
+    def test_finish_merge_without_work_dir_no_prompt_on_nongit(self) -> None:
+        """Without a ``work_dir`` ``_finish_merge`` falls back to the
+        non-git ``self.work_dir`` and emits no ``autocommit_prompt``."""
+        tab_id = "t-fm4"
+        tab = self.server._get_tab(tab_id)
+        tab.use_worktree = False
+        Path(self.repo, "new.txt").write_text("hello\n")
+        self.server._finish_merge(tab_id)
+        _find_event(self.events, "merge_ended")
+        assert not any(
+            e["type"] == "autocommit_prompt" for e in self.events
+        ), _event_types(self.events)
+
+
+class TestMergeActionDispatchForwardsWorkDir(unittest.TestCase):
+    """The ``mergeAction`` ``all-done`` command must forward its
+    ``workDir`` to ``_finish_merge`` so the post-merge dirty-file scan
+    runs against the tab's repo, not the daemon-wide ``self.work_dir``.
+    """
+
+    def setUp(self) -> None:
+        self.repo = tempfile.mkdtemp()
+        _init_repo(self.repo)
+        self.nongit = tempfile.mkdtemp()
+        if _git(self.nongit, "rev-parse", "--is-inside-work-tree").returncode == 0:
+            self.skipTest(f"{self.nongit} is inside a git repo")
+        self.server, self.events = _make_server(self.nongit)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.repo, ignore_errors=True)
+        shutil.rmtree(self.nongit, ignore_errors=True)
+
+    def test_all_done_command_forwards_work_dir(self) -> None:
+        """An ``all-done`` command carrying ``workDir`` triggers an
+        ``autocommit_prompt`` for the tab's dirty repo."""
+        tab_id = "t-md"
+        tab = self.server._get_tab(tab_id)
+        tab.use_worktree = False
+        Path(self.repo, "new.txt").write_text("hello\n")
+        self.server._handle_command({
+            "type": "mergeAction",
+            "action": "all-done",
+            "tabId": tab_id,
+            "workDir": self.repo,
+        })
+        prompt = _find_event(self.events, "autocommit_prompt")
+        assert "new.txt" in prompt["changedFiles"], prompt
+
+
+class TestStartMergeSessionStampsWorkDir(_LifecycleHarness):
+    """``_start_merge_session`` must stamp ``work_dir`` into the
+    ``merge_data`` payload so the shared web daemon can echo it back on
+    the ``all-done`` command (web all-done autocommit path)."""
+
+    def test_merge_data_carries_work_dir(self) -> None:
+        """The broadcast ``merge_data`` event's ``data`` includes the
+        repository ``work_dir`` passed to ``_prepare_and_start_merge``."""
+        tab_id = "test-tab-wd"
+        tab = self.server._get_tab(tab_id)
+        tab.use_worktree = False
+
+        from kiss.agents.sorcar.git_worktree import GitWorktreeOps
+
+        repo = GitWorktreeOps.discover_repo(Path(self.tmpdir))
+        pre_head_sha, pre_hunks, pre_untracked, pre_file_hashes = (
+            _TaskRunnerMixin._capture_pre_snapshot(self.tmpdir, repo, tab_id)
+        )
+        Path(self.tmpdir, "README.md").write_text(
+            "# Hello\n\nUpdated content by the agent\n"
+        )
+        started = self.server._prepare_and_start_merge(
+            self.tmpdir,
+            pre_hunks,
+            pre_untracked,
+            pre_file_hashes,
+            base_ref=pre_head_sha or "HEAD",
+            tab_id=tab_id,
+        )
+        assert started, _event_types(self.events)
+        merge_data = _find_event(self.events, "merge_data")
+        assert merge_data["data"].get("work_dir") == self.tmpdir, merge_data
+
+
 if __name__ == "__main__":
     unittest.main()

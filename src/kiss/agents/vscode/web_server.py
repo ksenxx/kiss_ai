@@ -323,6 +323,12 @@ class _WebMergeState:
 
     def __init__(self, merge_data: dict[str, Any]) -> None:
         self.files: list[dict[str, Any]] = merge_data.get("files", [])
+        # The tab's repository (or worktree) directory, stamped by the
+        # backend ``_start_merge_session``.  Echoed back on the
+        # ``all-done`` ``mergeAction`` so the post-merge autocommit scan
+        # runs against the tab's own repo rather than the daemon-wide
+        # ``self.work_dir`` (which may be a different, non-git folder).
+        self.work_dir: str = merge_data.get("work_dir", "")
         self._all_hunks: list[tuple[int, int]] = [
             (fi, hi)
             for fi, f in enumerate(self.files)
@@ -3181,7 +3187,12 @@ class RemoteAccessServer:
             with self._merge_states_lock:
                 self._merge_states.pop(tab_id, None)
             await self._run_cmd(
-                {"type": "mergeAction", "action": "all-done", "tabId": tab_id},
+                {
+                    "type": "mergeAction",
+                    "action": "all-done",
+                    "tabId": tab_id,
+                    "workDir": state.work_dir,
+                },
             )
 
 
