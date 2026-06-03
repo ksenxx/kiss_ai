@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests that default and fast model names are NOT hardcoded in vscode agent files.
 
 They must be obtained dynamically from kiss.core.models.model_info.

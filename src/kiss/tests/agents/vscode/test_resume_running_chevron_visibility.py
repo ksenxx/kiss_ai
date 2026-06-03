@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Regression: resuming a running task from history must show live
 streaming events in the chat webview even when the fixed-panel chevron
 is in the default *collapsed* state.

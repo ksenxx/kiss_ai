@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Synology Chat Agent — ChatSorcarAgent extension with Synology Chat webhook API.
 
 Provides access to Synology Chat via incoming and outgoing webhooks.

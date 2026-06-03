@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Find redundant tests using branch coverage with dynamic contexts.
 
 A test method is redundant when every coverage item it produces is

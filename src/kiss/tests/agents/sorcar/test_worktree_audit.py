@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests verifying fixes for worktree mode bugs found during audit.
 
 Each test targets a specific bug fix and verifies the correct behavior.

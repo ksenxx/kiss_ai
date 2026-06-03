@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests for the frequent_tasks table in sorcar.db.
 
 Verifies counter incrementing, timestamp updates, top-N retrieval and

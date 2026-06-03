@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Slack DM poller that dispatches messages from ksen to Sorcar.
 
 Designed to be invoked once per minute from cron.  The script holds a

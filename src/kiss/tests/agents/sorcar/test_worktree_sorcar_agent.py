@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests for WorktreeSorcarAgent: worktree lifecycle, blocking, crash recovery."""
 
 from __future__ import annotations

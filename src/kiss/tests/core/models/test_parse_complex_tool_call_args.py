@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Regression tests for ``_parse_text_based_tool_calls`` — complex args.
 
 These cases reproduce the bug where ``cc/opus`` tool calls were silently

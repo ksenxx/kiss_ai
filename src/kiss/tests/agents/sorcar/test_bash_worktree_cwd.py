@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Regression test: Bash tool runs subprocesses in the agent's work_dir.
 
 When the agent runs inside a git worktree, ``self.work_dir`` is the

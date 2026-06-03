@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration test: codex/gpt-5.5 generate() must enforce timeout on stream reading.
 
 Root cause: in ``CodexModel.generate()``, ``_parse_stream_events(proc.stdout)``

@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Tests for internal KISS components: utils, Base class.
 
 Merged from: test_internal, test_core_branch_coverage.

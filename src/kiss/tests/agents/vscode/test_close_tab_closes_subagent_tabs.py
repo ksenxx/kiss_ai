@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Closing a parent tab also closes every (nested) sub-agent tab.
 
 Boots the real ``media/main.js`` under Node with a stub DOM, lets the

@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration test for demo mode chv-hidden bug.
 
 Bug: When loading a task in demo mode, panels are invisible because

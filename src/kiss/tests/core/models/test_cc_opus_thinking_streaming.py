@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration test: cc/opus text tokens must stream incrementally during tool mode.
 
 Reproduces the bug where ``generate_and_process_with_tools`` buffers ALL

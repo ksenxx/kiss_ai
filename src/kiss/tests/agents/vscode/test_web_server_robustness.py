@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests for the twelve MEDIUM-severity robustness fixes
 in :mod:`kiss.agents.vscode.web_server`.
 

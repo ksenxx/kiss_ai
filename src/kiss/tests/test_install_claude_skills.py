@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests for Claude skills steps in release.sh and copy-kiss.sh.
 
 Note: ``install.sh`` was intentionally removed in commit 71a9d0c5

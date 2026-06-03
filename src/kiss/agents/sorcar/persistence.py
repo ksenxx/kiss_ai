@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """SQLite persistence for task history, chat events, model and file usage.
 
 All data is stored in a single SQLite database at ``~/.kiss/sorcar.db``

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Fetch latest model pricing/context from vendor APIs, test new models,
 and update model_info.py.
 

@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Test: merge fails when main working tree has dirty/staged changes.
 
 Reproduces the bug where ``squash_merge_branch`` fails with a misleading

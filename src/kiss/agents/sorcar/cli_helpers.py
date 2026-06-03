@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Shared CLI helpers for Sorcar agent entry points.
 
 Provides argument parsing, chat-session handling, run-kwarg construction,

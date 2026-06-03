@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration test: ``ConsolePrinter`` and ``JsonPrinter`` must
 produce equivalent user-visible content for the same scripted print
 calls.

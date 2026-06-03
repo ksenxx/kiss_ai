@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests for trajectory-viewer job discovery.
 
 Verify that :func:`kiss.viz_trajectory.server.list_jobs` aggregates jobs from

@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration test: model picker recovers from a stale ``"No model"``.
 
 On a fresh installation the ``VSCodeServer`` is constructed before any

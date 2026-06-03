@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration test: AnthropicModel must invoke thinking_callback.
 
 Claude models with extended thinking send ``thinking_delta`` events during

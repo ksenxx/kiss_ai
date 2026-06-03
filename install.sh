@@ -1,4 +1,8 @@
 #!/bin/bash
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 # Install KISS Sorcar from source.
 #
 # This script's job is intentionally small: bootstrap only the tools needed to

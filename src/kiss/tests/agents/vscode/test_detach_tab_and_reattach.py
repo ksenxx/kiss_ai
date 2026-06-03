@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Integration tests: closing a chat tab does NOT stop a running agent
 task, and resuming a still-running task from history subscribes the
 newly opened tab to the live agent's stream so events flow there

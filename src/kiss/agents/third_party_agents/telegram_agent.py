@@ -1,3 +1,7 @@
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
 """Telegram Agent — ChatSorcarAgent extension with Telegram Bot API tools.
 
 Provides authenticated access to Telegram via a bot token from @BotFather.
