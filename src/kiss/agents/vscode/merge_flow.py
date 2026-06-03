@@ -290,7 +290,7 @@ class _MergeFlowMixin:
         return event
 
     def _handle_autocommit_action(
-        self, action: str, tab_id: str = "", *, auto: bool = False,
+        self, action: str, tab_id: str = "",
     ) -> None:
         """Process the user's reply to an ``autocommit_prompt``.
 
@@ -299,14 +299,6 @@ class _MergeFlowMixin:
                 ``"skip"`` to leave the working tree untouched.
             tab_id: The tab that owns the prompt (echoed in the
                 ``autocommit_done`` event).
-            auto: True when invoked by the post-task auto-commit-mode
-                path (not by an explicit user click).  In this mode a
-                no-op task — one where the agent changed no files —
-                must produce **no output at all**: the user opted into
-                automatic commits, not into a stream of "Nothing to
-                commit" notifications for every read-only / question
-                turn.  When False (the interactive button) the
-                "Nothing to commit." status is still surfaced.
         """
         if action == "skip":
             self._broadcast_autocommit_done(
@@ -329,24 +321,19 @@ class _MergeFlowMixin:
                 )
                 return
             with repo_lock(repo):
-                # Stage everything FIRST so a no-op task (agent changed
-                # no files) is detected before any progress / result
-                # event is emitted.  In auto-commit mode (``auto``) such
-                # a task must stay completely silent — see the docstring.
-                _git(self.work_dir, "add", "-A")
-                diff = _git(self.work_dir, "diff", "--cached")
-                if not diff.stdout.strip():
-                    if not auto:
-                        self._broadcast_autocommit_done(
-                            tab_id, success=True, committed=False,
-                            message="Nothing to commit.",
-                        )
-                    return
                 self.printer.broadcast({
                     "type": "autocommit_progress",
                     "message": "Staging changes…",
                     "tabId": tab_id,
                 })
+                _git(self.work_dir, "add", "-A")
+                diff = _git(self.work_dir, "diff", "--cached")
+                if not diff.stdout.strip():
+                    self._broadcast_autocommit_done(
+                        tab_id, success=True, committed=False,
+                        message="Nothing to commit.",
+                    )
+                    return
                 self.printer.broadcast({
                     "type": "autocommit_progress",
                     "message": "Generating commit message…",
