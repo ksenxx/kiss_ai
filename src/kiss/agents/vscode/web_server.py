@@ -3835,11 +3835,75 @@ class RemoteAccessServer:
 
         Call this from the main thread.  Press Ctrl-C to stop.
         """
+        import resource
+
+        pid = os.getpid()
+        logger.info(
+            "Server starting: pid=%d python=%s platform=%s "
+            "work_dir=%s host=%s port=%d",
+            pid,
+            sys.version.split()[0],
+            platform.platform(),
+            self.work_dir,
+            self.host,
+            self.port,
+        )
+        try:
+            rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            # macOS reports bytes, Linux reports KB
+            rss_mb = rss / (1024 * 1024) if sys.platform == "darwin" else rss / 1024
+            logger.info("Initial memory: rss=%.1fMB pid=%d", rss_mb, pid)
+        except Exception:
+            pass
+
+        def _signal_handler(signum: int, frame: Any) -> None:
+            sig_name = signal.Signals(signum).name
+            # Snapshot in-flight tasks for the log
+            from kiss.agents.sorcar.running_agent_state import (
+                _RunningAgentState,
+            )
+            active_tabs = []
+            for tab_id, tab in _RunningAgentState.running_agent_states.items():
+                if tab.is_task_active:
+                    task_id = tab.task_history_id or tab.last_task_id
+                    active_tabs.append(f"{tab_id}(task={task_id})")
+            try:
+                rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+                rss_mb = (
+                    rss / (1024 * 1024)
+                    if sys.platform == "darwin"
+                    else rss / 1024
+                )
+            except Exception:
+                rss_mb = -1
+            logger.warning(
+                "Signal %s received: pid=%d active_tasks=[%s] rss=%.1fMB",
+                sig_name,
+                pid,
+                ", ".join(active_tabs) if active_tabs else "none",
+                rss_mb,
+            )
+            # For SIGTERM: raise KeyboardInterrupt so the asyncio loop
+            # can unwind cleanly through the existing try/except.
+            if signum == signal.SIGTERM:
+                raise KeyboardInterrupt(f"Received {sig_name}")
+
+        # Register handlers for catchable termination signals so we
+        # get a log entry before exit.  SIGKILL cannot be caught, but
+        # SIGTERM (pkill, systemd stop) and SIGHUP (terminal closed)
+        # can — and are the most common non-OOM kill causes.
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            try:
+                signal.signal(sig, _signal_handler)
+            except (OSError, ValueError):
+                pass  # e.g. not main thread, or unsupported on this OS
+
         try:
             asyncio.run(self._serve_async())
         except KeyboardInterrupt:
-            pass
+            logger.info("Server shutting down: pid=%d (KeyboardInterrupt)", pid)
         finally:
+            logger.info("Server stopped: pid=%d", pid)
             self._stop_tunnel()
 
     async def start_async(self) -> None:
