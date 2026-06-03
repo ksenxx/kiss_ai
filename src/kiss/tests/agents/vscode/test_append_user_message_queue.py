@@ -357,6 +357,97 @@ class TestPreStepHookIntegration:
         assert result == "ok"
 
 
+class TestPreStepHookSurvivesRunReset:
+    """The drain hook must survive ``RelentlessAgent._reset`` (regression).
+
+    Root cause of the original bug: :meth:`SorcarAgent.run` installed
+    ``self.pre_step_hook`` *before* calling ``super().run()``, but
+    ``RelentlessAgent.run`` immediately calls ``_reset`` which sets
+    ``self.pre_step_hook = None``.  The per-session executor loop in
+    ``RelentlessAgent.perform_task`` then copied that ``None`` onto
+    every inner executor, so queued follow-up prompts were never
+    drained into the live conversation and the agent silently ignored
+    them.  The fix moves the hook installation into
+    :meth:`SorcarAgent.perform_task`, which runs *after* ``_reset``.
+
+    This test drives the real ``run`` → ``_reset`` →
+    ``perform_task`` ordering and captures the ``pre_step_hook`` value
+    actually handed to the inner executor.  It must be the live drain
+    method, not ``None``.
+    """
+
+    def setup_method(self) -> None:
+        _clear_registry()
+
+    def teardown_method(self) -> None:
+        _clear_registry()
+
+    def test_executor_receives_live_drain_hook(self) -> None:
+        from kiss.core.kiss_agent import KISSAgent
+
+        agent = SorcarAgent("Sorcar Regression")
+        agent._tab_id = "tab-survive"  # type: ignore[attr-defined]
+
+        tab = _RunningAgentState("tab-survive", "gemini")
+        tab.pending_user_messages = ["queued follow-up"]
+        _RunningAgentState.running_agent_states["tab-survive"] = tab
+
+        captured: dict[str, Any] = {}
+        original_run = KISSAgent.run
+
+        def capture_run(self: KISSAgent, **kwargs: Any) -> str:
+            # Record the hook the per-session executor was given the
+            # instant ``RelentlessAgent.perform_task`` wires it up,
+            # then short-circuit the real LLM loop.
+            captured["hook"] = self.pre_step_hook
+            return '"success": true\n"summary": "stub"\n'
+
+        KISSAgent.run = capture_run  # type: ignore[assignment]
+        try:
+            agent.run(
+                model_name="claude-opus-4-8",
+                prompt_template="do nothing",
+                web_tools=False,
+                max_steps=2,
+                max_budget=1.0,
+                verbose=False,
+            )
+        finally:
+            KISSAgent.run = original_run  # type: ignore[assignment]
+
+        # Before the fix this would be ``None`` (wiped by ``_reset``).
+        assert captured.get("hook") is not None
+        assert captured["hook"] == agent._drain_pending_user_messages
+
+    def test_no_tab_id_means_no_hook(self) -> None:
+        from kiss.core.kiss_agent import KISSAgent
+
+        agent = SorcarAgent("Sorcar No Tab")
+        # No ``_tab_id`` attribute set at all.
+
+        captured: dict[str, Any] = {}
+        original_run = KISSAgent.run
+
+        def capture_run(self: KISSAgent, **kwargs: Any) -> str:
+            captured["hook"] = self.pre_step_hook
+            return '"success": true\n"summary": "stub"\n'
+
+        KISSAgent.run = capture_run  # type: ignore[assignment]
+        try:
+            agent.run(
+                model_name="claude-opus-4-8",
+                prompt_template="do nothing",
+                web_tools=False,
+                max_steps=2,
+                max_budget=1.0,
+                verbose=False,
+            )
+        finally:
+            KISSAgent.run = original_run  # type: ignore[assignment]
+
+        assert captured.get("hook") is None
+
+
 class TestPendingMessagesClearedOnTaskFinish:
     """Lingering queued messages must not leak across successive tasks."""
 
