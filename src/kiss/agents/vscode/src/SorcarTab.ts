@@ -297,6 +297,9 @@ export function buildChatHtml(
             <input type="checkbox" id="cfg-demo-mode">
             Demo mode
           </label>
+          <div class="config-update-row">
+            <button type="button" id="cfg-update-btn" class="config-update-btn">Update</button>
+          </div>
 
           <div class="config-divider"></div>
           <div class="sidebar-hdr" style="margin-top:8px;">API Keys</div>
