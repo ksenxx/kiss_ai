@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import os
 import re
+import select
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -245,3 +247,75 @@ def test_main_no_task_enters_repl(tmp_path: Path) -> None:
     )
     assert proc.returncode == 0, proc.stderr
     assert "interactive mode" in proc.stdout
+
+def _read_line_over_pty(typed: str) -> tuple[str, str]:
+    """Drive ``_read_line`` on a real PTY; return (before_enter, full).
+
+    Forks a child that calls ``_read_line(_PROMPT)`` attached to a
+    pseudo-terminal so the interactive (TTY) rendering path runs.  The
+    bytes emitted *before* the submitting newline is sent are captured
+    separately so a test can assert the box is already closed (top *and*
+    bottom rule visible) while the user is still typing.
+
+    Args:
+        typed: The text to type before pressing Enter.
+
+    Returns:
+        A ``(before_enter, full)`` tuple of decoded terminal output.
+    """
+    import pty
+
+    child_code = (
+        "from kiss.agents.sorcar.cli_repl import _PROMPT, _read_line\n"
+        "import sys\n"
+        "line = _read_line(_PROMPT)\n"
+        "sys.stdout.write(f'RESULT[{line}]\\n')\n"
+        "sys.stdout.flush()\n"
+    )
+    pid, fd = pty.fork()
+    if pid == 0:  # child: a fresh interpreter attached to the PTY slave
+        os.execvp(sys.executable, [sys.executable, "-c", child_code])
+        os._exit(0)  # pragma: no cover - exec never returns
+
+    def drain(seconds: float) -> str:
+        out = b""
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            ready, _, _ = select.select([fd], [], [], 0.2)
+            if not ready:
+                continue
+            try:
+                chunk = os.read(fd, 8192)
+            except OSError:
+                break
+            if not chunk:
+                break
+            out += chunk
+        return out.decode("utf-8", "ignore")
+
+    # Let the fresh interpreter import and draw the idle prompt box.
+    time.sleep(2.0)
+    os.write(fd, typed.encode())
+    before = drain(1.0)
+    os.write(fd, b"\n")
+    after = drain(1.5)
+    os.close(fd)
+    os.waitpid(pid, 0)
+    return before, before + after
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX pty")
+def test_idle_prompt_box_closed_while_typing() -> None:
+    """The idle input box shows its bottom rule *before* Enter is pressed.
+
+    Regression test: the lower horizontal bar of the task-input box must
+    be drawn while the user is still composing the task (not only after
+    submitting), so the box is never left visually open at the bottom.
+    """
+    before, full = _read_line_over_pty("hello task")
+    # Both the top and the bottom rounded-border rows are emitted before
+    # the user submits, so the box is already closed while typing.
+    assert "╭" in before and "╮" in before, before
+    assert "╰" in before and "╯" in before, before
+    # The line still submits correctly once Enter is pressed.
+    assert "RESULT[hello task]" in full, full
