@@ -66,6 +66,16 @@ if ! command -v curl &>/dev/null; then
     exit 1
 fi
 
+# Returns 0 only if /dev/tty can actually be opened for reading.  A plain
+# `[ -r /dev/tty ]` test only inspects the permission bits, which pass even
+# inside a detached Docker container where the controlling terminal does not
+# exist and opening /dev/tty fails with ENXIO ("No such device or address").
+# Probing with a real open avoids that crash and lets prompts fall back to
+# their non-interactive default.
+can_read_tty() {
+    { : < /dev/tty; } 2>/dev/null
+}
+
 ensure_xcode_clt() {
     [ "$OS" = "Darwin" ] || return 0
 
@@ -103,10 +113,10 @@ ensure_xcode_clt() {
     echo ""
     echo "   A dialog has appeared to install the Xcode Command Line Tools."
     echo "   Complete the installation in that dialog, then return to this terminal."
-    if [ -r /dev/tty ]; then
+    if can_read_tty; then
         read -n 1 -s -r -p "   Press any key to continue with the rest of installation..." </dev/tty
     else
-        read -n 1 -s -r -p "   Press any key to continue with the rest of installation..."
+        echo "   Non-interactive shell detected — continuing without waiting."
     fi
     echo ""
 
@@ -133,16 +143,16 @@ ensure_homebrew() {
     echo ""
 
     local REPLY_BREW=""
-    if [ -r /dev/tty ]; then
+    if can_read_tty; then
         read -r -p "   Install the latest Homebrew now? [Y/n] " REPLY_BREW </dev/tty
     else
-        read -r -p "   Install the latest Homebrew now? [Y/n] " REPLY_BREW
+        echo "   Non-interactive shell detected — defaulting to Yes."
     fi
 
     case "$REPLY_BREW" in
         ""|y|Y|yes|YES|Yes)
             echo "   Installing Homebrew..."
-            if [ -r /dev/tty ]; then
+            if can_read_tty; then
                 NONINTERACTIVE=1 /bin/bash -c \
                     "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" </dev/tty
             else
@@ -393,10 +403,10 @@ prompt_upgrade_or_abort() {
     echo ""
     echo "   $name $current is older than the required version $required."
     local reply=""
-    if [ -r /dev/tty ]; then
+    if can_read_tty; then
         read -r -p "   Upgrade $name to $required or later? [Y/n] " reply </dev/tty
     else
-        read -r -p "   Upgrade $name to $required or later? [Y/n] " reply
+        echo "   Non-interactive shell detected — defaulting to Yes."
     fi
     case "$reply" in
         ""|y|Y|yes|YES|Yes) return 0 ;;
