@@ -83,6 +83,11 @@
   let attachments = [];
   let _scrollLock = false;
   let _noScroll = false;
+  // When true (only during bulk replay in replayEventsInto), hlBlock defers
+  // syntax highlighting: code blocks are tagged `needs-hl` instead of being
+  // highlighted, so panels collapsed by collapseAllExceptResult() are only
+  // highlighted lazily when the user expands them (see highlightPending).
+  let _deferHighlight = false;
   let scrollRaf = 0;
   let acIdx = -1;
 
@@ -979,6 +984,8 @@
         p.classList.remove('chv-hidden');
         if (inRunning) continue;
         p.classList.remove('collapsed');
+        // Highlight code deferred while this panel stayed collapsed.
+        highlightPending(p);
         collapsePreview(p);
       }
     }
@@ -1372,10 +1379,32 @@
   }
 
   function hlBlock(el) {
-    if (typeof hljs !== 'undefined')
-      el.querySelectorAll('pre code').forEach(bl => {
+    if (typeof hljs === 'undefined') return;
+    el.querySelectorAll('pre code').forEach(bl => {
+      // During bulk replay, defer the (expensive) highlight: tag the block so
+      // it is only highlighted once its panel is shown.  See highlightPending.
+      if (_deferHighlight) {
+        bl.classList.add('needs-hl');
+      } else {
         hljs.highlightElement(bl);
-      });
+      }
+    });
+  }
+
+  /**
+   * Highlight code blocks under `root` that were deferred during replay.
+   *
+   * Blocks tagged with `needs-hl` by hlBlock() while `_deferHighlight` was
+   * active are syntax-highlighted now and the tag removed, so each block is
+   * highlighted at most once.  Called when a collapsed panel is expanded so a
+   * long task's off-screen code is highlighted lazily instead of all at once.
+   */
+  function highlightPending(root) {
+    if (typeof hljs === 'undefined' || !root) return;
+    root.querySelectorAll('code.needs-hl').forEach(bl => {
+      bl.classList.remove('needs-hl');
+      hljs.highlightElement(bl);
+    });
   }
 
   function toggleThink(el) {
@@ -1453,6 +1482,8 @@
         panelEl.classList.remove('user-pinned');
       } else {
         panelEl.classList.add('user-pinned');
+        // Highlight code that was deferred while this panel stayed collapsed.
+        highlightPending(panelEl);
       }
       collapsePreview(panelEl);
       setTimeout(() => {
@@ -3671,66 +3702,87 @@
     let rLastToolName = '';
     // Start true so the first thought also gets its own panel.
     let rPendingPanel = true;
-    events.forEach(ev => {
-      const t = ev.type;
-      if (
-        t === 'task_done' ||
-        t === 'task_error' ||
-        t === 'task_stopped' ||
-        t === 'task_interrupted'
-      ) {
-        return;
-      }
-      if (t === 'followup_suggestion') {
-        const fu = mkEl('div', 'followup-bar');
-        fu.innerHTML =
-          '<span class="fu-label">Suggested next</span>' +
-          '<span class="fu-text">' +
-          esc(ev.text) +
-          '</span>';
-        if (opts && opts.onFollowupClick) {
-          fu.addEventListener('click', () => {
-            opts.onFollowupClick(ev.text);
-          });
+    // Defer syntax highlighting for the whole replay: every code block is
+    // tagged `needs-hl` instead of being highlighted up front.  After the
+    // panels are collapsed below, only the still-visible blocks are
+    // highlighted; the collapsed ones wait until the user expands them.
+    const prevDefer = _deferHighlight;
+    _deferHighlight = true;
+    try {
+      events.forEach(ev => {
+        const t = ev.type;
+        if (
+          t === 'task_done' ||
+          t === 'task_error' ||
+          t === 'task_stopped' ||
+          t === 'task_interrupted'
+        ) {
+          return;
         }
-        container.appendChild(fu);
-        return;
-      }
-      if (t === 'tool_call') {
-        rLastToolName = ev.name || '';
-        rLlmPanel = null;
-        rLlmPanelState = mkS();
-        rPendingPanel = true;
-      }
-      if (t === 'tool_result' && rLastToolName !== 'finish') {
-        rPendingPanel = true;
-      }
-      if (rPendingPanel && (t === 'thinking_start' || t === 'text_delta')) {
-        rLlmPanel = mkEl('div', 'llm-panel');
-        const lHdr = mkEl('div', 'llm-panel-hdr');
-        lHdr.textContent = 'Thoughts';
-        addCollapse(rLlmPanel, lHdr);
-        rLlmPanel.appendChild(lHdr);
-        container.appendChild(rLlmPanel);
-        rLlmPanelState = mkS();
-        rPendingPanel = false;
-      }
-      let target = container,
-        tState = rState;
-      if (
-        rLlmPanel &&
-        (t === 'thinking_start' ||
-          t === 'thinking_delta' ||
-          t === 'thinking_end' ||
-          t === 'text_delta' ||
-          t === 'text_end')
-      ) {
-        target = rLlmPanel;
-        tState = rLlmPanelState;
-      }
-      handleOutputEvent(ev, target, tState);
-    });
+        if (t === 'followup_suggestion') {
+          const fu = mkEl('div', 'followup-bar');
+          fu.innerHTML =
+            '<span class="fu-label">Suggested next</span>' +
+            '<span class="fu-text">' +
+            esc(ev.text) +
+            '</span>';
+          if (opts && opts.onFollowupClick) {
+            fu.addEventListener('click', () => {
+              opts.onFollowupClick(ev.text);
+            });
+          }
+          container.appendChild(fu);
+          return;
+        }
+        if (t === 'tool_call') {
+          rLastToolName = ev.name || '';
+          rLlmPanel = null;
+          rLlmPanelState = mkS();
+          rPendingPanel = true;
+        }
+        if (t === 'tool_result' && rLastToolName !== 'finish') {
+          rPendingPanel = true;
+        }
+        if (rPendingPanel && (t === 'thinking_start' || t === 'text_delta')) {
+          rLlmPanel = mkEl('div', 'llm-panel');
+          const lHdr = mkEl('div', 'llm-panel-hdr');
+          lHdr.textContent = 'Thoughts';
+          addCollapse(rLlmPanel, lHdr);
+          rLlmPanel.appendChild(lHdr);
+          container.appendChild(rLlmPanel);
+          rLlmPanelState = mkS();
+          rPendingPanel = false;
+        }
+        let target = container,
+          tState = rState;
+        if (
+          rLlmPanel &&
+          (t === 'thinking_start' ||
+            t === 'thinking_delta' ||
+            t === 'thinking_end' ||
+            t === 'text_delta' ||
+            t === 'text_end')
+        ) {
+          target = rLlmPanel;
+          tState = rLlmPanelState;
+        }
+        handleOutputEvent(ev, target, tState);
+      });
+    } finally {
+      _deferHighlight = prevDefer;
+    }
     collapseAllExceptResult(container);
+    // Highlight only blocks that remain visible after collapsing; blocks
+    // inside a collapsed panel stay deferred and are highlighted lazily when
+    // the user expands the panel (see addCollapse / highlightPending).
+    if (typeof hljs !== 'undefined') {
+      container.querySelectorAll('code.needs-hl').forEach(bl => {
+        if (!bl.closest('.collapsible.collapsed')) {
+          bl.classList.remove('needs-hl');
+          hljs.highlightElement(bl);
+        }
+      });
+    }
   }
 
   function replayTaskEvents(events) {

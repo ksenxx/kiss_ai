@@ -22,8 +22,12 @@ extension precisely:
   :func:`clip_autocomplete_suggestion` (mirrors the webview ``ghost``
   event produced by ``_AutocompleteMixin._complete``).
 * ``/`` slash commands matching Claude Code's quick commands
-  (``/help``, ``/clear``, ``/resume``, ``/model``, ``/cost``,
-  ``/context``, ``/exit`` …).
+  (``/help``, ``/clear``, ``/resume``, ``/model``, ``/model list``,
+  ``/cost``, ``/context``, ``/exit`` …).
+* ``/model``-name fast completion — :func:`rank_model_suggestions` over
+  the generation-capable models in
+  :mod:`kiss.core.models.model_info` (preferring providers whose API key
+  is configured), so ``/model <partial>`` completes to a real model name.
 
 TAB triggers completion via :mod:`readline`, which also provides
 command history (Up/Down), reverse search (Ctrl+R), and emacs-style line
@@ -88,7 +92,10 @@ SLASH_COMMANDS: dict[str, str] = {
     "/clear": "Start a new chat (clear conversation context)",
     "/new": "Alias for /clear",
     "/resume": "Resume a chat: /resume <chat-id>, or list recent chats",
-    "/model": "Switch model: /model <name>, or show the current model",
+    "/model": (
+        "Switch model: /model <name>, list all models with /model list, "
+        "or show the current model"
+    ),
     "/cost": "Show cost and token usage for this session",
     "/usage": "Alias for /cost",
     "/context": "Show token usage for this session",
@@ -102,6 +109,9 @@ _EXIT_WORDS = {"exit", "quit"}
 _PROMPT = f"{CYAN}{PROMPT_MARKER}{RESET}"
 _AT_RE = re.compile(r"@([^\s]*)$")
 _MENTION_RE = re.compile(r"PWD/(\S+)")
+# Matches a ``/model <partial>`` line, capturing the partial model name so
+# the completer can fast-complete it from MODEL_INFO.
+_MODEL_CMD_RE = re.compile(r"^/model\s+(.*)$")
 _ESC = "\x1b"
 
 
@@ -155,6 +165,24 @@ class CliCompleter:
         ranked = rank_file_suggestions(self._files(), query, usage)
         prefix = line[:at_start]
         return [f"{prefix}PWD/{item['text']} " for item in ranked]
+
+    def _model_matches(self, query: str) -> list[str]:
+        """Return ``/model <name>`` completions for the ``/model`` command.
+
+        Mirrors the extension's model picker: candidate model names come
+        from :func:`rank_model_suggestions` over the generation-capable
+        models in ``MODEL_INFO`` (preferring those with a configured API
+        key), best match first.
+
+        Args:
+            query: Text typed after ``/model `` (the partial model name).
+
+        Returns:
+            Whole-line ``/model <name>`` replacements, best match first.
+        """
+        from kiss.core.models.model_info import rank_model_suggestions
+
+        return [f"/model {name}" for name in rank_model_suggestions(query)]
 
     def _slash_matches(self, line: str) -> list[str]:
         """Return slash-command completions for *line* (e.g. ``/he``)."""
@@ -224,6 +252,9 @@ class CliCompleter:
             return self._at_mention_matches(
                 line, at.start(), at.group(1),
             )
+        model_cmd = _MODEL_CMD_RE.match(line)
+        if model_cmd:
+            return self._model_matches(model_cmd.group(1))
         stripped = line.strip()
         if stripped.startswith("/") and " " not in stripped:
             return self._slash_matches(line)
@@ -299,8 +330,8 @@ def _print_help() -> None:
         print(f"  {cmd:<10} {desc}")
     print(
         "\nInput fast-completes (Tab): @path mentions files, "
-        "/ completes commands, and typing a prefix of a previous task "
-        "suggests its completion.\n"
+        "/ completes commands, /model <partial> completes model names, "
+        "and typing a prefix of a previous task suggests its completion.\n"
     )
 
 
@@ -379,14 +410,63 @@ def _handle_resume(agent: SorcarAgent, arg: str) -> None:
 def _handle_model(
     agent: SorcarAgent, arg: str, run_kwargs: dict[str, Any],
 ) -> None:
-    """Switch the model for subsequent tasks, or show the current one."""
+    """Switch the model, list all models, or show the current one.
+
+    Args:
+        agent: The live agent whose ``model_name`` is switched.
+        arg: The argument after ``/model``: ``"list"`` prints every
+            generation model with its provider and API-key status, an
+            empty string shows the current model, and anything else is
+            treated as a model name to switch to.
+        run_kwargs: The mutable run kwargs whose ``model_name`` is
+            updated when switching.
+    """
     current = getattr(agent, "model_name", "") or run_kwargs.get("model_name", "")
+    if arg == "list":
+        _print_model_list(current)
+        return
     if not arg:
         print(f"Current model: {current}\n")
         return
     agent.model_name = arg  # type: ignore[attr-defined]
     run_kwargs["model_name"] = arg
     print(f"Model switched to {arg} for subsequent tasks.\n")
+
+
+def _print_model_list(current: str = "") -> None:
+    """Print every generation model with provider and API-key status.
+
+    Lists the models from
+    :func:`kiss.core.models.model_info.get_generation_model_listing`,
+    aligned in columns, with a ``✓``/``✗`` marker showing whether the
+    credential needed to run each model is configured, a ``← current``
+    marker on the active model, and a configured/total summary header.
+
+    Args:
+        current: The currently selected model name, marked in the list.
+    """
+    from kiss.core.models.model_info import get_generation_model_listing
+
+    listing = get_generation_model_listing()
+    if not listing:  # pragma: no cover - MODEL_INFO always has generation models
+        print("No generation models are available.\n")
+        return
+    name_width = max(len(name) for name, _, _ in listing)
+    prov_width = max(len(provider) for _, provider, _ in listing)
+    configured = sum(1 for _, _, ok in listing if ok)
+    print(
+        f"\nGeneration models ({configured}/{len(listing)} with credentials "
+        f"configured):"
+    )
+    for name, provider, ok in listing:
+        mark = "✓" if ok else "✗"
+        status = "configured" if ok else "no API key"
+        here = "  ← current" if name == current else ""
+        print(
+            f"  {mark} {name:<{name_width}}  {provider:<{prov_width}}  "
+            f"{status}{here}"
+        )
+    print()
 
 
 def _print_usage(agent: SorcarAgent) -> None:
