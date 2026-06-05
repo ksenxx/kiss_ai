@@ -46,6 +46,7 @@ from typing import TYPE_CHECKING, Any, cast
 from kiss.agents.sorcar.cli_panel import (
     CYAN,
     DIM,
+    PROMPT_MARKER,
     RESET,
     STEER_TITLE,
     panel_body,
@@ -234,13 +235,18 @@ class _InputBox:
         top = panel_top(self.title, cols)
         bottom = panel_bottom(self.status, cols)
         body, is_placeholder = panel_body(self.buf, cols)
-        mid_color = DIM if is_placeholder else ""
-        mid = "│ " + mid_color + body + RESET + " │"
+        # ``body`` always opens with the chevron; keep it cyan (like the
+        # idle ``sorcar`` prompt) and dim only the placeholder text that
+        # follows it when the buffer is empty.
+        marker = body[: len(PROMPT_MARKER)]
+        rest = body[len(PROMPT_MARKER) :]
+        rest_color = DIM if is_placeholder else ""
+        mid_inner = f" {CYAN}{marker}{RESET}{rest_color}{rest}{RESET} "
 
         # Save output cursor, paint the three box rows, restore it.
         out.write(_ESC + "7")
         out.write(f"{_ESC}[{top_row};1H{_ESC}[2K{CYAN}{top}{RESET}")
-        out.write(f"{_ESC}[{top_row + 1};1H{_ESC}[2K{CYAN}│{RESET}{mid[1:-1]}{CYAN}│{RESET}")
+        out.write(f"{_ESC}[{top_row + 1};1H{_ESC}[2K{CYAN}│{RESET}{mid_inner}{CYAN}│{RESET}")
         out.write(f"{_ESC}[{top_row + 2};1H{_ESC}[2K{CYAN}{bottom}{RESET}")
         out.write(_ESC + "8")
         out.flush()
