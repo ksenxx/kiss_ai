@@ -46,9 +46,15 @@ ______________________________________________________________________
   <img src="assets/sorcar-main.gif" alt="KISS Sorcar demo" width="100%">
 </div>
 
-**KISS Sorcar is an open-source AI coding and general-purpose assistant**, which is **free**, **open-source**, and **fully local**. You bring your own model API key (Anthropic highly recommended) or LLM endpoint or Claude Code or OpenAI Codex; nothing about your code or prompts is sent through our servers.
+**KISS Sorcar is an open-source AI software engineering and general-purpose assistant**, which is **free**, **open-source**, and **fully local**. You bring your own model API key (Anthropic highly recommended) or LLM endpoint or Claude Code or OpenAI Codex; nothing about your code or prompts is sent through our servers.
 
-It runs as a **Visual Studio Code extension**, as a **CLI tool** and as a **web/mobile app**, and is built on the **KISS Agent Framework** — a deliberately simple agent runtime that follows the [KISS principle](https://en.wikipedia.org/wiki/KISS_principle) ("Keep it Simple, Stupid"). All agents run as daemon thread in the KISS Sorcar web server daemon process. The agent has **browser** support (Chromium + Playwright), **multimodal** support, **Docker container** support, can **research topics on the web**, and can **run for hours** across multiple sessions. If you have Claude Code or OpenAI Codex in your PATH, you can also use `cc/*` or `codex/*` models for chat.
+## Full Installation
+
+```
+curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh | bash
+```
+
+KISS Sorcar runs as a **Visual Studio Code extension**, as a **CLI tool** and as a **web/mobile app**, and is built on the **KISS Agent Framework** — a deliberately simple agent runtime that follows the [KISS principle](https://en.wikipedia.org/wiki/KISS_principle) ("Keep it Simple, Stupid"). All agents run as daemon thread in the KISS Sorcar web server daemon process. The agent has **browser** support (Chromium + Playwright), **multimodal** support, **Docker container** support, can **research topics on the web**, and can **run for hours** across multiple sessions. If you have Claude Code or OpenAI Codex in your PATH, you can also use `cc/*` or `codex/*` models for chat.
 
 KISS Sorcar is named after [P. C. Sorcar, the Bengali magician](https://en.wikipedia.org/wiki/P._C._Sorcar). The paper is at [papers/kisssorcar/kiss_sorcar.pdf](papers/kisssorcar/kiss_sorcar.pdf).
 
@@ -57,12 +63,6 @@ KISS Sorcar is named after [P. C. Sorcar, the Bengali magician](https://en.wikip
 An old video on KISS Sorcar can be found at [https://www.youtube.com/watch?v=xnYxWvRqACE](https://www.youtube.com/watch?v=xnYxWvRqACE). We **no longer** recommend explicitly creating a plan in KISS Sorcar. See the paper for details.
 
 <scriptsize>Note that **Sorcar** also means government in Bengali.</scriptsize>
-
-## Full Installation
-
-```
-curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh | bash
-```
 
 ## 🎬 See It in Action
 
@@ -109,13 +109,13 @@ From writing production-grade code to planning your next vacation, KISS Sorcar h
 
 ## KISS Sorcar Extension Installation
 
-To install KISS Sorcar, open Visual Studio Code, search for "KISS Sorcar" in the extension marketplace, install, and relaunch VS Code. Press ESC if you don't have a specific API key, but you must provide at least one API key.
+To install the KISS Sorcar extension only, open Visual Studio Code, search for "KISS Sorcar" in the extension marketplace, install, and relaunch VS Code. Press ESC if you don't have a specific API key, but you must provide at least one API key.
 
 You can also manually download the extension from [src/kiss/agents/vscode/kiss-sorcar.vsix](src/kiss/agents/vscode/kiss-sorcar.vsix).
 
 ## CLI Interface
 
-If you do not want to use the KISS Sorcar IDE, you can open a terminal and use `sorcar` as a shell command. Some examples:
+If you do not want to use the KISS Sorcar IDE, you can open a terminal and use `sorcar` as a shell command or a CLI (similar to Claude Code). Some examples:
 
 ```
 sorcar # to launch Sorcar CLI similar to Claude Code
