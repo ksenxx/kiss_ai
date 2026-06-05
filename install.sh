@@ -654,6 +654,12 @@ update_repo() {
     echo ">>> [6/6] Installing VS Code extension..."
     "$CODE_CLI" --install-extension "$VSIX" --force 2>&1
     echo "   Extension installed into VS Code"
+    # The VSIX is a throwaway build artifact: VS Code copies the extension into
+    # its own extensions directory during ``--install-extension``, so the file
+    # in the checkout is no longer needed.  Remove it to keep the working tree
+    # clean and avoid shipping a stale VSIX on the next build.
+    rm -f "$VSIX"
+    echo "   Removed build artifact $VSIX"
     date -u +%Y-%m-%dT%H:%M:%SZ > "$HOME/.kiss/.extension-updated"
     # Remove any stale source-install marker from older versions of this
     # installer.  The extension now always runs against the kiss_project
