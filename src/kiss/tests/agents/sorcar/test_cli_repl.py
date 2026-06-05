@@ -14,6 +14,7 @@ line is never sent, so ``agent.run`` is never invoked.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -207,6 +208,19 @@ def test_repl_cost_command(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stderr
     assert "Cost:" in proc.stdout
     assert "Total tokens:" in proc.stdout
+
+
+def test_repl_frames_input_with_horizontal_lines(tmp_path: Path) -> None:
+    """The input dialog is framed by horizontal rules above and below."""
+    proc = _run_repl_subprocess(tmp_path, "/cost\n/exit\n")
+    assert proc.returncode == 0, proc.stderr
+    # The box-drawing rule character appears around each prompt.
+    assert "\u2500" in proc.stdout
+    # Two prompts are read (/cost then /exit); each prints a rule above,
+    # and each non-EOF line prints a rule below, so at least 3 rules of
+    # consecutive box-drawing characters appear in the output.
+    rules = re.findall(r"\u2500{10,}", proc.stdout)
+    assert len(rules) >= 3
 
 
 def test_main_no_task_enters_repl(tmp_path: Path) -> None:
