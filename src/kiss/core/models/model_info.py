@@ -1037,6 +1037,78 @@ def get_available_models() -> list[str]:
     return sorted(result)
 
 
+def get_model_provider(model_name: str) -> str:
+    """Return the human-readable provider label that routes *model_name*.
+
+    The mapping mirrors the dispatch order in :func:`model`: subscription
+    CLIs first (``cc/`` → Claude Code, ``codex/`` → Codex), then the
+    prefix-routed HTTP providers (``openrouter/``, ``claude-``,
+    ``gemini-``, ``minimax-``), then the OpenAI and Together prefix sets.
+
+    Args:
+        model_name: A ``MODEL_INFO`` key.
+
+    Returns:
+        str: The provider label (e.g. ``"OpenAI"``, ``"Anthropic"``,
+            ``"OpenRouter"``), or ``"Unknown"`` if no route matches.
+    """
+    if model_name.startswith("cc/"):
+        return "Claude Code CLI"
+    if model_name.startswith("codex/"):
+        return "Codex CLI"
+    if model_name.startswith("openrouter/"):
+        return "OpenRouter"
+    if model_name.startswith("claude-"):
+        return "Anthropic"
+    if model_name.startswith("gemini-") or model_name == "text-embedding-004":
+        return "Gemini"
+    if model_name.startswith("minimax-"):
+        return "MiniMax"
+    if model_name.startswith(_OPENAI_PREFIXES) and not model_name.startswith("openai/gpt-oss"):
+        return "OpenAI"
+    if model_name.startswith(_TOGETHER_PREFIXES):
+        return "Together"
+    return "Unknown"
+
+
+def get_generation_model_listing() -> list[tuple[str, str, bool]]:
+    """List every generation-capable model with provider and key status.
+
+    Walks ``MODEL_INFO`` (sorted by model name), skipping non-generation
+    (embedding/image-only) entries, and reports for each model the
+    provider that routes it and whether the credential needed to run it
+    is currently present — an API key for HTTP providers, or the local
+    executable for the ``Claude Code`` / ``Codex`` subscription CLIs.
+
+    Returns:
+        list[tuple[str, str, bool]]: ``(model_name, provider, configured)``
+            triples sorted alphabetically by model name.
+    """
+    import shutil
+
+    from kiss.core.models.codex_model import find_codex_executable
+
+    keys = config_module.DEFAULT_CONFIG
+    provider_configured = {
+        "Anthropic": bool(keys.ANTHROPIC_API_KEY),
+        "OpenAI": bool(keys.OPENAI_API_KEY),
+        "Gemini": bool(keys.GEMINI_API_KEY),
+        "OpenRouter": bool(keys.OPENROUTER_API_KEY),
+        "Together": bool(keys.TOGETHER_API_KEY),
+        "MiniMax": bool(keys.MINIMAX_API_KEY),
+        "Claude Code CLI": shutil.which("claude") is not None,
+        "Codex CLI": find_codex_executable() is not None,
+        "Unknown": False,
+    }
+    listing: list[tuple[str, str, bool]] = []
+    for name, info in sorted(MODEL_INFO.items()):
+        if not info.is_generation_supported:
+            continue
+        provider = get_model_provider(name)
+        listing.append((name, provider, provider_configured.get(provider, False)))
+    return listing
+
+
 def get_completion_model_names() -> list[str]:
     """Return model names to offer for input fast-completion, best first.
 
