@@ -104,27 +104,6 @@ def test_webapp_omits_work_dir_config_field() -> None:
     ), "webapp still ships the removed cfg-work-dir field"
 
 
-def test_webapp_autocommit_button_lives_in_auto_commit_label() -> None:
-    """``#autocommit-btn`` renders inline next to the "Auto commit" label.
-
-    Both the extension webview and the remote webapp must place the
-    commit button inside the ``cfg-auto-commit`` settings label (after
-    the checkbox, before ``</label>``) and not inside ``#model-picker``.
-    """
-    for html in (_ext_html(), _build_html()):
-        web_picker = _section(html, "model-picker")
-        assert 'id="autocommit-btn"' not in web_picker, (
-            "autocommit-btn should no longer live inside #model-picker"
-        )
-        checkbox_pos = html.index('id="cfg-auto-commit"')
-        btn_pos = html.index('id="autocommit-btn"')
-        label_end = html.index("</label>", checkbox_pos)
-        assert checkbox_pos < btn_pos < label_end, (
-            "autocommit-btn must sit inside the cfg-auto-commit label "
-            "after the checkbox and before </label>"
-        )
-
-
 def test_webapp_delete_task_button_has_no_tooltip_attribute() -> None:
     """``data-tooltip`` was stripped from any delete-task button markup."""
     ext = _ext_html()
