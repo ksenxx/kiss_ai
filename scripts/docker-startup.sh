@@ -68,6 +68,12 @@ export PATH="$REPO_DIR/.venv/bin:$HOME/.local/bin:$PATH"
 # Microsoft VS Code and install the extension into ~/.vscode/extensions, which
 # code-server never reads, leaving the launched IDE without the extension.
 export KISS_CODE_CLI=code-server
+# Do NOT let install.sh launch its own code-server: this script starts
+# code-server itself via `exec /usr/bin/entrypoint.sh` at the end.  Without
+# this, install.sh's `launch_vscode` runs `code-server <workspace>` which
+# binds port 8080, racing the entrypoint's code-server — whichever loses dies
+# with EADDRINUSE and crashes the container.
+export KISS_SKIP_LAUNCH=1
 bash "$REPO_DIR/install.sh"
 info "install.sh completed"
 
