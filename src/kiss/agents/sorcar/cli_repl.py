@@ -499,6 +499,13 @@ def _run_one(
         print("\n⏹  Task interrupted.\n")
         return
     elapsed = time.time() - start
+    # When the agent runs verbosely it already renders the green "Result"
+    # panel (whose subtitle carries tokens / cost / steps) to the console
+    # as the task ends.  Re-printing the summary and the run stats here
+    # would duplicate that panel, so stay completely silent and let the
+    # Result panel be the last thing on screen before the prompt returns.
+    if kwargs.get("verbose", True):
+        return
     _print_result(result)
     if isinstance(agent, ChatSorcarAgent):
         _print_run_stats(agent, elapsed)
