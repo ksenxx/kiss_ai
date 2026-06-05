@@ -200,6 +200,40 @@ def test_handle_slash_model_switch(tmp_path: Path, kiss_db) -> None:
     assert agent.model_name == "new-model"
 
 
+def test_handle_slash_model_list_prints_models(tmp_path: Path, kiss_db, capsys) -> None:
+    """``/model list`` prints every generation model with provider/status."""
+    from kiss.core.models.model_info import get_generation_model_listing
+
+    agent = ChatSorcarAgent("t")
+    kwargs: dict = {"model_name": "demo-model"}
+    assert _handle_slash(agent, "/model list", kwargs) is False
+    out = capsys.readouterr().out
+    listing = get_generation_model_listing()
+    # Header reports the configured/total counts.
+    configured = sum(1 for _, _, ok in listing if ok)
+    assert f"({configured}/{len(listing)} with credentials configured)" in out
+    # A representative generation model and its provider label are shown.
+    assert "gpt-5.5" in out
+    assert "OpenAI" in out
+    # Every listed model name appears in the output.
+    for name, provider, _ok in listing:
+        assert name in out
+    # Listing does not change the active model.
+    assert kwargs["model_name"] == "demo-model"
+    assert agent.model_name != "list"
+
+
+def test_handle_slash_model_list_marks_current(tmp_path: Path, kiss_db, capsys) -> None:
+    """``/model list`` flags the currently selected model with a marker."""
+    agent = ChatSorcarAgent("t")
+    agent.model_name = "gpt-5.5"
+    _handle_slash(agent, "/model list", {})
+    out = capsys.readouterr().out
+    current_lines = [ln for ln in out.splitlines() if "← current" in ln]
+    assert len(current_lines) == 1
+    assert "gpt-5.5" in current_lines[0]
+
+
 def test_handle_slash_exit_returns_true(tmp_path: Path, kiss_db) -> None:
     """``/exit`` and ``/quit`` request loop termination."""
     agent = ChatSorcarAgent("t")
