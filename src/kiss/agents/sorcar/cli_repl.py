@@ -40,7 +40,11 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from kiss.agents.sorcar.cli_helpers import _print_recent_chats, _print_run_stats
+from kiss.agents.sorcar.cli_helpers import (
+    _print_recent_chats,
+    _print_result,
+    _print_run_stats,
+)
 from kiss.agents.sorcar.cli_steering import run_with_steering
 from kiss.agents.sorcar.persistence import (
     _default_kiss_dir,
@@ -477,7 +481,7 @@ def _run_one(
         print("\n⏹  Task interrupted.\n")
         return
     elapsed = time.time() - start
-    print(result)
+    _print_result(result)
     if isinstance(agent, ChatSorcarAgent):
         _print_run_stats(agent, elapsed)
     else:

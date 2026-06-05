@@ -26,6 +26,7 @@ from kiss.agents.sorcar.cli_helpers import (
     _build_arg_parser,
     _build_run_kwargs,
     _print_recent_chats,
+    _print_result,
     _print_run_stats,
 )
 from kiss.agents.sorcar.git_worktree import (
@@ -914,7 +915,7 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
         result = run_with_steering(agent, run_kwargs)
         elapsed = time_mod.time() - start_time
 
-        print(result)
+        _print_result(result)
         if isinstance(agent, ChatSorcarAgent):
             _print_run_stats(agent, elapsed)
         else:
