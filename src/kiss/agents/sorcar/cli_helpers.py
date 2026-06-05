@@ -23,6 +23,7 @@ from kiss.agents.sorcar.sorcar_agent import (
     cli_ask_user_question,
 )
 from kiss.core.config import DEFAULT_CONFIG
+from kiss.core.models.model_info import get_default_model
 
 if TYPE_CHECKING:
     from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
@@ -55,7 +56,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser for all Sorcar agent entry points."""
     parser = argparse.ArgumentParser(description="Run SorcarAgent demo")
     parser.add_argument(
-        "-m", "--model_name", type=str, default="claude-opus-4-6", help="LLM model name"
+        "-m", "--model_name", type=str, default=get_default_model(),
+        help="LLM model name (defaults to the best model for the configured API keys)",
     )
     parser.add_argument(
         "-e", "--endpoint", type=str, default=None, help="Custom endpoint for local model"
@@ -68,7 +70,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "-b", "--max_budget", type=float, default=DEFAULT_CONFIG.max_budget,
         help="Maximum budget in USD",
     )
-    parser.add_argument("-w", "--work_dir", type=str, default=None, help="Working directory")
+    parser.add_argument(
+        "-w", "--work_dir", type=str, default=str(Path.cwd()),
+        help="Working directory (defaults to the directory where sorcar is launched)",
+    )
     parser.add_argument(
         "-v", "--verbose",
         type=lambda x: str(x).lower() == "true",
