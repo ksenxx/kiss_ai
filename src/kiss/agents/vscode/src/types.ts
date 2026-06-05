@@ -88,7 +88,8 @@ export type FromWebviewMessage =
       config: Record<string, unknown>;
       apiKeys: Record<string, string>;
     }
-  | {type: 'sizeReport'; innerWidth: number; screenWidth: number};
+  | {type: 'sizeReport'; innerWidth: number; screenWidth: number}
+  | {type: 'runUpdate'};
 
 /** Messages from extension to webview (matches browser event protocol) */
 export type ToWebviewMessage = ToWebviewMessageBody & {tabId?: string};
