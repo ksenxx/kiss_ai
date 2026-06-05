@@ -287,6 +287,21 @@ REPO
 
 find_code_cli() {
     CODE_CLI=""
+    # Honor an explicit override so callers running inside a specific editor
+    # distribution can force its CLI.  The Docker/code-server entrypoint sets
+    # KISS_CODE_CLI=code-server so the extension is installed into
+    # code-server's extensions directory
+    # (~/.local/share/code-server/extensions) — the one the browser IDE
+    # actually reads — instead of a separately apt-installed Microsoft VS Code
+    # (~/.vscode/extensions), which code-server never loads.
+    if [ -n "${KISS_CODE_CLI:-}" ]; then
+        local override
+        override="$(command -v "$KISS_CODE_CLI" 2>/dev/null || true)"
+        if [ -n "$override" ] && [ -x "$override" ]; then
+            CODE_CLI="$override"
+            return 0
+        fi
+    fi
     for candidate in \
         "$(command -v code 2>/dev/null || true)" \
         "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code" \
