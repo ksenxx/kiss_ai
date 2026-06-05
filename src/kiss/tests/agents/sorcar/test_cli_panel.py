@@ -56,7 +56,9 @@ class TestPanelBody:
     def test_empty_buffer_shows_placeholder(self) -> None:
         body, is_placeholder = panel_body("", 80)
         assert is_placeholder is True
-        assert body.startswith(PLACEHOLDER)
+        # The chevron is always shown on the left, then the placeholder.
+        assert body.startswith(PROMPT_MARKER)
+        assert body.startswith(f"{PROMPT_MARKER}{PLACEHOLDER}")
 
     def test_long_buffer_is_tail_clipped(self) -> None:
         body, _ = panel_body("x" * 200, 40)
@@ -75,7 +77,22 @@ class TestSharedPanelAcrossDialogs:
         text = out.getvalue()
         # The same rounded glyphs the idle prompt prints appear here.
         assert "╭" in text and "╮" in text and "╰" in text and "╯" in text
-        assert f"{PROMPT_MARKER}tweak it" in text
+        # The chevron is drawn cyan (separated by ANSI codes) before the
+        # typed text, so assert each part is present.
+        assert PROMPT_MARKER in text
+        assert "tweak it" in text
+
+    def test_steering_box_shows_chevron_when_empty(self) -> None:
+        # The empty (placeholder) steering box still draws the ``› ``
+        # chevron on the left, exactly like the idle ``sorcar`` prompt.
+        out = io.StringIO()
+        box = _InputBox(threading.RLock(), out)
+        box._active = True
+        box.buf = ""
+        box.redraw()
+        text = out.getvalue()
+        assert PROMPT_MARKER in text
+        assert PLACEHOLDER in text
 
     def test_idle_and_steer_share_one_border_renderer(self) -> None:
         # Both dialogs build their top border from the same helper, so an
