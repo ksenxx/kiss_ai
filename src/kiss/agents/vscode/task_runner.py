@@ -136,6 +136,10 @@ class _TaskRunnerMixin:
                     tab.pending_user_messages.clear()
                     tab.is_task_active = False
                     tab.is_running_non_wt = False
+                    # Clear the shutdown-cancellation marker so a reused
+                    # tab's next task starts from a clean slate (it is
+                    # only meaningful while a task is in flight).
+                    tab.interrupted_by_shutdown = False
                     # Dispose the transient agent — a fresh one is
                     # built per task in ``_CommandsMixin._cmd_run``.
                     # Preserve the agent when a worktree branch with
@@ -462,10 +466,10 @@ class _TaskRunnerMixin:
                         result_summary[:200],
                     )
                 except KeyboardInterrupt:
-                    result_summary = "Task stopped by user"
-                    task_end_event = {"type": "task_stopped"}
+                    result_summary, task_end_event = self._cancel_outcome(tab)
                     logger.info(
-                        "Task stopped by user: tab_id=%s task_id=%s",
+                        "%s: tab_id=%s task_id=%s",
+                        result_summary,
                         tab_id,
                         tab.task_history_id,
                     )
@@ -518,8 +522,8 @@ class _TaskRunnerMixin:
             # raised) we preserve theirs.
             if result_summary == "Agent Failed Abruptly":
                 if isinstance(_outer_exc, KeyboardInterrupt):
-                    result_summary = "Task stopped by user"
-                    task_end_event = task_end_event or {"type": "task_stopped"}
+                    result_summary, _cancel_event = self._cancel_outcome(tab)
+                    task_end_event = task_end_event or _cancel_event
                 else:
                     _exc_name = type(_outer_exc).__name__
                     result_summary = f"Task failed: {_exc_name}: {_outer_exc}"
@@ -572,7 +576,7 @@ class _TaskRunnerMixin:
                     (
                         task_end_event
                         and task_end_event.get("type")
-                        in ("task_error", "task_stopped")
+                        in ("task_error", "task_stopped", "task_interrupted")
                     )
                     or _agent_reported_failure
                 )
@@ -791,6 +795,44 @@ class _TaskRunnerMixin:
                         "startTs": int(cmd.get("_start_ms") or 0),
                         "endTs": int(time.time() * 1000),
                     })
+
+    @staticmethod
+    def _cancel_outcome(
+        tab: _RunningAgentState,
+    ) -> tuple[str, dict[str, Any]]:
+        """Resolve the result label + end event for a cancelled task.
+
+        A task is cancelled by injecting a ``KeyboardInterrupt`` into
+        the worker thread.  Two unrelated paths do this and are
+        otherwise indistinguishable at the ``except KeyboardInterrupt``
+        site:
+
+        * the user clicking "Stop" (:meth:`_stop_task`), and
+        * a graceful server shutdown on ``SIGTERM`` — e.g. a daemon /
+          LaunchAgent restart triggered by a KISS Sorcar extension
+          update — which routes through
+          :meth:`RemoteAccessServer._stop_active_agent_tasks`.
+
+        The shutdown path sets :attr:`_RunningAgentState.interrupted_by_shutdown`
+        on the tab *before* injecting the interrupt, so this flag is the
+        single source of truth.  Returning the shutdown-specific label
+        and ``task_interrupted`` event prevents the long-standing
+        mislabelling where a server restart was reported to the user as
+        "Task stopped by user".
+
+        Args:
+            tab: The running tab state whose task was cancelled.
+
+        Returns:
+            ``(result_summary, task_end_event)`` — the persisted result
+            string and the lifecycle end-event dict.
+        """
+        if tab.interrupted_by_shutdown:
+            return (
+                "Task interrupted by server restart/shutdown",
+                {"type": "task_interrupted"},
+            )
+        return ("Task stopped by user", {"type": "task_stopped"})
 
     def _stop_task(self, tab_id: str = "") -> None:
         """Signal the agent to stop.
