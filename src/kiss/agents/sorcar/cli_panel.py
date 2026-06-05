@@ -75,14 +75,19 @@ def panel_bottom(status: str, cols: int) -> str:
 def panel_body(buf: str, cols: int) -> tuple[str, bool]:
     """Return the inner body text for *buf* padded to the panel width.
 
+    The body always opens with the :data:`PROMPT_MARKER` chevron — the
+    same ``› `` the idle ``sorcar`` prompt shows — so the steering box
+    carries the chevron on the left whether or not anything is typed.
+
     Args:
         buf: The current edit buffer (empty shows the placeholder).
         cols: Total panel width in columns.
 
     Returns:
         A ``(body, is_placeholder)`` tuple where *body* is padded to the
-        panel's inner width and *is_placeholder* is ``True`` when the
-        empty-buffer placeholder is shown (so callers can dim it).
+        panel's inner width and starts with :data:`PROMPT_MARKER`, and
+        *is_placeholder* is ``True`` when the empty-buffer placeholder is
+        shown (so callers can dim the text after the chevron).
     """
     inner_w = cols - 4  # room between "│ " and " │"
     if buf:
@@ -92,4 +97,5 @@ def panel_body(buf: str, cols: int) -> tuple[str, bool]:
             shown = shown[len(shown) - avail :]
         body = PROMPT_MARKER + shown + "▏"
         return body[:inner_w].ljust(inner_w), False
-    return PLACEHOLDER[:inner_w].ljust(inner_w), True
+    body = PROMPT_MARKER + PLACEHOLDER
+    return body[:inner_w].ljust(inner_w), True
