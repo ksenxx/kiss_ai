@@ -644,11 +644,11 @@ update_repo() {
         find_code_cli || true
     fi
     if [ -n "$CODE_CLI" ]; then
-        INSTALLED_VSCODE=$("$CODE_CLI" --version 2>/dev/null | head -1)
+        INSTALLED_VSCODE=$("$CODE_CLI" --version 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1)
         if [ -n "$REQUIRED_VSCODE_VERSION" ] && [ -n "$INSTALLED_VSCODE" ] && ! version_gte "$INSTALLED_VSCODE" "$REQUIRED_VSCODE_VERSION"; then
             prompt_upgrade_or_abort "VS Code" "$INSTALLED_VSCODE" "$REQUIRED_VSCODE_VERSION"
             upgrade_vscode
-            INSTALLED_VSCODE=$("$CODE_CLI" --version 2>/dev/null | head -1)
+            INSTALLED_VSCODE=$("$CODE_CLI" --version 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1)
         fi
         echo "   code CLI ready: $CODE_CLI (v$INSTALLED_VSCODE)"
     else
