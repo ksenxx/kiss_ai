@@ -3965,6 +3965,17 @@ class RemoteAccessServer:
             for tab_id, tab in _RunningAgentState.running_agent_states.items():
                 thread = tab.task_thread
                 if tab.is_task_active and thread is not None and thread.is_alive():
+                    # Mark BEFORE the cooperative stop / injected
+                    # KeyboardInterrupt so the worker's
+                    # ``except KeyboardInterrupt`` handler reliably
+                    # observes that this cancellation is a graceful
+                    # server shutdown (SIGTERM / daemon restart), not a
+                    # user "Stop" click.  This is the sole signal that
+                    # lets the task-runner persist
+                    # "Task interrupted by server restart/shutdown"
+                    # (event ``task_interrupted``) instead of
+                    # "Task stopped by user" (event ``task_stopped``).
+                    tab.interrupted_by_shutdown = True
                     active.append((tab_id, tab.stop_event, thread))
 
         if not active:
