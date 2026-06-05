@@ -136,7 +136,7 @@ class TestB5CommitMessageCarriesTabId(unittest.TestCase):
         done = threading.Event()
         captured_tab_ids: list[object] = []
 
-        def stub(tab_id_arg: str = "") -> None:
+        def stub(tab_id_arg: str = "", *, work_dir: str = "") -> None:
             captured_tab_ids.append(tab_id_arg)
             server.printer.broadcast({
                 "type": "commitMessage", "message": "x", "tabId": tab_id_arg,
