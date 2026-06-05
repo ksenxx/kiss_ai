@@ -1053,6 +1053,13 @@ def _flush_chat_events() -> None:
     """
     if _event_writer_thread is None:
         return
+    # Mirror ``_queue_chat_event``: if the writer thread died (e.g. it was
+    # stopped during a DB swap) while events are still queued, restart it
+    # so the backlog gets drained.  Otherwise ``_event_queue.join()`` would
+    # block forever waiting for a ``task_done()`` the dead writer can never
+    # call.
+    if not _event_writer_thread.is_alive() and _event_queue.unfinished_tasks:
+        _start_event_writer()
     _event_queue.join()
 
 
