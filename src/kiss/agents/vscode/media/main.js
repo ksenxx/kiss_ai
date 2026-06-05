@@ -863,6 +863,7 @@
   const worktreeToggleBtn = document.getElementById('cfg-use-worktree');
   const parallelToggleBtn = document.getElementById('cfg-use-parallel');
   const demoToggleBtn = document.getElementById('cfg-demo-mode');
+  const updateBtn = document.getElementById('cfg-update-btn');
   const autocommitToggleBtn = document.getElementById('cfg-auto-commit');
   const taskPanel = document.getElementById('task-panel');
   const taskPanelText = document.getElementById('task-panel-text');
@@ -3243,10 +3244,20 @@
         break;
       }
       case 'task_error':
+      case 'task_interrupted':
       case 'task_stopped': {
-        const isErr = t === 'task_error';
         markTabDone(ev.tabId, true);
-        setReady(isErr ? 'Error' : 'Stopped', ev.tabId);
+        // ``task_interrupted`` is a graceful server shutdown / restart
+        // (e.g. an extension update restarting the daemon), distinct
+        // from the user clicking "Stop" (``task_stopped``) and from a
+        // genuine failure (``task_error``).
+        const label =
+          t === 'task_error'
+            ? 'Error'
+            : t === 'task_interrupted'
+              ? 'Interrupted'
+              : 'Stopped';
+        setReady(label, ev.tabId);
         break;
       }
       case 'new_tab': {
@@ -3662,7 +3673,12 @@
     let rPendingPanel = true;
     events.forEach(ev => {
       const t = ev.type;
-      if (t === 'task_done' || t === 'task_error' || t === 'task_stopped') {
+      if (
+        t === 'task_done' ||
+        t === 'task_error' ||
+        t === 'task_stopped' ||
+        t === 'task_interrupted'
+      ) {
         return;
       }
       if (t === 'followup_suggestion') {
@@ -4396,6 +4412,14 @@
           return;
         }
         demoMode = demoToggleBtn.checked;
+      });
+    }
+
+    if (updateBtn) {
+      updateBtn.addEventListener('click', e => {
+        e.preventDefault();
+        e.stopPropagation();
+        vscode.postMessage({type: 'runUpdate'});
       });
     }
 

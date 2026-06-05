@@ -11,6 +11,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import {SorcarSidebarView} from './SorcarSidebarView';
+import {isReloadReady} from './reloadGuard';
 
 import {ensureDependencies, ensureLocalBinInPath} from './DependencyInstaller';
 
@@ -240,23 +241,92 @@ export function activate(context: vscode.ExtensionContext): void {
   //      *new* version.  A version bump puts the new extension in a separate
   //      directory, so the old extension.js is never modified and watcher #1
   //      never fires.
+  const extJsPath = path.join(context.extensionPath, 'out', 'extension.js');
+  const markerPath = path.join(os.homedir(), '.kiss', '.extension-updated');
+  const sockPath = path.join(os.homedir(), '.kiss', 'sorcar.sock');
+
   let reloadTriggered = false;
-  const triggerReload = () => {
+  let settleTimer: ReturnType<typeof setInterval> | undefined;
+
+  const doReload = () => {
     if (reloadTriggered) return;
     reloadTriggered = true;
+    if (settleTimer) {
+      clearInterval(settleTimer);
+      settleTimer = undefined;
+    }
     fs.unwatchFile(extJsPath);
     fs.unwatchFile(markerPath);
     vscode.commands.executeCommand('workbench.action.reloadWindow');
   };
 
-  const extJsPath = path.join(context.extensionPath, 'out', 'extension.js');
+  // A same-version ``code --install-extension --force`` first DELETES the
+  // extension directory and then re-extracts it, so ``out/extension.js`` is
+  // transiently missing (and briefly partially written) for a noticeable
+  // window.  Reloading during that window brings the chat webview up against
+  // a half-installed extension (its ``media`` resources are gone) — the chat
+  // view renders blank.  So we never reload until ``out/extension.js`` is
+  // present, non-empty and size-stable across two consecutive polls
+  // (``codeReady``).
+  //
+  // We *prefer* to also wait for the kiss-web daemon's socket to be back so
+  // the reloaded webview can reconnect immediately, but we must NOT block on
+  // it indefinitely.  ``install.sh`` deliberately kills the daemon and deletes
+  // the socket before writing the update marker, and on a source install the
+  // socket only returns once the *post-reload* ``ensureDependencies()``
+  // respawns the daemon.  Hard-gating the reload on the socket therefore
+  // dead-locks: the reload waits for a socket that can only come back after
+  // the reload.  That stranded users on stale code until the 60 s hard
+  // timeout, so they restarted VS Code by hand.  Instead, once the code is
+  // stable we give the socket a short grace window and then reload regardless
+  // — the webview's ``AgentClient`` auto-reconnects when the daemon comes back.
+  const RELOAD_SETTLE_INTERVAL_MS = 500;
+  // How long to keep waiting for the daemon socket after the extension code
+  // has settled before reloading anyway.
+  const RELOAD_SOCKET_GRACE_MS = 3_000;
+  // Absolute ceiling: reload no later than this even if the code never settles
+  // (e.g. an interrupted reinstall) so the user is never stranded.
+  const RELOAD_SETTLE_TIMEOUT_MS = 15_000;
+  const triggerReload = () => {
+    if (reloadTriggered || settleTimer) return;
+    let prevSize = -1;
+    let waited = 0;
+    // Wall-clock at which the extension code first became stable; -1 until
+    // then.  Used to bound the post-code-ready wait for the daemon socket.
+    let codeReadySince = -1;
+    settleTimer = setInterval(() => {
+      waited += RELOAD_SETTLE_INTERVAL_MS;
+      const {codeReady, socketUp, size} = isReloadReady(
+        extJsPath,
+        sockPath,
+        prevSize,
+      );
+      prevSize = size;
+      if (codeReady && codeReadySince < 0) codeReadySince = waited;
+      const codeStableFor = codeReadySince < 0 ? 0 : waited - codeReadySince;
+      // Reload when the code is stable AND either the socket is back or the
+      // grace window has elapsed; or when the absolute timeout is hit.
+      if (
+        (codeReady && (socketUp || codeStableFor >= RELOAD_SOCKET_GRACE_MS)) ||
+        waited >= RELOAD_SETTLE_TIMEOUT_MS
+      ) {
+        doReload();
+      }
+    }, RELOAD_SETTLE_INTERVAL_MS);
+  };
+
+  // Two watchers feed the same settle gate:
+  //   1. extension.js — fires when the VSIX is reinstalled with the *same*
+  //      version (files overwritten in-place).
+  //   2. ~/.kiss/.extension-updated marker — fires when install.sh /
+  //      build-extension.sh write the marker *after* installing the
+  //      extension and restarting the daemon.
   fs.watchFile(extJsPath, {interval: 2000}, (curr, prev) => {
     if (curr.mtimeMs !== prev.mtimeMs || curr.ino !== prev.ino) {
       triggerReload();
     }
   });
 
-  const markerPath = path.join(os.homedir(), '.kiss', '.extension-updated');
   fs.watchFile(markerPath, {interval: 2000}, (curr, prev) => {
     // Only reload when the marker is *created* or *modified* (size > 0),
     // not when ensureDependencies() deletes it (size === 0).
@@ -267,6 +337,10 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push({
     dispose: () => {
+      if (settleTimer) {
+        clearInterval(settleTimer);
+        settleTimer = undefined;
+      }
       fs.unwatchFile(extJsPath);
       fs.unwatchFile(markerPath);
     },

@@ -171,8 +171,9 @@ class TestShutdownStopsActiveTask(TestCase):
             "regression: shutdown left the task at the sentinel result; "
             f"got {row['result']!r}"
         )
-        assert row["result"] == "Task stopped by user", (
-            "shutdown should persist a clean 'stopped' result; "
+        assert row["result"] == "Task interrupted by server restart/shutdown", (
+            "shutdown should persist the restart/shutdown-specific result, "
+            "not the user-stop label; "
             f"got {row['result']!r}"
         )
 
