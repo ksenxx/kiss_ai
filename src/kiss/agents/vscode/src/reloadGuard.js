@@ -70,31 +70,47 @@ function pathExists(p) {
 }
 
 /**
- * Decide whether the window may be safely reloaded after an extension
- * reinstall, given the previously observed entry-file size.
+ * Probe the post-reinstall state, given the previously observed entry-file
+ * size, and report which reload preconditions currently hold.
  *
- * "Ready" requires all of:
- *   1. ``out/extension.js`` is present and non-empty (the reinstall has
- *      finished re-extracting, not mid-delete / mid-write), and
- *   2. its size is unchanged from the previous poll (stable — not still being
- *      written), and
- *   3. the kiss-web daemon socket is back (so the reloaded webview can
- *      reconnect instead of rendering blank).
+ * The two preconditions are reported separately so the caller can treat them
+ * differently:
  *
- * The caller threads the returned ``size`` back in as ``prevSize`` on the next
- * poll so stability is measured across consecutive observations.
+ *   * ``codeReady`` — ``out/extension.js`` is present, non-empty, and its size
+ *     is unchanged from the previous poll.  This is the *hard* precondition:
+ *     reloading while the entry file is mid-delete / mid-write brings the
+ *     webview up against a half-installed extension (its ``media`` chat
+ *     resources are missing) and renders blank.  The caller must never reload
+ *     until this is true.
+ *
+ *   * ``socketUp`` — the kiss-web daemon's Unix-domain socket exists, so a
+ *     reloaded webview can reconnect immediately.  This is only a *soft*
+ *     preference: ``install.sh`` deliberately kills the daemon and removes the
+ *     socket before writing the update marker, and the socket only returns
+ *     once a daemon is respawned.  On source installs the respawn happens in
+ *     the post-reload ``ensureDependencies()`` (``restartKissWebDaemon``), so
+ *     the socket *cannot* come back until after the reload.  Gating the reload
+ *     on it would therefore dead-lock until the hard timeout.  The webview's
+ *     ``AgentClient`` auto-reconnects when the socket reappears, so reloading
+ *     while it is still down only briefly shows a reconnecting view rather
+ *     than a permanently blank one.
+ *
+ * ``ready`` (= ``codeReady && socketUp``) is preserved for callers that want
+ * the strict both-conditions gate.  The caller threads the returned ``size``
+ * back in as ``prevSize`` on the next poll so stability is measured across
+ * consecutive observations.
  *
  * @param {string} extJsPath Absolute path to ``out/extension.js``.
  * @param {string} sockPath Absolute path to ``~/.kiss/sorcar.sock``.
  * @param {number} prevSize Entry-file size observed on the previous poll.
- * @returns {{ready: boolean, size: number}} Readiness flag and current size.
+ * @returns {{ready: boolean, codeReady: boolean, socketUp: boolean, size: number}}
+ *   Readiness flags and current entry-file size.
  */
 function isReloadReady(extJsPath, sockPath, prevSize) {
   const size = extensionFileSize(extJsPath);
-  if (size <= 0) return {ready: false, size};
-  if (size !== prevSize) return {ready: false, size};
-  if (!pathExists(sockPath)) return {ready: false, size};
-  return {ready: true, size};
+  const codeReady = size > 0 && size === prevSize;
+  const socketUp = pathExists(sockPath);
+  return {ready: codeReady && socketUp, codeReady, socketUp, size};
 }
 
 module.exports = {extensionFileSize, pathExists, isReloadReady};

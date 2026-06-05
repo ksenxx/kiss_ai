@@ -264,25 +264,52 @@ export function activate(context: vscode.ExtensionContext): void {
   // extension directory and then re-extracts it, so ``out/extension.js`` is
   // transiently missing (and briefly partially written) for a noticeable
   // window.  Reloading during that window brings the chat webview up against
-  // a half-installed extension (its ``media`` resources are gone) and before
-  // ``install.sh`` has restarted the kiss-web daemon — the chat view renders
-  // blank.  Instead of reloading the instant a watcher fires, poll until the
-  // reinstall has fully settled: ``out/extension.js`` present, non-empty and
-  // size-stable across two consecutive polls, AND the daemon socket is back so
-  // the reloaded webview can reconnect immediately.  A hard timeout reloads
-  // anyway so a daemon that never comes back can't strand the user on stale
-  // code.
+  // a half-installed extension (its ``media`` resources are gone) — the chat
+  // view renders blank.  So we never reload until ``out/extension.js`` is
+  // present, non-empty and size-stable across two consecutive polls
+  // (``codeReady``).
+  //
+  // We *prefer* to also wait for the kiss-web daemon's socket to be back so
+  // the reloaded webview can reconnect immediately, but we must NOT block on
+  // it indefinitely.  ``install.sh`` deliberately kills the daemon and deletes
+  // the socket before writing the update marker, and on a source install the
+  // socket only returns once the *post-reload* ``ensureDependencies()``
+  // respawns the daemon.  Hard-gating the reload on the socket therefore
+  // dead-locks: the reload waits for a socket that can only come back after
+  // the reload.  That stranded users on stale code until the 60 s hard
+  // timeout, so they restarted VS Code by hand.  Instead, once the code is
+  // stable we give the socket a short grace window and then reload regardless
+  // — the webview's ``AgentClient`` auto-reconnects when the daemon comes back.
   const RELOAD_SETTLE_INTERVAL_MS = 500;
-  const RELOAD_SETTLE_TIMEOUT_MS = 60_000;
+  // How long to keep waiting for the daemon socket after the extension code
+  // has settled before reloading anyway.
+  const RELOAD_SOCKET_GRACE_MS = 3_000;
+  // Absolute ceiling: reload no later than this even if the code never settles
+  // (e.g. an interrupted reinstall) so the user is never stranded.
+  const RELOAD_SETTLE_TIMEOUT_MS = 15_000;
   const triggerReload = () => {
     if (reloadTriggered || settleTimer) return;
     let prevSize = -1;
     let waited = 0;
+    // Wall-clock at which the extension code first became stable; -1 until
+    // then.  Used to bound the post-code-ready wait for the daemon socket.
+    let codeReadySince = -1;
     settleTimer = setInterval(() => {
       waited += RELOAD_SETTLE_INTERVAL_MS;
-      const {ready, size} = isReloadReady(extJsPath, sockPath, prevSize);
+      const {codeReady, socketUp, size} = isReloadReady(
+        extJsPath,
+        sockPath,
+        prevSize,
+      );
       prevSize = size;
-      if (ready || waited >= RELOAD_SETTLE_TIMEOUT_MS) {
+      if (codeReady && codeReadySince < 0) codeReadySince = waited;
+      const codeStableFor = codeReadySince < 0 ? 0 : waited - codeReadySince;
+      // Reload when the code is stable AND either the socket is back or the
+      // grace window has elapsed; or when the absolute timeout is hit.
+      if (
+        (codeReady && (socketUp || codeStableFor >= RELOAD_SOCKET_GRACE_MS)) ||
+        waited >= RELOAD_SETTLE_TIMEOUT_MS
+      ) {
         doReload();
       }
     }, RELOAD_SETTLE_INTERVAL_MS);
