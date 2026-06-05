@@ -24,6 +24,10 @@ extension precisely:
 * ``/`` slash commands matching Claude Code's quick commands
   (``/help``, ``/clear``, ``/resume``, ``/model``, ``/cost``,
   ``/context``, ``/exit`` …).
+* ``/model``-name fast completion — :func:`rank_model_suggestions` over
+  the generation-capable models in
+  :mod:`kiss.core.models.model_info` (preferring providers whose API key
+  is configured), so ``/model <partial>`` completes to a real model name.
 
 TAB triggers completion via :mod:`readline`, which also provides
 command history (Up/Down), reverse search (Ctrl+R), and emacs-style line
@@ -102,6 +106,9 @@ _EXIT_WORDS = {"exit", "quit"}
 _PROMPT = f"{CYAN}{PROMPT_MARKER}{RESET}"
 _AT_RE = re.compile(r"@([^\s]*)$")
 _MENTION_RE = re.compile(r"PWD/(\S+)")
+# Matches a ``/model <partial>`` line, capturing the partial model name so
+# the completer can fast-complete it from MODEL_INFO.
+_MODEL_CMD_RE = re.compile(r"^/model\s+(.*)$")
 _ESC = "\x1b"
 
 
@@ -155,6 +162,24 @@ class CliCompleter:
         ranked = rank_file_suggestions(self._files(), query, usage)
         prefix = line[:at_start]
         return [f"{prefix}PWD/{item['text']} " for item in ranked]
+
+    def _model_matches(self, query: str) -> list[str]:
+        """Return ``/model <name>`` completions for the ``/model`` command.
+
+        Mirrors the extension's model picker: candidate model names come
+        from :func:`rank_model_suggestions` over the generation-capable
+        models in ``MODEL_INFO`` (preferring those with a configured API
+        key), best match first.
+
+        Args:
+            query: Text typed after ``/model `` (the partial model name).
+
+        Returns:
+            Whole-line ``/model <name>`` replacements, best match first.
+        """
+        from kiss.core.models.model_info import rank_model_suggestions
+
+        return [f"/model {name}" for name in rank_model_suggestions(query)]
 
     def _slash_matches(self, line: str) -> list[str]:
         """Return slash-command completions for *line* (e.g. ``/he``)."""
@@ -224,6 +249,9 @@ class CliCompleter:
             return self._at_mention_matches(
                 line, at.start(), at.group(1),
             )
+        model_cmd = _MODEL_CMD_RE.match(line)
+        if model_cmd:
+            return self._model_matches(model_cmd.group(1))
         stripped = line.strip()
         if stripped.startswith("/") and " " not in stripped:
             return self._slash_matches(line)
@@ -299,8 +327,8 @@ def _print_help() -> None:
         print(f"  {cmd:<10} {desc}")
     print(
         "\nInput fast-completes (Tab): @path mentions files, "
-        "/ completes commands, and typing a prefix of a previous task "
-        "suggests its completion.\n"
+        "/ completes commands, /model <partial> completes model names, "
+        "and typing a prefix of a previous task suggests its completion.\n"
     )
 
 
