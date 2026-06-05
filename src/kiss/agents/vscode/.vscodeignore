@@ -1,6 +1,9 @@
 # TypeScript sources (compiled JS is in out/)
 src/**
 
+# Node integration tests (run with `npm test`, not needed at runtime)
+test/**
+
 # Local/generated artifacts
 .DS_Store
 **/.DS_Store

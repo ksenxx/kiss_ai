@@ -84,6 +84,14 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _disposed: boolean = false;
   /** Last remote URL sent to the webview — avoids redundant messages. */
   private _lastSentUrl: string = '';
+  /**
+   * Last ``remote_password`` observed in ``~/.kiss/config.json`` by the
+   * config-file watcher.  ``undefined`` until the first successful read
+   * so the watcher can distinguish "never read" from "read as empty".
+   */
+  private _lastSeenRemotePassword: string | undefined;
+  /** Poll timer for ``~/.kiss/config.json``; cleared on dispose(). */
+  private _configFileWatchTimer?: ReturnType<typeof setInterval>;
   private _preMergeOpenFiles: Map<string, Set<string>> = new Map();
   private _restoreChain: Promise<void> = Promise.resolve();
   private _onFirstResolve: (() => void) | undefined;
@@ -579,6 +587,56 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     }, 10_000);
   }
 
+  /**
+   * Poll ``~/.kiss/config.json`` and re-request ``getConfig`` from the
+   * daemon whenever its ``remote_password`` changes.
+   *
+   * On VS Code launch the daemon may still be (re)starting and the
+   * remote password may be empty or written only after the activation
+   * prompt — so the webview's initial ``getConfig`` can return a blank
+   * password, leaving the welcome-page remote-password panel empty
+   * until the user opens the Settings panel.  This watcher closes that
+   * gap: when the persisted password first becomes non-empty (or later
+   * changes), it re-issues ``getConfig`` so the daemon broadcasts a
+   * fresh ``configData`` and the webview repopulates both the welcome
+   * and settings password fields automatically.
+   */
+  private _watchConfigFile(): void {
+    if (this._configFileWatchTimer) return;
+    this._checkConfigFile();
+    this._configFileWatchTimer = setInterval(
+      () => this._checkConfigFile(),
+      2_000,
+    );
+  }
+
+  /**
+   * Read ``~/.kiss/config.json`` once and re-request ``getConfig`` from
+   * the daemon when the persisted ``remote_password`` first becomes
+   * non-empty or later changes.  A missing / mid-write file is ignored
+   * and retried on the next poll tick.
+   */
+  private _checkConfigFile(): void {
+    const configFile = path.join(os.homedir(), '.kiss', 'config.json');
+    let pw: string;
+    try {
+      const data = JSON.parse(fs.readFileSync(configFile, 'utf-8'));
+      pw = typeof data.remote_password === 'string' ? data.remote_password : '';
+    } catch {
+      // File missing or mid-write — retry on the next tick.
+      return;
+    }
+    const first = this._lastSeenRemotePassword === undefined;
+    const changed = pw !== this._lastSeenRemotePassword;
+    this._lastSeenRemotePassword = pw;
+    // Re-fetch when the password changed, and also on the first
+    // successful read of a non-empty password (the webview's init
+    // getConfig may have raced a transient empty/truncated config).
+    if ((changed && !first) || (first && pw !== '')) {
+      this._getClient().sendCommand({type: 'getConfig'});
+    }
+  }
+
   private _getVisibleEditorFile(): string {
     const activeEditor = vscode.window.activeTextEditor;
     if (activeEditor) {
@@ -656,6 +714,15 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         this._sendWelcomeSuggestions();
         this._sendRemoteUrl();
         client.sendCommand({type: 'getInputHistory'});
+        // Request the current config so the welcome-page remote-password
+        // panel is populated from the established connection (the webview's
+        // own init getConfig can race the daemon restart / password write).
+        client.sendCommand({type: 'getConfig'});
+        // Re-fetch config whenever ~/.kiss/config.json changes so a
+        // remote_password set after launch (e.g. via the activation prompt
+        // or a daemon restart) reaches the welcome panel without the user
+        // having to open the Settings panel.
+        this._watchConfigFile();
         this._sendToWebview({type: 'focusInput'} as ToWebviewMessage);
         // Auto-reload events for restored tabs that had active sessions.
         // The daemon's _RunningAgentState retains state across reloads, so resumeSession
@@ -1075,6 +1142,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         );
         break;
 
+      case 'runUpdate':
+        this._runUpdate();
+        break;
+
       case 'closeTab': {
         const closeTabId = message.tabId;
         if (closeTabId) {
@@ -1086,6 +1157,34 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         break;
       }
     }
+  }
+
+  /**
+   * Run ``install.sh`` from the current working directory to update
+   * KISS Sorcar and notify the user that an update is being installed.
+   *
+   * The script is executed in a dedicated integrated terminal so its
+   * progress is visible.  If the script is missing an error message is
+   * shown instead.
+   */
+  private _runUpdate(): void {
+    const workDir = this._getWorkDir();
+    const scriptPath = path.join(workDir, 'install.sh');
+    if (!fs.existsSync(scriptPath)) {
+      vscode.window.showErrorMessage(
+        `Cannot update KISS Sorcar: install.sh not found in ${workDir}.`,
+      );
+      return;
+    }
+    vscode.window.showInformationMessage(
+      'An update of KISS Sorcar is getting installed…',
+    );
+    const terminal = vscode.window.createTerminal({
+      name: 'KISS Sorcar Update',
+      cwd: workDir,
+    });
+    terminal.show();
+    terminal.sendText(`bash '${scriptPath.replace(/'/g, "'\\''")}'`);
   }
 
   /**
@@ -1306,6 +1405,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     if (this._urlFileWatchTimer) {
       clearInterval(this._urlFileWatchTimer);
       this._urlFileWatchTimer = undefined;
+    }
+    if (this._configFileWatchTimer) {
+      clearInterval(this._configFileWatchTimer);
+      this._configFileWatchTimer = undefined;
     }
     this._resolveAllWorktreeActions();
     if (this._workspaceFoldersSub) {
