@@ -10,7 +10,7 @@
 
 *Free. Local. Bring your own API key. Runs as a VS Code extension and as a web/mobile app.*
 
-[![Version](https://img.shields.io/badge/version-2026.6.4-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
+[![Version](https://img.shields.io/badge/version-2026.6.5-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
 [![Website](https://img.shields.io/badge/website-kisssorcar.github.io-1976d2?style=flat-square)](https://kisssorcar.github.io/)
@@ -58,6 +58,13 @@ An old video on KISS Sorcar can be found at [https://www.youtube.com/watch?v=xnY
 
 <scriptsize>Note that **Sorcar** also means government in Bengali.</scriptsize>
 
+## Full Installation
+
+```
+curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh | bash
+```
+
+
 ## 🎬 See It in Action
 
 From writing production-grade code to planning your next vacation, KISS Sorcar handles a range of tasks end-to-end. Here are a few examples:
@@ -100,12 +107,6 @@ From writing production-grade code to planning your next vacation, KISS Sorcar h
 </table>
 
 </div>
-
-## Full Installation
-
-```
-curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh | bash
-```
 
 ## KISS Sorcar Extension Installation
 

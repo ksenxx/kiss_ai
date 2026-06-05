@@ -401,7 +401,13 @@ async function runFinalization(
   await installCloudflaredIfNeeded();
 
   if (progress) progress.report({message: 'Restarting kiss-web daemon...'});
-  restartKissWebDaemon(kissProjectPath);
+  // Point the kiss-web daemon's WorkingDirectory (its process getcwd, and
+  // therefore the default task work_dir) at the VS Code workspace root —
+  // i.e. USER_PWD, the directory the user ran install.sh from.  Falls back
+  // to kissProjectPath when no folder is open (preserving prior behavior).
+  const webWorkDir =
+    vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || kissProjectPath;
+  restartKissWebDaemon(kissProjectPath, webWorkDir);
 
   if (progress) progress.report({message: 'Updating shell PATH...'});
   try {
@@ -823,6 +829,54 @@ function killProcessOnPort(port: number): void {
 }
 
 /**
+ * Start the kiss-web daemon directly as a detached background process.
+ *
+ * Fallback for Linux environments that have no usable systemd **user**
+ * session — most notably Docker containers (where PID 1 is not systemd
+ * and ``$DBUS_SESSION_BUS_ADDRESS`` / ``$XDG_RUNTIME_DIR`` are unset), as
+ * well as minimal VMs and some WSL setups.  In those environments
+ * ``systemctl --user`` fails, so without this fallback the daemon never
+ * starts, ``~/.kiss/sorcar.sock`` is never created, and the extension can
+ * never run a task.
+ *
+ * The child is detached and ``unref``-ed so it survives the extension host
+ * exiting, inherits the current environment (API keys, etc.), runs with
+ * ``cwd = workDir``, and appends its output to the same log files the
+ * systemd/launchd units use.
+ *
+ * @param kissWebBin - Absolute path to ``.venv/bin/kiss-web``.
+ * @param workDir - Working directory (process ``getcwd()``) for the daemon.
+ */
+function spawnKissWebDirect(kissWebBin: string, workDir: string): void {
+  const binDir = path.join(HOME_DIR, '.local', 'bin');
+  try {
+    fs.mkdirSync(LOG_DIR, {recursive: true});
+    const outFd = fs.openSync(path.join(LOG_DIR, 'kiss-web-stdout.log'), 'a');
+    const errFd = fs.openSync(path.join(LOG_DIR, 'kiss-web-stderr.log'), 'a');
+    const child = spawn(kissWebBin, [], {
+      cwd: workDir,
+      detached: true,
+      stdio: ['ignore', outFd, errFd],
+      env: {
+        ...process.env,
+        PATH: `${binDir}:${process.env.PATH || '/usr/local/bin:/usr/bin:/bin'}`,
+      },
+    });
+    child.unref();
+    fs.closeSync(outFd);
+    fs.closeSync(errFd);
+    log(
+      `kiss-web started directly (no systemd): pid ${child.pid ?? '<unknown>'}, ` +
+        `cwd ${workDir}`,
+    );
+  } catch (err) {
+    log(
+      `Failed to start kiss-web directly: ${err instanceof Error ? err.message : err}`,
+    );
+  }
+}
+
+/**
  * Restart the kiss-web remote access daemon.
  *
  * Always restarts the daemon so that code changes from an editable install
@@ -836,8 +890,18 @@ function killProcessOnPort(port: number): void {
  * ``Restart=always`` and enables lingering.
  *
  * @param kissProjectPath - Absolute path to the KISS project directory.
+ *   The ``kiss-web`` binary is always taken from
+ *   ``${kissProjectPath}/.venv/bin/kiss-web``.
+ * @param workDir - Absolute path used as the daemon's ``WorkingDirectory``
+ *   (the process ``getcwd()``).  This is the VS Code workspace root (i.e.
+ *   ``USER_PWD`` — the directory the user ran ``install.sh`` from), so that
+ *   the web app's default task work_dir resolves to the user's project
+ *   instead of the embedded ``kiss_project`` bundled inside the VSIX.
+ *   ``web_server.py`` launches kiss-web with no ``--workdir``, so its
+ *   ``os.getcwd()`` (= this ``WorkingDirectory``) becomes the fallback
+ *   work_dir for sessions that don't send an explicit ``workDir``.
  */
-function restartKissWebDaemon(kissProjectPath: string): void {
+function restartKissWebDaemon(kissProjectPath: string, workDir: string): void {
   if (process.platform === 'win32') return; // Not supported on Windows
 
   const kissWebBin = path.join(kissProjectPath, '.venv', 'bin', 'kiss-web');
@@ -861,7 +925,11 @@ function restartKissWebDaemon(kissProjectPath: string): void {
   // editable-install code-pickup behavior is preserved on real
   // changes.
   const fpFile = path.join(LOG_DIR, '.kiss-web.fingerprint');
-  const currentFp = computeKissWebFingerprint(kissProjectPath, kissWebBin);
+  const currentFp = computeKissWebFingerprint(
+    kissProjectPath,
+    kissWebBin,
+    workDir,
+  );
   let savedFp = '';
   try {
     savedFp = fs.readFileSync(fpFile, 'utf-8').trim();
@@ -918,7 +986,7 @@ function restartKissWebDaemon(kissProjectPath: string): void {
       // structure or inject alternate ProgramArguments via XML entities.
       const xLabel = xmlEscape(plistLabel);
       const xBin = xmlEscape(kissWebBin);
-      const xProj = xmlEscape(kissProjectPath);
+      const xProj = xmlEscape(workDir);
       const xLogDir = xmlEscape(LOG_DIR);
       const xPath = xmlEscape(
         `/opt/homebrew/bin:${binDir}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`,
@@ -1007,12 +1075,13 @@ function restartKissWebDaemon(kissProjectPath: string): void {
     const serviceFile = path.join(systemdDir, 'kiss-web.service');
 
     log('Restarting kiss-web systemd user service...');
+    let systemdOk = false;
     try {
       fs.mkdirSync(systemdDir, {recursive: true});
       // unit-escape every interpolated path so that backslashes / newlines
       // / percent signs in user paths cannot corrupt the unit.
       const uBin = unitEscape(kissWebBin);
-      const uProj = unitEscape(kissProjectPath);
+      const uProj = unitEscape(workDir);
       const uPath = unitEscape(`${binDir}:/usr/local/bin:/usr/bin:/bin`);
       const uLogDir = unitEscape(LOG_DIR);
       const serviceContent = `[Unit]
@@ -1055,10 +1124,19 @@ WantedBy=default.target
         /* may require elevated privileges — non-fatal */
       }
       log(`kiss-web systemd user service restarted: ${serviceFile}`);
+      systemdOk = true;
     } catch (err) {
       log(
-        `Failed to restart kiss-web daemon (Linux): ${err instanceof Error ? err.message : err}`,
+        'Failed to restart kiss-web daemon via systemd (Linux): ' +
+          `${err instanceof Error ? err.message : err} — ` +
+          'falling back to direct background spawn',
       );
+    }
+    // Environments without a usable systemd user session (Docker
+    // containers, minimal VMs, some WSL setups) reach here.  Start the
+    // daemon directly so the UDS socket is created and tasks can run.
+    if (!systemdOk) {
+      spawnKissWebDirect(kissWebBin, workDir);
     }
   }
 
@@ -1085,18 +1163,23 @@ WantedBy=default.target
  *     and ``tests/`` directories.
  *
  * This changes whenever the user rebuilds kiss-web, reinstalls the
- * package, or edits any source file picked up by the editable install
- * — exactly the situations where the daemon needs to restart to pick
- * up new code.  Returns ``""`` if the fingerprint cannot be computed
- * (caller treats this as a mismatch and restarts unconditionally).
+ * package, edits any source file picked up by the editable install, or
+ * opens a different workspace (``workDir`` changes the daemon's
+ * ``WorkingDirectory``) — exactly the situations where the daemon needs
+ * to restart, either to pick up new code or to re-point its default
+ * work_dir at the new workspace root.  Returns ``""`` if the fingerprint
+ * cannot be computed (caller treats this as a mismatch and restarts
+ * unconditionally).
  */
 function computeKissWebFingerprint(
   kissProjectPath: string,
   kissWebBin: string,
+  workDir: string,
 ): string {
   try {
     const hash = crypto.createHash('sha256');
     hash.update(fs.readFileSync(kissWebBin));
+    hash.update(workDir);
     const srcDir = path.join(kissProjectPath, 'src', 'kiss');
     let latestMtimeNs = BigInt(0);
     const walk = (dir: string): void => {

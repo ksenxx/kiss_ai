@@ -66,6 +66,16 @@ if ! command -v curl &>/dev/null; then
     exit 1
 fi
 
+# Returns 0 only if /dev/tty can actually be opened for reading.  A plain
+# `[ -r /dev/tty ]` test only inspects the permission bits, which pass even
+# inside a detached Docker container where the controlling terminal does not
+# exist and opening /dev/tty fails with ENXIO ("No such device or address").
+# Probing with a real open avoids that crash and lets prompts fall back to
+# their non-interactive default.
+can_read_tty() {
+    { : < /dev/tty; } 2>/dev/null
+}
+
 ensure_xcode_clt() {
     [ "$OS" = "Darwin" ] || return 0
 
@@ -103,10 +113,10 @@ ensure_xcode_clt() {
     echo ""
     echo "   A dialog has appeared to install the Xcode Command Line Tools."
     echo "   Complete the installation in that dialog, then return to this terminal."
-    if [ -r /dev/tty ]; then
+    if can_read_tty; then
         read -n 1 -s -r -p "   Press any key to continue with the rest of installation..." </dev/tty
     else
-        read -n 1 -s -r -p "   Press any key to continue with the rest of installation..."
+        echo "   Non-interactive shell detected — continuing without waiting."
     fi
     echo ""
 
@@ -133,16 +143,16 @@ ensure_homebrew() {
     echo ""
 
     local REPLY_BREW=""
-    if [ -r /dev/tty ]; then
+    if can_read_tty; then
         read -r -p "   Install the latest Homebrew now? [Y/n] " REPLY_BREW </dev/tty
     else
-        read -r -p "   Install the latest Homebrew now? [Y/n] " REPLY_BREW
+        echo "   Non-interactive shell detected — defaulting to Yes."
     fi
 
     case "$REPLY_BREW" in
         ""|y|Y|yes|YES|Yes)
             echo "   Installing Homebrew..."
-            if [ -r /dev/tty ]; then
+            if can_read_tty; then
                 NONINTERACTIVE=1 /bin/bash -c \
                     "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" </dev/tty
             else
@@ -277,6 +287,21 @@ REPO
 
 find_code_cli() {
     CODE_CLI=""
+    # Honor an explicit override so callers running inside a specific editor
+    # distribution can force its CLI.  The Docker/code-server entrypoint sets
+    # KISS_CODE_CLI=code-server so the extension is installed into
+    # code-server's extensions directory
+    # (~/.local/share/code-server/extensions) — the one the browser IDE
+    # actually reads — instead of a separately apt-installed Microsoft VS Code
+    # (~/.vscode/extensions), which code-server never loads.
+    if [ -n "${KISS_CODE_CLI:-}" ]; then
+        local override
+        override="$(command -v "$KISS_CODE_CLI" 2>/dev/null || true)"
+        if [ -n "$override" ] && [ -x "$override" ]; then
+            CODE_CLI="$override"
+            return 0
+        fi
+    fi
     for candidate in \
         "$(command -v code 2>/dev/null || true)" \
         "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code" \
@@ -334,6 +359,38 @@ launch_vscode() {
     return 1
 }
 
+# Return 0 (true) when a VS Code window is already running.  Used to skip the
+# explicit ``launch_vscode`` at the end of the install: when the editor is
+# already open, the extension's own file watchers detect the reinstall (the
+# overwritten ``out/extension.js`` and the freshly written
+# ``~/.kiss/.extension-updated`` marker) and fire
+# ``workbench.action.reloadWindow``.  That reload already brings the user back
+# into a working window, so a second ``open``/launch here would only spawn a
+# redundant duplicate window.
+vscode_is_running() {
+    case "$OS" in
+        Darwin)
+            # AppleScript reliably reports whether the app is running.
+            if command -v osascript &>/dev/null; then
+                local running
+                running="$(osascript -e 'application "Visual Studio Code" is running' 2>/dev/null)"
+                [ "$running" = "true" ] && return 0
+            fi
+            # Fallback: match the app's main process by its bundle path.
+            command -v pgrep &>/dev/null && pgrep -f "Visual Studio Code.app" &>/dev/null && return 0
+            ;;
+        Linux)
+            command -v pgrep &>/dev/null || return 1
+            # The Electron main process is named "code"; also match common
+            # absolute-path invocations in case the name is shortened.
+            pgrep -x code &>/dev/null && return 0
+            pgrep -f "/usr/share/code/code" &>/dev/null && return 0
+            pgrep -f "/snap/code/" &>/dev/null && return 0
+            ;;
+    esac
+    return 1
+}
+
 # ---------------------------------------------------------------------------
 # Version helpers
 # ---------------------------------------------------------------------------
@@ -361,10 +418,10 @@ prompt_upgrade_or_abort() {
     echo ""
     echo "   $name $current is older than the required version $required."
     local reply=""
-    if [ -r /dev/tty ]; then
+    if can_read_tty; then
         read -r -p "   Upgrade $name to $required or later? [Y/n] " reply </dev/tty
     else
-        read -r -p "   Upgrade $name to $required or later? [Y/n] " reply
+        echo "   Non-interactive shell detected — defaulting to Yes."
     fi
     case "$reply" in
         ""|y|Y|yes|YES|Yes) return 0 ;;
@@ -587,11 +644,11 @@ update_repo() {
         find_code_cli || true
     fi
     if [ -n "$CODE_CLI" ]; then
-        INSTALLED_VSCODE=$("$CODE_CLI" --version 2>/dev/null | head -1)
+        INSTALLED_VSCODE=$("$CODE_CLI" --version 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1)
         if [ -n "$REQUIRED_VSCODE_VERSION" ] && [ -n "$INSTALLED_VSCODE" ] && ! version_gte "$INSTALLED_VSCODE" "$REQUIRED_VSCODE_VERSION"; then
             prompt_upgrade_or_abort "VS Code" "$INSTALLED_VSCODE" "$REQUIRED_VSCODE_VERSION"
             upgrade_vscode
-            INSTALLED_VSCODE=$("$CODE_CLI" --version 2>/dev/null | head -1)
+            INSTALLED_VSCODE=$("$CODE_CLI" --version 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1)
         fi
         echo "   code CLI ready: $CODE_CLI (v$INSTALLED_VSCODE)"
     else
@@ -622,6 +679,49 @@ update_repo() {
     echo ">>> [6/6] Installing VS Code extension..."
     "$CODE_CLI" --install-extension "$VSIX" --force 2>&1
     echo "   Extension installed into VS Code"
+    # The VSIX is a throwaway build artifact: VS Code copies the extension into
+    # its own extensions directory during ``--install-extension``, so the file
+    # in the checkout is no longer needed.  Remove it to keep the working tree
+    # clean and avoid shipping a stale VSIX on the next build.
+    rm -f "$VSIX"
+    echo "   Removed build artifact $VSIX"
+
+    # Stop the old kiss-web daemon BEFORE the extension auto-reloads.  The
+    # ``--install-extension --force`` above replaced the extension directory
+    # tree that the running daemon's bundled kiss_project (.venv/bin/kiss-web)
+    # was loaded from, so the live daemon is technically broken even while it
+    # is still listening (subsequent UDS requests can hit stale / missing
+    # module paths).  If we skip this, the marker write below triggers
+    # ``workbench.action.reloadWindow`` (~2 s later) and the freshly reloaded
+    # webview reconnects to the broken daemon — the chat view comes up blank.
+    #
+    # ``pkill -x kiss-web`` is unreliable on macOS — kiss-web is a Python
+    # shebang script so the kernel's ``comm`` field is the (15-char-truncated)
+    # interpreter path, NOT the literal name.  Kill by listening port instead.
+    # The macOS LaunchAgent / Linux systemd unit's ``KeepAlive`` respawns a
+    # clean daemon from the freshly-installed VSIX before the reload fires.
+    if command -v lsof &>/dev/null; then
+        OLD_KISS_WEB_PIDS=$(lsof -ti :8787 2>/dev/null || true)
+        if [ -n "$OLD_KISS_WEB_PIDS" ]; then
+            echo "   Stopping old kiss-web daemon (PIDs: $OLD_KISS_WEB_PIDS)..."
+            echo "$OLD_KISS_WEB_PIDS" | xargs kill 2>/dev/null || true
+            for _ in 1 2 3 4 5 6 7 8 9 10; do
+                sleep 0.3
+                if ! lsof -i :8787 -t &>/dev/null; then break; fi
+            done
+            # Force-kill survivors.
+            KISS_WEB_STRAGGLERS=$(lsof -ti :8787 2>/dev/null || true)
+            if [ -n "$KISS_WEB_STRAGGLERS" ]; then
+                echo "$KISS_WEB_STRAGGLERS" | xargs kill -9 2>/dev/null || true
+            fi
+        fi
+    fi
+    # Remove the stale Unix-domain socket left behind by the now-dead daemon.
+    # The new daemon's ``_setup_server`` unlinks before binding, but pre-emptive
+    # cleanup avoids ENOENT/ECONNREFUSED reconnect-loop noise from the extension
+    # client that is mid-flight during the launchd/systemd respawn window.
+    rm -f "$HOME/.kiss/sorcar.sock"
+
     date -u +%Y-%m-%dT%H:%M:%SZ > "$HOME/.kiss/.extension-updated"
     # Remove any stale source-install marker from older versions of this
     # installer.  The extension now always runs against the kiss_project
@@ -641,5 +741,21 @@ update_repo() {
 
 echo ""
 echo "Log saved to $LOG_FILE"
-echo "Launching VS Code to finish setup..."
-launch_vscode || true
+# Only explicitly launch VS Code when it is not already running.  If a window
+# is already open, the extension's watchers on ``out/extension.js`` and
+# ``~/.kiss/.extension-updated`` (both touched in step [6/6]) trigger
+# ``workbench.action.reloadWindow`` to pick up the update — launching here too
+# would open a redundant second window.
+if [ -n "${KISS_SKIP_LAUNCH:-}" ]; then
+    # The caller (e.g. scripts/docker-startup.sh) owns launching the editor —
+    # typically because it will start code-server itself right after this
+    # script returns.  Launching here too would bind the same port and make
+    # the caller's code-server fail with EADDRINUSE, crashing the container.
+    echo "KISS_SKIP_LAUNCH set; skipping VS Code launch (caller will start the editor)."
+elif vscode_is_running; then
+    echo "VS Code is already running; the extension will reload to finish setup."
+    echo "Skipping explicit launch to avoid opening a duplicate window."
+else
+    echo "Launching VS Code to finish setup..."
+    launch_vscode || true
+fi
