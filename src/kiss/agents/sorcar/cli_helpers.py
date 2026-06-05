@@ -15,6 +15,8 @@ import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import yaml
+
 from kiss.agents.sorcar.persistence import _list_recent_chats
 from kiss.agents.sorcar.sorcar_agent import (
     _resolve_task,
@@ -157,6 +159,28 @@ def _build_run_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "verbose": args.verbose,
         "ask_user_question_callback": cli_ask_user_question,
     }
+
+
+def _print_result(result: str) -> None:
+    """Print the agent's run result without the raw YAML envelope.
+
+    The agent returns a YAML document with ``success`` and ``summary``
+    keys.  Printing that document verbatim exposes the raw YAML to the
+    user; instead show only the human-readable ``summary`` text.  When
+    the result is not the expected YAML mapping, fall back to printing
+    it as-is so no output is ever silently dropped.
+
+    Args:
+        result: The YAML string returned by the running agent.
+    """
+    try:
+        parsed = yaml.safe_load(result)
+    except Exception:
+        parsed = None
+    if isinstance(parsed, dict) and "summary" in parsed:
+        print(str(parsed.get("summary", "")))
+    else:
+        print(result)
 
 
 def _print_run_stats(agent: ChatSorcarAgent, elapsed: float) -> None:
