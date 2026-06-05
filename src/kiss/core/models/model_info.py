@@ -1037,6 +1037,52 @@ def get_available_models() -> list[str]:
     return sorted(result)
 
 
+def get_completion_model_names() -> list[str]:
+    """Return model names to offer for input fast-completion, best first.
+
+    Prefers models whose provider API key is configured (so every
+    suggestion is actually runnable), and falls back to every
+    generation-capable model in ``MODEL_INFO`` when no provider key is set
+    (e.g. completing in a fresh checkout) so the picker is never empty.
+
+    Returns:
+        list[str]: A sorted list of generation-capable model names.
+    """
+    available = get_available_models()
+    if available:
+        return available
+    return sorted(
+        name for name, info in MODEL_INFO.items() if info.is_generation_supported
+    )
+
+
+def rank_model_suggestions(query: str, names: list[str] | None = None) -> list[str]:
+    """Rank model names for fast-completion of *query*.
+
+    Case-insensitive prefix matches come first, then case-insensitive
+    substring matches; each group is sorted alphabetically. An empty query
+    returns all candidate names unchanged (already sorted).
+
+    Args:
+        query: The partial model name typed by the user.
+        names: Candidate model names. Defaults to
+            :func:`get_completion_model_names` when ``None``.
+
+    Returns:
+        list[str]: The matching model names, best first.
+    """
+    if names is None:
+        names = get_completion_model_names()
+    q = query.strip().lower()
+    if not q:
+        return list(names)
+    prefix = sorted(n for n in names if n.lower().startswith(q))
+    substring = sorted(
+        n for n in names if q in n.lower() and not n.lower().startswith(q)
+    )
+    return prefix + substring
+
+
 def get_fast_model() -> str:
     """Return a cheap/fast model based on which API keys are available.
 
