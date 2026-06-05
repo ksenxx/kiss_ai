@@ -62,6 +62,12 @@ info "REPO_DIR=$REPO_DIR"
 step "Running /home/kiss/install.sh..."
 cd "$REPO_DIR"
 export PATH="$REPO_DIR/.venv/bin:$HOME/.local/bin:$PATH"
+# Force install.sh to build/install the extension through code-server's CLI so
+# the VSIX lands in ~/.local/share/code-server/extensions — the directory the
+# browser IDE loads.  Without this, find_code_cli would apt-install a separate
+# Microsoft VS Code and install the extension into ~/.vscode/extensions, which
+# code-server never reads, leaving the launched IDE without the extension.
+export KISS_CODE_CLI=code-server
 bash "$REPO_DIR/install.sh"
 info "install.sh completed"
 
