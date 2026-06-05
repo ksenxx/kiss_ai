@@ -43,6 +43,16 @@ import sys
 import threading
 from typing import TYPE_CHECKING, Any, cast
 
+from kiss.agents.sorcar.cli_panel import (
+    CYAN,
+    DIM,
+    RESET,
+    STEER_TITLE,
+    panel_body,
+    panel_bottom,
+    panel_cols,
+    panel_top,
+)
 from kiss.agents.sorcar.persistence import _allocate_chat_id
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 
@@ -62,7 +72,6 @@ _BOX_H = 3
 # Minimum terminal height for which the anchored box is worthwhile.
 _MIN_ROWS = _BOX_H + 3
 _ESC = "\x1b"
-_PLACEHOLDER = "Add an instruction for the agent while it works…"
 
 
 def supports_steering() -> bool:
@@ -152,7 +161,7 @@ class _InputBox:
     def __init__(self, lock: threading.RLock, out: Any) -> None:
         self.lock = lock
         self.buf = ""
-        self.title = " steer · type, then Enter to queue · Ctrl+C to abort "
+        self.title = STEER_TITLE
         self.status = ""
         self._out = out
         self._fd = -1
@@ -209,43 +218,22 @@ class _InputBox:
                 self._draw_locked()
 
     def _draw_locked(self) -> None:
-        rows, cols = _term_size()
-        cols = max(cols, 10)
+        rows, _ = _term_size()
+        cols = panel_cols()
         top_row = rows - _BOX_H + 1
         out = self._out
-        cyan = f"{_ESC}[36m"
-        dim = f"{_ESC}[2m"
-        reset = f"{_ESC}[0m"
 
-        title = self.title[: cols - 4]
-        top = "╭─" + title + "─" * max(cols - 3 - len(title), 0) + "╮"
-        top = top[:cols]
-
-        status = self.status[: cols - 4]
-        bfill = "─" * max(cols - 3 - len(status), 0)
-        bottom = "╰" + bfill + status + "─╯"
-        bottom = bottom[:cols]
-
-        inner_w = cols - 4  # room between "│ " and " │"
-        if self.buf:
-            shown = self.buf
-            marker = "› "
-            avail = inner_w - len(marker)
-            if len(shown) > avail:
-                shown = shown[len(shown) - avail :]
-            body = marker + shown + "▏"
-            body = body[:inner_w].ljust(inner_w)
-            mid_color = ""
-        else:
-            body = (_PLACEHOLDER[:inner_w]).ljust(inner_w)
-            mid_color = dim
-        mid = "│ " + mid_color + body + reset + " │"
+        top = panel_top(self.title, cols)
+        bottom = panel_bottom(self.status, cols)
+        body, is_placeholder = panel_body(self.buf, cols)
+        mid_color = DIM if is_placeholder else ""
+        mid = "│ " + mid_color + body + RESET + " │"
 
         # Save output cursor, paint the three box rows, restore it.
         out.write(_ESC + "7")
-        out.write(f"{_ESC}[{top_row};1H{_ESC}[2K{cyan}{top}{reset}")
-        out.write(f"{_ESC}[{top_row + 1};1H{_ESC}[2K{cyan}│{reset}{mid[1:-1]}{cyan}│{reset}")
-        out.write(f"{_ESC}[{top_row + 2};1H{_ESC}[2K{cyan}{bottom}{reset}")
+        out.write(f"{_ESC}[{top_row};1H{_ESC}[2K{CYAN}{top}{RESET}")
+        out.write(f"{_ESC}[{top_row + 1};1H{_ESC}[2K{CYAN}│{RESET}{mid[1:-1]}{CYAN}│{RESET}")
+        out.write(f"{_ESC}[{top_row + 2};1H{_ESC}[2K{CYAN}{bottom}{RESET}")
         out.write(_ESC + "8")
         out.flush()
 
