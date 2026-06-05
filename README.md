@@ -64,7 +64,6 @@ An old video on KISS Sorcar can be found at [https://www.youtube.com/watch?v=xnY
 curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh | bash
 ```
 
-
 ## 🎬 See It in Action
 
 From writing production-grade code to planning your next vacation, KISS Sorcar handles a range of tasks end-to-end. Here are a few examples:
