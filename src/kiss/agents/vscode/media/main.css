@@ -158,18 +158,22 @@ body {
 .config-gitcommit-btn svg { flex-shrink: 0; }
 
 .config-update-btn {
-  display: inline-block;
-  padding: 6px 14px;
-  background: var(--accent);
-  border: 1px solid var(--accent);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+  border: 1px solid var(--border);
   border-radius: 4px;
-  color: var(--vscode-button-foreground, #fff);
+  color: var(--fg);
   font-size: var(--fs-sm);
   font-family: inherit;
   cursor: pointer;
 }
-.config-update-btn:hover { background: color-mix(in srgb, var(--accent) 85%, #000); }
+.config-update-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--fg) 10%, transparent); border-color: color-mix(in srgb, var(--fg) 24%, transparent); }
 .config-update-btn:focus-visible { outline: 1px solid var(--accent); }
+.config-update-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.config-update-btn svg { flex-shrink: 0; }
 
 .config-password-wrap { position: relative; margin-top: 4px; }
 .config-password-wrap input { margin-top: 0 !important; padding-right: 32px !important; }
