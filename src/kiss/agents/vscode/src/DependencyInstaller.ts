@@ -1241,11 +1241,20 @@ function installCliScript(kissProjectPath: string, uvPath: string): void {
   try {
     fs.mkdirSync(binDir, {recursive: true});
 
+    // ``uv run --directory <kissProjectPath>`` changes the child
+    // process's working directory to the bundled project before the
+    // CLI starts, so the CLI's ``Path.cwd()`` would otherwise report
+    // the project directory instead of the user's shell directory.
+    // Capture the launch directory in ``KISS_WORKDIR`` *before* uv
+    // runs so the CLI can recover it (see ``_launch_work_dir`` in
+    // ``cli_helpers.py``) and default the task ``work_dir`` to where
+    // the user actually invoked ``sorcar``.
     if (process.platform === 'win32') {
       const cmdPath = path.join(binDir, 'sorcar.cmd');
       const script =
         '@echo off\r\n' +
         'REM Installed by KISS Sorcar VS Code extension\r\n' +
+        'set "KISS_WORKDIR=%CD%"\r\n' +
         `"${absUvPath}" run --directory "${kissProjectPath}" sorcar %*\r\n`;
       fs.writeFileSync(cmdPath, script);
     } else {
@@ -1253,6 +1262,7 @@ function installCliScript(kissProjectPath: string, uvPath: string): void {
       const script =
         '#!/bin/bash\n' +
         '# Installed by KISS Sorcar VS Code extension\n' +
+        'export KISS_WORKDIR="$PWD"\n' +
         `exec "${absUvPath}" run --directory "${kissProjectPath}" sorcar "$@"\n`;
       fs.writeFileSync(scriptPath, script, {mode: 0o755});
     }
