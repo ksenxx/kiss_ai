@@ -137,6 +137,22 @@ body {
 .config-checkbox input[type="checkbox"] { margin: 0; width: auto; }
 .config-divider { border-top: 1px solid var(--border); margin: 12px 0; }
 
+.config-update-row { display: block; margin-bottom: 12px; }
+
+.config-update-btn {
+  display: inline-block;
+  padding: 6px 14px;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  color: var(--vscode-button-foreground, #fff);
+  font-size: var(--fs-sm);
+  font-family: inherit;
+  cursor: pointer;
+}
+.config-update-btn:hover { background: color-mix(in srgb, var(--accent) 85%, #000); }
+.config-update-btn:focus-visible { outline: 1px solid var(--accent); }
+
 .config-password-wrap { position: relative; margin-top: 4px; }
 .config-password-wrap input { margin-top: 0 !important; padding-right: 32px !important; }
 
