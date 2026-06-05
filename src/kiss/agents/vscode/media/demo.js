@@ -195,6 +195,7 @@
     task_done: 1,
     task_error: 1,
     task_stopped: 1,
+    task_interrupted: 1,
     followup_suggestion: 1,
   };
 
