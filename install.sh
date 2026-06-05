@@ -334,6 +334,38 @@ launch_vscode() {
     return 1
 }
 
+# Return 0 (true) when a VS Code window is already running.  Used to skip the
+# explicit ``launch_vscode`` at the end of the install: when the editor is
+# already open, the extension's own file watchers detect the reinstall (the
+# overwritten ``out/extension.js`` and the freshly written
+# ``~/.kiss/.extension-updated`` marker) and fire
+# ``workbench.action.reloadWindow``.  That reload already brings the user back
+# into a working window, so a second ``open``/launch here would only spawn a
+# redundant duplicate window.
+vscode_is_running() {
+    case "$OS" in
+        Darwin)
+            # AppleScript reliably reports whether the app is running.
+            if command -v osascript &>/dev/null; then
+                local running
+                running="$(osascript -e 'application "Visual Studio Code" is running' 2>/dev/null)"
+                [ "$running" = "true" ] && return 0
+            fi
+            # Fallback: match the app's main process by its bundle path.
+            command -v pgrep &>/dev/null && pgrep -f "Visual Studio Code.app" &>/dev/null && return 0
+            ;;
+        Linux)
+            command -v pgrep &>/dev/null || return 1
+            # The Electron main process is named "code"; also match common
+            # absolute-path invocations in case the name is shortened.
+            pgrep -x code &>/dev/null && return 0
+            pgrep -f "/usr/share/code/code" &>/dev/null && return 0
+            pgrep -f "/snap/code/" &>/dev/null && return 0
+            ;;
+    esac
+    return 1
+}
+
 # ---------------------------------------------------------------------------
 # Version helpers
 # ---------------------------------------------------------------------------
@@ -641,5 +673,15 @@ update_repo() {
 
 echo ""
 echo "Log saved to $LOG_FILE"
-echo "Launching VS Code to finish setup..."
-launch_vscode || true
+# Only explicitly launch VS Code when it is not already running.  If a window
+# is already open, the extension's watchers on ``out/extension.js`` and
+# ``~/.kiss/.extension-updated`` (both touched in step [6/6]) trigger
+# ``workbench.action.reloadWindow`` to pick up the update — launching here too
+# would open a redundant second window.
+if vscode_is_running; then
+    echo "VS Code is already running; the extension will reload to finish setup."
+    echo "Skipping explicit launch to avoid opening a duplicate window."
+else
+    echo "Launching VS Code to finish setup..."
+    launch_vscode || true
+fi
