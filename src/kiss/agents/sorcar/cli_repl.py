@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import logging
 import re
+import sys
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -101,6 +102,7 @@ _EXIT_WORDS = {"exit", "quit"}
 _PROMPT = f"{CYAN}{PROMPT_MARKER}{RESET}"
 _AT_RE = re.compile(r"@([^\s]*)$")
 _MENTION_RE = re.compile(r"PWD/(\S+)")
+_ESC = "\x1b"
 
 
 class CliCompleter:
@@ -397,6 +399,14 @@ def _print_usage(agent: SorcarAgent) -> None:
     print(f"Total tokens: {tokens}\n")
 
 
+def _stdout_isatty() -> bool:
+    """Return whether stdout is attached to an interactive terminal."""
+    try:
+        return bool(sys.stdout.isatty())
+    except Exception:  # pragma: no cover - defensive isatty guard
+        return False
+
+
 def _read_line(prompt: str) -> str | None:
     """Read one input line inside the shared rounded input panel.
 
@@ -407,6 +417,13 @@ def _read_line(prompt: str) -> str | None:
     (with the idle title) is printed above the prompt, the ``│ ›`` body
     carries the readline input, and the bottom border closes it below.
 
+    On an interactive terminal the bottom border is drawn *before* the
+    input is read and the cursor is moved back up onto the body line, so
+    the box stays fully closed — top *and* bottom rules visible — while
+    the user is still typing the task (matching the always-framed
+    steering box).  When stdout is not a TTY the bottom border is simply
+    printed after the line is read.
+
     Returns:
         The line, or ``None`` to signal EOF (Ctrl+D) — the caller exits.
 
@@ -414,14 +431,37 @@ def _read_line(prompt: str) -> str | None:
         KeyboardInterrupt: When the user presses Ctrl+C at the prompt.
     """
     cols = panel_cols()
-    print(f"{CYAN}{panel_top(IDLE_TITLE, cols)}{RESET}")
+    top = f"{CYAN}{panel_top(IDLE_TITLE, cols)}{RESET}"
+    bottom = f"{CYAN}{panel_bottom('', cols)}{RESET}"
     framed_prompt = f"{CYAN}│{RESET} {prompt}"
+
+    if not _stdout_isatty():
+        print(top)
+        try:
+            line = input(framed_prompt)
+        except EOFError:
+            print(bottom)
+            return None
+        print(bottom)
+        return line
+
+    # Interactive: pre-draw the closed box, then edit on the body line.
+    print(top)
+    # Reserve the body line, draw the bottom rule below it, then move the
+    # cursor back up onto the (now framed) body line for readline.
+    sys.stdout.write(f"\n{bottom}{_ESC}[1A\r")
+    sys.stdout.flush()
     try:
         line = input(framed_prompt)
     except EOFError:
-        print(f"{CYAN}{panel_bottom('', cols)}{RESET}")
+        # Cursor is still on the body line; drop below the bottom rule.
+        sys.stdout.write("\n\n")
+        sys.stdout.flush()
         return None
-    print(f"{CYAN}{panel_bottom('', cols)}{RESET}")
+    # Enter already moved the cursor onto the bottom rule line; step past
+    # it so following output never overwrites the closed box.
+    sys.stdout.write("\n")
+    sys.stdout.flush()
     return line
 
 
