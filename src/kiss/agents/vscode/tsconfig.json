@@ -5,6 +5,7 @@
     "outDir": "out",
     "lib": ["ES2022"],
     "sourceMap": true,
+    "allowJs": true,
     "rootDir": "src",
     "strict": true,
     "esModuleInterop": true,
