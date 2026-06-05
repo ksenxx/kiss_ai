@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -388,8 +389,22 @@ def _print_usage(agent: SorcarAgent) -> None:
     print(f"Total tokens: {tokens}\n")
 
 
+def _hr() -> str:
+    """Return a dim, full-terminal-width horizontal rule.
+
+    The width tracks the current terminal, falling back to 80 columns
+    when the size cannot be determined (e.g. piped/non-TTY stdout).
+    """
+    width = shutil.get_terminal_size((80, 24)).columns
+    return "\x1b[2m" + "─" * width + "\x1b[0m"
+
+
 def _read_line(prompt: str) -> str | None:
-    """Read one input line.
+    """Read one input line, framed by horizontal rules.
+
+    A horizontal rule is printed above the prompt and another below the
+    submitted line, so the user-input dialog is visually boxed off from
+    the surrounding task output.
 
     Returns:
         The line, or ``None`` to signal EOF (Ctrl+D) — the caller exits.
@@ -397,10 +412,13 @@ def _read_line(prompt: str) -> str | None:
     Raises:
         KeyboardInterrupt: When the user presses Ctrl+C at the prompt.
     """
+    print(_hr())
     try:
-        return input(prompt)
+        line = input(prompt)
     except EOFError:
         return None
+    print(_hr())
+    return line
 
 
 def run_repl(
