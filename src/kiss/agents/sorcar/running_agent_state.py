@@ -146,6 +146,7 @@ class _RunningAgentState:
         "is_merging",
         "is_running_non_wt",
         "is_task_active",
+        "interrupted_by_shutdown",
         "frontend_closed",
         "is_subagent",
         "parent_task_id",
@@ -223,6 +224,20 @@ class _RunningAgentState:
         self.is_merging: bool = False
         self.is_running_non_wt: bool = False
         self.is_task_active: bool = False
+        # ``True`` when this tab's in-flight task is being cancelled by
+        # the server's graceful-shutdown path
+        # (:meth:`RemoteAccessServer._stop_active_agent_tasks`, reached
+        # only when ``kiss-web`` receives a ``SIGTERM`` — e.g. a daemon
+        # / LaunchAgent restart triggered by an extension update) rather
+        # than by the user clicking "Stop".  Both paths inject the same
+        # ``KeyboardInterrupt`` into the worker thread, so this flag is
+        # the only way the task-runner's ``except KeyboardInterrupt``
+        # handler can tell them apart and persist the correct outcome
+        # label ("Task interrupted by server restart/shutdown" with an
+        # event type of ``task_interrupted`` vs. "Task stopped by
+        # user" / ``task_stopped``).  Set BEFORE the interrupt is
+        # injected so the handler always observes it.
+        self.interrupted_by_shutdown: bool = False
         # ``True`` once the frontend has issued ``closeTab`` for this
         # tab while a task / merge was still in flight.  The tab state
         # is then kept alive (so the running agent can finish) and

@@ -37,7 +37,7 @@ _DISPLAY_EVENT_TYPES = frozenset({
     "clear", "thinking_start", "thinking_delta", "thinking_end",
     "text_delta", "text_end", "tool_call", "tool_result",
     "system_output", "result", "system_prompt", "prompt",
-    "task_done", "task_error", "task_stopped",
+    "task_done", "task_error", "task_stopped", "task_interrupted",
     "followup_suggestion",
     "autocommit_done",
 })

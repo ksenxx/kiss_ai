@@ -140,6 +140,7 @@ type ToWebviewMessageBody =
   | {type: 'task_done'}
   | {type: 'task_error'; text: string}
   | {type: 'task_stopped'}
+  | {type: 'task_interrupted'}
   // UI events
   | {type: 'status'; running: boolean}
   | {
