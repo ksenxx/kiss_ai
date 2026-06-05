@@ -25,6 +25,7 @@ from kiss.agents.sorcar.cli_helpers import (
     _apply_chat_args,
     _build_arg_parser,
     _build_run_kwargs,
+    _launch_work_dir,
     _print_recent_chats,
     _print_result,
     _print_run_stats,
@@ -872,7 +873,7 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
         _print_recent_chats()
         sys.exit(0)
 
-    work_dir = args.work_dir or str(Path(".").resolve())
+    work_dir = args.work_dir or _launch_work_dir()
 
     if args.cleanup:
         repo = GitWorktreeOps.discover_repo(Path(work_dir))
