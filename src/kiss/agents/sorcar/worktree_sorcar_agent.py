@@ -892,8 +892,10 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
     if isinstance(agent, ChatSorcarAgent):
         _apply_chat_args(agent, args, task=run_kwargs.get("prompt_template", ""))
 
+    from kiss.agents.sorcar.cli_steering import run_with_steering
+
     start_time = time_mod.time()
-    result = agent.run(**run_kwargs)
+    result = run_with_steering(agent, run_kwargs)
     elapsed = time_mod.time() - start_time
 
     print(result)
