@@ -11,6 +11,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import {SorcarSidebarView} from './SorcarSidebarView';
+import {isReloadReady} from './reloadGuard';
 
 import {ensureDependencies, ensureLocalBinInPath} from './DependencyInstaller';
 
@@ -240,23 +241,65 @@ export function activate(context: vscode.ExtensionContext): void {
   //      *new* version.  A version bump puts the new extension in a separate
   //      directory, so the old extension.js is never modified and watcher #1
   //      never fires.
+  const extJsPath = path.join(context.extensionPath, 'out', 'extension.js');
+  const markerPath = path.join(os.homedir(), '.kiss', '.extension-updated');
+  const sockPath = path.join(os.homedir(), '.kiss', 'sorcar.sock');
+
   let reloadTriggered = false;
-  const triggerReload = () => {
+  let settleTimer: ReturnType<typeof setInterval> | undefined;
+
+  const doReload = () => {
     if (reloadTriggered) return;
     reloadTriggered = true;
+    if (settleTimer) {
+      clearInterval(settleTimer);
+      settleTimer = undefined;
+    }
     fs.unwatchFile(extJsPath);
     fs.unwatchFile(markerPath);
     vscode.commands.executeCommand('workbench.action.reloadWindow');
   };
 
-  const extJsPath = path.join(context.extensionPath, 'out', 'extension.js');
+  // A same-version ``code --install-extension --force`` first DELETES the
+  // extension directory and then re-extracts it, so ``out/extension.js`` is
+  // transiently missing (and briefly partially written) for a noticeable
+  // window.  Reloading during that window brings the chat webview up against
+  // a half-installed extension (its ``media`` resources are gone) and before
+  // ``install.sh`` has restarted the kiss-web daemon — the chat view renders
+  // blank.  Instead of reloading the instant a watcher fires, poll until the
+  // reinstall has fully settled: ``out/extension.js`` present, non-empty and
+  // size-stable across two consecutive polls, AND the daemon socket is back so
+  // the reloaded webview can reconnect immediately.  A hard timeout reloads
+  // anyway so a daemon that never comes back can't strand the user on stale
+  // code.
+  const RELOAD_SETTLE_INTERVAL_MS = 500;
+  const RELOAD_SETTLE_TIMEOUT_MS = 60_000;
+  const triggerReload = () => {
+    if (reloadTriggered || settleTimer) return;
+    let prevSize = -1;
+    let waited = 0;
+    settleTimer = setInterval(() => {
+      waited += RELOAD_SETTLE_INTERVAL_MS;
+      const {ready, size} = isReloadReady(extJsPath, sockPath, prevSize);
+      prevSize = size;
+      if (ready || waited >= RELOAD_SETTLE_TIMEOUT_MS) {
+        doReload();
+      }
+    }, RELOAD_SETTLE_INTERVAL_MS);
+  };
+
+  // Two watchers feed the same settle gate:
+  //   1. extension.js — fires when the VSIX is reinstalled with the *same*
+  //      version (files overwritten in-place).
+  //   2. ~/.kiss/.extension-updated marker — fires when install.sh /
+  //      build-extension.sh write the marker *after* installing the
+  //      extension and restarting the daemon.
   fs.watchFile(extJsPath, {interval: 2000}, (curr, prev) => {
     if (curr.mtimeMs !== prev.mtimeMs || curr.ino !== prev.ino) {
       triggerReload();
     }
   });
 
-  const markerPath = path.join(os.homedir(), '.kiss', '.extension-updated');
   fs.watchFile(markerPath, {interval: 2000}, (curr, prev) => {
     // Only reload when the marker is *created* or *modified* (size > 0),
     // not when ensureDependencies() deletes it (size === 0).
@@ -267,6 +310,10 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push({
     dispose: () => {
+      if (settleTimer) {
+        clearInterval(settleTimer);
+        settleTimer = undefined;
+      }
       fs.unwatchFile(extJsPath);
       fs.unwatchFile(markerPath);
     },
