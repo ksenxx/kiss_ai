@@ -137,7 +137,25 @@ body {
 .config-checkbox input[type="checkbox"] { margin: 0; width: auto; }
 .config-divider { border-top: 1px solid var(--border); margin: 12px 0; }
 
-.config-update-row { display: block; margin-bottom: 12px; }
+.config-update-row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+
+.config-gitcommit-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--fg);
+  font-size: var(--fs-sm);
+  font-family: inherit;
+  cursor: pointer;
+}
+.config-gitcommit-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--fg) 10%, transparent); border-color: color-mix(in srgb, var(--fg) 24%, transparent); }
+.config-gitcommit-btn:focus-visible { outline: 1px solid var(--accent); }
+.config-gitcommit-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.config-gitcommit-btn svg { flex-shrink: 0; }
 
 .config-update-btn {
   display: inline-block;
@@ -884,15 +902,6 @@ body.remote-chat #welcome-config { display: none !important; }
 }
 #menu-btn:hover:not(:disabled) { color: color-mix(in srgb, var(--fg) 66%, transparent); }
 #menu-btn:disabled { opacity: 0.3; cursor: not-allowed; }
-
-#autocommit-btn {
-  background: none; border: none;
-  color: color-mix(in srgb, var(--fg) 50%, transparent); cursor: pointer;
-  padding: 4px; transition: color 0.15s, opacity 0.15s;
-  display: flex; align-items: center; position: relative;
-}
-#autocommit-btn:hover:not(:disabled) { color: color-mix(in srgb, var(--fg) 66%, transparent); }
-#autocommit-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 
 /* Inline toggle buttons (worktree / parallel / auto-commit) */
 .toggle-btn {
