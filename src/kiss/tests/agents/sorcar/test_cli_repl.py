@@ -317,5 +317,9 @@ def test_idle_prompt_box_closed_while_typing() -> None:
     # the user submits, so the box is already closed while typing.
     assert "╭" in before and "╮" in before, before
     assert "╰" in before and "╯" in before, before
+    # The body line is fully framed: a left ``│`` (from the prompt) *and*
+    # a right ``│`` vertical border are drawn, so the right edge is never
+    # missing while typing.
+    assert before.count("│") >= 2, before
     # The line still submits correctly once Enter is pressed.
     assert "RESULT[hello task]" in full, full
