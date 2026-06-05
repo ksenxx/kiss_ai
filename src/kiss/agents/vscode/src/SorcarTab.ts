@@ -281,9 +281,6 @@ export function buildChatHtml(
           <label class="config-label config-checkbox">
             <input type="checkbox" id="cfg-auto-commit" checked>
             Auto commit
-            <button id="autocommit-btn" type="button" data-tooltip="git commit">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><line x1="1.05" y1="12" x2="7" y2="12"/><line x1="17.01" y1="12" x2="22.96" y2="12"/><line x1="12" y1="1.05" x2="12" y2="7"/><line x1="12" y1="17.01" x2="12" y2="22.96"/></svg>
-            </button>
           </label>
           <label class="config-label config-checkbox">
             <input type="checkbox" id="cfg-use-parallel" checked>
@@ -298,6 +295,10 @@ export function buildChatHtml(
             Demo mode
           </label>
           <div class="config-update-row">
+            <button id="autocommit-btn" type="button" class="config-gitcommit-btn" data-tooltip="git commit">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><line x1="1.05" y1="12" x2="7" y2="12"/><line x1="17.01" y1="12" x2="22.96" y2="12"/><line x1="12" y1="1.05" x2="12" y2="7"/><line x1="12" y1="17.01" x2="12" y2="22.96"/></svg>
+              <span>Git Commit</span>
+            </button>
             <button type="button" id="cfg-update-btn" class="config-update-btn">Update</button>
           </div>
 
