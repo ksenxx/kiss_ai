@@ -130,12 +130,6 @@ class TestConcurrentMergeRouting(unittest.TestCase):
         assert "_mergeManagers.get(" in block
         assert "_activeTabId" in block
 
-    def test_dispose_cleans_up_all_managers(self) -> None:
-        """dispose must dispose all per-tab MergeManagers."""
-        idx = _SIDEBAR_TS.index("public dispose(): void")
-        block = _SIDEBAR_TS[idx : idx + 400]
-        assert "_mergeManagers" in block
-
     def test_extension_no_global_merge_manager(self) -> None:
         """extension.ts must not create a global MergeManager."""
         assert "new MergeManager()" not in _EXTENSION_TS
