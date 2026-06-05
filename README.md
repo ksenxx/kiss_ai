@@ -118,6 +118,8 @@ You can also manually download the extension from [src/kiss/agents/vscode/kiss-s
 If you do not want to use the KISS Sorcar IDE, you can open a terminal and use `sorcar` as a shell command. Some examples:
 
 ```
+sorcar # to launch Sorcar CLI similar to Claude Code
+
 sorcar -t "What is 2435*234"
 
 sorcar -n -t --use-chat "What is 2435*234?" # start a new chat session
