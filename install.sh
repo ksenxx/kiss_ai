@@ -685,6 +685,43 @@ update_repo() {
     # clean and avoid shipping a stale VSIX on the next build.
     rm -f "$VSIX"
     echo "   Removed build artifact $VSIX"
+
+    # Stop the old kiss-web daemon BEFORE the extension auto-reloads.  The
+    # ``--install-extension --force`` above replaced the extension directory
+    # tree that the running daemon's bundled kiss_project (.venv/bin/kiss-web)
+    # was loaded from, so the live daemon is technically broken even while it
+    # is still listening (subsequent UDS requests can hit stale / missing
+    # module paths).  If we skip this, the marker write below triggers
+    # ``workbench.action.reloadWindow`` (~2 s later) and the freshly reloaded
+    # webview reconnects to the broken daemon — the chat view comes up blank.
+    #
+    # ``pkill -x kiss-web`` is unreliable on macOS — kiss-web is a Python
+    # shebang script so the kernel's ``comm`` field is the (15-char-truncated)
+    # interpreter path, NOT the literal name.  Kill by listening port instead.
+    # The macOS LaunchAgent / Linux systemd unit's ``KeepAlive`` respawns a
+    # clean daemon from the freshly-installed VSIX before the reload fires.
+    if command -v lsof &>/dev/null; then
+        OLD_KISS_WEB_PIDS=$(lsof -ti :8787 2>/dev/null || true)
+        if [ -n "$OLD_KISS_WEB_PIDS" ]; then
+            echo "   Stopping old kiss-web daemon (PIDs: $OLD_KISS_WEB_PIDS)..."
+            echo "$OLD_KISS_WEB_PIDS" | xargs kill 2>/dev/null || true
+            for _ in 1 2 3 4 5 6 7 8 9 10; do
+                sleep 0.3
+                if ! lsof -i :8787 -t &>/dev/null; then break; fi
+            done
+            # Force-kill survivors.
+            KISS_WEB_STRAGGLERS=$(lsof -ti :8787 2>/dev/null || true)
+            if [ -n "$KISS_WEB_STRAGGLERS" ]; then
+                echo "$KISS_WEB_STRAGGLERS" | xargs kill -9 2>/dev/null || true
+            fi
+        fi
+    fi
+    # Remove the stale Unix-domain socket left behind by the now-dead daemon.
+    # The new daemon's ``_setup_server`` unlinks before binding, but pre-emptive
+    # cleanup avoids ENOENT/ECONNREFUSED reconnect-loop noise from the extension
+    # client that is mid-flight during the launchd/systemd respawn window.
+    rm -f "$HOME/.kiss/sorcar.sock"
+
     date -u +%Y-%m-%dT%H:%M:%SZ > "$HOME/.kiss/.extension-updated"
     # Remove any stale source-install marker from older versions of this
     # installer.  The extension now always runs against the kiss_project
