@@ -210,15 +210,22 @@ def test_repl_cost_command(tmp_path: Path) -> None:
     assert "Total tokens:" in proc.stdout
 
 
-def test_repl_frames_input_with_horizontal_lines(tmp_path: Path) -> None:
-    """The input dialog is framed by horizontal rules above and below."""
+def test_repl_frames_input_with_single_panel(tmp_path: Path) -> None:
+    """The idle input dialog is drawn inside the shared rounded panel.
+
+    The idle prompt and the steering box now render the *same* panel, so
+    the idle dialog shows the rounded border glyphs and the shared idle
+    title instead of the old plain horizontal rules.
+    """
     proc = _run_repl_subprocess(tmp_path, "/cost\n/exit\n")
     assert proc.returncode == 0, proc.stderr
-    # The box-drawing rule character appears around each prompt.
-    assert "\u2500" in proc.stdout
-    # Two prompts are read (/cost then /exit); each prints a rule above,
-    # and each non-EOF line prints a rule below, so at least 3 rules of
-    # consecutive box-drawing characters appear in the output.
+    # Rounded-border glyphs (the same the steering box uses) frame input.
+    assert "╭" in proc.stdout and "╮" in proc.stdout
+    assert "╰" in proc.stdout and "╯" in proc.stdout
+    # The shared idle title appears in the panel's top border.
+    assert "sorcar · type a task" in proc.stdout
+    # Each of the two prompts (/cost then /exit) draws a top and bottom
+    # border, so at least 3 runs of consecutive box-drawing dashes show.
     rules = re.findall(r"\u2500{10,}", proc.stdout)
     assert len(rules) >= 3
 
