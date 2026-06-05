@@ -249,7 +249,8 @@
     "lint:html": "htmlhint 'src/**/*.html' 'media/**/*.html' || true",
     "lint:fix": "eslint 'src/**/*.ts' 'media/**/*.js' --ignore-pattern 'media/**/*.min.js' --fix && stylelint 'media/**/*.css' --ignore-pattern 'media/**/*.min.css' --fix",
     "typecheck": "tsc --noEmit -p ./",
-    "check": "npm run typecheck && npm run lint"
+    "test": "node test/reloadGuard.test.js",
+    "check": "npm run typecheck && npm run lint && npm run test"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
