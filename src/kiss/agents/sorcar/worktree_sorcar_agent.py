@@ -915,13 +915,19 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
         result = run_with_steering(agent, run_kwargs)
         elapsed = time_mod.time() - start_time
 
-        _print_result(result)
-        if isinstance(agent, ChatSorcarAgent):
-            _print_run_stats(agent, elapsed)
-        else:
-            print(f"\nTime: {elapsed:.1f}s")
-            print(f"Cost: ${agent.budget_used:.4f}")
-            print(f"Total tokens: {agent.total_tokens_used}")
+        # When the agent runs verbosely it already renders the green
+        # "Result" panel (whose subtitle carries tokens / cost / steps) to
+        # the console as the task ends; re-printing the summary and the run
+        # stats here would duplicate it.  Only print them when running
+        # quietly so the Result panel stays the last thing shown.
+        if not run_kwargs.get("verbose", True):
+            _print_result(result)
+            if isinstance(agent, ChatSorcarAgent):
+                _print_run_stats(agent, elapsed)
+            else:
+                print(f"\nTime: {elapsed:.1f}s")
+                print(f"Cost: ${agent.budget_used:.4f}")
+                print(f"Total tokens: {agent.total_tokens_used}")
 
     if isinstance(agent, WorktreeSorcarAgent) and agent._wt_pending:
         while True:
