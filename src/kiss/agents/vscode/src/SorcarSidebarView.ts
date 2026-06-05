@@ -1075,6 +1075,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         );
         break;
 
+      case 'runUpdate':
+        this._runUpdate();
+        break;
+
       case 'closeTab': {
         const closeTabId = message.tabId;
         if (closeTabId) {
@@ -1086,6 +1090,34 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         break;
       }
     }
+  }
+
+  /**
+   * Run ``install.sh`` from the current working directory to update
+   * KISS Sorcar and notify the user that an update is being installed.
+   *
+   * The script is executed in a dedicated integrated terminal so its
+   * progress is visible.  If the script is missing an error message is
+   * shown instead.
+   */
+  private _runUpdate(): void {
+    const workDir = this._getWorkDir();
+    const scriptPath = path.join(workDir, 'install.sh');
+    if (!fs.existsSync(scriptPath)) {
+      vscode.window.showErrorMessage(
+        `Cannot update KISS Sorcar: install.sh not found in ${workDir}.`,
+      );
+      return;
+    }
+    vscode.window.showInformationMessage(
+      'An update of KISS Sorcar is getting installed…',
+    );
+    const terminal = vscode.window.createTerminal({
+      name: 'KISS Sorcar Update',
+      cwd: workDir,
+    });
+    terminal.show();
+    terminal.sendText(`bash '${scriptPath.replace(/'/g, "'\\''")}'`);
   }
 
   /**
