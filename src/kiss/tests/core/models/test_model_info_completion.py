@@ -14,6 +14,8 @@ from __future__ import annotations
 from kiss.core.models.model_info import (
     MODEL_INFO,
     get_completion_model_names,
+    get_generation_model_listing,
+    get_model_provider,
     rank_model_suggestions,
 )
 
@@ -71,3 +73,52 @@ def test_rank_defaults_to_completion_model_names() -> None:
     ranked = rank_model_suggestions(sample[:3])
     assert sample in ranked
     assert set(ranked).issubset(set(get_completion_model_names()))
+
+
+def test_get_model_provider_routes_known_prefixes() -> None:
+    """Provider labels match the routing prefixes used by ``model()``."""
+    assert get_model_provider("gpt-5.5") == "OpenAI"
+    assert get_model_provider("o3") == "OpenAI"
+    assert get_model_provider("claude-opus-4-8") == "Anthropic"
+    assert get_model_provider("gemini-3.1-pro-preview") == "Gemini"
+    assert get_model_provider("minimax-m2.5") == "MiniMax"
+    assert get_model_provider("openrouter/openai/gpt-5.5") == "OpenRouter"
+    assert get_model_provider("Qwen/Qwen3.5-9B") == "Together"
+    assert get_model_provider("openai/gpt-oss-120b") == "Together"
+    assert get_model_provider("cc/opus") == "Claude Code CLI"
+    assert get_model_provider("codex/default") == "Codex CLI"
+
+
+def test_get_model_provider_unknown_for_unrouted_name() -> None:
+    """A name that matches no route is reported as ``Unknown``."""
+    assert get_model_provider("totally-made-up-model") == "Unknown"
+
+
+def test_generation_model_listing_sorted_generation_only() -> None:
+    """The listing covers exactly the generation models, sorted by name."""
+    listing = get_generation_model_listing()
+    assert listing, "listing must never be empty"
+    names = [name for name, _, _ in listing]
+    assert names == sorted(names)
+    listed = set(names)
+    expected = {
+        name for name, info in MODEL_INFO.items() if info.is_generation_supported
+    }
+    assert listed == expected
+
+
+def test_generation_model_listing_provider_and_bool_status() -> None:
+    """Each entry carries the correct provider label and a bool status."""
+    for name, provider, configured in get_generation_model_listing():
+        assert provider == get_model_provider(name)
+        assert provider != "Unknown"
+        assert isinstance(configured, bool)
+
+
+def test_generation_model_listing_excludes_embeddings_and_images() -> None:
+    """Embedding-only and image-only models never appear in the listing."""
+    names = {name for name, _, _ in get_generation_model_listing()}
+    assert "text-embedding-3-large" not in names  # embedding-only
+    assert "gpt-image-1" in names  # gpt-image-* are generation-capable (gen=True)
+    assert not MODEL_INFO["BAAI/bge-base-en-v1.5"].is_generation_supported
+    assert "BAAI/bge-base-en-v1.5" not in names
