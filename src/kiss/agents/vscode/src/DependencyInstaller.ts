@@ -829,6 +829,54 @@ function killProcessOnPort(port: number): void {
 }
 
 /**
+ * Start the kiss-web daemon directly as a detached background process.
+ *
+ * Fallback for Linux environments that have no usable systemd **user**
+ * session — most notably Docker containers (where PID 1 is not systemd
+ * and ``$DBUS_SESSION_BUS_ADDRESS`` / ``$XDG_RUNTIME_DIR`` are unset), as
+ * well as minimal VMs and some WSL setups.  In those environments
+ * ``systemctl --user`` fails, so without this fallback the daemon never
+ * starts, ``~/.kiss/sorcar.sock`` is never created, and the extension can
+ * never run a task.
+ *
+ * The child is detached and ``unref``-ed so it survives the extension host
+ * exiting, inherits the current environment (API keys, etc.), runs with
+ * ``cwd = workDir``, and appends its output to the same log files the
+ * systemd/launchd units use.
+ *
+ * @param kissWebBin - Absolute path to ``.venv/bin/kiss-web``.
+ * @param workDir - Working directory (process ``getcwd()``) for the daemon.
+ */
+function spawnKissWebDirect(kissWebBin: string, workDir: string): void {
+  const binDir = path.join(HOME_DIR, '.local', 'bin');
+  try {
+    fs.mkdirSync(LOG_DIR, {recursive: true});
+    const outFd = fs.openSync(path.join(LOG_DIR, 'kiss-web-stdout.log'), 'a');
+    const errFd = fs.openSync(path.join(LOG_DIR, 'kiss-web-stderr.log'), 'a');
+    const child = spawn(kissWebBin, [], {
+      cwd: workDir,
+      detached: true,
+      stdio: ['ignore', outFd, errFd],
+      env: {
+        ...process.env,
+        PATH: `${binDir}:${process.env.PATH || '/usr/local/bin:/usr/bin:/bin'}`,
+      },
+    });
+    child.unref();
+    fs.closeSync(outFd);
+    fs.closeSync(errFd);
+    log(
+      `kiss-web started directly (no systemd): pid ${child.pid ?? '<unknown>'}, ` +
+        `cwd ${workDir}`,
+    );
+  } catch (err) {
+    log(
+      `Failed to start kiss-web directly: ${err instanceof Error ? err.message : err}`,
+    );
+  }
+}
+
+/**
  * Restart the kiss-web remote access daemon.
  *
  * Always restarts the daemon so that code changes from an editable install
@@ -1027,6 +1075,7 @@ function restartKissWebDaemon(kissProjectPath: string, workDir: string): void {
     const serviceFile = path.join(systemdDir, 'kiss-web.service');
 
     log('Restarting kiss-web systemd user service...');
+    let systemdOk = false;
     try {
       fs.mkdirSync(systemdDir, {recursive: true});
       // unit-escape every interpolated path so that backslashes / newlines
@@ -1075,10 +1124,19 @@ WantedBy=default.target
         /* may require elevated privileges — non-fatal */
       }
       log(`kiss-web systemd user service restarted: ${serviceFile}`);
+      systemdOk = true;
     } catch (err) {
       log(
-        `Failed to restart kiss-web daemon (Linux): ${err instanceof Error ? err.message : err}`,
+        'Failed to restart kiss-web daemon via systemd (Linux): ' +
+          `${err instanceof Error ? err.message : err} — ` +
+          'falling back to direct background spawn',
       );
+    }
+    // Environments without a usable systemd user session (Docker
+    // containers, minimal VMs, some WSL setups) reach here.  Start the
+    // daemon directly so the UDS socket is created and tasks can run.
+    if (!systemdOk) {
+      spawnKissWebDirect(kissWebBin, workDir);
     }
   }
 
