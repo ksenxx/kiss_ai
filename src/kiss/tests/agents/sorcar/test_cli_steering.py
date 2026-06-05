@@ -106,7 +106,10 @@ class TestInputBoxRender:
         # Rounded border glyphs and the input marker are present.
         assert "╭" in text and "╮" in text
         assert "╰" in text and "╯" in text
-        assert "› do something" in text
+        # The cyan chevron precedes the typed text (separated by ANSI
+        # codes), so assert both the marker and the text appear.
+        assert "› " in text
+        assert "do something" in text
         assert "queued: 1" in text
         # Cursor is saved/restored around the box so output is undisturbed.
         assert "\x1b7" in text and "\x1b8" in text
