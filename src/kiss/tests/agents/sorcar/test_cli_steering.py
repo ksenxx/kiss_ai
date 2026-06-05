@@ -17,9 +17,11 @@ import io
 import threading
 from typing import Any
 
+from kiss.agents.sorcar.cli_panel import body_cursor_col, panel_cols
 from kiss.agents.sorcar.cli_steering import (
     SteeringSession,
     _InputBox,
+    _StdoutProxy,
     run_with_steering,
     supports_steering,
 )
@@ -111,8 +113,11 @@ class TestInputBoxRender:
         assert "› " in text
         assert "do something" in text
         assert "queued: 1" in text
-        # Cursor is saved/restored around the box so output is undisturbed.
-        assert "\x1b7" in text and "\x1b8" in text
+        # No static caret glyph is drawn — the real blinking cursor is
+        # parked right after the typed text instead.
+        assert "▏" not in text
+        col = body_cursor_col("do something", panel_cols())
+        assert f";{col}H" in text
 
     def test_draw_shows_placeholder_when_empty(self) -> None:
         out = io.StringIO()
@@ -121,6 +126,44 @@ class TestInputBoxRender:
         box.redraw()
         text = out.getvalue()
         assert "Add an instruction" in text
+
+    def test_draw_parks_caret_after_chevron_when_empty(self) -> None:
+        # With an empty buffer the caret sits immediately after the ``› ``
+        # chevron, exactly like the idle sorcar prompt's blinking cursor.
+        out = io.StringIO()
+        box = _InputBox(threading.RLock(), out)
+        box._active = True
+        box.redraw()
+        text = out.getvalue()
+        col = body_cursor_col("", panel_cols())
+        assert f";{col}H" in text
+
+
+class TestStdoutProxyCaret:
+    def test_output_restores_then_reparks_caret(self) -> None:
+        # While the box is active, agent output is wrapped so it lands in
+        # the scroll region (ESC8 restore / ESC7 save) and the blinking
+        # caret is returned to the box body afterwards.
+        out = io.StringIO()
+        box = _InputBox(threading.RLock(), out)
+        box._active = True
+        box.buf = "hi"
+        proxy = _StdoutProxy(out, box.lock, box)
+        proxy.write("agent says hello")
+        text = out.getvalue()
+        assert "\x1b8" in text  # restore output position
+        assert "agent says hello" in text
+        assert "\x1b7" in text  # re-save advanced output position
+        col = body_cursor_col("hi", panel_cols())
+        assert f";{col}H" in text  # caret re-parked in body
+
+    def test_output_is_plain_when_box_inactive(self) -> None:
+        out = io.StringIO()
+        box = _InputBox(threading.RLock(), out)
+        proxy = _StdoutProxy(out, box.lock, box)
+        proxy.write("plain text")
+        text = out.getvalue()
+        assert text == "plain text"
 
     def test_redraw_noop_when_inactive(self) -> None:
         out = io.StringIO()

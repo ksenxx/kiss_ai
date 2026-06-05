@@ -72,12 +72,39 @@ def panel_bottom(status: str, cols: int) -> str:
     return bottom[:cols]
 
 
+def clip_buf(buf: str, cols: int) -> str:
+    """Return the visible (tail-clipped) slice of *buf* for the body row.
+
+    When the edit buffer is wider than the room left after the chevron
+    the trailing end is shown (so the caret stays in view), matching the
+    way a real input line scrolls horizontally.
+
+    Args:
+        buf: The current edit buffer.
+        cols: Total panel width in columns.
+
+    Returns:
+        The portion of *buf* that fits on the body row (possibly the
+        whole buffer, or its tail when it would overflow).
+    """
+    inner_w = cols - 4  # room between "│ " and " │"
+    avail = inner_w - len(PROMPT_MARKER)
+    if len(buf) > avail:
+        return buf[len(buf) - avail :]
+    return buf
+
+
 def panel_body(buf: str, cols: int) -> tuple[str, bool]:
     """Return the inner body text for *buf* padded to the panel width.
 
     The body always opens with the :data:`PROMPT_MARKER` chevron — the
     same ``› `` the idle ``sorcar`` prompt shows — so the steering box
     carries the chevron on the left whether or not anything is typed.
+
+    No caret glyph is appended: callers park the real (blinking) terminal
+    cursor right after the typed text (see :func:`body_cursor_col`), so
+    the steering box shows the same blinking caret as the idle prompt
+    instead of a static block.
 
     Args:
         buf: The current edit buffer (empty shows the placeholder).
@@ -91,11 +118,27 @@ def panel_body(buf: str, cols: int) -> tuple[str, bool]:
     """
     inner_w = cols - 4  # room between "│ " and " │"
     if buf:
-        shown = buf
-        avail = inner_w - len(PROMPT_MARKER)
-        if len(shown) > avail:
-            shown = shown[len(shown) - avail :]
-        body = PROMPT_MARKER + shown + "▏"
+        body = PROMPT_MARKER + clip_buf(buf, cols)
         return body[:inner_w].ljust(inner_w), False
     body = PROMPT_MARKER + PLACEHOLDER
     return body[:inner_w].ljust(inner_w), True
+
+
+def body_cursor_col(buf: str, cols: int) -> int:
+    """Return the 1-based terminal column for the body row's blinking caret.
+
+    The caret sits right after the chevron and any visible typed text,
+    exactly where the idle ``sorcar`` prompt leaves the real cursor. The
+    body row is drawn as ``│`` (col 1), a space (col 2), then the body
+    text (starting at col 3), so the caret lands at
+    ``3 + len(PROMPT_MARKER) + len(visible_text)``.
+
+    Args:
+        buf: The current edit buffer.
+        cols: Total panel width in columns.
+
+    Returns:
+        The column (1-based) at which to park the blinking cursor.
+    """
+    shown = clip_buf(buf, cols) if buf else ""
+    return 3 + len(PROMPT_MARKER) + len(shown)
