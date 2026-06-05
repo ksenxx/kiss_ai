@@ -49,6 +49,7 @@ from kiss.agents.sorcar.cli_panel import (
     PROMPT_MARKER,
     RESET,
     STEER_TITLE,
+    body_cursor_col,
     panel_body,
     panel_bottom,
     panel_cols,
@@ -111,14 +112,25 @@ class _StdoutProxy:
     delegated to the real stream so Rich still detects the TTY, colour
     support and terminal width correctly.
 
+    While the box is active the real terminal cursor lives in the box
+    body (blinking right after the chevron, like the idle ``sorcar``
+    prompt).  Agent output, however, must land in the scroll region
+    above the box.  So each write restores the saved *output* cursor
+    position, emits the text, re-saves the advanced output position, and
+    finally parks the visible cursor back in the box body.
+
     Attributes:
         _stream: The original stdout stream.
         _lock: Shared re-entrant lock guarding terminal writes.
+        _box: The active input box (to re-park the caret after output).
     """
 
-    def __init__(self, stream: Any, lock: threading.RLock) -> None:
+    def __init__(
+        self, stream: Any, lock: threading.RLock, box: _InputBox | None = None
+    ) -> None:
         self._stream = stream
         self._lock = lock
+        self._box = box
 
     def write(self, text: str) -> int:
         """Write *text* to the underlying stream under the shared lock.
@@ -130,7 +142,15 @@ class _StdoutProxy:
             The number of characters written.
         """
         with self._lock:
-            n = self._stream.write(text)
+            if self._box is not None and self._box._active:
+                # Restore the output cursor, emit, re-save it, then return
+                # the blinking caret to the box body.
+                self._stream.write(f"{_ESC}8")
+                n = self._stream.write(text)
+                self._stream.write(f"{_ESC}7")
+                self._box._park_cursor_locked()
+            else:
+                n = self._stream.write(text)
             self._stream.flush()
             return int(n)
 
@@ -187,9 +207,14 @@ class _InputBox:
             out.write("\n" * _BOX_H)
             # Scroll region = everything above the box.
             out.write(f"{_ESC}[1;{rows - _BOX_H}r")
-            out.write(f"{_ESC}[?25l")  # hide the real cursor
-            # Park the output cursor on the last region row.
+            # Park the output cursor on the last region row and save that
+            # position; agent output is later written by restoring to it
+            # (see :class:`_StdoutProxy`).
             out.write(f"{_ESC}[{rows - _BOX_H};1H")
+            out.write(f"{_ESC}7")
+            # Keep the real cursor *visible*: it rests (blinking) in the
+            # box body, mirroring the idle ``sorcar`` prompt's caret.
+            out.write(f"{_ESC}[?25h")
             out.flush()
             self._active = True
             self._draw_locked()
@@ -243,13 +268,37 @@ class _InputBox:
         rest_color = DIM if is_placeholder else ""
         mid_inner = f" {CYAN}{marker}{RESET}{rest_color}{rest}{RESET} "
 
-        # Save output cursor, paint the three box rows, restore it.
-        out.write(_ESC + "7")
+        # The box rows use absolute positioning, so they never disturb the
+        # saved *output* position (held by the ``ESC 7`` register and
+        # restored by :class:`_StdoutProxy`).  After painting, the visible
+        # caret is parked in the body so it blinks after the chevron.
         out.write(f"{_ESC}[{top_row};1H{_ESC}[2K{CYAN}{top}{RESET}")
         out.write(f"{_ESC}[{top_row + 1};1H{_ESC}[2K{CYAN}│{RESET}{mid_inner}{CYAN}│{RESET}")
         out.write(f"{_ESC}[{top_row + 2};1H{_ESC}[2K{CYAN}{bottom}{RESET}")
-        out.write(_ESC + "8")
+        self._park_cursor_locked(rows, cols)
         out.flush()
+
+    def _park_cursor_locked(
+        self, rows: int | None = None, cols: int | None = None
+    ) -> None:
+        """Move the real (blinking) cursor onto the body row after the text.
+
+        Places the caret right after the chevron and any visible typed
+        text, exactly where the idle ``sorcar`` prompt leaves it, so the
+        steering box shows the same blinking cursor.  The caller is
+        responsible for flushing.
+
+        Args:
+            rows: Terminal row count (recomputed when ``None``).
+            cols: Terminal column count (recomputed when ``None``).
+        """
+        if rows is None:
+            rows, _ = _term_size()
+        if cols is None:
+            cols = panel_cols()
+        top_row = rows - _BOX_H + 1
+        col = body_cursor_col(self.buf, cols)
+        self._out.write(f"{_ESC}[{top_row + 1};{col}H")
 
     def feed(self, data: bytes, on_submit: Any, on_abort: Any) -> None:
         """Process a chunk of raw keyboard input.
@@ -398,7 +447,7 @@ class SteeringSession:
             KeyboardInterrupt: If the user aborts with Ctrl+C.
         """
         real_stdout = self._real_stdout
-        proxy = _StdoutProxy(real_stdout, self.lock)
+        proxy = _StdoutProxy(real_stdout, self.lock, self.box)
         sys.stdout = cast(Any, proxy)
         self.box.start()
         worker = threading.Thread(
