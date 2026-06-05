@@ -447,9 +447,13 @@ def _read_line(prompt: str) -> str | None:
 
     # Interactive: pre-draw the closed box, then edit on the body line.
     print(top)
-    # Reserve the body line, draw the bottom rule below it, then move the
-    # cursor back up onto the (now framed) body line for readline.
-    sys.stdout.write(f"\n{bottom}{_ESC}[1A\r")
+    # Draw the body line's right border at the far column so the box is
+    # fully framed (left ``│`` comes from ``framed_prompt`` below), then
+    # draw the bottom rule one line down, then move the cursor back up
+    # onto the (now framed) body line at column 1 for readline.
+    sys.stdout.write(
+        f"{_ESC}[{cols}G{CYAN}│{RESET}\r\n{bottom}{_ESC}[1A\r"
+    )
     sys.stdout.flush()
     try:
         line = input(framed_prompt)

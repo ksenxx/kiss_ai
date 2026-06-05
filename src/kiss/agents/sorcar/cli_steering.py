@@ -199,12 +199,20 @@ class _InputBox:
             return
         assert termios is not None
         rows, _ = _term_size()
+        top_row = rows - _BOX_H + 1
         with self.lock:
             out = self._out
             out.write(f"{_ESC}[r")  # reset scroll region to full screen
+            # Erase the box's rows so the steering panel does not linger
+            # once the task ends.  Otherwise the idle REPL prompt would
+            # be drawn *below* the stale steering box, leaving two input
+            # panels stacked on screen at once.
+            for row in range(top_row, rows + 1):
+                out.write(f"{_ESC}[{row};1H{_ESC}[2K")
             out.write(f"{_ESC}[?25h")  # show cursor
-            out.write(f"{_ESC}[{rows};1H")  # move below the box
-            out.write("\n")
+            # Park the cursor on the box's old first row so following
+            # output (the returning idle prompt) flows from there.
+            out.write(f"{_ESC}[{top_row};1H")
             out.flush()
             self._active = False
         if self._old_term is not None:
