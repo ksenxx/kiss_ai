@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import logging
 import re
-import shutil
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -45,6 +44,15 @@ from kiss.agents.sorcar.cli_helpers import (
     _print_recent_chats,
     _print_result,
     _print_run_stats,
+)
+from kiss.agents.sorcar.cli_panel import (
+    CYAN,
+    IDLE_TITLE,
+    PROMPT_MARKER,
+    RESET,
+    panel_bottom,
+    panel_cols,
+    panel_top,
 )
 from kiss.agents.sorcar.cli_steering import run_with_steering
 from kiss.agents.sorcar.persistence import (
@@ -90,7 +98,7 @@ SLASH_COMMANDS: dict[str, str] = {
 # Bare words (no leading slash) that also exit, matching Claude Code.
 _EXIT_WORDS = {"exit", "quit"}
 
-_PROMPT = "\x1b[36m› \x1b[0m"
+_PROMPT = f"{CYAN}{PROMPT_MARKER}{RESET}"
 _AT_RE = re.compile(r"@([^\s]*)$")
 _MENTION_RE = re.compile(r"PWD/(\S+)")
 
@@ -389,22 +397,15 @@ def _print_usage(agent: SorcarAgent) -> None:
     print(f"Total tokens: {tokens}\n")
 
 
-def _hr() -> str:
-    """Return a dim, full-terminal-width horizontal rule.
-
-    The width tracks the current terminal, falling back to 80 columns
-    when the size cannot be determined (e.g. piped/non-TTY stdout).
-    """
-    width = shutil.get_terminal_size((80, 24)).columns
-    return "\x1b[2m" + "─" * width + "\x1b[0m"
-
-
 def _read_line(prompt: str) -> str | None:
-    """Read one input line, framed by horizontal rules.
+    """Read one input line inside the shared rounded input panel.
 
-    A horizontal rule is printed above the prompt and another below the
-    submitted line, so the user-input dialog is visually boxed off from
-    the surrounding task output.
+    The idle prompt is drawn inside the very same rounded-border panel
+    that the steering box (:mod:`kiss.agents.sorcar.cli_steering`) uses
+    while a task runs, so the input dialog looks like one consistent
+    panel whether the agent is idle or steering.  The panel's top border
+    (with the idle title) is printed above the prompt, the ``│ ›`` body
+    carries the readline input, and the bottom border closes it below.
 
     Returns:
         The line, or ``None`` to signal EOF (Ctrl+D) — the caller exits.
@@ -412,12 +413,15 @@ def _read_line(prompt: str) -> str | None:
     Raises:
         KeyboardInterrupt: When the user presses Ctrl+C at the prompt.
     """
-    print(_hr())
+    cols = panel_cols()
+    print(f"{CYAN}{panel_top(IDLE_TITLE, cols)}{RESET}")
+    framed_prompt = f"{CYAN}│{RESET} {prompt}"
     try:
-        line = input(prompt)
+        line = input(framed_prompt)
     except EOFError:
+        print(f"{CYAN}{panel_bottom('', cols)}{RESET}")
         return None
-    print(_hr())
+    print(f"{CYAN}{panel_bottom('', cols)}{RESET}")
     return line
 
 
