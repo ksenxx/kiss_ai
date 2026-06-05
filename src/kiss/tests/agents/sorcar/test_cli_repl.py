@@ -83,6 +83,55 @@ def test_slash_command_completion(tmp_path: Path) -> None:
     assert "/exit " in all_cmds
 
 
+def test_model_command_completion_lists_all_models(tmp_path: Path) -> None:
+    """``/model `` with no partial completes to every candidate model."""
+    from kiss.core.models.model_info import get_completion_model_names
+
+    completer = CliCompleter(str(tmp_path))
+    matches = completer._build_matches("/model ")
+    expected = [f"/model {n}" for n in get_completion_model_names()]
+    assert matches == expected
+    assert matches, "expected at least one model suggestion"
+
+
+def test_model_command_completion_by_prefix(tmp_path: Path) -> None:
+    """``/model <prefix>`` completes model names that start with the prefix."""
+    from kiss.core.models.model_info import get_completion_model_names
+
+    completer = CliCompleter(str(tmp_path))
+    sample = get_completion_model_names()[0]
+    prefix = sample[:4]
+    matches = completer._build_matches(f"/model {prefix}")
+    assert matches, "expected suggestions for a known prefix"
+    assert all(m.startswith("/model ") for m in matches)
+    bare = [m[len("/model "):] for m in matches]
+    assert sample in bare
+    assert all(n.lower().startswith(prefix.lower()) or prefix.lower() in n.lower()
+               for n in bare)
+
+
+def test_model_command_completion_no_match_is_empty(tmp_path: Path) -> None:
+    """A ``/model`` partial that matches nothing yields no suggestions."""
+    completer = CliCompleter(str(tmp_path))
+    assert completer._build_matches("/model zzz-no-such-model-xyz") == []
+
+
+def test_model_command_takes_precedence_over_predictive(tmp_path: Path, kiss_db) -> None:
+    """``/model`` completion wins over history-based ghost completion."""
+    th._add_task("/model something from history", chat_id="c1")
+    completer = CliCompleter(str(tmp_path))
+    matches = completer._build_matches("/model gpt")
+    assert all(m.startswith("/model ") for m in matches)
+    # Not the predictive single-line ghost from history.
+    assert matches != ["/model something from history"]
+
+
+def test_bare_slash_model_still_completes_command(tmp_path: Path) -> None:
+    """Typing ``/model`` (no space) completes the command itself."""
+    completer = CliCompleter(str(tmp_path))
+    assert completer._build_matches("/model") == ["/model "]
+
+
 def test_completer_state_protocol(tmp_path: Path) -> None:
     """The readline ``complete(text, state)`` protocol returns then None."""
     completer = CliCompleter(str(tmp_path))
@@ -149,6 +198,40 @@ def test_handle_slash_model_switch(tmp_path: Path, kiss_db) -> None:
     _handle_slash(agent, "/model new-model", kwargs)
     assert kwargs["model_name"] == "new-model"
     assert agent.model_name == "new-model"
+
+
+def test_handle_slash_model_list_prints_models(tmp_path: Path, kiss_db, capsys) -> None:
+    """``/model list`` prints every generation model with provider/status."""
+    from kiss.core.models.model_info import get_generation_model_listing
+
+    agent = ChatSorcarAgent("t")
+    kwargs: dict = {"model_name": "demo-model"}
+    assert _handle_slash(agent, "/model list", kwargs) is False
+    out = capsys.readouterr().out
+    listing = get_generation_model_listing()
+    # Header reports the configured/total counts.
+    configured = sum(1 for _, _, ok in listing if ok)
+    assert f"({configured}/{len(listing)} with credentials configured)" in out
+    # A representative generation model and its provider label are shown.
+    assert "gpt-5.5" in out
+    assert "OpenAI" in out
+    # Every listed model name appears in the output.
+    for name, provider, _ok in listing:
+        assert name in out
+    # Listing does not change the active model.
+    assert kwargs["model_name"] == "demo-model"
+    assert agent.model_name != "list"
+
+
+def test_handle_slash_model_list_marks_current(tmp_path: Path, kiss_db, capsys) -> None:
+    """``/model list`` flags the currently selected model with a marker."""
+    agent = ChatSorcarAgent("t")
+    agent.model_name = "gpt-5.5"
+    _handle_slash(agent, "/model list", {})
+    out = capsys.readouterr().out
+    current_lines = [ln for ln in out.splitlines() if "← current" in ln]
+    assert len(current_lines) == 1
+    assert "gpt-5.5" in current_lines[0]
 
 
 def test_handle_slash_exit_returns_true(tmp_path: Path, kiss_db) -> None:

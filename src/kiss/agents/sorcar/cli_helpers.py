@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -23,6 +24,7 @@ from kiss.agents.sorcar.sorcar_agent import (
     cli_ask_user_question,
 )
 from kiss.core.config import DEFAULT_CONFIG
+from kiss.core.models.model_info import get_default_model
 
 if TYPE_CHECKING:
     from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
@@ -51,11 +53,35 @@ def _print_recent_chats() -> None:
                 print(f"    {result_text}")
 
 
+def _launch_work_dir() -> str:
+    """Return the directory the sorcar CLI was launched from.
+
+    The installed ``sorcar`` wrapper runs
+    ``uv run --directory <kiss_project> sorcar ...``, and ``uv``'s
+    ``--directory`` flag changes the process working directory to the
+    bundled ``kiss_project`` before the CLI starts.  As a result
+    :func:`Path.cwd` reports the project directory rather than the
+    user's shell directory.  The wrapper therefore records the
+    original ``$PWD`` in the ``KISS_WORKDIR`` environment variable, so
+    we prefer that when it is set and points at an existing directory,
+    falling back to :func:`Path.cwd` for direct (non-wrapper)
+    invocations where the cwd is already correct.
+
+    Returns:
+        Absolute path of the launch directory as a string.
+    """
+    env_dir = os.environ.get("KISS_WORKDIR", "").strip()
+    if env_dir and Path(env_dir).is_dir():
+        return str(Path(env_dir).resolve())
+    return str(Path.cwd())
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser for all Sorcar agent entry points."""
     parser = argparse.ArgumentParser(description="Run SorcarAgent demo")
     parser.add_argument(
-        "-m", "--model_name", type=str, default="claude-opus-4-6", help="LLM model name"
+        "-m", "--model_name", type=str, default=get_default_model(),
+        help="LLM model name (defaults to the best model for the configured API keys)",
     )
     parser.add_argument(
         "-e", "--endpoint", type=str, default=None, help="Custom endpoint for local model"
@@ -68,7 +94,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "-b", "--max_budget", type=float, default=DEFAULT_CONFIG.max_budget,
         help="Maximum budget in USD",
     )
-    parser.add_argument("-w", "--work_dir", type=str, default=None, help="Working directory")
+    parser.add_argument(
+        "-w", "--work_dir", type=str, default=_launch_work_dir(),
+        help="Working directory (defaults to the directory where sorcar is launched)",
+    )
     parser.add_argument(
         "-v", "--verbose",
         type=lambda x: str(x).lower() == "true",
@@ -133,7 +162,7 @@ def _apply_chat_args(
 def _build_run_kwargs(args: argparse.Namespace) -> dict[str, Any]:
     """Build ``agent.run()`` keyword arguments from parsed CLI args."""
     task_description = _resolve_task(args)
-    work_dir = args.work_dir or str(Path(".").resolve())
+    work_dir = args.work_dir or _launch_work_dir()
     Path(work_dir).mkdir(parents=True, exist_ok=True)
 
     model_config: dict[str, Any] = {}
