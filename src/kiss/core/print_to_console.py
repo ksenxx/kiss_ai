@@ -29,6 +29,14 @@ class ConsolePrinter(Printer):
         self._mid_line = False
         self._bash_streamed = False
         self._current_block_type = ""
+        # Per-task usage offsets, mirroring ``JsonPrinter``.  The agentic
+        # loop sets these (``printer.tokens_offset = ...`` etc.) so that
+        # sub-agent / continued-session usage accumulated into the parent
+        # is included in the Result panel and usage line -- exactly like
+        # the webview status bar.  Default 0 for a simple single-agent run.
+        self.tokens_offset = 0
+        self.budget_offset = 0.0
+        self.steps_offset = 0
 
     def reset(self) -> None:
         """Reset internal streaming state for a new turn."""
@@ -36,16 +44,42 @@ class ConsolePrinter(Printer):
         self._bash_streamed = False
         self._current_block_type = ""
 
+    def _apply_budget_offset(self, cost: Any) -> Any:
+        """Add the accumulated budget offset to a ``$x.xxxx`` cost string.
+
+        Mirrors ``JsonPrinter`` so the Result panel and usage line on the
+        console include sub-agent / continued-session spend.  Non-dollar
+        values (e.g. ``"N/A"``) are returned unchanged.
+
+        Args:
+            cost: The cost value, typically a ``"$<float>"`` string.
+
+        Returns:
+            The cost with ``budget_offset`` added when it is a dollar
+            string, otherwise the original value.
+        """
+        if isinstance(cost, str) and cost.startswith("$"):
+            try:
+                return f"${float(cost[1:]) + self.budget_offset:.4f}"
+            except ValueError:
+                return cost
+        return cost
+
     @staticmethod
     def _format_result_content(raw: str) -> Group | Markdown:
         data = parse_result_yaml(raw)
         if data is None:
             return Markdown(raw)
         parts: list[Any] = []
-        if "success" in data:
-            style = "bold green" if data["success"] else "bold red"
-            label = "PASSED" if data["success"] else "FAILED"
-            parts.append(Text(f"Status: {label}", style=style))
+        # Mirror the webview Result panel exactly (see ``main.js`` "result"
+        # case): a continuation shows a yellow "Status: Continue", an
+        # explicit failure shows a red "Status: FAILED", and a plain
+        # success shows NO status banner at all.
+        if data.get("is_continue"):
+            parts.append(Text("Status: Continue", style="bold yellow"))
+            parts.append(Text(""))
+        elif data.get("success") is False:
+            parts.append(Text("Status: FAILED", style="bold red"))
             parts.append(Text(""))
         parts.append(Markdown(str(data["summary"])))
         return Group(*parts)
@@ -145,14 +179,15 @@ class ConsolePrinter(Printer):
             return ""
         if type == "result":
             self._flush_newline()
-            cost = kwargs.get("cost", "N/A")
-            total_tokens = kwargs.get("total_tokens", 0)
+            cost = self._apply_budget_offset(kwargs.get("cost", "N/A"))
+            total_tokens = kwargs.get("total_tokens", 0) + self.tokens_offset
+            step_count = kwargs.get("step_count", 0) + self.steps_offset
             body = self._format_result_content(str(content)) if content else "(no result)"
             self._console.print(
                 Panel(
                     body,
                     title="Result",
-                    subtitle=f"tokens={total_tokens:,}  cost={cost}",
+                    subtitle=f"tokens={total_tokens:,}  cost={cost}  steps={step_count:,}",
                     border_style="bold green",
                     padding=(1, 2),
                 )
@@ -247,8 +282,10 @@ class ConsolePrinter(Printer):
                     self._mid_line = not text.endswith("\n")
         elif hasattr(message, "result"):
             budget_used = kwargs.get("budget_used", 0.0)
-            total_tokens_used = kwargs.get("total_tokens_used", 0)
-            cost_str = f"${budget_used:.4f}" if budget_used else "N/A"
+            total_tokens_used = kwargs.get("total_tokens_used", 0) + self.tokens_offset
+            cost_str = self._apply_budget_offset(
+                f"${budget_used:.4f}" if budget_used else "N/A"
+            )
             self._flush_newline()
             body = self._format_result_content(message.result) if message.result else "(no result)"
             self._console.print(

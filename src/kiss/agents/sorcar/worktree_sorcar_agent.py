@@ -26,6 +26,7 @@ from kiss.agents.sorcar.cli_helpers import (
     _build_arg_parser,
     _build_run_kwargs,
     _print_recent_chats,
+    _print_result,
     _print_run_stats,
 )
 from kiss.agents.sorcar.git_worktree import (
@@ -881,6 +882,14 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
         print(WorktreeSorcarAgent.cleanup(repo))
         sys.exit(0)
 
+    # Claude-Code parity: with no -t/--task and no -f/--file the user
+    # wants an interactive session.  Turn on chat mode (unless worktree
+    # isolation was explicitly requested) and drive a REPL that waits
+    # for the next instruction after each task finishes.
+    interactive = args.task is None and args.file is None
+    if interactive and not args.use_worktree:
+        args.use_chat = True
+
     if args.use_worktree:
         agent: SorcarAgent = WorktreeSorcarAgent("Worktree Sorcar Agent")
     elif args.use_chat:
@@ -889,24 +898,46 @@ def main() -> None:  # pragma: no cover – CLI entry point requires API
         agent = SorcarAgent("Sorcar Agent")
 
     run_kwargs = _build_run_kwargs(args)
+    # In interactive mode the prompt is read from the REPL, so do not
+    # treat the default-task placeholder as a chat to resume.
+    chat_task = "" if interactive else run_kwargs.get("prompt_template", "")
     if isinstance(agent, ChatSorcarAgent):
-        _apply_chat_args(agent, args, task=run_kwargs.get("prompt_template", ""))
+        _apply_chat_args(agent, args, task=chat_task)
 
-    start_time = time_mod.time()
-    result = agent.run(**run_kwargs)
-    elapsed = time_mod.time() - start_time
+    if interactive:
+        from kiss.agents.sorcar.cli_repl import run_repl
 
-    print(result)
-    if isinstance(agent, ChatSorcarAgent):
-        _print_run_stats(agent, elapsed)
+        run_repl(agent, run_kwargs)
     else:
-        print(f"\nTime: {elapsed:.1f}s")
-        print(f"Cost: ${agent.budget_used:.4f}")
-        print(f"Total tokens: {agent.total_tokens_used}")
+        from kiss.agents.sorcar.cli_steering import run_with_steering
+
+        start_time = time_mod.time()
+        result = run_with_steering(agent, run_kwargs)
+        elapsed = time_mod.time() - start_time
+
+        # When the agent runs verbosely it already renders the green
+        # "Result" panel (whose subtitle carries tokens / cost / steps) to
+        # the console as the task ends; re-printing the summary and the run
+        # stats here would duplicate it.  Only print them when running
+        # quietly so the Result panel stays the last thing shown.
+        if not run_kwargs.get("verbose", True):
+            _print_result(result)
+            if isinstance(agent, ChatSorcarAgent):
+                _print_run_stats(agent, elapsed)
+            else:
+                print(f"\nTime: {elapsed:.1f}s")
+                print(f"Cost: ${agent.budget_used:.4f}")
+                print(f"Total tokens: {agent.total_tokens_used}")
 
     if isinstance(agent, WorktreeSorcarAgent) and agent._wt_pending:
         while True:
-            choice = input("\n[c]ommit and merge / [d]iscard? ").strip().lower()
+            try:
+                choice = input("\n[c]ommit and merge / [d]iscard? ").strip().lower()
+            except EOFError:
+                # Interactive session ended (Ctrl+D); leave the branch
+                # in place for the user to merge or discard manually.
+                print(f"\nWorktree branch kept: {agent._wt_branch}")
+                break
             if choice == "c":
                 print(agent.merge())
                 break

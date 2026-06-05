@@ -149,6 +149,98 @@ class TestMessageParity:
         assert len(events) == 0
 
 
+class TestResultStatusParity:
+    """The Result panel status banner must match the webview exactly:
+    success -> no banner, is_continue -> "Status: Continue",
+    success false -> "Status: FAILED"."""
+
+    def test_success_has_no_status_banner(self):
+        import yaml
+        console, buf, browser = _make_printers()
+        result = yaml.dump({"success": True, "summary": "all good"})
+        console.print(result, type="result", cost="$0.01", total_tokens=100, step_count=5)
+        browser.print(result, type="result", cost="$0.01", total_tokens=100, step_count=5)
+        out = buf.getvalue()
+        events = _drain(browser)
+        r = [e for e in events if e["type"] == "result"][-1]
+        # Webview: success true emits no banner (only is_continue / success
+        # false do), and the console must do the same.
+        assert "Status:" not in out
+        assert r["success"] is True
+        assert r["is_continue"] is False
+        assert "all good" in out
+
+    def test_continue_shows_status_continue(self):
+        import yaml
+        console, buf, browser = _make_printers()
+        result = yaml.dump(
+            {"success": False, "is_continue": True, "summary": "more to do"}
+        )
+        console.print(result, type="result", cost="$0.01", total_tokens=100, step_count=5)
+        browser.print(result, type="result", cost="$0.01", total_tokens=100, step_count=5)
+        out = buf.getvalue()
+        events = _drain(browser)
+        r = [e for e in events if e["type"] == "result"][-1]
+        assert "Status: Continue" in out
+        assert "Status: FAILED" not in out
+        assert r["is_continue"] is True
+
+    def test_failure_shows_status_failed(self):
+        import yaml
+        console, buf, browser = _make_printers()
+        result = yaml.dump({"success": False, "summary": "it broke"})
+        console.print(result, type="result", cost="$0.01", total_tokens=100, step_count=5)
+        browser.print(result, type="result", cost="$0.01", total_tokens=100, step_count=5)
+        out = buf.getvalue()
+        events = _drain(browser)
+        r = [e for e in events if e["type"] == "result"][-1]
+        assert "Status: FAILED" in out
+        assert "Status: Continue" not in out
+        assert r["success"] is False
+        assert r["is_continue"] is False
+
+    def test_step_count_shown_on_console(self):
+        import yaml
+        console, buf, browser = _make_printers()
+        result = yaml.dump({"success": True, "summary": "done"})
+        console.print(result, type="result", cost="$0.01", total_tokens=100, step_count=7)
+        browser.print(result, type="result", cost="$0.01", total_tokens=100, step_count=7)
+        out = buf.getvalue()
+        events = _drain(browser)
+        r = [e for e in events if e["type"] == "result"][-1]
+        # The webview Result event carries step_count; the console now
+        # surfaces the same number in the panel subtitle.
+        assert "steps=7" in out
+        assert r["step_count"] == 7
+
+
+class TestResultOffsetParity:
+    """Sub-agent / continued-session usage offsets must be applied to the
+    Result panel on both surfaces identically."""
+
+    def test_offsets_applied_to_result(self):
+        import yaml
+        console, buf, browser = _make_printers()
+        for p in (console, browser):
+            p.tokens_offset = 1000
+            p.budget_offset = 0.10
+            p.steps_offset = 3
+        result = yaml.dump({"success": True, "summary": "done"})
+        console.print(result, type="result", cost="$0.0500", total_tokens=200, step_count=4)
+        browser.print(result, type="result", cost="$0.0500", total_tokens=200, step_count=4)
+        out = buf.getvalue()
+        events = _drain(browser)
+        r = [e for e in events if e["type"] == "result"][-1]
+        # Webview adds the offsets: tokens 200+1000, cost 0.05+0.10,
+        # steps 4+3.  The console subtitle must show the same totals.
+        assert r["total_tokens"] == 1200
+        assert r["cost"] == "$0.1500"
+        assert r["step_count"] == 7
+        assert "tokens=1,200" in out
+        assert "$0.1500" in out
+        assert "steps=7" in out
+
+
 class TestTokenCallbackParity:
     """Both printers handle token_callback the same way."""
 
