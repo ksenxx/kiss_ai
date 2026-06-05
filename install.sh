@@ -709,7 +709,13 @@ echo "Log saved to $LOG_FILE"
 # ``~/.kiss/.extension-updated`` (both touched in step [6/6]) trigger
 # ``workbench.action.reloadWindow`` to pick up the update — launching here too
 # would open a redundant second window.
-if vscode_is_running; then
+if [ -n "${KISS_SKIP_LAUNCH:-}" ]; then
+    # The caller (e.g. scripts/docker-startup.sh) owns launching the editor —
+    # typically because it will start code-server itself right after this
+    # script returns.  Launching here too would bind the same port and make
+    # the caller's code-server fail with EADDRINUSE, crashing the container.
+    echo "KISS_SKIP_LAUNCH set; skipping VS Code launch (caller will start the editor)."
+elif vscode_is_running; then
     echo "VS Code is already running; the extension will reload to finish setup."
     echo "Skipping explicit launch to avoid opening a duplicate window."
 else
