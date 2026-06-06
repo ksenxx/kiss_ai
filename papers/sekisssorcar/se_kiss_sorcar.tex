@@ -197,6 +197,30 @@ MetaGPT~\cite{hong2024metagpt}, and
 AutoGen~\cite{wu2023autogen} simulate organizations of specialist
 roles.
 
+These agents rest on a body of work that taught language models to
+reason and act.
+Chain-of-thought prompting~\cite{wei2022chain} showed that eliciting
+intermediate reasoning steps improves problem solving, and
+ReAct~\cite{yao2023react} interleaved that reasoning with tool calls---the
+loop at the core of our KISS Agent.
+Toolformer~\cite{schick2023toolformer} demonstrated that models can
+learn when and how to invoke external APIs, while
+Reflexion~\cite{shinn2023reflexion} added verbal self-reflection so an
+agent can learn from its own failed attempts within a session, a
+behavior our Relentless Agent reproduces through summarized
+continuation.
+Voyager~\cite{wang2023voyager} accumulated reusable skills in an
+open-ended environment, echoing how \kisssys{} grows its own tooling.
+The coding ability these agents exploit comes from code-trained
+foundation models such as Codex~\cite{chen2021evaluating} and
+Code~Llama~\cite{roziere2023code}.
+A complementary line of work treats prompting itself as a program to be
+optimized: DSPy~\cite{khattab2024dspy} compiles declarative language-model
+pipelines into tuned prompts.
+\kisssys{} instead keeps a single hand-written, human-readable system
+prompt, trading automatic optimization for transparency and direct
+editability.
+
 Our approach differs.
 Rather than training a specialized model or orchestrating many agents,
 we use a single agent with a structured system prompt and a layered
@@ -213,6 +237,14 @@ Beck~\cite{beck2003tdd} codified test-driven development.
 Hunt and Thomas~\cite{hunt1999pragmatic} distilled pragmatic
 engineering heuristics.
 Martin~\cite{martin2008clean} catalogued clean-code practices.
+Gamma et al.~\cite{gamma1994design} catalogued reusable design patterns,
+and the Agile Manifesto~\cite{beck2001manifesto} reframed software
+development around short feedback loops and responsiveness to change---the
+same rhythm as our task-by-task conversational workflow.
+Lehman's laws of software evolution~\cite{lehman1980programs} observed
+that a system in use must continually change or become progressively less
+useful, which is precisely the pressure a self-hosting agent places on
+itself.
 
 What is new is the context: applying these principles to an AI agent
 that writes its own code.
