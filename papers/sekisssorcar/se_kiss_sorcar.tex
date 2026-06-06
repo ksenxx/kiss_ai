@@ -162,6 +162,9 @@ The rest of the paper is organized as follows.
 Section~\ref{sec:background} surveys related work.
 Section~\ref{sec:patterns} presents the seven usage patterns with
 concrete examples from the log.
+Section~\ref{sec:iterative-case} zooms in on a single, complete
+development episode---redesigning the git-worktree merge workflow---to
+show the conversational explain-then-revise loop in detail.
 Section~\ref{sec:principles} maps each pattern to a software
 engineering principle.
 Section~\ref{sec:software} catalogs the software ecosystem.
@@ -716,6 +719,291 @@ The lesson of Pattern~7 is therefore not merely that one agent can do
 many things, but that the \emph{same} engineering safeguards---verify
 sources, isolate changes, refuse unsafe requests, never fabricate---apply
 uniformly whether the task is a code fix or a dinner reservation.
+
+%----------------------------------------------------------------------
+\section{Iterative Development: A Detailed Case Study}
+\label{sec:iterative-case}
+%----------------------------------------------------------------------
+
+Patterns~2 and~5 (Sections~\ref{sec:p-iterative}
+and~\ref{sec:p-investigate}) describe, in the aggregate, how the
+developer evolves the system through conversation rather than through
+manual code editing.
+In this section we zoom in on a single, complete development episode
+to make that workflow concrete.
+The episode is drawn verbatim from the project's own usage log and is
+representative of how the bulk of \kisssys{} was built: the developer
+\emph{never opened a source file, never wrote a line of code, and never
+ran a test by hand}.
+Every step---understanding the design, redesigning it, diagnosing an
+anomaly, and fixing it---was a single natural-language task.
+
+\paragraph{The explain-then-revise loop.}
+The workflow has a characteristic two-move shape that recurs throughout
+the log.
+First, the developer asks \kisssys{} to produce a \emph{detailed,
+step-by-step description} of a workflow or algorithm that is suspected
+to be buggy or overly complex.
+Second, having read that description, the developer asks \kisssys{} to
+\emph{revise specific steps}, stated in plain English (``delete the
+unstage step,'' ``ask only two questions instead of three'').
+The first move externalizes the agent's understanding of the code into
+an inspectable artifact; the second move edits that understanding back
+into the code.
+The crucial property---and the reason this loop is so much more
+reliable than editing a design document by hand---is that the same
+agent, reading the same source, produces both the explanation and the
+subsequent edits.
+There is no translation loss between a human's mental model of a design
+document and the code that implements it: the explanation \emph{is} a
+faithful read of the code, and the edit is applied to exactly the code
+that was just explained.
+
+We illustrate the loop with the git-worktree merge workflow
+implemented in \texttt{worktree\_sorcar\_agent.py}---the outermost layer
+of the hierarchy in Section~\ref{sec:intro}, which isolates every task
+on its own branch.
+This subsystem is a fitting example precisely because it is the one
+the developer interacts with on \emph{every} task: when a task
+finishes, the developer must decide whether to merge the agent's branch
+back into \texttt{main} or discard it, so any rough edge in the merge
+logic is felt hundreds of times a day.
+The episode comprises six consecutive tasks within a single chat
+session; we reproduce the prompts verbatim and summarize the agent's
+responses.
+
+\paragraph{Step~1: Eliciting the detailed workflow.}
+The developer begins not with a change request but with a request for
+an explanation, applying the ``read before you write'' discipline
+(Section~\ref{sec:preflight}) as an explicit conversational turn:
+
+\begin{lstlisting}[style=prompt]
+Can you tell me what happens, step by step, with git in
+worktree_sorcar_agent.py when a task finishes?
+\end{lstlisting}
+
+\noindent The agent reads the source and returns a structured account
+of the four-phase post-task lifecycle:
+(1)~during \texttt{run()}, a fresh branch and a corresponding worktree
+directory are created---the branch name encodes a timestamp and a
+random suffix for uniqueness---and the task executes \emph{inside} the
+worktree, so the user's main working tree is never touched; when the
+task completes, \emph{nothing is committed or merged}---the result is
+returned with merge instructions appended and the worktree is left
+pending;
+(2)~\texttt{merge()} calls \texttt{\_finalize\_worktree()}, which stages
+all changes, generates a commit message with an LLM call over the
+staged diff, commits inside the worktree, removes the worktree, checks
+out the original branch, and replays the change onto it;
+(3)~\texttt{discard()} removes the worktree, prunes it, checks out the
+original branch, and deletes the task branch;
+(4)~in CLI mode an interactive prompt forces the user to choose between
+\texttt{[c]ommit and merge}, a \texttt{[m]anual} merge, and
+\texttt{[d]iscard} before exiting.
+The agent also surfaces two non-obvious invariants that turn out to be
+central to the redesign that follows: when the user's working tree was
+dirty at task start, the dirty state is snapshotted into a
+\emph{baseline commit} so the agent sees the same files as the user,
+and the merge therefore uses
+\texttt{git cherry-pick -{}-no-commit baseline..branch} (rather than
+\texttt{git merge -{}-squash}) so that only the agent's own commits are
+replayed and the dirty-state snapshot is excluded.
+Finally, the agent notes that all worktree state lives in git itself
+(branch names and git config), so the lifecycle is idempotent and
+recoverable after a crash.
+
+This single answer is the artifact the rest of the episode operates on.
+It is not a comment, a design document, or a wiki page that might drift
+out of date; it is a read of the live source, generated on demand, and
+it exposes exactly the design decisions (the three-way CLI choice, the
+baseline-commit detour) that the developer will next decide to
+simplify.
+
+\paragraph{Step~2: Revising a step in natural language.}
+Having seen the workflow spelled out, the developer judges the
+three-way choice (auto-merge / manual merge / discard) to be needless
+complexity and dictates a simpler one:
+
+\begin{lstlisting}[style=prompt]
+Can you change worktree_sorcar_agent.py and the extension so that after
+the agent finishes its task, it simply asks "Commit and Merge" or
+"Discard". When "Commit and Merge" is clicked by the user, the agent
+must commit the changes with a generated commit message, merge the
+branch with the original branch, and delete the worktree and the branch
+associated with the worktree. If the user clicks "discard", it must
+delete the worktree and the branch, and checkout the original branch.
+\end{lstlisting}
+
+\noindent This is a single English sentence describing a behavioral
+change, yet it ranges across two languages and the full stack.
+The agent applies the Complex-Task-Planning discipline from the system
+prompt (Section~\ref{sec:system-prompt})---enumerating the files to
+touch before editing any of them---and then modifies six files:
+it rewrites \texttt{discard()} to check out the original branch
+\emph{before} deleting the task branch (deleting a checked-out branch
+fails); it removes the \texttt{manual\_merge()} method entirely;
+it simplifies \texttt{merge\_instructions()} to present only two
+options; it replaces the three-button webview toolbar with a
+two-button ``Commit and Merge or Discard?'' bar in the TypeScript
+frontend; it deletes the \texttt{manual} action type from the
+TypeScript type definitions; and it removes the corresponding handler
+from the Python backend.
+The agent then updates the test suite to match: three tests covering
+the now-deleted manual-merge path are removed and one routing test is
+revised.
+It runs the impacted tests and reports that all 28 worktree tests pass.
+The developer reviewed the diff in the worktree and merged it---without
+ever opening an editor.
+
+\paragraph{Step~3: Diagnosing an anomaly with a second explain turn.}
+After exercising the simplified flow, the developer notices behavior
+that contradicts the mental model from Step~1: files appear in
+VS~Code's Source Control panel \emph{on the original branch} after
+pressing ``Commit and Merge.''
+Rather than guessing at a fix, the developer issues another
+\emph{explain} request---the loop's first move applied to a narrower
+question:
+
+\begin{lstlisting}[style=prompt]
+After the user presses "Commit and Merge", why do the modified files
+show up as committed in the original branch?
+\end{lstlisting}
+
+\noindent The agent traces the exact execution path through the
+squash-merge routine and discovers that the implementation
+deliberately \emph{unstages} the squash-merged changes with
+\texttt{git reset HEAD}, so that they surface as uncommitted
+working-tree modifications in the Source Control panel.
+The original design intent was to let the user review the diff one more
+time and commit it manually on the original branch.
+The agent reports this finding, quotes the responsible line, and
+includes a verified end state showing no \emph{new} commits on the
+branch---confirming the developer's observation and explaining its
+cause.
+Note that this diagnostic turn touched no code: it is purely the
+collect-then-reason discipline (Section~\ref{sec:preflight}) applied to
+a runtime puzzle, and it produces the precise fact---``the unstage is
+intentional and lives in one \texttt{git reset HEAD} call''---that the
+next task will act on.
+
+\paragraph{Step~4: Directing the fix in one sentence.}
+Armed with the explanation, the developer realizes the design premise
+no longer holds: review already happened in the worktree branch before
+the merge, so the post-merge unstage-for-review step is redundant.
+The fix is dictated in two sentences:
+
+\begin{lstlisting}[style=prompt]
+The review is already happening in the worktree branch. You don't need
+the user to review the modified and new files in the original branch.
+Fix it.
+\end{lstlisting}
+
+\noindent The agent replaces the \texttt{git reset HEAD} call with a
+conditional \texttt{git commit -{}-no-edit} that reuses the
+auto-generated squash commit message, and---anticipating an
+edge case the developer did not mention---adds a
+\texttt{git diff -{}-cached -{}-quiet} guard so that a merge producing no
+staged changes does not attempt an empty commit.
+It renames the now-misnamed test
+\texttt{test\_merge\_leaves\_changes\_uncommitted} to
+\texttt{test\_merge\_commits\_changes} and rewrites its assertions to
+verify a \emph{clean} working tree after merge.
+It runs the suite and reports that all worktree tests pass.
+
+\paragraph{Step~5: Hardening the dirty-state edge case.}
+A subsequent task in the same session asks the agent to re-examine the
+merge under the dirty-working-tree condition that the baseline commit
+was designed to handle:
+
+\begin{lstlisting}[style=prompt]
+What happens to my uncommitted changes if I start a task while the
+working tree is dirty and then click "Commit and Merge"?
+\end{lstlisting}
+
+\noindent The agent re-reads the merge path and explains the
+baseline-commit mechanism in operational terms: the dirty files are
+captured in a baseline commit at task start so the agent operates on
+the same files the developer sees, and the merge replays only the
+commits between the baseline and the branch tip via
+\texttt{git cherry-pick -{}-no-commit baseline..branch}.
+The consequence---which the agent states explicitly---is that the
+developer's pre-existing uncommitted edits are \emph{not} swept into the
+agent's commit; they remain as uncommitted changes in the user's tree,
+exactly as they were before the task ran.
+This is the explain move again, and it confirms that the simplification
+in Steps~2--4 preserved the dirty-state invariant rather than silently
+breaking it---a verification that, in a manual workflow, would have
+required the developer to construct a dirty-tree scenario and inspect
+the git history by hand.
+
+\paragraph{Step~6: Serializing concurrent merges.}
+Because the developer routinely runs several IDE tabs and a remote web
+server against the same repository, a final task probes what happens
+when two tabs finish and merge at the same time:
+
+\begin{lstlisting}[style=prompt]
+What happens if two tabs both press "Commit and Merge" on the same repo
+at the same time? Can the checkout/merge steps interleave?
+\end{lstlisting}
+
+\noindent The agent explains that the checkout--cherry-pick--commit
+sequence is serialized by a per-repository file lock
+(\texttt{repo\_lock}), so concurrent tabs cannot interleave operations
+on the same repository, and that per-task state (stream buffers, bash
+output, recording state) is held in thread-local storage so that
+stopping one task cannot corrupt another.
+Satisfied that the redesigned, simpler workflow retained the
+concurrency guarantees of the original, the developer closed the
+session.
+This pair of closing explain-only turns (Steps~5 and~6) illustrates a
+subtle but important habit: after a simplification, the developer uses
+the same explain move not to drive a change but to \emph{audit} that
+the change did not regress an invariant the simpler code still needed
+to honor.
+
+\paragraph{Discussion.}
+The six-task episode is a microcosm of how \kisssys{} was built.
+Three properties of the system make this conversational loop possible,
+and each maps to a layer of the architecture
+(Section~\ref{sec:intro}).
+First, the \textbf{Worktree Sorcar Agent} ran every one of the six
+tasks on its own throwaway branch, so the developer could redesign a
+safety-critical merge routine without any risk to \texttt{main}: a
+botched edit in Step~2 or~4 would simply be discarded.
+Second, the \textbf{Chat Sorcar Agent} preserved the conversation
+across all six tasks, so the redesign request in Step~2 could refer to
+``the workflow'' explained in Step~1, and the fix in Step~4 could refer
+to the anomaly diagnosed in Step~3, without the developer restating
+context.
+Third, the \textbf{Relentless Agent} would have continued any single
+task that exhausted its context window---a multi-file Python plus
+TypeScript edit with test updates is large enough that this matters in
+practice.
+The \textbf{KISS Agent} underneath tracked the dollar cost of each
+turn, so the developer saw the price of the whole episode accumulate in
+the sidebar.
+
+The deeper lesson concerns the \emph{explain-then-revise} loop itself.
+Conventional wisdom holds that natural language is too imprecise a
+medium for specifying software changes.
+This episode suggests the opposite when the explanation and the edit
+are produced by the same agent over the same source.
+The developer's change requests in Steps~2 and~4---``ask two questions
+instead of three,'' ``you don't need the user to review in the original
+branch''---are vague by the standards of a formal specification, yet
+they produce correct, multi-file, multi-language edits because they are
+\emph{grounded in an explanation the agent itself just generated}.
+The agent does not have to guess what ``the unstage step'' refers to;
+it explained that step two tasks earlier and can locate the exact
+\texttt{git reset HEAD} call.
+This grounding is what distinguishes the loop from prompting a stateless
+code generator: the explanation turn is not a courtesy to the human, it
+is a shared, code-faithful referent that makes the subsequent
+imprecise instruction unambiguous.
+Finally, the episode shows that the explain move serves two distinct
+purposes---comprehension before a change (Steps~1 and~3) and
+verification after one (Steps~5 and~6)---so that the same lightweight
+conversational primitive both opens and closes the development loop.
 
 %----------------------------------------------------------------------
 \section{Principles Behind the Patterns}
