@@ -52,7 +52,7 @@ Koushik Sen \\ EECS Department, UC Berkeley\\ \texttt{ksen@berkeley.edu} \\ }
 \begin{abstract}
 Large language models can generate code and call tools fluently, yet deploying them as practical software engineering assistants still exposes persistent gaps: finite context windows, a single mistake that can derail entire sessions, agents that get stuck in dead ends, AI slop, and generated changes that are difficult to review or revert.
 
-We present \textbf{KISS Sorcar}, a general-purpose assistant and integrated development environment (IDE) built on top of the \textbf{KISS Agent Framework}, a stupidly-simple AI agent framework of roughly 2,700~lines of code for the core agents.  The framework addresses these gaps through a structured system prompt and a five-layer agent hierarchy in which each layer adds exactly one concern: budget-tracked ReAct execution, automatic continuation across sub-sessions via summarization, coding, and browser tools with parallel sub-agents, persistent multi-turn chat with history recall, and git worktree isolation so every task runs on its own branch.  Engineering principles are encoded in the agent's system prompt.
+We present \textbf{KISS Sorcar}, a general-purpose assistant and integrated development environment (IDE) built on top of the \textbf{KISS Agent Framework}, a stupidly-simple AI agent framework of roughly 2,400~lines of code for the core agents.  The framework addresses these gaps through a structured system prompt and a five-layer agent hierarchy in which each layer adds exactly one concern: budget-tracked ReAct execution, automatic continuation across sub-sessions via summarization, coding, and browser tools with parallel sub-agents, persistent multi-turn chat with history recall, and git worktree isolation so every task runs on its own branch.  Engineering principles are encoded in the agent's system prompt.
 
 We implemented KISS Sorcar as a free, open-source Visual Studio Code extension that runs locally, handles long-horizon tasks, and supports browser automation, multimodal input, and Docker containers.
 
@@ -66,7 +66,7 @@ In this research, we deliberately prioritize output quality over speed:  giving 
 
 Modern Large language models (LLMs), such as Anthropic's Claude Opus 4.7~\citep{anthropic2026opus47}, OpenAI's GPT 5.5~\citep{openai2026gpt55}, and Google's Gemini 3.1~\citep{google2026gemini31}, can generate code, reason about software architecture, and use developer tools~\citep{chen2021evaluating,roziere2023code}.  A growing body of work has explored how to harness these capabilities for autonomous software engineering, from single-session agents that resolve GitHub issues~\citep{yang2024sweagent,wang2024openhands} to industrial products marketed as AI software and general assistants ~\citep{copilot2021,cursor2024,devin2024,claudecode2025,codex2025,openclaw2025}. Yet using an LLM as a practical software engineering or general assistant still exposes several stubborn gaps: context windows are finite, a single mistake can derail an entire session, agents get stuck in dead ends, models generate AI slop, and generated changes are difficult to review or revert once applied to a live codebase.
 
-We propose the \emph{KISS Agent Framework}, a stupidly simple AI agent framework containing around 2,700 lines of code for the core agent implementation.  We try to address the above-mentioned gaps through a structured system prompt (Section~\ref{sec:system-prompt}) and a five-layer agent hierarchy in which each layer solves exactly one concern:
+We propose the \emph{KISS Agent Framework}, a stupidly simple AI agent framework containing around 2,400 lines of code for the core agent implementation.  We try to address the above-mentioned gaps through a structured system prompt (Section~\ref{sec:system-prompt}) and a five-layer agent hierarchy in which each layer solves exactly one concern:
 
 \begin{enumerate}[nosep]
   \item \textbf{KISS Agent} --- budget-tracked
@@ -92,7 +92,7 @@ The name ``KISS'' reflects the \emph{Keep It Simple, Stupid} design philosophy i
 
 We implement KISS Sorcar, a general-purpose assistant and an integrated development environment (IDE), on top of the KISS Agent Framework.  KISS Sorcar is a Visual Studio Code extension that runs locally. It has browser support (using open-source Chromium and Playwright), multimodal support, Docker container support, OpenClaw-like features (whose discussion is beyond the scope of the paper), and a mobile/web app. KISS Sorcar is free and open-source; all one needs is a model API key from a major LLM provider, such as Anthropic.  We implemented this framework in roughly 4 months, and the repository is available at \url{https://github.com/ksenxx/kiss_ai}. The name ``Sorcar'' pays homage to P.~C.~Sorcar, the Bengali magician.  The engineering principles described in Section~\ref{sec:system-prompt} are encoded in the agent's system prompt.
 
-KISS Sorcar has been built using itself.  The entire codebase---the KISS Agent framework, the Sorcar agent layers, the VS~Code extension, and the system prompt---was developed by KISS Sorcar operating on its own repository.  This self-hosting discipline provides a continuous-integration-style stress test: if the agent introduces a bug that impairs its ability to function, we ask the agent to fix it by analyzing the trajectory and code.  The simplicity of the layered architecture was both a prerequisite for and a consequence of this bootstrapping process. The simplicity of the framework reduced the number of bugs the agent introduced.  The five core agent classes are compact: the KISS Agent comprises 428~lines, the Relentless Agent 433~lines, the Sorcar Agent 744~lines, the Chat Sorcar Agent 317~lines, and the Worktree Sorcar Agent 741~lines---a total of roughly 2,663~lines of code (excluding empty lines and comments).  The framework has grown modestly from earlier revisions of this paper, primarily because the Sorcar and Chat layers absorbed Docker-aware tool variants, parallel sub-agent orchestration, and persistent chat-session bookkeeping, while remaining within the layered, single-concern design.
+KISS Sorcar has been built using itself.  The entire codebase---the KISS Agent framework, the Sorcar agent layers, the VS~Code extension, and the system prompt---was developed by KISS Sorcar operating on its own repository.  This self-hosting discipline provides a continuous-integration-style stress test: if the agent introduces a bug that impairs its ability to function, we ask the agent to fix it by analyzing the trajectory and code.  The simplicity of the layered architecture was both a prerequisite for and a consequence of this bootstrapping process. The simplicity of the framework reduced the number of bugs the agent introduced.  The five core agent classes are compact: the KISS Agent comprises 392~lines, the Relentless Agent 403~lines, the Sorcar Agent 673~lines, the Chat Sorcar Agent 315~lines, and the Worktree Sorcar Agent 638~lines---a total of roughly 2,421~lines of code (counting only significant lines, i.e.\ excluding empty lines, comment-only lines, and the docstrings of private methods).  Despite the Sorcar and Chat layers absorbing Docker-aware tool variants, parallel sub-agent orchestration, and persistent chat-session bookkeeping, the framework has remained within this compact footprint and within the layered, single-concern design.
 
 In the project, we deliberately prioritize output quality over speed.  In our experience, using a weaker or cheaper model often forces the developer to discard the agent's work and retry, ultimately increasing the total cost of completing a task.  Conversely, giving a frontier model adequate time to validate its own output---running linters, type checkers, and tests before declaring success---reduces the ``slop'' (low-quality, subtly incorrect code) common in faster but less thorough agents.  We expect token costs and inference latencies to continue to fall~\citep {gao2025trae}, making this quality-first posture increasingly practical.  In the meantime, the code produced by our agent is well-organized, simple, and idiomatic.
 
@@ -328,7 +328,7 @@ The prompt opens with two XML-tagged sections that establish who the agent is an
 You are KISS Sorcar, an AI General Assistant and IDE
 developed by Koushik Sen (ksen@berkeley.edu).
 Repo: https://github.com/ksenxx/kiss_ai
-Version: 2026.6.3
+Version: 2026.6.8
 
 Your sole goal is completing the user's task accurately
 and thoroughly.  Be rigorous, check facts, and produce
@@ -445,11 +445,26 @@ in SORCAR.md with highest priority.
 
 ## Pre-flight Checks
 
-Read before modify rule: You MUST call Read(file_path)
-on every file BEFORE calling Edit(file_path) on it.
-Never Edit a file you have not Read in the current
-session. This is non-negotiable. Do NOT use
-Bash("cat ...") as a substitute -- use the Read() tool.
+**Read before modify rule -- NON-NEGOTIABLE**: You MUST
+call Read(file_path) on every file BEFORE calling
+Edit(file_path) on it. Never Edit a file you have not
+Read in the current session.
+
+**Use the file tools, never shell substitutes --
+CRITICAL**: To VIEW the contents of any file, you MUST
+use the Read() tool. It is FORBIDDEN to inspect or dump
+file contents through Bash using cat, sed -n, head,
+tail, awk, more, less, nl, grep over a whole file,
+echo "$(<file)", or a for-loop of cat. These do NOT
+satisfy the read-before-modify rule and waste context
+-- always call Read() instead (use max_lines/chunking
+for big files). To MODIFY any file, you MUST use the
+Edit() or Write() tools. It is FORBIDDEN to edit files
+in place through Bash using sed -i, perl -i,
+awk ... > file, tee, or output redirection (>, >>) onto
+a source/tracked file. Bash may still be used for
+non-file-content operations (running tests, ls, grep -l
+to find files, git, builds, moving/removing files).
 
 Read relevant source files when the task depends on
 existing architecture. If referenced files, commands, or
@@ -463,11 +478,13 @@ fix the code, then verify the test passes.
 
 \noindent The ``Mandatory First Actions'' section ensures that project-specific overrides are loaded before any work begins.  This section has undergone several rounds of empirical refinement.  In an earlier version that merely mentioned the read inside a separate ``Self-Improvement Loop'' section, the agent read \texttt{SORCAR.md} as its first tool call only 46\% of the time.  After promoting the read to a dedicated section with imperative language, compliance improved in integration tests but regressed in production: analysis of 91~real tasks showed that 92\% never read \texttt{SORCAR.md}.  Two evasion patterns emerged: (1)~the agent used \texttt{Bash("cat ...")} instead of the \texttt{Read()} tool, and (2)~the agent combined the file read with other commands in a single \texttt{Bash} call.  Explicit prohibitions and ordinal position mandates raised compliance to 100\% in integration tests.
 
-The current version collapses the mandatory first action to a single read of \texttt{SORCAR.md}, accompanied by the rider ``follow the instructions in SORCAR.md with highest priority.''  This is a deliberate simplification: \texttt{SORCAR.md} contains project-specific instructions that can override or extend the general system prompt, and loading it first lets the rest of the task be interpreted under the active project's rules.  Earlier revisions of the prompt also mandated a second read of a per-project \texttt{USER\_PREFS.md} preferences file paired with a ``Self-Improvement Loop'' section that asked the agent to update the file at task end; both have since been removed because production audits (Section~\ref{sec:self-improvement-prompt}) showed 0\%~compliance with the update step and the read-only half of the protocol added prompt bulk without measurable benefit.  The prohibitions against \texttt{Bash}-based reading remain enforced by the general ``Read before modify'' discipline in the Pre-flight Checks section.
+The current version collapses the mandatory first action to a single read of \texttt{SORCAR.md}, accompanied by the rider ``follow the instructions in SORCAR.md with highest priority.''  This is a deliberate simplification: \texttt{SORCAR.md} contains project-specific instructions that can override or extend the general system prompt, and loading it first lets the rest of the task be interpreted under the active project's rules.  Earlier revisions of the prompt also mandated a second read of a per-project \texttt{USER\_PREFS.md} preferences file paired with a ``Self-Improvement Loop'' section that asked the agent to update the file at task end; both have since been removed because production audits (Section~\ref{sec:self-improvement-prompt}) showed 0\%~compliance with the update step and the read-only half of the protocol added prompt bulk without measurable benefit.  The prohibitions against \texttt{Bash}-based reading have since been promoted into an explicit, enumerated rule of their own---``Use the file tools, never shell substitutes''---in the Pre-flight Checks section.
 
 Each pre-flight check targets a specific category of avoidable error:
 
 \textbf{``Read before modify rule.''}  The most common source of agent-introduced bugs is modifying a file based on an incorrect assumption about its current contents.  The model may ``remember'' an older version of the file from its training data, or it may extrapolate from a partial reading.  By requiring a fresh read immediately before any edit, the instruction ensures that the model operates on the file's current state rather than a stale mental model.  The companion clause ``Read relevant sources if the task depends on existing architecture'' extends this rule from individual files to architectural context.  A task like ``add a caching layer to the database module'' requires understanding not just the file to be modified, but also how callers interact with it, what interfaces it provides, and what invariants it assumes.  The instruction prevents the model from jumping straight to code generation without understanding the broader context.
+
+\textbf{``Use the file tools, never shell substitutes.''}  The read-before-modify discipline is only effective if the model actually routes file access through the \texttt{Read()}, \texttt{Edit()}, and \texttt{Write()} tools, where the framework can track, render, and (for edits) verify the operation.  In practice, the model repeatedly evaded this by reaching for the shell instead---dumping a file with \texttt{cat}, \texttt{sed -n}, \texttt{head}, \texttt{tail}, \texttt{awk}, \texttt{nl}, or a \texttt{grep} over the whole file, and editing in place with \texttt{sed -i}, \texttt{perl -i}, \texttt{tee}, or output redirection (\texttt{>}, \texttt{>>}).  These shell substitutes bypass the read tracking entirely (so a subsequent \texttt{Edit()} fires against a file the framework never saw being read) and waste context by spilling raw file contents into the transcript.  The current prompt therefore enumerates the forbidden commands explicitly for both viewing and modifying, clarifies that editing a file viewed only through a forbidden shell command is a ``double violation'' (the file must be \texttt{Read()} first, then \texttt{Edit()}/\texttt{Write()}), and---crucially---carves out the legitimate uses of Bash that must remain available (running tests, \texttt{ls}, \texttt{grep -l} to locate files, \texttt{git}, builds, and moving or removing files).  Enumerating both the prohibited and the permitted shell uses prevents the model from over-applying the rule and abandoning Bash for tasks where it is the correct tool.
 
 \textbf{``If referenced files, commands, or config don't exist, stop and ask the user rather than guessing.''}  LLMs have a strong tendency to confabulate: when asked to modify a file that does not exist, the model will often proceed as if it does, producing edits against phantom content.  This instruction converts a silent failure (incorrect edits applied to a nonexistent file, which silently creates it) into an explicit clarification request.
 
@@ -655,12 +672,16 @@ Before calling finish(success=True):
    the equivalent lint/typecheck command.
 3. Check each user requirement against what was
    delivered.
-4. Clean up temporary files: Delete all temporary
-   files you created in PWD/tmp/ during this session
-   (research notes, file-information dumps, scratch
-   files, etc.).  Use Bash("rm -f
-   PWD/tmp/<files-you-created>").  Do NOT delete files
-   you did not create.
+4. **Clean up temporary files -- MANDATORY**: You MUST
+   delete every temporary file you created in PWD/tmp/
+   during this session (research notes, information-*.md,
+   file-information-*.md, scratch scripts, downloaded
+   artifacts, etc.).  Explicitly run Bash("rm -f
+   PWD/tmp/<each-file-you-created>") and then
+   Bash("ls PWD/tmp") to confirm they are gone. Do NOT
+   call finish(success=True) while any temp file you
+   created still remains. Do NOT delete files you did
+   not create.
 5. If any check fails, keep working.
 6. After 3 failed retries of the same fix approach,
    step back and rethink from scratch.
@@ -674,7 +695,7 @@ Before calling finish(success=True):
 
 \textbf{``Check each user requirement against delivery.''}  The model may have completed a task that it \emph{thinks} satisfies the user's request, but actually misses a requirement.  This instruction forces a systematic comparison between the original task description and the delivered result, catching gaps and misinterpretations.
 
-\textbf{``Clean up temporary files.''}  The temporary-files directive in the Tool Usage section requires the agent to write scratch files into \texttt{PWD/tmp/}, but without an explicit cleanup step at the end of the task, those artifacts persist and pollute the project's working tree over time.  This step mandates deletion of every temporary file the agent created during the session.  The companion clause ``Do NOT delete files you did not create'' is essential: the \texttt{tmp/} directory may contain artifacts from other sessions or from the developer's own scratch work, and an indiscriminate \texttt{rm -rf tmp/*} would destroy unrelated content.  Together, the two clauses form a narrow, audit-friendly cleanup contract.  The current revision additionally embeds an explicit command template---\texttt{Bash("rm -f PWD/tmp/<files-you-created>")}---directly inside the bullet, so the agent has a concrete, copy-pasteable cleanup command and does not have to invent its own (occasionally over-broad) deletion strategy.
+\textbf{``Clean up temporary files.''}  The temporary-files directive in the Tool Usage section requires the agent to write scratch files into \texttt{PWD/tmp/}, but without an explicit cleanup step at the end of the task, those artifacts persist and pollute the project's working tree over time.  This step mandates deletion of every temporary file the agent created during the session.  The companion clause ``Do NOT delete files you did not create'' is essential: the \texttt{tmp/} directory may contain artifacts from other sessions or from the developer's own scratch work, and an indiscriminate \texttt{rm -rf tmp/*} would destroy unrelated content.  Together, the two clauses form a narrow, audit-friendly cleanup contract.  The current revision additionally embeds an explicit command template---\texttt{Bash("rm -f PWD/tmp/<files-you-created>")}---directly inside the bullet, so the agent has a concrete, copy-pasteable cleanup command and does not have to invent its own (occasionally over-broad) deletion strategy.  It further requires the agent to run \texttt{Bash("ls PWD/tmp")} afterward to confirm the files are gone, and forbids calling \texttt{finish(success=True)} while any agent-created temporary file remains---turning the cleanup from an easily skipped suggestion into a verified post-condition.
 
 \textbf{``If any check fails, keep working.''}  Without this instruction, the model may call \texttt{finish(success=True)} even when it knows a check has failed, rationalizing that the failure is ``minor'' or ``unrelated.''  The instruction makes the rule absolute: no finishing until all checks pass.
 
@@ -782,10 +803,10 @@ A final section provides project-specific instructions that are injected when th
 - Lint/typecheck/format: `uv run check --full`. Tests:
   `uv run pytest -v` (timeout 900s).
 - The injectable instructions are available at
-  ~/.vscode/extensions/ksenxx.kiss-sorcar-2026.6.3/
+  ~/.vscode/extensions/ksenxx.kiss-sorcar-2026.6.8/
     kiss_project/src/kiss/INJECTIONS.md
 - Your SYSTEM.md (the system prompt) is located at
-  ~/.vscode/extensions/ksenxx.kiss-sorcar-2026.6.3/
+  ~/.vscode/extensions/ksenxx.kiss-sorcar-2026.6.8/
     kiss_project/src/kiss/SYSTEM.md
 - KISS Sorcar paper:
   https://github.com/ksenxx/kiss_ai/blob/main/
