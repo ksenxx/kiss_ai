@@ -61,8 +61,8 @@ Koushik Sen \\ EECS Department, UC Berkeley\\ \texttt{ksen@berkeley.edu} \\ }
 \begin{abstract}
 We describe how we built \kisssys{}---a general-purpose AI assistant and
 integrated development environment---using \kisssys{} itself.
-Over 27~days (April~22 to May~19, 2026), the developer issued
-3,011~tasks through the system's own interface.
+Over 44~days (April~22 to June~5, 2026), the developer issued
+3,099~tasks through the system's own interface.
 We analyzed every task in the system's SQLite usage log
 and identified seven recurring patterns: test-first bug fixing,
 iterative feature construction, periodic code hygiene, paper--code
@@ -80,7 +80,7 @@ Cloudflare Tunnels, Docker, pytest, and a dozen third-party agent
 integrations.
 We find that six established software engineering principles---encoded
 in a structured system prompt and a five-layer agent
-hierarchy totaling 1,900~lines of code---explain the patterns
+hierarchy totaling roughly 3,350~lines of code---explain the patterns
 and produce an AI assistant that achieves a 62.2\%
 pass rate on Terminal Bench~2.0 without benchmark-specific tuning.
 \end{abstract}
@@ -102,7 +102,7 @@ Framework~\cite{sen2026kiss}.
 The name reflects the \emph{Keep It Simple, Stupid} design philosophy:
 each component does one thing, each concern lives in one place,
 and the overall system avoids unnecessary abstraction.
-The entire framework comprises roughly 1,900~lines of core agent code
+The entire framework comprises roughly 3,350~lines of core agent code
 spread across five layers, each adding exactly one concern:
 
 \begin{enumerate}[nosep]
@@ -124,8 +124,8 @@ stress test: any bug the agent introduces impairs its own ability to
 function, and must be fixed immediately.
 
 To understand how this process works in practice, we analyzed all
-3,011~tasks recorded in the system's SQLite usage log
-(\texttt{\textasciitilde/.kiss/sorcar.db}) over 27~days of active development.
+3,099~tasks recorded in the system's SQLite usage log
+(\texttt{\textasciitilde/.kiss/sorcar.db}) over 44~days of active development.
 The tasks fall into seven recurring patterns
 (Section~\ref{sec:patterns}), each grounded in a software engineering
 principle (Section~\ref{sec:principles}).
@@ -133,26 +133,26 @@ Table~\ref{tab:categories} summarizes the task distribution.
 
 \begin{table}[t]
 \centering
-\caption{Task categories identified in the 3,011-task usage log.
+\caption{Task categories identified in the 3,099-task usage log.
 Counts are approximate because tasks often span categories.}
 \label{tab:categories}
 \begin{tabular}{lrr}
 \toprule
 \textbf{Category} & \textbf{Count} & \textbf{\%} \\
 \midrule
-Bug finding, reproducing, and fixing   & $\sim$600  & 20 \\
-Feature implementation                 & $\sim$500  & 17 \\
-UI/UX refinement                       & $\sim$350  & 12 \\
-Paper writing and building             & $\sim$300  & 10 \\
+Bug finding, reproducing, and fixing   & $\sim$620  & 20 \\
+Feature implementation                 & $\sim$520  & 17 \\
+UI/UX refinement                       & $\sim$360  & 12 \\
+Paper writing and building             & $\sim$310  & 10 \\
 Code quality / refactoring             & $\sim$250  &  8 \\
-Testing and CI                         & $\sim$200  &  7 \\
-Git operations                         & $\sim$150  &  5 \\
+Testing and CI                         & $\sim$210  &  7 \\
+Git operations                         & $\sim$155  &  5 \\
 System prompt engineering              & $\sim$100  &  3 \\
 General assistance (weather, travel,
-  shopping, stocks, research)          & $\sim$200  &  7 \\
-Communication (Slack, iMessage, email) & $\sim$80   &  3 \\
+  shopping, stocks, research)          & $\sim$210  &  7 \\
+Communication (Slack, iMessage, email) & $\sim$90   &  3 \\
 Smart-home control                     & $\sim$50   &  2 \\
-Greetings and identity                 & $\sim$80   &  3 \\
+Greetings and identity                 & $\sim$150  &  5 \\
 Other (security audits, installation,
   architecture investigation)          & $\sim$150  &  5 \\
 \bottomrule
@@ -232,7 +232,7 @@ every defect it introduces is a defect it must then live with.
 \label{sec:patterns}
 %----------------------------------------------------------------------
 
-We examined all 3,011~tasks in the usage log and identified seven
+We examined all 3,099~tasks in the usage log and identified seven
 recurring patterns.
 Each pattern is a workflow that the developer repeated dozens or
 hundreds of times.
@@ -255,18 +255,18 @@ Because every task the developer issued---whether a coding request, a
 weather query, or a smart-home command---flows through the same Chat
 Sorcar Agent, the log is a complete, unfiltered record of how the
 system was actually used.
-The 3,011~tasks span 27~days and group into 856~distinct chat
+The 3,099~tasks span 44~days and group into 877~distinct chat
 sessions, an average of roughly 3.5~tasks per session, confirming the
 iterative, multi-turn nature of the interaction
 (Section~\ref{sec:p-iterative}).
 We extracted patterns by three complementary methods:
 (i)~clustering tasks by the \texttt{frequent\_tasks} frequency table,
 which surfaces verbatim repeated commands such as
-``\texttt{uv run check -{}-full and fix}'' (41~occurrences) and
+``\texttt{uv run check -{}-full and fix}'' (50~occurrences) and
 ``\texttt{git push origin}'' (13~occurrences);
 (ii)~full-text \texttt{LIKE} queries over the task descriptions to
-count phrasings (\eg{} 82~tasks contain ``build the paper,''
-97~contain ``\texttt{uv run check}''); and
+count phrasings (\eg{} 73~tasks contain ``build the paper,''
+105~contain ``\texttt{uv run check}''); and
 (iii)~manual reading of representative tasks within each cluster to
 recover the underlying workflow.
 The category counts in Table~\ref{tab:categories} are approximate
@@ -362,7 +362,7 @@ often ``can you get rid of the last commit to main?''
 The exact string ``get rid of the last commit'' (with minor
 variations such as ``\ldots to main,'' ``\ldots from main,''
 ``\ldots from main and origin,'' and ``\ldots in main?'') recurs more
-than 20~times in the log, making it one of the most frequent
+than 30~times in the log, making it one of the most frequent
 recovery commands.
 It functions as a manual rollback mechanism that complements the
 Worktree Sorcar Agent's branch-per-task isolation: even though each
@@ -385,7 +385,7 @@ The developer described a feature, observed the result, then issued
 follow-up tasks to refine behavior, fix edge cases, and polish
 the UI.
 A single feature could span 5--20~tasks.
-This pattern is the dominant explanation for the 856~chat
+This pattern is the dominant explanation for the 877~chat
 sessions in the log: a feature is typically developed within one chat
 session, and the Chat Sorcar Agent's persistence
 lets each follow-up task reference the
@@ -452,8 +452,8 @@ a sweep:
         (Tasks~26, 60, 72, 73, 83, 203, 212, \ldots).
         The exact string ``\texttt{uv run check -{}-full and fix}''
         is the second most frequent command in the entire log
-        (41~occurrences in the \texttt{frequent\_tasks} table), and
-        97~tasks in total mention ``\texttt{uv run check}.''
+        (50~occurrences in the \texttt{frequent\_tasks} table), and
+        105~tasks in total mention ``\texttt{uv run check}.''
   \item ``Can you thoroughly find all bugs, redundancies, and
         inconsistencies in \texttt{PWD/src/kiss/agents/vscode/}?''
         (Tasks~1, 6, 15, 17, 19, 23, 153, 425--427, 716, 918, 978, 981).
@@ -462,7 +462,7 @@ a sweep:
         (Tasks~798, 840, 866, 890--891, 961, 986, 990, 1013, 1126, 1128, 1158).
         A closely related verbatim phrasing---``can you run all tests
         and report the cause of failing tests?  Do not modify any''
-        code---appears 15~times.
+        code---appears 22~times.
 \end{itemize}
 
 These sweeps function as a periodic ``garbage collection'' for code
@@ -514,7 +514,7 @@ revision sometimes triggered a code change:
 This bidirectional flow means the paper is always a faithful
 description of the system, and the system always reflects the
 principles claimed in the paper.
-The phrase ``build the paper'' appears in 82~tasks, making
+The phrase ``build the paper'' appears in 73~tasks, making
 paper~maintenance one of the highest-volume non-coding activities in
 the log; the \LaTeX{} toolchain (\texttt{pdflatex}, BibTeX) is
 consequently one of the most-exercised pieces of the software
@@ -733,14 +733,14 @@ engineering principles.
 %......................................................................
 
 \emph{Keep it simple.}
-The five-layer hierarchy embodies this: 1,892~lines total,
+The five-layer hierarchy embodies this: 3,346~lines total,
 an order of magnitude smaller than comparable systems.
 Pattern~7 (multi-channel assistance) shows the principle at the
 usage level: one system handles coding, smart home, travel, and
 communication without specialized sub-systems.
 
 When the user typed ``hi'' (Tasks~207, 272, 278, 285, 289, 416,
-421, 443, 454, \ldots---at least 80~occurrences), the agent
+421, 443, 454, \ldots---roughly 150~occurrences), the agent
 responded with a single friendly sentence.
 It did not launch into a capabilities description.
 The KISS principle applied to interaction design says: match the
@@ -835,14 +835,14 @@ was reviewing the agent's own output.
 \label{sec:software}
 %----------------------------------------------------------------------
 
-The 3,011~tasks touched a broad software ecosystem.
+The 3,099~tasks touched a broad software ecosystem.
 Table~\ref{tab:software} lists the tools and services used,
 grouped by function.
 
 \begin{table}[t]
 \centering
 \caption{Software used by the developer through \kisssys{}
-over the 27-day period.}
+over the 44-day period.}
 \label{tab:software}
 \begin{tabular}{ll}
 \toprule
@@ -922,7 +922,7 @@ developer checks whether the specification (system prompt) is
 strong enough to prevent observed failures.
 
 \paragraph{Prompt evolution.}
-Over 27~days, the system prompt evolved from aggressive imperatives
+Over 44~days, the system prompt evolved from aggressive imperatives
 (``BE RELENTLESS'') to calm, explanatory framing (``Be rigorous,
 check facts, and produce high-quality work'').
 Specific instructions were added reactively: the ``temporary files
@@ -1010,8 +1010,8 @@ We resolved this through bootstrapping: the first version was
 written manually, and each subsequent version was written with
 the previous one.
 
-The 20+ defensive reverts in the log (Pattern~1) show the cost of
-this approach: roughly one in every 150~tasks required undoing the
+The 30+ defensive reverts in the log (Pattern~1) show the cost of
+this approach: roughly one in every 90~tasks required undoing the
 agent's work.
 But the benefit is that every surviving change has been validated
 by the same system that will maintain it.
@@ -1032,7 +1032,7 @@ one tool for everything beats many specialized tools.
 %----------------------------------------------------------------------
 
 \textbf{Single developer.}
-All 3,011~tasks were issued by one developer.
+All 3,099~tasks were issued by one developer.
 Other developers may exhibit different patterns.
 
 \textbf{Single system.}
@@ -1051,7 +1051,7 @@ We evaluate on Terminal Bench~2.0 only.
 \label{sec:conclusion}
 %----------------------------------------------------------------------
 
-We analyzed 3,011~tasks from 27~days of building \kisssys{} with
+We analyzed 3,099~tasks from 44~days of building \kisssys{} with
 \kisssys{}.
 Seven patterns emerged: test-first bug fixing, iterative feature
 construction, periodic code hygiene, paper--code co-evolution,
@@ -1066,7 +1066,7 @@ as continuous integration.
 The developer used \kisssys{} to write code in five languages,
 control smart-home lights, plan trips, send messages, check email,
 query weather and stocks, build a website, prepare lecture slides,
-and refuse an unethical request---all through the same 1,900-line
+and refuse an unethical request---all through the same 3,350-line
 agent framework and a single structured system prompt.
 
 The surprise is not the principles.
