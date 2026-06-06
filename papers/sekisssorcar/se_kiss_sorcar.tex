@@ -81,8 +81,7 @@ integrations.
 We find that six established software engineering principles---encoded
 in a structured system prompt and a five-layer agent
 hierarchy totaling roughly 2,400~lines of code---explain the patterns
-and produce an AI assistant that achieves a 62.2\%
-pass rate on Terminal Bench~2.0 without benchmark-specific tuning.
+and produce an AI assistant capable enough to build itself.
 \end{abstract}
 
 %----------------------------------------------------------------------
@@ -168,7 +167,6 @@ engineering principle.
 Section~\ref{sec:software} catalogs the software ecosystem.
 Section~\ref{sec:system-prompt} shows how the principles are
 encoded in the system prompt.
-Section~\ref{sec:evaluation} reports evaluation results.
 Section~\ref{sec:discussion} discusses lessons learned.
 Section~\ref{sec:conclusion} concludes.
 
@@ -668,8 +666,8 @@ general-purpose assistant:
         913--915, 1015--1017, 1188--1189),
         iMessage (Tasks~550--551, 1184--1185, 1210),
         Gmail (Tasks~1191--1198, 1233).
-  \item \textbf{Ethical refusal:} ``Can you hack the Echo Show~15?''
-        The agent refused and offered five legitimate
+  \item \textbf{Ethical refusal:} an unethical hacking request, which
+        the agent refused, offering five legitimate
         alternatives (Task~1240).
 \end{itemize}
 
@@ -711,7 +709,7 @@ handled with the same collect-then-synthesize rigor as a code
 investigation.
 Even the ethical refusal in Task~1240 is an application of the
 defensive-programming clause (Section~\ref{sec:defensive}): the agent
-declined to hack the Echo Show~15 and offered five legitimate
+declined an unethical hacking request and offered five legitimate
 alternatives, treating ``refuse what you cannot do safely'' as a
 first-class behavior rather than an exception.
 The lesson of Pattern~7 is therefore not merely that one agent can do
@@ -787,7 +785,7 @@ system.
 
 \emph{Validate everything.  Refuse what you cannot do safely.}
 The ethical refusal in Pattern~7 (Task~1240) is the clearest example.
-The agent refused to hack the Echo Show~15 and offered five
+The agent refused an unethical hacking request and offered five
 alternatives.
 
 Pattern~1's ``defensive revert'' variant is another form of
@@ -861,7 +859,7 @@ Database              & SQLite (\texttt{sorcar.db}) \\
 Browser automation    & Playwright, Chromium \\
 Remote access         & Cloudflare Tunnels, TLS/WSS \\
 Notifications         & ntfy.sh \\
-Containerization      & Docker (Terminal Bench~2.0) \\
+Containerization      & Docker \\
 Smart home            & Govee API (third-party agent) \\
 Messaging             & Slack, iMessage, WhatsApp (agents) \\
 Email                 & Gmail API, Resend \\
@@ -929,42 +927,6 @@ Specific instructions were added reactively: the ``temporary files
 in \texttt{PWD/tmp/}'' rule (Task~1416) was added after the agent
 polluted the project root; the ``visit at least 10~websites'' rule
 (Task~757) was strengthened after the agent cut research short.
-
-%----------------------------------------------------------------------
-\section{Evaluation}
-\label{sec:evaluation}
-%----------------------------------------------------------------------
-
-We evaluate on Terminal Bench~2.0, a benchmark of 89~diverse
-terminal-based programming tasks.
-Each task runs in an isolated Docker container with automatic
-verification.
-We use Claude Opus~4.6 as the underlying model and run five trials
-per task.
-We do not modify the general system prompt or inject
-benchmark-specific instructions.
-
-\begin{table}[t]
-\centering
-\caption{Terminal Bench~2.0 aggregate results (89 tasks, 5 trials,
-Claude Opus~4.6).}
-\label{tab:results}
-\begin{tabular}{lc}
-\toprule
-\textbf{System} & \textbf{Pass Rate} \\
-\midrule
-Claude Code       & 58.0\% \\
-Cursor Composer~2 & 61.7\% \\
-\kisssys{}        & 62.2\% \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-Table~\ref{tab:results} shows the results.
-\kisssys{} achieves a 62.2\% overall pass rate (277 of 445 trials).
-The pass@any rate is 78.7\% (70/89).
-The pass@all rate is 43.8\% (39/89).
-The median cost per trial is \$0.45; the mean is \$0.90.
 
 %----------------------------------------------------------------------
 \section{Discussion}
@@ -1042,9 +1004,6 @@ Different agent architectures may induce different workflows.
 \textbf{Self-hosting bias.}
 Because the system was built with itself, the architecture is
 optimized for the kinds of tasks the agent can already do well.
-
-\textbf{Single benchmark.}
-We evaluate on Terminal Bench~2.0 only.
 
 %----------------------------------------------------------------------
 \section{Conclusion}
