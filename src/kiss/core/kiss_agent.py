@@ -460,14 +460,26 @@ class KISSAgent(Base):
     def _update_tokens_and_budget_from_response(self, response: Any) -> None:
         """Updates token counter and budget from API response."""
         try:
-            input_tokens, output_tokens, cache_read, cache_write = (
-                self.model.extract_input_output_token_counts_from_response(response)
+            usage = self.model.extract_input_output_token_counts_from_response(response)
+            if len(usage) == 4:
+                input_tokens, output_tokens, cache_read, cache_write = usage
+                cache_write_1h = 0
+            else:
+                input_tokens, output_tokens, cache_read, cache_write, cache_write_1h = usage
+            self.total_tokens_used += (
+                input_tokens + output_tokens + cache_read + cache_write + cache_write_1h
             )
-            self.total_tokens_used += input_tokens + output_tokens + cache_read + cache_write
             cost = calculate_cost(
-                self.model.model_name, input_tokens, output_tokens, cache_read, cache_write
+                self.model.model_name,
+                input_tokens,
+                output_tokens,
+                cache_read,
+                cache_write,
+                cache_write_1h,
             )
             self.budget_used += cost
+        except KISSError:
+            raise
         except Exception as e:  # pragma: no cover
             logger.debug("Exception caught", exc_info=True)
             logger.error(
