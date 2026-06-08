@@ -259,6 +259,93 @@ class TestUdsListener(IsolatedAsyncioTestCase):
             except Exception:
                 pass
 
+    async def test_active_tasks_query_idle_daemon_returns_zero(self) -> None:
+        """``activeTasksQuery`` returns count=0 when no agent is running.
+
+        Locks in the wire format the VS Code extension's dependency
+        installer relies on to decide whether to SIGTERM the daemon
+        before the ``ensureDependencies`` post-install step.  An idle
+        daemon must return ``{type: "activeTasksResponse", count: 0,
+        tabs: []}`` so the installer is allowed to restart it on a
+        fingerprint change.
+        """
+        reader, writer = await asyncio.open_unix_connection(
+            str(self.uds_path),
+        )
+        try:
+            query = json.dumps({"type": "activeTasksQuery"}).encode("utf-8")
+            writer.write(query + b"\n")
+            await writer.drain()
+            msg = await self._drain_events(
+                reader, "activeTasksResponse", timeout=2.0,
+            )
+            self.assertEqual(msg.get("count"), 0)
+            self.assertEqual(msg.get("tabs"), [])
+        finally:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+    async def test_active_tasks_query_reports_running_tab(self) -> None:
+        """When a tab claims to be running a task, the query reports it.
+
+        Reproduces the SIGTERM regression by injecting a fake active
+        ``_RunningAgentState`` into the registry and verifying the UDS
+        query returns ``count=1`` plus a ``"<tab_id>(task=<id>)"``
+        descriptor — the same shape the SIGTERM log line prints.  This
+        is the signal the extension uses to defer the restart.
+        """
+        from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+
+        class _FakeTab:
+            def __init__(self, tid: str) -> None:
+                self.is_task_active = True
+                self.task_history_id = tid
+                self.last_task_id = tid
+
+        fake_tab_id = "ad4ecb65-2878-4c2c-9736-3bb9be18814a"
+        fake = _FakeTab("74")
+        # Duck-typed insertion: ``_handle_active_tasks_query`` only
+        # reads ``is_task_active`` / ``task_history_id`` / ``last_task_id``.
+        # pyright cannot see through the runtime structural shape so the
+        # value cast is needed to satisfy the registry's declared type.
+        from typing import cast
+
+        with _RunningAgentState._registry_lock:
+            _RunningAgentState.running_agent_states[fake_tab_id] = cast(
+                _RunningAgentState, fake,
+            )
+        try:
+            reader, writer = await asyncio.open_unix_connection(
+                str(self.uds_path),
+            )
+            try:
+                writer.write(
+                    json.dumps({"type": "activeTasksQuery"}).encode("utf-8")
+                    + b"\n",
+                )
+                await writer.drain()
+                msg = await self._drain_events(
+                    reader, "activeTasksResponse", timeout=2.0,
+                )
+                self.assertEqual(msg.get("count"), 1)
+                tabs = msg.get("tabs")
+                self.assertIsInstance(tabs, list)
+                assert isinstance(tabs, list)
+                self.assertEqual(len(tabs), 1)
+                self.assertEqual(tabs[0], f"{fake_tab_id}(task=74)")
+            finally:
+                writer.close()
+                try:
+                    await writer.wait_closed()
+                except Exception:
+                    pass
+        finally:
+            with _RunningAgentState._registry_lock:
+                _RunningAgentState.running_agent_states.pop(fake_tab_id, None)
+
     async def test_stop_async_removes_socket(self) -> None:
         """``stop_async`` unlinks the socket file on shutdown."""
         # asyncTearDown calls stop_async after this; bind a fresh
