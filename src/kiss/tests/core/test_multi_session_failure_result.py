@@ -142,7 +142,7 @@ class TestMultiSessionFailureResult(unittest.TestCase):
             agent = RelentlessAgent("FailAfterContinue")
             with tempfile.TemporaryDirectory() as td:
                 result = agent.run(
-                    model_name="test-model",
+                    model_name="gpt-4o-mini",
                     prompt_template="Do multi-step work.",
                     max_steps=5,
                     max_budget=1.0,
@@ -196,7 +196,7 @@ class TestMultiSessionFailureResult(unittest.TestCase):
             with tempfile.TemporaryDirectory() as td:
                 try:
                     agent.run(
-                        model_name="test-model",
+                        model_name="gpt-4o-mini",
                         prompt_template="Do work that never finishes.",
                         max_steps=5,
                         max_budget=1.0,
