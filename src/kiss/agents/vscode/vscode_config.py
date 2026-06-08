@@ -17,10 +17,21 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# Serializes the read-modify-write of ``config.json`` in ``save_config``.
+# The on-disk write is already atomic (staged temp file + ``os.replace``),
+# but atomicity alone does not prevent a lost update: two threads that
+# each read the same old file, overlay only their own keys, and then
+# replace it would drop one another's change.  Holding this lock across
+# the entire load-merge-store sequence makes concurrent ``save_config``
+# calls (e.g. an agent persisting ``last_model`` while the command
+# handler persists a settings toggle) serialize so every update survives.
+_config_lock = threading.Lock()
 
 # ``KISS_HOME`` overrides the default ``~/.kiss`` location so that
 # tests (see ``src/kiss/tests/conftest.py``) can redirect persistent
@@ -119,25 +130,28 @@ def save_config(data: dict[str, Any]) -> None:
         data: Configuration dict.
     """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    existing: dict[str, Any] = {}
-    if CONFIG_PATH.exists():
+    # Serialize the whole read-modify-write so concurrent callers cannot
+    # each read the same old file and clobber one another's keys.
+    with _config_lock:
+        existing: dict[str, Any] = {}
+        if CONFIG_PATH.exists():
+            try:
+                with open(CONFIG_PATH) as f:
+                    stored = json.load(f)
+                if isinstance(stored, dict):
+                    existing = stored
+            except (json.JSONDecodeError, OSError):
+                pass
+        for k in DEFAULTS:
+            if k in data:
+                existing[k] = data[k]
+        serialized = json.dumps(existing, indent=2)
+        fd, tmp = tempfile.mkstemp(prefix=".kiss-config-", dir=str(CONFIG_DIR))
         try:
-            with open(CONFIG_PATH) as f:
-                stored = json.load(f)
-            if isinstance(stored, dict):
-                existing = stored
-        except (json.JSONDecodeError, OSError):
-            pass
-    for k in DEFAULTS:
-        if k in data:
-            existing[k] = data[k]
-    serialized = json.dumps(existing, indent=2)
-    fd, tmp = tempfile.mkstemp(prefix=".kiss-config-", dir=str(CONFIG_DIR))
-    try:
-        os.write(fd, serialized.encode("utf-8"))
-    finally:
-        os.close(fd)
-    os.replace(tmp, CONFIG_PATH)
+            os.write(fd, serialized.encode("utf-8"))
+        finally:
+            os.close(fd)
+        os.replace(tmp, CONFIG_PATH)
 
 
 def _get_user_shell() -> str:
