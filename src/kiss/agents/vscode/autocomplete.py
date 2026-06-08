@@ -39,7 +39,7 @@ class _AutocompleteMixin:
         _complete_queue: queue.Queue[tuple[str, int, str, str, str]] | None
         _complete_worker: threading.Thread | None
         _complete_seq_latest: int
-        _file_cache: list[str] | None
+        _file_cache: dict[str, list[str]]
 
     def _complete_from_active_file(
         self,
@@ -182,13 +182,34 @@ class _AutocompleteMixin:
             )
             self._complete_worker.start()
 
-    def _refresh_file_cache(self, then_emit_for_prefix: str | None = None) -> None:
-        """Refresh the file cache from disk in a background thread.
+    def _resolve_work_dir(self, work_dir: str) -> str:
+        """Return *work_dir* when non-empty, else the daemon-wide work_dir.
+
+        Used by the ``@``-mention file picker so each chat tab can scan
+        its own working directory: the frontend stamps the active tab's
+        ``workDir`` on ``getFiles``/``recordFileUsage`` commands, and an
+        empty value falls back to the daemon-wide ``self.work_dir``
+        captured from ``KISS_WORKDIR`` or the most-recent ``setWorkDir``.
+        """
+        return work_dir or self.work_dir
+
+    def _refresh_file_cache(
+        self,
+        then_emit_for_prefix: str | None = None,
+        work_dir: str = "",
+    ) -> None:
+        """Refresh the file cache for *work_dir* in a background thread.
 
         When ``then_emit_for_prefix`` is set, broadcasts a ``files``
         event ranked for that prefix once the scan finishes.  This lets
         callers (``_get_files``) kick off a non-blocking refresh and
         still deliver suggestions to the UI.
+
+        ``work_dir`` selects which directory to scan; an empty value
+        defaults to ``self.work_dir`` so existing callers that omit it
+        keep the daemon-wide behaviour.  Each work_dir has its own
+        entry in ``self._file_cache`` (keyed by the resolved path) so
+        tabs with different working directories never share file lists.
 
         Race protection: when invoked from ``_get_files`` (i.e.
         ``then_emit_for_prefix is not None``, meaning the cache was
@@ -203,17 +224,19 @@ class _AutocompleteMixin:
         """
         from kiss.agents.vscode.diff_merge import _scan_files
 
+        wd = self._resolve_work_dir(work_dir)
         only_if_empty = then_emit_for_prefix is not None
 
         def _do_refresh() -> None:
-            result = _scan_files(self.work_dir)
+            result = _scan_files(wd)
             with self._state_lock:
-                if only_if_empty and self._file_cache is not None:
+                existing = self._file_cache.get(wd)
+                if only_if_empty and existing is not None:
                     # A concurrent writer published a fresher value
                     # while we were scanning — emit theirs, not ours.
-                    result = self._file_cache
+                    result = existing
                 else:
-                    self._file_cache = result
+                    self._file_cache[wd] = result
             if then_emit_for_prefix is not None:
                 usage = _load_file_usage()
                 ranked = rank_file_suggestions(
@@ -223,19 +246,29 @@ class _AutocompleteMixin:
 
         threading.Thread(target=_do_refresh, daemon=True).start()
 
-    def _get_files(self, prefix: str) -> None:
-        """Send file list for autocomplete with usage-based sorting.
+    def _get_files(self, prefix: str, work_dir: str = "") -> None:
+        """Send file list for the ``@``-mention picker, scoped to *work_dir*.
 
-        H9 — must not block the message-handling thread.  When the cache
-        is empty, kick off a background refresh and respond immediately
-        with an empty ``loading=true`` list; the same scan then emits a
-        second ``files`` event with the populated list once it finishes,
-        so the frontend gets results without the caller blocking.
+        ``work_dir`` selects the directory the picker is rooted at.  An
+        empty value falls back to ``self.work_dir``: the chat webview
+        stamps the active tab's ``workDir`` on the ``getFiles`` command
+        so tabs with different working directories see their own files,
+        independent of the daemon-wide default.
+
+        H9 — must not block the message-handling thread.  When the
+        cache for the resolved work_dir is empty, kick off a background
+        refresh and respond immediately with an empty ``loading=true``
+        list; the same scan then emits a second ``files`` event with
+        the populated list once it finishes, so the frontend gets
+        results without the caller blocking.
         """
+        wd = self._resolve_work_dir(work_dir)
         with self._state_lock:
-            cache = self._file_cache
+            cache = self._file_cache.get(wd)
         if cache is None:
-            self._refresh_file_cache(then_emit_for_prefix=prefix)
+            self._refresh_file_cache(
+                then_emit_for_prefix=prefix, work_dir=wd,
+            )
             self.printer.broadcast(
                 {"type": "files", "files": [], "loading": True},
             )

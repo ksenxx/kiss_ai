@@ -136,7 +136,7 @@ class TestH9AutocompleteNonBlocking(unittest.TestCase):
                 self._complete_queue = None
                 self._complete_worker = None
                 self._complete_seq_latest = 0
-                self._file_cache = None
+                self._file_cache = {}
 
         srv = FakeServer()
         # Patch _scan_files to take a long time so a synchronous call would block.

@@ -49,9 +49,10 @@ class TestFileCacheOverwriteRace(unittest.TestCase):
 
     def test_background_refresh_is_not_overwritten(self) -> None:
         server = VSCodeServer()
-        server._file_cache = None
+        server._file_cache = {}
         server.printer.broadcast = lambda *_a, **_k: None  # type: ignore[method-assign]  # silence output
 
+        wd = server.work_dir
         fresh = ["fresh/file.py"]
         scan_started = threading.Event()
         bg_done = threading.Event()
@@ -59,7 +60,7 @@ class TestFileCacheOverwriteRace(unittest.TestCase):
         def bg_refresh() -> None:
             scan_started.wait(timeout=5)
             with server._state_lock:
-                server._file_cache = fresh
+                server._file_cache[wd] = fresh
             bg_done.set()
 
         t = threading.Thread(target=bg_refresh, daemon=True)
@@ -82,7 +83,7 @@ class TestFileCacheOverwriteRace(unittest.TestCase):
             t.join(timeout=2)
 
         self.assertEqual(
-            server._file_cache, fresh,
+            server._file_cache.get(wd), fresh,
             "background refresh result must not be overwritten by a slower scan",
         )
 

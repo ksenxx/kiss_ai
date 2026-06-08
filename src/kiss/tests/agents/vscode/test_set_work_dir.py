@@ -103,7 +103,7 @@ def test_set_work_dir_updates_field_and_invalidates_caches(
     server = _make_server(a)
     # Seed the caches with values that came from folder A.
     with server._state_lock:
-        server._file_cache = ["alpha.txt"]
+        server._file_cache = {a: ["alpha.txt"]}
         server._last_active_file = os.path.join(a, "alpha.txt")
         server._last_active_content = "alpha"
 
@@ -112,7 +112,7 @@ def test_set_work_dir_updates_field_and_invalidates_caches(
     assert server.work_dir == b, (
         "setWorkDir must update work_dir to the new workspace folder"
     )
-    assert server._file_cache is None, (
+    assert server._file_cache == {}, (
         "file_cache holds folder-A files; must be cleared on folder change"
     )
     assert server._last_active_file == ""
@@ -124,10 +124,10 @@ def test_set_work_dir_ignored_when_empty(two_workspaces: tuple[str, str]) -> Non
     a, _b = two_workspaces
     server = _make_server(a)
     with server._state_lock:
-        server._file_cache = ["alpha.txt"]
+        server._file_cache = {a: ["alpha.txt"]}
     server._handle_command({"type": "setWorkDir", "workDir": ""})
     assert server.work_dir == a
-    assert server._file_cache == ["alpha.txt"], (
+    assert server._file_cache == {a: ["alpha.txt"]}, (
         "empty workDir must not invalidate caches"
     )
 
@@ -144,9 +144,9 @@ def test_set_work_dir_idempotent_when_unchanged(
     a, _b = two_workspaces
     server = _make_server(a)
     with server._state_lock:
-        server._file_cache = ["alpha.txt"]
+        server._file_cache = {a: ["alpha.txt"]}
     server._handle_command({"type": "setWorkDir", "workDir": a})
-    assert server._file_cache == ["alpha.txt"]
+    assert server._file_cache == {a: ["alpha.txt"]}
 
 
 def test_get_files_returns_new_workspace_after_set_work_dir(
