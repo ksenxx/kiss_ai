@@ -42,7 +42,13 @@ _PLATFORM_ERROR = json.dumps(
 
 def _run_osascript(script: str) -> tuple[str, str]:
     """Run an AppleScript and return (stdout, stderr)."""
-    result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=30)
+    result = subprocess.run(
+        ["osascript", "-e", script],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=30,
+    )
     return result.stdout.strip(), result.stderr.strip()
 
 

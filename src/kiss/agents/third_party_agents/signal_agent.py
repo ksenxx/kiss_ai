@@ -56,7 +56,9 @@ class SignalChannelBackend(ToolMethodBackend):
     def _run_cli(self, *args: str) -> tuple[str, str]:
         """Run signal-cli command and return (stdout, stderr)."""
         cmd = [self._signal_cli, "-u", self._phone_number, *args]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, encoding="utf-8", timeout=30
+        )
         return result.stdout, result.stderr
 
     def poll_messages(
@@ -241,6 +243,7 @@ class SignalAgent(BaseChannelAgent, ChatSorcarAgent):
                     [agent._backend._signal_cli, "--version"],
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
                     timeout=10,
                 )
                 return json.dumps(
