@@ -236,7 +236,7 @@ class TestMultiSessionSummaryMerge(unittest.TestCase):
             agent = RelentlessAgent("MergeTest")
             with tempfile.TemporaryDirectory() as td:
                 result = agent.run(
-                    model_name="test-model",
+                    model_name="gpt-4o-mini",
                     prompt_template="Do multi-step work.",
                     max_steps=5,
                     max_budget=1.0,
@@ -278,7 +278,7 @@ class TestMultiSessionSummaryMerge(unittest.TestCase):
             agent = RelentlessAgent("SingleTest")
             with tempfile.TemporaryDirectory() as td:
                 result = agent.run(
-                    model_name="test-model",
+                    model_name="gpt-4o-mini",
                     prompt_template="Do one-step work.",
                     max_steps=5,
                     max_budget=1.0,
