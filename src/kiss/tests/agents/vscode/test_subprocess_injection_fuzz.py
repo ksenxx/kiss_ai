@@ -353,7 +353,7 @@ class TestFuzzAutocompletePrefix(unittest.TestCase):
                 self._complete_queue = None
                 self._complete_worker = None
                 self._complete_seq_latest = 0
-                self._file_cache = ["a.py", "b.py", "x/y.txt"]
+                self._file_cache = {"/": ["a.py", "b.py", "x/y.txt"]}
 
         srv = FakeServer()
         marker = Path(tempfile.gettempdir()) / f"ac-pwned-{os.getpid()}"
