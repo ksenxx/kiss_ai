@@ -245,6 +245,7 @@ class ClaudeCodeModel(Model):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                encoding="utf-8",
             )
         except OSError as e:  # pragma: no cover – requires broken PATH
             raise KISSError(f"Failed to start Claude Code CLI: {e}") from e
