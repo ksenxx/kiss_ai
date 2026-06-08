@@ -24,6 +24,17 @@ from kiss.core.models.model import (
 logger = logging.getLogger(__name__)
 
 
+def _anthropic_cache_creation_tokens(usage: Any) -> tuple[int, int]:
+    """Return Anthropic 5-minute and 1-hour cache-creation token counts."""
+    cache_creation = getattr(usage, "cache_creation", None)
+    if cache_creation is not None:
+        five_minute = getattr(cache_creation, "ephemeral_5m_input_tokens", 0) or 0
+        one_hour = getattr(cache_creation, "ephemeral_1h_input_tokens", 0) or 0
+        return five_minute, one_hour
+    aggregate = getattr(usage, "cache_creation_input_tokens", 0) or 0
+    return 0, aggregate
+
+
 def _uses_adaptive_thinking(model_name: str) -> bool:
     """Return True if the Claude model requires ``thinking.type=adaptive``.
 
@@ -522,20 +533,22 @@ class AnthropicModel(Model):
 
     def extract_input_output_token_counts_from_response(
         self, response: Any
-    ) -> tuple[int, int, int, int]:
+    ) -> tuple[int, int, int, int, int]:
         """Extracts token counts from an Anthropic API response.
 
         Returns:
             (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens).
         """
         if hasattr(response, "usage") and response.usage:
+            cache_write_5m, cache_write_1h = _anthropic_cache_creation_tokens(response.usage)
             return (
                 getattr(response.usage, "input_tokens", 0) or 0,
                 getattr(response.usage, "output_tokens", 0) or 0,
                 getattr(response.usage, "cache_read_input_tokens", 0) or 0,
-                getattr(response.usage, "cache_creation_input_tokens", 0) or 0,
+                cache_write_5m,
+                cache_write_1h,
             )
-        return 0, 0, 0, 0
+        return 0, 0, 0, 0, 0
 
     def get_embedding(self, text: str, embedding_model: str | None = None) -> list[float]:
         """Generates an embedding vector for the given text.

@@ -387,6 +387,160 @@ def _read_line_over_pty(typed: str) -> tuple[str, str]:
     return before, before + after
 
 
+def _gnu_readline_active() -> bool:
+    """Return whether the live readline backend can cycle (GNU readline).
+
+    Tab/Shift-Tab *cycling* uses ``menu-complete``, which exists only in
+    GNU readline; the libedit/editline backend (stock macOS Python with
+    no ``gnureadline`` wheel) cannot cycle, so the cycling tests skip.
+    """
+    from kiss.agents.sorcar import cli_repl
+
+    rl = cli_repl.readline
+    if rl is None:
+        return False
+    backend = getattr(rl, "backend", "") or ""
+    doc = getattr(rl, "__doc__", "") or ""
+    return backend != "editline" and "libedit" not in doc
+
+
+def _complete_line_over_pty(
+    project: str, chunks: list[str],
+) -> tuple[str, list[str]]:
+    """Type *chunks* into a real readline line and return the result.
+
+    Forks a child interpreter attached to a pseudo-terminal that installs
+    the real :class:`CliCompleter` via :func:`_setup_readline` (so the
+    actual Tab/Shift-Tab key bindings run) and reads a single line with
+    :func:`input`.  The *chunks* are sent one at a time with a short
+    pause between them — each ``\\t`` (Tab) and ``\\x1b[Z`` (Shift-Tab)
+    is its own chunk so readline processes one completion action per
+    keystroke (sending them all at once races the redisplay).  Enter is
+    pressed last and the submitted line is read from a ``RESULT[...]``
+    marker.
+
+    Args:
+        project: Project directory seeding ``@``-mention completion.
+        chunks: Keystroke chunks to type in order before Enter; embed
+            ``"\\t"`` for Tab and ``"\\x1b[Z"`` for Shift-Tab.
+
+    Returns:
+        A ``(result, candidates)`` tuple: the line ``input`` returned
+        after the keystrokes, and the child's own ``@alpha`` candidate
+        ordering (file-scan order can differ between processes, so the
+        child reports the order its readline session actually cycles).
+    """
+    import pty
+
+    child_code = (
+        "import os, sys\n"
+        "from pathlib import Path\n"
+        "from kiss.agents.sorcar.cli_repl import CliCompleter, _setup_readline\n"
+        f"c = CliCompleter({project!r})\n"
+        "for i, m in enumerate(c._build_matches('@alpha')):\n"
+        "    sys.stdout.write(f'CAND{i}[{m}]\\n')\n"
+        "_setup_readline(c, Path(os.devnull))\n"
+        "line = input('> ')\n"
+        "sys.stdout.write(f'RESULT[{line}]\\n')\n"
+        "sys.stdout.flush()\n"
+    )
+    pid, fd = pty.fork()
+    if pid == 0:  # child: fresh interpreter on the PTY slave
+        os.execvp(sys.executable, [sys.executable, "-c", child_code])
+        os._exit(0)  # pragma: no cover - exec never returns
+
+    def drain(seconds: float) -> str:
+        out = b""
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            ready, _, _ = select.select([fd], [], [], 0.2)
+            if not ready:
+                continue
+            try:
+                chunk = os.read(fd, 8192)
+            except OSError:
+                break
+            if not chunk:
+                break
+            out += chunk
+        return out.decode("utf-8", "ignore")
+
+    time.sleep(2.0)  # let the fresh interpreter import and draw the prompt
+    out = drain(0.5)  # capture the startup CAND lines + prompt
+    for chunk in chunks:
+        os.write(fd, chunk.encode())
+        out += drain(0.4)  # one completion action settles per keystroke
+    os.write(fd, b"\r")
+    out += drain(1.5)
+    os.close(fd)
+    os.waitpid(pid, 0)
+    result = re.search(r"RESULT\[(.*)\]", out)
+    cands = re.findall(r"CAND\d+\[(.*)\]", out)
+    return (result.group(1) if result else "", cands)
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "fork") or not _gnu_readline_active(),
+    reason="cycling needs a POSIX pty and GNU readline (menu-complete)",
+)
+def test_tab_cycles_forward_through_candidates(tmp_path: Path, kiss_db) -> None:
+    """Pressing Tab repeatedly cycles forward through the candidates.
+
+    With ``menu-complete`` bound to Tab, the first Tab inserts the best
+    candidate and the second Tab replaces it with the next one — i.e. the
+    candidates are *cycled* one at a time rather than merely listed.
+    """
+    for name in ("alpha_one.py", "alpha_two.py", "alpha_three.py"):
+        (tmp_path / name).write_text("x = 1\n")
+
+    one_tab, cands = _complete_line_over_pty(str(tmp_path), ["@alpha", "\t"])
+    two_tab, c2 = _complete_line_over_pty(str(tmp_path), ["@alpha", "\t", "\t"])
+    three_tab, c3 = _complete_line_over_pty(
+        str(tmp_path), ["@alpha", "\t", "\t", "\t"],
+    )
+    # Ordering is deterministic, so each child cycles the same candidates.
+    assert len(cands) >= 3 and cands == c2 == c3, (cands, c2, c3)
+    # The first Tab inserts the best candidate; the candidates carry a
+    # trailing space which ``input`` returns verbatim.
+    assert one_tab == cands[0], (one_tab, cands)
+    # Each completion landed on a real candidate from the menu.
+    assert {one_tab, two_tab, three_tab} <= set(cands), (
+        one_tab, two_tab, three_tab, cands,
+    )
+    # Three Tabs visited three *distinct* candidates — i.e. cycling, not
+    # merely re-inserting one common-prefix completion every time.
+    assert len({one_tab, two_tab, three_tab}) == 3, (
+        one_tab, two_tab, three_tab,
+    )
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "fork") or not _gnu_readline_active(),
+    reason="cycling needs a POSIX pty and GNU readline (menu-complete)",
+)
+def test_shift_tab_cycles_backward(tmp_path: Path, kiss_db) -> None:
+    """Shift-Tab steps back through the menu after Tab moved forward.
+
+    Shift-Tab is bound to ``menu-complete-backward``: after two forward
+    Tabs, one Shift-Tab moves the menu selection back to a *different*
+    candidate, proving the backward binding cycles the menu.
+    """
+    for name in ("alpha_one.py", "alpha_two.py", "alpha_three.py"):
+        (tmp_path / name).write_text("x = 1\n")
+
+    two_tab, _ = _complete_line_over_pty(
+        str(tmp_path), ["@alpha", "\t", "\t"],
+    )
+    back, cands = _complete_line_over_pty(
+        str(tmp_path), ["@alpha", "\t", "\t", "\x1b[Z"],
+    )
+    assert len(cands) >= 3, cands
+    # Shift-Tab landed on a real candidate and moved the selection back
+    # to a different one than the two-forward-Tab position.
+    assert back in cands, (back, cands)
+    assert back != two_tab, (back, two_tab)
+
+
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX pty")
 def test_idle_prompt_box_closed_while_typing() -> None:
     """The idle input box shows its bottom rule *before* Enter is pressed.

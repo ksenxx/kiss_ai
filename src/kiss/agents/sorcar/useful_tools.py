@@ -368,7 +368,8 @@ class UsefulTools:
             content: The full content to write to the file.
         """
         try:
-            resolved = Path(file_path).resolve()
+            expanded = _expand_pwd_prefix(file_path, self.work_dir)
+            resolved = Path(expanded).resolve()
             resolved.parent.mkdir(parents=True, exist_ok=True)
             resolved.write_text(content)
             return f"Successfully wrote {len(content)} characters to {file_path}"
@@ -395,7 +396,8 @@ class UsefulTools:
             The output of the edit operation.
         """
         try:
-            resolved = Path(file_path).resolve()
+            expanded = _expand_pwd_prefix(file_path, self.work_dir)
+            resolved = Path(expanded).resolve()
             if not resolved.is_file():
                 return f"Error: File not found: {file_path}"
             if old_string == new_string:
@@ -451,6 +453,7 @@ class UsefulTools:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                encoding="utf-8",
                 env=env,
                 cwd=self.work_dir,
             )
@@ -493,6 +496,7 @@ class UsefulTools:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            encoding="utf-8",
             env=_clean_env(self.work_dir),
             cwd=self.work_dir,
         )

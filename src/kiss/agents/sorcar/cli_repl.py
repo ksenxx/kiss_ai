@@ -78,7 +78,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 try:  # POSIX line editing; ``readline`` is absent on stock Windows.
-    import readline
+    # Prefer GNU readline (the ``gnureadline`` wheel) when it is
+    # installed: stock macOS Python links ``readline`` against libedit,
+    # which has no ``menu-complete`` and therefore cannot *cycle* through
+    # completion candidates one at a time.  ``gnureadline`` ships real
+    # GNU readline, enabling the Tab/Shift-Tab menu cycling configured in
+    # :func:`_setup_readline`.  Fall back to the stdlib ``readline`` (and
+    # its degraded list-on-double-Tab behaviour) when it is unavailable.
+    try:
+        import gnureadline as readline  # type: ignore[import-not-found]
+    except ImportError:
+        import readline
 
     _HAVE_READLINE = True
 except ImportError:  # pragma: no cover - exercised only on Windows
@@ -264,6 +274,16 @@ class CliCompleter:
 def _setup_readline(completer: CliCompleter, history_path: Path) -> None:
     """Install the completer and load per-directory history.
 
+    Binds Tab to ``menu-complete`` so pressing Tab repeatedly *cycles*
+    through the completion candidates one at a time (best match first),
+    and Shift-Tab (``\\e[Z``) to ``menu-complete-backward`` to cycle the
+    other way; ``show-all-if-ambiguous`` makes the first Tab jump
+    straight into the menu instead of just inserting the common prefix.
+    These ``menu-complete`` actions exist only in GNU readline, so on the
+    libedit/editline backend (stock macOS Python without the
+    ``gnureadline`` wheel) we fall back to ``rl_complete``, which lists
+    candidates on a double-Tab but cannot cycle.
+
     Args:
         completer: The completion function holder to install.
         history_path: File used to persist and restore input history.
@@ -276,9 +296,13 @@ def _setup_readline(completer: CliCompleter, history_path: Path) -> None:
     backend = getattr(readline, "backend", "") or ""
     doc = getattr(readline, "__doc__", "") or ""
     if backend == "editline" or "libedit" in doc:
+        # libedit has no menu-complete; cycling is unavailable here.
         readline.parse_and_bind("bind ^I rl_complete")
     else:
-        readline.parse_and_bind("tab: complete")
+        # GNU readline: Tab cycles forward, Shift-Tab cycles backward.
+        readline.parse_and_bind("set show-all-if-ambiguous on")
+        readline.parse_and_bind("tab: menu-complete")
+        readline.parse_and_bind('"\\e[Z": menu-complete-backward')
     try:
         readline.read_history_file(str(history_path))
     except (FileNotFoundError, OSError):

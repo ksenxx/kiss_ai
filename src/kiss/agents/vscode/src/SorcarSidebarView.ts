@@ -878,6 +878,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         this._getClient().sendCommand({
           type: 'getFiles',
           prefix: message.prefix,
+          workDir: message.workDir,
         });
         break;
 
@@ -910,6 +911,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           this._getClient().sendCommand({
             type: 'recordFileUsage',
             path: message.path,
+            workDir: message.workDir,
           });
         }
         break;

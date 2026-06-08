@@ -372,7 +372,13 @@ class TestAnthropicTokenCounts:
         class FakeResp:
             usage = None
 
-        assert m.extract_input_output_token_counts_from_response(FakeResp()) == (0, 0, 0, 0)
+        assert m.extract_input_output_token_counts_from_response(FakeResp()) == (
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
 
 
 class TestAnthropicHelpers:
