@@ -78,7 +78,7 @@ class _CommandsMixin:
         _complete_queue: queue.Queue[tuple[str, int, str, str, str]] | None
         _last_active_file: str
         _last_active_content: str
-        _file_cache: list[str] | None
+        _file_cache: dict[str, list[str]]
 
         def _get_tab(self, tab_id: str) -> _RunningAgentState: ...
         def _run_task(self, cmd: dict[str, Any]) -> None: ...
@@ -88,9 +88,11 @@ class _CommandsMixin:
             self, query: str | None, offset: int = 0, generation: int = 0
         ) -> None: ...
         def _get_frequent_tasks(self, limit: int = 50) -> None: ...
-        def _get_files(self, prefix: str) -> None: ...
+        def _get_files(self, prefix: str, work_dir: str = "") -> None: ...
         def _refresh_file_cache(
-            self, then_emit_for_prefix: str | None = None,
+            self,
+            then_emit_for_prefix: str | None = None,
+            work_dir: str = "",
         ) -> None: ...
         def _replay_session(
             self, chat_id: str, tab_id: str = "", task_id: int | None = None,
@@ -225,11 +227,27 @@ class _CommandsMixin:
         self._handle_set_favorite(int(task_id), is_favorite)
 
     def _cmd_get_files(self, cmd: dict[str, Any]) -> None:
-        """Send file list for autocomplete."""
-        self._get_files(cmd.get("prefix", ""))
+        """Send file list for autocomplete, scoped to the tab's work_dir.
+
+        The chat webview stamps the active tab's ``workDir`` on every
+        ``getFiles`` command so the ``@``-mention picker lists files
+        relative to *that* tab's working directory rather than the
+        daemon-wide default (which is shared across every tab and
+        otherwise reflects whichever directory the daemon was launched
+        from or last switched to via ``setWorkDir``).
+        """
+        self._get_files(cmd.get("prefix", ""), cmd.get("workDir", ""))
 
     def _cmd_record_file_usage(self, cmd: dict[str, Any]) -> None:
-        """Record a file access for usage-based sorting."""
+        """Record a file access for usage-based sorting.
+
+        Usage counts are stored as workspace-relative paths in a
+        single shared SQLite table; the ``workDir`` (if any) on the
+        command is currently informational — the ranking still applies
+        across every tab.  Accepting the field keeps the message shape
+        symmetric with ``getFiles`` so the frontend can forward both
+        without conditional branching.
+        """
         path = cmd.get("path", "")
         if path:
             _record_file_usage(path)
@@ -564,8 +582,14 @@ class _CommandsMixin:
                 return
             self.work_dir = new_dir
             # Stale cache from the previous folder must not bleed
-            # into the new folder's autocomplete results.
-            self._file_cache = None
+            # into the new folder's autocomplete results.  The cache
+            # is keyed per work_dir so distinct keys would not actually
+            # cross-contaminate, but switching the daemon-wide folder
+            # is a clear signal that any in-memory file lists are
+            # potentially stale (files may have been added/removed
+            # while the daemon was pointed elsewhere), so wipe them
+            # all and let subsequent ``getFiles`` rebuild lazily.
+            self._file_cache = {}
             self._last_active_file = ""
             self._last_active_content = ""
         # Keep the printer's work_dir in sync so global ``configData``

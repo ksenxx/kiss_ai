@@ -47,11 +47,11 @@ export type FromWebviewMessage =
   | {type: 'deleteTask'; taskId: number}
   | {type: 'deleteFrequentTask'; task: string}
   | {type: 'setFavorite'; taskId: number; isFavorite: boolean}
-  | {type: 'getFiles'; prefix: string}
+  | {type: 'getFiles'; prefix: string; workDir?: string}
   | {type: 'userAnswer'; answer: string; tabId?: string}
   | {type: 'userActionDone'}
   | {type: 'openFile'; path: string; line?: number}
-  | {type: 'recordFileUsage'; path: string}
+  | {type: 'recordFileUsage'; path: string; workDir?: string}
   | {
       type: 'ready';
       tabId?: string;
