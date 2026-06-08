@@ -451,6 +451,7 @@ class UsefulTools:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                encoding="utf-8",
                 env=env,
                 cwd=self.work_dir,
             )
@@ -493,6 +494,7 @@ class UsefulTools:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            encoding="utf-8",
             env=_clean_env(self.work_dir),
             cwd=self.work_dir,
         )
