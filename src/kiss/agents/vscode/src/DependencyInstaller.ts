@@ -16,6 +16,11 @@ import * as https from 'https';
 import * as crypto from 'crypto';
 import {exec, execSync, execFileSync, spawn} from 'child_process';
 import {findKissProject, findUvPath} from './kissPaths';
+import {
+  probeDaemonHealth,
+  daemonHasActiveTasks,
+  decideRestart,
+} from './daemonHealth';
 
 const HOME_DIR = process.env.HOME || process.env.USERPROFILE || '';
 const LOG_DIR = path.join(HOME_DIR, '.kiss');
@@ -407,7 +412,7 @@ async function runFinalization(
   // to kissProjectPath when no folder is open (preserving prior behavior).
   const webWorkDir =
     vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || kissProjectPath;
-  restartKissWebDaemon(kissProjectPath, webWorkDir);
+  await restartKissWebDaemon(kissProjectPath, webWorkDir);
 
   if (progress) progress.report({message: 'Updating shell PATH...'});
   try {
@@ -901,7 +906,10 @@ function spawnKissWebDirect(kissWebBin: string, workDir: string): void {
  *   ``os.getcwd()`` (= this ``WorkingDirectory``) becomes the fallback
  *   work_dir for sessions that don't send an explicit ``workDir``.
  */
-function restartKissWebDaemon(kissProjectPath: string, workDir: string): void {
+async function restartKissWebDaemon(
+  kissProjectPath: string,
+  workDir: string,
+): Promise<void> {
   if (process.platform === 'win32') return; // Not supported on Windows
 
   const kissWebBin = path.join(kissProjectPath, '.venv', 'bin', 'kiss-web');
@@ -937,24 +945,62 @@ function restartKissWebDaemon(kissProjectPath: string, workDir: string): void {
     /* missing or unreadable — treat as mismatch */
   }
   const sockPath = path.join(HOME_DIR, '.kiss', 'sorcar.sock');
-  const daemonAlive = (() => {
-    try {
-      execSync('lsof -i :8787 -t', {stdio: 'ignore', timeout: 2000});
-      return fs.existsSync(sockPath);
-    } catch {
-      return false;
+
+  // Tri-state TCP probe.  The OLD implementation here was::
+  //
+  //     try { execSync('lsof -i :8787 -t', {timeout: 2000});
+  //           return fs.existsSync(sockPath); }
+  //     catch { return false; }
+  //
+  // — which conflates "no listener" with "lsof slow under load".
+  // On a heavily-loaded host the 2 s ``lsof`` timeout would fire,
+  // the catch returned ``false``, the guard fell through, and the
+  // installer SIGTERMed a perfectly healthy daemon that was mid-task.
+  // ``probeDaemonHealth`` returns ``'alive' | 'dead' | 'unknown'`` so
+  // the guard can treat a transient probe failure as "do not restart"
+  // when the fingerprint matches.
+  const health = await probeDaemonHealth(8787, 1500);
+  const sockExists = fs.existsSync(sockPath);
+
+  // Ask the live daemon whether any agent tasks are in flight.  The
+  // SIGTERM regression report shows the kill happened with
+  // ``active_tasks=[ad4ecb65(task=74)]`` on the daemon's own log — i.e.
+  // the restart logic had no awareness of in-flight work at all.  When
+  // the daemon reports tasks, defer the restart unconditionally (even
+  // on a fingerprint change): the new code will be picked up on the
+  // next activation once the running task has finished.
+  let activeTasks:
+    | {ok: true; count: number; tabs: string[]}
+    | {ok: false; reason: string} = {ok: false, reason: 'not-probed'};
+  if (health !== 'dead' && sockExists) {
+    activeTasks = await daemonHasActiveTasks(sockPath, 1500);
+  }
+
+  const decision = decideRestart({
+    fingerprintMatches: !!currentFp && currentFp === savedFp,
+    health,
+    activeTasks,
+  });
+  if (decision.skip) {
+    if (decision.reason === 'active-tasks') {
+      log(
+        `kiss-web has ${(activeTasks as {ok: true; count: number}).count} ` +
+          'active task(s) — deferring restart to avoid aborting in-flight work',
+      );
+    } else {
+      log(
+        `kiss-web fingerprint unchanged (${currentFp.slice(0, 8)}) and ` +
+          `daemon healthy (health=${health}, sock=${sockExists}) — ` +
+          'skipping restart to preserve tunnel URL',
+      );
     }
-  })();
-  if (currentFp && currentFp === savedFp && daemonAlive) {
-    log(
-      `kiss-web fingerprint unchanged (${currentFp.slice(0, 8)}) and ` +
-        'daemon healthy on :8787 + sorcar.sock — skipping restart to preserve tunnel URL',
-    );
     return;
   }
   log(
     `kiss-web restart: fingerprint ${savedFp.slice(0, 8) || '<none>'} → ` +
-      `${currentFp.slice(0, 8) || '<none>'}, daemonAlive=${daemonAlive}`,
+      `${currentFp.slice(0, 8) || '<none>'}, health=${health}, ` +
+      `sock=${sockExists}, activeTasks=` +
+      `${activeTasks.ok ? activeTasks.count : 'unknown(' + activeTasks.reason + ')'}`,
   );
 
   // Kill the existing kiss-web process before restarting.  ``kiss-web``

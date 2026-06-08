@@ -2823,6 +2823,9 @@ class RemoteAccessServer:
                 cmd_type = cmd.get("type", "")
                 if cmd_type in _VSCODE_ONLY_COMMANDS:
                     continue
+                if cmd_type == "activeTasksQuery":
+                    await self._handle_active_tasks_query(writer)
+                    continue
                 if cmd_type == "ready":
                     await self._handle_ready(cmd, writer)
                     continue
@@ -2849,6 +2852,62 @@ class RemoteAccessServer:
                 writer.close()
             except Exception:
                 logger.debug("UDS writer close failed", exc_info=True)
+
+
+    async def _handle_active_tasks_query(
+        self, writer: asyncio.StreamWriter,
+    ) -> None:
+        """Report in-flight agent tasks back to a single UDS client.
+
+        Used by the VS Code extension's dependency installer before it
+        considers SIGTERMing the daemon: when any task is still active,
+        the extension must defer the restart so that an in-progress
+        agent run is not interrupted by ``ensureDependencies()`` on a
+        spurious re-activation of the extension.
+
+        The response is a single newline-delimited JSON object written
+        directly to ``writer`` (i.e. not broadcast to other clients).
+        It has the shape::
+
+            {"type": "activeTasksResponse",
+             "count": <int>,
+             "tabs": ["<tabId>(task=<task_id>)", ...]}
+
+        Inactive tabs are filtered out; ``count`` is the length of the
+        ``tabs`` list, matching the format emitted by the signal-
+        handler log line above.
+        """
+        from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+
+        active_tabs: list[str] = []
+        try:
+            with _RunningAgentState._registry_lock:
+                items = list(_RunningAgentState.running_agent_states.items())
+        except Exception:
+            items = list(_RunningAgentState.running_agent_states.items())
+        for tab_id, tab in items:
+            try:
+                if not tab.is_task_active:
+                    continue
+                task_id = tab.task_history_id or tab.last_task_id
+                active_tabs.append(f"{tab_id}(task={task_id})")
+            except Exception:
+                logger.debug(
+                    "activeTasksQuery: skipping malformed tab entry",
+                    exc_info=True,
+                )
+        payload = json.dumps({
+            "type": "activeTasksResponse",
+            "count": len(active_tabs),
+            "tabs": active_tabs,
+        }) + "\n"
+        try:
+            writer.write(payload.encode("utf-8"))
+            await writer.drain()
+        except Exception:
+            logger.debug(
+                "activeTasksQuery: failed to write response", exc_info=True,
+            )
 
 
     async def _send_welcome_info(self) -> None:
