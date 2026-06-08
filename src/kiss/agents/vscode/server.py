@@ -142,7 +142,13 @@ class VSCodeServer(
         self._complete_seq_latest: int = -1
         self._complete_queue: queue.Queue[tuple[str, int, str, str, str]] | None = None
         self._complete_worker: threading.Thread | None = None
-        self._file_cache: list[str] | None = None
+        # Per-work_dir file scan cache.  Keyed by the absolute work_dir
+        # path the scan ran in so different chat tabs (each with their
+        # own ``work_dir``) keep independent file lists for the
+        # ``@``-mention autocomplete picker.  ``None`` would have meant
+        # "no cache" for the legacy single-dir cache; the dict form uses
+        # "key absent" instead and is initialised empty.
+        self._file_cache: dict[str, list[str]] = {}
         self._last_active_file: str = ""
         self._last_active_content: str = ""
 
