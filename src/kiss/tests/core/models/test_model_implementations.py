@@ -8,6 +8,8 @@ These tests verify the actual model implementations (AnthropicModel, GeminiModel
 OpenAICompatibleModel) using real API calls. No mocks are used.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 from kiss.core import config as config_module
@@ -73,6 +75,45 @@ class TestAnthropicModel:
         m.initialize("test")
         kwargs = m._build_create_kwargs()
         assert kwargs.get(expected_key) == expected_value
+
+
+class TestAnthropicTokenExtraction:
+    def test_split_cache_creation_tokens_are_preserved(self):
+        m = AnthropicModel("claude-opus-4-8", api_key="test")
+        usage = SimpleNamespace(
+            input_tokens=100,
+            output_tokens=20,
+            cache_read_input_tokens=30,
+            cache_creation=SimpleNamespace(
+                ephemeral_5m_input_tokens=40,
+                ephemeral_1h_input_tokens=50,
+            ),
+        )
+        response = SimpleNamespace(usage=usage)
+        assert m.extract_input_output_token_counts_from_response(response) == (
+            100,
+            20,
+            30,
+            40,
+            50,
+        )
+
+    def test_aggregate_cache_creation_is_conservative_one_hour(self):
+        m = AnthropicModel("claude-opus-4-8", api_key="test")
+        usage = SimpleNamespace(
+            input_tokens=100,
+            output_tokens=20,
+            cache_read_input_tokens=30,
+            cache_creation_input_tokens=50,
+        )
+        response = SimpleNamespace(usage=usage)
+        assert m.extract_input_output_token_counts_from_response(response) == (
+            100,
+            20,
+            30,
+            0,
+            50,
+        )
 
 
 @requires_gemini_api_key
@@ -153,6 +194,7 @@ class TestCachePricing:
         info = MODEL_INFO["claude-sonnet-4"]
         assert info.cache_read_price_per_1M == pytest.approx(0.30)
         assert info.cache_write_price_per_1M == pytest.approx(3.75)
+        assert info.cache_write_1h_price_per_1M == pytest.approx(6.00)
 
     def test_anthropic_cache_pricing_formula(self):
         for name, info in MODEL_INFO.items():
@@ -160,6 +202,7 @@ class TestCachePricing:
                 continue
             assert info.cache_read_price_per_1M == pytest.approx(info.input_price_per_1M * 0.1)
             assert info.cache_write_price_per_1M == pytest.approx(info.input_price_per_1M * 1.25)
+            assert info.cache_write_1h_price_per_1M == pytest.approx(info.input_price_per_1M * 2.0)
 
     def test_openai_model_has_cache_read_pricing(self):
         # gpt-4.1 family caches at 0.25x input; OpenAI never charges for writes.
@@ -185,6 +228,7 @@ class TestCachePricing:
 
     def test_openai_cache_read_multiplier_classification(self):
         assert _openai_cache_read_multiplier("gpt-5.4") == 0.10
+        assert _openai_cache_read_multiplier("gpt-5.4-pro") == 1.0
         assert _openai_cache_read_multiplier("gpt-chat-latest") == 0.10
         assert _openai_cache_read_multiplier("gpt-latest") == 0.10
         assert _openai_cache_read_multiplier("gpt-mini-latest") == 0.10
@@ -215,13 +259,13 @@ class TestCachePricing:
         assert MODEL_INFO["openrouter/openai/gpt-4o"].cache_read_price_per_1M == pytest.approx(
             MODEL_INFO["openrouter/openai/gpt-4o"].input_price_per_1M * 0.5
         )
-        # DeepSeek: read 0.1x, write = input price.
-        d = MODEL_INFO["openrouter/deepseek/deepseek-v3.2"]
-        assert d.cache_read_price_per_1M == pytest.approx(d.input_price_per_1M * 0.1)
+        # DeepSeek V4: cache-hit pricing is much cheaper than the old 0.1x rule.
+        d = MODEL_INFO["openrouter/deepseek/deepseek-v4-flash"]
+        assert d.cache_read_price_per_1M == pytest.approx(d.input_price_per_1M * 0.02)
         assert d.cache_write_price_per_1M == pytest.approx(d.input_price_per_1M)
-        # Qwen explicit cache: read 0.1x, write 1.25x.
+        # Qwen implicit cache reads at 0.2x; writes remain explicit-cache 1.25x.
         q = MODEL_INFO["openrouter/qwen/qwen3-max"]
-        assert q.cache_read_price_per_1M == pytest.approx(q.input_price_per_1M * 0.1)
+        assert q.cache_read_price_per_1M == pytest.approx(q.input_price_per_1M * 0.2)
         assert q.cache_write_price_per_1M == pytest.approx(q.input_price_per_1M * 1.25)
         # Moonshot / Grok: read 0.25x, no write cost.
         for name in ("openrouter/moonshotai/kimi-k2.5", "openrouter/x-ai/grok-4.3"):
@@ -233,6 +277,7 @@ class TestCachePricing:
         info = MODEL_INFO["openrouter/anthropic/claude-opus-4.8"]
         assert info.cache_read_price_per_1M == pytest.approx(info.input_price_per_1M * 0.1)
         assert info.cache_write_price_per_1M == pytest.approx(info.input_price_per_1M * 1.25)
+        assert info.cache_write_1h_price_per_1M == pytest.approx(info.input_price_per_1M * 2.0)
 
     def test_gpt_oss_openrouter_has_no_cache_pricing(self):
         info = MODEL_INFO["openrouter/openai/gpt-oss-120b"]
@@ -253,24 +298,27 @@ class TestCachePricing:
             assert info.cache_write_price_per_1M is None
 
     def test_calculate_cost_unknown_model_with_cache_tokens(self):
-        assert calculate_cost("unknown-model-xyz", 1000, 1000, 500, 500) == 0.0
+        with pytest.raises(KISSError, match="unknown model"):
+            calculate_cost("unknown-model-xyz", 1000, 1000, 500, 500)
+        assert calculate_cost("unknown-model-xyz", 0, 0, 0, 0) == 0.0
 
     def test_calculate_cost_numeric_per_family(self):
         # 1M cache-read tokens -> price equals the per-1M cache-read rate in USD.
-        assert calculate_cost("gpt-5.5", 0, 0, 1_000_000, 0) == pytest.approx(0.50)
+        assert calculate_cost("gpt-5.5", 0, 0, 1_000_000, 0) == pytest.approx(1.00)
         assert calculate_cost("gpt-4o", 0, 0, 1_000_000, 0) == pytest.approx(1.25)
         assert calculate_cost("o3", 0, 0, 1_000_000, 0) == pytest.approx(0.50)
-        assert calculate_cost("gemini-2.5-pro", 0, 0, 1_000_000, 0) == pytest.approx(0.125)
-        # Anthropic cache write billed at 1.25x input ($5 -> $6.25 per 1M).
+        assert calculate_cost("gemini-2.5-pro", 0, 0, 1_000_000, 0) == pytest.approx(0.25)
+        # Anthropic cache writes distinguish 5-minute (1.25x) and 1-hour (2.0x).
         assert calculate_cost("claude-opus-4-8", 0, 0, 0, 1_000_000) == pytest.approx(6.25)
-        # Combined: input + output + cache read for gpt-5.4 ($2.50 in / $15 out / $0.25 cr).
+        assert calculate_cost("claude-opus-4-8", 0, 0, 0, 0, 1_000_000) == pytest.approx(10.00)
+        # Combined: gpt-5.4 applies long-context tiers above 200k tokens.
         assert calculate_cost("gpt-5.4", 1_000_000, 1_000_000, 1_000_000, 0) == pytest.approx(
-            2.50 + 15.0 + 0.25
+            5.0 + 22.5 + 0.5
         )
 
     def test_calculate_cost_strips_provider_prefix(self):
         # Harbor-style provider prefix resolves to the same pricing.
-        assert calculate_cost("openai/gpt-5.5", 0, 0, 1_000_000, 0) == pytest.approx(0.50)
+        assert calculate_cost("openai/gpt-5.5", 0, 0, 1_000_000, 0) == pytest.approx(1.00)
 
     def test_apply_cache_pricing_respects_existing_prices(self):
         info = _mi(1000, 10.0, 20.0, cr=1.0, cw=2.0)
@@ -282,6 +330,26 @@ class TestCachePricing:
         info = _mi(1000, 10.0, 20.0, cr=1.0, cw=2.0)
         assert info.cache_read_price_per_1M == 1.0
         assert info.cache_write_price_per_1M == 2.0
+
+    def test_openai_pro_cache_read_uses_full_input_price(self):
+        info = MODEL_INFO["gpt-5.5-pro"]
+        assert info.cache_read_price_per_1M == pytest.approx(info.input_price_per_1M)
+        assert calculate_cost("gpt-5.5-pro", 0, 0, 1_000_000, 0) == pytest.approx(30.00)
+
+    def test_long_context_tiers_apply_after_threshold(self):
+        expected_openai = (201_000 * 10.00 + 201_000 * 45.00 + 201_000 * 1.00) / 1_000_000
+        assert calculate_cost("gpt-5.5", 201_000, 201_000, 201_000, 0) == pytest.approx(
+            expected_openai
+        )
+        expected_gemini = (201_000 * 2.50 + 201_000 * 15.00 + 201_000 * 0.25) / 1_000_000
+        assert calculate_cost("gemini-2.5-pro", 201_000, 201_000, 201_000, 0) == pytest.approx(
+            expected_gemini
+        )
+
+    def test_image_model_prices_updated_to_current_text_defaults(self):
+        assert MODEL_INFO["gpt-image-1-mini"].input_price_per_1M == pytest.approx(2.00)
+        assert MODEL_INFO["gpt-image-1-mini"].output_price_per_1M == pytest.approx(8.00)
+        assert MODEL_INFO["gpt-image-1.5"].output_price_per_1M == pytest.approx(32.00)
 
 
 @requires_anthropic_api_key

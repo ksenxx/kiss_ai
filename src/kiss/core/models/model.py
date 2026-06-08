@@ -451,15 +451,16 @@ class Model(ABC):
     @abstractmethod
     def extract_input_output_token_counts_from_response(
         self, response: Any
-    ) -> tuple[int, int, int, int]:
+    ) -> tuple[int, int, int, int] | tuple[int, int, int, int, int]:
         """Extracts token counts from an API response.
 
         Args:
             response: The raw API response object.
 
         Returns:
-            tuple[int, int, int, int]: (input_tokens, output_tokens,
-                cache_read_tokens, cache_write_tokens).
+            A 4-tuple ``(input_tokens, output_tokens, cache_read_tokens,
+            cache_write_tokens)`` or a 5-tuple whose last element is the
+            Anthropic one-hour cache-write token count.
         """
         pass  # pragma: no cover
 
