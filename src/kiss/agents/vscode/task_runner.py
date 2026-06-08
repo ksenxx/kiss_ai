@@ -265,6 +265,15 @@ class _TaskRunnerMixin:
             no_model_msg = (
                 "No model available.  Set at least one API key in the environment."
             )
+            # Stamp the owning tab id explicitly: this branch runs on
+            # the task thread BEFORE ``ChatSorcarAgent.run`` sets the
+            # printer's thread-local ``task_id``, so without ``tabId``
+            # the event has no task context and ``WebPrinter.broadcast``
+            # would fall into its GLOBAL branch — sending the result
+            # verbatim (no ``tabId``) to every connected client, where
+            # the frontend renders it into whichever tab is active.
+            # That pollutes a *different* tab running an unrelated task.
+            # An explicit ``tabId`` scopes the result to this tab only.
             self.printer.broadcast({
                 "type": "result",
                 "text": no_model_msg,
@@ -272,6 +281,7 @@ class _TaskRunnerMixin:
                 "total_tokens": 0,
                 "cost": "$0.0000",
                 "step_count": 0,
+                "tabId": tab_id,
             })
             return
 
