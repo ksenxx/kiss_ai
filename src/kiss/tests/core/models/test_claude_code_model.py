@@ -62,7 +62,38 @@ class TestTokenExtraction:
     def test_extract_from_non_dict(self) -> None:
         m = ClaudeCodeModel("cc/opus")
         assert m.extract_input_output_token_counts_from_response("bad") == (
-            0, 0, 0, 0,
+            0, 0, 0, 0, 0,
+        )
+
+    def test_extract_split_cache_creation(self) -> None:
+        m = ClaudeCodeModel("cc/opus")
+        response = {
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "cache_read_input_tokens": 30,
+                "cache_creation": {
+                    "ephemeral_5m_input_tokens": 40,
+                    "ephemeral_1h_input_tokens": 50,
+                },
+            }
+        }
+        assert m.extract_input_output_token_counts_from_response(response) == (
+            100, 20, 30, 40, 50,
+        )
+
+    def test_extract_aggregate_cache_creation_is_conservative_one_hour(self) -> None:
+        m = ClaudeCodeModel("cc/opus")
+        response = {
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "cache_read_input_tokens": 30,
+                "cache_creation_input_tokens": 50,
+            }
+        }
+        assert m.extract_input_output_token_counts_from_response(response) == (
+            100, 20, 30, 0, 50,
         )
 
 
@@ -121,7 +152,7 @@ class TestGenerateIntegration:
         m = ClaudeCodeModel("cc/haiku")
         m.initialize("Say 'hi'")
         _, response = m.generate()
-        inp, out, _, _ = m.extract_input_output_token_counts_from_response(response)
+        inp, out, _, _, _ = m.extract_input_output_token_counts_from_response(response)
         assert inp > 0
         assert out > 0
 
