@@ -87,6 +87,17 @@ class _NonRetryableErrorModel(_RetryableErrorModel):
         raise Exception("Unauthorized: invalid API key")
 
 
+class _UnknownPricedModel(_RetryableErrorModel):
+    def __init__(self) -> None:
+        super().__init__(failures=0)
+        self.model_name = "unknown-budget-model"
+
+    def extract_input_output_token_counts_from_response(
+        self, response: Any
+    ) -> tuple[int, int, int, int]:
+        return (1000, 1000, 0, 0)
+
+
 def _make_agent(model_obj: Any, max_steps: int = 5) -> KISSAgent:
     agent = KISSAgent("RetryTest")
     agent.model = model_obj
@@ -236,4 +247,11 @@ def test_run_agentic_loop_raises_immediately_for_non_retryable_error() -> None:
         KISSError,
         match="Non-retryable error from model: Unauthorized: invalid API key",
     ):
+        agent._run_agentic_loop()
+
+
+def test_unknown_model_pricing_error_is_not_swallowed() -> None:
+    agent = _make_agent(_UnknownPricedModel())
+
+    with pytest.raises(KISSError, match="Cannot calculate budget for unknown model"):
         agent._run_agentic_loop()
