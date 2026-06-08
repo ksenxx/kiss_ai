@@ -537,6 +537,7 @@ def _discover_tunnel_url_from_metrics() -> str | None:
             ["pgrep", "-a", "cloudflared"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=5,
         )
     except Exception:
@@ -3235,6 +3236,7 @@ class RemoteAccessServer:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 text=True,
+                encoding="utf-8",
                 # Detach cloudflared into its own process group / session
                 # so it survives ``kiss-web``'s SIGTERM / SIGINT.  Combined
                 # with the pidfile written below and adoption logic in
