@@ -752,6 +752,84 @@ def _recover_orphaned_tasks(active_task_ids: set[int]) -> int:
     return rowcount
 
 
+def _shutdown_persist_in_flight_results(task_ids: set[int]) -> int:
+    """Pre-emptive sentinel rewrite for in-flight tasks during shutdown.
+
+    Called by :meth:`RemoteAccessServer._stop_active_agent_tasks` BEFORE
+    the worker threads are signalled to stop.  For each row in
+    *task_ids* that still carries the ``"Agent Failed Abruptly"``
+    sentinel (set by :func:`_add_task` at task creation time and
+    normally overwritten by :func:`_save_task_result` from
+    ``_TaskRunnerMixin._run_task_inner``'s cleanup ``finally``), the
+    column is rewritten to ``"Task interrupted by server
+    restart/shutdown"``.
+
+    This is a safety net for the failure mode where the worker thread
+    cannot reach ``_save_task_result`` before the process exits — e.g.
+    because it is wedged in C code (a blocking LLM API call ignoring
+    ``KeyboardInterrupt``) or its cleanup ``finally`` exceeds the
+    shutdown timeout.  Without the pre-emptive rewrite, the row stays
+    at the sentinel and the next startup's orphan sweep
+    (:func:`_recover_orphaned_tasks`) rewrites it to ``"Task
+    terminated unexpectedly (process killed)"`` — the silent failure
+    mode users report as "the agent was killed mid-task".
+
+    Workers that *do* manage to finish their cleanup will overwrite
+    this placeholder with a more detailed message (e.g. the per-task
+    summary or "Task interrupted by server restart/shutdown" from the
+    same cleanup path) — that ordering is fine because we set the
+    placeholder BEFORE signalling the workers.
+
+    Only rows still at the sentinel are touched, so a task that
+    already completed cleanly (its row carrying a real result) is
+    never clobbered.
+
+    Args:
+        task_ids: Row ids whose still-pending sentinel rows should be
+            pre-emptively rewritten.
+
+    Returns:
+        The number of rows whose ``result`` column was rewritten.
+    """
+    if not task_ids:
+        return 0
+    db = _get_db()
+    # Inline ids (integers, no injection surface; SQLite parameter
+    # limit is ~999 and the active-task set is always far smaller).
+    ids_clause = ",".join(str(int(t)) for t in task_ids)
+    sql = (
+        f"UPDATE task_history SET result = ? "
+        f"WHERE id IN ({ids_clause}) AND result = ?"
+    )
+    affected_chat_ids: list[str] = []
+    with _rw_lock.write_lock():
+        # Capture chat_ids of rows we are about to rewrite so we can
+        # invalidate the autocomplete chat-context cache afterwards.
+        rows = db.execute(
+            f"SELECT chat_id FROM task_history "
+            f"WHERE id IN ({ids_clause}) AND result = ?",
+            ("Agent Failed Abruptly",),
+        ).fetchall()
+        affected_chat_ids = [r["chat_id"] or "" for r in rows]
+        cursor = db.execute(
+            sql,
+            (
+                "Task interrupted by server restart/shutdown",
+                "Agent Failed Abruptly",
+            ),
+        )
+        rowcount = cursor.rowcount or 0
+        db.commit()
+    if rowcount:
+        logger.warning(
+            "Pre-emptively persisted shutdown result for %d in-flight task(s)",
+            rowcount,
+        )
+        for chat_id in set(affected_chat_ids):
+            _invalidate_chat_context_cache(chat_id)
+    return rowcount
+
+
 def _save_task_result(
     result: str,
     task_id: int | None = None,
