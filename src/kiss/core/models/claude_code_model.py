@@ -36,6 +36,17 @@ from kiss.core.models.model import (
 logger = logging.getLogger(__name__)
 
 
+def _claude_code_cache_creation_tokens(usage: dict[str, Any]) -> tuple[int, int]:
+    """Return Claude Code 5-minute and 1-hour cache-creation token counts."""
+    cache_creation = usage.get("cache_creation")
+    if isinstance(cache_creation, dict):
+        return (
+            cache_creation.get("ephemeral_5m_input_tokens", 0) or 0,
+            cache_creation.get("ephemeral_1h_input_tokens", 0) or 0,
+        )
+    return 0, usage.get("cache_creation_input_tokens", 0) or 0
+
+
 def _find_claude_cli() -> str:
     """Locate the ``claude`` executable on PATH.
 
@@ -505,7 +516,7 @@ class ClaudeCodeModel(Model):
 
     def extract_input_output_token_counts_from_response(
         self, response: Any
-    ) -> tuple[int, int, int, int]:
+    ) -> tuple[int, int, int, int, int]:
         """Extract token counts from the Claude Code CLI JSON response.
 
         Args:
@@ -515,13 +526,15 @@ class ClaudeCodeModel(Model):
             (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens).
         """
         if not isinstance(response, dict):
-            return 0, 0, 0, 0
+            return 0, 0, 0, 0, 0
         usage = response.get("usage", {})
+        cache_write_5m, cache_write_1h = _claude_code_cache_creation_tokens(usage)
         return (
             usage.get("input_tokens", 0),
             usage.get("output_tokens", 0),
             usage.get("cache_read_input_tokens", 0),
-            usage.get("cache_creation_input_tokens", 0),
+            cache_write_5m,
+            cache_write_1h,
         )
 
     def get_embedding(self, text: str, embedding_model: str | None = None) -> list[float]:
