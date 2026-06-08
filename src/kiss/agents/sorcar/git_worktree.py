@@ -71,7 +71,7 @@ def _git(
         The completed process with stdout/stderr captured as text.
     """
     cmd = ["git", "-C", str(cwd), *args]
-    return subprocess.run(cmd, capture_output=True, text=True)
+    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
 
 
 @dataclass(frozen=True)

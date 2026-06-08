@@ -5962,7 +5962,11 @@
   function checkAutocomplete() {
     const atCtx = getAtCtx();
     if (atCtx) {
-      vscode.postMessage({type: 'getFiles', prefix: atCtx.query});
+      vscode.postMessage({
+        type: 'getFiles',
+        prefix: atCtx.query,
+        workDir: workDirForTab(activeTabId),
+      });
     } else {
       hideAC();
     }
@@ -6079,7 +6083,11 @@
       syncClearBtn();
       const np = before.length + mention.length + sep.length;
       inp.setSelectionRange(np, np);
-      vscode.postMessage({type: 'recordFileUsage', path: file});
+      vscode.postMessage({
+        type: 'recordFileUsage',
+        path: file,
+        workDir: workDirForTab(activeTabId),
+      });
     }
     hideAC();
     inp.focus();

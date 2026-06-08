@@ -84,12 +84,14 @@ class TestGetFiles(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(f"# {name}")
 
-        self.server._file_cache = [
-            "src/main.py",
-            "src/util.py",
-            "README.md",
-            "test/test_main.py",
-        ]
+        self.server._file_cache = {
+            self.tmpdir: [
+                "src/main.py",
+                "src/util.py",
+                "README.md",
+                "test/test_main.py",
+            ],
+        }
 
     def tearDown(self) -> None:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
