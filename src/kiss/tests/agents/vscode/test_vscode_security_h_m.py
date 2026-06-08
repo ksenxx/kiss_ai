@@ -534,7 +534,13 @@ class TestH10PlistSystemdEscape(unittest.TestCase):
         src = _ts_path("DependencyInstaller.ts").read_text()
         idx = src.find("function restartKissWebDaemon")
         self.assertGreater(idx, 0)
-        body = src[idx: idx + 5000]
+        # Slice the whole restartKissWebDaemon body — up to the next
+        # top-level ``function `` declaration or end-of-file.  A
+        # fixed-size window (e.g. 5000 chars) is brittle: as the
+        # function grows, the XML-escape calls slide past the window
+        # and the test falsely reports a missing escape.
+        next_fn = src.find("\nfunction ", idx + 1)
+        body = src[idx:] if next_fn == -1 else src[idx:next_fn]
         # Must call an XML-escape helper before interpolating into `<string>`.
         self.assertRegex(
             body, r"xmlEscape|escapeXml|replace\(/&/",
