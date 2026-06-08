@@ -431,6 +431,7 @@ def source_shell_env() -> None:
             [shell_path, "-c", cmd],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=5,
             env=sub_env,
         )
