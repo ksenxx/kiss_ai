@@ -421,7 +421,7 @@ class GeminiModel(Model):
             thoughts_tokens = getattr(um, "thoughts_token_count", 0) or 0
             output_tokens += thoughts_tokens
             cached_tokens = getattr(um, "cached_content_token_count", 0) or 0
-            return prompt_tokens - cached_tokens, output_tokens, cached_tokens, 0
+            return max(prompt_tokens - cached_tokens, 0), output_tokens, cached_tokens, 0
         return 0, 0, 0, 0
 
     def get_embedding(  # pragma: no cover – API call
