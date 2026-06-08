@@ -82,7 +82,7 @@ class TestNoToolCallLoop:
         try:
             agent = KISSAgent("test-no-tool-loop")
             result = agent.run(
-                model_name="test-model",
+                model_name="gpt-4o-mini",
                 prompt_template="hi",
                 max_steps=20,
                 max_budget=1.0,
@@ -167,7 +167,7 @@ class TestNoToolCallLoop:
         try:
             agent = KISSAgent("test-mixed-calls")
             result = agent.run(
-                model_name="test-model",
+                model_name="gpt-4o-mini",
                 prompt_template="do something",
                 max_steps=20,
                 max_budget=1.0,

@@ -10,7 +10,7 @@
 
 *Free. Local. Bring your own API key. Runs as a VS Code extension and as a web/mobile app.*
 
-[![Version](https://img.shields.io/badge/version-2026.6.8-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
+[![Version](https://img.shields.io/badge/version-2026.6.9-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
 [![Website](https://img.shields.io/badge/website-kisssorcar.github.io-1976d2?style=flat-square)](https://kisssorcar.github.io/)
@@ -161,11 +161,13 @@ KISS Sorcar includes 23 third-party messaging agents that can send and receive m
 
 BlueBubbles · Discord · Feishu · Gmail · Google Chat · iMessage · IRC · LINE · Matrix · Mattermost · Microsoft Teams · Nextcloud Talk · Nostr · Phone Control · Signal · Slack · SMS · Synology Chat · Telegram · Tlon · Twitch · WhatsApp · Zalo
 
+It also ships a **Govee smart-home CLI** for controlling IoT lights (on/off, brightness, color, color temperature) via the Govee Developer API.
+
 These agents are in `src/kiss/agents/third_party_agents/`.
 
 ## 🤖 Models Supported
 
-**533 models** across 8 provider categories (OpenAI, Anthropic, Gemini, Together AI, MiniMax, OpenRouter, Claude Code CLI, Codex CLI) with built-in pricing, context lengths, and capability flags.
+**529 models** across 8 provider categories (OpenAI, Anthropic, Gemini, Together AI, MiniMax, OpenRouter, Claude Code CLI, Codex CLI) with built-in pricing, context lengths, and capability flags.
 
 **Generation Models** (text generation with function calling support):
 
@@ -193,7 +195,7 @@ These agents are in `src/kiss/agents/third_party_agents/`.
 - **Together AI (DeepCogito)**: cogito-v1-preview (llama-70B/8B/70B-Turbo, qwen-14B/32B), cogito-v2-1-671b
 - **Together AI (NVIDIA)**: Llama-3.1-Nemotron-70B, Nemotron-Nano-9B-v2
 - **Together AI (Other)**: arcee-ai/trinity-mini, essentialai/rnj-1-instruct
-- **OpenRouter**: Access to 317 models from 50 providers via unified API, including OpenAI, Anthropic, Google, Meta Llama, DeepSeek, Qwen, Amazon Nova, Cohere, X.AI Grok, MiniMax, ByteDance Seed, MoonshotAI, Mistral, NVIDIA, Z.AI/GLM, AllenAI, Perplexity, NousResearch, Baidu ERNIE, Xiaomi, Reka AI, Arcee AI, Perceptron, StepFun, Tencent, Inception, InclusionAI, KwaiPilot, Liquid, Morph, Relace, IBM Granite, Prime Intellect, and others
+- **OpenRouter**: Access to 313 models from 53 providers via unified API, including OpenAI, Anthropic, Google, Meta Llama, DeepSeek, Qwen, Amazon Nova, Cohere, X.AI Grok, MiniMax, ByteDance/ByteDance Seed, MoonshotAI, Mistral, NVIDIA, Z.AI/GLM, AllenAI, Perplexity, NousResearch, Baidu ERNIE, Xiaomi, Reka AI, Arcee AI, Perceptron, StepFun, Tencent, Inception, InclusionAI, KwaiPilot, Liquid, Morph, Relace, IBM Granite, Prime Intellect, AI21, Aion Labs, Anthracite, DeepCogito, Essential AI, Gryphe, Inflection, Mancer, Microsoft, Sao10K, Switchpoint, TheDrummer, Undi95, Upstage, Writer, and others
 
 **Embedding Models** (for RAG and semantic search):
 

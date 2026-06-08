@@ -8,6 +8,8 @@ These tests avoid mocks while exercising internal transformations and
 conversation handling without making external API calls.
 """
 
+from types import SimpleNamespace
+
 from kiss.core.models.gemini_model import GeminiModel
 
 
@@ -51,3 +53,15 @@ class TestGeminiModelConversationConversion:
             usage_metadata = None
 
         assert model.extract_input_output_token_counts_from_response(Dummy()) == (0, 0, 0, 0)
+
+    def test_extract_token_counts_clamps_cached_prompt_difference(self):
+        model = self._model()
+        response = SimpleNamespace(
+            usage_metadata=SimpleNamespace(
+                prompt_token_count=10,
+                candidates_token_count=5,
+                thoughts_token_count=2,
+                cached_content_token_count=20,
+            )
+        )
+        assert model.extract_input_output_token_counts_from_response(response) == (0, 7, 20, 0)

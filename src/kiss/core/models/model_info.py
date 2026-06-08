@@ -31,6 +31,7 @@ class ModelInfo:
         is_generation_supported: bool,
         cache_read_price_per_million: float | None = None,
         cache_write_price_per_million: float | None = None,
+        cache_write_1h_price_per_million: float | None = None,
     ):
         self.context_length = context_length
         self.input_price_per_1M = input_price_per_million
@@ -40,6 +41,7 @@ class ModelInfo:
         self.is_generation_supported = is_generation_supported
         self.cache_read_price_per_1M = cache_read_price_per_million
         self.cache_write_price_per_1M = cache_write_price_per_million
+        self.cache_write_1h_price_per_1M = cache_write_1h_price_per_million
 
 
 def _mi(
@@ -51,6 +53,7 @@ def _mi(
     gen: bool = True,
     cr: float | None = None,
     cw: float | None = None,
+    cw1h: float | None = None,
 ) -> ModelInfo:
     """Helper to create ModelInfo with shorter syntax.
 
@@ -63,8 +66,9 @@ def _mi(
         gen: is_generation_supported (default True)
         cr: cache_read_price_per_million (None = use input price)
         cw: cache_write_price_per_million (None = use input price)
+        cw1h: one-hour cache write price per million tokens.
     """
-    return ModelInfo(ctx, inp, out, fc, emb, gen, cr, cw)
+    return ModelInfo(ctx, inp, out, fc, emb, gen, cr, cw, cw1h)
 
 
 def _emb(ctx: int, inp: float) -> ModelInfo:
@@ -254,8 +258,8 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "gpt-5.5-pro": _mi(1050000, 30.00, 180.00),
     "gpt-5.5-pro-2026-04-23": _mi(1050000, 30.00, 180.00),
     "gpt-image-1": _mi(32768, 5.00, 40.00, fc=False),
-    "gpt-image-1-mini": _mi(32768, 1.50, 12.00, fc=False),
-    "gpt-image-1.5": _mi(32768, 5.00, 40.00, fc=False),
+    "gpt-image-1-mini": _mi(32768, 2.00, 8.00, fc=False),
+    "gpt-image-1.5": _mi(32768, 5.00, 32.00, fc=False),
     "gpt-image-2": _mi(32768, 5.00, 30.00, fc=False),
     "gpt-image-2-2026-04-21": _mi(32768, 5.00, 30.00, fc=False),
     "intfloat/multilingual-e5-large-instruct": _emb(514, 0.02),
@@ -341,11 +345,9 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/anthropic/claude-sonnet-4.6": _mi(1000000, 3.00, 15.00),
     "openrouter/arcee-ai/coder-large": _mi(32768, 0.50, 0.80, fc=False),
     "openrouter/arcee-ai/maestro-reasoning": _mi(131072, 0.90, 3.30, fc=False),
-    "openrouter/arcee-ai/spotlight": _mi(131072, 0.18, 0.18, fc=False),
     "openrouter/arcee-ai/trinity-large-thinking": _mi(262144, 0.22, 0.85),
     "openrouter/arcee-ai/trinity-mini": _mi(131072, 0.045, 0.15, fc=False),
     "openrouter/arcee-ai/virtuoso-large": _mi(131072, 0.75, 1.20),
-    "openrouter/baidu/ernie-4.5-vl-28b-a3b": _mi(131072, 0.14, 0.56),
     "openrouter/baidu/ernie-4.5-vl-424b-a47b": _mi(131072, 0.42, 1.25, fc=False),
     "openrouter/bytedance-seed/seed-1.6": _mi(262144, 0.25, 2.00),
     "openrouter/bytedance-seed/seed-1.6-flash": _mi(262144, 0.075, 0.30),
@@ -386,9 +388,9 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/google/gemini-3.1-pro-preview-customtools": _mi(1048756, 2.00, 12.00),
     "openrouter/google/gemini-3.5-flash": _mi(1048576, 1.50, 9.00),  # NEW
     "openrouter/google/gemma-2-27b-it": _mi(8192, 0.65, 0.65, fc=False),
-    "openrouter/google/gemma-3-12b-it": _mi(131072, 0.04, 0.13, fc=False),
+    "openrouter/google/gemma-3-12b-it": _mi(131072, 0.05, 0.15, fc=False),
     "openrouter/google/gemma-3-27b-it": _mi(131072, 0.08, 0.16, fc=False),
-    "openrouter/google/gemma-3-4b-it": _mi(131072, 0.04, 0.08, fc=False),
+    "openrouter/google/gemma-3-4b-it": _mi(131072, 0.05, 0.10, fc=False),
     "openrouter/google/gemma-3n-e4b-it": _mi(32768, 0.06, 0.12, fc=False),
     "openrouter/google/gemma-4-26b-a4b-it": _mi(262144, 0.06, 0.33),
     "openrouter/google/gemma-4-31b-it": _mi(262144, 0.12, 0.36),
@@ -407,15 +409,15 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/liquid/lfm-2-24b-a2b": _mi(128000, 0.03, 0.12),
     "openrouter/mancer/weaver": _mi(8000, 0.75, 1.00, fc=False),
     "openrouter/meta-llama/llama-3-70b-instruct": _mi(8192, 0.51, 0.74, fc=False),
-    "openrouter/meta-llama/llama-3-8b-instruct": _mi(8192, 0.04, 0.04, fc=False),
+    "openrouter/meta-llama/llama-3-8b-instruct": _mi(8192, 0.14, 0.14, fc=False),
     "openrouter/meta-llama/llama-3.1-70b-instruct": _mi(131072, 0.40, 0.40, fc=False),
     "openrouter/meta-llama/llama-3.1-8b-instruct": _mi(131072, 0.02, 0.03, fc=False),
-    "openrouter/meta-llama/llama-3.2-11b-vision-instruct": _mi(131072, 0.245, 0.245, fc=False),
+    "openrouter/meta-llama/llama-3.2-11b-vision-instruct": _mi(131072, 0.345, 0.345, fc=False),
     "openrouter/meta-llama/llama-3.2-1b-instruct": _mi(131072, 0.03, 0.20, fc=False),
     "openrouter/meta-llama/llama-3.2-3b-instruct": _mi(131072, 0.051, 0.335, fc=False),
     "openrouter/meta-llama/llama-3.3-70b-instruct": _mi(131072, 0.10, 0.32, fc=False, gen=False),
     "openrouter/meta-llama/llama-4-maverick": _mi(1048576, 0.15, 0.60, fc=False),
-    "openrouter/meta-llama/llama-4-scout": _mi(10000000, 0.08, 0.30, fc=False),
+    "openrouter/meta-llama/llama-4-scout": _mi(10000000, 0.10, 0.30, fc=False),
     "openrouter/meta-llama/llama-guard-3-8b": _mi(131072, 0.48, 0.03, fc=False),
     "openrouter/meta-llama/llama-guard-4-12b": _mi(163840, 0.18, 0.18, fc=False),
     "openrouter/microsoft/phi-4": _mi(16384, 0.065, 0.14, fc=False),
@@ -452,15 +454,14 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/moonshotai/kimi-k2-0905": _mi(262144, 0.60, 2.50, fc=False),
     "openrouter/moonshotai/kimi-k2-thinking": _mi(262144, 0.60, 2.50, fc=False),
     "openrouter/moonshotai/kimi-k2.5": _mi(262144, 0.40, 1.90),
-    "openrouter/moonshotai/kimi-k2.6": _mi(262144, 0.684, 3.42),
+    "openrouter/moonshotai/kimi-k2.6": _mi(262144, 0.684, 3.41),
     "openrouter/morph/morph-v3-fast": _mi(81920, 0.80, 1.20, fc=False),
     "openrouter/morph/morph-v3-large": _mi(262144, 0.90, 1.90, fc=False),
-    "openrouter/nex-agi/deepseek-v3.1-nex-n1": _mi(131072, 0.135, 0.50, fc=False),
     "openrouter/nousresearch/hermes-3-llama-3.1-405b": _mi(131072, 1.00, 1.00, fc=False),
-    "openrouter/nousresearch/hermes-3-llama-3.1-70b": _mi(131072, 0.30, 0.30, fc=False),
+    "openrouter/nousresearch/hermes-3-llama-3.1-70b": _mi(131072, 0.70, 0.70, fc=False),
     "openrouter/nousresearch/hermes-4-405b": _mi(131072, 1.00, 3.00, fc=False),
     "openrouter/nousresearch/hermes-4-70b": _mi(131072, 0.13, 0.40, fc=False),
-    "openrouter/nvidia/llama-3.3-nemotron-super-49b-v1.5": _mi(131072, 0.10, 0.40),
+    "openrouter/nvidia/llama-3.3-nemotron-super-49b-v1.5": _mi(131072, 0.40, 0.40),
     "openrouter/nvidia/nemotron-3-nano-30b-a3b": _mi(262144, 0.05, 0.20, fc=False),
     "openrouter/nvidia/nemotron-3-super-120b-a12b": _mi(1000000, 0.09, 0.45),
     "openrouter/nvidia/nemotron-3-ultra-550b-a55b": _mi(1000000, 0.50, 2.50),  # NEW
@@ -470,7 +471,6 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/openai/gpt-3.5-turbo-16k": _mi(16385, 3.00, 4.00),
     "openrouter/openai/gpt-3.5-turbo-instruct": _mi(4095, 1.50, 2.00, fc=False),
     "openrouter/openai/gpt-4": _mi(8191, 30.00, 60.00),
-    "openrouter/openai/gpt-4-1106-preview": _mi(128000, 10.00, 30.00),
     "openrouter/openai/gpt-4-turbo": _mi(128000, 10.00, 30.00),
     "openrouter/openai/gpt-4-turbo-preview": _mi(128000, 10.00, 30.00),
     "openrouter/openai/gpt-4.1": _mi(1047576, 2.00, 8.00),
@@ -543,9 +543,9 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/qwen/qwen2.5-vl-72b-instruct": _mi(131072, 0.25, 0.75, fc=False),
     "openrouter/qwen/qwen3-14b": _mi(131702, 0.10, 0.24, fc=False),
     "openrouter/qwen/qwen3-235b-a22b": _mi(131072, 0.455, 1.82, fc=False, gen=False),
-    "openrouter/qwen/qwen3-235b-a22b-2507": _mi(262144, 0.07, 0.10, fc=False),
+    "openrouter/qwen/qwen3-235b-a22b-2507": _mi(262144, 0.09, 0.10, fc=False),
     "openrouter/qwen/qwen3-235b-a22b-thinking-2507": _mi(262144, 0.10, 0.10),
-    "openrouter/qwen/qwen3-30b-a3b": _mi(131072, 0.09, 0.45, fc=False),
+    "openrouter/qwen/qwen3-30b-a3b": _mi(131072, 0.12, 0.50, fc=False),
     "openrouter/qwen/qwen3-30b-a3b-instruct-2507": _mi(131072, 0.048, 0.193),
     "openrouter/qwen/qwen3-30b-a3b-thinking-2507": _mi(131072, 0.08, 0.40),
     "openrouter/qwen/qwen3-32b": _mi(131072, 0.08, 0.28, fc=False),
@@ -570,11 +570,11 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/qwen/qwen3.5-27b": _mi(262144, 0.195, 1.56),
     "openrouter/qwen/qwen3.5-35b-a3b": _mi(262144, 0.14, 1.00),
     "openrouter/qwen/qwen3.5-397b-a17b": _mi(262144, 0.39, 2.34),
-    "openrouter/qwen/qwen3.5-9b": _mi(262144, 0.04, 0.15),
+    "openrouter/qwen/qwen3.5-9b": _mi(262144, 0.10, 0.15),
     "openrouter/qwen/qwen3.5-flash-02-23": _mi(1000000, 0.065, 0.26),
     "openrouter/qwen/qwen3.5-plus-02-15": _mi(1000000, 0.26, 1.56),
     "openrouter/qwen/qwen3.5-plus-20260420": _mi(1000000, 0.30, 1.80),
-    "openrouter/qwen/qwen3.6-27b": _mi(262144, 0.29, 3.20),
+    "openrouter/qwen/qwen3.6-27b": _mi(262144, 0.29, 2.40),
     "openrouter/qwen/qwen3.6-35b-a3b": _mi(262144, 0.14, 1.00, fc=False),
     "openrouter/qwen/qwen3.6-flash": _mi(1000000, 0.188, 1.125),
     "openrouter/qwen/qwen3.6-max-preview": _mi(262144, 1.04, 6.24),
@@ -625,7 +625,7 @@ MODEL_INFO: dict[str, ModelInfo] = {
     "openrouter/~anthropic/claude-sonnet-latest": _mi(1000000, 3.00, 15.00),
     "openrouter/~google/gemini-flash-latest": _mi(1048576, 1.50, 9.00),
     "openrouter/~google/gemini-pro-latest": _mi(1048576, 2.00, 12.00),
-    "openrouter/~moonshotai/kimi-latest": _mi(262144, 0.684, 3.42),
+    "openrouter/~moonshotai/kimi-latest": _mi(262144, 0.684, 3.41),
     "openrouter/~openai/gpt-latest": _mi(1050000, 5.00, 30.00),
     "openrouter/~openai/gpt-mini-latest": _mi(400000, 0.75, 4.50),
     "Qwen/Qwen2-1.5B-Instruct": _mi(32768, 0.02, 0.02),
@@ -677,9 +677,11 @@ def _openai_cache_read_multiplier(bare: str) -> float:
 
     OpenAI bills prompt-cache reads at a per-model fraction of the base input
     price (and never charges for cache writes). The multipliers below match
-    OpenAI's published pricing (verified against the OpenAI and Azure OpenAI
-    pricing pages): GPT-5.x is 0.10x, GPT-4.1 and o3/o4-mini are 0.25x, while
-    GPT-4o, GPT-4, GPT-3.5, o1 and o3-mini are 0.50x.
+    OpenAI's published pricing: GPT-5.x is 0.10x when a cached-input price is
+    published, GPT-4.1 and o3/o4-mini are 0.25x, while GPT-4o, GPT-4,
+    GPT-3.5, o1 and o3-mini are 0.50x. GPT-5 ``pro`` variants currently show
+    no cached-input discount, so cached tokens are charged at the full input
+    price rather than silently undercounted.
 
     Args:
         bare: An OpenAI model name without any provider prefix (e.g.
@@ -688,6 +690,8 @@ def _openai_cache_read_multiplier(bare: str) -> float:
     Returns:
         The fraction of the base input price charged for cached read tokens.
     """
+    if "-pro" in bare:
+        return 1.0
     if bare in ("gpt-latest", "gpt-mini-latest"):
         return 0.10  # OpenRouter aliases for the current GPT-5.x models
     if bare.startswith("gpt-5") or "chat-latest" in bare:
@@ -752,6 +756,7 @@ def _apply_cache_pricing(name: str, info: ModelInfo) -> None:
     if name.startswith(_ANTHROPIC_CACHE_PREFIXES):
         info.cache_read_price_per_1M = inp * 0.1
         info.cache_write_price_per_1M = inp * 1.25
+        info.cache_write_1h_price_per_1M = inp * 2.0
         return
     bare = _openai_bare_name(name)
     if bare is not None:
@@ -767,11 +772,14 @@ def _apply_cache_pricing(name: str, info: ModelInfo) -> None:
         info.cache_write_price_per_1M = 0.0
         return
     if name.startswith("openrouter/deepseek/"):
-        info.cache_read_price_per_1M = inp * 0.1
+        multiplier = 0.02
+        if name.startswith("openrouter/deepseek/deepseek-v4-pro"):
+            multiplier = 0.003625 / 0.435
+        info.cache_read_price_per_1M = inp * multiplier
         info.cache_write_price_per_1M = inp  # DeepSeek cache write = input price
         return
     if name.startswith("openrouter/qwen/"):
-        info.cache_read_price_per_1M = inp * 0.1
+        info.cache_read_price_per_1M = inp * 0.2
         info.cache_write_price_per_1M = inp * 1.25
         return
     if name.startswith(_QUARTER_CACHE_OPENROUTER_PREFIXES):
@@ -1197,13 +1205,13 @@ def get_default_model() -> str:
 
     keys = config_module.DEFAULT_CONFIG
     if keys.ANTHROPIC_API_KEY:
-        return "claude-opus-4-8"
+        return "claude-opus-4-7"
     if keys.OPENAI_API_KEY:
         return "gpt-5.5"
     if keys.GEMINI_API_KEY:
         return "gemini-3.1-pro-preview"
     if keys.OPENROUTER_API_KEY:
-        return "openrouter/anthropic/claude-opus-4.8"
+        return "openrouter/anthropic/claude-opus-4.7"
     if keys.TOGETHER_API_KEY:
         return "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8"
     if shutil.which("claude") is not None:
@@ -1226,12 +1234,40 @@ def get_most_expensive_model(fc_only: bool = True) -> str:
     return best_name
 
 
+def _openai_long_context_prices(model_name: str) -> tuple[int, float, float, float] | None:
+    """Return ``(threshold, input, output, cached)`` long-context prices if known."""
+    bare = _strip_provider_prefix(model_name)
+    if bare.startswith(_OPENAI_OPENROUTER_PREFIXES):
+        bare = bare.split("/", 2)[2]
+    if bare.startswith("gpt-5.5") and "-pro" not in bare:
+        return 200_000, 10.00, 45.00, 1.00
+    if (
+        bare.startswith("gpt-5.4")
+        and "-pro" not in bare
+        and "-mini" not in bare
+        and "-nano" not in bare
+    ):
+        return 200_000, 5.00, 22.50, 0.50
+    return None
+
+
+def _gemini_long_context_prices(model_name: str) -> tuple[int, float, float, float] | None:
+    """Return ``(threshold, input, output, cached)`` long-context prices if known."""
+    bare = _strip_provider_prefix(model_name)
+    if bare.startswith(_GOOGLE_OPENROUTER_PREFIXES):
+        bare = bare.split("/", 2)[2]
+    if bare.startswith("gemini-2.5-pro"):
+        return 200_000, 2.50, 15.00, 0.25
+    return None
+
+
 def calculate_cost(
     model_name: str,
     num_input_tokens: int,
     num_output_tokens: int,
     num_cache_read_tokens: int = 0,
     num_cache_write_tokens: int = 0,
+    num_cache_write_1h_tokens: int = 0,
 ) -> float:
     """Calculates the cost in USD for the given token counts.
 
@@ -1240,13 +1276,29 @@ def calculate_cost(
         num_input_tokens: Number of non-cached input tokens.
         num_output_tokens: Number of output tokens.
         num_cache_read_tokens: Number of tokens read from cache.
-        num_cache_write_tokens: Number of tokens written to cache.
+        num_cache_write_tokens: Number of standard/5-minute cache-write tokens.
+        num_cache_write_1h_tokens: Number of one-hour Anthropic cache-write tokens.
 
     Returns:
-        float: Cost in USD, or 0.0 if pricing is not available for the model.
+        float: Cost in USD.
+
+    Raises:
+        KISSError: If positive usage is reported for a model without pricing.
     """
     info = MODEL_INFO.get(model_name) or MODEL_INFO.get(_strip_provider_prefix(model_name))
+    total_tokens = (
+        num_input_tokens
+        + num_output_tokens
+        + num_cache_read_tokens
+        + num_cache_write_tokens
+        + num_cache_write_1h_tokens
+    )
     if info is None:
+        if total_tokens > 0:
+            raise KISSError(
+                f"Cannot calculate budget for unknown model '{model_name}'. "
+                "Add the model to MODEL_INFO or configure explicit pricing."
+            )
         return 0.0
     cr_price = (
         info.cache_read_price_per_1M
@@ -1258,11 +1310,27 @@ def calculate_cost(
         if info.cache_write_price_per_1M is not None
         else info.input_price_per_1M
     )
+    cw1h_price = (
+        info.cache_write_1h_price_per_1M
+        if info.cache_write_1h_price_per_1M is not None
+        else cw_price
+    )
+    input_price = info.input_price_per_1M
+    output_price = info.output_price_per_1M
+    long_prices = _openai_long_context_prices(model_name) or _gemini_long_context_prices(
+        model_name
+    )
+    if long_prices is not None and total_tokens > long_prices[0]:
+        _, input_price, output_price, cr_price = long_prices
+    input_cost = num_input_tokens * input_price
+    output_cost = num_output_tokens * output_price
+    cache_read_cost = num_cache_read_tokens * cr_price
     return (
-        num_input_tokens * info.input_price_per_1M
-        + num_output_tokens * info.output_price_per_1M
-        + num_cache_read_tokens * cr_price
+        input_cost
+        + output_cost
+        + cache_read_cost
         + num_cache_write_tokens * cw_price
+        + num_cache_write_1h_tokens * cw1h_price
     ) / 1_000_000
 
 

@@ -537,6 +537,7 @@ def _discover_tunnel_url_from_metrics() -> str | None:
             ["pgrep", "-a", "cloudflared"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=5,
         )
     except Exception:
@@ -2822,6 +2823,9 @@ class RemoteAccessServer:
                 cmd_type = cmd.get("type", "")
                 if cmd_type in _VSCODE_ONLY_COMMANDS:
                     continue
+                if cmd_type == "activeTasksQuery":
+                    await self._handle_active_tasks_query(writer)
+                    continue
                 if cmd_type == "ready":
                     await self._handle_ready(cmd, writer)
                     continue
@@ -2848,6 +2852,62 @@ class RemoteAccessServer:
                 writer.close()
             except Exception:
                 logger.debug("UDS writer close failed", exc_info=True)
+
+
+    async def _handle_active_tasks_query(
+        self, writer: asyncio.StreamWriter,
+    ) -> None:
+        """Report in-flight agent tasks back to a single UDS client.
+
+        Used by the VS Code extension's dependency installer before it
+        considers SIGTERMing the daemon: when any task is still active,
+        the extension must defer the restart so that an in-progress
+        agent run is not interrupted by ``ensureDependencies()`` on a
+        spurious re-activation of the extension.
+
+        The response is a single newline-delimited JSON object written
+        directly to ``writer`` (i.e. not broadcast to other clients).
+        It has the shape::
+
+            {"type": "activeTasksResponse",
+             "count": <int>,
+             "tabs": ["<tabId>(task=<task_id>)", ...]}
+
+        Inactive tabs are filtered out; ``count`` is the length of the
+        ``tabs`` list, matching the format emitted by the signal-
+        handler log line above.
+        """
+        from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+
+        active_tabs: list[str] = []
+        try:
+            with _RunningAgentState._registry_lock:
+                items = list(_RunningAgentState.running_agent_states.items())
+        except Exception:
+            items = list(_RunningAgentState.running_agent_states.items())
+        for tab_id, tab in items:
+            try:
+                if not tab.is_task_active:
+                    continue
+                task_id = tab.task_history_id or tab.last_task_id
+                active_tabs.append(f"{tab_id}(task={task_id})")
+            except Exception:
+                logger.debug(
+                    "activeTasksQuery: skipping malformed tab entry",
+                    exc_info=True,
+                )
+        payload = json.dumps({
+            "type": "activeTasksResponse",
+            "count": len(active_tabs),
+            "tabs": active_tabs,
+        }) + "\n"
+        try:
+            writer.write(payload.encode("utf-8"))
+            await writer.drain()
+        except Exception:
+            logger.debug(
+                "activeTasksQuery: failed to write response", exc_info=True,
+            )
 
 
     async def _send_welcome_info(self) -> None:
@@ -3235,6 +3295,7 @@ class RemoteAccessServer:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 text=True,
+                encoding="utf-8",
                 # Detach cloudflared into its own process group / session
                 # so it survives ``kiss-web``'s SIGTERM / SIGINT.  Combined
                 # with the pidfile written below and adoption logic in
@@ -3961,6 +4022,7 @@ class RemoteAccessServer:
         from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 
         active: list[tuple[str, threading.Event | None, threading.Thread]] = []
+        active_task_history_ids: set[int] = set()
         with _RunningAgentState._registry_lock:
             for tab_id, tab in _RunningAgentState.running_agent_states.items():
                 thread = tab.task_thread
@@ -3977,9 +4039,50 @@ class RemoteAccessServer:
                     # "Task stopped by user" (event ``task_stopped``).
                     tab.interrupted_by_shutdown = True
                     active.append((tab_id, tab.stop_event, thread))
+                    # Capture the in-flight task row id so the helper
+                    # below can pre-emptively rewrite its sentinel
+                    # ``"Agent Failed Abruptly"`` ``result`` column to
+                    # ``"Task interrupted by server restart/shutdown"``.
+                    # ``tab.task_history_id`` is only set in the
+                    # task_runner's inner finally *after* the agent's
+                    # ``run()`` returns — but the agent itself sets
+                    # ``self._last_task_id`` early in ``run()`` (see
+                    # ``ChatSorcarAgent.run``) so a worker wedged
+                    # mid-``run()`` is still recoverable via the
+                    # agent's own attribute.
+                    th_id = tab.task_history_id
+                    if th_id is None and tab.agent is not None:
+                        th_id = getattr(tab.agent, "_last_task_id", None)
+                    if th_id is not None:
+                        active_task_history_ids.add(int(th_id))
 
         if not active:
             return
+
+        # Pre-emptive persistence safety net.  Done BEFORE we start
+        # signalling workers so that — even if a worker is wedged in
+        # uninterruptible C code (a blocking LLM API call) and never
+        # reaches its cleanup ``finally`` within *timeout* — the
+        # task_history row already carries a meaningful result rather
+        # than the sentinel.  Without this net, the next startup's
+        # orphan sweep would rewrite the surviving sentinel to
+        # ``"Task terminated unexpectedly (process killed)"`` — the
+        # intermittent "agent was killed" symptom users observe.
+        # Workers that *do* finish unwinding will overwrite this
+        # placeholder with a more detailed result via
+        # ``_save_task_result``.
+        if active_task_history_ids:
+            try:
+                from kiss.agents.sorcar.persistence import (
+                    _shutdown_persist_in_flight_results,
+                )
+
+                _shutdown_persist_in_flight_results(active_task_history_ids)
+            except Exception:  # noqa: BLE001 — best-effort, must not block shutdown
+                logger.debug(
+                    "Pre-emptive shutdown persistence failed",
+                    exc_info=True,
+                )
 
         logger.warning(
             "Shutdown: stopping %d in-flight agent task(s) before exit: %s",
