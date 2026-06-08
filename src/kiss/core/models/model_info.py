@@ -1205,13 +1205,13 @@ def get_default_model() -> str:
 
     keys = config_module.DEFAULT_CONFIG
     if keys.ANTHROPIC_API_KEY:
-        return "claude-opus-4-8"
+        return "claude-opus-4-7"
     if keys.OPENAI_API_KEY:
         return "gpt-5.5"
     if keys.GEMINI_API_KEY:
         return "gemini-3.1-pro-preview"
     if keys.OPENROUTER_API_KEY:
-        return "openrouter/anthropic/claude-opus-4.8"
+        return "openrouter/anthropic/claude-opus-4.7"
     if keys.TOGETHER_API_KEY:
         return "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8"
     if shutil.which("claude") is not None:
