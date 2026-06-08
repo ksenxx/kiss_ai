@@ -321,16 +321,53 @@ class RelentlessAgent(Base):
                         0.01, self.max_budget - self.budget_used - executor.budget_used
                     )
                     summarizer_agent = KISSAgent(f"{self.name} Summarizer")
-                    summarizer_result = summarizer_agent.run(
-                        model_name=self.model_name,
-                        prompt_template=SUMMARIZER_PROMPT,
-                        tools=[shell_tools.Read, shell_tools.Bash],
-                        arguments={
-                            "trajectory_file": str(trajectory_path),
-                        },
-                        max_steps=self.max_steps,
-                        max_budget=summarizer_budget,
-                    )
+                    try:
+                        summarizer_result = summarizer_agent.run(
+                            model_name=self.model_name,
+                            prompt_template=SUMMARIZER_PROMPT,
+                            tools=[shell_tools.Read, shell_tools.Bash],
+                            arguments={
+                                # ``SUMMARIZER_PROMPT`` uses
+                                # ``{trajectory_path}`` as the
+                                # placeholder; the argument key MUST
+                                # match or the literal placeholder
+                                # leaks into the LLM prompt.
+                                "trajectory_path": str(trajectory_path),
+                            },
+                            max_steps=self.max_steps,
+                            max_budget=summarizer_budget,
+                            # Inherit the parent's model routing
+                            # (e.g. custom ``base_url``/``api_key``)
+                            # so the summarizer talks to the same
+                            # provider as the executor — otherwise it
+                            # silently falls back to the default
+                            # OpenAI client and its cost vanishes
+                            # from this agent's accounting.
+                            model_config=self.model_config,
+                            # Inherit verbose/printer so the
+                            # summarizer's streaming behaviour
+                            # matches the parent's (no surprise
+                            # ``ConsolePrinter`` when the parent
+                            # asked for ``verbose=False``).
+                            printer=self.printer,
+                            verbose=self.verbose,
+                        )
+                    finally:
+                        # The summarizer's spend MUST be folded into
+                        # the parent's running totals BEFORE we leave
+                        # this block — otherwise every model call the
+                        # summarizer made (which costs real money on
+                        # paid providers) silently disappears from
+                        # ``self.budget_used`` and the user is told
+                        # they spent less than they actually did.
+                        # This must run even when ``summarizer_agent.run``
+                        # raises (e.g. budget exceeded mid-summary) so
+                        # the partial spend is still attributed.
+                        self.budget_used += summarizer_agent.budget_used
+                        self.total_tokens_used += (
+                            summarizer_agent.total_tokens_used
+                        )
+                        self.total_steps += summarizer_agent.step_count
                     try:
                         parsed = yaml.safe_load(summarizer_result)
                         summary_text = (
