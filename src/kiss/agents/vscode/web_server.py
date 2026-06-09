@@ -99,11 +99,14 @@ TUNNEL_CHECK_INTERVAL = 30
 # a genuine network change and restart the server.  Without this
 # debounce a single transient flake from :func:`_get_local_ips`
 # (briefly empty result, DHCP renewal, VPN flap, post-sleep DNS hiccup)
-# would force a spurious daemon restart on LAN-only deployments.  Two
-# ticks at :data:`TUNNEL_CHECK_INTERVAL` = 60 s of sustained change is
-# a good trade-off between responsiveness and stability; tests override
-# both knobs to drive the loop faster.
-_IP_CHANGE_DEBOUNCE_TICKS = 2
+# would force a spurious daemon restart on LAN-only deployments.  Four
+# ticks at :data:`TUNNEL_CHECK_INTERVAL` = 120 s of sustained change.
+# Earlier code used 2 ticks (60 s) which still let a real-but-brief
+# VPN-connect / Ethernet↔WiFi handover that holds a new consistent
+# IP set for ≥60 s trigger a daemon restart even if the address
+# reverted seconds later.  Tests override both knobs to drive the
+# loop faster.
+_IP_CHANGE_DEBOUNCE_TICKS = 4
 
 # Maximum number of attempts :meth:`RemoteAccessServer._setup_server`
 # will make to bind the WSS listener before giving up.  Each transient
@@ -178,6 +181,29 @@ _TUNNEL_BACKOFF_MAX = 1800
 _TUNNEL_RATE_LIMIT_BACKOFF = 900  # 15 minutes
 
 _TUNNEL_RATE_LIMIT_JITTER = 300  # 0..5 minutes additional jitter
+
+# After the watchdog force-restarts cloudflared because it observed
+# ``readyConnections == 0`` for the unhealthy-tick limit, wait at
+# least this many seconds before allowing another force-restart even
+# if the new cloudflared instance is *also* immediately unhealthy.
+# Without this cool-down a chronically-flaky cloudflared metrics
+# endpoint (or a Cloudflare edge that briefly drops every fresh
+# quick-tunnel registration) rotates the public ``*.trycloudflare.com``
+# URL every ~10 minutes (= quick-tunnel limit × tick interval) forever,
+# breaking long-lived browser sessions and pushing a steady stream of
+# stale URLs to the message board.  Each consecutive force-restart
+# without a sustained healthy period in between doubles the wait, up
+# to :data:`_TUNNEL_FORCE_RESTART_COOLDOWN_MAX`.
+_TUNNEL_FORCE_RESTART_COOLDOWN_INITIAL = 60
+
+_TUNNEL_FORCE_RESTART_COOLDOWN_MAX = 3600
+
+# Once a freshly-restarted cloudflared has been continuously healthy
+# for this many seconds since its ``_tunnel_started_at`` we consider
+# the chronic-flake episode over and reset the consecutive
+# force-restart counter so a future, *unrelated* event starts at the
+# minimum cool-down.
+_TUNNEL_FORCE_RESTART_RESET_AFTER_HEALTHY = 600
 
 # Substrings (case-insensitive) in cloudflared's stderr that indicate
 # trycloudflare.com is rate-limiting the local egress IP.  Matching is
@@ -778,8 +804,8 @@ def _try_adopt_existing_cloudflared() -> tuple[int, int, str] | None:
     return pid, metrics_port, url
 
 
-def _probe_tunnel_ready(metrics_port: int) -> bool:
-    """Return True if ``cloudflared`` has at least one live edge connection.
+def _probe_tunnel_ready(metrics_port: int) -> bool | None:
+    """Return tunnel readiness as a 3-valued result.
 
     Queries the ``cloudflared`` ``/ready`` metrics endpoint and parses
     the JSON ``readyConnections`` field.  Cloudflare's edge can
@@ -793,15 +819,29 @@ def _probe_tunnel_ready(metrics_port: int) -> bool:
     ``readyConnections`` reading is the canonical signal for this
     "process alive but tunnel deregistered" failure mode.
 
+    The previous version of this helper returned a plain ``bool`` and
+    folded every error (connection refused, timeout, parse error,
+    schema change) into ``False`` — which the watchdog then counted
+    as "unhealthy" and used to force-restart cloudflared.  On a slow
+    CPU after wake, during a post-sleep socket-rebind window, or just
+    a momentary 127.0.0.1 loopback hiccup, this conflated "endpoint
+    unreachable" with "tunnel deregistered" and was the single
+    biggest source of spurious quick-tunnel URL rotation.  Returning
+    ``None`` for "no information" lets callers skip the tick entirely
+    instead of incrementing their unhealthy-streak counter.
+
     Args:
         metrics_port: The port on which ``cloudflared`` is serving its
             metrics HTTP endpoint (passed via ``--metrics``).
 
     Returns:
-        True if the endpoint reports at least one ready connection.
-        False on any error (timeout, connection refused, parse error,
-        zero connections), so the caller can treat it as "unhealthy"
-        and increment its consecutive-failure counter.
+        ``True`` if the endpoint reports ``readyConnections > 0``.
+        ``False`` if the endpoint *successfully* reports
+        ``readyConnections == 0`` (confirmed deregistration).
+        ``None`` if the endpoint is unreachable, the response is not
+        valid JSON, or the value is non-numeric — callers should treat
+        this as "no information" and *not* count it toward an unhealthy
+        streak.
     """
     try:
         req = urllib.request.Request(
@@ -811,11 +851,11 @@ def _probe_tunnel_ready(metrics_port: int) -> bool:
         with urllib.request.urlopen(req, timeout=2) as resp:
             data = json.loads(resp.read())
     except Exception:
-        return False
+        return None
     try:
         return int(data.get("readyConnections", 0)) > 0
     except (TypeError, ValueError):
-        return False
+        return None
 
 
 def _stderr_reader_loop(
@@ -1211,16 +1251,31 @@ def _post_url_to_message_board(
 
 
 def _get_local_ips() -> frozenset[str]:
-    """Return the current non-loopback IPv4 addresses of the host machine.
+    """Return the current routable IPv4 addresses of the host machine.
 
     Uses a UDP connect to ``8.8.8.8`` (no packet is actually sent) to
     discover the default-route IP, plus :func:`socket.getaddrinfo` on
-    the hostname for any additional addresses.
+    the hostname for any additional addresses.  The raw discovery is
+    then filtered to drop addresses that should never trigger a
+    server restart:
+
+    *   ``127.0.0.0/8`` loopback — never a useful LAN address.
+    *   ``169.254.0.0/16`` link-local — auto-assigned when DHCP fails
+        or while an interface is still negotiating.  These addresses
+        come and go during boot, sleep/wake, captive portals and
+        VPN flaps, which used to surface as spurious "IP changed"
+        events from :meth:`RemoteAccessServer._watchdog`.
+    *   IPv4-mapped IPv6 addresses in dotted form (e.g.
+        ``"::ffff:1.2.3.4"``) — returned by :func:`socket.getaddrinfo`
+        on dual-stack hosts as the same underlying IPv4 address; the
+        ``::ffff:`` prefix would make them look like a *new* address
+        each time the family-preference oscillated, again causing
+        spurious change events.
 
     Returns:
-        A frozen set of IPv4 address strings (e.g.
+        A frozen set of routable IPv4 address strings (e.g.
         ``frozenset({"192.168.1.42"})``).  Returns an empty set when
-        no non-loopback addresses are found.
+        discovery failed or all discovered addresses were filtered.
     """
     ips: set[str] = set()
     try:
@@ -1233,11 +1288,19 @@ def _get_local_ips() -> frozenset[str]:
     try:
         for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
             addr = str(info[4][0])
-            if not addr.startswith("127."):
-                ips.add(addr)
+            ips.add(addr)
     except Exception:
         pass
-    return frozenset(ips)
+    filtered: set[str] = set()
+    for addr in ips:
+        if addr.startswith("127."):
+            continue
+        if addr.startswith("169.254."):
+            continue
+        if addr.startswith("::ffff:"):
+            continue
+        filtered.add(addr)
+    return frozenset(filtered)
 
 
 def _print_url() -> None:
@@ -2530,6 +2593,19 @@ class RemoteAccessServer:
         # to apply a much longer backoff than the regular exponential
         # one so the per-IP cooldown actually has time to clear.
         self._tunnel_rate_limited = False
+        # Counts consecutive force-restarts of cloudflared driven by
+        # the unhealthy-tick watchdog without a sustained healthy
+        # period in between.  Used together with
+        # ``_tunnel_force_restart_next_allowed`` to apply an
+        # exponentially-growing cool-down so a chronically-flaky
+        # metrics endpoint (or an edge that keeps dropping fresh
+        # quick-tunnel registrations) cannot rotate
+        # ``*.trycloudflare.com`` URLs every ~10 minutes forever.
+        # The counter is reset to 0 by the next ``healthy`` probe
+        # observed after ``_TUNNEL_FORCE_RESTART_RESET_AFTER_HEALTHY``
+        # seconds of post-restart uptime.
+        self._tunnel_force_restart_count = 0
+        self._tunnel_force_restart_next_allowed = 0.0
         # Last Cloudflare tunnel URL posted to the ntfy.sh message
         # board.  Tracked so a watchdog restart that yields the *same*
         # public hostname (e.g. an adopted cloudflared, or a named
@@ -3667,8 +3743,26 @@ class RemoteAccessServer:
         healthy = await self._loop.run_in_executor(
             None, _probe_tunnel_ready, self._tunnel_metrics_port,
         )
+        if healthy is None:
+            # Metrics endpoint unreachable, response malformed, or
+            # schema changed.  This is "no information" — do NOT
+            # increment ``_tunnel_unhealthy_ticks`` (which would
+            # eventually force a brand-new ``*.trycloudflare.com``
+            # URL on every flake of the loopback metrics socket).
+            return
         if healthy:
             self._tunnel_unhealthy_ticks = 0
+            # After enough sustained healthy uptime, treat the prior
+            # chronic-flake episode as resolved and let a future,
+            # unrelated event start the cool-down ladder from rung 1.
+            if (
+                self._tunnel_force_restart_count > 0
+                and self._tunnel_started_at is not None
+                and now - self._tunnel_started_at
+                    > _TUNNEL_FORCE_RESTART_RESET_AFTER_HEALTHY
+            ):
+                self._tunnel_force_restart_count = 0
+                self._tunnel_force_restart_next_allowed = 0.0
             return
 
         self._tunnel_unhealthy_ticks += 1
@@ -3687,6 +3781,25 @@ class RemoteAccessServer:
         if self._tunnel_unhealthy_ticks < unhealthy_limit:
             return
 
+        if now < self._tunnel_force_restart_next_allowed:
+            # The watchdog already force-restarted cloudflared recently
+            # and the replacement is *still* unhealthy.  Skip the
+            # force-restart this tick: rotating the public URL every
+            # ~10 minutes for a problem that has not gone away just
+            # breaks every existing browser session without recovering
+            # the tunnel.  The cool-down grows exponentially so a
+            # genuinely-dead edge will eventually be force-restarted.
+            remaining = int(self._tunnel_force_restart_next_allowed - now)
+            logger.info(
+                "cloudflared tunnel still reports zero ready edge "
+                "connections, but a force-restart was attempted "
+                "recently; deferring the next force-restart for "
+                "~%ds (consecutive force-restarts: %d)",
+                remaining,
+                self._tunnel_force_restart_count,
+            )
+            return
+
         logger.warning(
             "cloudflared tunnel appears deregistered from Cloudflare's "
             "edge (readyConnections=0 for %d ticks); force-restarting",
@@ -3696,6 +3809,13 @@ class RemoteAccessServer:
         # we are replacing; leaving it running would leak metrics
         # ports and confuse the next adoption attempt.
         self._terminate_tunnel_proc(kill_adopted=True)
+        self._tunnel_force_restart_count += 1
+        cooldown = min(
+            _TUNNEL_FORCE_RESTART_COOLDOWN_INITIAL
+                * (2 ** (self._tunnel_force_restart_count - 1)),
+            _TUNNEL_FORCE_RESTART_COOLDOWN_MAX,
+        )
+        self._tunnel_force_restart_next_allowed = now + cooldown
         if now >= self._tunnel_next_retry:
             await self._restart_tunnel_url()
 
