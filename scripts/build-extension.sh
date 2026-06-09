@@ -15,6 +15,28 @@ CODE="/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"
 echo "==> Ensuring Claude Code skills are present..."
 "$SCRIPT_DIR/fetch-claude-skills.sh"
 
+# Refuse to clobber a kiss-web daemon that is mid-task.  Without this guard
+# the SIGTERM block further down silently kills any in-flight agent run —
+# the regression that turned task_history rows 3233/3234 into
+# ``"Task interrupted by server restart/shutdown"``.  The check is the
+# bash-side counterpart of the ``daemonHasActiveTasks``-based guard in
+# ``src/kiss/agents/vscode/src/DependencyInstaller.ts`` — both rely on the
+# same ``activeTasksQuery`` UDS protocol exposed by
+# :meth:`RemoteAccessServer._uds_handler`.  Override with
+# ``KISS_FORCE_RESTART=1`` when the developer knowingly wants to interrupt
+# in-flight work.
+if command -v python3 >/dev/null 2>&1; then
+    if ! python3 "$SCRIPT_DIR/check-kiss-web-active-tasks.py"; then
+        if [ "${KISS_FORCE_RESTART:-}" = "1" ]; then
+            echo "==> KISS_FORCE_RESTART=1 set; proceeding despite active tasks."
+        else
+            echo "==> Aborting build-extension.sh: kiss-web has in-flight tasks." >&2
+            echo "    Wait for them to finish, or rerun with KISS_FORCE_RESTART=1." >&2
+            exit 3
+        fi
+    fi
+fi
+
 cd "$EXT_DIR"
 
 echo "==> Compiling TypeScript..."
