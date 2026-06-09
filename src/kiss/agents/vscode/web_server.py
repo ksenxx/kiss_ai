@@ -93,6 +93,17 @@ TRAJECTORY_TEMPLATE = (
 
 TUNNEL_CHECK_INTERVAL = 30
 
+# Number of consecutive watchdog ticks that must observe the *same*
+# new non-empty set of local IPs before the watchdog will treat it as
+# a genuine network change and restart the server.  Without this
+# debounce a single transient flake from :func:`_get_local_ips`
+# (briefly empty result, DHCP renewal, VPN flap, post-sleep DNS hiccup)
+# would force a spurious daemon restart on LAN-only deployments.  Two
+# ticks at :data:`TUNNEL_CHECK_INTERVAL` = 60 s of sustained change is
+# a good trade-off between responsiveness and stability; tests override
+# both knobs to drive the loop faster.
+_IP_CHANGE_DEBOUNCE_TICKS = 2
+
 # How often the server polls PyPI to learn whether a newer
 # ``kiss-agent-framework`` release is available.  3600 s = once per
 # hour, matching the "every hour" requirement.  Tests override this
@@ -2564,6 +2575,16 @@ class RemoteAccessServer:
         self._printer._merge_state_callback = self._register_merge_state
         self._active_url: str | None = None
         self._last_ips: frozenset[str] = frozenset()
+        # Debounce state for the IP-change watchdog.  ``_pending_ip_change``
+        # holds the most recent *candidate* new IP set observed by the
+        # watchdog (``None`` when no change is pending), and
+        # ``_pending_ip_change_count`` counts how many consecutive ticks
+        # have observed that same candidate.  Only when the count reaches
+        # :data:`_IP_CHANGE_DEBOUNCE_TICKS` does the watchdog accept the
+        # candidate as the new baseline and (in LAN mode) restart the
+        # server.  See :meth:`_watchdog` for the full state machine.
+        self._pending_ip_change: frozenset[str] | None = None
+        self._pending_ip_change_count: int = 0
         # Per-IP auth failure timestamps, used by _is_auth_locked.
         self._auth_failures: dict[str, list[float]] = {}
 
@@ -3879,35 +3900,84 @@ class RemoteAccessServer:
                 logger.debug("Watchdog URL-file check error", exc_info=True)
             try:
                 current_ips = _get_local_ips()
-                if current_ips != self._last_ips:
+                if not current_ips:
+                    # IP discovery failed (transient WiFi roam, DHCP
+                    # renewal, VPN flap, slow resolver, post-sleep DNS
+                    # hiccup).  Bare ``try/except: pass`` inside
+                    # :func:`_get_local_ips` swallows any error and
+                    # returns ``frozenset()``.  Treat this as "no
+                    # information" — do NOT compare it against
+                    # ``_last_ips`` (which would falsely look like a
+                    # network change and trigger a spurious restart),
+                    # and drop any in-flight debounce candidate so a
+                    # later real change starts its count from scratch.
+                    self._pending_ip_change = None
+                    self._pending_ip_change_count = 0
+                elif current_ips == self._last_ips:
+                    # IPs match the established baseline — clear any
+                    # in-flight candidate (the host's network briefly
+                    # diverged and recovered before reaching the
+                    # debounce threshold).
+                    self._pending_ip_change = None
+                    self._pending_ip_change_count = 0
+                elif not self._last_ips:
+                    # Initial discovery (or recovery after a sustained
+                    # failure) — adopt the first non-empty result as
+                    # the baseline without restarting.  Without this
+                    # branch a server that started before the network
+                    # came up would always trigger one spurious restart
+                    # on the first successful poll.
                     self._last_ips = current_ips
-                    if self.use_tunnel:
-                        # In tunnel mode, cloudflared handles edge
-                        # reconnection automatically.  Restarting the
-                        # entire daemon would assign a new random
-                        # *.trycloudflare.com URL — avoid that.  Just
-                        # log and let cloudflared recover on its own.
-                        # N.B. Check use_tunnel only — NOT
-                        # _tunnel_proc, which can be None during
-                        # startup, when remote_password is empty, or
-                        # between a force-restart.
-                        logger.info(
-                            "IP address changed: %s → %s; tunnel mode "
-                            "— cloudflared will re-register "
-                            "automatically",
-                            self._last_ips,
-                            current_ips,
-                        )
+                    self._pending_ip_change = None
+                    self._pending_ip_change_count = 0
+                else:
+                    # Real divergence from the established baseline.
+                    # Require :data:`_IP_CHANGE_DEBOUNCE_TICKS`
+                    # consecutive ticks observing the *same* candidate
+                    # set before acting.  A single divergent tick (the
+                    # most common spurious-restart trigger) is no
+                    # longer enough.
+                    if current_ips == self._pending_ip_change:
+                        self._pending_ip_change_count += 1
                     else:
-                        logger.info(
-                            "IP address changed: %s → %s, "
-                            "restarting server…",
-                            self._last_ips,
-                            current_ips,
-                        )
-                        if self._ws_server is not None:
-                            self._ws_server.close()
-                        return
+                        self._pending_ip_change = current_ips
+                        self._pending_ip_change_count = 1
+                    if (
+                        self._pending_ip_change_count
+                        >= _IP_CHANGE_DEBOUNCE_TICKS
+                    ):
+                        prev_ips = self._last_ips
+                        self._last_ips = current_ips
+                        self._pending_ip_change = None
+                        self._pending_ip_change_count = 0
+                        if self.use_tunnel:
+                            # In tunnel mode, cloudflared handles edge
+                            # reconnection automatically.  Restarting
+                            # the entire daemon would assign a new
+                            # random *.trycloudflare.com URL — avoid
+                            # that.  Just log and let cloudflared
+                            # recover on its own.
+                            # N.B. Check use_tunnel only — NOT
+                            # _tunnel_proc, which can be None during
+                            # startup, when remote_password is empty,
+                            # or between a force-restart.
+                            logger.info(
+                                "IP address changed: %s → %s; tunnel "
+                                "mode — cloudflared will re-register "
+                                "automatically",
+                                prev_ips,
+                                current_ips,
+                            )
+                        else:
+                            logger.info(
+                                "IP address changed: %s → %s, "
+                                "restarting server…",
+                                prev_ips,
+                                current_ips,
+                            )
+                            if self._ws_server is not None:
+                                self._ws_server.close()
+                            return
             except asyncio.CancelledError:
                 raise
             except Exception:
