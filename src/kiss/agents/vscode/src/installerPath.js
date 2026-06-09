@@ -46,7 +46,12 @@ function kissAiRoot() {
 
 /**
  * Return the absolute path of ``install.sh`` inside *root* (defaulting
- * to :func:`kissAiRoot`) if it exists, otherwise ``null``.
+ * to :func:`kissAiRoot`) if it is a regular file, otherwise ``null``.
+ *
+ * A regular-file check (not a bare existence check) keeps this in
+ * lockstep with the Python twin ``web_server._find_install_script``,
+ * which uses ``Path.is_file()`` — a directory named ``install.sh``
+ * (e.g. from a botched checkout) must not be handed to ``bash``.
  *
  * The *root* override exists for integration tests; production callers
  * pass no argument so the real ``~/kiss_ai`` is probed.
@@ -55,7 +60,7 @@ function findInstallScript(root) {
   const base = root || kissAiRoot();
   const candidate = path.join(base, 'install.sh');
   try {
-    return fs.existsSync(candidate) ? candidate : null;
+    return fs.statSync(candidate).isFile() ? candidate : null;
   } catch {
     return null;
   }
