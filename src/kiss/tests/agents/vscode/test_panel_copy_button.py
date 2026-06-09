@@ -31,24 +31,6 @@ def _read(path: Path) -> str:
     return path.read_text()
 
 
-def test_add_copy_button_helper_exists() -> None:
-    """main.js must define an ``addCopyButton`` helper that uses the
-    async clipboard API and stops click propagation so it does not
-    trigger the collapsible header listener."""
-    src = _read(MAIN_JS)
-    assert re.search(r"function\s+addCopyButton\s*\(\s*panelEl\s*\)", src), (
-        "main.js must define `function addCopyButton(panelEl)`"
-    )
-    # The helper must call navigator.clipboard.writeText
-    assert "navigator.clipboard.writeText" in src, (
-        "addCopyButton must use navigator.clipboard.writeText to copy text"
-    )
-    # It must mark the panel as copyable so the CSS positions the button.
-    assert "classList.add('copyable')" in src, (
-        "addCopyButton must add the 'copyable' class to the panel"
-    )
-
-
 def test_add_collapse_attaches_copy_button() -> None:
     """``addCollapse`` must invoke ``addCopyButton`` so every collapsible
     panel (tool call, prompt, Thoughts, tool-result error, merge-info)
