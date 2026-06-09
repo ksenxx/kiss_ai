@@ -9,8 +9,6 @@ events to a dedicated subagent tab. These tests verify:
 - openSubagentTab events are broadcast for each sub-task
 - Streaming events carry the subagent tab_id
 - subagentDone events are broadcast when sub-tasks complete
-- The frontend JS correctly handles subagent tabs (no input area)
-- TypeScript types include the new message types
 
 Uses real LLM calls with claude-haiku-4-5 and tight budgets.
 No mocks, patches, fakes, or test doubles.
@@ -20,7 +18,6 @@ from __future__ import annotations
 
 import os
 import threading
-from pathlib import Path
 
 import pytest
 
@@ -165,38 +162,3 @@ class TestSubagentTabEvents:
         assert "result" in sub_types or "text_delta" in sub_types, (
             f"Expected result or text_delta in sub-agent events, got: {sub_types}"
         )
-
-
-# -----------------------------------------------------------------------
-# Frontend logic tests: verify JS handles subagent tabs correctly
-# -----------------------------------------------------------------------
-
-_MAIN_JS = (
-    Path(__file__).resolve().parents[3]
-    / "agents" / "vscode" / "media" / "main.js"
-)
-
-
-
-
-# -----------------------------------------------------------------------
-# Types check: verify ToWebviewMessageBody includes subagent types
-# -----------------------------------------------------------------------
-
-_TYPES_TS = (
-    Path(__file__).resolve().parents[3]
-    / "agents" / "vscode" / "src" / "types.ts"
-)
-
-
-
-
-# -----------------------------------------------------------------------
-# CSS check: verify subagent tab styles exist
-# -----------------------------------------------------------------------
-
-_MAIN_CSS = (
-    Path(__file__).resolve().parents[3]
-    / "agents" / "vscode" / "media" / "main.css"
-)
-

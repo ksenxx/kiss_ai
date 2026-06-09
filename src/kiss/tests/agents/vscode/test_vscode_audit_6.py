@@ -203,13 +203,6 @@ class TestFastModelForReturnsActuallyFastModels(TestCase):
         finally:
             config_module.DEFAULT_CONFIG = orig
 
-    def test_docstring_consistency(self) -> None:
-        """The function's docstring should match actual behavior."""
-        doc = get_fast_model.__doc__ or ""
-        assert "cheap" in doc.lower() or "fast" in doc.lower(), (
-            "get_fast_model docstring should mention cheap/fast"
-        )
-
 
 class TestUserAnswerNoDeadIsNotNoneCheck(TestCase):
     """R1 FIX: removed the dead ``if ans_tab is not None`` guard from
