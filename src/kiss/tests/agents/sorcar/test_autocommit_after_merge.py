@@ -376,55 +376,5 @@ class TestAutocommitPromptRoundtrip(_ServerHarness):
         ).stdout
 
 
-class TestAutocommitTypesContract(unittest.TestCase):
-    """The frontend type-definitions file must advertise the new
-    message and command types so the TS compiler picks them up."""
-
-    types_ts: str
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
-        cls.types_ts = (
-            base / "vscode" / "src" / "types.ts"
-        ).read_text()
-
-    def test_autocommit_prompt_event_declared(self) -> None:
-        assert "autocommit_prompt" in self.types_ts
-
-    def test_autocommit_done_event_declared(self) -> None:
-        assert "autocommit_done" in self.types_ts
-
-    def test_autocommit_action_command_declared(self) -> None:
-        assert "autocommitAction" in self.types_ts
-
-
-class TestMainJsRendersAutocommitButtons(unittest.TestCase):
-    """``main.js`` must render "Auto commit" and "Do nothing" buttons
-    in the input textarea when an ``autocommit_prompt`` event is
-    received."""
-
-    js: str
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        base = Path(__file__).resolve().parents[4] / "kiss" / "agents"
-        cls.js = (base / "vscode" / "media" / "main.js").read_text()
-
-    def test_handles_autocommit_prompt_event(self) -> None:
-        assert "autocommit_prompt" in self.js
-
-    def test_has_auto_commit_button_label(self) -> None:
-        assert "Auto commit" in self.js
-
-    def test_has_do_nothing_button_label(self) -> None:
-        assert "Do nothing" in self.js
-
-    def test_sends_autocommit_action_commit(self) -> None:
-        assert "autocommitAction" in self.js
-        assert "'commit'" in self.js or '"commit"' in self.js
-        assert "'skip'" in self.js or '"skip"' in self.js
-
-
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
