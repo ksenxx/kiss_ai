@@ -595,7 +595,41 @@ _VSCODE_ONLY_COMMANDS = frozenset({
     "openFile",
     "resolveDroppedPaths",
     "pickFolder",
+    # ``sizeReport`` is the webview's reply to the extension-only
+    # ``measureSize`` request; it never has meaning for the web
+    # server but must not surface as "Unknown command" if a client
+    # ever emits it.
+    "sizeReport",
 })
+
+# Canonical KISS Sorcar source-checkout root.  The curl-piped
+# bootstrapper (``scripts/install.sh``) clones the GitHub repo to this
+# fixed location and ``install.sh`` — which the Update button re-runs —
+# lives at its root.  Mirrors ``kissAiRoot()`` in the VS Code
+# extension's ``installerPath.js`` so the extension and the remote
+# webapp resolve the updater identically.
+_KISS_AI_ROOT = Path.home() / "kiss_ai"
+
+
+def _find_install_script(root: Path) -> Path | None:
+    """Return ``install.sh`` inside *root* if it exists, else ``None``.
+
+    Python twin of ``findInstallScript()`` in the extension's
+    ``installerPath.js`` so the remote webapp's Update button probes
+    the exact same location as the VS Code extension.
+
+    Args:
+        root: Directory expected to contain ``install.sh`` (production
+            callers pass :data:`_KISS_AI_ROOT`; tests pass a temp dir).
+
+    Returns:
+        The absolute script path, or ``None`` when missing/unreadable.
+    """
+    candidate = root / "install.sh"
+    try:
+        return candidate if candidate.is_file() else None
+    except OSError:
+        return None
 
 _KISS_HOME = Path(os.environ.get("KISS_HOME") or (Path.home() / ".kiss"))
 _TLS_DIR = _KISS_HOME / "tls"
@@ -2391,6 +2425,12 @@ class RemoteAccessServer:
         self._pending_ip_change_count: int = 0
         # Per-IP auth failure timestamps, used by _is_auth_locked.
         self._auth_failures: dict[str, list[float]] = {}
+        # Where the ``runUpdate`` command looks for ``install.sh`` and
+        # where it appends the updater's output.  Mirrors the VS Code
+        # extension's ``installerPath.js`` lookup; tests override both
+        # to temp paths.
+        self._install_root: Path = _KISS_AI_ROOT
+        self._update_log_path: Path = _KISS_HOME / "update.log"
 
 
     async def _process_request(
@@ -2659,28 +2699,11 @@ class RemoteAccessServer:
                     cmd = json.loads(message)
                 except json.JSONDecodeError:
                     continue
-                tab_id = cmd.get("tabId", "")
-                if isinstance(tab_id, str) and tab_id:
-                    self._ws_tabs[websocket].add(tab_id)
-                cmd_type = cmd.get("type", "")
-                if cmd_type in _VSCODE_ONLY_COMMANDS:
+                if not isinstance(cmd, dict):
                     continue
-                if cmd_type == "ready":
-                    await self._handle_ready(cmd, websocket)
-                    continue
-                if cmd_type == "submit":
-                    await self._handle_submit(cmd)
-                    continue
-                if cmd_type == "getWelcomeSuggestions":
-                    await self._send_welcome_info()
-                    continue
-                if cmd_type == "mergeAction":
-                    action = cmd.get("action", "")
-                    if action != "all-done":
-                        await self._handle_web_merge_action(cmd)
-                        continue
-                cmd = _translate_webview_command(cmd)
-                await self._run_cmd(cmd)
+                await self._dispatch_client_command(
+                    cmd, websocket, self._ws_tabs[websocket],
+                )
         except websockets.exceptions.ConnectionClosed:
             pass
         except Exception:
@@ -2732,31 +2755,7 @@ class RemoteAccessServer:
                     continue
                 if not isinstance(cmd, dict):
                     continue
-                tab_id = cmd.get("tabId", "")
-                if isinstance(tab_id, str) and tab_id:
-                    tabs_seen.add(tab_id)
-                cmd_type = cmd.get("type", "")
-                if cmd_type in _VSCODE_ONLY_COMMANDS:
-                    continue
-                if cmd_type == "activeTasksQuery":
-                    await self._handle_active_tasks_query(writer)
-                    continue
-                if cmd_type == "ready":
-                    await self._handle_ready(cmd, writer)
-                    continue
-                if cmd_type == "submit":
-                    await self._handle_submit(cmd)
-                    continue
-                if cmd_type == "getWelcomeSuggestions":
-                    await self._send_welcome_info()
-                    continue
-                if cmd_type == "mergeAction":
-                    action = cmd.get("action", "")
-                    if action != "all-done":
-                        await self._handle_web_merge_action(cmd)
-                        continue
-                cmd = _translate_webview_command(cmd)
-                await self._run_cmd(cmd)
+                await self._dispatch_client_command(cmd, writer, tabs_seen)
         except Exception:
             logger.debug("UDS handler error", exc_info=True)
         finally:
@@ -2769,10 +2768,127 @@ class RemoteAccessServer:
                 logger.debug("UDS writer close failed", exc_info=True)
 
 
-    async def _handle_active_tasks_query(
-        self, writer: asyncio.StreamWriter,
+    async def _dispatch_client_command(
+        self,
+        cmd: dict[str, Any],
+        endpoint: Any,
+        tabs_seen: set[str],
     ) -> None:
-        """Report in-flight agent tasks back to a single UDS client.
+        """Dispatch one parsed client command from a WSS or UDS peer.
+
+        Single shared per-message dispatch body for
+        :meth:`_ws_handler` (remote browsers) and :meth:`_uds_handler`
+        (the local VS Code extension), so the two transports cannot
+        drift in behaviour.  Records the command's ``tabId`` in
+        *tabs_seen* (used by the callers' ``finally`` blocks to arm
+        deferred ``closeTab`` timers), drops VS Code-only webview
+        messages, special-cases the commands the TypeScript extension
+        would otherwise translate (``ready``, ``submit``,
+        ``getWelcomeSuggestions``, ``runUpdate``, ``mergeAction``,
+        ``activeTasksQuery``), and forwards everything else through
+        :func:`_translate_webview_command` to
+        :class:`VSCodeServer._handle_command`.
+
+        Args:
+            cmd: The parsed JSON command dictionary.
+            endpoint: The client connection — a
+                :class:`ServerConnection` (WSS) or an
+                :class:`asyncio.StreamWriter` (UDS).  Used for direct
+                replies via :meth:`_endpoint_send`.
+            tabs_seen: Per-connection set of tab ids, mutated in place.
+        """
+        tab_id = cmd.get("tabId", "")
+        if isinstance(tab_id, str) and tab_id:
+            tabs_seen.add(tab_id)
+        cmd_type = cmd.get("type", "")
+        if cmd_type in _VSCODE_ONLY_COMMANDS:
+            return
+        if cmd_type == "activeTasksQuery":
+            await self._handle_active_tasks_query(endpoint)
+            return
+        if cmd_type == "ready":
+            await self._handle_ready(cmd, endpoint)
+            return
+        if cmd_type == "submit":
+            await self._handle_submit(cmd)
+            return
+        if cmd_type == "getWelcomeSuggestions":
+            await self._send_welcome_info()
+            return
+        if cmd_type == "runUpdate":
+            await self._handle_run_update()
+            return
+        if cmd_type == "mergeAction" and cmd.get("action", "") != "all-done":
+            await self._handle_web_merge_action(cmd)
+            return
+        cmd = _translate_webview_command(cmd)
+        await self._run_cmd(cmd)
+
+    async def _handle_run_update(self) -> None:
+        """Run ``~/kiss_ai/install.sh`` to update KISS Sorcar.
+
+        Server-side twin of the VS Code extension's
+        ``SorcarSidebarView._runUpdate()``: the extension locates the
+        installer via ``installerPath.js`` and runs it in an integrated
+        terminal; the web server locates it via
+        :func:`_find_install_script` and runs it as a detached
+        subprocess (output appended to ``~/.kiss/update.log``) since a
+        remote browser has no terminal.  Error/info wording matches
+        the extension's ``showErrorMessage``/``showInformationMessage``
+        so both frontends behave the same.
+        """
+        loop = self._loop
+        assert loop is not None
+        script = await loop.run_in_executor(
+            None, _find_install_script, self._install_root,
+        )
+        if script is None:
+            self._printer.broadcast({
+                "type": "error",
+                "text": (
+                    "Cannot update KISS Sorcar: install.sh not found "
+                    f"in {self._install_root}."
+                ),
+            })
+            return
+        self._printer.broadcast({
+            "type": "notice",
+            "text": (
+                "An update of KISS Sorcar is getting installed… "
+                f"(output: {self._update_log_path})"
+            ),
+        })
+        await loop.run_in_executor(None, self._spawn_update_script, script)
+
+    def _spawn_update_script(self, script: Path) -> None:
+        """Start ``install.sh`` detached, logging to the update log.
+
+        Runs in the executor so file I/O and process spawn never block
+        the event loop.  ``start_new_session=True`` keeps the updater
+        alive when ``install.sh`` restarts this very daemon.  Failures
+        are broadcast as ``error`` events instead of raised.
+
+        Args:
+            script: Absolute path of the ``install.sh`` to execute.
+        """
+        try:
+            self._update_log_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._update_log_path, "ab") as log:
+                subprocess.Popen(
+                    ["bash", str(script)],
+                    cwd=str(script.parent),
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+        except OSError as exc:
+            self._printer.broadcast({
+                "type": "error",
+                "text": f"Failed to start KISS Sorcar update: {exc}",
+            })
+
+    async def _handle_active_tasks_query(self, endpoint: Any) -> None:
+        """Report in-flight agent tasks back to a single client.
 
         Used by the VS Code extension's dependency installer before it
         considers SIGTERMing the daemon: when any task is still active,
@@ -2780,8 +2896,9 @@ class RemoteAccessServer:
         agent run is not interrupted by ``ensureDependencies()`` on a
         spurious re-activation of the extension.
 
-        The response is a single newline-delimited JSON object written
-        directly to ``writer`` (i.e. not broadcast to other clients).
+        The response is a single JSON object sent directly to the
+        requesting *endpoint* — a UDS writer or a WSS connection, via
+        :meth:`_endpoint_send` — i.e. not broadcast to other clients.
         It has the shape::
 
             {"type": "activeTasksResponse",
@@ -2815,10 +2932,9 @@ class RemoteAccessServer:
             "type": "activeTasksResponse",
             "count": len(active_tabs),
             "tabs": active_tabs,
-        }) + "\n"
+        })
         try:
-            writer.write(payload.encode("utf-8"))
-            await writer.drain()
+            await self._endpoint_send(endpoint, payload)
         except Exception:
             logger.debug(
                 "activeTasksQuery: failed to write response", exc_info=True,
@@ -3018,6 +3134,10 @@ class RemoteAccessServer:
             "attachments": attachments,
             "useWorktree": cmd.get("useWorktree", False),
             "useParallel": cmd.get("useParallel", False),
+            # Mirror the extension's ``_startTask``: the webview's
+            # "Auto commit" toggle must survive the submit → run
+            # translation or remote submits silently lose the mode.
+            "autoCommit": cmd.get("autoCommit", False),
         }
         await self._run_cmd(run_cmd)
 
