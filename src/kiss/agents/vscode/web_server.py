@@ -1240,6 +1240,13 @@ def _post_url_to_message_board(
             headers={
                 "Title": "KISS Sorcar Remote URL",
                 "Tags": "link,kiss-sorcar",
+                # Make the notification itself clickable: tapping the
+                # notification (mobile) or the message card (web UI)
+                # opens the URL in a browser.  Without this header
+                # ntfy renders the body as plain text that is not
+                # auto-linked, so users cannot navigate to the site
+                # by clicking it.
+                "Click": url,
                 "User-Agent": "kiss-web",
             },
         )
