@@ -98,24 +98,6 @@ You are a judge assessing whether the task was fully completed.
   - summary: concise explanation of what is missing or why it passes
 """
 
-def _user_visible_work_dir(work_dir: str) -> str:
-    """Return the work directory exactly as the agent will see it on disk.
-
-    When the agent runs in worktree mode, its real working directory is
-    inside ``<repo>/.kiss-worktrees/<slug>/``.  That is where ``pwd``,
-    ``os.getcwd()``, and ``Bash`` commands actually execute, so the
-    system prompt must report that exact path — anything else would
-    mislead the agent about its real location.
-
-    Args:
-        work_dir: Absolute work directory path.
-
-    Returns:
-        ``work_dir`` unchanged.
-    """
-    return work_dir
-
-
 def _str_to_bool(value: str | bool) -> bool:
     """Coerce a string or bool to a Python bool.
 
@@ -154,6 +136,11 @@ def finish(success: bool, is_continue: bool = False, summary: str = "") -> str:
 
 class RelentlessAgent(Base):
     """Base agent with auto-continuation for long tasks."""
+
+    # ``_reset`` assigns the resolved absolute path on every ``run()``;
+    # this default makes ``self.work_dir`` safe to read on a freshly
+    # constructed agent (mirroring ``Base.model_name``).
+    work_dir: str = ""
 
     def _reset(
         self,
@@ -231,9 +218,12 @@ class RelentlessAgent(Base):
         summary = ""
         summaries: list[str] = []
         current_pid = str(os.getpid())
+        # Report ``self.work_dir`` verbatim — in worktree mode this is the
+        # real on-disk ``<repo>/.kiss-worktrees/<slug>/...`` path, matching
+        # what ``pwd`` / ``os.getcwd()`` return inside the agent's tools.
         important_instructions = IMPORTANT_INSTRUCTIONS.format(
             step_threshold=str(self.max_steps - 2),
-            work_dir=_user_visible_work_dir(self.work_dir),
+            work_dir=self.work_dir,
             current_pid=current_pid,
         )
         system_prompt = self.system_prompt + important_instructions
