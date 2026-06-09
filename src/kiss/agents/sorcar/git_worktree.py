@@ -70,7 +70,18 @@ def _git(
     Returns:
         The completed process with stdout/stderr captured as text.
     """
-    cmd = ["git", "-C", str(cwd), *args]
+    # ``-c core.quotepath=false`` forces git to emit non-ASCII filenames
+    # verbatim (UTF-8) rather than as C-style ``\NNN`` octal escapes,
+    # regardless of the repo's local ``core.quotePath`` config.  All
+    # callers parse these outputs as plain UTF-8 paths.
+    cmd = [
+        "git",
+        "-c",
+        "core.quotepath=false",
+        "-C",
+        str(cwd),
+        *args,
+    ]
     return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
 
 

@@ -108,7 +108,7 @@ def _git(cwd: str, *args: str) -> subprocess.CompletedProcess[str]:
     """
     try:
         return subprocess.run(
-            ["git", *args],
+            ["git", "-c", "core.quotepath=false", *args],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -149,7 +149,7 @@ def _git_bytes(cwd: str, *args: str) -> subprocess.CompletedProcess[bytes]:
     """
     try:
         return subprocess.run(
-            ["git", *args],
+            ["git", "-c", "core.quotepath=false", *args],
             capture_output=True,
             cwd=cwd,
             timeout=_GIT_TIMEOUT_SECONDS,
