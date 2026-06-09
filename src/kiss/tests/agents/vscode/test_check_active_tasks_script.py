@@ -32,6 +32,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 from typing import cast
 from unittest import IsolatedAsyncioTestCase
@@ -202,6 +203,123 @@ class TestCheckActiveTasksScript(IsolatedAsyncioTestCase):
             self.assertIn("not present", result.stderr)
         finally:
             shutil.rmtree(missing_sock.parent.parent, ignore_errors=True)
+
+    def _run_fake_uds_server(
+        self,
+        sock_path: Path,
+        lines: list[bytes],
+    ) -> tuple[socket.socket, threading.Thread]:
+        """Spin up a one-shot AF_UNIX server that returns ``lines``.
+
+        Each ``bytes`` element is written verbatim after the helper
+        sends its ``activeTasksQuery`` line (so callers can include or
+        omit the trailing newline as needed for the test case).  This
+        bypasses ``RemoteAccessServer`` entirely so we can simulate an
+        OLD daemon that doesn't recognise ``activeTasksQuery`` — the
+        exact wire behaviour responsible for the install.sh abort in
+        the user-reported bug.
+        """
+        if sock_path.exists():
+            sock_path.unlink()
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(str(sock_path))
+        srv.listen(1)
+        srv.settimeout(5.0)
+
+        def _serve() -> None:
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            try:
+                conn.settimeout(5.0)
+                # Drain the incoming activeTasksQuery before responding
+                # so the helper's ``sendall`` does not race with the
+                # close.
+                buf = b""
+                while b"\n" not in buf:
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        break
+                    buf += chunk
+                for line in lines:
+                    conn.sendall(line)
+            finally:
+                conn.close()
+
+        thread = threading.Thread(target=_serve, daemon=True)
+        thread.start()
+        return srv, thread
+
+    def test_old_daemon_unknown_command_exits_zero(self) -> None:
+        """An OLD daemon's "Unknown command" error → exit 0.
+
+        Reproduces the user report::
+
+            kiss-web UDS probe at ~/.kiss/sorcar.sock returned
+            unexpected message {'type': 'error', 'text':
+            'Unknown command: activeTasksQuery'}; refusing to kill.
+
+        Before the fix the helper read the first broadcast line, saw
+        an unknown ``type``, and exited 1 — blocking install.sh from
+        replacing the very daemon that lacked the handler.  After the
+        fix the helper recognises the specific error string and exits
+        0 so install.sh can proceed.
+        """
+        scratch = Path(tempfile.mkdtemp())
+        sock_path = scratch / "old.sock"
+        srv, thread = self._run_fake_uds_server(
+            sock_path,
+            [b'{"type":"error","text":"Unknown command: activeTasksQuery"}\n'],
+        )
+        try:
+            result = _run_helper(sock_path)
+            self.assertEqual(
+                result.returncode, 0,
+                f"expected exit 0 for OLD-daemon error; got "
+                f"exit={result.returncode}\nstderr={result.stderr}\n"
+                f"stdout={result.stdout}",
+            )
+            self.assertIn("predates", result.stderr)
+            self.assertIn("activeTasksQuery", result.stderr)
+        finally:
+            srv.close()
+            thread.join(timeout=2.0)
+            shutil.rmtree(scratch, ignore_errors=True)
+
+    def test_stray_broadcast_before_response_is_tolerated(self) -> None:
+        """Helper drains stray broadcast lines and parses the real reply.
+
+        ``RemoteAccessServer._uds_handler`` registers every connected
+        client as a broadcast destination.  Unrelated event lines can
+        therefore land on the wire BEFORE our ``activeTasksResponse``.
+        The pre-fix helper read only the first line and rejected
+        anything that wasn't an ``activeTasksResponse`` — this test
+        locks in the fix by interleaving a stray broadcast with the
+        real reply and asserting the helper still exits 0.
+        """
+        scratch = Path(tempfile.mkdtemp())
+        sock_path = scratch / "noisy.sock"
+        srv, thread = self._run_fake_uds_server(
+            sock_path,
+            [
+                b'{"type":"event","name":"noise"}\n',
+                b'{"type":"activeTasksResponse","count":0,"tabs":[]}\n',
+            ],
+        )
+        try:
+            result = _run_helper(sock_path)
+            self.assertEqual(
+                result.returncode, 0,
+                f"expected exit 0 after skipping stray broadcast; got "
+                f"exit={result.returncode}\nstderr={result.stderr}\n"
+                f"stdout={result.stdout}",
+            )
+            self.assertIn("idle (count=0)", result.stderr)
+        finally:
+            srv.close()
+            thread.join(timeout=2.0)
+            shutil.rmtree(scratch, ignore_errors=True)
 
     def test_stale_socket_with_no_listener_exits_zero(self) -> None:
         """A socket file with no listener is "safe to kill" (daemon dead).
