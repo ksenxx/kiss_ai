@@ -31,6 +31,7 @@ import {AgentClient} from './AgentClient';
 import {MergeManager} from './MergeManager';
 import {getDefaultModel} from './DependencyInstaller';
 import {buildChatHtml} from './SorcarTab';
+import {findInstallScript, kissAiRoot} from './installerPath';
 import {
   FromWebviewMessage,
   ToWebviewMessage,
@@ -1162,19 +1163,23 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   }
 
   /**
-   * Run ``install.sh`` from the current working directory to update
-   * KISS Sorcar and notify the user that an update is being installed.
+   * Run ``install.sh`` from the KISS Sorcar source checkout to update
+   * the extension and notify the user that an update is being
+   * installed.
    *
-   * The script is executed in a dedicated integrated terminal so its
-   * progress is visible.  If the script is missing an error message is
-   * shown instead.
+   * The script always lives at ``~/kiss_ai/install.sh`` because the
+   * curl-piped bootstrapper (``scripts/install.sh``) clones the repo
+   * to that fixed path — see :mod:`installerPath` for the rationale.
+   * It is executed in a dedicated integrated terminal so its progress
+   * is visible.  When the script is missing an error message points
+   * the user at the canonical install root rather than their current
+   * workspace.
    */
   private _runUpdate(): void {
-    const workDir = this._getWorkDir();
-    const scriptPath = path.join(workDir, 'install.sh');
-    if (!fs.existsSync(scriptPath)) {
+    const scriptPath = findInstallScript();
+    if (!scriptPath) {
       vscode.window.showErrorMessage(
-        `Cannot update KISS Sorcar: install.sh not found in ${workDir}.`,
+        `Cannot update KISS Sorcar: install.sh not found in ${kissAiRoot()}.`,
       );
       return;
     }
@@ -1183,7 +1188,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     );
     const terminal = vscode.window.createTerminal({
       name: 'KISS Sorcar Update',
-      cwd: workDir,
+      cwd: path.dirname(scriptPath),
     });
     terminal.show();
     terminal.sendText(`bash '${scriptPath.replace(/'/g, "'\\''")}'`);

@@ -245,7 +245,7 @@ class TestGetAvailableModels:
 
             os.environ["OPENROUTER_API_KEY"] = "t"
             config_module.DEFAULT_CONFIG = config_module.Config()
-            assert get_default_model() == "openrouter/anthropic/claude-opus-4.8"
+            assert get_default_model() == "openrouter/anthropic/claude-opus-4.7"
 
             os.environ["GEMINI_API_KEY"] = "t"
             config_module.DEFAULT_CONFIG = config_module.Config()
@@ -257,7 +257,7 @@ class TestGetAvailableModels:
 
             os.environ["ANTHROPIC_API_KEY"] = "t"
             config_module.DEFAULT_CONFIG = config_module.Config()
-            assert get_default_model() == "claude-opus-4-8"
+            assert get_default_model() == "claude-opus-4-7"
         finally:
             for k in env_keys:
                 val = saved[k]
