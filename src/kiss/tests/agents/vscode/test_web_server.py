@@ -3427,7 +3427,16 @@ class TestWatchdogBranches(IsolatedAsyncioTestCase):
             except asyncio.CancelledError:
                 pass
             await ws.send(json.dumps({"type": "getModels"}))
-            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            # The periodic version-check task may interleave its own
+            # ``update_available`` broadcast between our request and
+            # the ``models`` reply.  Skip any unrelated event types.
+            resp: dict[str, object] = {}
+            for _ in range(10):
+                resp = json.loads(
+                    await asyncio.wait_for(ws.recv(), timeout=5),
+                )
+                if resp.get("type") == "models":
+                    break
             self.assertEqual(resp["type"], "models")
         finally:
             ws_mod.TUNNEL_CHECK_INTERVAL = original_interval
