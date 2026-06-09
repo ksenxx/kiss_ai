@@ -987,6 +987,15 @@ async function restartKissWebDaemon(
         `kiss-web has ${(activeTasks as {ok: true; count: number}).count} ` +
           'active task(s) — deferring restart to avoid aborting in-flight work',
       );
+    } else if (decision.reason.startsWith('alive-uncertain')) {
+      // The daemon's TCP probe says ``alive`` but the UDS active-tasks
+      // round-trip could not be completed.  Deferring is the safe
+      // call: SIGTERMing an alive daemon whose task status is unknown
+      // is exactly what aborted task_history row 3192 mid-flight.
+      log(
+        `kiss-web alive but active-tasks probe inconclusive ` +
+          `(${decision.reason}) — deferring restart to next activation`,
+      );
     } else {
       log(
         `kiss-web fingerprint unchanged (${currentFp.slice(0, 8)}) and ` +

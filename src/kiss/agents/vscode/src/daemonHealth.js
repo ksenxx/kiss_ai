@@ -208,16 +208,32 @@ function daemonHasActiveTasks(sockPath, timeoutMs) {
  * Returns ``{skip: true, reason}`` when the daemon must NOT be
  * restarted, ``{skip: false, reason}`` when a restart is permitted.
  *
- * Decision table::
+ * Decision table (evaluated top-to-bottom; first match wins)::
  *
  *     activeTasks.ok && activeTasks.count > 0   → skip ("active-tasks")
+ *     health === 'alive' && !activeTasks.ok     → skip ("alive-uncertain")
  *     fingerprintMatches && health !== 'dead'   → skip ("healthy-unchanged")
  *     otherwise                                  → restart
  *
- * The key safety property — and the actual bug fix — is that
- * ``health === 'unknown'`` is treated as "do not restart" when the
- * fingerprint matches.  The old code conflated ``'unknown'`` with
- * ``'dead'`` and SIGTERMed the daemon during transient probe failures.
+ * Two safety properties drive this table:
+ *
+ *   * ``health === 'unknown'`` is treated as "do not restart" when the
+ *     fingerprint matches.  The original code conflated ``'unknown'``
+ *     with ``'dead'`` and SIGTERMed the daemon during transient lsof
+ *     timeouts.
+ *
+ *   * An ``'alive'`` daemon whose ``activeTasks`` status could NOT be
+ *     confirmed (UDS timeout, socket missing during a transient
+ *     startup window, parse failure, etc.) MUST NOT be SIGTERMed.
+ *     This regression killed task_history row 3192 mid-flight: the
+ *     fingerprint had changed (extension auto-update rewrote every
+ *     bundled ``.py`` mtime), the UDS round-trip missed its 1500 ms
+ *     deadline under load, and the previous decision table fell
+ *     through to ``restart-required`` even though the daemon's own
+ *     log line ``active_tasks=[a3b4ec24(task=3191)]`` proved it was
+ *     mid-task.  The fingerprint change is applied lazily on the
+ *     next activation that can prove the daemon is idle (or has died
+ *     on its own).
  *
  * @param {{
  *   fingerprintMatches: boolean,
@@ -231,6 +247,14 @@ function decideRestart(state) {
   const {fingerprintMatches, health, activeTasks} = state;
   if (activeTasks && activeTasks.ok && activeTasks.count > 0) {
     return {skip: true, reason: 'active-tasks'};
+  }
+  if (health === 'alive' && !(activeTasks && activeTasks.ok)) {
+    const reason = activeTasks && activeTasks.reason
+      ? activeTasks.reason : 'no-probe';
+    return {
+      skip: true,
+      reason: `alive-uncertain (activeTasks=${reason})`,
+    };
   }
   if (fingerprintMatches && health !== 'dead') {
     return {skip: true, reason: `healthy-unchanged (health=${health})`};
