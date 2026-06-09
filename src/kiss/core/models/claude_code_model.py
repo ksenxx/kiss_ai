@@ -453,6 +453,31 @@ class ClaudeCodeModel(Model):
             content = content[:last_tc_end]
             self._stopped_for_tool_calls = True
 
+        # When we stopped early for tool_calls, continue reading the
+        # stream to capture the "result" event which carries usage data
+        # (input/output/cache token counts).  The "result" event always
+        # arrives AFTER all content blocks, so it was skipped by the
+        # early break above.  Without this, every agentic Claude Code
+        # call reports 0 tokens / $0 cost.
+        if self._stopped_for_tool_calls and not result_json:
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                etype = event.get("type")
+                if etype == "stream_event":
+                    event = event.get("event", {})
+                    etype = event.get("type")
+
+                if etype == "result":
+                    result_json = event
+                    break
+
         self._last_thinking_content = thinking_content
         self._pre_result_content = pre_result_content
         return content, result_json
