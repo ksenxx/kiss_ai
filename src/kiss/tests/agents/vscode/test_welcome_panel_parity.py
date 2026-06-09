@@ -21,7 +21,7 @@ from pathlib import Path
 
 from kiss.agents.vscode import web_server
 
-_SORCAR_TAB_TS = Path(web_server.__file__).parent / "src" / "SorcarTab.ts"
+_CHAT_TPL = Path(web_server.__file__).parent / "media" / "chat.html"
 
 
 def _extract_welcome(text: str) -> str:
@@ -62,7 +62,7 @@ class TestWelcomePanelParity(unittest.TestCase):
         """The ``<div id="welcome">`` block is identical in both
         sources (after collapsing whitespace)."""
         webapp = _extract_welcome(web_server._build_html())
-        extension = _extract_welcome(_SORCAR_TAB_TS.read_text())
+        extension = _extract_welcome(_CHAT_TPL.read_text())
         self.assertEqual(extension, webapp)
 
 
