@@ -1723,412 +1723,103 @@ class WebPrinter(JsonPrinter):
 def _build_html() -> str:
     """Build the standalone HTML page for remote Sorcar access.
 
-    Produces HTML equivalent to ``SorcarTab.buildChatHtml`` but uses
-    plain ``/media/`` URLs for assets and injects a WebSocket shim
-    script that provides ``acquireVsCodeApi()`` for ``main.js``.
+    Loads ``media/chat.html`` — the exact same template the VS Code
+    extension's ``SorcarTab.buildChatHtml`` reads — and substitutes
+    remote-mode values (no CSP, plain ``/media/`` URLs, ``loading...``
+    model name, the auth-modal block, and the WebSocket shim that
+    provides ``acquireVsCodeApi()`` for ``main.js``).
+
+    Sharing the markup with the extension guarantees the two HTML
+    pages cannot drift in script ordering or DOM ids — the bug that
+    previously broke the tab bar, the ``+`` button and the send-task
+    flow on the remote webapp.
 
     Returns:
         The complete HTML string.
     """
     version = _read_version()
     tricks_json = json.dumps(_read_tricks())
-    shim = _WS_SHIM_JS
-    return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="\
-width=device-width,initial-scale=1,maximum-scale=1">
-  <link href="/media/main.css" rel="stylesheet">
-  <link href="/media/highlight-github-dark.min.css" rel="stylesheet">
-  <title>KISS Sorcar</title>
-  <style>
-    html, body {{ height: 100%; margin: 0; padding: 0; overflow: hidden; }}
-    body {{ background: var(--vscode-editor-background, #1e1e1e);
-            color: var(--vscode-editor-foreground, #cccccc); }}
-    :root {{
-      --vscode-font-size: 16px;
-      --vscode-font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI',
-        Roboto, 'Helvetica Neue', Arial, sans-serif;
-      --vscode-editor-font-size: 16px;
-      --vscode-editor-background: #1e1e1e;
-      --vscode-editor-foreground: #cccccc;
-      --vscode-input-background: #3c3c3c;
-      --vscode-input-foreground: #cccccc;
-      --vscode-input-border: #3c3c3c;
-      --vscode-focusBorder: #007acc;
-      --vscode-button-background: #0e639c;
-      --vscode-button-foreground: #ffffff;
-      --vscode-button-hoverBackground: #1177bb;
-      --vscode-sideBar-background: #252526;
-      --vscode-list-hoverBackground: #2a2d2e;
-      --vscode-badge-background: #4d4d4d;
-      --vscode-badge-foreground: #ffffff;
-      --vscode-textLink-foreground: #3794ff;
-      --vscode-descriptionForeground: #8b8b8b;
-      --vscode-editorWidget-background: #252526;
-      --vscode-editorWidget-border: #454545;
-      --vscode-panel-border: #80808059;
-      --vscode-terminal-ansiRed: #f44747;
-      --vscode-terminal-ansiGreen: #6a9955;
-      --vscode-terminal-ansiYellow: #d7ba7d;
-      --vscode-terminal-ansiBlue: #569cd6;
-      --vscode-terminal-ansiMagenta: #c586c0;
-      --vscode-terminal-ansiCyan: #4ec9b0;
-    }}
-  </style>
-</head>
-<body class="remote-chat">
-  <div id="app">
-    <div id="tab-bar"><div id="tab-list"></div></div>
-
-    <div id="tab-status-bar">
-      <div class="status">
-        <span id="status-text">Ready</span>
-        <span id="status-tokens" class="status-metric"></span>
-        <span id="status-budget" class="status-metric"></span>
-        <span id="status-steps" class="status-metric"></span>
-      </div>
-    </div>
-
-    <div id="task-panel">
-      <button id="task-panel-chevron" type="button" aria-label="Toggle panel visibility">
-        <svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-         stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
-          <polyline points="9 18 15 12 9 6"/>
-        </svg>
-      </button>
-      <div id="task-panel-text"></div>
-    </div>
-
-    <div id="output">
-      <div id="welcome">
-        <h2>Welcome to KISS Sorcar</h2>
-        <p>Your AI assistant. Ask me anything!</p>
-        <div id="welcome-config" class="welcome-config" style="display:none;">
-          <div id="welcome-remote-url"></div>
-          <label class="config-label welcome-config-label">Remote password
-            <div class="config-password-wrap">
-              <input type="password" id="welcome-cfg-remote-password"\
- placeholder="Remote access password">
-              <button type="button" id="welcome-cfg-remote-password-toggle"\
- class="config-password-toggle" aria-label="Show password"\
- aria-pressed="false" title="Show password">
-                <svg class="icon-eye" width="16" height="16" viewBox="0 0 24 24"\
- fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"\
- stroke-linejoin="round" aria-hidden="true"><path\
- d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12"\
- r="3"/></svg>
-                <svg class="icon-eye-off" width="16" height="16"\
- viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"\
- stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"\
- style="display:none;"><path d="M17.94 17.94A10.94 10.94 0 0 1 12 19c-7 0-11-7-11-7\
-a19.7 19.7 0 0 1 4.22-5.06"/><path d="M9.9 4.24A10.94 10.94 0 0 1 12 4c7 0 11 7 11 7\
-a19.7 19.7 0 0 1-3.16 4.19"/><path d="M14.12 14.12A3 3 0 0 1 9.88 9.88"/><line\
- x1="1" y1="1" x2="23" y2="23"/></svg>
-              </button>
-            </div>
-          </label>
-        </div>
-        <div id="suggestions"></div>
-      </div>
-    </div>
-
-    <div id="input-area">
-      <div id="autocomplete"></div>
-      <div id="input-container">
-        <div id="file-chips"></div>
-        <div id="input-wrap">
-          <div id="input-text-wrap">
-            <div id="ghost-overlay"></div>
-            <textarea id="task-input"
-             placeholder="Ask anything... (@ for files)" rows="1"
-             enterkeyhint="send"></textarea>
-            <button id="input-clear-btn" style="display:none;">&times;</button>
-          </div>
-        </div>
-        <div id="input-footer">
-          <div id="model-picker">
-            <button id="menu-btn">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
-               stroke="currentColor" stroke-width="2" stroke-linecap="round"
-               stroke-linejoin="round">
-                <line x1="3" y1="6" x2="21" y2="6"/>
-                <line x1="3" y1="12" x2="21" y2="12"/>
-                <line x1="3" y1="18" x2="21" y2="18"/>
-              </svg>
-            </button>
-            <button id="model-btn" data-tooltip="Select model">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
-               stroke="currentColor" stroke-width="2">
-                <path d="M12 2l3 7h7l-5.5 4 2 7L12 16l-6.5 4 2-7L2 9h7z"/>
-              </svg>
-              <span id="model-name">loading...</span>
-            </button>
-            <button id="upload-btn" data-tooltip="Attach files">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
-               stroke="currentColor" stroke-width="2" stroke-linecap="round"
-               stroke-linejoin="round">
-                <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19\
-a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
-              </svg>
-            </button>
-            <button id="frequent-tasks-btn" class="toggle-btn"
-             data-tooltip="Frequent tasks">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
-               stroke="currentColor" stroke-width="2.5" stroke-linecap="round"
-               stroke-linejoin="round">
-                <line x1="6" y1="20" x2="6" y2="14"/>
-                <line x1="12" y1="20" x2="12" y2="9"/>
-                <line x1="18" y1="20" x2="18" y2="4"/>
-              </svg>
-            </button>
-            <button id="tricks-btn" class="toggle-btn"
-             data-tooltip="Inject instruction">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
-               stroke="currentColor" stroke-width="2.5" stroke-linecap="round"
-               stroke-linejoin="round">
-                <path d="M9 18h6"/>
-                <path d="M10 22h4"/>
-                <path d="M12 2a7 7 0 00-4 12.7c.7.6 1 1.4 1 2.3h6c0-.9.3-1.7 1-2.3A7 7 0 0012 2z"/>
-              </svg>
-            </button>
-            <div id="model-dropdown">
-              <div class="search-wrap">
-                <input type="text" id="model-search" placeholder="Search models...">
-                <button class="search-clear-btn" id="model-search-clear"
-                 style="display:none;">&times;</button>
-              </div>
-              <div id="model-list"></div>
-            </div>
-          </div>
-          <div id="input-actions">
-            <span id="wait-spinner"></span>
-            <button id="send-btn" data-tooltip="Send message">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
-               stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <line x1="22" y1="2" x2="11" y2="13"/>
-                <polygon points="22 2 15 22 11 13 2 9 22 2"/>
-              </svg>
-            </button>
-            <button id="stop-btn" data-tooltip="Stop agent" style="display:none;">
-              <svg viewBox="0 0 24 24" fill="currentColor">
-                <rect x="6" y="6" width="12" height="12" rx="2"/>
-              </svg>
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <div id="sidebar">
-      <button id="sidebar-close">&times;</button>
-      <div id="sidebar-tab-history-panel"
-       class="sidebar-section sidebar-tab-panel">
-        <div class="sidebar-hdr">History</div>
-        <div class="search-wrap">
-          <input type="text" id="history-search" placeholder="Search history...">
-          <button class="search-clear-btn" id="history-search-clear"
-           style="display:none;">&times;</button>
-        </div>
-        <div class="history-filter-bar">
-          <label class="history-filter-chk" title="Show running tasks">
-            <input type="checkbox" id="hf-running" checked>Running
-          </label>
-          <label class="history-filter-chk" title="Show tasks that finished with error">
-            <input type="checkbox" id="hf-errors" checked>Errored
-          </label>
-          <label class="history-filter-chk" title="Show successfully completed tasks">
-            <input type="checkbox" id="hf-completed" checked>Succeeded
-          </label>
-          <label class="history-filter-chk"
-           title="Show only tasks marked as favourite">
-            <input type="checkbox" id="hf-favorite">Favorites
-          </label>
-          <label for="hf-from" class="history-filter-date-lbl">From:</label>
-          <input type="date" id="hf-from" class="history-filter-date"
-           title="From date" aria-label="From date">
-          <button type="button" id="hf-from-btn"
-           class="history-filter-date-btn"
-           title="Pick From date" aria-label="Pick From date">📅</button>
-          <label for="hf-to" class="history-filter-date-lbl">To:</label>
-          <input type="date" id="hf-to" class="history-filter-date"
-           title="To date" aria-label="To date">
-          <button type="button" id="hf-to-btn"
-           class="history-filter-date-btn"
-           title="Pick To date" aria-label="Pick To date">📅</button>
-        </div>
-        <div id="history-list">
-          <div class="sidebar-empty">No conversations yet</div>
-        </div>
-      </div>
-    </div>
-    <div id="sidebar-overlay"></div>
-
-    <div id="frequent-panel">
-      <button id="frequent-panel-close">&times;</button>
-      <div class="sidebar-section sidebar-tab-panel">
-        <div class="sidebar-hdr">Frequent tasks</div>
-        <div id="frequent-list">
-          <div class="sidebar-empty">No tasks yet</div>
-        </div>
-      </div>
-    </div>
-    <div id="frequent-overlay"></div>
-
-    <div id="tricks-panel">
-      <button id="tricks-panel-close">&times;</button>
-      <div class="sidebar-section sidebar-tab-panel">
-        <div class="sidebar-hdr">Inject</div>
-        <div id="tricks-list">
-          <div class="sidebar-empty">No tricks available</div>
-        </div>
-      </div>
-    </div>
-    <div id="tricks-overlay"></div>
-
-    <div id="settings-panel">
-      <button id="settings-panel-close">&times;</button>
-      <div class="sidebar-section">
-        <div class="sidebar-hdr">Sorcar Configuration{' ' + version if version else ''}</div>
-        <div id="remote-url"></div>
-        <div id="config-form">
-          <label class="config-label">Remote password
-            <div class="config-password-wrap">
-              <input type="password" id="cfg-remote-password"
-               placeholder="Remote access password">
-              <button type="button" id="cfg-remote-password-toggle"
-               class="config-password-toggle"
-               aria-label="Show password" aria-pressed="false"
-               title="Show password">
-                <svg class="icon-eye" width="16" height="16" viewBox="0 0 24 24"
-                 fill="none" stroke="currentColor" stroke-width="2"
-                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/>
-                  <circle cx="12" cy="12" r="3"/>
-                </svg>
-                <svg class="icon-eye-off" width="16" height="16"
-                 viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
-                 aria-hidden="true" style="display:none;">
-                  <path d="M17.94 17.94A10.94 10.94 0 0 1 12 19c-7 0-11-7-11-7\
-a19.7 19.7 0 0 1 4.22-5.06"/>
-                  <path d="M9.9 4.24A10.94 10.94 0 0 1 12 4c7 0 11 7 11 7\
-a19.7 19.7 0 0 1-3.16 4.19"/>
-                  <path d="M14.12 14.12A3 3 0 0 1 9.88 9.88"/>
-                  <line x1="1" y1="1" x2="23" y2="23"/>
-                </svg>
-              </button>
-            </div>
-          </label>
-          <label class="config-label">Max budget per task ($)
-            <input type="number" id="cfg-max-budget" min="0" step="1" value="100">
-          </label>
-          <label class="config-label config-checkbox">
-            <input type="checkbox" id="cfg-use-web-browser" checked>
-            Use web browser
-          </label>
-          <label class="config-label config-checkbox">
-            <input type="checkbox" id="cfg-auto-commit" checked>
-            Auto commit
-            <button id="autocommit-btn" type="button" data-tooltip="git commit">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
-               stroke="currentColor" stroke-width="2" stroke-linecap="round"
-               stroke-linejoin="round">
-                <circle cx="12" cy="12" r="4"/>
-                <line x1="1.05" y1="12" x2="7" y2="12"/>
-                <line x1="17.01" y1="12" x2="22.96" y2="12"/>
-                <line x1="12" y1="1.05" x2="12" y2="7"/>
-                <line x1="12" y1="17.01" x2="12" y2="22.96"/>
-              </svg>
-            </button>
-          </label>
-          <label class="config-label config-checkbox">
-            <input type="checkbox" id="cfg-use-parallel" checked>
-            Use parallel agents
-          </label>
-          <label class="config-label config-checkbox">
-            <input type="checkbox" id="cfg-use-worktree" checked>
-            Use worktree
-          </label>
-          <label class="config-label config-checkbox">
-            <input type="checkbox" id="cfg-demo-mode">
-            Demo mode
-          </label>
-
-          <div class="config-divider"></div>
-          <div class="sidebar-hdr" style="margin-top:8px;">API Keys</div>
-          <label class="config-label">Gemini API Key
-            <input type="text" id="cfg-key-GEMINI_API_KEY"
-             placeholder="Enter Gemini API key">
-          </label>
-          <label class="config-label">OpenAI API Key
-            <input type="text" id="cfg-key-OPENAI_API_KEY"
-             placeholder="Enter OpenAI API key">
-          </label>
-          <label class="config-label">Anthropic API Key
-            <input type="text" id="cfg-key-ANTHROPIC_API_KEY"
-             placeholder="Enter Anthropic API key">
-          </label>
-          <label class="config-label">Together API Key
-            <input type="text" id="cfg-key-TOGETHER_API_KEY"
-             placeholder="Enter Together API key">
-          </label>
-          <label class="config-label">OpenRouter API Key
-            <input type="text" id="cfg-key-OPENROUTER_API_KEY"
-             placeholder="Enter OpenRouter API key">
-          </label>
-          <label class="config-label">MiniMax API Key
-            <input type="text" id="cfg-key-MINIMAX_API_KEY"
-             placeholder="Enter MiniMax API key">
-          </label>
-          <label class="config-label">Custom endpoint (local model)
-            <input type="text" id="cfg-custom-endpoint"
-             placeholder="http://localhost:8080/v1">
-          </label>
-          <label class="config-label">Custom API key
-            <input type="text" id="cfg-custom-api-key"
-             placeholder="Optional API key for custom endpoint">
-          </label>
-          <label class="config-label">Custom headers
-            <textarea id="cfg-custom-headers" rows="2"
-             placeholder="Key:Value (one per line)"></textarea>
-          </label>
-        </div>
-      </div>
-    </div>
-    <div id="settings-overlay"></div>
-
-    <div id="ask-user-modal" style="display:none;">
-      <div class="modal-content">
-        <div class="modal-title">Agent needs your input</div>
-        <div id="ask-user-slot"></div>
-      </div>
-    </div>
-
-    <div id="auth-modal" style="display:none;">
-      <div class="auth-modal-content">
-        <div class="auth-modal-title">Remote access password</div>
-        <input type="password" id="auth-modal-input" class="auth-modal-input"
-               autocomplete="current-password" placeholder="Enter password">
-        <div class="auth-modal-actions">
-          <button id="auth-modal-cancel" class="auth-modal-btn auth-modal-cancel"
-                  type="button">Cancel</button>
-          <button id="auth-modal-ok" class="auth-modal-btn auth-modal-ok"
-                  type="button">OK</button>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <script src="/media/highlight.min.js"></script>
-  <script src="/media/marked.min.js"></script>
-  <script>{shim}</script>
-  <script>window.__TRICKS__ = {tricks_json};</script>
-  <script src="/media/main.js"></script>
-  <script src="/media/demo.js"></script>
-</body>
-</html>"""
+    head_style = (
+        "<style>\n"
+        "    html, body { height: 100%; margin: 0; padding: 0; overflow: hidden; }\n"
+        "    body { background: var(--vscode-editor-background, #1e1e1e);\n"
+        "            color: var(--vscode-editor-foreground, #cccccc); }\n"
+        "    :root {\n"
+        "      --vscode-font-size: 16px;\n"
+        "      --vscode-font-family: -apple-system, BlinkMacSystemFont, "
+        "'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;\n"
+        "      --vscode-editor-font-size: 16px;\n"
+        "      --vscode-editor-background: #1e1e1e;\n"
+        "      --vscode-editor-foreground: #cccccc;\n"
+        "      --vscode-input-background: #3c3c3c;\n"
+        "      --vscode-input-foreground: #cccccc;\n"
+        "      --vscode-input-border: #3c3c3c;\n"
+        "      --vscode-focusBorder: #007acc;\n"
+        "      --vscode-button-background: #0e639c;\n"
+        "      --vscode-button-foreground: #ffffff;\n"
+        "      --vscode-button-hoverBackground: #1177bb;\n"
+        "      --vscode-sideBar-background: #252526;\n"
+        "      --vscode-list-hoverBackground: #2a2d2e;\n"
+        "      --vscode-badge-background: #4d4d4d;\n"
+        "      --vscode-badge-foreground: #ffffff;\n"
+        "      --vscode-textLink-foreground: #3794ff;\n"
+        "      --vscode-descriptionForeground: #8b8b8b;\n"
+        "      --vscode-editorWidget-background: #252526;\n"
+        "      --vscode-editorWidget-border: #454545;\n"
+        "      --vscode-panel-border: #80808059;\n"
+        "      --vscode-terminal-ansiRed: #f44747;\n"
+        "      --vscode-terminal-ansiGreen: #6a9955;\n"
+        "      --vscode-terminal-ansiYellow: #d7ba7d;\n"
+        "      --vscode-terminal-ansiBlue: #569cd6;\n"
+        "      --vscode-terminal-ansiMagenta: #c586c0;\n"
+        "      --vscode-terminal-ansiCyan: #4ec9b0;\n"
+        "    }\n"
+        "  </style>"
+    )
+    auth_modal = (
+        '    <div id="auth-modal" style="display:none;">\n'
+        '      <div class="auth-modal-content">\n'
+        '        <div class="auth-modal-title">Remote access password</div>\n'
+        '        <input type="password" id="auth-modal-input" '
+        'class="auth-modal-input"\n'
+        '               autocomplete="current-password" '
+        'placeholder="Enter password">\n'
+        '        <div class="auth-modal-actions">\n'
+        '          <button id="auth-modal-cancel" '
+        'class="auth-modal-btn auth-modal-cancel"\n'
+        '                  type="button">Cancel</button>\n'
+        '          <button id="auth-modal-ok" '
+        'class="auth-modal-btn auth-modal-ok"\n'
+        '                  type="button">OK</button>\n'
+        '        </div>\n'
+        '      </div>\n'
+        '    </div>\n'
+    )
+    subs = {
+        "VIEWPORT": "width=device-width,initial-scale=1,maximum-scale=1",
+        "CSP_META": "",
+        "STYLE_HREF": "/media/main.css",
+        "HLJS_CSS_HREF": "/media/highlight-github-dark.min.css",
+        "HEAD_STYLE": head_style,
+        "BODY_CLASS_ATTR": ' class="remote-chat"',
+        "INPUT_PLACEHOLDER": "Ask anything... (@ for files)",
+        "ENTERKEYHINT": ' enterkeyhint="send"',
+        "MODEL_NAME": "loading...",
+        "VERSION_SUFFIX": f" {version}" if version else "",
+        "AUTH_MODAL": auth_modal,
+        "NONCE_ATTR": "",
+        "HLJS_SRC": "/media/highlight.min.js",
+        "MARKED_SRC": "/media/marked.min.js",
+        "PANEL_COPY_SRC": "/media/panelCopy.js",
+        "MAIN_SRC": "/media/main.js",
+        "DEMO_SRC": "/media/demo.js",
+        "SHIM_SCRIPT": f"<script>{_WS_SHIM_JS}</script>\n  ",
+        "TRICKS_JSON": tricks_json,
+    }
+    tpl = (MEDIA_DIR / "chat.html").read_text(encoding="utf-8")
+    for key, value in subs.items():
+        tpl = tpl.replace("{{" + key + "}}", value)
+    return tpl
 
 
 def _read_version() -> str:
