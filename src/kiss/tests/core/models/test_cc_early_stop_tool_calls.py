@@ -94,6 +94,28 @@ def _run_with_events(
     return function_calls, content, m
 
 
+def _run_with_events_and_response(
+    events: list[dict[str, Any]],
+    function_map: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], str, dict[str, Any], ClaudeCodeModel]:
+    """Same as _run_with_events but also returns the raw response dict."""
+    m = ClaudeCodeModel("cc/opus")
+    m.initialize("test")
+    if function_map is None:
+        function_map = {
+            "Bash": lambda command, **kw: "ok",
+            "go_to_url": lambda url: "page content",
+        }
+    fake_popen = _build_fake_popen_class(events)
+    original_popen = subprocess.Popen
+    subprocess.Popen = fake_popen  # type: ignore[assignment,misc]
+    try:
+        function_calls, content, response = m.generate_and_process_with_tools(function_map)
+    finally:
+        subprocess.Popen = original_popen  # type: ignore[assignment,misc]
+    return function_calls, content, response, m
+
+
 class TestFindConsecutiveToolCallsEnd:
     """Unit tests for _find_consecutive_tool_calls_end helper."""
 
@@ -385,3 +407,85 @@ class TestEarlyStopOnToolCalls:
         names = {fc["name"] for fc in function_calls}
         assert "Bash" in names
         assert "go_to_url" in names
+
+    def test_usage_captured_after_early_stop(self) -> None:
+        """After early stop for tool_calls, usage data from result event is
+        captured so cost is not reported as $0."""
+        tool_json = json.dumps(
+            {"tool_calls": [{"name": "Bash", "arguments": {"command": "ls"}}]}
+        )
+        events = [
+            {"type": "stream_event", "event": {
+                "type": "content_block_start",
+                "content_block": {"type": "text", "text": ""},
+            }},
+            {"type": "stream_event", "event": {
+                "type": "content_block_delta",
+                "delta": {"type": "text_delta", "text": tool_json},
+            }},
+            {"type": "stream_event", "event": {
+                "type": "content_block_delta",
+                "delta": {"type": "text_delta", "text": "\n\n(no output)\n"},
+            }},
+            {"type": "stream_event", "event": {"type": "content_block_stop"}},
+            {"type": "result", "result": tool_json + "\n\n(no output)",
+             "usage": {"input_tokens": 1234, "output_tokens": 56,
+                       "cache_read_input_tokens": 0}},
+        ]
+
+        function_calls, content, response, m = _run_with_events_and_response(events)
+
+        assert m._stopped_for_tool_calls is True
+        assert len(function_calls) == 1
+        assert isinstance(response, dict)
+        usage = response.get("usage", {})
+        assert usage.get("input_tokens") == 1234
+        assert usage.get("output_tokens") == 56
+
+    def test_usage_captured_with_simulated_agentic_loop(self) -> None:
+        """Same as test_simulated_agentic_loop_halted but includes the
+        result event with usage after the hallucinated content."""
+        first_tool = json.dumps(
+            {"tool_calls": [{"name": "Bash", "arguments": {
+                "command": "mkdir -p /tmp && echo 'hello'",
+            }}]}
+        )
+        hallucinated = (
+            '\n\n```\n(no output)\n```\n\n'
+            + json.dumps({"tool_calls": [{"name": "go_to_url", "arguments": {
+                "url": "https://x.com"
+            }}]})
+        )
+        events = [
+            {"type": "stream_event", "event": {
+                "type": "content_block_start",
+                "content_block": {"type": "text", "text": ""},
+            }},
+            {"type": "stream_event", "event": {
+                "type": "content_block_delta",
+                "delta": {"type": "text_delta",
+                          "text": "I'll help.\n\n" + first_tool},
+            }},
+            {"type": "stream_event", "event": {
+                "type": "content_block_delta",
+                "delta": {"type": "text_delta", "text": hallucinated},
+            }},
+            {"type": "stream_event", "event": {"type": "content_block_stop"}},
+            {"type": "result", "result": "...",
+             "usage": {"input_tokens": 5000, "output_tokens": 1200,
+                       "cache_read_input_tokens": 200,
+                       "cache_creation": {"ephemeral_5m_input_tokens": 300,
+                                          "ephemeral_1h_input_tokens": 0}}},
+        ]
+
+        function_calls, content, response, m = _run_with_events_and_response(events)
+
+        assert m._stopped_for_tool_calls is True
+        assert len(function_calls) == 1
+        assert function_calls[0]["name"] == "Bash"
+        usage = response.get("usage", {})
+        assert usage.get("input_tokens") == 5000
+        assert usage.get("output_tokens") == 1200
+        assert usage.get("cache_read_input_tokens") == 200
+        cache_creation = usage.get("cache_creation", {})
+        assert cache_creation.get("ephemeral_5m_input_tokens") == 300
