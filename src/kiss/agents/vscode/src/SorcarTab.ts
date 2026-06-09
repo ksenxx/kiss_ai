@@ -91,7 +91,11 @@ export function buildChatHtml(
   const tricksJson = JSON.stringify(getTricks());
   const mod = process.platform === 'darwin' ? '⌘' : 'Ctrl+';
 
-  const tplPath = vscode.Uri.joinPath(extensionUri, 'media', 'chat.html').fsPath;
+  const tplPath = vscode.Uri.joinPath(
+    extensionUri,
+    'media',
+    'chat.html',
+  ).fsPath;
   const tpl = fs.readFileSync(tplPath, 'utf-8');
 
   const u = (name: string): string =>
