@@ -4,15 +4,14 @@
 # add your name here
 """Parity between the VS Code chat webview and the remote webapp HTML.
 
-The VS Code extension renders its chat panel from
-``SorcarTab.buildChatHtml``.  The standalone remote webapp renders its
-UI from :func:`kiss.agents.vscode.web_server._build_html`.  Whenever
-the extension webview's button layout changes, the same change must be
-reflected in the webapp so remote users see the same controls.  These
-integration tests assert that the two surfaces stay in sync.
-
-The tests use the real extension source file and the real
-``_build_html`` output — no mocks, fakes, or fixtures.
+Both the VS Code extension (``SorcarTab.buildChatHtml``) and the
+standalone remote web server (:func:`kiss.agents.vscode.web_server._build_html`)
+now load the SAME ``media/chat.html`` template and only substitute
+mode-specific values (CSP, nonces, webview URIs, the WS shim, the
+auth-modal block).  These integration tests guard that single source
+of truth: the shared template must contain the canonical layout, and
+the remote-rendered output must still expose every id the extension
+expects.
 """
 
 from __future__ import annotations
@@ -22,18 +21,18 @@ from pathlib import Path
 
 from kiss.agents.vscode.web_server import _build_html
 
-_SORCAR_TAB_TS = (
+_CHAT_TPL = (
     Path(__file__).resolve().parents[3]
     / "agents"
     / "vscode"
-    / "src"
-    / "SorcarTab.ts"
+    / "media"
+    / "chat.html"
 )
 
 
 def _ext_html() -> str:
-    """Return the chat HTML embedded in ``SorcarTab.ts``."""
-    return _SORCAR_TAB_TS.read_text(encoding="utf-8")
+    """Return the shared chat HTML template used by the extension."""
+    return _CHAT_TPL.read_text(encoding="utf-8")
 
 
 def _section(html: str, container_id: str) -> str:
