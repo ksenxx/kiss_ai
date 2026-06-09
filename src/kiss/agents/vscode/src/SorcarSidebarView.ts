@@ -163,6 +163,29 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     this._onFirstResolve = cb;
   }
 
+  /**
+   * Eagerly push the current VS Code workspace folder to the daemon as
+   * its ``work_dir``.
+   *
+   * The daemon caches ``self.work_dir`` once at process start from
+   * ``KISS_WORKDIR``/``getcwd()``.  When VS Code launches and re-uses an
+   * already-running daemon (the dependency-installer fast path), the
+   * daemon retains the previous session's work_dir until the user
+   * interacts with the sidebar (which lazily triggers ``_getClient()``).
+   *
+   * Calling this method from ``activate()`` ensures the daemon's
+   * ``work_dir`` matches the open workspace folder *before* any backend
+   * call (autocomplete file-list, commit-message generation, etc.) is
+   * issued.  Safe to call repeatedly — the daemon ignores no-op
+   * updates and the client queues the command if the socket is not yet
+   * connected.
+   */
+  public syncWorkDir(): void {
+    // _getClient() lazily creates the AgentClient and sends the
+    // initial setWorkDir + installs the workspace-folders listener.
+    this._getClient();
+  }
+
   constructor(extensionUri: vscode.Uri) {
     this._extensionUri = extensionUri;
     this._selectedModel =
