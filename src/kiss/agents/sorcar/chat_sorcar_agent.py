@@ -120,8 +120,8 @@ class ChatSorcarAgent(SorcarAgent):
 
         """
         tasks = _coerce_tasks(tasks)
-        model = getattr(self, "model_name", None)
-        work_dir = getattr(self, "work_dir", None)
+        model = self.model_name
+        work_dir = self.work_dir
         chat_id = self._chat_id
         parent_task_id = self._last_task_id
         # Resolve the parent's frontend tab id from the running-agent
@@ -432,8 +432,8 @@ class ChatSorcarAgent(SorcarAgent):
                 from kiss._version import __version__
 
                 extra_payload: dict[str, object] = {
-                    "model": getattr(self, "model_name", ""),
-                    "work_dir": getattr(self, "work_dir", ""),
+                    "model": self.model_name,
+                    "work_dir": self.work_dir,
                     "version": __version__,
                     "tokens": self.total_tokens_used,
                     "cost": round(self.budget_used, 6),

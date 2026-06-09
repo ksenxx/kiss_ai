@@ -91,8 +91,8 @@ class SorcarAgent(RelentlessAgent):
         results = run_tasks_parallel(
             tasks,
             max_workers=max_workers,
-            model_name=getattr(self, "model_name", None),
-            work_dir=getattr(self, "work_dir", None),
+            model_name=self.model_name,
+            work_dir=self.work_dir,
             printer=self.printer,
             totals_out=totals,
         )
@@ -148,7 +148,7 @@ class SorcarAgent(RelentlessAgent):
         useful_tools = UsefulTools(
             stream_callback=_stream,
             stop_event=stop_event,
-            work_dir=getattr(self, "work_dir", None),
+            work_dir=self.work_dir,
         )
         if self.docker_manager:
             from kiss.docker.docker_tools import DockerTools

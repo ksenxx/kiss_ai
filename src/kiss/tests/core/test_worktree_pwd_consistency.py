@@ -22,7 +22,6 @@ from pathlib import Path
 from kiss.core.relentless_agent import (
     IMPORTANT_INSTRUCTIONS,
     RelentlessAgent,
-    _user_visible_work_dir,
 )
 
 
@@ -102,33 +101,15 @@ class _CapturingServer:
         self._server.shutdown()
 
 
-class TestUserVisibleWorkDir(unittest.TestCase):
-    """Unit tests: the helper now returns the real path unchanged."""
-
-    def test_non_worktree_path_unchanged(self) -> None:
-        """Paths outside .kiss-worktrees are returned unchanged."""
-        self.assertEqual(_user_visible_work_dir("/Users/x/repo"), "/Users/x/repo")
-
-    def test_worktree_root_preserved(self) -> None:
-        """``<repo>/.kiss-worktrees/<slug>`` is returned unchanged."""
-        wt = "/Users/x/repo/.kiss-worktrees/kiss_wt-abc-123"
-        self.assertEqual(_user_visible_work_dir(wt), wt)
-
-    def test_worktree_subdir_preserved(self) -> None:
-        """A subdirectory inside a worktree is returned unchanged."""
-        wt = "/Users/x/repo/.kiss-worktrees/kiss_wt-abc-123/src/pkg"
-        self.assertEqual(_user_visible_work_dir(wt), wt)
-
-
 class TestImportantInstructionsRendering(unittest.TestCase):
-    """Direct rendering of IMPORTANT_INSTRUCTIONS via the helper."""
+    """Direct rendering of IMPORTANT_INSTRUCTIONS with the verbatim work_dir."""
 
     def test_worktree_dir_is_exposed(self) -> None:
         """The real worktree path must appear in IMPORTANT_INSTRUCTIONS."""
         wt = "/Users/x/repo/.kiss-worktrees/kiss_wt-abc-123"
         rendered = IMPORTANT_INSTRUCTIONS.format(
             step_threshold="98",
-            work_dir=_user_visible_work_dir(wt),
+            work_dir=wt,
             current_pid="1",
         )
         self.assertIn(wt, rendered)
