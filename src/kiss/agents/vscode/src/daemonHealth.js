@@ -164,33 +164,56 @@ function daemonHasActiveTasks(sockPath, timeoutMs) {
     });
     sock.on('data', chunk => {
       buf += chunk;
-      const nl = buf.indexOf('\n');
-      if (nl < 0) return;
-      const line = buf.slice(0, nl);
-      let parsed;
-      try {
-        parsed = JSON.parse(line);
-      } catch {
-        finish({ok: false, reason: 'parse-failed'});
-        return;
+      // ``RemoteAccessServer._uds_handler`` registers every connected
+      // client as a broadcast destination, so unrelated event lines
+      // (or the OLD-daemon ``Unknown command: activeTasksQuery`` error
+      // emitted by a pre-``activeTasksQuery`` build) can land on the
+      // wire BEFORE the response we asked for.  Drain every complete
+      // line and keep waiting until we see either the response, the
+      // specific "old daemon" error (treated as ``count: 0`` so the
+      // installer can replace it), an unrecoverable parse failure
+      // is logged but ignored, or the outer ``setTimeout`` fires.
+      let nl = buf.indexOf('\n');
+      while (nl >= 0) {
+        const line = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        nl = buf.indexOf('\n');
+        if (line.length === 0) continue;
+        let parsed;
+        try {
+          parsed = JSON.parse(line);
+        } catch {
+          // Non-JSON noise on the broadcast stream — skip rather than
+          // fail; a malformed line should not be misread as "daemon
+          // refusing to answer".
+          continue;
+        }
+        if (!parsed || typeof parsed !== 'object') continue;
+        if (parsed.type === 'activeTasksResponse') {
+          const count = typeof parsed.count === 'number' ? parsed.count : -1;
+          const tabs = Array.isArray(parsed.tabs)
+            ? parsed.tabs.filter(t => typeof t === 'string')
+            : [];
+          if (count < 0) {
+            finish({ok: false, reason: 'missing-count'});
+            return;
+          }
+          finish({ok: true, count, tabs});
+          return;
+        }
+        if (
+          parsed.type === 'error' &&
+          typeof parsed.text === 'string' &&
+          parsed.text.indexOf('Unknown command: activeTasksQuery') >= 0
+        ) {
+          // OLD daemon: cannot have in-flight-task accounting we need
+          // to defer to.  Report ``count: 0`` so ``decideRestart`` lets
+          // the caller replace it.
+          finish({ok: true, count: 0, tabs: []});
+          return;
+        }
+        // Any other broadcast line — keep draining.
       }
-      if (
-        !parsed ||
-        typeof parsed !== 'object' ||
-        parsed.type !== 'activeTasksResponse'
-      ) {
-        finish({ok: false, reason: 'unexpected-type'});
-        return;
-      }
-      const count = typeof parsed.count === 'number' ? parsed.count : -1;
-      const tabs = Array.isArray(parsed.tabs)
-        ? parsed.tabs.filter(t => typeof t === 'string')
-        : [];
-      if (count < 0) {
-        finish({ok: false, reason: 'missing-count'});
-        return;
-      }
-      finish({ok: true, count, tabs});
     });
     sock.once('error', err => {
       finish({ok: false, reason: 'error:' + (err && err.code)});
