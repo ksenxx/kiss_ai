@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import errno
 import hashlib
 import ipaddress
 import json
@@ -103,6 +104,35 @@ TUNNEL_CHECK_INTERVAL = 30
 # a good trade-off between responsiveness and stability; tests override
 # both knobs to drive the loop faster.
 _IP_CHANGE_DEBOUNCE_TICKS = 2
+
+# Maximum number of attempts :meth:`RemoteAccessServer._setup_server`
+# will make to bind the WSS listener before giving up.  Each transient
+# ``OSError`` (most often ``EADDRINUSE`` lingering from a previous
+# instance still in ``TIME_WAIT``, or ``EADDRNOTAVAIL`` while an
+# interface is still coming up at boot / post-resume) is backed off
+# via :data:`_BIND_RETRY_BACKOFF` between attempts.  After exhausting
+# all retries the server exits with a structured ``SystemExit`` and a
+# single-line error message — *no* traceback — so that a supervisor
+# (launchd, systemd, the VS Code extension's respawn loop) sees a
+# clean non-zero exit and backs off naturally, rather than respawning
+# straight into the same OSError traceback in a tight flap loop.
+_BIND_RETRY_ATTEMPTS = 5
+# Per-attempt backoff in seconds; the value at index ``attempt`` is
+# slept *before* attempt ``attempt + 2`` (i.e. between attempts).  The
+# tuple is indexed by ``min(attempt, len(_BIND_RETRY_BACKOFF) - 1)``
+# so a shorter override (in tests) still terminates the loop.
+_BIND_RETRY_BACKOFF: tuple[float, ...] = (0.5, 1.0, 2.0, 4.0, 8.0)
+# ``OSError.errno`` values worth retrying.  ``EADDRINUSE`` covers the
+# common "previous kiss-web instance just SIGTERM'd, its port is in
+# TIME_WAIT" case; ``EADDRNOTAVAIL`` covers a slow interface coming up
+# at boot or after a network state change.  Other errnos (``EACCES``
+# = privileged port without permission, ``ENOENT`` = bad UDS path,
+# TLS load errors which surface as :class:`ssl.SSLError`, ...) are
+# *not* retried — they will not be fixed by waiting and would only
+# delay the inevitable failure exit.
+_BIND_RETRYABLE_ERRNOS: frozenset[int] = frozenset({
+    errno.EADDRINUSE, errno.EADDRNOTAVAIL,
+})
 
 # How often the server polls PyPI to learn whether a newer
 # ``kiss-agent-framework`` release is available.  3600 s = once per
@@ -4026,17 +4056,79 @@ class RemoteAccessServer:
         self._loop = asyncio.get_running_loop()
         self._printer._loop = self._loop
 
-        self._ws_server = await serve(
-            self._ws_handler,
-            self.host,
-            self.port,
-            process_request=self._process_request,
-            ssl=self._ssl_context,
-            ping_interval=None,
-            ping_timeout=None,
-            max_size=_MAX_LINE_BYTES,
-            create_connection=_HeadAwareServerConnection,
-        )
+        # Bind the WSS listener with bounded retry on transient
+        # ``OSError`` (most often ``EADDRINUSE`` lingering from a
+        # previous instance still in ``TIME_WAIT`` during a fast
+        # launchd / extension respawn, or ``EADDRNOTAVAIL`` while the
+        # network interface is still coming up post-boot / post-
+        # resume).  Without retry, the first crash propagates an
+        # OSError traceback out of ``asyncio.run`` and the supervisor
+        # immediately respawns kiss-web into the same OSError, visible
+        # to the user as a flap loop.  After ``_BIND_RETRY_ATTEMPTS``
+        # we raise :class:`SystemExit` with a clean error message and
+        # no traceback so the supervisor backs off naturally.
+        last_err: OSError | None = None
+        for attempt in range(_BIND_RETRY_ATTEMPTS):
+            try:
+                self._ws_server = await serve(
+                    self._ws_handler,
+                    self.host,
+                    self.port,
+                    process_request=self._process_request,
+                    ssl=self._ssl_context,
+                    ping_interval=None,
+                    ping_timeout=None,
+                    max_size=_MAX_LINE_BYTES,
+                    create_connection=_HeadAwareServerConnection,
+                )
+                break
+            except OSError as exc:
+                # Permission errors (EACCES on a privileged port) and
+                # other non-transient errnos are not worth retrying —
+                # fail fast so the supervisor sees the error promptly.
+                if exc.errno not in _BIND_RETRYABLE_ERRNOS:
+                    logger.error(
+                        "WSS bind to %s:%d failed with non-retryable "
+                        "errno %s: %s",
+                        self.host, self.port, exc.errno, exc,
+                    )
+                    print(
+                        f"Error: cannot bind to {self.host}:{self.port}: "
+                        f"{exc}",
+                        file=sys.stderr,
+                    )
+                    raise SystemExit(2) from exc
+                last_err = exc
+                # Was this the final attempt?  Skip the sleep and
+                # fall through to the SystemExit below.
+                if attempt + 1 >= _BIND_RETRY_ATTEMPTS:
+                    break
+                delay = _BIND_RETRY_BACKOFF[
+                    min(attempt, len(_BIND_RETRY_BACKOFF) - 1)
+                ]
+                logger.warning(
+                    "WSS bind to %s:%d failed (attempt %d/%d, "
+                    "errno=%s): %s — retrying in %.1fs",
+                    self.host, self.port, attempt + 1,
+                    _BIND_RETRY_ATTEMPTS, exc.errno, exc, delay,
+                )
+                await asyncio.sleep(delay)
+        else:  # pragma: no cover — covered by the ``break`` paths above
+            pass
+        if self._ws_server is None:
+            # All retryable attempts exhausted.  Exit cleanly so the
+            # supervisor backs off naturally instead of respawning
+            # into the same OSError traceback in a flap loop.
+            logger.error(
+                "WSS bind to %s:%d failed after %d attempts: %s — exiting",
+                self.host, self.port, _BIND_RETRY_ATTEMPTS, last_err,
+            )
+            print(
+                f"Error: cannot bind to {self.host}:{self.port} after "
+                f"{_BIND_RETRY_ATTEMPTS} attempts: {last_err}",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
 
         # Bind the local Unix-domain socket for the VS Code extension.
         # File permissions (mode 0o600) restrict access to the owning
@@ -4174,11 +4266,44 @@ class RemoteAccessServer:
         sig_name = signal.Signals(signum).name
         from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 
+        # Snapshot the registry under its own lock before iterating.
+        # The signal handler runs synchronously on the main thread —
+        # interrupting whatever bytecode happened to be executing — so
+        # without the snapshot a concurrent worker thread mutating
+        # ``running_agent_states`` (registering a fresh tab, disposing
+        # a finished one) would race the ``items()`` iterator and
+        # raise ``RuntimeError: dictionary changed size during
+        # iteration`` *from inside the signal handler*.  That
+        # RuntimeError is not a ``KeyboardInterrupt``, so it would
+        # bypass the ``except KeyboardInterrupt`` arm in
+        # :meth:`start`, escape ``asyncio.run`` uncaught, and crash
+        # the daemon with an unhandled traceback (visible to the user
+        # as a kiss-web flap).  ``_registry_lock`` is a
+        # :class:`threading.RLock`, so re-entry from the same main
+        # thread is safe even if the signal interrupted a worker
+        # thread that holds the lock — re-acquisition will block
+        # until the worker releases it, but it cannot deadlock.
+        # Falling back to a best-effort unlocked snapshot mirrors the
+        # ``_handle_active_tasks_query`` pattern: if anything goes
+        # wrong inside the ``with`` (e.g. the lock object itself was
+        # GC'd during interpreter shutdown), we still produce a log
+        # rather than crash the signal handler.
         active_tabs = []
-        for tab_id, tab in _RunningAgentState.running_agent_states.items():
-            if tab.is_task_active:
-                task_id = tab.task_history_id or tab.last_task_id
-                active_tabs.append(f"{tab_id}(task={task_id})")
+        try:
+            with _RunningAgentState._registry_lock:
+                items = list(_RunningAgentState.running_agent_states.items())
+        except Exception:
+            items = list(_RunningAgentState.running_agent_states.items())
+        for tab_id, tab in items:
+            try:
+                if tab.is_task_active:
+                    task_id = tab.task_history_id or tab.last_task_id
+                    active_tabs.append(f"{tab_id}(task={task_id})")
+            except Exception:
+                logger.debug(
+                    "shutdown signal: skipping malformed tab entry",
+                    exc_info=True,
+                )
         try:
             rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
             rss_mb = (
